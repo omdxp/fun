@@ -1,5 +1,10 @@
 const std = @import("std");
+const token = @import("./token.zig");
 
 pub fn main() !void {
-    std.debug.print("This is the start!\n", .{});
+    const t = token.Token{
+        .data = .{ .cval = 'c' },
+        .type = token.TokenType.Symbol,
+    };
+    std.debug.print("t is {}!\n", .{t});
 }
