@@ -22,3 +22,8 @@ pub const Pos = struct {
     col: u32,
     filename: []u8,
 };
+
+pub const Token = struct {
+    type: TokenType,
+    data: TokenData,
+};
