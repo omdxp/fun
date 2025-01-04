@@ -16,3 +16,9 @@ pub const TokenData = union {
     lnum: c_long,
     llnum: c_longlong,
 };
+
+pub const Pos = struct {
+    line: u32,
+    col: u32,
+    filename: []u8,
+};
