@@ -23,7 +23,7 @@ pub const TokenData = union {
     /// A single character value.
     cval: u8,
     /// A string value.
-    sval: []u8,
+    sval: []const u8,
     /// An integer value.
     inum: c_int,
     /// A long integer value.
@@ -39,7 +39,7 @@ pub const Pos = struct {
     /// The column number where the token is located.
     col: u32,
     /// The name of the file where the token is located.
-    filename: []u8,
+    filename: []const u8,
 };
 
 /// Represents a token in the source code, including its type and associated data.
