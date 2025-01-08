@@ -13,9 +13,7 @@ pub fn main() !void {
         "./test.c",
         0,
     );
-    defer p.ifile.close();
-    defer p.ofile.close();
-    defer p.tokens.deinit();
+    defer p.deinit();
 
     try p.tokens.append(token.Token{
         .between_args = "",
