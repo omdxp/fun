@@ -18,6 +18,18 @@ pub const TokenType = enum {
     NewLine,
 };
 
+/// Represents the different types of numeric literals.
+pub const NumberType = enum {
+    /// A normal integer.
+    Normal,
+    /// A long integer.
+    Long,
+    /// A floating-point number.
+    Float,
+    /// A double-precision floating-point number.
+    Double,
+};
+
 /// Represents the data associated with a token. This can be one of several types.
 pub const TokenData = union {
     /// A single character value.
@@ -48,4 +60,15 @@ pub const Token = struct {
     type: TokenType,
     /// The data associated with the token.
     data: TokenData,
+    /// The type of the numeric literal, if the token is a number.
+    num: struct {
+        /// The type of the number.
+        type: NumberType,
+    },
+    /// Indicates if the token is preceded by whitespace.
+    whitespace: bool,
+    /// The text between brackets, if the token is within brackets.
+    between_brackets: []const u8,
+    /// The text between arguments, if the token is within arguments.
+    between_args: []const u8,
 };
