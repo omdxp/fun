@@ -4,31 +4,25 @@ const mem = std.mem;
 const heap = std.heap;
 const token = @import("./token.zig");
 const transpiler = @import("./transpiler.zig");
+const lexer = @import("./lexer.zig");
 pub const global_allocator = heap.page_allocator;
 
 pub fn main() !void {
-    var p = try transpiler.TranspileProcess.init(
+    const ifilepath = "./test.fn";
+    const ofilepath = "./test.c";
+
+    var tp = try transpiler.TranspileProcess.init(
         global_allocator,
-        "./test.fn",
-        "./test.c",
+        ifilepath,
+        ofilepath,
         0,
     );
-    defer p.deinit();
+    defer tp.deinit();
 
-    try p.tokens.append(token.Token{
-        .between_args = "",
-        .between_brackets = "",
-        .data = .{ .cval = 'c' },
-        .type = .Symbol,
-        .num = .{ .type = .Long },
-        .whitespace = false,
-    });
-    for (p.tokens.items) |t| {
-        std.debug.print("t is {}\n", .{t});
-    }
-
-    const buffer = try p.ifile.readToEndAlloc(global_allocator, 2064);
-    defer global_allocator.free(buffer);
-
-    try p.ofile.writeAll(buffer);
+    var lp = lexer.LexProcess.init(
+        global_allocator,
+        ifilepath,
+        &tp,
+    );
+    defer lp.deinit();
 }
