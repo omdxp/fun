@@ -35,12 +35,12 @@ pub const TranspileProcess = struct {
     /// Errors:
     /// - Returns an error if opening the input file or creating the output file fails.
     pub fn init(allocator: mem.Allocator, ifilepath: []const u8, ofilepath: []const u8, flags: u8) !Self {
-        const ifile = try fs.cwd().openFile(ifilepath, .{ .mode = .read_only });
+        const ifile = try fs.cwd().openFile(ifilepath, .{ .mode = .read_write });
         const ofile = try fs.cwd().createFile(ofilepath, .{ .read = true });
 
         return Self{
             .flags = flags,
-            .pos = .{ .col = 0, .line = 0, .filename = ifilepath },
+            .pos = .{ .col = 1, .line = 1, .filename = ifilepath },
             .ifile = ifile,
             .ofile = ofile,
             .tokens = std.ArrayList(token.Token).init(allocator),

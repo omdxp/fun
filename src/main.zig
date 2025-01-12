@@ -4,31 +4,38 @@ const mem = std.mem;
 const heap = std.heap;
 const token = @import("./token.zig");
 const transpiler = @import("./transpiler.zig");
+const lexer = @import("./lexer.zig");
 pub const global_allocator = heap.page_allocator;
 
 pub fn main() !void {
-    var p = try transpiler.TranspileProcess.init(
+    const ifilepath = "./test.fn";
+    const ofilepath = "./test.c";
+
+    var tp = try transpiler.TranspileProcess.init(
         global_allocator,
-        "./test.fn",
-        "./test.c",
+        ifilepath,
+        ofilepath,
         0,
     );
-    defer p.deinit();
+    var lp = lexer.LexProcess.init(
+        global_allocator,
+        &tp,
+    );
+    defer tp.deinit();
+    defer lp.deinit();
 
-    try p.tokens.append(token.Token{
-        .between_args = "",
-        .between_brackets = "",
-        .data = .{ .cval = 'c' },
-        .type = .Symbol,
-        .num = .{ .type = .Long },
-        .whitespace = false,
-    });
-    for (p.tokens.items) |t| {
-        std.debug.print("t is {}\n", .{t});
+    for (0..5) |_| {
+        std.debug.print("{}:{} -> ", .{ tp.pos.line, tp.pos.col });
+        const c = try lp.next_char();
+        const p = try lp.peek_char();
+        std.debug.print("c = '{c}', p = '{c}'\n", .{ c, p });
     }
 
-    const buffer = try p.ifile.readToEndAlloc(global_allocator, 2064);
+    try lp.push_char(';');
+    try tp.ifile.seekTo(0);
+
+    const buffer = try tp.ifile.readToEndAlloc(global_allocator, 2064);
     defer global_allocator.free(buffer);
 
-    try p.ofile.writeAll(buffer);
+    try tp.ofile.writeAll(buffer);
 }
