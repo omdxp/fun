@@ -17,12 +17,25 @@ pub fn main() !void {
         ofilepath,
         0,
     );
-    defer tp.deinit();
-
     var lp = lexer.LexProcess.init(
         global_allocator,
-        ifilepath,
         &tp,
     );
+    defer tp.deinit();
     defer lp.deinit();
+
+    for (0..5) |_| {
+        std.debug.print("{}:{} -> ", .{ tp.pos.line, tp.pos.col });
+        const c = try lp.next_char();
+        const p = try lp.peek_char();
+        std.debug.print("c = '{c}', p = '{c}'\n", .{ c, p });
+    }
+
+    try lp.push_char(';');
+    try tp.ifile.seekTo(0);
+
+    const buffer = try tp.ifile.readToEndAlloc(global_allocator, 2064);
+    defer global_allocator.free(buffer);
+
+    try tp.ofile.writeAll(buffer);
 }
