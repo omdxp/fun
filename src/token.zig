@@ -1,3 +1,5 @@
+const std = @import("std");
+
 /// Represents the different types of tokens that can be encountered in the source code.
 pub const TokenType = enum {
     /// An identifier, such as a variable or function name.
@@ -35,7 +37,7 @@ pub const TokenData = union {
     /// A single character value.
     cval: u8,
     /// A string value.
-    sval: []const u8,
+    sval: std.ArrayList(u8),
     /// An integer value.
     inum: c_int,
     /// A long integer value.
@@ -61,14 +63,14 @@ pub const Token = struct {
     /// The data associated with the token.
     data: TokenData,
     /// The type of the numeric literal, if the token is a number.
-    num: struct {
+    num: ?struct {
         /// The type of the number.
         type: NumberType,
-    },
+    } = null,
     /// Indicates if the token is preceded by whitespace.
-    whitespace: bool,
+    whitespace: bool = false,
     /// The text between brackets, if the token is within brackets.
-    between_brackets: []const u8,
+    between_brackets: ?[]const u8 = null,
     /// The text between arguments, if the token is within arguments.
-    between_args: []const u8,
+    between_args: ?[]const u8 = null,
 };
