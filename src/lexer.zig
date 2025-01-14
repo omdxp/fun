@@ -40,6 +40,41 @@ pub const LexProcess = struct {
         };
     }
 
+    /// Checks if the given string is a datatype keyword.
+    ///
+    /// This function checks if the provided string matches any of the predefined.
+    ///
+    /// Parameters:
+    /// - `str`: The string to check.
+    ///
+    /// Returns:
+    /// - `bool`: `true` if the string is a datatype keyword, otherwise `false`.
+    fn keyword_is_datatype(_: Self, str: []const u8) bool {
+        // TODO: more to add later
+        return mem.eql(u8, "num", str) || mem.eql(u8, "str", str) ||
+            mem.eql(u8, "bin", str);
+    }
+
+    /// Checks if the given string is a keyword.
+    ///
+    /// This function checks if the provided string matches any of the predefined
+    /// keywords..
+    ///
+    /// Parameters:
+    /// - `str`: The string to check.
+    ///
+    /// Returns:
+    /// - `bool`: `true` if the string is a keyword, otherwise `false`.
+    fn is_keyword(_: Self, str: []const u8) bool {
+        // TODO: more to add later
+        return mem.eql(u8, "imp", str) || mem.eql(u8, "fun", str) ||
+            mem.eql(u8, "num", str) || mem.eql(u8, "str", str) ||
+            mem.eql(u8, "if", str) || mem.eql(u8, "elif", str) ||
+            mem.eql(u8, "else", str) || mem.eql(u8, "bin", str) ||
+            mem.eql(u8, "true", str) || mem.eql(u8, "false", str) ||
+            mem.eql(u8, "fit", str) || mem.eql(u8, "ret", str);
+    }
+
     /// Reads the next character from the input file.
     ///
     /// This function reads the next character from the input file associated with the
