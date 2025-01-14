@@ -2,6 +2,7 @@ const std = @import("std");
 const mem = std.mem;
 const token = @import("./token.zig");
 const transpiler = @import("./transpiler.zig");
+const main = @import("./main.zig");
 
 /// `LexProcess` represents the state and configuration of a lexical analysis process.
 pub const LexProcess = struct {
@@ -93,6 +94,135 @@ pub const LexProcess = struct {
     pub fn push_char(self: *Self, c: u8) !void {
         var buffer: [1]u8 = [_]u8{c};
         _ = try self.transpile_proc.ifile.write(buffer[0..]);
+    }
+
+    /// Reads characters from the input file based on a given condition.
+    ///
+    /// This function reads characters from the input file and appends them to the
+    /// specified buffer until the given condition is no longer met.
+    ///
+    /// Parameters:
+    /// - `buffer`: The buffer to store the read characters.
+    /// - `exp`: A function that defines the condition to be met for reading characters.
+    ///
+    /// Errors:
+    /// - Returns an error if reading from the input file fails.
+    fn lex_getc_if(self: *Self, buffer: *std.ArrayList(u8), exp: fn (u8) bool) !void {
+        while (true) {
+            const c = try self.peek_char();
+            if (!exp(c)) break;
+            try buffer.append(c);
+            _ = try self.next_char();
+        }
+    }
+
+    /// Creates a comment token from the input file.
+    ///
+    /// This function reads characters from the input file to create a comment token.
+    ///
+    /// Returns:
+    /// - `token.Token`: A new comment token.
+    ///
+    /// Errors:
+    /// - Returns an error if reading from the input file fails.
+    fn token_make_comment(self: *Self) !token.Token {
+        var buffer = std.ArrayList(u8).init(main.global_allocator);
+        defer buffer.deinit();
+        try self.lex_getc_if(&buffer, struct {
+            fn call(_c: u8) bool {
+                return _c != '\n';
+            }
+        }.call);
+
+        var sval = std.ArrayList(u8).init(main.global_allocator);
+        try sval.appendSlice(buffer.items);
+        return token.Token{
+            .type = .Comment,
+            .data = .{
+                .sval = sval,
+            },
+        };
+    }
+
+    /// Handles comment tokens in the input file.
+    ///
+    /// This function checks for comment tokens in the input file and processes them.
+    ///
+    /// Returns:
+    /// - `?token.Token`: A comment token if one is found, otherwise `null`.
+    ///
+    /// Errors:
+    /// - Returns an error if reading from the input file fails.
+    fn handle_comment(self: *Self) !?token.Token {
+        const c = try self.peek_char();
+        if (c == '/') {
+            _ = try self.next_char();
+            if (try self.peek_char() == '/') {
+                _ = try self.next_char();
+                return try self.token_make_comment();
+            }
+
+            try self.push_char('/');
+            return null; // TODO: deal with operator or strings
+        }
+
+        return null;
+    }
+
+    /// Creates a newline token from the input file.
+    ///
+    /// This function reads a newline character from the input file to create a newline token.
+    ///
+    /// Returns:
+    /// - `token.Token`: A new newline token.
+    ///
+    /// Errors:
+    /// - Returns an error if reading from the input file fails.
+    fn token_make_newline(self: *Self) !token.Token {
+        _ = try self.next_char();
+        return token.Token{
+            .type = .NewLine,
+            .data = .{ .cval = '\n' },
+        };
+    }
+
+    /// Reads the next token from the input file.
+    ///
+    /// This function reads the next token from the input file, handling different token types
+    /// such as comments and newlines.
+    ///
+    /// Returns:
+    /// - `?token.Token`: The next token if one is found, otherwise `null`.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the next token fails.
+    fn read_next_token(self: *Self) !?token.Token {
+        var t = try self.handle_comment();
+        if (t != null) {
+            return t;
+        }
+
+        const c = try self.peek_char();
+        switch (c) {
+            '\n' => t = try self.token_make_newline(),
+            else => t = null,
+        }
+        return t;
+    }
+
+    /// Lexes the input and appends tokens to the `tokens` array.
+    ///
+    /// This function reads tokens from the input using `read_next_token` and appends
+    /// them to the `tokens` array until no more tokens are available.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the next token fails.
+    pub fn lex(self: *Self) !void {
+        var t = try self.read_next_token();
+        while (t != null) {
+            try self.tokens.append(t.?);
+            t = try self.read_next_token();
+        }
     }
 
     /// Deinitializes the lexical analysis process.

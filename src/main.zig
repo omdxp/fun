@@ -1,6 +1,4 @@
 const std = @import("std");
-const io = std.io;
-const mem = std.mem;
 const heap = std.heap;
 const token = @import("./token.zig");
 const transpiler = @import("./transpiler.zig");
@@ -15,27 +13,27 @@ pub fn main() !void {
         global_allocator,
         ifilepath,
         ofilepath,
-        0,
+        .TranspileProcessOutf,
     );
     var lp = lexer.LexProcess.init(
         global_allocator,
         &tp,
     );
-    defer tp.deinit();
-    defer lp.deinit();
-
-    for (0..5) |_| {
-        std.debug.print("{}:{} -> ", .{ tp.pos.line, tp.pos.col });
-        const c = try lp.next_char();
-        const p = try lp.peek_char();
-        std.debug.print("c = '{c}', p = '{c}'\n", .{ c, p });
+    defer {
+        tp.deinit();
+        lp.deinit();
     }
 
-    try lp.push_char(';');
-    try tp.ifile.seekTo(0);
-
-    const buffer = try tp.ifile.readToEndAlloc(global_allocator, 2064);
-    defer global_allocator.free(buffer);
-
-    try tp.ofile.writeAll(buffer);
+    try lp.lex();
+    for (lp.tokens.items) |t| {
+        std.debug.print("type: {}, ", .{t.type});
+        switch (t.type) {
+            .Comment => {
+                defer t.data.sval.deinit();
+                std.debug.print("sval: '{s}'\n", .{t.data.sval.items});
+            },
+            .NewLine => std.debug.print("cval: '{c}'\n", .{t.data.cval}),
+            else => std.debug.print("Unhandled token type\n", .{}),
+        }
+    }
 }
