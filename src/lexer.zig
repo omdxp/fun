@@ -169,6 +169,29 @@ pub const LexProcess = struct {
         return null;
     }
 
+    /// Handles whitespace characters in the input file.
+    ///
+    /// This function processes whitespace characters by setting the `whitespace`
+    /// property of the last token to `true` and then reading the next character.
+    ///
+    /// Returns:
+    /// - `?token.Token`: The next token after handling whitespace, or `null` if no
+    ///   more tokens are available.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the next character fails.
+    fn handle_whitespace(self: *Self) anyerror!?token.Token {
+        var last_token = self.tokens.getLastOrNull();
+        if (last_token != null) {
+            _ = self.tokens.pop();
+            last_token.?.whitespace = true;
+            try self.tokens.append(last_token.?);
+        }
+
+        _ = try self.next_char();
+        return self.read_next_token();
+    }
+
     /// Creates a newline token from the input file.
     ///
     /// This function reads a newline character from the input file to create a newline token.
@@ -205,6 +228,7 @@ pub const LexProcess = struct {
         const c = try self.peek_char();
         switch (c) {
             '\n' => t = try self.token_make_newline(),
+            ' ', '\t' => t = try self.handle_whitespace(),
             else => t = null,
         }
         return t;

@@ -30,9 +30,9 @@ pub fn main() !void {
         switch (t.type) {
             .Comment => {
                 defer t.data.sval.deinit();
-                std.debug.print("sval: '{s}'\n", .{t.data.sval.items});
+                std.debug.print("sval: '{s}', whitespace: {}\n", .{ t.data.sval.items, t.whitespace });
             },
-            .NewLine => std.debug.print("cval: '{c}'\n", .{t.data.cval}),
+            .NewLine => std.debug.print("cval: '{c}', whitespace: {}\n", .{ t.data.cval, t.whitespace }),
             else => std.debug.print("Unhandled token type\n", .{}),
         }
     }
