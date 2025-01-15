@@ -28,6 +28,11 @@ pub fn main() !void {
     for (lp.tokens.items) |t| {
         std.debug.print("type: {}, ", .{t.type});
         switch (t.type) {
+            .Operator => {
+                defer t.data.sval.deinit();
+                std.debug.print("sval: '{s}', whitespace: {}\n", .{ t.data.sval.items, t.whitespace });
+            },
+            .Symbol => std.debug.print("cval: '{c}', whitespace: {}\n", .{ t.data.cval, t.whitespace }),
             .Comment => {
                 defer t.data.sval.deinit();
                 std.debug.print("sval: '{s}', whitespace: {}\n", .{ t.data.sval.items, t.whitespace });

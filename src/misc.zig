@@ -63,3 +63,57 @@ pub fn is_keyword(str: []const u8) bool {
         mem.eql(u8, "true", str) or mem.eql(u8, "false", str) or
         mem.eql(u8, "fit", str) or mem.eql(u8, "ret", str);
 }
+
+/// Checks if an operator is treated as a single unit.
+///
+/// This function checks if the given operator is treated as a single unit
+/// in the context of the transpilation process.
+///
+/// Returns:
+/// - `bool`: `true` if the operator is treated as a single unit, otherwise `false`.
+///
+/// Parameters:
+/// - `op (u8)`: The operator to check.
+pub fn op_treated_as_one(op: u8) bool {
+    return op == '(' or op == '[' or op == ',' or op == '.' or op == '*';
+}
+
+/// Checks if an operator is a single character operator.
+///
+/// This function checks if the given operator is a single character operator
+/// in the context of the transpilation process.
+///
+/// Returns:
+/// - `bool`: `true` if the operator is a single character operator, otherwise `false`.
+///
+/// Parameters:
+/// - `op (u8)`: The operator to check.
+pub fn is_single_operator(op: u8) bool {
+    return op == '+' or op == '-' or op == '/' or op == '*' or op == '=' or
+        op == '>' or op == '<' or op == '|' or op == '&' or op == '^' or
+        op == '%' or op == '~' or op == '!' or op == '(' or op == '[' or
+        op == ',' or op == '.';
+}
+
+/// Checks if an operator is valid.
+///
+/// This function checks if the given operator string matches any of the valid operators
+/// defined for the transpilation process.
+///
+/// Returns:
+/// - `bool`: `true` if the operator is valid, otherwise `false`.
+///
+/// Parameters:
+/// - `op ([]const u8)`: The operator string to check.
+pub fn op_valid(op: []const u8) bool {
+    return mem.eql(u8, "+", op) or mem.eql(u8, "-", op) or mem.eql(u8, "*", op) or mem.eql(u8, "/", op) or
+        mem.eql(u8, "!", op) or mem.eql(u8, "^", op) or mem.eql(u8, "+=", op) or mem.eql(u8, "-=", op) or
+        mem.eql(u8, "*=", op) or mem.eql(u8, "/=", op) or mem.eql(u8, ">>", op) or
+        mem.eql(u8, ">>=", op) or mem.eql(u8, "<<", op) or mem.eql(u8, "<<=", op) or
+        mem.eql(u8, ">", op) or mem.eql(u8, "<", op) or mem.eql(u8, ">=", op) or mem.eql(u8, "<=", op) or
+        mem.eql(u8, "||", op) or mem.eql(u8, "&&", op) or mem.eql(u8, "|", op) or mem.eql(u8, "&", op) or
+        mem.eql(u8, "++", op) or mem.eql(u8, "--", op) or mem.eql(u8, "=", op) or mem.eql(u8, "!=", op) or
+        mem.eql(u8, "==", op) or mem.eql(u8, "(", op) or mem.eql(u8, "[", op) or
+        mem.eql(u8, ",", op) or mem.eql(u8, ".", op) or mem.eql(u8, "...", op) or mem.eql(u8, "~", op) or
+        mem.eql(u8, "%", op);
+}

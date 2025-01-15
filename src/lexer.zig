@@ -368,6 +368,102 @@ pub const LexProcess = struct {
         return self.token_make_number_for_value(try self.read_number());
     }
 
+    /// Creates a symbol token from the input file.
+    ///
+    /// This function reads the next character from the input file and creates a symbol token.
+    ///
+    /// Returns:
+    /// - `!?token.Token`: The created symbol token, or `null` if creation fails.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the next character fails.
+    fn token_make_symbol(self: *Self) !?token.Token {
+        const c = try self.peek_char();
+        _ = try self.next_char();
+        return token.Token{
+            .type = .Symbol,
+            .data = .{ .cval = c.? },
+        };
+    }
+
+    /// Pushes back all but the first character in the buffer to the input file.
+    ///
+    /// This function pushes back all characters in the buffer except for the first one
+    /// to the input file.
+    ///
+    /// Errors:
+    /// - Returns an error if pushing a character back to the input file fails.
+    ///
+    /// Parameters:
+    /// - `buffer (*std.ArrayList(u8))`: The buffer containing the characters to be pushed back.
+    fn read_op_flush_back_keep_first(self: *Self, buffer: *std.ArrayList(u8)) !void {
+        var i = buffer.items.len - 1;
+        while (i >= 0) {
+            _ = try self.push_char(buffer.items[i]);
+            i -= 1;
+        }
+    }
+
+    /// Reads an operator from the input file.
+    ///
+    /// This function reads an operator from the input file, handling different operator types
+    /// and validating them.
+    ///
+    /// Returns:
+    /// - `!std.ArrayList(u8)`: The buffer containing the operator string.
+    ///
+    /// Errors:
+    /// - Returns an error if reading characters or validating the operator fails.
+    fn read_op(self: *Self) !std.ArrayList(u8) {
+        var buffer = std.ArrayList(u8).init(main.global_allocator);
+        var single_operator = true;
+        var op = try self.next_char();
+        try buffer.append(op.?);
+        var pc = try self.peek_char();
+        if (op.? == '*' and pc.? == '=') {
+            pc = try self.peek_char();
+            try buffer.append(pc.?);
+            _ = try self.next_char();
+            single_operator = false;
+        } else if (!misc.op_treated_as_one(op.?)) {
+            for (0..2) |_| {
+                op = try self.peek_char();
+                if (misc.is_single_operator(op.?)) {
+                    try buffer.append(op.?);
+                    _ = try self.next_char();
+                    single_operator = false;
+                }
+            }
+        }
+
+        if (!single_operator) {
+            if (!misc.op_valid(buffer.items)) {
+                try self.read_op_flush_back_keep_first(&buffer);
+            }
+        } else if (!misc.op_valid(buffer.items)) {
+            self.transpile_proc.error_message("operator not valid");
+        }
+
+        return buffer;
+    }
+
+    /// Creates an operator or string token from the input file.
+    ///
+    /// This function reads an operator from the input file and creates an operator or string token.
+    ///
+    /// Returns:
+    /// - `!token.Token`: The created operator or string token.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the operator or creating the token fails.
+    fn token_make_operator_or_string(self: *Self) !token.Token {
+        const sval = try self.read_op();
+        return token.Token{
+            .type = .Operator,
+            .data = .{ .sval = sval },
+        };
+    }
+
     /// Reads the next token from the input file.
     ///
     /// This function reads the next token from the input file, handling different token types
@@ -390,6 +486,8 @@ pub const LexProcess = struct {
         }
 
         switch (c.?) {
+            '+', '-', '*', '>', '<', '^', '%', '!', '=', '~', '|', '&', '(', '[', ',', '.' => t = try self.token_make_operator_or_string(),
+            '{', '}', ';', ')', ']' => t = try self.token_make_symbol(),
             '0'...'9' => t = try self.token_make_number(),
             '\n' => t = try self.token_make_newline(),
             ' ', '\t' => t = try self.handle_whitespace(),

@@ -1,4 +1,7 @@
-//comment
-some // another
-fun add
-339f // this is a float
+[] //comment
+*abc.c = 1
+1 >>= 2;
+// function
+fun add(num a, num b) {
+	ret a + b;
+}
