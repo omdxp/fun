@@ -32,7 +32,15 @@ pub fn main() !void {
                 defer t.data.sval.deinit();
                 std.debug.print("sval: '{s}', whitespace: {}\n", .{ t.data.sval.items, t.whitespace });
             },
-            .NewLine => std.debug.print("cval: '{c}', whitespace: {}\n", .{ t.data.cval, t.whitespace }),
+            .Identifier => {
+                defer t.data.sval.deinit();
+                std.debug.print("sval: '{s}', whitespace: {}\n", .{ t.data.sval.items, t.whitespace });
+            },
+            .Keyword => {
+                defer t.data.sval.deinit();
+                std.debug.print("sval: '{s}', whitespace: {}\n", .{ t.data.sval.items, t.whitespace });
+            },
+            .NewLine => std.debug.print("whitespace: {}\n", .{t.whitespace}),
             else => std.debug.print("Unhandled token type\n", .{}),
         }
     }

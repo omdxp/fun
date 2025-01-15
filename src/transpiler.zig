@@ -12,6 +12,7 @@ pub const TranspileProcessFlags = enum(u8) {
     /// Flag to indicate output file process.
     TranspileProcessOutf = 0b0000_0010,
 };
+
 /// `TranspileProcess` represents the state and configuration of a transpilation process.
 pub const TranspileProcess = struct {
     /// `flags` is a set of flags that control the behavior of the transpilation process.

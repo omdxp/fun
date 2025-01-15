@@ -3,6 +3,7 @@ const mem = std.mem;
 const token = @import("./token.zig");
 const transpiler = @import("./transpiler.zig");
 const main = @import("./main.zig");
+const misc = @import("./misc.zig");
 
 /// `LexProcess` represents the state and configuration of a lexical analysis process.
 pub const LexProcess = struct {
@@ -40,41 +41,6 @@ pub const LexProcess = struct {
         };
     }
 
-    /// Checks if the given string is a datatype keyword.
-    ///
-    /// This function checks if the provided string matches any of the predefined.
-    ///
-    /// Parameters:
-    /// - `str`: The string to check.
-    ///
-    /// Returns:
-    /// - `bool`: `true` if the string is a datatype keyword, otherwise `false`.
-    fn keyword_is_datatype(_: Self, str: []const u8) bool {
-        // TODO: more to add later
-        return mem.eql(u8, "num", str) || mem.eql(u8, "str", str) ||
-            mem.eql(u8, "bin", str);
-    }
-
-    /// Checks if the given string is a keyword.
-    ///
-    /// This function checks if the provided string matches any of the predefined
-    /// keywords..
-    ///
-    /// Parameters:
-    /// - `str`: The string to check.
-    ///
-    /// Returns:
-    /// - `bool`: `true` if the string is a keyword, otherwise `false`.
-    fn is_keyword(_: Self, str: []const u8) bool {
-        // TODO: more to add later
-        return mem.eql(u8, "imp", str) || mem.eql(u8, "fun", str) ||
-            mem.eql(u8, "num", str) || mem.eql(u8, "str", str) ||
-            mem.eql(u8, "if", str) || mem.eql(u8, "elif", str) ||
-            mem.eql(u8, "else", str) || mem.eql(u8, "bin", str) ||
-            mem.eql(u8, "true", str) || mem.eql(u8, "false", str) ||
-            mem.eql(u8, "fit", str) || mem.eql(u8, "ret", str);
-    }
-
     /// Reads the next character from the input file.
     ///
     /// This function reads the next character from the input file associated with the
@@ -82,14 +48,18 @@ pub const LexProcess = struct {
     /// it also updates the line and column numbers.
     ///
     /// Returns:
-    /// - `u8`: The next character read from the input file.
+    /// - `?u8`: The next character read from the input file, or `null` if the end of the file is reached.
     ///
     /// Errors:
     /// - Returns an error if reading from the input file fails.
-    pub fn next_char(self: *Self) !u8 {
+    pub fn next_char(self: *Self) !?u8 {
         self.transpile_proc.pos.col += 1;
         var buffer: [1]u8 = undefined;
-        _ = try self.transpile_proc.ifile.read(buffer[0..]);
+        const readBytes = try self.transpile_proc.ifile.read(buffer[0..]);
+        if (readBytes == 0) {
+            return null;
+        }
+
         const c = buffer[0];
         if (c == '\n') {
             self.transpile_proc.pos.line += 1;
@@ -104,16 +74,16 @@ pub const LexProcess = struct {
     /// transpilation process and then seeks back to the original position.
     ///
     /// Returns:
-    /// - `u8`: The next character in the input file.
+    /// - `?u8`: The next character in the input file, or `null` if the end of the file is reached.
     ///
     /// Errors:
     /// - Returns an error if reading from or seeking in the input file fails.
-    pub fn peek_char(self: *Self) !u8 {
+    pub fn peek_char(self: *Self) !?u8 {
         const pos = try self.transpile_proc.ifile.seekableStream().getPos();
         var buffer: [1]u8 = undefined;
-        _ = try self.transpile_proc.ifile.read(buffer[0..]);
+        const readBytes = try self.transpile_proc.ifile.read(buffer[0..]);
         try self.transpile_proc.ifile.seekTo(pos);
-        return buffer[0];
+        return if (readBytes == 0) null else buffer[0];
     }
 
     /// Writes a character to the input file.
@@ -145,8 +115,8 @@ pub const LexProcess = struct {
     fn lex_getc_if(self: *Self, buffer: *std.ArrayList(u8), exp: fn (u8) bool) !void {
         while (true) {
             const c = try self.peek_char();
-            if (!exp(c)) break;
-            try buffer.append(c);
+            if (!exp(c.?)) break;
+            try buffer.append(c.?);
             _ = try self.next_char();
         }
     }
@@ -244,6 +214,63 @@ pub const LexProcess = struct {
         };
     }
 
+    /// Creates an identifier or keyword token from the input file.
+    ///
+    /// This function reads characters from the input file and appends them to a buffer
+    /// until a non-alphanumeric character, digit, or underscore is encountered.
+    /// It then checks if the collected characters form a keyword or an identifier and
+    /// returns the corresponding token.
+    ///
+    /// Returns:
+    /// - `!?token.Token`: The next token as either a keyword or an identifier, or `null` if no
+    ///   valid token is found.
+    ///
+    /// Errors:
+    /// - Returns an error if reading characters or allocating memory fails.
+    fn token_make_identifier_or_keyword(self: *Self) !?token.Token {
+        var buffer = std.ArrayList(u8).init(main.global_allocator);
+        defer buffer.deinit();
+        try self.lex_getc_if(&buffer, struct {
+            fn call(_c: u8) bool {
+                return misc.is_alpha(_c) or misc.is_number(_c) or _c == '_';
+            }
+        }.call);
+
+        var sval = std.ArrayList(u8).init(main.global_allocator);
+        try sval.appendSlice(buffer.items);
+        if (misc.is_keyword(buffer.items)) {
+            return token.Token{
+                .type = .Keyword,
+                .data = .{ .sval = sval },
+            };
+        }
+
+        return token.Token{
+            .type = .Identifier,
+            .data = .{ .sval = sval },
+        };
+    }
+
+    /// Reads a special token from the input file.
+    ///
+    /// This function reads the next character from the input file and checks if it is
+    /// an alphabetic character or an underscore. If it is, the function attempts to
+    /// create an identifier or keyword token.
+    ///
+    /// Returns:
+    /// - `!?token.Token`: The next token if the character is a valid special token, otherwise `null`.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the next character fails.
+    fn read_special_token(self: *Self) !?token.Token {
+        const c = try self.peek_char();
+        if (misc.is_alpha(c.?) or c.? == '_') {
+            return self.token_make_identifier_or_keyword();
+        }
+
+        return null;
+    }
+
     /// Reads the next token from the input file.
     ///
     /// This function reads the next token from the input file, handling different token types
@@ -261,11 +288,21 @@ pub const LexProcess = struct {
         }
 
         const c = try self.peek_char();
-        switch (c) {
+        if (c == null) {
+            return t;
+        }
+
+        switch (c.?) {
             '\n' => t = try self.token_make_newline(),
             ' ', '\t' => t = try self.handle_whitespace(),
-            else => t = null,
+            else => {
+                t = try self.read_special_token();
+                if (t == null) {
+                    self.transpile_proc.error_message("unexpected token");
+                }
+            },
         }
+
         return t;
     }
 
