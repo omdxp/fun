@@ -271,6 +271,103 @@ pub const LexProcess = struct {
         return null;
     }
 
+    /// Reads a numeric string from the input file.
+    ///
+    /// This function reads characters from the input file that are considered numeric
+    /// and stores them in a buffer.
+    ///
+    /// Returns:
+    /// - `!std.ArrayList(u8)`: The buffer containing the numeric string.
+    ///
+    /// Errors:
+    /// - Returns an error if reading characters or allocating the buffer fails.
+    fn read_number_str(self: *Self) !std.ArrayList(u8) {
+        var buffer = std.ArrayList(u8).init(main.global_allocator);
+        try self.lex_getc_if(&buffer, struct {
+            fn call(_c: u8) bool {
+                return misc.is_number(_c);
+            }
+        }.call);
+
+        return buffer;
+    }
+
+    /// Parses a numeric string from the input file into a `c_longlong`.
+    ///
+    /// This function reads a numeric string from the input file and converts it into a `c_longlong`.
+    ///
+    /// Returns:
+    /// - `!c_longlong`: The parsed number.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the numeric string or parsing the number fails.
+    fn read_number(self: *Self) !c_longlong {
+        const s = try self.read_number_str();
+        defer s.deinit();
+
+        const number: c_longlong = std.fmt.parseInt(c_longlong, s.items, 10) catch {
+            self.transpile_proc.error_message("failed to parse number");
+            return 0; // or handle the error as needed
+        };
+        return number;
+    }
+
+    /// Determines the type of number based on a character.
+    ///
+    /// This function checks the character to determine if it indicates a long integer or float.
+    ///
+    /// Returns:
+    /// - `token.NumberType`: The determined number type.
+    ///
+    /// Parameters:
+    /// - `c (u8)`: The character to check.
+    fn number_type(_: *Self, c: u8) token.NumberType {
+        return switch (c) {
+            'L' => .Long,
+            'f' => .Float,
+            else => .Normal,
+        };
+    }
+
+    /// Creates a number token for a given value.
+    ///
+    /// This function creates a number token based on the given numeric value and its type.
+    ///
+    /// Returns:
+    /// - `!?token.Token`: The created number token, or `null` if creation fails.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the next character fails.
+    ///
+    /// Parameters:
+    /// - `num (c_longlong)`: The numeric value to be tokenized.
+    fn token_make_number_for_value(self: *Self, num: c_longlong) !?token.Token {
+        const pc = try self.peek_char();
+        const num_type = self.number_type(pc.?);
+        if (num_type != .Normal) {
+            _ = try self.next_char();
+        }
+
+        return token.Token{
+            .type = .Number,
+            .data = .{ .llnum = num },
+            .num = .{ .type = num_type },
+        };
+    }
+
+    /// Creates a number token from the input file.
+    ///
+    /// This function reads a number from the input file and creates a number token.
+    ///
+    /// Returns:
+    /// - `!?token.Token`: The created number token, or `null` if creation fails.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the number or next character fails.
+    fn token_make_number(self: *Self) !?token.Token {
+        return self.token_make_number_for_value(try self.read_number());
+    }
+
     /// Reads the next token from the input file.
     ///
     /// This function reads the next token from the input file, handling different token types
@@ -293,6 +390,7 @@ pub const LexProcess = struct {
         }
 
         switch (c.?) {
+            '0'...'9' => t = try self.token_make_number(),
             '\n' => t = try self.token_make_newline(),
             ' ', '\t' => t = try self.handle_whitespace(),
             else => {

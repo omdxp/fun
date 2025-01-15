@@ -40,6 +40,7 @@ pub fn main() !void {
                 defer t.data.sval.deinit();
                 std.debug.print("sval: '{s}', whitespace: {}\n", .{ t.data.sval.items, t.whitespace });
             },
+            .Number => std.debug.print("llnum: '{}', type: {}, whitespace: {}\n", .{ t.data.llnum, t.num.?.type, t.whitespace }),
             .NewLine => std.debug.print("whitespace: {}\n", .{t.whitespace}),
             else => std.debug.print("Unhandled token type\n", .{}),
         }
