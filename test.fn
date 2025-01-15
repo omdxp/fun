@@ -1,7 +1,2 @@
-[] //comment
-*abc.c = 1
-1 >>= 2;
-// function
-fun add(num a, num b) {
-	ret a + b;
-}
+x = 0b0011
+y = 0x000a

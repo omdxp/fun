@@ -117,3 +117,16 @@ pub fn op_valid(op: []const u8) bool {
         mem.eql(u8, ",", op) or mem.eql(u8, ".", op) or mem.eql(u8, "...", op) or mem.eql(u8, "~", op) or
         mem.eql(u8, "%", op);
 }
+
+/// Checks if a character is a hexadecimal digit.
+///
+/// This function checks if the given character is a valid hexadecimal digit (0-9, a-f).
+///
+/// Returns:
+/// - `bool`: `true` if the character is a hexadecimal digit, otherwise `false`.
+///
+/// Parameters:
+/// - `c (u8)`: The character to check.
+pub fn is_hex_number(c: u8) bool {
+    return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'b');
+}

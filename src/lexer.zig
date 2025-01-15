@@ -307,7 +307,7 @@ pub const LexProcess = struct {
 
         const number: c_longlong = std.fmt.parseInt(c_longlong, s.items, 10) catch {
             self.transpile_proc.error_message("failed to parse number");
-            return 0; // or handle the error as needed
+            return 0;
         };
         return number;
     }
@@ -464,13 +464,124 @@ pub const LexProcess = struct {
         };
     }
 
+    /// Validates a binary string.
+    ///
+    /// This function checks if the given string contains only valid binary digits ('0' and '1').
+    ///
+    /// Errors:
+    /// - Logs an error message if the string contains invalid binary digits.
+    ///
+    /// Parameters:
+    /// - `str ([]const u8)`: The binary string to validate.
+    fn validate_binary_string(self: *Self, str: []const u8) void {
+        for (str) |c| {
+            if (c != '1' and c != '0') {
+                self.transpile_proc.error_message("invalid binary number");
+            }
+        }
+    }
+
+    /// Creates a special number token from a binary string.
+    ///
+    /// This function reads a binary string from the input file, validates it, and creates
+    /// a token representing the binary number.
+    ///
+    /// Returns:
+    /// - `!token.Token`: The created binary number token.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the binary string or parsing the number fails.
+    fn token_make_special_number_binary(self: *Self) !?token.Token {
+        _ = try self.next_char(); // skip special character 'b'
+        const number_str = try self.read_number_str();
+        defer number_str.deinit();
+        self.validate_binary_string(number_str.items);
+        const number: c_longlong = std.fmt.parseInt(c_longlong, number_str.items, 2) catch {
+            self.transpile_proc.error_message("failed to parse number");
+            return null;
+        };
+
+        return self.token_make_number_for_value(number);
+    }
+
+    /// Reads a hexadecimal string from the input file.
+    ///
+    /// This function reads characters from the input file that are considered valid hexadecimal digits
+    /// and stores them in a buffer.
+    ///
+    /// Returns:
+    /// - `!std.ArrayList(u8)`: The buffer containing the hexadecimal string.
+    ///
+    /// Errors:
+    /// - Returns an error if reading characters or allocating the buffer fails.
+    fn read_hex_number_str(self: *Self) !std.ArrayList(u8) {
+        var buffer = std.ArrayList(u8).init(main.global_allocator);
+        try self.lex_getc_if(&buffer, struct {
+            fn call(_c: u8) bool {
+                return misc.is_hex_number(_c);
+            }
+        }.call);
+
+        return buffer;
+    }
+
+    /// Creates a hexadecimal number token.
+    ///
+    /// This function reads a hexadecimal string from the input file, converts it to a number,
+    /// and creates a token representing the hexadecimal number.
+    ///
+    /// Returns:
+    /// - `!?token.Token`: The created hexadecimal number token.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the hexadecimal string or parsing the number fails.
+    fn token_make_number_hexadecimal(self: *Self) !?token.Token {
+        _ = try self.next_char(); // skip special character 'x'
+        const number_str = try self.read_hex_number_str();
+        const number: c_longlong = std.fmt.parseInt(c_longlong, number_str.items, 16) catch {
+            self.transpile_proc.error_message("failed to parse number");
+            return null;
+        };
+
+        return self.token_make_number_for_value(number);
+    }
+
+    /// Creates a special number token based on a prefix.
+    ///
+    /// This function reads the special number prefix ('b' or 'x'), determines the number type,
+    /// and creates the appropriate number token.
+    ///
+    /// Returns:
+    /// - `!?token.Token`: The created special number token.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the prefix, creating the identifier or keyword token,
+    ///   or creating the special number token fails.
+    fn token_make_special_number(self: *Self) !?token.Token {
+        var t: ?token.Token = null;
+        const last_token = self.tokens.getLastOrNull();
+        if (last_token == null or !(last_token.?.type == .Number and last_token.?.data.llnum == 0)) {
+            return try self.token_make_identifier_or_keyword();
+        }
+
+        _ = self.tokens.pop(); // popping the first 0 (.eg [0]b0001)
+        const c = try self.peek_char();
+        switch (c.?) {
+            'b' => t = try self.token_make_special_number_binary(),
+            'x' => t = try self.token_make_number_hexadecimal(),
+            else => self.transpile_proc.error_message("character not valid for special numbers"),
+        }
+
+        return t;
+    }
+
     /// Reads the next token from the input file.
     ///
     /// This function reads the next token from the input file, handling different token types
     /// such as comments and newlines.
     ///
     /// Returns:
-    /// - `?token.Token`: The next token if one is found, otherwise `null`.
+    /// - `!?token.Token`: The next token if one is found, otherwise `null`.
     ///
     /// Errors:
     /// - Returns an error if reading the next token fails.
@@ -489,6 +600,7 @@ pub const LexProcess = struct {
             '+', '-', '*', '>', '<', '^', '%', '!', '=', '~', '|', '&', '(', '[', ',', '.' => t = try self.token_make_operator_or_string(),
             '{', '}', ';', ')', ']' => t = try self.token_make_symbol(),
             '0'...'9' => t = try self.token_make_number(),
+            'b', 'x' => t = try self.token_make_special_number(),
             '\n' => t = try self.token_make_newline(),
             ' ', '\t' => t = try self.handle_whitespace(),
             else => {
