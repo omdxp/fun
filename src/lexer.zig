@@ -707,6 +707,20 @@ pub const LexProcess = struct {
         };
     }
 
+    /// Creates a character token from the input file.
+    ///
+    /// This function reads characters from the input file to form a character token.
+    /// It handles escape sequences and validates the format of the character literal.
+    ///
+    /// Returns:
+    /// - `!?token.Token`: The created character token, or `null` if creation fails.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the next character fails or if the character format is invalid.
+    /// - Logs an error message if the closing single quote (`'`) is missing.
+    ///
+    /// Parameters:
+    /// - `self (*Self)`: The pointer to the current instance.
     fn token_make_character(self: *Self) !?token.Token {
         _ = try self.next_char(); // skip "'"
         var c = try self.next_char();
