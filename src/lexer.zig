@@ -371,6 +371,14 @@ pub const LexProcess = struct {
         return self.token_make_number_for_value(try self.read_number());
     }
 
+    /// Starts a new expression context.
+    ///
+    /// This function increments the current expression count. If this is the first expression,
+    /// it initializes the parenthesis buffer. Additionally, if the last token is an identifier
+    /// or a comma operator, it initializes the argument string buffer.
+    ///
+    /// Parameters:
+    /// - `self (*Self)`: The pointer to the current instance.
     fn start_expression(self: *Self) void {
         self.curr_exp_count += 1;
         if (self.curr_exp_count == 1) {
