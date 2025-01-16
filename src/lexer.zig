@@ -12,11 +12,11 @@ pub const LexProcess = struct {
     /// `transpile_proc` is a pointer to the associated transpilation process.
     transpile_proc: *transpiler.TranspileProcess,
     /// `curr_exp_count` is the current expression count.
-    curr_exp_count: u8,
+    curr_exp_count: isize,
     /// `parenthesis_buf` is a buffer for storing parenthesis characters.
-    parenthesis_buf: []const u8,
+    parenthesis_buf: ?std.ArrayList(u8) = null,
     /// `arg_str_buf` is a buffer for storing argument strings.
-    arg_str_buf: []const u8,
+    arg_str_buf: ?std.ArrayList(u8) = null,
 
     const Self = @This();
 
@@ -36,8 +36,6 @@ pub const LexProcess = struct {
             .tokens = std.ArrayList(token.Token).init(allocator),
             .transpile_proc = transpile_proc,
             .curr_exp_count = 0,
-            .parenthesis_buf = "",
-            .arg_str_buf = "",
         };
     }
 
@@ -65,6 +63,14 @@ pub const LexProcess = struct {
             self.transpile_proc.pos.line += 1;
             self.transpile_proc.pos.col = 1;
         }
+
+        if (self.in_expression()) {
+            try self.parenthesis_buf.?.append(c);
+            if (self.arg_str_buf != null) {
+                try self.arg_str_buf.?.append(c);
+            }
+        }
+
         return c;
     }
 
@@ -364,6 +370,44 @@ pub const LexProcess = struct {
         return self.token_make_number_for_value(try self.read_number());
     }
 
+    fn start_expression(self: *Self) void {
+        self.curr_exp_count += 1;
+        if (self.curr_exp_count == 1) {
+            self.parenthesis_buf = std.ArrayList(u8).init(main.global_allocator);
+        }
+
+        const t = self.tokens.getLastOrNull();
+        if (t != null and (t.?.type == .Identifier or token.is_operator(t, ","))) {
+            self.arg_str_buf = std.ArrayList(u8).init(main.global_allocator);
+        }
+    }
+
+    /// Checks if currently inside an expression.
+    ///
+    /// This function returns `true` if the current expression count is greater than zero,
+    /// indicating that the process is currently inside an expression.
+    ///
+    /// Returns:
+    /// - `bool`: `true` if the current expression count is greater than zero, otherwise `false`.
+    fn in_expression(self: *Self) bool {
+        return self.curr_exp_count > 0;
+    }
+
+    /// Finishes the current expression.
+    ///
+    /// This function decrements the current expression count. If the expression count
+    /// goes below zero, it logs an error message indicating that an expression was closed
+    /// without being opened.
+    ///
+    /// Errors:
+    /// - Logs an error message if the expression count goes below zero.
+    fn finish_expression(self: *Self) !void {
+        self.curr_exp_count -= 1;
+        if (self.curr_exp_count < 0) {
+            self.transpile_proc.error_message("expression was never opened");
+        }
+    }
+
     /// Creates a symbol token from the input file.
     ///
     /// This function reads the next character from the input file and creates a symbol token.
@@ -375,6 +419,10 @@ pub const LexProcess = struct {
     /// - Returns an error if reading the next character fails.
     fn token_make_symbol(self: *Self) !?token.Token {
         const c = try self.peek_char();
+        if (c.? == ')') {
+            try self.finish_expression();
+        }
+
         _ = try self.next_char();
         return token.Token{
             .type = .Symbol,
@@ -453,11 +501,18 @@ pub const LexProcess = struct {
     /// Errors:
     /// - Returns an error if reading the operator or creating the token fails.
     fn token_make_operator(self: *Self) !token.Token {
+        const op = try self.peek_char();
         const sval = try self.read_op();
-        return token.Token{
+        const t = token.Token{
             .type = .Operator,
             .data = .{ .sval = sval },
         };
+
+        if (op.? == '(') {
+            self.start_expression();
+        }
+
+        return t;
     }
 
     /// Validates a binary string.
@@ -727,7 +782,7 @@ pub const LexProcess = struct {
 
     /// Deinitializes the lexical analysis process.
     ///
-    /// This function deinitializes the token list used by the lexical analysis process.
+    /// This function deinitializes the token list and `parenthesis_buf` and `arg_str_buf` used by the lexical analysis process.
     ///
     /// Parameters:
     /// - `self`: The instance of the lexical analysis process to deinitialize.
@@ -736,5 +791,7 @@ pub const LexProcess = struct {
     /// - This function does not return any value.
     pub fn deinit(self: Self) void {
         self.tokens.deinit();
+        if (self.parenthesis_buf != null) self.parenthesis_buf.?.deinit();
+        if (self.arg_str_buf != null) self.arg_str_buf.?.deinit();
     }
 };

@@ -1,4 +1,5 @@
 const std = @import("std");
+const mem = std.mem;
 
 /// Represents the different types of tokens that can be encountered in the source code.
 pub const TokenType = enum {
@@ -74,3 +75,18 @@ pub const Token = struct {
     /// The text between arguments, if the token is within arguments.
     between_args: ?[]const u8 = null,
 };
+
+/// Checks if a token is an operator with a specific value.
+///
+/// This function checks if the given token is not null, is of type `Operator`,
+/// and if its data matches the provided value.
+///
+/// Returns:
+/// - `bool`: `true` if the token is an operator with the specified value, otherwise `false`.
+///
+/// Parameters:
+/// - `token (?Token)`: The token to check.
+/// - `val ([]const u8)`: The value to compare the token's data against.
+pub fn is_operator(token: ?Token, val: []const u8) bool {
+    return token != null and token.?.type == .Operator and mem.eql(u8, token.?.data.sval.items, val);
+}
