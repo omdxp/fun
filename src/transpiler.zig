@@ -66,6 +66,7 @@ pub const TranspileProcess = struct {
     /// - `self`: The instance of the transpiler.
     /// - `msg`: The error message to log.
     pub fn error_message(self: Self, msg: []const u8) void {
+        self.deinit();
         std.debug.panic("Error: {s} on line {d}, col {d} in file {s}", .{
             msg,
             self.pos.line,
