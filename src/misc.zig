@@ -41,7 +41,7 @@ pub fn is_number(c: u8) bool {
 pub fn keyword_is_datatype(str: []const u8) bool {
     // TODO: more to add later
     return mem.eql(u8, "num", str) or mem.eql(u8, "str", str) or
-        mem.eql(u8, "bin", str);
+        mem.eql(u8, "bin", str) or mem.eql(u8, "chr", str);
 }
 
 /// Checks if the given string is a keyword.
