@@ -1,1 +1,1 @@
-num x /= 3; // this is a comment
+str x = "this is\ta string\n"; // now we support strings!

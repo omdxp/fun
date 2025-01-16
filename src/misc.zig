@@ -130,3 +130,23 @@ pub fn op_valid(op: []const u8) bool {
 pub fn is_hex_number(c: u8) bool {
     return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'b');
 }
+
+/// Converts an escape character to its corresponding value.
+///
+/// This function takes an escape character and returns its corresponding character value.
+/// For example, the escape character 'n' is converted to the newline character '\n'.
+///
+/// Returns:
+/// - `u8`: The character corresponding to the escape character, or `0` if the escape character is not recognized.
+///
+/// Parameters:
+/// - `c (u8)`: The escape character to convert.
+pub fn get_escape_char(c: u8) u8 {
+    return switch (c) {
+        'n' => '\n',
+        '\\' => '\\',
+        't' => '\t',
+        '\'' => '\'',
+        else => 0,
+    };
+}

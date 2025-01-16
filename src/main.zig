@@ -28,6 +28,10 @@ pub fn main() !void {
     for (lp.tokens.items) |t| {
         std.debug.print("type: {}, ", .{t.type});
         switch (t.type) {
+            .String => {
+                defer t.data.sval.deinit();
+                std.debug.print("sval: '{s}', whitespace: {}\n", .{ t.data.sval.items, t.whitespace });
+            },
             .Operator => {
                 defer t.data.sval.deinit();
                 std.debug.print("sval: '{s}', whitespace: {}\n", .{ t.data.sval.items, t.whitespace });
@@ -47,7 +51,6 @@ pub fn main() !void {
             },
             .Number => std.debug.print("llnum: '{}', type: {}, whitespace: {}\n", .{ t.data.llnum, t.num.?.type, t.whitespace }),
             .NewLine => std.debug.print("whitespace: {}\n", .{t.whitespace}),
-            else => std.debug.print("Unhandled token type\n", .{}),
         }
     }
 }

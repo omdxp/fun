@@ -167,7 +167,7 @@ pub const LexProcess = struct {
                 return try self.token_make_comment();
             }
             try self.push_char('/');
-            return try self.token_make_operator_or_string();
+            return try self.token_make_operator();
         }
 
         return null;
@@ -443,16 +443,16 @@ pub const LexProcess = struct {
         return buffer;
     }
 
-    /// Creates an operator or string token from the input file.
+    /// Creates an operator token from the input file.
     ///
-    /// This function reads an operator from the input file and creates an operator or string token.
+    /// This function reads an operator from the input file and creates an operator token.
     ///
     /// Returns:
-    /// - `!token.Token`: The created operator or string token.
+    /// - `!token.Token`: The created operator token.
     ///
     /// Errors:
     /// - Returns an error if reading the operator or creating the token fails.
-    fn token_make_operator_or_string(self: *Self) !token.Token {
+    fn token_make_operator(self: *Self) !token.Token {
         const sval = try self.read_op();
         return token.Token{
             .type = .Operator,
@@ -571,6 +571,48 @@ pub const LexProcess = struct {
         return t;
     }
 
+    fn handle_escape_number(self: *Self, buf: *std.ArrayList(u8)) !void {
+        const num = try self.read_number();
+        if (num > 255) {
+            self.transpile_proc.error_message("characters must be between 0 and 255");
+        }
+
+        try buf.append(@intCast(num));
+    }
+
+    fn handle_escape(self: *Self, buf: *std.ArrayList(u8)) !void {
+        const c = try self.peek_char();
+        if (misc.is_number(c.?)) {
+            try self.handle_escape_number(buf);
+            return;
+        }
+
+        const ec = misc.get_escape_char(c.?);
+        try buf.append(ec);
+        _ = try self.next_char();
+    }
+
+    fn token_make_string(self: *Self) !?token.Token {
+        var buffer = std.ArrayList(u8).init(main.global_allocator);
+        _ = try self.next_char(); // skip '"'
+        var c = try self.next_char();
+        while (c.? != '"') {
+            if (c.? == '\\') {
+                try self.handle_escape(&buffer);
+                c = try self.next_char();
+                continue;
+            }
+
+            try buffer.append(c.?);
+            c = try self.next_char();
+        }
+
+        return token.Token{
+            .type = .String,
+            .data = .{ .sval = buffer },
+        };
+    }
+
     /// Reads the next token from the input file.
     ///
     /// This function reads the next token from the input file, handling different token types
@@ -593,7 +635,8 @@ pub const LexProcess = struct {
         }
 
         switch (c.?) {
-            '+', '-', '*', '>', '<', '^', '%', '!', '=', '~', '|', '&', '(', '[', ',', '.' => t = try self.token_make_operator_or_string(),
+            '"' => t = try self.token_make_string(),
+            '+', '-', '*', '>', '<', '^', '%', '!', '=', '~', '|', '&', '(', '[', ',', '.' => t = try self.token_make_operator(),
             '{', '}', ';', ')', ']' => t = try self.token_make_symbol(),
             '0'...'9' => t = try self.token_make_number(),
             'b', 'x' => t = try self.token_make_special_number(),
