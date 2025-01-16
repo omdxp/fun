@@ -1,1 +1,1 @@
-str x = "this is\ta string\n"; // now we support strings!
+str x = "this is\ta string\2\n"; // now we support strings!

@@ -571,6 +571,17 @@ pub const LexProcess = struct {
         return t;
     }
 
+    /// Handles an escape sequence representing a number and appends it to the buffer.
+    ///
+    /// This function reads a number from the input file, validates that it is within the
+    /// range of 0 to 255, and appends it to the buffer.
+    ///
+    /// Parameters:
+    /// - `buf (*std.ArrayList(u8))`: The buffer to append the number to.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the number or appending to the buffer fails.
+    /// - Logs an error message if the number is outside the valid range (0 to 255).
     fn handle_escape_number(self: *Self, buf: *std.ArrayList(u8)) !void {
         const num = try self.read_number();
         if (num > 255) {
@@ -580,6 +591,16 @@ pub const LexProcess = struct {
         try buf.append(@intCast(num));
     }
 
+    /// Handles an escape sequence and appends the corresponding character to the buffer.
+    ///
+    /// This function checks if the escape sequence represents a number or a special character
+    /// and appends the corresponding character to the buffer.
+    ///
+    /// Parameters:
+    /// - `buf (*std.ArrayList(u8))`: The buffer to append the character to.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the next character or appending to the buffer fails.
     fn handle_escape(self: *Self, buf: *std.ArrayList(u8)) !void {
         const c = try self.peek_char();
         if (misc.is_number(c.?)) {
@@ -592,19 +613,36 @@ pub const LexProcess = struct {
         _ = try self.next_char();
     }
 
+    /// Creates a string token from the input file.
+    ///
+    /// This function reads characters from the input file until it encounters a closing quote (`"`),
+    /// handling escape sequences, and creates a string token.
+    ///
+    /// Returns:
+    /// - `!?token.Token`: The created string token, or `null` if creation fails.
+    ///
+    /// Errors:
+    /// - Returns an error if reading characters or appending to the buffer fails.
+    /// - Logs an error message if the end of file is reached unexpectedly.
     fn token_make_string(self: *Self) !?token.Token {
         var buffer = std.ArrayList(u8).init(main.global_allocator);
         _ = try self.next_char(); // skip '"'
-        var c = try self.next_char();
-        while (c.? != '"') {
-            if (c.? == '\\') {
-                try self.handle_escape(&buffer);
-                c = try self.next_char();
-                continue;
+        while (true) {
+            const c = try self.next_char();
+            if (c == null) {
+                self.transpile_proc.error_message("unexpected end of file while reading string");
+                return null;
             }
 
-            try buffer.append(c.?);
-            c = try self.next_char();
+            if (c.? == '"') {
+                break;
+            }
+
+            if (c.? == '\\') {
+                try self.handle_escape(&buffer);
+            } else {
+                try buffer.append(c.?);
+            }
         }
 
         return token.Token{
