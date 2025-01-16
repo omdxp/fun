@@ -1,6 +1,4 @@
 const std = @import("std");
-const io = std.io;
-const mem = std.mem;
 const heap = std.heap;
 const token = @import("./token.zig");
 const transpiler = @import("./transpiler.zig");
@@ -15,27 +13,54 @@ pub fn main() !void {
         global_allocator,
         ifilepath,
         ofilepath,
-        0,
+        .TranspileProcessOutf,
     );
     var lp = lexer.LexProcess.init(
         global_allocator,
         &tp,
     );
-    defer tp.deinit();
-    defer lp.deinit();
-
-    for (0..5) |_| {
-        std.debug.print("{}:{} -> ", .{ tp.pos.line, tp.pos.col });
-        const c = try lp.next_char();
-        const p = try lp.peek_char();
-        std.debug.print("c = '{c}', p = '{c}'\n", .{ c, p });
+    defer {
+        tp.deinit();
+        lp.deinit();
     }
 
-    try lp.push_char(';');
-    try tp.ifile.seekTo(0);
+    try lp.lex();
+    for (lp.tokens.items) |t| {
+        std.debug.print("type: {}, ", .{t.type});
+        switch (t.type) {
+            .String => {
+                defer t.data.sval.deinit();
+                std.debug.print("sval: '{s}', whitespace: {}\n", .{ t.data.sval.items, t.whitespace });
+            },
+            .Operator => {
+                defer t.data.sval.deinit();
+                std.debug.print("sval: '{s}', whitespace: {}\n", .{ t.data.sval.items, t.whitespace });
+            },
+            .Symbol => std.debug.print("cval: '{c}', whitespace: {}\n", .{ t.data.cval, t.whitespace }),
+            .Comment => {
+                defer t.data.sval.deinit();
+                std.debug.print("sval: '{s}', whitespace: {}\n", .{ t.data.sval.items, t.whitespace });
+            },
+            .Identifier => {
+                defer t.data.sval.deinit();
+                std.debug.print("sval: '{s}', whitespace: {}\n", .{ t.data.sval.items, t.whitespace });
+            },
+            .Keyword => {
+                defer t.data.sval.deinit();
+                std.debug.print("sval: '{s}', whitespace: {}\n", .{ t.data.sval.items, t.whitespace });
+            },
+            .Number => {
+                switch (t.data) {
+                    .llnum => std.debug.print("llnum: '{}', type: {}, whitespace: {}\n", .{ t.data.llnum, t.num.?.type, t.whitespace }),
+                    .cval => std.debug.print("cval: '{c}', whitespace: {}\n", .{ t.data.cval, t.whitespace }),
+                    else => unreachable,
+                }
+            },
+            .NewLine => std.debug.print("whitespace: {}\n", .{t.whitespace}),
+        }
+    }
+}
 
-    const buffer = try tp.ifile.readToEndAlloc(global_allocator, 2064);
-    defer global_allocator.free(buffer);
-
-    try tp.ofile.writeAll(buffer);
+test {
+    std.testing.refAllDecls(@This());
 }

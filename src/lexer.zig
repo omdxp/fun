@@ -1,7 +1,10 @@
 const std = @import("std");
+const fs = std.fs;
 const mem = std.mem;
 const token = @import("./token.zig");
 const transpiler = @import("./transpiler.zig");
+const main = @import("./main.zig");
+const misc = @import("./misc.zig");
 
 /// `LexProcess` represents the state and configuration of a lexical analysis process.
 pub const LexProcess = struct {
@@ -10,11 +13,11 @@ pub const LexProcess = struct {
     /// `transpile_proc` is a pointer to the associated transpilation process.
     transpile_proc: *transpiler.TranspileProcess,
     /// `curr_exp_count` is the current expression count.
-    curr_exp_count: u8,
+    curr_exp_count: isize,
     /// `parenthesis_buf` is a buffer for storing parenthesis characters.
-    parenthesis_buf: []const u8,
+    parenthesis_buf: ?std.ArrayList(u8) = null,
     /// `arg_str_buf` is a buffer for storing argument strings.
-    arg_str_buf: []const u8,
+    arg_str_buf: ?std.ArrayList(u8) = null,
 
     const Self = @This();
 
@@ -34,8 +37,6 @@ pub const LexProcess = struct {
             .tokens = std.ArrayList(token.Token).init(allocator),
             .transpile_proc = transpile_proc,
             .curr_exp_count = 0,
-            .parenthesis_buf = "",
-            .arg_str_buf = "",
         };
     }
 
@@ -46,19 +47,31 @@ pub const LexProcess = struct {
     /// it also updates the line and column numbers.
     ///
     /// Returns:
-    /// - `u8`: The next character read from the input file.
+    /// - `?u8`: The next character read from the input file, or `null` if the end of the file is reached.
     ///
     /// Errors:
     /// - Returns an error if reading from the input file fails.
-    pub fn next_char(self: *Self) !u8 {
+    pub fn next_char(self: *Self) !?u8 {
         self.transpile_proc.pos.col += 1;
         var buffer: [1]u8 = undefined;
-        _ = try self.transpile_proc.ifile.read(buffer[0..]);
+        const readBytes = try self.transpile_proc.ifile.read(buffer[0..]);
+        if (readBytes == 0) {
+            return null;
+        }
+
         const c = buffer[0];
         if (c == '\n') {
             self.transpile_proc.pos.line += 1;
             self.transpile_proc.pos.col = 1;
         }
+
+        if (self.in_expression()) {
+            try self.parenthesis_buf.?.append(c);
+            if (self.arg_str_buf != null) {
+                try self.arg_str_buf.?.append(c);
+            }
+        }
+
         return c;
     }
 
@@ -68,36 +81,709 @@ pub const LexProcess = struct {
     /// transpilation process and then seeks back to the original position.
     ///
     /// Returns:
-    /// - `u8`: The next character in the input file.
+    /// - `?u8`: The next character in the input file, or `null` if the end of the file is reached.
     ///
     /// Errors:
     /// - Returns an error if reading from or seeking in the input file fails.
-    pub fn peek_char(self: *Self) !u8 {
+    pub fn peek_char(self: *Self) !?u8 {
         const pos = try self.transpile_proc.ifile.seekableStream().getPos();
         var buffer: [1]u8 = undefined;
-        _ = try self.transpile_proc.ifile.read(buffer[0..]);
+        const readBytes = try self.transpile_proc.ifile.read(buffer[0..]);
         try self.transpile_proc.ifile.seekTo(pos);
-        return buffer[0];
+        return if (readBytes == 0) null else buffer[0];
     }
 
-    /// Writes a character to the input file.
+    /// Pushes a character back onto the input file stream.
     ///
-    /// This function writes the given character to the input file associated with the
-    /// transpilation process.
+    /// This function pushes the given character back onto the input file stream,
+    /// effectively making it the next character to be read.
     ///
     /// Parameters:
-    /// - `c`: The character to write to the input file.
+    /// - `c`: The character to push back onto the input file stream.
     ///
     /// Errors:
-    /// - Returns an error if writing to the input file fails.
+    /// - Returns an error if seeking or writing to the input file fails.
     pub fn push_char(self: *Self, c: u8) !void {
+        const pos = try self.transpile_proc.ifile.seekableStream().getPos();
+        try self.transpile_proc.ifile.seekTo(pos - 1);
         var buffer: [1]u8 = [_]u8{c};
         _ = try self.transpile_proc.ifile.write(buffer[0..]);
+        try self.transpile_proc.ifile.seekTo(pos - 1);
+    }
+
+    /// Reads characters from the input file based on a given condition.
+    ///
+    /// This function reads characters from the input file and appends them to the
+    /// specified buffer until the given condition is no longer met.
+    ///
+    /// Parameters:
+    /// - `buffer`: The buffer to store the read characters.
+    /// - `exp`: A function that defines the condition to be met for reading characters.
+    ///
+    /// Errors:
+    /// - Returns an error if reading from the input file fails.
+    fn lex_getc_if(self: *Self, buffer: *std.ArrayList(u8), exp: fn (u8) bool) !void {
+        while (true) {
+            const c = try self.peek_char();
+            if (c == null or !exp(c.?)) break;
+            try buffer.append(c.?);
+            _ = try self.next_char();
+        }
+    }
+
+    /// Creates a comment token from the input file.
+    ///
+    /// This function reads characters from the input file to create a comment token.
+    ///
+    /// Returns:
+    /// - `token.Token`: A new comment token.
+    ///
+    /// Errors:
+    /// - Returns an error if reading from the input file fails.
+    fn token_make_comment(self: *Self) !token.Token {
+        var buffer = std.ArrayList(u8).init(main.global_allocator);
+        try self.lex_getc_if(&buffer, struct {
+            fn call(_c: u8) bool {
+                return _c != '\n';
+            }
+        }.call);
+
+        return token.Token{
+            .type = .Comment,
+            .data = .{
+                .sval = buffer,
+            },
+        };
+    }
+
+    /// Handles comment tokens in the input file.
+    ///
+    /// This function checks for comment tokens in the input file and processes them.
+    ///
+    /// Returns:
+    /// - `!?token.Token`: A comment token if one is found, otherwise `null`.
+    ///
+    /// Errors:
+    /// - Returns an error if reading from the input file fails.
+    fn handle_comment(self: *Self) !?token.Token {
+        const c = try self.peek_char();
+        if (c == '/') {
+            _ = try self.next_char();
+            if (try self.peek_char() == '/') {
+                _ = try self.next_char();
+                return try self.token_make_comment();
+            }
+            try self.push_char('/');
+            return try self.token_make_operator();
+        }
+
+        return null;
+    }
+
+    /// Handles whitespace characters in the input file.
+    ///
+    /// This function processes whitespace characters by setting the `whitespace`
+    /// property of the last token to `true` and then reading the next character.
+    ///
+    /// Returns:
+    /// - `?token.Token`: The next token after handling whitespace, or `null` if no
+    ///   more tokens are available.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the next character fails.
+    fn handle_whitespace(self: *Self) anyerror!?token.Token {
+        var last_token = self.tokens.getLastOrNull();
+        if (last_token != null) {
+            _ = self.tokens.pop();
+            last_token.?.whitespace = true;
+            try self.tokens.append(last_token.?);
+        }
+
+        _ = try self.next_char();
+        return self.read_next_token();
+    }
+
+    /// Creates a newline token from the input file.
+    ///
+    /// This function reads a newline character from the input file to create a newline token.
+    ///
+    /// Returns:
+    /// - `token.Token`: A new newline token.
+    ///
+    /// Errors:
+    /// - Returns an error if reading from the input file fails.
+    fn token_make_newline(self: *Self) !token.Token {
+        _ = try self.next_char();
+        return token.Token{
+            .type = .NewLine,
+            .data = .{ .cval = '\n' },
+        };
+    }
+
+    /// Creates an identifier or keyword token from the input file.
+    ///
+    /// This function reads characters from the input file and appends them to a buffer
+    /// until a non-alphanumeric character, digit, or underscore is encountered.
+    /// It then checks if the collected characters form a keyword or an identifier and
+    /// returns the corresponding token.
+    ///
+    /// Returns:
+    /// - `!?token.Token`: The next token as either a keyword or an identifier, or `null` if no
+    ///   valid token is found.
+    ///
+    /// Errors:
+    /// - Returns an error if reading characters or allocating memory fails.
+    fn token_make_identifier_or_keyword(self: *Self) !?token.Token {
+        var buffer = std.ArrayList(u8).init(main.global_allocator);
+        try self.lex_getc_if(&buffer, struct {
+            fn call(_c: u8) bool {
+                return misc.is_alpha(_c) or misc.is_number(_c) or _c == '_';
+            }
+        }.call);
+
+        if (misc.is_keyword(buffer.items)) {
+            return token.Token{
+                .type = .Keyword,
+                .data = .{ .sval = buffer },
+            };
+        }
+
+        return token.Token{
+            .type = .Identifier,
+            .data = .{ .sval = buffer },
+        };
+    }
+
+    /// Reads a special token from the input file.
+    ///
+    /// This function reads the next character from the input file and checks if it is
+    /// an alphabetic character or an underscore. If it is, the function attempts to
+    /// create an identifier or keyword token.
+    ///
+    /// Returns:
+    /// - `!?token.Token`: The next token if the character is a valid special token, otherwise `null`.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the next character fails.
+    fn read_special_token(self: *Self) !?token.Token {
+        const c = try self.peek_char();
+        if (misc.is_alpha(c.?) or c.? == '_') {
+            return self.token_make_identifier_or_keyword();
+        }
+
+        return null;
+    }
+
+    /// Reads a numeric string from the input file.
+    ///
+    /// This function reads characters from the input file that are considered numeric
+    /// and stores them in a buffer.
+    ///
+    /// Returns:
+    /// - `!std.ArrayList(u8)`: The buffer containing the numeric string.
+    ///
+    /// Errors:
+    /// - Returns an error if reading characters or allocating the buffer fails.
+    fn read_number_str(self: *Self) !std.ArrayList(u8) {
+        var buffer = std.ArrayList(u8).init(main.global_allocator);
+        try self.lex_getc_if(&buffer, struct {
+            fn call(_c: u8) bool {
+                return misc.is_number(_c);
+            }
+        }.call);
+
+        return buffer;
+    }
+
+    /// Parses a numeric string from the input file into a `c_longlong`.
+    ///
+    /// This function reads a numeric string from the input file and converts it into a `c_longlong`.
+    ///
+    /// Returns:
+    /// - `!c_longlong`: The parsed number.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the numeric string or parsing the number fails.
+    fn read_number(self: *Self) !c_longlong {
+        const s = try self.read_number_str();
+        defer s.deinit();
+
+        const number: c_longlong = std.fmt.parseInt(c_longlong, s.items, 10) catch {
+            self.transpile_proc.error_message("failed to parse number");
+            return 0;
+        };
+        return number;
+    }
+
+    /// Determines the type of number based on a character.
+    ///
+    /// This function checks the character to determine if it indicates a long integer or float.
+    ///
+    /// Returns:
+    /// - `token.NumberType`: The determined number type.
+    ///
+    /// Parameters:
+    /// - `c (u8)`: The character to check.
+    fn number_type(_: *Self, c: u8) token.NumberType {
+        return switch (c) {
+            'L' => .Long,
+            'f' => .Float,
+            else => .Normal,
+        };
+    }
+
+    /// Creates a number token for a given value.
+    ///
+    /// This function creates a number token based on the given numeric value and its type.
+    ///
+    /// Returns:
+    /// - `!?token.Token`: The created number token, or `null` if creation fails.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the next character fails.
+    ///
+    /// Parameters:
+    /// - `num (c_longlong)`: The numeric value to be tokenized.
+    fn token_make_number_for_value(self: *Self, num: c_longlong) !?token.Token {
+        const pc = try self.peek_char();
+        const num_type = if (pc != null) self.number_type(pc.?) else .Normal;
+        if (num_type != .Normal) {
+            _ = try self.next_char();
+        }
+
+        return token.Token{
+            .type = .Number,
+            .data = .{ .llnum = num },
+            .num = .{ .type = num_type },
+        };
+    }
+
+    /// Creates a number token from the input file.
+    ///
+    /// This function reads a number from the input file and creates a number token.
+    ///
+    /// Returns:
+    /// - `!?token.Token`: The created number token, or `null` if creation fails.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the number or next character fails.
+    fn token_make_number(self: *Self) !?token.Token {
+        return self.token_make_number_for_value(try self.read_number());
+    }
+
+    fn start_expression(self: *Self) void {
+        self.curr_exp_count += 1;
+        if (self.curr_exp_count == 1) {
+            self.parenthesis_buf = std.ArrayList(u8).init(main.global_allocator);
+        }
+
+        const t = self.tokens.getLastOrNull();
+        if (t != null and (t.?.type == .Identifier or token.is_operator(t, ","))) {
+            self.arg_str_buf = std.ArrayList(u8).init(main.global_allocator);
+        }
+    }
+
+    /// Checks if currently inside an expression.
+    ///
+    /// This function returns `true` if the current expression count is greater than zero,
+    /// indicating that the process is currently inside an expression.
+    ///
+    /// Returns:
+    /// - `bool`: `true` if the current expression count is greater than zero, otherwise `false`.
+    fn in_expression(self: *Self) bool {
+        return self.curr_exp_count > 0;
+    }
+
+    /// Finishes the current expression.
+    ///
+    /// This function decrements the current expression count. If the expression count
+    /// goes below zero, it logs an error message indicating that an expression was closed
+    /// without being opened.
+    ///
+    /// Errors:
+    /// - Logs an error message if the expression count goes below zero.
+    fn finish_expression(self: *Self) !void {
+        self.curr_exp_count -= 1;
+        if (self.curr_exp_count < 0) {
+            self.transpile_proc.error_message("expression was never opened");
+        }
+    }
+
+    /// Creates a symbol token from the input file.
+    ///
+    /// This function reads the next character from the input file and creates a symbol token.
+    ///
+    /// Returns:
+    /// - `!?token.Token`: The created symbol token, or `null` if creation fails.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the next character fails.
+    fn token_make_symbol(self: *Self) !?token.Token {
+        const c = try self.peek_char();
+        if (c.? == ')') {
+            try self.finish_expression();
+        }
+
+        _ = try self.next_char();
+        return token.Token{
+            .type = .Symbol,
+            .data = .{ .cval = c.? },
+        };
+    }
+
+    /// Pushes back all but the first character in the buffer to the input file.
+    ///
+    /// This function pushes back all characters in the buffer except for the first one
+    /// to the input file.
+    ///
+    /// Errors:
+    /// - Returns an error if pushing a character back to the input file fails.
+    ///
+    /// Parameters:
+    /// - `buffer (*std.ArrayList(u8))`: The buffer containing the characters to be pushed back.
+    fn read_op_flush_back_keep_first(self: *Self, buffer: *std.ArrayList(u8)) !void {
+        var i = buffer.items.len - 1;
+        while (i >= 0) {
+            _ = try self.push_char(buffer.items[i]);
+            i -= 1;
+        }
+    }
+
+    /// Reads an operator from the input file.
+    ///
+    /// This function reads an operator from the input file, handling different operator types
+    /// and validating them.
+    ///
+    /// Returns:
+    /// - `!std.ArrayList(u8)`: The buffer containing the operator string.
+    ///
+    /// Errors:
+    /// - Returns an error if reading characters or validating the operator fails.
+    fn read_op(self: *Self) !std.ArrayList(u8) {
+        var buffer = std.ArrayList(u8).init(main.global_allocator);
+        var single_operator = true;
+        var op = try self.next_char();
+        try buffer.append(op.?);
+        var pc = try self.peek_char();
+        if (op.? == '*' and pc.? == '=') {
+            pc = try self.peek_char();
+            try buffer.append(pc.?);
+            _ = try self.next_char();
+            single_operator = false;
+        } else if (!misc.op_treated_as_one(op.?)) {
+            for (0..2) |_| {
+                op = try self.peek_char();
+                if (misc.is_single_operator(op.?)) {
+                    try buffer.append(op.?);
+                    _ = try self.next_char();
+                    single_operator = false;
+                }
+            }
+        }
+
+        if (!single_operator) {
+            if (!misc.op_valid(buffer.items)) {
+                try self.read_op_flush_back_keep_first(&buffer);
+            }
+        } else if (!misc.op_valid(buffer.items)) {
+            self.transpile_proc.error_message("operator not valid");
+        }
+
+        return buffer;
+    }
+
+    /// Creates an operator token from the input file.
+    ///
+    /// This function reads an operator from the input file and creates an operator token.
+    ///
+    /// Returns:
+    /// - `!token.Token`: The created operator token.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the operator or creating the token fails.
+    fn token_make_operator(self: *Self) !token.Token {
+        const op = try self.peek_char();
+        const sval = try self.read_op();
+        const t = token.Token{
+            .type = .Operator,
+            .data = .{ .sval = sval },
+        };
+
+        if (op.? == '(') {
+            self.start_expression();
+        }
+
+        return t;
+    }
+
+    /// Validates a binary string.
+    ///
+    /// This function checks if the given string contains only valid binary digits ('0' and '1').
+    ///
+    /// Errors:
+    /// - Logs an error message if the string contains invalid binary digits.
+    ///
+    /// Parameters:
+    /// - `str ([]const u8)`: The binary string to validate.
+    fn validate_binary_string(self: *Self, str: []const u8) void {
+        for (str) |c| {
+            if (c != '1' and c != '0') {
+                self.transpile_proc.error_message("invalid binary number");
+            }
+        }
+    }
+
+    /// Creates a special number token from a binary string.
+    ///
+    /// This function reads a binary string from the input file, validates it, and creates
+    /// a token representing the binary number.
+    ///
+    /// Returns:
+    /// - `!token.Token`: The created binary number token.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the binary string or parsing the number fails.
+    fn token_make_special_number_binary(self: *Self) !?token.Token {
+        _ = try self.next_char(); // skip special character 'b'
+        const number_str = try self.read_number_str();
+        defer number_str.deinit();
+        self.validate_binary_string(number_str.items);
+        const number: c_longlong = std.fmt.parseInt(c_longlong, number_str.items, 2) catch {
+            self.transpile_proc.error_message("failed to parse number");
+            return null;
+        };
+
+        return self.token_make_number_for_value(number);
+    }
+
+    /// Reads a hexadecimal string from the input file.
+    ///
+    /// This function reads characters from the input file that are considered valid hexadecimal digits
+    /// and stores them in a buffer.
+    ///
+    /// Returns:
+    /// - `!std.ArrayList(u8)`: The buffer containing the hexadecimal string.
+    ///
+    /// Errors:
+    /// - Returns an error if reading characters or allocating the buffer fails.
+    fn read_hex_number_str(self: *Self) !std.ArrayList(u8) {
+        var buffer = std.ArrayList(u8).init(main.global_allocator);
+        try self.lex_getc_if(&buffer, struct {
+            fn call(_c: u8) bool {
+                return misc.is_hex_number(_c);
+            }
+        }.call);
+
+        return buffer;
+    }
+
+    /// Creates a hexadecimal number token.
+    ///
+    /// This function reads a hexadecimal string from the input file, converts it to a number,
+    /// and creates a token representing the hexadecimal number.
+    ///
+    /// Returns:
+    /// - `!?token.Token`: The created hexadecimal number token.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the hexadecimal string or parsing the number fails.
+    fn token_make_number_hexadecimal(self: *Self) !?token.Token {
+        _ = try self.next_char(); // skip special character 'x'
+        const number_str = try self.read_hex_number_str();
+        const number: c_longlong = std.fmt.parseInt(c_longlong, number_str.items, 16) catch {
+            self.transpile_proc.error_message("failed to parse number");
+            return null;
+        };
+
+        return self.token_make_number_for_value(number);
+    }
+
+    /// Creates a special number token based on a prefix.
+    ///
+    /// This function reads the special number prefix ('b' or 'x'), determines the number type,
+    /// and creates the appropriate number token.
+    ///
+    /// Returns:
+    /// - `!?token.Token`: The created special number token.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the prefix, creating the identifier or keyword token,
+    ///   or creating the special number token fails.
+    fn token_make_special_number(self: *Self) !?token.Token {
+        var t: ?token.Token = null;
+        const last_token = self.tokens.getLastOrNull();
+        if (last_token == null or !(last_token.?.type == .Number and last_token.?.data.llnum == 0)) {
+            return try self.token_make_identifier_or_keyword();
+        }
+
+        _ = self.tokens.pop(); // popping the first 0 (.eg [0]b0001)
+        const c = try self.peek_char();
+        switch (c.?) {
+            'b' => t = try self.token_make_special_number_binary(),
+            'x' => t = try self.token_make_number_hexadecimal(),
+            else => self.transpile_proc.error_message("character not valid for special numbers"),
+        }
+
+        return t;
+    }
+
+    /// Handles an escape sequence representing a number and appends it to the buffer.
+    ///
+    /// This function reads a number from the input file, validates that it is within the
+    /// range of 0 to 255, and appends it to the buffer.
+    ///
+    /// Parameters:
+    /// - `buf (*std.ArrayList(u8))`: The buffer to append the number to.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the number or appending to the buffer fails.
+    /// - Logs an error message if the number is outside the valid range (0 to 255).
+    fn handle_escape_number(self: *Self, buf: *std.ArrayList(u8)) !void {
+        const num = try self.read_number();
+        if (num > 255) {
+            self.transpile_proc.error_message("characters must be between 0 and 255");
+        }
+
+        try buf.append(@intCast(num));
+    }
+
+    /// Handles an escape sequence and appends the corresponding character to the buffer.
+    ///
+    /// This function checks if the escape sequence represents a number or a special character
+    /// and appends the corresponding character to the buffer.
+    ///
+    /// Parameters:
+    /// - `buf (*std.ArrayList(u8))`: The buffer to append the character to.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the next character or appending to the buffer fails.
+    fn handle_escape(self: *Self, buf: *std.ArrayList(u8)) !void {
+        const c = try self.peek_char();
+        if (misc.is_number(c.?)) {
+            try self.handle_escape_number(buf);
+            return;
+        }
+
+        const ec = misc.get_escape_char(c.?);
+        try buf.append(ec);
+        _ = try self.next_char();
+    }
+
+    /// Creates a string token from the input file.
+    ///
+    /// This function reads characters from the input file until it encounters a closing quote (`"`),
+    /// handling escape sequences, and creates a string token.
+    ///
+    /// Returns:
+    /// - `!?token.Token`: The created string token, or `null` if creation fails.
+    ///
+    /// Errors:
+    /// - Returns an error if reading characters or appending to the buffer fails.
+    /// - Logs an error message if the end of file is reached unexpectedly.
+    fn token_make_string(self: *Self) !?token.Token {
+        var buffer = std.ArrayList(u8).init(main.global_allocator);
+        _ = try self.next_char(); // skip '"'
+        while (true) {
+            const c = try self.next_char();
+            if (c == null) {
+                self.transpile_proc.error_message("unexpected end of file while reading string");
+                return null;
+            }
+
+            if (c.? == '"') {
+                break;
+            }
+
+            if (c.? == '\\') {
+                try self.handle_escape(&buffer);
+            } else {
+                try buffer.append(c.?);
+            }
+        }
+
+        return token.Token{
+            .type = .String,
+            .data = .{ .sval = buffer },
+        };
+    }
+
+    fn token_make_character(self: *Self) !?token.Token {
+        _ = try self.next_char(); // skip "'"
+        var c = try self.next_char();
+        if (c.? == '\\') {
+            c = try self.next_char();
+            c = misc.get_escape_char(c.?);
+        }
+
+        if (try self.next_char() != '\'') {
+            self.transpile_proc.error_message("expected '");
+        }
+
+        return token.Token{
+            .type = .Number,
+            .data = .{ .cval = c.? },
+        };
+    }
+
+    /// Reads the next token from the input file.
+    ///
+    /// This function reads the next token from the input file, handling different token types
+    /// such as comments and newlines.
+    ///
+    /// Returns:
+    /// - `!?token.Token`: The next token if one is found, otherwise `null`.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the next token fails.
+    fn read_next_token(self: *Self) !?token.Token {
+        var t = try self.handle_comment();
+        if (t != null) {
+            return t;
+        }
+
+        const c = try self.peek_char();
+        if (c == null) {
+            return t;
+        }
+
+        switch (c.?) {
+            '"' => t = try self.token_make_string(),
+            '\'' => t = try self.token_make_character(),
+            '+', '-', '*', '>', '<', '^', '%', '!', '=', '~', '|', '&', '(', '[', ',', '.' => t = try self.token_make_operator(),
+            '{', '}', ';', ')', ']' => t = try self.token_make_symbol(),
+            '0'...'9' => t = try self.token_make_number(),
+            'b', 'x' => t = try self.token_make_special_number(),
+            '\n' => t = try self.token_make_newline(),
+            ' ', '\t' => t = try self.handle_whitespace(),
+            else => {
+                t = try self.read_special_token();
+                if (t == null) {
+                    self.transpile_proc.error_message("unexpected token");
+                }
+            },
+        }
+
+        return t;
+    }
+
+    /// Lexes the input and appends tokens to the `tokens` array.
+    ///
+    /// This function reads tokens from the input using `read_next_token` and appends
+    /// them to the `tokens` array until no more tokens are available.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the next token fails.
+    pub fn lex(self: *Self) !void {
+        var t = try self.read_next_token();
+        while (t != null) {
+            try self.tokens.append(t.?);
+            t = try self.read_next_token();
+        }
     }
 
     /// Deinitializes the lexical analysis process.
     ///
-    /// This function deinitializes the token list used by the lexical analysis process.
+    /// This function deinitializes the token list and `parenthesis_buf` and `arg_str_buf` used by the lexical analysis process.
     ///
     /// Parameters:
     /// - `self`: The instance of the lexical analysis process to deinitialize.
@@ -106,5 +792,237 @@ pub const LexProcess = struct {
     /// - This function does not return any value.
     pub fn deinit(self: Self) void {
         self.tokens.deinit();
+        if (self.parenthesis_buf != null) self.parenthesis_buf.?.deinit();
+        if (self.arg_str_buf != null) self.arg_str_buf.?.deinit();
     }
 };
+
+test "LexProcess initialization" {
+    const ifilepath = "LexProcess_initialization.fn";
+    const ofilepath = "LexProcess_initialization.c";
+    // Mock input file
+    {
+        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
+        defer file.close();
+        const input = "dummy";
+        try file.writeAll(input);
+    }
+
+    const allocator = std.testing.allocator;
+    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .TranspileProcessOutf);
+    var lex_proc = LexProcess.init(allocator, &transpile_proc);
+
+    defer transpile_proc.deinit();
+    defer lex_proc.deinit();
+
+    try std.testing.expect(lex_proc.tokens.items.len == 0);
+    try std.testing.expect(lex_proc.transpile_proc == &transpile_proc);
+    try std.testing.expect(lex_proc.curr_exp_count == 0);
+    try std.testing.expect(lex_proc.parenthesis_buf == null);
+    try std.testing.expect(lex_proc.arg_str_buf == null);
+
+    // Delete test files
+    try fs.cwd().deleteFile(ifilepath);
+    try fs.cwd().deleteFile(ofilepath);
+}
+
+test "LexProcess next_char" {
+    const ifilepath = "LexProcess_next_char.fn";
+    const ofilepath = "LexProcess_next_char.c";
+    // Mock input file
+    {
+        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
+        defer file.close();
+        const input = "abc\n";
+        try file.writeAll(input);
+    }
+
+    const allocator = std.testing.allocator;
+    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .TranspileProcessOutf);
+    var lex_proc = LexProcess.init(allocator, &transpile_proc);
+
+    defer transpile_proc.deinit();
+    defer lex_proc.deinit();
+
+    try std.testing.expectEqual('a', (try lex_proc.next_char()).?);
+    try std.testing.expectEqual('b', (try lex_proc.next_char()).?);
+    try std.testing.expectEqual('c', (try lex_proc.next_char()).?);
+    try std.testing.expectEqual('\n', (try lex_proc.next_char()).?);
+    try std.testing.expect(try lex_proc.next_char() == null);
+
+    // Delete test files
+    try fs.cwd().deleteFile(ifilepath);
+    try fs.cwd().deleteFile(ofilepath);
+}
+
+test "LexProcess peek_char" {
+    const ifilepath = "LexProcess_peek_char.fn";
+    const ofilepath = "LexProcess_peek_char.c";
+    // Mock input file
+    {
+        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
+        defer file.close();
+        const input = "abc";
+        try file.writeAll(input);
+    }
+
+    const allocator = std.testing.allocator;
+    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .TranspileProcessOutf);
+    var lex_proc = LexProcess.init(allocator, &transpile_proc);
+
+    defer transpile_proc.deinit();
+    defer lex_proc.deinit();
+
+    try std.testing.expectEqual('a', (try lex_proc.peek_char()).?);
+    try std.testing.expectEqual('a', (try lex_proc.peek_char()).?);
+    _ = try lex_proc.next_char();
+    try std.testing.expectEqual('b', (try lex_proc.peek_char()).?);
+
+    // Delete test files
+    try fs.cwd().deleteFile(ifilepath);
+    try fs.cwd().deleteFile(ofilepath);
+}
+
+test "LexProcess push_char" {
+    const ifilepath = "LexProcess_push_char.fn";
+    const ofilepath = "LexProcess_push_char.c";
+    // Mock input file
+    {
+        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
+        defer file.close();
+        const input = "abc";
+        try file.writeAll(input);
+    }
+
+    const allocator = std.testing.allocator;
+    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .TranspileProcessOutf);
+    var lex_proc = LexProcess.init(allocator, &transpile_proc);
+
+    defer transpile_proc.deinit();
+    defer lex_proc.deinit();
+
+    _ = try lex_proc.next_char();
+    _ = try lex_proc.next_char();
+    try lex_proc.push_char('b');
+    try std.testing.expectEqual('b', (try lex_proc.next_char()).?);
+
+    // Delete test files
+    try fs.cwd().deleteFile(ifilepath);
+    try fs.cwd().deleteFile(ofilepath);
+}
+
+test "LexProcess comment" {
+    const ifilepath = "LexProcess_comment.fn";
+    const ofilepath = "LexProcess_comment.c";
+    // Mock input file
+    {
+        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
+        defer file.close();
+        const input = "// This is a comment\n";
+        try file.writeAll(input);
+    }
+
+    const allocator = std.testing.allocator;
+    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .TranspileProcessOutf);
+    var lex_proc = LexProcess.init(allocator, &transpile_proc);
+
+    defer transpile_proc.deinit();
+    defer lex_proc.deinit();
+
+    try lex_proc.lex();
+    const t = lex_proc.tokens.items[0];
+    try std.testing.expectEqual(t.type, .Comment);
+    try std.testing.expectEqualStrings(" This is a comment", t.data.sval.items);
+
+    // Delete test files
+    try fs.cwd().deleteFile(ifilepath);
+    try fs.cwd().deleteFile(ofilepath);
+}
+
+test "LexProcess string" {
+    const ifilepath = "LexProcess_string.fn";
+    const ofilepath = "LexProcess_string.c";
+    // Mock input file
+    {
+        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
+        defer file.close();
+        const input = "\"Hello, World!\"";
+        try file.writeAll(input);
+    }
+
+    const allocator = std.testing.allocator;
+    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .TranspileProcessOutf);
+    var lex_proc = LexProcess.init(allocator, &transpile_proc);
+
+    defer transpile_proc.deinit();
+    defer lex_proc.deinit();
+
+    try lex_proc.lex();
+    const t = lex_proc.tokens.items[0];
+    try std.testing.expectEqual(t.type, .String);
+    try std.testing.expectEqualStrings("Hello, World!", t.data.sval.items);
+
+    // Delete test files
+    try fs.cwd().deleteFile(ifilepath);
+    try fs.cwd().deleteFile(ofilepath);
+}
+
+test "LexProcess number" {
+    const ifilepath = "LexProcess_number.fn";
+    const ofilepath = "LexProcess_number.c";
+    // Mock input file
+    {
+        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
+        defer file.close();
+        const input = "12345";
+        try file.writeAll(input);
+    }
+
+    const allocator = std.testing.allocator;
+    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .TranspileProcessOutf);
+    var lex_proc = LexProcess.init(allocator, &transpile_proc);
+
+    defer transpile_proc.deinit();
+    defer lex_proc.deinit();
+
+    try lex_proc.lex();
+    const t = lex_proc.tokens.items[0];
+    try std.testing.expectEqual(t.type, .Number);
+    try std.testing.expectEqual(t.data.llnum, 12345);
+
+    // Delete test files
+    try fs.cwd().deleteFile(ifilepath);
+    try fs.cwd().deleteFile(ofilepath);
+}
+
+test "LexProcess lex" {
+    const ifilepath = "LexProcess_lex.fn";
+    const ofilepath = "LexProcess_lex.c";
+    // Mock input file
+    {
+        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
+        defer file.close();
+        const input = "123 + 456 // comment\n\"string\"";
+        try file.writeAll(input);
+    }
+
+    const allocator = std.testing.allocator;
+    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .TranspileProcessOutf);
+    var lex_proc = LexProcess.init(allocator, &transpile_proc);
+
+    defer transpile_proc.deinit();
+    defer lex_proc.deinit();
+
+    try lex_proc.lex();
+
+    try std.testing.expectEqual(6, lex_proc.tokens.items.len);
+    try std.testing.expectEqual(lex_proc.tokens.items[0].type, .Number);
+    try std.testing.expectEqual(lex_proc.tokens.items[1].type, .Operator);
+    try std.testing.expectEqual(lex_proc.tokens.items[2].type, .Number);
+    try std.testing.expectEqual(lex_proc.tokens.items[3].type, .Comment);
+    try std.testing.expectEqual(lex_proc.tokens.items[4].type, .NewLine);
+    try std.testing.expectEqual(lex_proc.tokens.items[5].type, .String);
+    // Delete test files
+    try fs.cwd().deleteFile(ifilepath);
+    try fs.cwd().deleteFile(ofilepath);
+}
