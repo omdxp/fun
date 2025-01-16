@@ -110,3 +110,31 @@ pub const TranspileProcess = struct {
         self.tokens.deinit();
     }
 };
+
+test "TranspileProcess init and deinit" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "TranspileProcess_init_and_deinit.fn";
+    const ofilepath = "TranspileProcess_init_and_deinit.c";
+
+    // Create dummy input file
+    {
+        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
+        defer file.close();
+        try file.writeAll("dummy input");
+    }
+
+    // Initialize TranspileProcess
+    var process = try TranspileProcess.init(allocator, ifilepath, ofilepath, .TranspileProcessExec);
+    defer process.deinit();
+
+    // Check initial state
+    try std.testing.expect(process.flags == .TranspileProcessExec);
+    try std.testing.expect(process.pos.line == 1);
+    try std.testing.expect(process.pos.col == 1);
+    try std.testing.expect(mem.eql(u8, process.pos.filename, ifilepath));
+    try std.testing.expect(process.tokens.items.len == 0);
+
+    // Delete test files
+    try fs.cwd().deleteFile(ifilepath);
+    try fs.cwd().deleteFile(ofilepath);
+}
