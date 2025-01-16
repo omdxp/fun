@@ -1,1 +1,1 @@
-str x = "this is\ta string\2\n"; // now we support strings!
+chr c = 'O'; // now we support chacters

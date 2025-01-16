@@ -61,7 +61,8 @@ pub fn is_keyword(str: []const u8) bool {
         mem.eql(u8, "if", str) or mem.eql(u8, "elif", str) or
         mem.eql(u8, "else", str) or mem.eql(u8, "bin", str) or
         mem.eql(u8, "true", str) or mem.eql(u8, "false", str) or
-        mem.eql(u8, "fit", str) or mem.eql(u8, "ret", str);
+        mem.eql(u8, "fit", str) or mem.eql(u8, "ret", str) or
+        mem.eql(u8, "chr", str);
 }
 
 /// Checks if an operator is treated as a single unit.

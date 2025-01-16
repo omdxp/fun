@@ -651,6 +651,24 @@ pub const LexProcess = struct {
         };
     }
 
+    fn token_make_character(self: *Self) !?token.Token {
+        _ = try self.next_char(); // skip "'"
+        var c = try self.next_char();
+        if (c.? == '\\') {
+            c = try self.next_char();
+            c = misc.get_escape_char(c.?);
+        }
+
+        if (try self.next_char() != '\'') {
+            self.transpile_proc.error_message("expected '");
+        }
+
+        return token.Token{
+            .type = .Number,
+            .data = .{ .cval = c.? },
+        };
+    }
+
     /// Reads the next token from the input file.
     ///
     /// This function reads the next token from the input file, handling different token types
@@ -674,6 +692,7 @@ pub const LexProcess = struct {
 
         switch (c.?) {
             '"' => t = try self.token_make_string(),
+            '\'' => t = try self.token_make_character(),
             '+', '-', '*', '>', '<', '^', '%', '!', '=', '~', '|', '&', '(', '[', ',', '.' => t = try self.token_make_operator(),
             '{', '}', ';', ')', ']' => t = try self.token_make_symbol(),
             '0'...'9' => t = try self.token_make_number(),

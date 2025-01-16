@@ -33,7 +33,7 @@ pub const NumberType = enum {
 };
 
 /// Represents the data associated with a token. This can be one of several types.
-pub const TokenData = union {
+pub const TokenData = union(enum) {
     /// A single character value.
     cval: u8,
     /// A string value.

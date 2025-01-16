@@ -49,7 +49,13 @@ pub fn main() !void {
                 defer t.data.sval.deinit();
                 std.debug.print("sval: '{s}', whitespace: {}\n", .{ t.data.sval.items, t.whitespace });
             },
-            .Number => std.debug.print("llnum: '{}', type: {}, whitespace: {}\n", .{ t.data.llnum, t.num.?.type, t.whitespace }),
+            .Number => {
+                switch (t.data) {
+                    .llnum => std.debug.print("llnum: '{}', type: {}, whitespace: {}\n", .{ t.data.llnum, t.num.?.type, t.whitespace }),
+                    .cval => std.debug.print("cval: '{c}', whitespace: {}\n", .{ t.data.cval, t.whitespace }),
+                    else => unreachable,
+                }
+            },
             .NewLine => std.debug.print("whitespace: {}\n", .{t.whitespace}),
         }
     }
