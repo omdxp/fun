@@ -86,19 +86,22 @@ pub const LexProcess = struct {
         return if (readBytes == 0) null else buffer[0];
     }
 
-    /// Writes a character to the input file.
+    /// Pushes a character back onto the input file stream.
     ///
-    /// This function writes the given character to the input file associated with the
-    /// transpilation process.
+    /// This function pushes the given character back onto the input file stream,
+    /// effectively making it the next character to be read.
     ///
     /// Parameters:
-    /// - `c`: The character to write to the input file.
+    /// - `c`: The character to push back onto the input file stream.
     ///
     /// Errors:
-    /// - Returns an error if writing to the input file fails.
+    /// - Returns an error if seeking or writing to the input file fails.
     pub fn push_char(self: *Self, c: u8) !void {
+        const pos = try self.transpile_proc.ifile.seekableStream().getPos();
+        try self.transpile_proc.ifile.seekTo(pos - 1);
         var buffer: [1]u8 = [_]u8{c};
         _ = try self.transpile_proc.ifile.write(buffer[0..]);
+        try self.transpile_proc.ifile.seekTo(pos - 1);
     }
 
     /// Reads characters from the input file based on a given condition.
@@ -132,19 +135,16 @@ pub const LexProcess = struct {
     /// - Returns an error if reading from the input file fails.
     fn token_make_comment(self: *Self) !token.Token {
         var buffer = std.ArrayList(u8).init(main.global_allocator);
-        defer buffer.deinit();
         try self.lex_getc_if(&buffer, struct {
             fn call(_c: u8) bool {
                 return _c != '\n';
             }
         }.call);
 
-        var sval = std.ArrayList(u8).init(main.global_allocator);
-        try sval.appendSlice(buffer.items);
         return token.Token{
             .type = .Comment,
             .data = .{
-                .sval = sval,
+                .sval = buffer,
             },
         };
     }
@@ -154,7 +154,7 @@ pub const LexProcess = struct {
     /// This function checks for comment tokens in the input file and processes them.
     ///
     /// Returns:
-    /// - `?token.Token`: A comment token if one is found, otherwise `null`.
+    /// - `!?token.Token`: A comment token if one is found, otherwise `null`.
     ///
     /// Errors:
     /// - Returns an error if reading from the input file fails.
@@ -166,9 +166,8 @@ pub const LexProcess = struct {
                 _ = try self.next_char();
                 return try self.token_make_comment();
             }
-
             try self.push_char('/');
-            return null; // TODO: deal with operator or strings
+            return try self.token_make_operator_or_string();
         }
 
         return null;
@@ -229,25 +228,22 @@ pub const LexProcess = struct {
     /// - Returns an error if reading characters or allocating memory fails.
     fn token_make_identifier_or_keyword(self: *Self) !?token.Token {
         var buffer = std.ArrayList(u8).init(main.global_allocator);
-        defer buffer.deinit();
         try self.lex_getc_if(&buffer, struct {
             fn call(_c: u8) bool {
                 return misc.is_alpha(_c) or misc.is_number(_c) or _c == '_';
             }
         }.call);
 
-        var sval = std.ArrayList(u8).init(main.global_allocator);
-        try sval.appendSlice(buffer.items);
         if (misc.is_keyword(buffer.items)) {
             return token.Token{
                 .type = .Keyword,
-                .data = .{ .sval = sval },
+                .data = .{ .sval = buffer },
             };
         }
 
         return token.Token{
             .type = .Identifier,
-            .data = .{ .sval = sval },
+            .data = .{ .sval = buffer },
         };
     }
 

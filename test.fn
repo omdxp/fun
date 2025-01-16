@@ -1,2 +1,1 @@
-x = 0b0011
-y = 0x000a
+num x /= 3; // this is a comment
