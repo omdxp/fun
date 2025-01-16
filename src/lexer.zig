@@ -803,16 +803,23 @@ pub const LexProcess = struct {
         }
     }
 
-    /// Deinitializes the lexical analysis process.
+    /// Deinitializes the current instance.
     ///
-    /// This function deinitializes the token list and `parenthesis_buf` and `arg_str_buf` used by the lexical analysis process.
+    /// This function deinitializes the current instance by:
+    /// - Deinitializing the string values in the tokens.
+    /// - Deinitializing the token list.
+    /// - Deinitializing the parenthesis buffer if it is not null.
+    /// - Deinitializing the argument string buffer if it is not null.
     ///
     /// Parameters:
-    /// - `self`: The instance of the lexical analysis process to deinitialize.
-    ///
-    /// Returns:
-    /// - This function does not return any value.
+    /// - `self (Self)`: The current instance to deinitialize.
     pub fn deinit(self: Self) void {
+        for (self.tokens.items) |t| {
+            switch (t.data) {
+                .sval => t.data.sval.deinit(),
+                else => {},
+            }
+        }
         self.tokens.deinit();
         if (self.parenthesis_buf != null) self.parenthesis_buf.?.deinit();
         if (self.arg_str_buf != null) self.arg_str_buf.?.deinit();

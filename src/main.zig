@@ -28,33 +28,16 @@ pub fn main() !void {
     for (lp.tokens.items) |t| {
         std.debug.print("type: {}, ", .{t.type});
         switch (t.type) {
-            .String => {
-                defer t.data.sval.deinit();
-                std.debug.print("sval: '{s}', whitespace: {}\n", .{ t.data.sval.items, t.whitespace });
-            },
-            .Operator => {
-                defer t.data.sval.deinit();
-                std.debug.print("sval: '{s}', whitespace: {}\n", .{ t.data.sval.items, t.whitespace });
-            },
+            .String => std.debug.print("sval: '{s}', whitespace: {}\n", .{ t.data.sval.items, t.whitespace }),
+            .Operator => std.debug.print("sval: '{s}', whitespace: {}\n", .{ t.data.sval.items, t.whitespace }),
             .Symbol => std.debug.print("cval: '{c}', whitespace: {}\n", .{ t.data.cval, t.whitespace }),
-            .Comment => {
-                defer t.data.sval.deinit();
-                std.debug.print("sval: '{s}', whitespace: {}\n", .{ t.data.sval.items, t.whitespace });
-            },
-            .Identifier => {
-                defer t.data.sval.deinit();
-                std.debug.print("sval: '{s}', whitespace: {}\n", .{ t.data.sval.items, t.whitespace });
-            },
-            .Keyword => {
-                defer t.data.sval.deinit();
-                std.debug.print("sval: '{s}', whitespace: {}\n", .{ t.data.sval.items, t.whitespace });
-            },
-            .Number => {
-                switch (t.data) {
-                    .llnum => std.debug.print("llnum: '{}', type: {}, whitespace: {}\n", .{ t.data.llnum, t.num.?.type, t.whitespace }),
-                    .cval => std.debug.print("cval: '{c}', whitespace: {}\n", .{ t.data.cval, t.whitespace }),
-                    else => unreachable,
-                }
+            .Comment => std.debug.print("sval: '{s}', whitespace: {}\n", .{ t.data.sval.items, t.whitespace }),
+            .Identifier => std.debug.print("sval: '{s}', whitespace: {}\n", .{ t.data.sval.items, t.whitespace }),
+            .Keyword => std.debug.print("sval: '{s}', whitespace: {}\n", .{ t.data.sval.items, t.whitespace }),
+            .Number => switch (t.data) {
+                .llnum => std.debug.print("llnum: '{}', type: {}, whitespace: {}\n", .{ t.data.llnum, t.num.?.type, t.whitespace }),
+                .cval => std.debug.print("cval: '{c}', whitespace: {}\n", .{ t.data.cval, t.whitespace }),
+                else => unreachable,
             },
             .NewLine => std.debug.print("whitespace: {}\n", .{t.whitespace}),
         }
