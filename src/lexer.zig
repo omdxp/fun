@@ -453,7 +453,7 @@ pub const LexProcess = struct {
     /// - `buffer (*std.ArrayList(u8))`: The buffer containing the characters to be pushed back.
     fn read_op_flush_back_keep_first(self: *Self, buffer: *std.ArrayList(u8)) !void {
         var i = buffer.items.len - 1;
-        while (i >= 0) {
+        while (i > 0) {
             _ = try self.push_char(buffer.items[i]);
             i -= 1;
         }
