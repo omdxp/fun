@@ -25,6 +25,8 @@ pub const TranspileProcess = struct {
     ofile: fs.File,
     /// `tokens` is a list of tokens generated from the input file.
     tokens: std.ArrayList(token.Token),
+    /// The allocator to be used for memory allocation operations.
+    allocator: mem.Allocator,
 
     const Self = @This();
 
@@ -34,7 +36,7 @@ pub const TranspileProcess = struct {
     /// with read permissions. It also initializes the token list with the provided allocator.
     ///
     /// Parameters:
-    /// - `allocator`: The memory allocator to use for the token list.
+    /// - `allocator`: The memory allocator to use for memory allocation operations.
     /// - `ifilepath`: The file path of the input file.
     /// - `ofilepath`: The file path of the output file.
     /// - `flags`: The flags to set for the transpiler.
@@ -54,6 +56,7 @@ pub const TranspileProcess = struct {
             .ifile = ifile,
             .ofile = ofile,
             .tokens = std.ArrayList(token.Token).init(allocator),
+            .allocator = allocator,
         };
     }
 

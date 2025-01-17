@@ -3,7 +3,6 @@ const fs = std.fs;
 const mem = std.mem;
 const token = @import("./token.zig");
 const transpiler = @import("./transpiler.zig");
-const main = @import("./main.zig");
 const misc = @import("./misc.zig");
 
 /// `LexProcess` represents the state and configuration of a lexical analysis process.
@@ -18,6 +17,8 @@ pub const LexProcess = struct {
     parenthesis_buf: ?std.ArrayList(u8) = null,
     /// `arg_str_buf` is a buffer for storing argument strings.
     arg_str_buf: ?std.ArrayList(u8) = null,
+    /// The allocator to be used for memory allocation operations.
+    allocator: mem.Allocator,
 
     const Self = @This();
 
@@ -27,7 +28,7 @@ pub const LexProcess = struct {
     /// the lexical analysis process with the given transpilation process.
     ///
     /// Parameters:
-    /// - `allocator`: The memory allocator to use for the token list.
+    /// - `allocator`: The memory allocator to use for memory allocation operations.
     /// - `transpile_proc`: A pointer to the associated transpilation process.
     ///
     /// Returns:
@@ -37,6 +38,7 @@ pub const LexProcess = struct {
             .tokens = std.ArrayList(token.Token).init(allocator),
             .transpile_proc = transpile_proc,
             .curr_exp_count = 0,
+            .allocator = allocator,
         };
     }
 
@@ -141,7 +143,7 @@ pub const LexProcess = struct {
     /// Errors:
     /// - Returns an error if reading from the input file fails.
     fn token_make_comment(self: *Self) !token.Token {
-        var buffer = std.ArrayList(u8).init(main.global_allocator);
+        var buffer = std.ArrayList(u8).init(self.allocator);
         try self.lex_getc_if(&buffer, struct {
             fn call(_c: u8) bool {
                 return _c != '\n';
@@ -234,7 +236,7 @@ pub const LexProcess = struct {
     /// Errors:
     /// - Returns an error if reading characters or allocating memory fails.
     fn token_make_identifier_or_keyword(self: *Self) !?token.Token {
-        var buffer = std.ArrayList(u8).init(main.global_allocator);
+        var buffer = std.ArrayList(u8).init(self.allocator);
         try self.lex_getc_if(&buffer, struct {
             fn call(_c: u8) bool {
                 return misc.is_alpha(_c) or misc.is_number(_c) or _c == '_';
@@ -285,7 +287,7 @@ pub const LexProcess = struct {
     /// Errors:
     /// - Returns an error if reading characters or allocating the buffer fails.
     fn read_number_str(self: *Self) !std.ArrayList(u8) {
-        var buffer = std.ArrayList(u8).init(main.global_allocator);
+        var buffer = std.ArrayList(u8).init(self.allocator);
         try self.lex_getc_if(&buffer, struct {
             fn call(_c: u8) bool {
                 return misc.is_number(_c);
@@ -382,12 +384,12 @@ pub const LexProcess = struct {
     fn start_expression(self: *Self) void {
         self.curr_exp_count += 1;
         if (self.curr_exp_count == 1) {
-            self.parenthesis_buf = std.ArrayList(u8).init(main.global_allocator);
+            self.parenthesis_buf = std.ArrayList(u8).init(self.allocator);
         }
 
         const t = self.tokens.getLastOrNull();
         if (t != null and (t.?.type == .Identifier or token.is_operator(t, ","))) {
-            self.arg_str_buf = std.ArrayList(u8).init(main.global_allocator);
+            self.arg_str_buf = std.ArrayList(u8).init(self.allocator);
         }
     }
 
@@ -468,7 +470,7 @@ pub const LexProcess = struct {
     /// Errors:
     /// - Returns an error if reading characters or validating the operator fails.
     fn read_op(self: *Self) !std.ArrayList(u8) {
-        var buffer = std.ArrayList(u8).init(main.global_allocator);
+        var buffer = std.ArrayList(u8).init(self.allocator);
         var single_operator = true;
         var op = try self.next_char();
         try buffer.append(op.?);
@@ -575,7 +577,7 @@ pub const LexProcess = struct {
     /// Errors:
     /// - Returns an error if reading characters or allocating the buffer fails.
     fn read_hex_number_str(self: *Self) !std.ArrayList(u8) {
-        var buffer = std.ArrayList(u8).init(main.global_allocator);
+        var buffer = std.ArrayList(u8).init(self.allocator);
         try self.lex_getc_if(&buffer, struct {
             fn call(_c: u8) bool {
                 return misc.is_hex_number(_c);
@@ -689,7 +691,7 @@ pub const LexProcess = struct {
     /// - Returns an error if reading characters or appending to the buffer fails.
     /// - Logs an error message if the end of file is reached unexpectedly.
     fn token_make_string(self: *Self) !?token.Token {
-        var buffer = std.ArrayList(u8).init(main.global_allocator);
+        var buffer = std.ArrayList(u8).init(self.allocator);
         _ = try self.next_char(); // skip '"'
         while (true) {
             const c = try self.next_char();
