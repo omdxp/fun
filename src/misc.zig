@@ -151,3 +151,175 @@ pub fn get_escape_char(c: u8) u8 {
         else => 0,
     };
 }
+/// Creates a generic Vector type with the specified element type.
+///
+/// This function defines a generic Vector type with various methods for manipulating
+/// and accessing the elements in the vector.
+///
+/// Parameters:
+/// - `T: type`: The element type for the Vector.
+///
+/// Returns:
+/// - `type`: The defined Vector type.
+pub fn Vector(comptime T: type) type {
+    return struct {
+        /// The internal ArrayList for storing elements.
+        data: std.ArrayList(T),
+        /// The peek index for accessing elements without removing them.
+        pindex: usize = 0,
+        /// The count of elements in the Vector.
+        count: usize = 0,
+
+        const Self = @This();
+
+        /// Initializes a new Vector instance.
+        ///
+        /// Parameters:
+        /// - `allocator (mem.Allocator)`: The allocator to use for memory allocation.
+        ///
+        /// Returns:
+        /// - `Self`: The initialized Vector instance.
+        pub fn init(allocator: mem.Allocator) Self {
+            return Self{
+                .data = std.ArrayList(T).init(allocator),
+            };
+        }
+
+        /// Returns a slice of all elements in the Vector.
+        ///
+        /// This function provides access to the underlying array of elements in the Vector.
+        ///
+        /// Returns:
+        /// - `[]T`: A slice of all elements in the Vector.
+        pub fn items(self: Self) []T {
+            return self.data.items;
+        }
+
+        /// Gets the element at the specified index.
+        ///
+        /// Parameters:
+        /// - `index (usize)`: The index of the element to get.
+        ///
+        /// Returns:
+        /// - `?T`: The element at the specified index, or `null` if the index is out of bounds.
+        pub fn at(self: *Self, index: usize) T {
+            if (index >= self.data.items.len) {
+                return null;
+            }
+            return self.data.items[index];
+        }
+
+        /// Peeks at the element at the peek index without incrementing the index.
+        ///
+        /// Returns:
+        /// - `?T`: The element at the peek index, or `null` if the index is out of bounds.
+        pub fn peek_no_increment(self: *Self) ?T {
+            return self.at(self.pindex);
+        }
+
+        /// Peeks at the element at the peek index and increments the peek index.
+        ///
+        /// Returns:
+        /// - `?T`: The element at the peek index, or `null` if the index is out of bounds.
+        pub fn peek(self: *Self) ?T {
+            const res = self.peek_no_increment();
+            if (res != null) {
+                self.pindex += 1;
+            }
+            return res;
+        }
+
+        /// Pops off the last peeked element by decrementing the peek index.
+        pub fn pop_last_peek(self: *Self) void {
+            if (self.pindex > 0) {
+                self.pindex -= 1;
+            }
+        }
+
+        /// Sets the peek pointer to the specified index.
+        ///
+        /// Parameters:
+        /// - `index (usize)`: The index to set the peek pointer to.
+        pub fn set_peek_pointer(self: *Self, index: usize) void {
+            self.pindex = index;
+        }
+
+        /// Sets the peek pointer to the end of the Vector.
+        pub fn set_peek_pointer_end(self: *Self) void {
+            self.pindex = self.data.items.len;
+        }
+
+        /// Pushes an element onto the Vector.
+        ///
+        /// Parameters:
+        /// - `elem (T)`: The element to push onto the Vector.
+        ///
+        /// Errors:
+        /// - Returns an error if the element could not be appended.
+        pub fn push(self: *Self, elem: T) !void {
+            try self.data.append(elem);
+            self.count += 1;
+        }
+
+        /// Inserts an element at the specified index in the Vector.
+        ///
+        /// Parameters:
+        /// - `index (usize)`: The index to insert the element at.
+        /// - `elem (T)`: The element to insert.
+        ///
+        /// Errors:
+        /// - Returns an error if the element could not be inserted.
+        pub fn push_at(self: *Self, index: usize, elem: T) !void {
+            try self.data.insert(index, elem);
+            self.count += 1;
+        }
+
+        /// Pops an element off the Vector.
+        pub fn pop(self: *Self) void {
+            if (self.count > 0) {
+                self.count -= 1;
+                _ = self.data.pop();
+            }
+        }
+
+        /// Pops the last peeked element off the Vector.
+        pub fn peek_pop(self: *Self) void {
+            if (self.pindex > 0) {
+                self.pindex -= 1;
+                _ = self.data.pop();
+                self.count -= 1;
+            }
+        }
+
+        /// Gets the last element in the Vector.
+        ///
+        /// Returns:
+        /// - `?T`: The last element in the Vector, or `null` if the Vector is empty.
+        pub fn back(self: *Self) ?T {
+            if (self.data.items.len == 0) {
+                return null;
+            }
+            return self.data.items[self.data.items.len - 1];
+        }
+
+        /// Checks if the Vector is empty.
+        ///
+        /// Returns:
+        /// - `bool`: `true` if the Vector is empty, otherwise `false`.
+        pub fn is_empty(self: *Self) bool {
+            return self.data.items.len == 0;
+        }
+
+        /// Clears the Vector, retaining its capacity.
+        pub fn clear(self: *Self) void {
+            self.data.clearRetainingCapacity();
+            self.count = 0;
+            self.pindex = 0;
+        }
+
+        /// Deinitializes the Vector, releasing its resources.
+        pub fn deinit(self: Self) void {
+            self.data.deinit();
+        }
+    };
+}
