@@ -1,5 +1,6 @@
 const std = @import("std");
 const mem = std.mem;
+const dtype = @import("./dtype.zig");
 
 /// Checks if the given character is an alphabetic letter.
 ///
@@ -150,6 +151,30 @@ pub fn get_escape_char(c: u8) u8 {
         '\'' => '\'',
         else => 0,
     };
+}
+
+/// Determines the data type from a string representation.
+///
+/// This function compares a given string (`dt`) against known data type representations
+/// and returns the corresponding `DataTypeType` enum value. If the string does not match
+/// any known data type, it returns `.Unknown`.
+///
+/// Returns:
+/// - `dtype.DataTypeType`: The corresponding data type enum value. Possible values are:
+///   - `.Chr`: If the string is `"chr"`.
+///   - `.Str`: If the string is `"str"`.
+///   - `.Num`: If the string is `"num"`.
+///   - `.Bin`: If the string is `"bin"`.
+///   - `.Unknown`: If the string does not match any known data type.
+///
+/// Parameters:
+/// - `dt ( []const u8 )`: The string representation of the data type.
+pub fn get_datatype_type(dt: []const u8) dtype.DataTypeType {
+    if (mem.eql(u8, "chr", dt)) return .Chr;
+    if (mem.eql(u8, "str", dt)) return .Str;
+    if (mem.eql(u8, "num", dt)) return .Num;
+    if (mem.eql(u8, "bin", dt)) return .Bin;
+    return .Unknown;
 }
 
 /// Creates a generic Vector type with the specified element type.

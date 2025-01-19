@@ -155,6 +155,7 @@ pub const LexProcess = struct {
             .data = .{
                 .sval = buffer,
             },
+            .pos = self.transpile_proc.pos,
         };
     }
 
@@ -219,6 +220,7 @@ pub const LexProcess = struct {
         return token.Token{
             .type = .NewLine,
             .data = .{ .cval = '\n' },
+            .pos = self.transpile_proc.pos,
         };
     }
 
@@ -247,12 +249,14 @@ pub const LexProcess = struct {
             return token.Token{
                 .type = .Keyword,
                 .data = .{ .sval = buffer },
+                .pos = self.transpile_proc.pos,
             };
         }
 
         return token.Token{
             .type = .Identifier,
             .data = .{ .sval = buffer },
+            .pos = self.transpile_proc.pos,
         };
     }
 
@@ -357,6 +361,7 @@ pub const LexProcess = struct {
             .type = .Number,
             .data = .{ .llnum = num },
             .num = .{ .type = num_type },
+            .pos = self.transpile_proc.pos,
         };
     }
 
@@ -438,6 +443,7 @@ pub const LexProcess = struct {
         return token.Token{
             .type = .Symbol,
             .data = .{ .cval = c.? },
+            .pos = self.transpile_proc.pos,
         };
     }
 
@@ -517,6 +523,7 @@ pub const LexProcess = struct {
         const t = token.Token{
             .type = .Operator,
             .data = .{ .sval = sval },
+            .pos = self.transpile_proc.pos,
         };
 
         if (op.? == '(') {
@@ -714,6 +721,7 @@ pub const LexProcess = struct {
         return token.Token{
             .type = .String,
             .data = .{ .sval = buffer },
+            .pos = self.transpile_proc.pos,
         };
     }
 
@@ -746,6 +754,7 @@ pub const LexProcess = struct {
         return token.Token{
             .type = .Number,
             .data = .{ .cval = c.? },
+            .pos = self.transpile_proc.pos,
         };
     }
 

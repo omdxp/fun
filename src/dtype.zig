@@ -33,15 +33,15 @@ pub const DataTypeType = enum {
 /// pointer depth, and array information.
 pub const DataType = struct {
     /// Flags representing characteristics of the data type.
-    flags: DataTypeFlags,
+    flags: ?DataTypeFlags = null,
     /// The specific type of data.
-    type: DataTypeType,
+    type: ?DataTypeType = null,
     /// A string representation of the data type.
-    type_str: std.ArrayList(u8),
+    type_str: ?std.ArrayList(u8) = null,
     /// The depth of pointers if the data type is a pointer.
-    pointer_depth: usize,
+    pointer_depth: usize = 0,
     /// Information about the array dimensions and brackets.
-    array: struct {
+    array: ?struct {
         brackets: std.ArrayList(ast.Node),
-    },
+    } = null,
 };

@@ -1,5 +1,6 @@
 const std = @import("std");
 const mem = std.mem;
+const dtype = @import("./dtype.zig");
 
 /// Represents the different types of tokens that can be encountered in the source code.
 pub const TokenType = enum {
@@ -63,6 +64,8 @@ pub const Token = struct {
     type: TokenType,
     /// The data associated with the token.
     data: TokenData,
+    /// The current position of the token.
+    pos: Pos,
     /// The type of the numeric literal, if the token is a number.
     num: ?struct {
         /// The type of the number.

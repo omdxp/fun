@@ -5,6 +5,7 @@ const token = @import("./token.zig");
 const ast = @import("./ast.zig");
 const misc = @import("./misc.zig");
 const history = @import("./history.zig");
+const dtype = @import("./dtype.zig");
 
 /// Represents the parsing process in the transpiler.
 ///
@@ -67,6 +68,25 @@ pub const ParseProcess = struct {
         return self.transpile_proc.tokens.peek_no_increment();
     }
 
+    /// Retrieves the next token.
+    ///
+    /// This function peeks at the next token without incrementing the token stream's position.
+    /// It ignores newline or comment tokens and updates the current position if a valid token is found.
+    ///
+    /// Returns:
+    /// - `!?token.Token`: The next token, or `null` if there are no more tokens.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the next token fails.
+    fn token_next(self: *Self) !?token.Token {
+        var next_token = self.transpile_proc.tokens.peek_no_increment();
+        try self.ignore_nl_or_comment(&next_token);
+        if (next_token != null) {
+            self.transpile_proc.pos = next_token.?.pos;
+        }
+        return self.transpile_proc.tokens.peek();
+    }
+
     /// Pops the last node from the transpiler's node stack.
     ///
     /// This function retrieves the last node from the transpiler's node stack,
@@ -117,6 +137,72 @@ pub const ParseProcess = struct {
         self.transpile_proc.error_message("invalid symbol");
     }
 
+    fn token_next_is_operator(self: *Self, op: []const u8) !bool {
+        const t = try self.token_peek_next();
+        return token.is_operator(t, op);
+    }
+
+    fn parse_get_pointer_depth(self: *Self) !usize {
+        var depth: u8 = 0;
+        while (try self.token_next_is_operator("*")) {
+            depth += 1;
+            _ = try self.token_next();
+        }
+        return depth;
+    }
+
+    fn parse_datatype(self: *Self, dt: *dtype.DataType) !void {
+        const dt_token = try self.token_next();
+        const ptr_depth = try self.parse_get_pointer_depth();
+        if (ptr_depth > 0) {
+            dt.*.flags.?.is_pointer = true;
+            dt.*.pointer_depth = ptr_depth;
+        }
+        dt.*.type = misc.get_datatype_type(dt_token.?.data.sval.items);
+        if (dt.*.type.? == .Unknown) {
+            self.transpile_proc.error_message("unknown datatype");
+        }
+        dt.*.type_str = dt_token.?.data.sval;
+    }
+
+    fn parse_expressionable_single(self: *Self, _: *history.History) !bool {
+        const t = try self.token_peek_next();
+        if (t == null) {
+            return false;
+        }
+        // TODO: parse all possible expressionables
+        return true;
+    }
+
+    fn parse_expressionable(self: *Self, hist: *history.History) !void {
+        while (try self.parse_expressionable_single(hist)) {}
+    }
+
+    fn parse_expressionable_root(self: *Self, hist: *history.History) !void {
+        try self.parse_expressionable(hist);
+        const n = self.node_pop();
+        try self.transpile_proc.nodes.push(n.?);
+    }
+
+    fn parse_variable(self: *Self, hist: *history.History) !void {
+        var dt: ?dtype.DataType = null;
+        try self.parse_datatype(&dt.?);
+
+        const ident_token = try self.token_next();
+        if (ident_token.?.type != .Identifier) {
+            self.transpile_proc.error_message("expected indentifier");
+        }
+
+        // TODO: parse array brackets
+        var value_node: ?ast.Node = null;
+
+        if (try self.token_next_is_operator("=")) {
+            _ = try self.token_next(); // skip =
+            try self.parse_expressionable_root(hist);
+            value_node = self.node_pop();
+        }
+    }
+
     /// Parses a keyword token.
     ///
     /// This function checks if the next token matches any known keywords.
@@ -130,29 +216,24 @@ pub const ParseProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if reading the next token fails.
-    fn parse_keyword(self: *Self, _: *history.History) !void {
+    fn parse_keyword(self: *Self, hist: *history.History) !void {
         const t = try self.token_peek_next();
         const sval = t.?.data.sval.items;
         if (misc.keyword_is_datatype(sval)) {
-            // TODO: parse variable
+            try self.parse_variable(hist);
             return;
         }
 
         if (mem.eql(u8, "imp", sval)) {
-            // TODO: parse imp keyword
-            return;
+            @compileError("TODO: parse imp keyword");
         } else if (mem.eql(u8, "fun", sval)) {
-            // TODO: parse fun keyword
-            return;
+            @compileError("TODO: parse fun keyword");
         } else if (mem.eql(u8, "if", sval)) {
-            // TODO: parse if keyword
-            return;
+            @compileError("TODO: parse if keyword");
         } else if (mem.eql(u8, "fit", sval)) {
-            // TODO: parse fit keyword
-            return;
+            @compileError("TODO: parse fit keyword");
         } else if (mem.eql(u8, "ret", sval)) {
-            // TODO: parse ret keyword
-            return;
+            @compileError("TODO: parse ret keyword");
         }
 
         self.transpile_proc.error_message("invalid keyword");
