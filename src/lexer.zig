@@ -840,7 +840,7 @@ test "LexProcess initialization" {
     }
 
     const allocator = std.testing.allocator;
-    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .TranspileProcessOutf);
+    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
     var lex_proc = LexProcess.init(allocator, &transpile_proc);
 
     defer transpile_proc.deinit();
@@ -869,7 +869,7 @@ test "LexProcess next_char" {
     }
 
     const allocator = std.testing.allocator;
-    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .TranspileProcessOutf);
+    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
     var lex_proc = LexProcess.init(allocator, &transpile_proc);
 
     defer transpile_proc.deinit();
@@ -898,7 +898,7 @@ test "LexProcess peek_char" {
     }
 
     const allocator = std.testing.allocator;
-    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .TranspileProcessOutf);
+    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
     var lex_proc = LexProcess.init(allocator, &transpile_proc);
 
     defer transpile_proc.deinit();
@@ -926,7 +926,7 @@ test "LexProcess push_char" {
     }
 
     const allocator = std.testing.allocator;
-    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .TranspileProcessOutf);
+    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
     var lex_proc = LexProcess.init(allocator, &transpile_proc);
 
     defer transpile_proc.deinit();
@@ -954,7 +954,7 @@ test "LexProcess comment" {
     }
 
     const allocator = std.testing.allocator;
-    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .TranspileProcessOutf);
+    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
     var lex_proc = LexProcess.init(allocator, &transpile_proc);
 
     defer transpile_proc.deinit();
@@ -982,7 +982,7 @@ test "LexProcess string" {
     }
 
     const allocator = std.testing.allocator;
-    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .TranspileProcessOutf);
+    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
     var lex_proc = LexProcess.init(allocator, &transpile_proc);
 
     defer transpile_proc.deinit();
@@ -1010,7 +1010,7 @@ test "LexProcess number" {
     }
 
     const allocator = std.testing.allocator;
-    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .TranspileProcessOutf);
+    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
     var lex_proc = LexProcess.init(allocator, &transpile_proc);
 
     defer transpile_proc.deinit();
@@ -1038,7 +1038,7 @@ test "LexProcess lex" {
     }
 
     const allocator = std.testing.allocator;
-    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .TranspileProcessOutf);
+    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
     var lex_proc = LexProcess.init(allocator, &transpile_proc);
 
     defer transpile_proc.deinit();

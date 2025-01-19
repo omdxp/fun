@@ -2,13 +2,11 @@ const std = @import("std");
 const ast = @import("./ast.zig");
 
 /// Flags representing characteristics of a data type.
-///
-/// This enum defines flags that indicate specific attributes of a data type.
-pub const DataTypeFlags = enum(u8) {
+pub const DataTypeFlags = packed struct {
     /// Indicates if the data type is a pointer.
-    IsPointer = 0b0000_0001,
+    is_pointer: bool = false,
     /// Indicates if the data type is a literal.
-    IsLiteral = 0b0000_0010,
+    is_literal: bool = false,
 };
 
 /// Types of data types.

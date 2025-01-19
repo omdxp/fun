@@ -3,15 +3,15 @@ const mem = std.mem;
 const misc = @import("./misc.zig");
 
 /// Flags representing various states in the history.
-pub const HistoryFlags = enum(i8) {
+pub const HistoryFlags = packed struct {
     /// Indicates the global scope.
-    IsGlobalScope = 0b0000_0001,
+    is_global_scope: bool = false,
     /// Indicates that we are inside a function body.
-    InsideFunctionBody = 0b0000_0010,
+    inside_function_body: bool = false,
     /// Indicates that we are inside a fit statement.
-    InFitStatement = 0b0000_0100,
+    in_fit_statement: bool = false,
     /// Indicates that the parenthesis is not part of a function call.
-    ParenthesisNotFunctionCall = 0b0000_1000,
+    parenthesis_not_function_call: bool = false,
 };
 
 /// Represents the branches in a fit statement.
@@ -23,7 +23,7 @@ pub const HistoryFitBranches = struct {
 };
 
 pub const History = struct {
-    flags: i8,
+    flags: HistoryFlags,
     fit: ?struct {
         branch_data: HistoryFitBranches,
     } = null,
@@ -39,7 +39,7 @@ pub const History = struct {
     ///
     /// Returns:
     /// - `Self`: The initialized History instance.
-    pub fn init(allocator: mem.Allocator, flags: i8) Self {
+    pub fn init(allocator: mem.Allocator, flags: HistoryFlags) Self {
         return Self{
             .flags = flags,
             .allocator = allocator,

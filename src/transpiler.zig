@@ -6,13 +6,11 @@ const ast = @import("./ast.zig");
 const misc = @import("./misc.zig");
 
 /// TranspileProcessFlags is an enumeration that defines flags for the transpile process.
-///
-/// Each flag is represented as a bit in an 8-bit unsigned integer.
-pub const TranspileProcessFlags = enum(u8) {
+pub const TranspileProcessFlags = packed struct {
     /// Flag to indicate execution process.
-    TranspileProcessExec = 0b0000_0001,
+    exec: bool = false,
     /// Flag to indicate output file process.
-    TranspileProcessOutf = 0b0000_0010,
+    outf: bool = false,
 };
 
 /// `TranspileProcess` represents the state and configuration of a transpilation process.
@@ -134,11 +132,11 @@ test "TranspileProcess init and deinit" {
     }
 
     // Initialize TranspileProcess
-    var process = try TranspileProcess.init(allocator, ifilepath, ofilepath, .TranspileProcessExec);
+    var process = try TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
     defer process.deinit();
 
     // Check initial state
-    try std.testing.expect(process.flags == .TranspileProcessExec);
+    try std.testing.expect(process.flags.outf);
     try std.testing.expect(process.pos.line == 1);
     try std.testing.expect(process.pos.col == 1);
     try std.testing.expect(mem.eql(u8, process.pos.filename, ifilepath));

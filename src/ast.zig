@@ -1,13 +1,14 @@
 const std = @import("std");
 const token = @import("./token.zig");
 const dtype = @import("./dtype.zig");
+const misc = @import("./misc.zig");
 
 /// Flags representing characteristics of a node.
-pub const NodeFlags = enum(u8) {
+pub const NodeFlags = packed struct {
     /// Indicates if the node is inside an expression.
-    InsideExpression = 0b0000_0001,
+    inside_expression: bool = false,
     /// Indicates if the node has a combined variable.
-    HasVariableCombined = 0b0000_0010,
+    has_variable_combined: bool = false,
 };
 
 /// Types of nodes.
@@ -107,7 +108,7 @@ pub const Node = struct {
         },
         body: struct {
             /// The statements inside the body.
-            statements: std.ArrayList(*Node),
+            statements: misc.Vector(*Node),
         },
         function: struct {
             /// The return type of the function.
@@ -115,7 +116,7 @@ pub const Node = struct {
             /// The name of the function.
             name: std.ArrayList(u8),
             /// The arguments of the function.
-            args: std.ArrayList(*Node),
+            args: misc.Vector(*Node),
         },
         statement: struct {
             return_stmt: struct {
@@ -140,7 +141,7 @@ pub const Node = struct {
                 /// The body of the fit statement.
                 body: *Node,
                 /// The branches of the fit statement.
-                branches: std.ArrayList(u8), // index of parsed branch
+                branches: misc.Vector(u8), // index of parsed branch
                 /// Indicates if the fit statement has a default branch.
                 has_default_branch: bool,
             },

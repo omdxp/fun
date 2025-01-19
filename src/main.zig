@@ -14,13 +14,16 @@ pub fn main() !void {
         global_allocator,
         ifilepath,
         ofilepath,
-        .TranspileProcessOutf,
+        .{ .outf = true },
     );
     var lp = lexer.LexProcess.init(
         global_allocator,
         &tp,
     );
-    var pp = parser.ParseProcess.init(&tp);
+    var pp = parser.ParseProcess.init(
+        global_allocator,
+        &tp,
+    );
     defer {
         tp.deinit();
         lp.deinit();
@@ -29,6 +32,14 @@ pub fn main() !void {
     try lp.lex();
     try tp.tokens.push_slice(lp.tokens.items());
     try pp.parse();
+
+    for (tp.nodes.items()) |n| {
+        std.debug.print("node type: {}, ", .{n.type});
+        switch (n.type) {
+            .Body => std.debug.print("{?}\n", .{n.node_variant.body}),
+            else => unreachable,
+        }
+    }
 }
 
 test {
