@@ -151,6 +151,7 @@ pub fn get_escape_char(c: u8) u8 {
         else => 0,
     };
 }
+
 /// Creates a generic Vector type with the specified element type.
 ///
 /// This function defines a generic Vector type with various methods for manipulating
@@ -202,7 +203,7 @@ pub fn Vector(comptime T: type) type {
         ///
         /// Returns:
         /// - `?T`: The element at the specified index, or `null` if the index is out of bounds.
-        pub fn at(self: *Self, index: usize) T {
+        pub fn at(self: *Self, index: usize) ?T {
             if (index >= self.data.items.len) {
                 return null;
             }
@@ -259,6 +260,23 @@ pub fn Vector(comptime T: type) type {
         pub fn push(self: *Self, elem: T) !void {
             try self.data.append(elem);
             self.count += 1;
+        }
+
+        /// Appends a slice of elements to the Vector.
+        ///
+        /// This function adds the elements from the provided slice to the end of the Vector.
+        ///
+        /// Parameters:
+        /// - `elems ([]const T)`: The slice of elements to append to the Vector.
+        ///
+        /// Errors:
+        /// - Returns an error if the elements could not be appended.
+        ///
+        /// Postcondition:
+        /// - The count of elements in the Vector is increased by the length of the provided slice.
+        pub fn push_slice(self: *Self, elems: []const T) !void {
+            try self.data.appendSlice(elems);
+            self.count += elems.len;
         }
 
         /// Inserts an element at the specified index in the Vector.
@@ -322,4 +340,145 @@ pub fn Vector(comptime T: type) type {
             self.data.deinit();
         }
     };
+}
+
+test "Vector can be initialized and deinitialized" {
+    const allocator = std.testing.allocator;
+    var vec = Vector(u8).init(allocator);
+    defer vec.deinit();
+
+    try std.testing.expectEqual(0, vec.count);
+    try std.testing.expectEqual(0, vec.pindex);
+    try std.testing.expect(vec.is_empty());
+}
+
+test "Vector can push and retrieve elements" {
+    const allocator = std.testing.allocator;
+    var vec = Vector(u8).init(allocator);
+    defer vec.deinit();
+
+    try vec.push(42);
+    try std.testing.expectEqual(1, vec.count);
+    try std.testing.expectEqual(42, vec.back().?);
+    try std.testing.expectEqual(42, vec.at(0).?);
+
+    try vec.push(100);
+    try std.testing.expectEqual(2, vec.count);
+    try std.testing.expectEqual(100, vec.back().?);
+    try std.testing.expectEqual(100, vec.at(1).?);
+}
+
+test "Vector can push slice and retrieve elements" {
+    const allocator = std.testing.allocator;
+    var vec = Vector(u8).init(allocator);
+    defer vec.deinit();
+
+    try vec.push_slice(&[_]u8{ 1, 2, 3, 4, 5 });
+    try std.testing.expectEqual(5, vec.count);
+    try std.testing.expectEqual(1, vec.at(0).?);
+    try std.testing.expectEqual(5, vec.at(4).?);
+}
+
+test "Vector can peek and pop elements" {
+    const allocator = std.testing.allocator;
+    var vec = Vector(u8).init(allocator);
+    defer vec.deinit();
+
+    try vec.push(42);
+    try vec.push(100);
+
+    try std.testing.expectEqual(42, vec.peek().?);
+    try std.testing.expectEqual(100, vec.peek().?);
+
+    vec.pop_last_peek();
+    try std.testing.expectEqual(100, vec.peek().?);
+
+    vec.pop();
+    try std.testing.expectEqual(1, vec.count);
+    try std.testing.expectEqual(42, vec.back().?);
+
+    vec.peek_pop();
+    try std.testing.expectEqual(0, vec.count);
+    try std.testing.expect(vec.is_empty());
+}
+
+test "Vector can clear elements" {
+    const allocator = std.testing.allocator;
+    var vec = Vector(u8).init(allocator);
+    defer vec.deinit();
+
+    try vec.push(42);
+    try vec.push(100);
+    try std.testing.expectEqual(2, vec.count);
+
+    vec.clear();
+    try std.testing.expectEqual(0, vec.count);
+    try std.testing.expect(vec.is_empty());
+}
+
+test "Vector can set peek pointer" {
+    const allocator = std.testing.allocator;
+    var vec = Vector(u8).init(allocator);
+    defer vec.deinit();
+
+    try vec.push(42);
+    try vec.push(100);
+
+    vec.set_peek_pointer(1);
+    try std.testing.expectEqual(100, vec.peek().?);
+
+    vec.set_peek_pointer_end();
+    try std.testing.expectEqual(null, vec.peek());
+}
+
+test "Vector can push at specific index" {
+    const allocator = std.testing.allocator;
+    var vec = Vector(u8).init(allocator);
+    defer vec.deinit();
+
+    try vec.push(42);
+    try vec.push(100);
+    try vec.push_at(1, 50);
+
+    try std.testing.expectEqual(3, vec.count);
+    try std.testing.expectEqual(42, vec.at(0).?);
+    try std.testing.expectEqual(50, vec.at(1).?);
+    try std.testing.expectEqual(100, vec.at(2).?);
+}
+
+test "Vector can retrieve items as slice" {
+    const allocator = std.testing.allocator;
+    var vec = Vector(u8).init(allocator);
+    defer vec.deinit();
+
+    try vec.push(42);
+    try vec.push(100);
+
+    const items = vec.items();
+    try std.testing.expectEqual(2, items.len);
+    try std.testing.expectEqual(42, items[0]);
+    try std.testing.expectEqual(100, items[1]);
+}
+
+test "Vector can peek at element without incrementing the peek index" {
+    const allocator = std.testing.allocator;
+    var vec = Vector(u8).init(allocator);
+    defer vec.deinit();
+
+    try vec.push(42);
+    try vec.push(100);
+
+    const first_peek = vec.peek_no_increment();
+    try std.testing.expectEqual(42, first_peek.?);
+    try std.testing.expectEqual(42, vec.peek_no_increment().?);
+
+    // Ensure that the peek index has not been incremented
+    try std.testing.expectEqual(42, vec.peek().?); // This should still return 42 and increment the peek index
+
+    const second_peek = vec.peek_no_increment();
+    try std.testing.expectEqual(100, second_peek.?);
+    try std.testing.expectEqual(100, vec.peek_no_increment().?);
+
+    // Ensure that the peek index has only incremented by 1
+    try std.testing.expectEqual(100, vec.peek().?); // This should now return 100 and increment the peek index
 }
