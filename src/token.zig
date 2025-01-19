@@ -90,3 +90,37 @@ pub const Token = struct {
 pub fn is_operator(token: ?Token, val: []const u8) bool {
     return token != null and token.?.type == .Operator and mem.eql(u8, token.?.data.sval.items, val);
 }
+
+/// Checks if a token is a symbol with a specific value.
+///
+/// This function checks if the given token is not null, is of type `Symbol`,
+/// and if its data matches the provided value.
+///
+/// Parameters:
+/// - `token (?Token)`: The token to check.
+/// - `val (u8)`: The value to compare the token's data against.
+///
+/// Returns:
+/// - `bool`: `true` if the token is a symbol with the specified value, otherwise `false`.
+pub fn is_symbol(token: ?Token, val: u8) bool {
+    return token != null and token.?.type == .Symbol and token.?.data.cval == val;
+}
+
+/// Checks if a token is a newline, comment, or newline separator.
+///
+/// This function checks if the given token is not null and is either a newline,
+/// a comment, or a newline separator (backslash).
+///
+/// Parameters:
+/// - `token (?Token)`: The token to check.
+///
+/// Returns:
+/// - `bool`: `true` if the token is a newline, comment, or newline separator, otherwise `false`.
+pub fn is_nl_or_comment_or_newline_separator(token: ?Token) bool {
+    if (token == null) {
+        return false;
+    }
+
+    return token.?.type == .NewLine or
+        token.?.type == .Comment or is_symbol(token, '\\');
+}

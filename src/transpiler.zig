@@ -2,6 +2,8 @@ const std = @import("std");
 const fs = std.fs;
 const mem = std.mem;
 const token = @import("./token.zig");
+const ast = @import("./ast.zig");
+const misc = @import("./misc.zig");
 
 /// TranspileProcessFlags is an enumeration that defines flags for the transpile process.
 ///
@@ -23,8 +25,11 @@ pub const TranspileProcess = struct {
     ifile: fs.File,
     /// `ofile` is the output file where the transpiled code will be written.
     ofile: fs.File,
-    /// `tokens` is a list of tokens generated from the input file.
-    tokens: std.ArrayList(token.Token),
+    /// `tokens` is a vector of tokens generated from the input file.
+    tokens: misc.Vector(token.Token),
+    /// `nodes` is a list of AST (Abstract Syntax Tree) nodes.
+    /// This vector holds the nodes that are part of the AST being processed by the transpiler.
+    nodes: misc.Vector(ast.Node),
     /// The allocator to be used for memory allocation operations.
     allocator: mem.Allocator,
 
@@ -55,7 +60,8 @@ pub const TranspileProcess = struct {
             .pos = .{ .col = 1, .line = 1, .filename = ifilepath },
             .ifile = ifile,
             .ofile = ofile,
-            .tokens = std.ArrayList(token.Token).init(allocator),
+            .tokens = misc.Vector(token.Token).init(allocator),
+            .nodes = misc.Vector(ast.Node).init(allocator),
             .allocator = allocator,
         };
     }
@@ -111,6 +117,7 @@ pub const TranspileProcess = struct {
         self.ifile.close();
         self.ofile.close();
         self.tokens.deinit();
+        self.nodes.deinit();
     }
 };
 
@@ -135,7 +142,7 @@ test "TranspileProcess init and deinit" {
     try std.testing.expect(process.pos.line == 1);
     try std.testing.expect(process.pos.col == 1);
     try std.testing.expect(mem.eql(u8, process.pos.filename, ifilepath));
-    try std.testing.expect(process.tokens.items.len == 0);
+    try std.testing.expect(process.tokens.items().len == 0);
 
     // Delete test files
     try fs.cwd().deleteFile(ifilepath);

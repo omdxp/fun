@@ -7,8 +7,8 @@ const misc = @import("./misc.zig");
 
 /// `LexProcess` represents the state and configuration of a lexical analysis process.
 pub const LexProcess = struct {
-    /// `tokens` is a list of tokens generated during lexical analysis.
-    tokens: std.ArrayList(token.Token),
+    /// `tokens` is a vector of tokens generated during lexical analysis.
+    tokens: misc.Vector(token.Token),
     /// `transpile_proc` is a pointer to the associated transpilation process.
     transpile_proc: *transpiler.TranspileProcess,
     /// `curr_exp_count` is the current expression count.
@@ -35,7 +35,7 @@ pub const LexProcess = struct {
     /// - `Self`: A new instance of `LexProcess`.
     pub fn init(allocator: mem.Allocator, transpile_proc: *transpiler.TranspileProcess) Self {
         return Self{
-            .tokens = std.ArrayList(token.Token).init(allocator),
+            .tokens = misc.Vector(token.Token).init(allocator),
             .transpile_proc = transpile_proc,
             .curr_exp_count = 0,
             .allocator = allocator,
@@ -124,7 +124,7 @@ pub const LexProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if reading from the input file fails.
-    fn lex_getc_if(self: *Self, buffer: *std.ArrayList(u8), exp: fn (u8) bool) !void {
+    fn getc_if(self: *Self, buffer: *std.ArrayList(u8), exp: fn (u8) bool) !void {
         while (true) {
             const c = try self.peek_char();
             if (c == null or !exp(c.?)) break;
@@ -144,7 +144,7 @@ pub const LexProcess = struct {
     /// - Returns an error if reading from the input file fails.
     fn token_make_comment(self: *Self) !token.Token {
         var buffer = std.ArrayList(u8).init(self.allocator);
-        try self.lex_getc_if(&buffer, struct {
+        try self.getc_if(&buffer, struct {
             fn call(_c: u8) bool {
                 return _c != '\n';
             }
@@ -194,11 +194,11 @@ pub const LexProcess = struct {
     /// Errors:
     /// - Returns an error if reading the next character fails.
     fn handle_whitespace(self: *Self) anyerror!?token.Token {
-        var last_token = self.tokens.getLastOrNull();
+        var last_token = self.tokens.back();
         if (last_token != null) {
             _ = self.tokens.pop();
             last_token.?.whitespace = true;
-            try self.tokens.append(last_token.?);
+            try self.tokens.push(last_token.?);
         }
 
         _ = try self.next_char();
@@ -237,7 +237,7 @@ pub const LexProcess = struct {
     /// - Returns an error if reading characters or allocating memory fails.
     fn token_make_identifier_or_keyword(self: *Self) !?token.Token {
         var buffer = std.ArrayList(u8).init(self.allocator);
-        try self.lex_getc_if(&buffer, struct {
+        try self.getc_if(&buffer, struct {
             fn call(_c: u8) bool {
                 return misc.is_alpha(_c) or misc.is_number(_c) or _c == '_';
             }
@@ -288,7 +288,7 @@ pub const LexProcess = struct {
     /// - Returns an error if reading characters or allocating the buffer fails.
     fn read_number_str(self: *Self) !std.ArrayList(u8) {
         var buffer = std.ArrayList(u8).init(self.allocator);
-        try self.lex_getc_if(&buffer, struct {
+        try self.getc_if(&buffer, struct {
             fn call(_c: u8) bool {
                 return misc.is_number(_c);
             }
@@ -387,7 +387,7 @@ pub const LexProcess = struct {
             self.parenthesis_buf = std.ArrayList(u8).init(self.allocator);
         }
 
-        const t = self.tokens.getLastOrNull();
+        const t = self.tokens.back();
         if (t != null and (t.?.type == .Identifier or token.is_operator(t, ","))) {
             self.arg_str_buf = std.ArrayList(u8).init(self.allocator);
         }
@@ -578,7 +578,7 @@ pub const LexProcess = struct {
     /// - Returns an error if reading characters or allocating the buffer fails.
     fn read_hex_number_str(self: *Self) !std.ArrayList(u8) {
         var buffer = std.ArrayList(u8).init(self.allocator);
-        try self.lex_getc_if(&buffer, struct {
+        try self.getc_if(&buffer, struct {
             fn call(_c: u8) bool {
                 return misc.is_hex_number(_c);
             }
@@ -621,7 +621,7 @@ pub const LexProcess = struct {
     ///   or creating the special number token fails.
     fn token_make_special_number(self: *Self) !?token.Token {
         var t: ?token.Token = null;
-        const last_token = self.tokens.getLastOrNull();
+        const last_token = self.tokens.back();
         if (last_token == null or !(last_token.?.type == .Number and last_token.?.data.llnum == 0)) {
             return try self.token_make_identifier_or_keyword();
         }
@@ -800,7 +800,7 @@ pub const LexProcess = struct {
     pub fn lex(self: *Self) !void {
         var t = try self.read_next_token();
         while (t != null) {
-            try self.tokens.append(t.?);
+            try self.tokens.push(t.?);
             t = try self.read_next_token();
         }
     }
@@ -816,7 +816,7 @@ pub const LexProcess = struct {
     /// Parameters:
     /// - `self (Self)`: The current instance to deinitialize.
     pub fn deinit(self: Self) void {
-        for (self.tokens.items) |t| {
+        for (self.tokens.items()) |t| {
             switch (t.data) {
                 .sval => t.data.sval.deinit(),
                 else => {},
@@ -846,7 +846,7 @@ test "LexProcess initialization" {
     defer transpile_proc.deinit();
     defer lex_proc.deinit();
 
-    try std.testing.expect(lex_proc.tokens.items.len == 0);
+    try std.testing.expect(lex_proc.tokens.items().len == 0);
     try std.testing.expect(lex_proc.transpile_proc == &transpile_proc);
     try std.testing.expect(lex_proc.curr_exp_count == 0);
     try std.testing.expect(lex_proc.parenthesis_buf == null);
@@ -961,7 +961,7 @@ test "LexProcess comment" {
     defer lex_proc.deinit();
 
     try lex_proc.lex();
-    const t = lex_proc.tokens.items[0];
+    const t = lex_proc.tokens.items()[0];
     try std.testing.expectEqual(t.type, .Comment);
     try std.testing.expectEqualStrings(" This is a comment", t.data.sval.items);
 
@@ -989,7 +989,7 @@ test "LexProcess string" {
     defer lex_proc.deinit();
 
     try lex_proc.lex();
-    const t = lex_proc.tokens.items[0];
+    const t = lex_proc.tokens.items()[0];
     try std.testing.expectEqual(t.type, .String);
     try std.testing.expectEqualStrings("Hello, World!", t.data.sval.items);
 
@@ -1017,7 +1017,7 @@ test "LexProcess number" {
     defer lex_proc.deinit();
 
     try lex_proc.lex();
-    const t = lex_proc.tokens.items[0];
+    const t = lex_proc.tokens.items()[0];
     try std.testing.expectEqual(t.type, .Number);
     try std.testing.expectEqual(t.data.llnum, 12345);
 
@@ -1046,13 +1046,13 @@ test "LexProcess lex" {
 
     try lex_proc.lex();
 
-    try std.testing.expectEqual(6, lex_proc.tokens.items.len);
-    try std.testing.expectEqual(lex_proc.tokens.items[0].type, .Number);
-    try std.testing.expectEqual(lex_proc.tokens.items[1].type, .Operator);
-    try std.testing.expectEqual(lex_proc.tokens.items[2].type, .Number);
-    try std.testing.expectEqual(lex_proc.tokens.items[3].type, .Comment);
-    try std.testing.expectEqual(lex_proc.tokens.items[4].type, .NewLine);
-    try std.testing.expectEqual(lex_proc.tokens.items[5].type, .String);
+    try std.testing.expectEqual(6, lex_proc.tokens.items().len);
+    try std.testing.expectEqual(lex_proc.tokens.items()[0].type, .Number);
+    try std.testing.expectEqual(lex_proc.tokens.items()[1].type, .Operator);
+    try std.testing.expectEqual(lex_proc.tokens.items()[2].type, .Number);
+    try std.testing.expectEqual(lex_proc.tokens.items()[3].type, .Comment);
+    try std.testing.expectEqual(lex_proc.tokens.items()[4].type, .NewLine);
+    try std.testing.expectEqual(lex_proc.tokens.items()[5].type, .String);
     // Delete test files
     try fs.cwd().deleteFile(ifilepath);
     try fs.cwd().deleteFile(ofilepath);
