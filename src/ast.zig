@@ -55,6 +55,8 @@ pub const NodeType = enum {
     Unary,
     /// Represents a tenary node.
     Tenary,
+    /// Represents a bracket node.
+    Bracket,
     /// Represents a blank node.
     Blank,
 };
@@ -82,7 +84,7 @@ pub const Node = struct {
             /// The right-hand side of the expression.
             right: *Node,
             /// The operator used in the expression.
-            op: std.ArrayList(u8),
+            op: []const u8,
         },
         paren: struct {
             /// The expression inside the parentheses.
@@ -95,6 +97,18 @@ pub const Node = struct {
             name: std.ArrayList(u8),
             /// The value of the variable.
             val: *Node,
+        },
+
+        unary: struct {
+            /// The unary operator.
+            op: []const u8,
+            /// The operand of the unary operation.
+            operand: *Node,
+            /// Optional indirection information.
+            indirection: ?struct {
+                /// The depth of indirection.
+                depth: usize,
+            } = null,
         },
         tenary: struct {
             /// The expression for the true condition.
@@ -152,3 +166,61 @@ pub const Node = struct {
         },
     },
 };
+
+/// Checks if the node is an expression or a parenthesis.
+///
+/// This function determines if the given node (`n`) is of type `.Expression`
+/// or `.ExpressionParenthesis`.
+///
+/// Returns:
+/// - `bool`: `true` if the node is an expression or a parenthesis, otherwise `false`.
+///
+/// Parameters:
+/// - `n (Node)`: The node to check.
+pub fn node_is_expression_or_parenthesis(n: Node) bool {
+    return n.type == .Expression or n.type == .ExpressionParenthesis;
+}
+
+/// Checks if the node is a value type.
+///
+/// This function determines if the given node (`n`) is of a value type, which includes:
+/// - Expression or ExpressionParenthesis
+/// - Identifier
+/// - Number
+/// - Unary
+/// - Tenary
+/// - String
+///
+/// Returns:
+/// - `bool`: `true` if the node is a value type, otherwise `false`.
+///
+/// Parameters:
+/// - `n (Node)`: The node to check.
+pub fn node_is_value_type(n: Node) bool {
+    return node_is_expression_or_parenthesis(n) or
+        n.type == .Identifier or n.type == .Number or
+        n.type == .Unary or n.type == .Tenary or
+        n.type == .String;
+}
+
+/// Checks if the node is expressionable.
+///
+/// This function determines if the given node (`n`) is of a type that can be part of an expression.
+/// The types considered expressionable are:
+/// - Expression
+/// - ExpressionParenthesis
+/// - Unary
+/// - Identifier
+/// - Number
+/// - String
+///
+/// Returns:
+/// - `bool`: `true` if the node is expressionable, otherwise `false`.
+///
+/// Parameters:
+/// - `n (Node)`: The node to check.
+pub fn node_is_expressionable(n: Node) bool {
+    return n.type == .Expression or n.type == .ExpressionParenthesis or
+        n.type == .Unary or n.type == .Identifier or
+        n.type == .Number or n.type == .String;
+}
