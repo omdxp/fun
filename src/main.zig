@@ -36,7 +36,18 @@ pub fn main() !void {
     for (tp.nodes.items()) |n| {
         std.debug.print("node type: {}, ", .{n.type});
         switch (n.type) {
-            .Body => std.debug.print("{?}\n", .{n.node_variant.body}),
+            .Variable => {
+                const variable = n.node_variant.?.variable;
+                std.debug.print("name: {s}, dtype: {s}, ", .{ variable.name.items, variable.type.type_str.?.items });
+                switch (variable.val.type) {
+                    .String => std.debug.print("val: '{s}'\n", .{variable.val.data.?.sval.items}),
+                    else => unreachable,
+                }
+            },
+            .Number => {
+                const number = n.data.?.llnum;
+                std.debug.print("llnum: {}\n", .{number});
+            },
             else => unreachable,
         }
     }

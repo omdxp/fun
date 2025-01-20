@@ -412,6 +412,22 @@ pub const ParseProcess = struct {
         return true;
     }
 
+    fn parse_identifier(self: *Self) !bool {
+        const t = try self.token_peek_next();
+        if (t != null and t.?.type != .Identifier) {
+            self.transpile_proc.error_message("expected identifier");
+        }
+        return try self.parse_single_token_to_node();
+    }
+
+    fn parse_string(self: *Self) !bool {
+        const t = try self.token_peek_next();
+        if (t != null and t.?.type != .String) {
+            self.transpile_proc.error_message("expected string");
+        }
+        return try self.parse_single_token_to_node();
+    }
+
     fn parse_expressionable_single(self: *Self, hist: *history.History) !bool {
         const t = try self.token_peek_next();
         if (t == null) {
@@ -420,7 +436,13 @@ pub const ParseProcess = struct {
         return try switch (t.?.type) {
             .Number => self.parse_single_token_to_node(),
             .Operator => self.parse_expression(hist),
-            else => unreachable,
+            .Identifier => self.parse_identifier(),
+            .Keyword => {
+                try self.parse_keyword(hist);
+                return true;
+            },
+            .String => self.parse_string(),
+            else => false,
         };
     }
 
@@ -435,8 +457,8 @@ pub const ParseProcess = struct {
     }
 
     fn parse_variable(self: *Self, hist: *history.History) !void {
-        var dt: ?dtype.DataType = null;
-        try self.parse_datatype(&dt.?);
+        var dt: dtype.DataType = dtype.DataType{};
+        try self.parse_datatype(&dt);
 
         const ident_token = try self.token_next();
         if (ident_token.?.type != .Identifier) {
@@ -451,6 +473,17 @@ pub const ParseProcess = struct {
             try self.parse_expressionable_root(hist);
             value_node = self.node_pop();
         }
+
+        try self.transpile_proc.nodes.push(ast.Node{
+            .type = .Variable,
+            .node_variant = .{
+                .variable = .{
+                    .name = ident_token.?.data.sval,
+                    .type = dt,
+                    .val = &value_node.?,
+                },
+            },
+        });
     }
 
     /// Parses a keyword token.
@@ -475,15 +508,15 @@ pub const ParseProcess = struct {
         }
 
         if (mem.eql(u8, "imp", sval)) {
-            @compileError("TODO: parse imp keyword");
+            // @compileError("TODO: parse imp keyword");
         } else if (mem.eql(u8, "fun", sval)) {
-            @compileError("TODO: parse fun keyword");
+            // @compileError("TODO: parse fun keyword");
         } else if (mem.eql(u8, "if", sval)) {
-            @compileError("TODO: parse if keyword");
+            // @compileError("TODO: parse if keyword");
         } else if (mem.eql(u8, "fit", sval)) {
-            @compileError("TODO: parse fit keyword");
+            // @compileError("TODO: parse fit keyword");
         } else if (mem.eql(u8, "ret", sval)) {
-            @compileError("TODO: parse ret keyword");
+            // @compileError("TODO: parse ret keyword");
         }
 
         self.transpile_proc.error_message("invalid keyword");
@@ -523,7 +556,11 @@ pub const ParseProcess = struct {
             return false;
         }
         try switch (t.?.type) {
-            .Number, .Identifier, .String => {},
+            .Number, .Identifier, .String => {
+                var hist = history.History.init(self.allocator, .{});
+                defer hist.deinit();
+                try self.parse_expressionable(&hist);
+            },
             .Keyword => self.parse_global_keyword(),
             .Symbol => self.parse_symbol(),
             else => unreachable,
@@ -539,11 +576,6 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if reading the next token fails.
     pub fn parse(self: *Self) !void {
-        var node: ?ast.Node = null;
-        while (try self.next()) {
-            node = self.transpile_proc.nodes.back();
-            if (node == null) break;
-            try self.transpile_proc.nodes.push(node.?);
-        }
+        while (try self.next()) {}
     }
 };
