@@ -71,14 +71,16 @@ pub const TranspileProcess = struct {
     ///
     /// Parameters:
     /// - `self`: The instance of the transpiler.
-    /// - `msg`: The error message to log.
-    pub fn error_message(self: Self, msg: []const u8) void {
+    /// - `fmt`: The format string for the error message.
+    /// - `args`: The arguments for the format string.
+    pub fn err(self: *Self, comptime fmt: []const u8, args: anytype) void {
         self.deinit();
-        std.debug.panic("Error: {s} on line {d}, col {d} in file {s}", .{
+        const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
+        std.debug.panic("Error: {s} in {s}:{d}:{d}\n", .{
             msg,
+            self.pos.filename,
             self.pos.line,
             self.pos.col,
-            self.pos.filename,
         });
     }
 
@@ -89,13 +91,15 @@ pub const TranspileProcess = struct {
     ///
     /// Parameters:
     /// - `self`: The instance of the transpiler.
-    /// - `msg`: The warning message to log.
-    pub fn warn_message(self: Self, msg: []const u8) void {
-        std.debug.print("Warning: {s} on line {d}, col {d} in file {s}\n", .{
+    /// - `fmt`: The format string for the warning message.
+    /// - `args`: The arguments for the format string.
+    pub fn warn(self: *Self, fmt: []const u8, args: anytype) void {
+        const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
+        std.debug.print("Warning: {s} in {s}:{d}:{d}\n", .{
             msg,
+            self.pos.filename,
             self.pos.line,
             self.pos.col,
-            self.pos.filename,
         });
     }
 

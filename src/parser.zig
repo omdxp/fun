@@ -50,7 +50,7 @@ pub const ParseProcess = struct {
     fn expect_sym(self: *Self, c: u8) !void {
         const t = try self.token_next();
         if (t == null or t.?.type != .Symbol or t.?.data.cval != c) {
-            self.transpile_proc.error_message("expected symbol");
+            self.transpile_proc.err("expected symbol", .{});
         }
     }
 
@@ -69,7 +69,7 @@ pub const ParseProcess = struct {
     fn expect_op(self: *Self, op: []const u8) !void {
         const t = try self.token_next();
         if (t == null or t.?.type != .Operator or !mem.eql(u8, op, t.?.data.sval.items)) {
-            self.transpile_proc.error_message("expected operator");
+            self.transpile_proc.err("expected operator", .{});
         }
     }
 
@@ -172,7 +172,7 @@ pub const ParseProcess = struct {
             const body_node = self.node_pop();
             try self.transpile_proc.nodes.push(body_node.?);
         }
-        self.transpile_proc.error_message("invalid symbol");
+        self.transpile_proc.err("invalid symbol", .{});
     }
 
     fn token_next_is_operator(self: *Self, op: []const u8) !bool {
@@ -198,7 +198,7 @@ pub const ParseProcess = struct {
         }
         dt.*.type = misc.get_datatype_type(dt_token.?.data.sval.items);
         if (dt.*.type.? == .Unknown) {
-            self.transpile_proc.error_message("unknown datatype");
+            self.transpile_proc.err("unknown datatype", .{});
         }
         dt.*.type_str = dt_token.?.data.sval;
     }
@@ -218,7 +218,7 @@ pub const ParseProcess = struct {
                 .type = .String,
                 .data = .{ .sval = t.?.data.sval },
             }),
-            else => self.transpile_proc.error_message("expected single token"),
+            else => self.transpile_proc.err("expected single token, got '{?}'", .{t.?.type}),
         }
         return true;
     }
@@ -364,7 +364,7 @@ pub const ParseProcess = struct {
         var node_left = try self.node_peek_expressionable_or_null();
         if (node_left == null) {
             if (!misc.is_unary_operator(node_left.?.data.?.sval.items)) {
-                self.transpile_proc.error_message("expected left operand");
+                self.transpile_proc.err("expected left operand", .{});
             }
             try self.parse_for_unary();
             return;
@@ -386,7 +386,7 @@ pub const ParseProcess = struct {
             } else if (misc.is_unary_operator(t.?.data.sval.items)) {
                 try self.parse_for_unary();
             } else {
-                self.transpile_proc.error_message("expected expressionable");
+                self.transpile_proc.err("expected expressionable", .{});
             }
         } else {
             var hist_down = history.History.down(self.allocator, hist, hist.flags);
@@ -415,7 +415,7 @@ pub const ParseProcess = struct {
     fn parse_identifier(self: *Self) !bool {
         const t = try self.token_peek_next();
         if (t != null and t.?.type != .Identifier) {
-            self.transpile_proc.error_message("expected identifier");
+            self.transpile_proc.err("expected identifier", .{});
         }
         return try self.parse_single_token_to_node();
     }
@@ -423,7 +423,7 @@ pub const ParseProcess = struct {
     fn parse_string(self: *Self) !bool {
         const t = try self.token_peek_next();
         if (t != null and t.?.type != .String) {
-            self.transpile_proc.error_message("expected string");
+            self.transpile_proc.err("expected string", .{});
         }
         return try self.parse_single_token_to_node();
     }
@@ -462,7 +462,7 @@ pub const ParseProcess = struct {
 
         const ident_token = try self.token_next();
         if (ident_token.?.type != .Identifier) {
-            self.transpile_proc.error_message("expected indentifier");
+            self.transpile_proc.err("expected indentifier, got '{}'", .{ident_token.?.type});
         }
 
         // TODO: parse array brackets
@@ -519,7 +519,7 @@ pub const ParseProcess = struct {
             // @compileError("TODO: parse ret keyword");
         }
 
-        self.transpile_proc.error_message("invalid keyword");
+        self.transpile_proc.err("invalid keyword", .{});
     }
 
     /// Parses a global keyword token.

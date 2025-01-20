@@ -315,7 +315,7 @@ pub const LexProcess = struct {
         defer s.deinit();
 
         const number: c_longlong = std.fmt.parseInt(c_longlong, s.items, 10) catch {
-            self.transpile_proc.error_message("failed to parse number");
+            self.transpile_proc.err("failed to parse number '{s}'", .{s.items});
             return 0;
         };
         return number;
@@ -420,7 +420,7 @@ pub const LexProcess = struct {
     fn finish_expression(self: *Self) !void {
         self.curr_exp_count -= 1;
         if (self.curr_exp_count < 0) {
-            self.transpile_proc.error_message("expression was never opened");
+            self.transpile_proc.err("expression was never opened", .{});
         }
     }
 
@@ -502,7 +502,7 @@ pub const LexProcess = struct {
                 try self.read_op_flush_back_keep_first(&buffer);
             }
         } else if (!misc.op_valid(buffer.items)) {
-            self.transpile_proc.error_message("operator not valid");
+            self.transpile_proc.err("operator '{?}' not valid", .{op});
         }
 
         return buffer;
@@ -545,7 +545,7 @@ pub const LexProcess = struct {
     fn validate_binary_string(self: *Self, str: []const u8) void {
         for (str) |c| {
             if (c != '1' and c != '0') {
-                self.transpile_proc.error_message("invalid binary number");
+                self.transpile_proc.err("invalid binary number", .{});
             }
         }
     }
@@ -566,7 +566,7 @@ pub const LexProcess = struct {
         defer number_str.deinit();
         self.validate_binary_string(number_str.items);
         const number: c_longlong = std.fmt.parseInt(c_longlong, number_str.items, 2) catch {
-            self.transpile_proc.error_message("failed to parse number");
+            self.transpile_proc.err("failed to parse number '{s}'", .{number_str.items});
             return null;
         };
 
@@ -608,7 +608,7 @@ pub const LexProcess = struct {
         _ = try self.next_char(); // skip special character 'x'
         const number_str = try self.read_hex_number_str();
         const number: c_longlong = std.fmt.parseInt(c_longlong, number_str.items, 16) catch {
-            self.transpile_proc.error_message("failed to parse number");
+            self.transpile_proc.err("failed to parse number '{s}'", .{number_str.items});
             return null;
         };
 
@@ -638,7 +638,7 @@ pub const LexProcess = struct {
         switch (c.?) {
             'b' => t = try self.token_make_special_number_binary(),
             'x' => t = try self.token_make_number_hexadecimal(),
-            else => self.transpile_proc.error_message("character not valid for special numbers"),
+            else => self.transpile_proc.err("character '{c}' not valid for special numbers", .{c.?}),
         }
 
         return t;
@@ -658,7 +658,7 @@ pub const LexProcess = struct {
     fn handle_escape_number(self: *Self, buf: *std.ArrayList(u8)) !void {
         const num = try self.read_number();
         if (num > 255) {
-            self.transpile_proc.error_message("characters must be between 0 and 255");
+            self.transpile_proc.err("characters must be between 0 and 255, got '{}'", .{num});
         }
 
         try buf.append(@intCast(num));
@@ -703,7 +703,7 @@ pub const LexProcess = struct {
         while (true) {
             const c = try self.next_char();
             if (c == null) {
-                self.transpile_proc.error_message("unexpected end of file while reading string");
+                self.transpile_proc.err("unexpected end of file while reading string", .{});
                 return null;
             }
 
@@ -747,8 +747,9 @@ pub const LexProcess = struct {
             c = misc.get_escape_char(c.?);
         }
 
-        if (try self.next_char() != '\'') {
-            self.transpile_proc.error_message("expected '");
+        const nc = try self.next_char();
+        if (nc.? != '\'') {
+            self.transpile_proc.err("expected ' got '{c}'", .{nc.?});
         }
 
         return token.Token{
@@ -791,7 +792,7 @@ pub const LexProcess = struct {
             else => {
                 t = try self.read_special_token();
                 if (t == null) {
-                    self.transpile_proc.error_message("unexpected token");
+                    self.transpile_proc.err("unexpected token '{c}'", .{c.?});
                 }
             },
         }
