@@ -1,6 +1,7 @@
 const std = @import("std");
 const mem = std.mem;
 const dtype = @import("./dtype.zig");
+const token = @import("./token.zig");
 
 /// Checks if the given character is an alphabetic letter.
 ///
@@ -175,6 +176,103 @@ pub fn get_datatype_type(dt: []const u8) dtype.DataTypeType {
     if (mem.eql(u8, "num", dt)) return .Num;
     if (mem.eql(u8, "bin", dt)) return .Bin;
     return .Unknown;
+}
+
+/// Checks if the given operator is an access operator.
+///
+/// This function compares the given operator (`op`) to the access operator `"."`.
+///
+/// Returns:
+/// - `bool`: `true` if the operator is `"."`, otherwise `false`.
+///
+/// Parameters:
+/// - `op ( []const u8 )`: The operator to check.
+pub fn is_access_operator(op: []const u8) bool {
+    return mem.eql(u8, ".", op);
+}
+
+/// Checks if the given operator is an array operator.
+///
+/// This function compares the given operator (`op`) to the array operator `"[]"`.
+///
+/// Returns:
+/// - `bool`: `true` if the operator is `"[]"`, otherwise `false`.
+///
+/// Parameters:
+/// - `op ( []const u8 )`: The operator to check.
+pub fn is_array_operator(op: []const u8) bool {
+    return mem.eql(u8, "[]", op);
+}
+
+/// Checks if the given operator is a parenthesis.
+///
+/// This function compares the given operator (`op`) to the parenthesis operator `"("`.
+///
+/// Returns:
+/// - `bool`: `true` if the operator is `"("`, otherwise `false`.
+///
+/// Parameters:
+/// - `op ( []const u8 )`: The operator to check.
+pub fn is_parenthesis(op: []const u8) bool {
+    return mem.eql(u8, "(", op);
+}
+
+/// Checks if the given token is compatible with unary operands.
+///
+/// This function determines if the given token (`t`) is an access operator, array operator,
+/// or parenthesis, and returns `true` if any of these conditions are met.
+///
+/// Returns:
+/// - `bool`: `true` if the token is compatible with unary operands, otherwise `false`.
+///
+/// Parameters:
+/// - `t ( token.Token )`: The token to check.
+pub fn is_unary_operand_compatible(t: token.Token) bool {
+    return is_access_operator(t.data.sval.items) or is_array_operator(t.data.sval.items) or is_parenthesis(t.data.sval.items);
+}
+
+/// Checks if the given operator is a unary operator.
+///
+/// This function compares the given operator (`op`) against known unary operators.
+/// The unary operators checked are: `"-"`, `"+"`, `"!"`, `"~"`, `"*"`, `"&"`, `"++"`, `"--"`.
+///
+/// Returns:
+/// - `bool`: `true` if the operator is a unary operator, otherwise `false`.
+///
+/// Parameters:
+/// - `op ( []const u8 )`: The operator to check.
+pub fn is_unary_operator(op: []const u8) bool {
+    return mem.eql(u8, "-", op) or mem.eql(u8, "+", op) or
+        mem.eql(u8, "!", op) or mem.eql(u8, "~", op) or
+        mem.eql(u8, "*", op) or mem.eql(u8, "&", op) or
+        mem.eql(u8, "++", op) or mem.eql(u8, "--", op);
+}
+
+/// Checks if the given operator is an indirection operator.
+///
+/// This function compares the given operator (`op`) to the indirection operator `"*"`.
+///
+/// Returns:
+/// - `bool`: `true` if the operator is `"*"`, otherwise `false`.
+///
+/// Parameters:
+/// - `op ( []const u8 )`: The operator to check.
+pub fn is_indirection_operator(op: []const u8) bool {
+    return mem.eql(u8, "*", op);
+}
+
+/// Checks if the given operator is a left-operanded unary operator.
+///
+/// This function compares the given operator (`op`) against known left-operanded unary operators.
+/// The unary operators checked are: `"++"` and `"--"`.
+///
+/// Returns:
+/// - `bool`: `true` if the operator is a left-operanded unary operator, otherwise `false`.
+///
+/// Parameters:
+/// - `op ( []const u8 )`: The operator to check.
+pub fn is_left_operanded_unary_operator(op: []const u8) bool {
+    return mem.eql(u8, "++", op) or mem.eql(u8, "--", op);
 }
 
 /// Creates a generic Vector type with the specified element type.

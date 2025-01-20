@@ -64,20 +64,20 @@ pub const NodeType = enum {
 /// Represents a node in the abstract syntax tree (AST).
 pub const Node = struct {
     /// Flags representing characteristics of the node.
-    flags: NodeFlags,
+    flags: ?NodeFlags = null,
     /// The specific type of the node.
     type: NodeType,
     /// The position of the node in the source code.
-    pos: token.Pos,
-    binded: struct {
+    pos: ?token.Pos = null,
+    binded: ?struct {
         /// The owner of the node.
         owner: *Node,
         /// The function associated with the node.
         function: *Node,
-    },
+    } = null,
     /// The token data associated with the node.
-    data: token.TokenData,
-    node_variant: union(enum) {
+    data: ?token.TokenData = null,
+    node_variant: ?union(enum) {
         exp: struct {
             /// The left-hand side of the expression.
             left: *Node,
@@ -98,8 +98,9 @@ pub const Node = struct {
             /// The value of the variable.
             val: *Node,
         },
-
         unary: struct {
+            /// Indicates if the unary operator is left-operanded.
+            is_left_operanded_unary: bool = false,
             /// The unary operator.
             op: []const u8,
             /// The operand of the unary operation.
@@ -164,7 +165,7 @@ pub const Node = struct {
                 exp: *Node,
             },
         },
-    },
+    } = null,
 };
 
 /// Checks if the node is an expression or a parenthesis.

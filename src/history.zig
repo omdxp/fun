@@ -12,6 +12,8 @@ pub const HistoryFlags = packed struct {
     in_fit_statement: bool = false,
     /// Indicates that the parenthesis is not part of a function call.
     parenthesis_not_function_call: bool = false,
+    /// Indicates that expression is unary.
+    expression_is_unary: bool = false,
 };
 
 /// Represents the branches in a fit statement.
@@ -59,10 +61,17 @@ pub const History = struct {
     ///
     /// Returns:
     /// - `Self`: The new History instance with the updated flags.
-    pub fn down(allocator: mem.Allocator, history: *History, flags: i8) Self {
-        var new_history = init(allocator, flags);
-        @memcpy(new_history, history);
-        new_history.flags = flags;
+    pub fn down(allocator: mem.Allocator, history: *History, flags: HistoryFlags) Self {
+        var new_history: Self = Self{
+            .flags = history.flags,
+            .fit = history.fit,
+            .allocator = allocator,
+        };
+        if (flags.expression_is_unary) new_history.flags.expression_is_unary = true;
+        if (flags.in_fit_statement) new_history.flags.in_fit_statement = true;
+        if (flags.inside_function_body) new_history.flags.inside_function_body = true;
+        if (flags.is_global_scope) new_history.flags.is_global_scope = true;
+        if (flags.parenthesis_not_function_call) new_history.flags.parenthesis_not_function_call = true;
         return new_history;
     }
 

@@ -35,6 +35,44 @@ pub const ParseProcess = struct {
         };
     }
 
+    /// Expects the next token to be a specific symbol.
+    ///
+    /// This function retrieves the next token and checks if it matches the specified symbol (`c`).
+    /// If the next token is not the expected symbol, it logs an error message indicating that
+    /// the expected symbol was not found.
+    ///
+    /// Parameters:
+    /// - `c (u8)`: The expected symbol.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the next token fails.
+    /// - Logs an error message if the next token is not the expected symbol.
+    fn expect_sym(self: *Self, c: u8) !void {
+        const t = try self.token_next();
+        if (t == null or t.?.type != .Symbol or t.?.data.cval != c) {
+            self.transpile_proc.error_message("expected symbol");
+        }
+    }
+
+    /// Expects the next token to be a specific operator.
+    ///
+    /// This function retrieves the next token and checks if it matches the specified operator (`op`).
+    /// If the next token is not the expected operator, it logs an error message indicating that
+    /// the expected operator was not found.
+    ///
+    /// Parameters:
+    /// - `op ( []const u8 )`: The expected operator.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the next token fails.
+    /// - Logs an error message if the next token is not the expected operator.
+    fn expect_op(self: *Self, op: []const u8) !void {
+        const t = try self.token_next();
+        if (t == null or t.?.type != .Operator or !mem.eql(u8, op, t.?.data.sval.items)) {
+            self.transpile_proc.error_message("expected operator");
+        }
+    }
+
     /// Skips newline, comment, and newline separator tokens.
     ///
     /// This function skips tokens that are either newline, comment, or newline separator
@@ -115,7 +153,7 @@ pub const ParseProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if reading the next token fails.
-    fn next_token_is_symbol(self: *Self, c: u8) bool {
+    fn next_token_is_symbol(self: *Self, c: u8) !bool {
         const t = try self.token_peek_next();
         return token.is_symbol(t, c);
     }
@@ -129,7 +167,7 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if reading the next token fails or if pushing the node fails.
     fn parse_symbol(self: *Self) !void {
-        if (self.next_token_is_symbol('{')) {
+        if (try self.next_token_is_symbol('{')) {
             // TODO: parse body
             const body_node = self.node_pop();
             try self.transpile_proc.nodes.push(body_node.?);
@@ -165,20 +203,232 @@ pub const ParseProcess = struct {
         dt.*.type_str = dt_token.?.data.sval;
     }
 
-    fn parse_expressionable_single(self: *Self, _: *history.History) !bool {
+    fn parse_single_token_to_node(self: *Self) !bool {
+        const t = try self.token_next();
+        switch (t.?.type) {
+            .Number => try self.transpile_proc.nodes.push(ast.Node{
+                .type = .Number,
+                .data = .{ .llnum = t.?.data.llnum },
+            }),
+            .Identifier => try self.transpile_proc.nodes.push(ast.Node{
+                .type = .Identifier,
+                .data = .{ .sval = t.?.data.sval },
+            }),
+            .String => try self.transpile_proc.nodes.push(ast.Node{
+                .type = .String,
+                .data = .{ .sval = t.?.data.sval },
+            }),
+            else => self.transpile_proc.error_message("expected single token"),
+        }
+        return true;
+    }
+
+    fn parse_additional_expression(self: *Self) !void {
+        const t = try self.token_peek_next();
+        if (t.?.type == .Operator) {
+            var hist = history.History.init(self.allocator, .{});
+            defer hist.deinit();
+            try self.parse_expressionable(&hist);
+        }
+    }
+
+    fn parse_for_parenthesis(self: *Self, hist: *history.History) !void {
+        try self.expect_op("(");
+        var left_node: ?ast.Node = null;
+        const tmp_node = self.transpile_proc.nodes.back();
+        if (tmp_node != null and ast.node_is_value_type(tmp_node.?)) {
+            left_node = tmp_node;
+            _ = self.node_pop();
+        }
+        var exp_node = ast.Node{ .type = .Blank };
+        if (!try self.next_token_is_symbol(')')) {
+            try self.parse_expressionable_root(hist);
+            exp_node = self.node_pop().?;
+        }
+        try self.expect_sym(')');
+        try self.transpile_proc.nodes.push(ast.Node{
+            .type = .ExpressionParenthesis,
+            .node_variant = .{ .paren = .{ .exp = &exp_node } },
+        });
+        if (left_node != null) {
+            var parenthesis_node = self.node_pop();
+            try self.transpile_proc.nodes.push(ast.Node{
+                .type = .Expression,
+                .node_variant = .{
+                    .exp = .{
+                        .left = &left_node.?,
+                        .right = &parenthesis_node.?,
+                        .op = "()",
+                    },
+                },
+            });
+        }
+        try self.parse_additional_expression();
+    }
+
+    fn parse_for_comma(self: *Self, hist: *history.History) !void {
+        _ = try self.token_next(); // skip ,
+        var left_node = self.node_pop();
+        try self.parse_expressionable_root(hist);
+        var right_node = self.node_pop();
+        try self.transpile_proc.nodes.push(ast.Node{
+            .type = .Expression,
+            .node_variant = .{
+                .exp = .{
+                    .left = &left_node.?,
+                    .right = &right_node.?,
+                    .op = ",",
+                },
+            },
+        });
+    }
+
+    fn parse_for_bracket(self: *Self, hist: *history.History) !void {
+        var left_node = self.transpile_proc.nodes.back();
+        if (left_node != null) {
+            _ = self.node_pop();
+        }
+        try self.expect_op("[");
+        try self.parse_expressionable_root(hist);
+        try self.expect_sym(']');
+        var exp_node = self.node_pop();
+        try self.transpile_proc.nodes.push(ast.Node{
+            .type = .Bracket,
+            .node_variant = .{ .bracket = .{ .inner = &exp_node.? } },
+        });
+        if (left_node != null) {
+            var bracket_node = self.node_pop();
+            try self.transpile_proc.nodes.push(ast.Node{
+                .type = .Expression,
+                .node_variant = .{
+                    .exp = .{
+                        .left = &left_node.?,
+                        .right = &bracket_node.?,
+                        .op = "[]",
+                    },
+                },
+            });
+        }
+    }
+
+    fn node_peek_expressionable_or_null(self: *Self) !?ast.Node {
+        const n = self.transpile_proc.nodes.back();
+        return if (n != null and ast.node_is_expressionable(n.?)) n.? else null;
+    }
+
+    fn parse_for_indirection_unary(self: *Self) !void {
+        const depth = try self.parse_get_pointer_depth();
+        var hist = history.History.init(self.allocator, .{ .expression_is_unary = true });
+        defer hist.deinit();
+        try self.parse_expressionable(&hist);
+        var unary_operand_node = self.node_pop();
+        try self.transpile_proc.nodes.push(ast.Node{
+            .type = .Unary,
+            .node_variant = .{
+                .unary = .{
+                    .op = "*",
+                    .operand = &unary_operand_node.?,
+                },
+            },
+        });
+        var unary_node = self.node_pop();
+        unary_node.?.node_variant.?.unary.indirection.?.depth = depth;
+        try self.transpile_proc.nodes.push(unary_node.?);
+    }
+
+    fn parse_for_unary(self: *Self) !void {
+        const t = try self.token_peek_next();
+        const unary_op = t.?.data.sval.items;
+        if (misc.is_indirection_operator(unary_op)) {
+            try self.parse_for_indirection_unary();
+            return;
+        }
+    }
+
+    fn parse_for_left_operanded_unary(self: *Self, node_left: *ast.Node, unary_op: []const u8) !void {
+        try self.transpile_proc.nodes.push(ast.Node{
+            .type = .Unary,
+            .node_variant = .{
+                .unary = .{
+                    .op = unary_op,
+                    .operand = node_left,
+                    .is_left_operanded_unary = true,
+                },
+            },
+        });
+    }
+
+    fn parse_normal_expression(self: *Self, hist: *history.History) !void {
+        var t = try self.token_peek_next();
+        const op = t.?.data.sval.items;
+        var node_left = try self.node_peek_expressionable_or_null();
+        if (node_left == null) {
+            if (!misc.is_unary_operator(node_left.?.data.?.sval.items)) {
+                self.transpile_proc.error_message("expected left operand");
+            }
+            try self.parse_for_unary();
+            return;
+        }
+        _ = try self.token_next(); // skip operator
+        _ = self.node_pop();
+        if (misc.is_left_operanded_unary_operator(op)) {
+            try self.parse_for_left_operanded_unary(&node_left.?, op);
+            return;
+        }
+        node_left.?.flags.?.inside_expression = true;
+        t = try self.token_peek_next();
+        if (t.?.type == .Operator) {
+            if (mem.eql(u8, t.?.data.sval.items, "(")) {
+                var hist_down = history.History.down(self.allocator, hist, hist.flags);
+                defer hist_down.deinit();
+                hist_down.flags.parenthesis_not_function_call = true;
+                try self.parse_for_parenthesis(&hist_down);
+            } else if (misc.is_unary_operator(t.?.data.sval.items)) {
+                try self.parse_for_unary();
+            } else {
+                self.transpile_proc.error_message("expected expressionable");
+            }
+        } else {
+            var hist_down = history.History.down(self.allocator, hist, hist.flags);
+            defer hist_down.deinit();
+            try self.parse_expressionable(&hist_down);
+        }
+    }
+
+    fn parse_expression(self: *Self, hist: *history.History) !bool {
+        const t = try self.token_peek_next();
+        if (hist.flags.expression_is_unary and !misc.is_unary_operand_compatible(t.?)) {
+            return false;
+        }
+        if (mem.eql(u8, "(", t.?.data.sval.items)) {
+            try self.parse_for_parenthesis(hist);
+        } else if (mem.eql(u8, ",", t.?.data.sval.items)) {
+            try self.parse_for_comma(hist);
+        } else if (mem.eql(u8, "[", t.?.data.sval.items)) {
+            try self.parse_for_bracket(hist);
+        } else {
+            try self.parse_normal_expression(hist);
+        }
+        return true;
+    }
+
+    fn parse_expressionable_single(self: *Self, hist: *history.History) !bool {
         const t = try self.token_peek_next();
         if (t == null) {
             return false;
         }
-        // TODO: parse all possible expressionables
-        return true;
+        return try switch (t.?.type) {
+            .Number => self.parse_single_token_to_node(),
+            .Operator => self.parse_expression(hist),
+            else => unreachable,
+        };
     }
 
-    fn parse_expressionable(self: *Self, hist: *history.History) !void {
+    fn parse_expressionable(self: *Self, hist: *history.History) anyerror!void {
         while (try self.parse_expressionable_single(hist)) {}
     }
 
-    fn parse_expressionable_root(self: *Self, hist: *history.History) !void {
+    fn parse_expressionable_root(self: *Self, hist: *history.History) anyerror!void {
         try self.parse_expressionable(hist);
         const n = self.node_pop();
         try self.transpile_proc.nodes.push(n.?);
