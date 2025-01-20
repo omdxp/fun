@@ -1,3 +1,1 @@
-// this is a comment
-123
-str x = "hello"
+num x = 1 + 2

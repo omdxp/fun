@@ -6,6 +6,11 @@ const ast = @import("./ast.zig");
 const misc = @import("./misc.zig");
 const history = @import("./history.zig");
 const dtype = @import("./dtype.zig");
+const expressionable = @import("./expressionable.zig");
+
+var parser_last_token: ?token.Token = null;
+var parser_current_body: ?*ast.Node = null;
+var parser_current_function: ?*ast.Node = null;
 
 /// Represents the parsing process in the transpiler.
 ///
@@ -73,6 +78,24 @@ pub const ParseProcess = struct {
         }
     }
 
+    /// Creates and initializes a new node in the transpiler's node list.
+    ///
+    /// This function sets the `owner` and `function` bindings of the provided node (`n`)
+    /// and adds it to the transpiler's node list.
+    ///
+    /// Parameters:
+    /// - `n (*ast.Node)`: The node to create and initialize.
+    ///
+    /// Errors:
+    /// - Returns an error if adding the node to the node list fails.
+    fn create_node(self: *Self, n: *ast.Node) !void {
+        n.binded = .{
+            .owner = parser_current_body,
+            .function = parser_current_function,
+        };
+        try self.transpile_proc.nodes.push(n.*);
+    }
+
     /// Skips newline, comment, and newline separator tokens.
     ///
     /// This function skips tokens that are either newline, comment, or newline separator
@@ -122,6 +145,7 @@ pub const ParseProcess = struct {
         if (next_token != null) {
             self.transpile_proc.pos = next_token.?.pos;
         }
+        parser_last_token = next_token.?;
         return self.transpile_proc.tokens.peek();
     }
 
@@ -206,18 +230,27 @@ pub const ParseProcess = struct {
     fn parse_single_token_to_node(self: *Self) !bool {
         const t = try self.token_next();
         switch (t.?.type) {
-            .Number => try self.transpile_proc.nodes.push(ast.Node{
-                .type = .Number,
-                .data = .{ .llnum = t.?.data.llnum },
-            }),
-            .Identifier => try self.transpile_proc.nodes.push(ast.Node{
-                .type = .Identifier,
-                .data = .{ .sval = t.?.data.sval },
-            }),
-            .String => try self.transpile_proc.nodes.push(ast.Node{
-                .type = .String,
-                .data = .{ .sval = t.?.data.sval },
-            }),
+            .Number => {
+                var number_node = ast.Node{
+                    .type = .Number,
+                    .data = .{ .llnum = t.?.data.llnum },
+                };
+                try self.create_node(&number_node);
+            },
+            .Identifier => {
+                var ident_node = ast.Node{
+                    .type = .Identifier,
+                    .data = .{ .sval = t.?.data.sval },
+                };
+                try self.create_node(&ident_node);
+            },
+            .String => {
+                var str_node = ast.Node{
+                    .type = .String,
+                    .data = .{ .sval = t.?.data.sval },
+                };
+                try self.create_node(&str_node);
+            },
             else => self.transpile_proc.err("expected single token, got '{?}'", .{t.?.type}),
         }
         return true;
@@ -358,13 +391,109 @@ pub const ParseProcess = struct {
         });
     }
 
+    fn make_expression_node(self: *Self, left_node: *ast.Node, right_node: *ast.Node, op: []const u8) !void {
+        var exp_node = ast.Node{
+            .type = .Expression,
+            .node_variant = .{
+                .exp = .{
+                    .left = left_node,
+                    .right = right_node,
+                    .op = op,
+                },
+            },
+        };
+        try self.create_node(&exp_node);
+    }
+
+    fn parse_get_precedence_for_operator(_: Self, op: []const u8, group: *?expressionable.OpPrecedenceGroup) i8 {
+        for (0..expressionable.TOTAL_OPERATOR_GROUPS) |i| {
+            var j: u8 = 0;
+            while (expressionable.op_precedence[i].operators[j] != null) {
+                const _op = expressionable.op_precedence[i].operators[j];
+                if (mem.eql(u8, _op.?, op)) {
+                    group.* = expressionable.op_precedence[i];
+                    return @intCast(i);
+                }
+                j += 1;
+            }
+        }
+        return -1;
+    }
+
+    fn parse_left_has_priority(self: *Self, op_left: []const u8, op_right: []const u8) bool {
+        var left_group: ?expressionable.OpPrecedenceGroup = null;
+        var right_group: ?expressionable.OpPrecedenceGroup = null;
+        if (mem.eql(u8, op_left, op_right)) {
+            return false;
+        }
+        const left_prec = self.parse_get_precedence_for_operator(op_left, &left_group);
+        const right_prec = self.parse_get_precedence_for_operator(op_right, &right_group);
+        if (left_group.?.associativity == .RightToLeft) {
+            return false;
+        }
+        return left_prec <= right_prec;
+    }
+
+    fn parse_node_shift_children_left(self: *Self, node: *ast.Node) !void {
+        const right_op = node.*.node_variant.?.exp.right.?.*.node_variant.?.exp.op;
+        var new_exp_left_node = node.*.node_variant.?.exp.left.*;
+        var new_exp_right_node = node.*.node_variant.?.exp.right.?.*.node_variant.?.exp.left.*;
+        try self.make_expression_node(&new_exp_left_node, &new_exp_right_node, node.*.node_variant.?.exp.op);
+        var new_left_operand = self.node_pop();
+        var new_right_operand = node.*.node_variant.?.exp.right.?.*.node_variant.?.exp.right.?.*;
+        node.*.node_variant.?.exp.left = &new_left_operand.?;
+        node.*.node_variant.?.exp.right = &new_right_operand;
+        node.*.node_variant.?.exp.op = right_op;
+    }
+
+    fn parse_node_move_right_left_to_left(self: *Self, node: *ast.Node) !void {
+        try self.make_expression_node(
+            node.*.node_variant.?.exp.left,
+            node.*.node_variant.?.exp.right.?.*.node_variant.?.exp.left,
+            node.*.node_variant.?.exp.op,
+        );
+        var completed_node = self.node_pop();
+        const new_op = node.*.node_variant.?.exp.right.?.*.node_variant.?.exp.op;
+        node.*.node_variant.?.exp.left = &completed_node.?;
+        node.*.node_variant.?.exp.right = node.*.node_variant.?.exp.right.?.*.node_variant.?.exp.right;
+        node.*.node_variant.?.exp.op = new_op;
+    }
+
+    fn parse_reorder_expression(self: *Self, node: *ast.Node) !void {
+        if (node.*.type != .Expression) {
+            return;
+        }
+        if (node.*.node_variant.?.exp.left.*.type != .Expression and node.*.node_variant.?.exp.right != null and
+            node.*.node_variant.?.exp.right.?.*.type != .Expression)
+        {
+            return;
+        }
+        if (node.*.node_variant.?.exp.left.*.type != .Expression and node.*.node_variant.?.exp.right != null and
+            node.*.node_variant.?.exp.right.?.*.type == .Expression)
+        {
+            const right_op = node.*.node_variant.?.exp.right.?.*.node_variant.?.exp.op;
+            if (self.parse_left_has_priority(node.*.node_variant.?.exp.op, right_op)) {
+                try self.parse_node_shift_children_left(node);
+                try self.parse_reorder_expression(node.*.node_variant.?.exp.left);
+                try self.parse_reorder_expression(node.*.node_variant.?.exp.right.?);
+            }
+        }
+        if ((ast.node_is_array(node.*.node_variant.?.exp.left.*) and ast.node_is_assignment(node.*.node_variant.?.exp.right.?.*)) or
+            ((ast.node_is_expression(node.*.node_variant.?.exp.left.*, "()") or
+            ast.node_is_expression(node.*.node_variant.?.exp.left.*, "[]")) and
+            ast.node_is_expression(node.*.node_variant.?.exp.right.?.*, ",")))
+        {
+            try self.parse_node_move_right_left_to_left(node);
+        }
+    }
+
     fn parse_normal_expression(self: *Self, hist: *history.History) !void {
         var t = try self.token_peek_next();
         const op = t.?.data.sval.items;
         var node_left = try self.node_peek_expressionable_or_null();
         if (node_left == null) {
-            if (!misc.is_unary_operator(node_left.?.data.?.sval.items)) {
-                self.transpile_proc.err("expected left operand", .{});
+            if (!misc.is_unary_operator(op)) {
+                self.transpile_proc.err("expected left operand for '{s}' operator", .{op});
             }
             try self.parse_for_unary();
             return;
@@ -375,7 +504,7 @@ pub const ParseProcess = struct {
             try self.parse_for_left_operanded_unary(&node_left.?, op);
             return;
         }
-        node_left.?.flags.?.inside_expression = true;
+        node_left.?.flags = .{ .inside_expression = true };
         t = try self.token_peek_next();
         if (t.?.type == .Operator) {
             if (mem.eql(u8, t.?.data.sval.items, "(")) {
@@ -386,13 +515,19 @@ pub const ParseProcess = struct {
             } else if (misc.is_unary_operator(t.?.data.sval.items)) {
                 try self.parse_for_unary();
             } else {
-                self.transpile_proc.err("expected expressionable", .{});
+                self.transpile_proc.err("expected expressionable for '{s}' operator", .{op});
             }
         } else {
             var hist_down = history.History.down(self.allocator, hist, hist.flags);
             defer hist_down.deinit();
             try self.parse_expressionable(&hist_down);
         }
+        var node_right = self.node_pop();
+        node_right.?.flags = .{ .inside_expression = true };
+        try self.make_expression_node(&node_left.?, &node_right.?, op);
+        var exp_node = self.node_pop();
+        try self.parse_reorder_expression(&exp_node.?);
+        try self.transpile_proc.nodes.push(exp_node.?);
     }
 
     fn parse_expression(self: *Self, hist: *history.History) !bool {
@@ -433,17 +568,16 @@ pub const ParseProcess = struct {
         if (t == null) {
             return false;
         }
-        return try switch (t.?.type) {
-            .Number => self.parse_single_token_to_node(),
-            .Operator => self.parse_expression(hist),
-            .Identifier => self.parse_identifier(),
-            .Keyword => {
-                try self.parse_keyword(hist);
-                return true;
-            },
-            .String => self.parse_string(),
-            else => false,
+        hist.flags.inside_expression = true;
+        _ = switch (t.?.type) {
+            .Number => try self.parse_single_token_to_node(),
+            .Operator => try self.parse_expression(hist),
+            .Identifier => try self.parse_identifier(),
+            .Keyword => try self.parse_keyword(hist),
+            .String => try self.parse_string(),
+            else => unreachable,
         };
+        return true;
     }
 
     fn parse_expressionable(self: *Self, hist: *history.History) anyerror!void {

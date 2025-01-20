@@ -1,4 +1,5 @@
 const std = @import("std");
+const mem = std.mem;
 const token = @import("./token.zig");
 const dtype = @import("./dtype.zig");
 const misc = @import("./misc.zig");
@@ -71,9 +72,9 @@ pub const Node = struct {
     pos: ?token.Pos = null,
     binded: ?struct {
         /// The owner of the node.
-        owner: *Node,
+        owner: ?*Node,
         /// The function associated with the node.
-        function: *Node,
+        function: ?*Node,
     } = null,
     /// The token data associated with the node.
     data: ?token.TokenData = null,
@@ -82,7 +83,7 @@ pub const Node = struct {
             /// The left-hand side of the expression.
             left: *Node,
             /// The right-hand side of the expression.
-            right: *Node,
+            right: ?*Node = null,
             /// The operator used in the expression.
             op: []const u8,
         },
@@ -224,4 +225,57 @@ pub fn node_is_expressionable(n: Node) bool {
     return n.type == .Expression or n.type == .ExpressionParenthesis or
         n.type == .Unary or n.type == .Identifier or
         n.type == .Number or n.type == .String;
+}
+
+/// Checks if the node is an array expression.
+///
+/// This function determines if the given node (`n`) is of type `.Expression`
+/// and if its operation is an array operator.
+///
+/// Returns:
+/// - `bool`: `true` if the node is an array expression, otherwise `false`.
+///
+/// Parameters:
+/// - `n (Node)`: The node to check.
+pub fn node_is_array(n: Node) bool {
+    return n.type == .Expression and misc.is_array_operator(n.node_variant.?.exp.op);
+}
+
+/// Checks if the node is an assignment expression.
+///
+/// This function determines if the given node (`n`) is of type `.Expression`
+/// and if its operation is an assignment operator. The assignment operators checked are:
+/// `"="`, `"+="`, `"-="`, `"*="`, `"/="`, `"%="`, `"&="`, `"|="`, `"^="`, `"<<="`, `">>="`.
+///
+/// Returns:
+/// - `bool`: `true` if the node is an assignment expression, otherwise `false`.
+///
+/// Parameters:
+/// - `n (Node)`: The node to check.
+pub fn node_is_assignment(n: Node) bool {
+    if (n.type != .Expression) {
+        return false;
+    }
+    const op = n.node_variant.?.exp.op;
+    return mem.eql(u8, "=", op) or mem.eql(u8, "+=", op) or
+        mem.eql(u8, "-=", op) or mem.eql(u8, "*=", op) or
+        mem.eql(u8, "/=", op) or mem.eql(u8, "%=", op) or
+        mem.eql(u8, "&=", op) or mem.eql(u8, "|=", op) or
+        mem.eql(u8, "^=", op) or mem.eql(u8, "<<=", op) or
+        mem.eql(u8, ">>=", op);
+}
+
+/// Checks if the node is an expression with a specific operator.
+///
+/// This function determines if the given node (`n`) is of type `.Expression`
+/// and if its operation matches the specified operator (`op`).
+///
+/// Returns:
+/// - `bool`: `true` if the node is an expression with the specified operator, otherwise `false`.
+///
+/// Parameters:
+/// - `n (Node)`: The node to check.
+/// - `op ( []const u8 )`: The operator to check against.
+pub fn node_is_expression(n: Node, op: []const u8) bool {
+    return n.type == .Expression and mem.eql(u8, n.node_variant.?.exp.op, op);
 }

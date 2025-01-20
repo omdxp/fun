@@ -14,6 +14,8 @@ pub const HistoryFlags = packed struct {
     parenthesis_not_function_call: bool = false,
     /// Indicates that expression is unary.
     expression_is_unary: bool = false,
+    /// Indicates that we are inside an expression.
+    inside_expression: bool = false,
 };
 
 /// Represents the branches in a fit statement.

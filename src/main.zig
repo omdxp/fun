@@ -41,6 +41,8 @@ pub fn main() !void {
                 std.debug.print("name: {s}, dtype: {s}, ", .{ variable.name.items, variable.type.type_str.?.items });
                 switch (variable.val.type) {
                     .String => std.debug.print("val: '{s}'\n", .{variable.val.data.?.sval.items}),
+                    .Number => std.debug.print("val: {}\n", .{variable.val.*.data.?.llnum}),
+                    .Expression => std.debug.print("val: {s}\n", .{variable.val.node_variant.?.exp.op}),
                     else => unreachable,
                 }
             },
