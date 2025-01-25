@@ -227,11 +227,14 @@ pub const ParseProcess = struct {
             var hist_down = history.History.down(self.allocator, hist, hist.flags);
             defer hist_down.deinit();
             try self.parse_statement(&hist_down);
-            var stmt_node = self.node_pop();
-            try stmts.push(&stmt_node.?);
+            const stmt_node = self.node_pop();
+            const stmt = try self.allocator.create(ast.Node);
+            stmt.* = stmt_node.?;
+            try stmts.push(stmt);
         }
         try self.expect_sym('}');
         parser_current_body = body_node.?.binded.?.owner.?.*;
+        body_node.?.node_variant.?.body.statements = stmts;
         try self.transpile_proc.nodes.push(body_node.?);
     }
 
@@ -620,7 +623,7 @@ pub const ParseProcess = struct {
     fn parse_identifier(self: *Self) !bool {
         const t = try self.token_peek_next();
         if (t != null and t.?.type != .Identifier) {
-            self.transpile_proc.err("expected identifier", .{});
+            self.transpile_proc.err("expected identifier, got '{?}'", .{t.?.type});
         }
         return try self.parse_single_token_to_node();
     }
@@ -628,7 +631,7 @@ pub const ParseProcess = struct {
     fn parse_string(self: *Self) !bool {
         const t = try self.token_peek_next();
         if (t != null and t.?.type != .String) {
-            self.transpile_proc.err("expected string", .{});
+            self.transpile_proc.err("expected string, got '{?}'", .{t.?.type});
         }
         return try self.parse_single_token_to_node();
     }
@@ -639,15 +642,17 @@ pub const ParseProcess = struct {
             return false;
         }
         hist.flags.inside_expression = true;
-        _ = switch (t.?.type) {
+        return switch (t.?.type) {
             .Number => try self.parse_single_token_to_node(),
             .Operator => try self.parse_expression(hist),
             .Identifier => try self.parse_identifier(),
-            .Keyword => try self.parse_keyword(hist),
+            .Keyword => {
+                try self.parse_keyword(hist);
+                return true;
+            },
             .String => try self.parse_string(),
-            else => unreachable,
+            else => false,
         };
-        return true;
     }
 
     fn parse_expressionable(self: *Self, hist: *history.History) anyerror!void {
@@ -755,13 +760,33 @@ pub const ParseProcess = struct {
             var hist_body = history.History.init(self.allocator, .{});
             defer hist_body.deinit();
             try self.parse_body(&hist_body);
-            var body_node = self.node_pop();
-            function_node.node_variant.?.function.body = &body_node.?;
+            const body_node = self.node_pop();
+            const body = try self.allocator.create(ast.Node);
+            body.* = body_node.?;
+            function_node.node_variant.?.function.body = body;
         } else {
             try self.expect_sym(';');
         }
         parser_current_function = undefined;
         try self.transpile_proc.nodes.push(function_node);
+    }
+
+    fn parse_return(self: *Self, hist: *history.History) !void {
+        _ = try self.token_next(); // skip ret
+        if (try self.next_token_is_symbol(';')) {
+            try self.expect_sym(';');
+            try self.transpile_proc.nodes.push(ast.Node{
+                .type = .StatementReturn,
+            });
+            return;
+        }
+        try self.parse_expressionable_root(hist);
+        var exp_node = self.node_pop();
+        try self.transpile_proc.nodes.push(ast.Node{
+            .type = .StatementReturn,
+            .node_variant = .{ .statement = .{ .return_stmt = &exp_node.? } },
+        });
+        try self.expect_sym(';');
     }
 
     /// Parses a keyword token.
@@ -790,14 +815,13 @@ pub const ParseProcess = struct {
         if (mem.eql(u8, "imp", sval)) {
             // @compileError("TODO: parse imp keyword");
         } else if (mem.eql(u8, "fun", sval)) {
-            try self.parse_function();
-            return;
+            return try self.parse_function();
         } else if (mem.eql(u8, "if", sval)) {
             // @compileError("TODO: parse if keyword");
         } else if (mem.eql(u8, "fit", sval)) {
             // @compileError("TODO: parse fit keyword");
         } else if (mem.eql(u8, "ret", sval)) {
-            // @compileError("TODO: parse ret keyword");
+            return try self.parse_return(hist);
         }
 
         self.transpile_proc.err("invalid keyword", .{});

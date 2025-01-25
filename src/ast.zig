@@ -136,11 +136,10 @@ pub const Node = struct {
             /// The body of the function.
             body: ?*Node = null,
         },
-        statement: struct {
-            return_stmt: struct {
-                /// The return statement node.
-                return_stmt: *Node,
-            },
+        statement: union {
+            /// The return statement node.
+            return_stmt: *Node,
+            /// The if statement node.
             if_stmt: struct {
                 /// The condition of the if statement.
                 condition: *Node,

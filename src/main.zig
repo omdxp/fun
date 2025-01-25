@@ -70,6 +70,22 @@ pub fn main() !void {
                         else => unreachable,
                     }
                 }
+                if (function.body != null) {
+                    switch (function.body.?.type) {
+                        .Body => {
+                            std.debug.print("body:\n", .{});
+                            for (function.body.?.node_variant.?.body.statements.items()) |stmt| {
+                                switch (stmt.type) {
+                                    .Variable => std.debug.print("  variable: {s}\n", .{stmt.node_variant.?.variable.name.items}),
+                                    .Expression => std.debug.print("  expression: {s}\n", .{stmt.node_variant.?.exp.op}),
+                                    .StatementReturn => std.debug.print("  return\n", .{}),
+                                    else => unreachable,
+                                }
+                            }
+                        },
+                        else => std.debug.print("body: none\n", .{}),
+                    }
+                }
                 std.debug.print("\n", .{});
             },
             else => unreachable,
