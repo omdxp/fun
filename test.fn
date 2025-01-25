@@ -1,2 +1,6 @@
-num x = (1 + 2) * 3 / 4;
-x >>= 1
+str[] x = ["Void", "Chr", "Str", "Num", "Bin", "Unknown"];
+
+fun main(str[] args) {
+	num x = 0;
+	ret;
+}

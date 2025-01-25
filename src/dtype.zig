@@ -1,5 +1,6 @@
 const std = @import("std");
 const ast = @import("./ast.zig");
+const misc = @import("./misc.zig");
 
 /// Flags representing characteristics of a data type.
 pub const DataTypeFlags = packed struct {
@@ -7,6 +8,8 @@ pub const DataTypeFlags = packed struct {
     is_pointer: bool = false,
     /// Indicates if the data type is a literal.
     is_literal: bool = false,
+    /// Indicates if the data type is an array.
+    is_array: bool = false,
 };
 
 /// Types of data types.
@@ -42,6 +45,7 @@ pub const DataType = struct {
     pointer_depth: usize = 0,
     /// Information about the array dimensions and brackets.
     array: ?struct {
-        brackets: std.ArrayList(ast.Node),
+        /// The dimensions of the array.
+        brackets: misc.Vector(ast.Node),
     } = null,
 };

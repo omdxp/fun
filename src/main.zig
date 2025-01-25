@@ -38,11 +38,13 @@ pub fn main() !void {
         switch (n.type) {
             .Variable => {
                 const variable = n.node_variant.?.variable;
-                std.debug.print("name: {s}, dtype: {s}, ", .{ variable.name.items, variable.type.type_str.items });
+                const is_array = variable.type.array != null;
+                std.debug.print("name: {s}, dtype: {s}{s}, ", .{ variable.name.items, variable.type.type_str.items, if (is_array) "[]" else "" });
                 switch (variable.val.?.type) {
                     .String => std.debug.print("val: '{s}'\n", .{variable.val.?.*.data.?.sval.items}),
                     .Number => std.debug.print("val: {}\n", .{variable.val.?.*.data.?.llnum}),
                     .Expression => std.debug.print("val: {s}\n", .{variable.val.?.*.node_variant.?.exp.op}),
+                    .Bracket => std.debug.print("val: {?}\n", .{variable.val.?.*.node_variant.?.bracket.inner.*.type}),
                     else => unreachable,
                 }
             },
@@ -66,8 +68,9 @@ pub fn main() !void {
                 std.debug.print("name: {s}, rtype: {s}, ", .{ function.name.?.items, function.rtype.?.type_str.items });
                 std.debug.print("args: ", .{});
                 for (function.args.?.items()) |arg| {
+                    const is_array = arg.node_variant.?.variable.type.array != null;
                     switch (arg.type) {
-                        .Variable => std.debug.print("[{s} {s}], ", .{ arg.node_variant.?.variable.type.type_str.items, arg.node_variant.?.variable.name.items }),
+                        .Variable => std.debug.print("({s} {s}{s}), ", .{ arg.node_variant.?.variable.type.type_str.items, arg.node_variant.?.variable.name.items, if (is_array) "[]" else "" }),
                         .Expression => {},
                         else => unreachable,
                     }

@@ -268,14 +268,14 @@ pub const ParseProcess = struct {
         self.transpile_proc.err("invalid symbol", .{});
     }
 
-    fn token_next_is_operator(self: *Self, op: []const u8) !bool {
+    fn next_token_is_operator(self: *Self, op: []const u8) !bool {
         const t = try self.token_peek_next();
         return token.is_operator(t, op);
     }
 
     fn parse_get_pointer_depth(self: *Self) !usize {
         var depth: u8 = 0;
-        while (try self.token_next_is_operator("*")) {
+        while (try self.next_token_is_operator("*")) {
             depth += 1;
             _ = try self.token_next();
         }
@@ -716,26 +716,47 @@ pub const ParseProcess = struct {
         try self.transpile_proc.nodes.push(n.?);
     }
 
+    fn parse_array_brackets(self: *Self, dt: *dtype.DataType, hist: *history.History) !void {
+        dt.*.array.?.brackets = misc.Vector(ast.Node).init(self.allocator);
+        while (try self.next_token_is_operator("[")) {
+            try self.expect_op("[");
+            if (try self.next_token_is_symbol(']')) {
+                try self.expect_sym(']');
+                break;
+            }
+            try self.parse_expressionable_root(hist);
+            try self.expect_sym(']');
+            const exp_node = self.node_pop();
+            const exp = try self.allocator.create(ast.Node);
+            exp.* = exp_node.?;
+            try self.transpile_proc.nodes.push(ast.Node{
+                .type = .Bracket,
+                .node_variant = .{ .bracket = .{ .inner = exp } },
+            });
+            const bracket_node = self.node_pop();
+            try dt.*.array.?.brackets.push(bracket_node.?);
+            dt.*.flags.?.is_array = true;
+        }
+    }
+
     fn parse_variable(self: *Self, dt: *dtype.DataType, hist: *history.History) !void {
+        if (try self.next_token_is_operator("[")) {
+            try self.parse_array_brackets(dt, hist);
+        }
         const ident_token = try self.token_next();
         if (ident_token.?.type != .Identifier) {
             self.transpile_proc.err("expected indentifier, got '{}'", .{ident_token.?.type});
         }
-
-        // TODO: parse array brackets
         var value_node: ?ast.Node = null;
-
-        if (try self.token_next_is_operator("=")) {
+        if (try self.next_token_is_operator("=")) {
             _ = try self.token_next(); // skip =
             try self.parse_expressionable_root(hist);
             value_node = self.node_pop();
         }
-
         const val = try self.allocator.create(ast.Node);
         if (value_node != null) {
             val.* = value_node.?;
         }
-
         try self.transpile_proc.nodes.push(ast.Node{
             .type = .Variable,
             .node_variant = .{
@@ -757,7 +778,7 @@ pub const ParseProcess = struct {
     fn parse_function_args(self: *Self, hist: *history.History) !misc.Vector(*ast.Node) {
         var args = misc.Vector(*ast.Node).init(self.allocator);
         while (!try self.next_token_is_symbol(')')) {
-            if (try self.token_next_is_operator(".")) { // variadic
+            if (try self.next_token_is_operator(".")) { // variadic
                 for (0..3) |_| {
                     try self.expect_op(".");
                 }
@@ -768,7 +789,7 @@ pub const ParseProcess = struct {
             const arg = try self.allocator.create(ast.Node);
             arg.* = arg_node.?;
             try args.push(arg);
-            if (!try self.token_next_is_operator(",")) {
+            if (!try self.next_token_is_operator(",")) {
                 break;
             }
             _ = try self.token_next(); // skip ,
