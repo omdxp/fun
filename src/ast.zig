@@ -238,7 +238,7 @@ pub fn node_is_value_type(n: Node) bool {
 pub fn node_is_expressionable(n: Node) bool {
     return n.type == .Expression or n.type == .ExpressionParenthesis or
         n.type == .Unary or n.type == .Identifier or
-        n.type == .Number or n.type == .String;
+        n.type == .Number or n.type == .String or n.type == .Boolean;
 }
 
 /// Checks if the node is an array expression.

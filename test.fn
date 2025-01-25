@@ -1,2 +1,2 @@
-if false {
+if false && 1 {
 }
