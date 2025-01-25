@@ -78,6 +78,13 @@ pub const ParseProcess = struct {
         }
     }
 
+    fn expect_keyword(self: *Self, keyword: []const u8) !void {
+        const t = try self.token_next();
+        if (t == null or t.?.type != .Keyword or !mem.eql(u8, keyword, t.?.data.sval.items)) {
+            self.transpile_proc.err("expected keyword '{s}'", .{keyword});
+        }
+    }
+
     /// Creates and initializes a new node in the transpiler's node list.
     ///
     /// This function sets the `owner` and `function` bindings of the provided node (`n`)
@@ -194,7 +201,7 @@ pub const ParseProcess = struct {
         }
         try self.parse_expressionable_root(hist);
         t = try self.token_peek_next();
-        if (t.?.type == .Symbol and t.?.data.cval == ';') {
+        if (t.?.type == .Symbol and t.?.data.cval != ';') {
             try self.parse_symbol();
             return;
         }
@@ -271,6 +278,11 @@ pub const ParseProcess = struct {
     fn next_token_is_operator(self: *Self, op: []const u8) !bool {
         const t = try self.token_peek_next();
         return token.is_operator(t, op);
+    }
+
+    fn next_token_is_keyword(self: *Self, keyword: []const u8) !bool {
+        const t = try self.token_peek_next();
+        return token.is_keyword(t, keyword);
     }
 
     fn parse_get_pointer_depth(self: *Self) !usize {
@@ -863,6 +875,57 @@ pub const ParseProcess = struct {
         try self.expect_sym(';');
     }
 
+    fn parse_elif(self: *Self, hist: *history.History) !void {
+        if (try self.next_token_is_keyword("elif")) {
+            _ = try self.token_next(); // skip elif
+            try self.parse_expressionable_root(hist);
+            const condition_node = self.node_pop();
+            const condition = try self.allocator.create(ast.Node);
+            condition.* = condition_node.?;
+            try self.parse_body(hist);
+            const body_node = self.node_pop();
+            const body = try self.allocator.create(ast.Node);
+            body.* = body_node.?;
+            try self.transpile_proc.nodes.push(ast.Node{
+                .type = .StatementElseIf,
+                .node_variant = .{ .statement = .{ .elif_stmt = .{ .condition = condition, .body = body } } },
+            });
+        }
+    }
+
+    fn parse_else(self: *Self, hist: *history.History) !void {
+        if (try self.next_token_is_keyword("else")) {
+            _ = try self.token_next(); // skip else
+            try self.parse_body(hist);
+            const body_node = self.node_pop();
+            const body = try self.allocator.create(ast.Node);
+            body.* = body_node.?;
+            try self.transpile_proc.nodes.push(ast.Node{
+                .type = .StatementElse,
+                .node_variant = .{ .statement = .{ .else_stmt = .{ .body = body } } },
+            });
+        }
+    }
+
+    fn parse_if_statement(self: *Self, hist: *history.History) !void {
+        try self.expect_keyword("if");
+        try self.parse_expressionable_root(hist);
+        const condition_node = self.node_pop();
+        const condition = try self.allocator.create(ast.Node);
+        condition.* = condition_node.?;
+        try self.parse_body(hist);
+        const body_node = self.node_pop();
+        const body = try self.allocator.create(ast.Node);
+        body.* = body_node.?;
+        const if_node = ast.Node{
+            .type = .StatementIf,
+            .node_variant = .{ .statement = .{ .if_stmt = .{ .condition = condition, .body = body } } },
+        };
+        try self.transpile_proc.nodes.push(if_node);
+        try self.parse_elif(hist);
+        try self.parse_else(hist);
+    }
+
     /// Parses a keyword token.
     ///
     /// This function checks if the next token matches any known keywords.
@@ -892,7 +955,7 @@ pub const ParseProcess = struct {
         } else if (mem.eql(u8, "fun", sval)) {
             return try self.parse_function();
         } else if (mem.eql(u8, "if", sval)) {
-            // @compileError("TODO: parse if keyword");
+            return try self.parse_if_statement(hist);
         } else if (mem.eql(u8, "fit", sval)) {
             // @compileError("TODO: parse fit keyword");
         } else if (mem.eql(u8, "ret", sval)) {

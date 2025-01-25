@@ -1,6 +1,7 @@
-str[] x = ["Void", "Chr", "Str", "Num", "Bin", "Unknown"];
-
-fun main(str[] args) {
-	num x = 0;
-	ret;
+if x == 1 {
+	x = 2;
+} elif x == 2 && y == 3 {
+	x = 3;
+} else {
+	x = 4;
 }

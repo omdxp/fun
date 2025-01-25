@@ -145,13 +145,20 @@ pub const Node = struct {
                 condition: *Node,
                 /// The body of the if statement.
                 body: *Node,
-                /// The next node (else or else-if).
-                next: *Node,
             },
+            /// The elif statement node.
+            elif_stmt: struct {
+                /// The condition of the elif statement.
+                condition: *Node,
+                /// The body of the elif statement.
+                body: *Node,
+            },
+            /// The else statement node.
             else_stmt: struct {
                 /// The body of the else statement.
                 body: *Node,
             },
+            /// The fit statement node.
             fit_stmt: struct {
                 /// The expression for the fit statement.
                 exp: *Node,

@@ -94,6 +94,21 @@ pub fn is_operator(token: ?Token, val: []const u8) bool {
     return token != null and token.?.type == .Operator and mem.eql(u8, token.?.data.sval.items, val);
 }
 
+/// Checks if a token is a keyword with a specific value.
+///
+/// This function checks if the given token is not null, is of type `Keyword`,
+/// and if its data matches the provided value.
+///
+/// Returns:
+/// - `bool`: `true` if the token is a keyword with the specified value, otherwise `false`.
+///
+/// Parameters:
+/// - `token (?Token)`: The token to check.
+/// - `val ([]const u8)`: The value to compare the token's data against.
+pub fn is_keyword(token: ?Token, val: []const u8) bool {
+    return token != null and token.?.type == .Keyword and mem.eql(u8, token.?.data.sval.items, val);
+}
+
 /// Checks if a token is a symbol with a specific value.
 ///
 /// This function checks if the given token is not null, is of type `Symbol`,

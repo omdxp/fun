@@ -36,6 +36,20 @@ pub fn main() !void {
     for (tp.nodes.items()) |n| {
         std.debug.print("node type: {}, ", .{n.type});
         switch (n.type) {
+            .StatementIf => {
+                const if_stmt = n.node_variant.?.statement.if_stmt;
+                std.debug.print("condition: {s}, ", .{if_stmt.condition.*.node_variant.?.exp.op});
+                std.debug.print("body: {?}\n", .{if_stmt.body.*.type});
+            },
+            .StatementElseIf => {
+                const elif_stmt = n.node_variant.?.statement.elif_stmt;
+                std.debug.print("condition: {s}, ", .{elif_stmt.condition.*.node_variant.?.exp.op});
+                std.debug.print("body: {?}\n", .{elif_stmt.body.*.type});
+            },
+            .StatementElse => {
+                const else_stmt = n.node_variant.?.statement.else_stmt;
+                std.debug.print("body: {?}\n", .{else_stmt.body.*.type});
+            },
             .Variable => {
                 const variable = n.node_variant.?.variable;
                 const is_array = variable.type.array != null;
