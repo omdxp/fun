@@ -76,7 +76,14 @@ pub fn main() !void {
                             std.debug.print("body:\n", .{});
                             for (function.body.?.node_variant.?.body.statements.items()) |stmt| {
                                 switch (stmt.type) {
-                                    .Variable => std.debug.print("  variable: {s}\n", .{stmt.node_variant.?.variable.name.items}),
+                                    .Variable => {
+                                        switch (stmt.node_variant.?.variable.val.?.type) {
+                                            .String => std.debug.print("  variable: {s} = '{s}'\n", .{ stmt.node_variant.?.variable.name.items, stmt.node_variant.?.variable.val.?.*.data.?.sval.items }),
+                                            .Number => std.debug.print("  variable: {s} = {}\n", .{ stmt.node_variant.?.variable.name.items, stmt.node_variant.?.variable.val.?.*.data.?.llnum }),
+                                            .Expression => std.debug.print("  variable: {s} = {s}\n", .{ stmt.node_variant.?.variable.name.items, stmt.node_variant.?.variable.val.?.*.node_variant.?.exp.op }),
+                                            else => unreachable,
+                                        }
+                                    },
                                     .Expression => std.debug.print("  expression: {s}\n", .{stmt.node_variant.?.exp.op}),
                                     .StatementReturn => std.debug.print("  return\n", .{}),
                                     else => unreachable,

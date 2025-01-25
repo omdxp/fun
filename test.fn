@@ -1,3 +1,10 @@
-fun add(num x, num y) num {
-	ret x + y;
+num global = 1;
+
+fun add(num a, num b) num {
+	num x = a + b + (2 - 1);
+	ret x;
+}
+
+fun main() {
+	num res = add(1, 2);
 }

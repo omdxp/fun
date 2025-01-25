@@ -809,6 +809,7 @@ pub const ParseProcess = struct {
             var dt: dtype.DataType = undefined;
             try self.parse_datatype(&dt);
             try self.parse_variable(&dt, hist);
+            try self.expect_sym(';');
             return;
         }
 
