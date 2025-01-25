@@ -208,23 +208,6 @@ pub const ParseProcess = struct {
         try self.expect_sym(';');
     }
 
-    fn parse_body_single_statement(self: *Self, hist: *history.History) !void {
-        var stmts = misc.Vector(*ast.Node).init(self.allocator);
-        try self.make_body_node(misc.Vector(*ast.Node).init(self.allocator));
-        var body_node = self.node_pop();
-        const owner = try self.allocator.create(ast.Node);
-        owner.* = parser_current_body;
-        body_node.?.binded.?.owner = owner;
-        parser_current_body = body_node.?;
-        var hist_down = history.History.down(self.allocator, hist, hist.flags);
-        defer hist_down.deinit();
-        try self.parse_statement(&hist_down);
-        var stmt_node = self.node_pop();
-        try stmts.push(&stmt_node.?);
-        parser_current_body = body_node.?.binded.?.owner.?.*;
-        try self.transpile_proc.nodes.push(body_node.?);
-    }
-
     fn parse_body_multiple_statements(self: *Self, hist: *history.History) !void {
         var stmts = misc.Vector(*ast.Node).init(self.allocator);
         try self.make_body_node(misc.Vector(*ast.Node).init(self.allocator));
@@ -250,10 +233,6 @@ pub const ParseProcess = struct {
     }
 
     fn parse_body(self: *Self, hist: *history.History) !void {
-        if (!try self.next_token_is_symbol('{')) {
-            try self.parse_body_single_statement(hist);
-            return;
-        }
         try self.parse_body_multiple_statements(hist);
     }
 
