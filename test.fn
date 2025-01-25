@@ -1,1 +1,12 @@
-num x = 1 + 2
+fun f(); // forward declaration
+
+fun f1() {} // void
+
+fun f2(str arg) {}
+
+fun f3(str arg1, str arg2) {}
+
+fun f4() str {}
+
+fun f5(num x, num y) num {}
+

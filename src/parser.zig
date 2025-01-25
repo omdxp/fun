@@ -8,9 +8,9 @@ const history = @import("./history.zig");
 const dtype = @import("./dtype.zig");
 const expressionable = @import("./expressionable.zig");
 
-var parser_last_token: ?token.Token = null;
-var parser_current_body: ?*ast.Node = null;
-var parser_current_function: ?*ast.Node = null;
+var parser_last_token: token.Token = undefined;
+var parser_current_body: ast.Node = undefined;
+var parser_current_function: ast.Node = undefined;
 
 /// Represents the parsing process in the transpiler.
 ///
@@ -55,7 +55,7 @@ pub const ParseProcess = struct {
     fn expect_sym(self: *Self, c: u8) !void {
         const t = try self.token_next();
         if (t == null or t.?.type != .Symbol or t.?.data.cval != c) {
-            self.transpile_proc.err("expected symbol", .{});
+            self.transpile_proc.err("expected symbol '{c}'", .{c});
         }
     }
 
@@ -74,7 +74,7 @@ pub const ParseProcess = struct {
     fn expect_op(self: *Self, op: []const u8) !void {
         const t = try self.token_next();
         if (t == null or t.?.type != .Operator or !mem.eql(u8, op, t.?.data.sval.items)) {
-            self.transpile_proc.err("expected operator", .{});
+            self.transpile_proc.err("expected operator '{s}'", .{op});
         }
     }
 
@@ -89,9 +89,13 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if adding the node to the node list fails.
     fn create_node(self: *Self, n: *ast.Node) !void {
+        const owner = try self.allocator.create(ast.Node);
+        owner.* = parser_current_body;
+        const function = try self.allocator.create(ast.Node);
+        function.* = parser_current_function;
         n.binded = .{
-            .owner = parser_current_body,
-            .function = parser_current_function,
+            .owner = owner,
+            .function = function,
         };
         try self.transpile_proc.nodes.push(n.*);
     }
@@ -144,8 +148,8 @@ pub const ParseProcess = struct {
         try self.ignore_nl_or_comment(&next_token);
         if (next_token != null) {
             self.transpile_proc.pos = next_token.?.pos;
+            parser_last_token = next_token.?;
         }
-        parser_last_token = next_token.?;
         return self.transpile_proc.tokens.peek();
     }
 
@@ -182,6 +186,63 @@ pub const ParseProcess = struct {
         return token.is_symbol(t, c);
     }
 
+    fn parse_statement(self: *Self, hist: *history.History) !void {
+        var t = try self.token_peek_next();
+        if (t.?.type == .Keyword) {
+            try self.parse_keyword(hist);
+            return;
+        }
+        try self.parse_expressionable_root(hist);
+        t = try self.token_peek_next();
+        if (t.?.type == .Symbol and t.?.data.cval == ';') {
+            try self.parse_symbol();
+            return;
+        }
+        try self.expect_sym(';');
+    }
+
+    fn parse_body_single_statement(self: *Self, hist: *history.History) !void {
+        var stmts = misc.Vector(*ast.Node).init(self.allocator);
+        try self.make_body_node(misc.Vector(*ast.Node).init(self.allocator));
+        var body_node = self.node_pop();
+        body_node.?.binded.?.owner = &parser_current_body;
+        parser_current_body = body_node.?;
+        var hist_down = history.History.down(self.allocator, hist, hist.flags);
+        defer hist_down.deinit();
+        try self.parse_statement(&hist_down);
+        var stmt_node = self.node_pop();
+        try stmts.push(&stmt_node.?);
+        parser_current_body = body_node.?.binded.?.owner.?.*;
+        try self.transpile_proc.nodes.push(body_node.?);
+    }
+
+    fn parse_body_multiple_statements(self: *Self, hist: *history.History) !void {
+        var stmts = misc.Vector(*ast.Node).init(self.allocator);
+        try self.make_body_node(misc.Vector(*ast.Node).init(self.allocator));
+        var body_node = self.node_pop();
+        body_node.?.binded.?.owner = &parser_current_body;
+        parser_current_body = body_node.?;
+        try self.expect_sym('{');
+        while (!try self.next_token_is_symbol('}')) {
+            var hist_down = history.History.down(self.allocator, hist, hist.flags);
+            defer hist_down.deinit();
+            try self.parse_statement(&hist_down);
+            var stmt_node = self.node_pop();
+            try stmts.push(&stmt_node.?);
+        }
+        try self.expect_sym('}');
+        parser_current_body = body_node.?.binded.?.owner.?.*;
+        try self.transpile_proc.nodes.push(body_node.?);
+    }
+
+    fn parse_body(self: *Self, hist: *history.History) !void {
+        if (!try self.next_token_is_symbol('{')) {
+            try self.parse_body_single_statement(hist);
+            return;
+        }
+        try self.parse_body_multiple_statements(hist);
+    }
+
     /// Parses a symbol token.
     ///
     /// This function checks if the next token is the '{' symbol. If so, it pops the last
@@ -190,9 +251,10 @@ pub const ParseProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if reading the next token fails or if pushing the node fails.
-    fn parse_symbol(self: *Self) !void {
+    fn parse_symbol(self: *Self) anyerror!void {
         if (try self.next_token_is_symbol('{')) {
-            // TODO: parse body
+            var hist = history.History.init(self.allocator, .{ .is_global_scope = true });
+            try self.parse_body(&hist);
             const body_node = self.node_pop();
             try self.transpile_proc.nodes.push(body_node.?);
         }
@@ -215,6 +277,9 @@ pub const ParseProcess = struct {
 
     fn parse_datatype(self: *Self, dt: *dtype.DataType) !void {
         const dt_token = try self.token_next();
+        if (dt_token.?.type != .Keyword) {
+            self.transpile_proc.err("expected datatype, got '{?}'", .{dt_token.?.type});
+        }
         const ptr_depth = try self.parse_get_pointer_depth();
         if (ptr_depth > 0) {
             dt.*.flags.?.is_pointer = true;
@@ -405,6 +470,11 @@ pub const ParseProcess = struct {
         try self.create_node(&exp_node);
     }
 
+    fn make_body_node(self: *Self, stmts: misc.Vector(*ast.Node)) !void {
+        var body_node = ast.Node{ .type = .Body, .node_variant = .{ .body = .{ .statements = stmts } } };
+        try self.create_node(&body_node);
+    }
+
     fn parse_get_precedence_for_operator(_: Self, op: []const u8, group: *?expressionable.OpPrecedenceGroup) i8 {
         for (0..expressionable.TOTAL_OPERATOR_GROUPS) |i| {
             var j: u8 = 0;
@@ -590,10 +660,7 @@ pub const ParseProcess = struct {
         try self.transpile_proc.nodes.push(n.?);
     }
 
-    fn parse_variable(self: *Self, hist: *history.History) !void {
-        var dt: dtype.DataType = dtype.DataType{};
-        try self.parse_datatype(&dt);
-
+    fn parse_variable(self: *Self, dt: *dtype.DataType, hist: *history.History) !void {
         const ident_token = try self.token_next();
         if (ident_token.?.type != .Identifier) {
             self.transpile_proc.err("expected indentifier, got '{}'", .{ident_token.?.type});
@@ -608,16 +675,93 @@ pub const ParseProcess = struct {
             value_node = self.node_pop();
         }
 
+        const val = try self.allocator.create(ast.Node);
+        if (value_node != null) {
+            val.* = value_node.?;
+        }
+
         try self.transpile_proc.nodes.push(ast.Node{
             .type = .Variable,
             .node_variant = .{
                 .variable = .{
                     .name = ident_token.?.data.sval,
-                    .type = dt,
-                    .val = &value_node.?,
+                    .type = dt.*,
+                    .val = val,
                 },
             },
         });
+    }
+
+    fn parse_full_variable(self: *Self, hist: *history.History) !void {
+        var dt: dtype.DataType = undefined;
+        try self.parse_datatype(&dt);
+        try self.parse_variable(&dt, hist);
+    }
+
+    fn parse_function_args(self: *Self, hist: *history.History) !misc.Vector(*ast.Node) {
+        var args = misc.Vector(*ast.Node).init(self.allocator);
+        while (!try self.next_token_is_symbol(')')) {
+            if (try self.token_next_is_operator(".")) { // variadic
+                for (0..3) |_| {
+                    try self.expect_op(".");
+                }
+                return args;
+            }
+            try self.parse_full_variable(hist);
+            const arg_node = self.node_pop();
+            const arg = try self.allocator.create(ast.Node);
+            arg.* = arg_node.?;
+            try args.push(arg);
+            if (!try self.token_next_is_operator(",")) {
+                break;
+            }
+            _ = try self.token_next(); // skip ,
+        }
+        return args;
+    }
+
+    fn parse_function(self: *Self) !void {
+        _ = try self.token_next(); // skip fun
+        var function_node: ast.Node = ast.Node{
+            .type = .Function,
+            .node_variant = .{ .function = .{} },
+        };
+        var dt: dtype.DataType = undefined;
+        const ident_token = try self.token_next();
+        if (ident_token.?.type != .Identifier) {
+            self.transpile_proc.err("expected indentifier, got '{}'", .{ident_token.?.type});
+        }
+        function_node.node_variant.?.function.name = ident_token.?.data.sval;
+        parser_current_function = function_node;
+        try self.expect_op("(");
+        var hist_args = history.History.init(self.allocator, .{});
+        defer hist_args.deinit();
+        const args = try self.parse_function_args(&hist_args);
+        try self.expect_sym(')');
+        function_node.node_variant.?.function.args = args;
+        const rtype_token = try self.token_peek_next();
+        if (rtype_token != null and rtype_token.?.type == .Keyword and misc.keyword_is_datatype(rtype_token.?.data.sval.items)) {
+            try self.parse_datatype(&dt);
+        } else {
+            var type_str = std.ArrayList(u8).init(self.allocator);
+            try type_str.appendSlice("void");
+            dt = dtype.DataType{
+                .type = .Void,
+                .type_str = type_str,
+            };
+        }
+        function_node.node_variant.?.function.rtype = dt;
+        if (try self.next_token_is_symbol('{')) {
+            var hist_body = history.History.init(self.allocator, .{});
+            defer hist_body.deinit();
+            try self.parse_body(&hist_body);
+            var body_node = self.node_pop();
+            function_node.node_variant.?.function.body = &body_node.?;
+        } else {
+            try self.expect_sym(';');
+        }
+        parser_current_function = undefined;
+        try self.transpile_proc.nodes.push(function_node);
     }
 
     /// Parses a keyword token.
@@ -633,18 +777,21 @@ pub const ParseProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if reading the next token fails.
-    fn parse_keyword(self: *Self, hist: *history.History) !void {
+    fn parse_keyword(self: *Self, hist: *history.History) anyerror!void {
         const t = try self.token_peek_next();
         const sval = t.?.data.sval.items;
         if (misc.keyword_is_datatype(sval)) {
-            try self.parse_variable(hist);
+            var dt: dtype.DataType = undefined;
+            try self.parse_datatype(&dt);
+            try self.parse_variable(&dt, hist);
             return;
         }
 
         if (mem.eql(u8, "imp", sval)) {
             // @compileError("TODO: parse imp keyword");
         } else if (mem.eql(u8, "fun", sval)) {
-            // @compileError("TODO: parse fun keyword");
+            try self.parse_function();
+            return;
         } else if (mem.eql(u8, "if", sval)) {
             // @compileError("TODO: parse if keyword");
         } else if (mem.eql(u8, "fit", sval)) {
@@ -671,6 +818,8 @@ pub const ParseProcess = struct {
         defer hist.deinit();
 
         try self.parse_keyword(&hist);
+        const n = self.node_pop();
+        try self.transpile_proc.nodes.push(n.?);
     }
 
     /// Processes the next token in the input.

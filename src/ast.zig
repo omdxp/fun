@@ -97,7 +97,7 @@ pub const Node = struct {
             /// The name of the variable.
             name: std.ArrayList(u8),
             /// The value of the variable.
-            val: *Node,
+            val: ?*Node = null,
         },
         unary: struct {
             /// Indicates if the unary operator is left-operanded.
@@ -128,11 +128,13 @@ pub const Node = struct {
         },
         function: struct {
             /// The return type of the function.
-            rtype: dtype.DataType,
+            rtype: ?dtype.DataType = null,
             /// The name of the function.
-            name: std.ArrayList(u8),
+            name: ?std.ArrayList(u8) = null,
             /// The arguments of the function.
-            args: misc.Vector(*Node),
+            args: ?misc.Vector(*Node) = null,
+            /// The body of the function.
+            body: ?*Node = null,
         },
         statement: struct {
             return_stmt: struct {

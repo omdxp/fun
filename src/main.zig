@@ -4,7 +4,7 @@ const token = @import("./token.zig");
 const transpiler = @import("./transpiler.zig");
 const lexer = @import("./lexer.zig");
 const parser = @import("./parser.zig");
-const global_allocator = heap.page_allocator;
+pub const global_allocator = heap.page_allocator;
 
 pub fn main() !void {
     const ifilepath = "./test.fn";
@@ -38,17 +38,39 @@ pub fn main() !void {
         switch (n.type) {
             .Variable => {
                 const variable = n.node_variant.?.variable;
-                std.debug.print("name: {s}, dtype: {s}, ", .{ variable.name.items, variable.type.type_str.?.items });
-                switch (variable.val.type) {
-                    .String => std.debug.print("val: '{s}'\n", .{variable.val.data.?.sval.items}),
-                    .Number => std.debug.print("val: {}\n", .{variable.val.*.data.?.llnum}),
-                    .Expression => std.debug.print("val: {s}\n", .{variable.val.node_variant.?.exp.op}),
+                std.debug.print("name: {s}, dtype: {s}, ", .{ variable.name.items, variable.type.type_str.items });
+                switch (variable.val.?.type) {
+                    .String => std.debug.print("val: '{s}'\n", .{variable.val.?.*.data.?.sval.items}),
+                    .Number => std.debug.print("val: {}\n", .{variable.val.?.*.data.?.llnum}),
+                    .Expression => std.debug.print("val: {s}\n", .{variable.val.?.*.node_variant.?.exp.op}),
                     else => unreachable,
                 }
             },
             .Number => {
                 const number = n.data.?.llnum;
                 std.debug.print("llnum: {}\n", .{number});
+            },
+            .Expression => {
+                const expression = n.node_variant.?.exp;
+                std.debug.print("op: {s}, ", .{expression.op});
+                switch (expression.left.type) {
+                    .Number => std.debug.print("left: {}\n", .{expression.left.data.?.llnum}),
+                    .Variable => std.debug.print("left: {s}\n", .{expression.left.node_variant.?.variable.name.items}),
+                    else => unreachable,
+                }
+            },
+            .Function => {
+                const function = n.node_variant.?.function;
+                std.debug.print("name: {s}, rtype: {s}, ", .{ function.name.?.items, function.rtype.?.type_str.items });
+                std.debug.print("args: ", .{});
+                for (function.args.?.items()) |arg| {
+                    switch (arg.type) {
+                        .Variable => std.debug.print("[{s} {s}], ", .{ arg.node_variant.?.variable.type.type_str.items, arg.node_variant.?.variable.name.items }),
+                        .Expression => {},
+                        else => unreachable,
+                    }
+                }
+                std.debug.print("\n", .{});
             },
             else => unreachable,
         }

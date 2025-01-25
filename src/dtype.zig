@@ -37,7 +37,7 @@ pub const DataType = struct {
     /// The specific type of data.
     type: ?DataTypeType = null,
     /// A string representation of the data type.
-    type_str: ?std.ArrayList(u8) = null,
+    type_str: std.ArrayList(u8),
     /// The depth of pointers if the data type is a pointer.
     pointer_depth: usize = 0,
     /// Information about the array dimensions and brackets.
