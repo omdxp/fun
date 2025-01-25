@@ -1,7 +1,2 @@
-if x == 1 {
-	x = 2;
-} elif x == 2 && y == 3 {
-	x = 3;
-} else {
-	x = 4;
+if false {
 }

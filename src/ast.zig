@@ -36,6 +36,8 @@ pub const NodeType = enum {
     StatementReturn,
     /// Represents an if statement node.
     StatementIf,
+    /// Represents a boolean node.
+    Boolean,
     /// Represents an elif statement node.
     StatementElseIf,
     /// Represents an else statement node.
@@ -79,6 +81,10 @@ pub const Node = struct {
     /// The token data associated with the node.
     data: ?token.TokenData = null,
     node_variant: ?union(enum) {
+        boolean: struct {
+            /// The boolean value of the node.
+            val: bool,
+        },
         exp: struct {
             /// The left-hand side of the expression.
             left: ?*Node,

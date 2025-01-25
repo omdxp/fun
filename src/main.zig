@@ -38,7 +38,11 @@ pub fn main() !void {
         switch (n.type) {
             .StatementIf => {
                 const if_stmt = n.node_variant.?.statement.if_stmt;
-                std.debug.print("condition: {s}, ", .{if_stmt.condition.*.node_variant.?.exp.op});
+                switch (if_stmt.condition.*.type) {
+                    .Expression => std.debug.print("condition: {s}, ", .{if_stmt.condition.*.node_variant.?.exp.op}),
+                    .Boolean => std.debug.print("condition: {}\n", .{if_stmt.condition.*.data.?.bval}),
+                    else => unreachable,
+                }
                 std.debug.print("body: {?}\n", .{if_stmt.body.*.type});
             },
             .StatementElseIf => {
@@ -59,6 +63,7 @@ pub fn main() !void {
                     .Number => std.debug.print("val: {}\n", .{variable.val.?.*.data.?.llnum}),
                     .Expression => std.debug.print("val: {s}\n", .{variable.val.?.*.node_variant.?.exp.op}),
                     .Bracket => std.debug.print("val: {?}\n", .{variable.val.?.*.node_variant.?.bracket.inner.*.type}),
+                    .Boolean => std.debug.print("val: {}\n", .{variable.val.?.*.data.?.bval}),
                     else => unreachable,
                 }
             },

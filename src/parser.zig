@@ -314,6 +314,13 @@ pub const ParseProcess = struct {
                 };
                 try self.create_node(&str_node);
             },
+            .Boolean => {
+                var bool_node = ast.Node{
+                    .type = .Boolean,
+                    .data = .{ .bval = t.?.data.bval },
+                };
+                try self.create_node(&bool_node);
+            },
             else => self.transpile_proc.err("expected single token, got '{?}'", .{t.?.type}),
         }
         return true;
@@ -685,7 +692,7 @@ pub const ParseProcess = struct {
         }
         hist.flags.inside_expression = true;
         return switch (t.?.type) {
-            .Number => try self.parse_single_token_to_node(),
+            .Number, .Boolean => try self.parse_single_token_to_node(),
             .Operator => try self.parse_expression(hist),
             .Identifier => try self.parse_identifier(),
             .Keyword => {
@@ -939,6 +946,18 @@ pub const ParseProcess = struct {
             // @compileError("TODO: parse fit keyword");
         } else if (mem.eql(u8, "ret", sval)) {
             return try self.parse_return(hist);
+        } else if (mem.eql(u8, "true", sval)) {
+            try self.transpile_proc.nodes.push(ast.Node{
+                .type = .Boolean,
+                .node_variant = .{ .boolean = .{ .val = true } },
+            });
+            return;
+        } else if (mem.eql(u8, "false", sval)) {
+            try self.transpile_proc.nodes.push(ast.Node{
+                .type = .Boolean,
+                .node_variant = .{ .boolean = .{ .val = false } },
+            });
+            return;
         }
 
         self.transpile_proc.err("invalid keyword", .{});

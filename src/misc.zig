@@ -67,6 +67,19 @@ pub fn is_keyword(str: []const u8) bool {
         mem.eql(u8, "chr", str);
 }
 
+/// Checks if the given character is a boolean keyword.
+///
+/// This function checks if the provided character is a boolean keyword.
+///
+/// Parameters:
+/// - `str`: The string to check.
+///
+/// Returns:
+/// - `bool`: `true` if the string is a boolean keyword, otherwise `false`.
+pub fn is_boolean_keyword(str: []const u8) bool {
+    return mem.eql(u8, "true", str) or mem.eql(u8, "false", str);
+}
+
 /// Checks if an operator is treated as a single unit.
 ///
 /// This function checks if the given operator is treated as a single unit

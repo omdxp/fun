@@ -245,7 +245,14 @@ pub const LexProcess = struct {
             }
         }.call);
 
-        if (misc.is_keyword(buffer.items)) {
+        if (misc.is_boolean_keyword(buffer.items)) {
+            const bval = if (mem.eql(u8, "true", buffer.items)) true else false;
+            return token.Token{
+                .type = .Boolean,
+                .data = .{ .bval = bval },
+                .pos = self.transpile_proc.pos,
+            };
+        } else if (misc.is_keyword(buffer.items)) {
             return token.Token{
                 .type = .Keyword,
                 .data = .{ .sval = buffer },

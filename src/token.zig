@@ -16,6 +16,8 @@ pub const TokenType = enum {
     Number,
     /// A string literal.
     String,
+    /// A boolean literal.
+    Boolean,
     /// A comment.
     Comment,
     /// A newline character.
@@ -46,6 +48,8 @@ pub const TokenData = union(enum) {
     lnum: c_long,
     /// A long long integer value.
     llnum: c_longlong,
+    /// A boolean value.
+    bval: bool,
 };
 
 /// Represents the position of a token in the source code.
