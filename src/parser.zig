@@ -205,7 +205,9 @@ pub const ParseProcess = struct {
         var stmts = misc.Vector(*ast.Node).init(self.allocator);
         try self.make_body_node(misc.Vector(*ast.Node).init(self.allocator));
         var body_node = self.node_pop();
-        body_node.?.binded.?.owner = &parser_current_body;
+        const owner = try self.allocator.create(ast.Node);
+        owner.* = parser_current_body;
+        body_node.?.binded.?.owner = owner;
         parser_current_body = body_node.?;
         var hist_down = history.History.down(self.allocator, hist, hist.flags);
         defer hist_down.deinit();
@@ -220,7 +222,9 @@ pub const ParseProcess = struct {
         var stmts = misc.Vector(*ast.Node).init(self.allocator);
         try self.make_body_node(misc.Vector(*ast.Node).init(self.allocator));
         var body_node = self.node_pop();
-        body_node.?.binded.?.owner = &parser_current_body;
+        const owner = try self.allocator.create(ast.Node);
+        owner.* = parser_current_body;
+        body_node.?.binded.?.owner = owner;
         parser_current_body = body_node.?;
         try self.expect_sym('{');
         while (!try self.next_token_is_symbol('}')) {
@@ -347,18 +351,24 @@ pub const ParseProcess = struct {
             exp_node = self.node_pop().?;
         }
         try self.expect_sym(')');
+        const exp = try self.allocator.create(ast.Node);
+        exp.* = exp_node;
         try self.transpile_proc.nodes.push(ast.Node{
             .type = .ExpressionParenthesis,
-            .node_variant = .{ .paren = .{ .exp = &exp_node } },
+            .node_variant = .{ .paren = .{ .exp = exp } },
         });
         if (left_node != null) {
-            var parenthesis_node = self.node_pop();
+            const parenthesis_node = self.node_pop();
+            const left = try self.allocator.create(ast.Node);
+            left.* = left_node.?;
+            const right = try self.allocator.create(ast.Node);
+            right.* = parenthesis_node.?;
             try self.transpile_proc.nodes.push(ast.Node{
                 .type = .Expression,
                 .node_variant = .{
                     .exp = .{
-                        .left = &left_node.?,
-                        .right = &parenthesis_node.?,
+                        .left = left,
+                        .right = right,
                         .op = "()",
                     },
                 },
@@ -369,15 +379,19 @@ pub const ParseProcess = struct {
 
     fn parse_for_comma(self: *Self, hist: *history.History) !void {
         _ = try self.token_next(); // skip ,
-        var left_node = self.node_pop();
+        const left_node = self.node_pop();
         try self.parse_expressionable_root(hist);
-        var right_node = self.node_pop();
+        const right_node = self.node_pop();
+        const left = try self.allocator.create(ast.Node);
+        left.* = left_node.?;
+        const right = try self.allocator.create(ast.Node);
+        right.* = right_node.?;
         try self.transpile_proc.nodes.push(ast.Node{
             .type = .Expression,
             .node_variant = .{
                 .exp = .{
-                    .left = &left_node.?,
-                    .right = &right_node.?,
+                    .left = left,
+                    .right = right,
                     .op = ",",
                 },
             },
@@ -385,26 +399,32 @@ pub const ParseProcess = struct {
     }
 
     fn parse_for_bracket(self: *Self, hist: *history.History) !void {
-        var left_node = self.transpile_proc.nodes.back();
+        const left_node = self.transpile_proc.nodes.back();
         if (left_node != null) {
             _ = self.node_pop();
         }
         try self.expect_op("[");
         try self.parse_expressionable_root(hist);
         try self.expect_sym(']');
-        var exp_node = self.node_pop();
+        const exp_node = self.node_pop();
+        const inner = try self.allocator.create(ast.Node);
+        inner.* = exp_node.?;
         try self.transpile_proc.nodes.push(ast.Node{
             .type = .Bracket,
-            .node_variant = .{ .bracket = .{ .inner = &exp_node.? } },
+            .node_variant = .{ .bracket = .{ .inner = inner } },
         });
         if (left_node != null) {
-            var bracket_node = self.node_pop();
+            const bracket_node = self.node_pop();
+            const left = try self.allocator.create(ast.Node);
+            left.* = left_node.?;
+            const right = try self.allocator.create(ast.Node);
+            right.* = bracket_node.?;
             try self.transpile_proc.nodes.push(ast.Node{
                 .type = .Expression,
                 .node_variant = .{
                     .exp = .{
-                        .left = &left_node.?,
-                        .right = &bracket_node.?,
+                        .left = left,
+                        .right = right,
                         .op = "[]",
                     },
                 },
@@ -422,19 +442,40 @@ pub const ParseProcess = struct {
         var hist = history.History.init(self.allocator, .{ .expression_is_unary = true });
         defer hist.deinit();
         try self.parse_expressionable(&hist);
-        var unary_operand_node = self.node_pop();
+        const unary_operand_node = self.node_pop();
+        const operand = try self.allocator.create(ast.Node);
+        operand.* = unary_operand_node.?;
         try self.transpile_proc.nodes.push(ast.Node{
             .type = .Unary,
             .node_variant = .{
                 .unary = .{
                     .op = "*",
-                    .operand = &unary_operand_node.?,
+                    .operand = operand,
                 },
             },
         });
         var unary_node = self.node_pop();
         unary_node.?.node_variant.?.unary.indirection.?.depth = depth;
         try self.transpile_proc.nodes.push(unary_node.?);
+    }
+
+    fn parse_for_normal_unary(self: *Self) !void {
+        const unary_op = (try self.token_next()).?.data.sval.items;
+        var hist = history.History.init(self.allocator, .{ .expression_is_unary = true });
+        defer hist.deinit();
+        try self.parse_expressionable(&hist);
+        const unary_operand_node = self.node_pop();
+        const operand = try self.allocator.create(ast.Node);
+        operand.* = unary_operand_node.?;
+        try self.transpile_proc.nodes.push(ast.Node{
+            .type = .Unary,
+            .node_variant = .{
+                .unary = .{
+                    .op = unary_op,
+                    .operand = operand,
+                },
+            },
+        });
     }
 
     fn parse_for_unary(self: *Self) !void {
@@ -444,6 +485,8 @@ pub const ParseProcess = struct {
             try self.parse_for_indirection_unary();
             return;
         }
+        try self.parse_for_normal_unary();
+        try self.parse_additional_expression();
     }
 
     fn parse_for_left_operanded_unary(self: *Self, node_left: *ast.Node, unary_op: []const u8) !void {
@@ -509,26 +552,34 @@ pub const ParseProcess = struct {
 
     fn parse_node_shift_children_left(self: *Self, node: *ast.Node) !void {
         const right_op = node.*.node_variant.?.exp.right.?.*.node_variant.?.exp.op;
-        var new_exp_left_node = node.*.node_variant.?.exp.left.*;
-        var new_exp_right_node = node.*.node_variant.?.exp.right.?.*.node_variant.?.exp.left.*;
+        var new_exp_left_node = node.*.node_variant.?.exp.left.?.*;
+        var new_exp_right_node = node.*.node_variant.?.exp.right.?.*.node_variant.?.exp.left.?.*;
         try self.make_expression_node(&new_exp_left_node, &new_exp_right_node, node.*.node_variant.?.exp.op);
-        var new_left_operand = self.node_pop();
-        var new_right_operand = node.*.node_variant.?.exp.right.?.*.node_variant.?.exp.right.?.*;
-        node.*.node_variant.?.exp.left = &new_left_operand.?;
-        node.*.node_variant.?.exp.right = &new_right_operand;
+        const new_left_operand = self.node_pop();
+        const new_right_operand = node.*.node_variant.?.exp.right.?.*.node_variant.?.exp.right.?.*;
+        const left = try self.allocator.create(ast.Node);
+        left.* = new_left_operand.?;
+        const right = try self.allocator.create(ast.Node);
+        right.* = new_right_operand;
+        node.*.node_variant.?.exp.left = left;
+        node.*.node_variant.?.exp.right = right;
         node.*.node_variant.?.exp.op = right_op;
     }
 
     fn parse_node_move_right_left_to_left(self: *Self, node: *ast.Node) !void {
         try self.make_expression_node(
-            node.*.node_variant.?.exp.left,
-            node.*.node_variant.?.exp.right.?.*.node_variant.?.exp.left,
+            node.*.node_variant.?.exp.left.?,
+            node.*.node_variant.?.exp.right.?.*.node_variant.?.exp.left.?,
             node.*.node_variant.?.exp.op,
         );
-        var completed_node = self.node_pop();
+        const completed_node = self.node_pop();
         const new_op = node.*.node_variant.?.exp.right.?.*.node_variant.?.exp.op;
-        node.*.node_variant.?.exp.left = &completed_node.?;
-        node.*.node_variant.?.exp.right = node.*.node_variant.?.exp.right.?.*.node_variant.?.exp.right;
+        const left = try self.allocator.create(ast.Node);
+        left.* = completed_node.?;
+        const right = try self.allocator.create(ast.Node);
+        right.* = node.*.node_variant.?.exp.right.?.*.node_variant.?.exp.right.?.*;
+        node.*.node_variant.?.exp.left = left;
+        node.*.node_variant.?.exp.right = right;
         node.*.node_variant.?.exp.op = new_op;
     }
 
@@ -536,24 +587,24 @@ pub const ParseProcess = struct {
         if (node.*.type != .Expression) {
             return;
         }
-        if (node.*.node_variant.?.exp.left.*.type != .Expression and node.*.node_variant.?.exp.right != null and
+        if (node.*.node_variant != null and node.*.node_variant.?.exp.left.?.*.type != .Expression and node.*.node_variant.?.exp.right != null and
             node.*.node_variant.?.exp.right.?.*.type != .Expression)
         {
             return;
         }
-        if (node.*.node_variant.?.exp.left.*.type != .Expression and node.*.node_variant.?.exp.right != null and
+        if (node.*.node_variant != null and node.*.node_variant.?.exp.left.?.*.type != .Expression and node.*.node_variant.?.exp.right != null and
             node.*.node_variant.?.exp.right.?.*.type == .Expression)
         {
             const right_op = node.*.node_variant.?.exp.right.?.*.node_variant.?.exp.op;
             if (self.parse_left_has_priority(node.*.node_variant.?.exp.op, right_op)) {
                 try self.parse_node_shift_children_left(node);
-                try self.parse_reorder_expression(node.*.node_variant.?.exp.left);
+                try self.parse_reorder_expression(node.*.node_variant.?.exp.left.?);
                 try self.parse_reorder_expression(node.*.node_variant.?.exp.right.?);
             }
         }
-        if ((ast.node_is_array(node.*.node_variant.?.exp.left.*) and ast.node_is_assignment(node.*.node_variant.?.exp.right.?.*)) or
-            ((ast.node_is_expression(node.*.node_variant.?.exp.left.*, "()") or
-            ast.node_is_expression(node.*.node_variant.?.exp.left.*, "[]")) and
+        if ((node.*.node_variant.?.exp.left != null and ast.node_is_array(node.*.node_variant.?.exp.left.?.*) and node.*.node_variant.?.exp.right != null and ast.node_is_assignment(node.*.node_variant.?.exp.right.?.*)) or
+            ((ast.node_is_expression(node.*.node_variant.?.exp.left.?.*, "()") or
+            ast.node_is_expression(node.*.node_variant.?.exp.left.?.*, "[]")) and
             ast.node_is_expression(node.*.node_variant.?.exp.right.?.*, ",")))
         {
             try self.parse_node_move_right_left_to_left(node);
@@ -781,10 +832,12 @@ pub const ParseProcess = struct {
             return;
         }
         try self.parse_expressionable_root(hist);
-        var exp_node = self.node_pop();
+        const exp_node = self.node_pop();
+        const exp = try self.allocator.create(ast.Node);
+        exp.* = exp_node.?;
         try self.transpile_proc.nodes.push(ast.Node{
             .type = .StatementReturn,
-            .node_variant = .{ .statement = .{ .return_stmt = &exp_node.? } },
+            .node_variant = .{ .statement = .{ .return_stmt = exp } },
         });
         try self.expect_sym(';');
     }

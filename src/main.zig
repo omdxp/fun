@@ -53,9 +53,11 @@ pub fn main() !void {
             .Expression => {
                 const expression = n.node_variant.?.exp;
                 std.debug.print("op: {s}, ", .{expression.op});
-                switch (expression.left.type) {
-                    .Number => std.debug.print("left: {}\n", .{expression.left.data.?.llnum}),
-                    .Variable => std.debug.print("left: {s}\n", .{expression.left.node_variant.?.variable.name.items}),
+                switch (expression.left.?.*.type) {
+                    .Number => std.debug.print("left: {}\n", .{expression.left.?.*.data.?.llnum}),
+                    .Variable => std.debug.print("left: {s}\n", .{expression.left.?.*.node_variant.?.variable.name.items}),
+                    .Expression => std.debug.print("left: {s}\n", .{expression.left.?.*.node_variant.?.exp.op}),
+                    .Identifier => std.debug.print("left: {s}\n", .{expression.left.?.*.data.?.sval.items}),
                     else => unreachable,
                 }
             },

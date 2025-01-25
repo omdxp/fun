@@ -81,7 +81,7 @@ pub const Node = struct {
     node_variant: ?union(enum) {
         exp: struct {
             /// The left-hand side of the expression.
-            left: *Node,
+            left: ?*Node,
             /// The right-hand side of the expression.
             right: ?*Node = null,
             /// The operator used in the expression.
