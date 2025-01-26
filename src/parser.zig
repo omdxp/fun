@@ -975,6 +975,34 @@ pub const ParseProcess = struct {
         try self.transpile_proc.nodes.push(fit_node);
     }
 
+    fn parse_import(self: *Self) !void {
+        _ = try self.token_next(); // skip imp
+        const folder_token = try self.token_next();
+        if (folder_token.?.type != .Identifier) {
+            self.transpile_proc.err("expected folder identifier, got '{?}'", .{folder_token.?.type});
+        }
+        var import_name = std.ArrayList(u8).init(self.allocator);
+        defer import_name.deinit();
+        try import_name.appendSlice(folder_token.?.data.sval.items);
+
+        const next_token = try self.token_peek_next();
+        if (next_token != null and next_token.?.type == .Operator and misc.is_access_operator(next_token.?.data.sval.items)) {
+            _ = try self.token_next(); // skip dot
+            const file_token = try self.token_next();
+            if (file_token.?.type != .Identifier) {
+                self.transpile_proc.err("expected file identifier, got '{?}'", .{file_token.?.type});
+            }
+            try import_name.append('.');
+            try import_name.appendSlice(file_token.?.data.sval.items);
+        }
+
+        try self.expect_sym(';');
+        try self.transpile_proc.nodes.push(ast.Node{
+            .type = .Import,
+            .node_variant = .{ .import = .{ .path = try import_name.toOwnedSlice() } },
+        });
+    }
+
     /// Parses a keyword token.
     ///
     /// This function checks if the next token matches any known keywords.
@@ -1000,7 +1028,7 @@ pub const ParseProcess = struct {
         }
 
         if (mem.eql(u8, "imp", sval)) {
-            // @compileError("TODO: parse imp keyword");
+            return try self.parse_import();
         } else if (mem.eql(u8, "fun", sval)) {
             return try self.parse_function();
         } else if (mem.eql(u8, "if", sval)) {

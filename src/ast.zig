@@ -60,6 +60,8 @@ pub const NodeType = enum {
     Tenary,
     /// Represents a bracket node.
     Bracket,
+    /// Represents an import node.
+    Import,
     /// Represents a blank node.
     Blank,
 };
@@ -81,6 +83,10 @@ pub const Node = struct {
     /// The token data associated with the node.
     data: ?token.TokenData = null,
     node_variant: ?union(enum) {
+        import: struct {
+            /// The path of the import.
+            path: []const u8,
+        },
         boolean: struct {
             /// The boolean value of the node.
             val: bool,

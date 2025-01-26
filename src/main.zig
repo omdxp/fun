@@ -153,6 +153,10 @@ pub fn main() !void {
                     std.debug.print("body: {?}, stmts: {}\n", .{ branch.body.*.type, branch.body.*.node_variant.?.body.statements.count });
                 }
             },
+            .Import => {
+                const import = n.node_variant.?.import;
+                std.debug.print("import: {s}\n", .{import.path});
+            },
             else => unreachable,
         }
     }
