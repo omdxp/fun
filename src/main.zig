@@ -119,6 +119,40 @@ pub fn main() !void {
                 }
                 std.debug.print("\n", .{});
             },
+            .StatementFit => {
+                const fit_stmt = n.node_variant.?.statement.fit_stmt;
+                switch (fit_stmt.exp.*.type) {
+                    .Expression => std.debug.print("condition: {s}, ", .{fit_stmt.exp.*.node_variant.?.exp.op}),
+                    .Boolean => std.debug.print("condition: {}\n", .{fit_stmt.exp.*.data.?.bval}),
+                    .Identifier => switch (fit_stmt.exp.*.data.?) {
+                        .sval => std.debug.print("condition: {s}\n", .{fit_stmt.exp.*.data.?.sval.items}),
+                        .cval => std.debug.print("condition: {c}\n", .{fit_stmt.exp.*.data.?.cval}),
+                        else => unreachable,
+                    },
+                    else => unreachable,
+                }
+                std.debug.print("has_default_branch: {}\n", .{fit_stmt.has_default_branch});
+                for (fit_stmt.branches.items()) |branch| {
+                    if (branch.condition == null) {
+                        std.debug.print("branch: default\n", .{});
+                        std.debug.print("body: {?}, stmts: {}\n", .{ branch.body.*.type, branch.body.*.node_variant.?.body.statements.count });
+                        continue;
+                    }
+                    const condition = branch.condition.?;
+                    switch (condition.*.type) {
+                        .Number => std.debug.print("branch: {}\n", .{condition.*.data.?.llnum}),
+                        .Expression => std.debug.print("branch: {s}, ", .{condition.*.node_variant.?.exp.op}),
+                        .Boolean => std.debug.print("branch: {}\n", .{condition.*.data.?.bval}),
+                        .Identifier => switch (condition.*.data.?) {
+                            .sval => std.debug.print("branch: {s}\n", .{condition.*.data.?.sval.items}),
+                            .cval => std.debug.print("branch: {c}\n", .{condition.*.data.?.cval}),
+                            else => unreachable,
+                        },
+                        else => unreachable,
+                    }
+                    std.debug.print("body: {?}, stmts: {}\n", .{ branch.body.*.type, branch.body.*.node_variant.?.body.statements.count });
+                }
+            },
             else => unreachable,
         }
     }

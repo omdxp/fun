@@ -1,2 +1,21 @@
-if false && 1 {
+bin x = false;
+
+fit x {
+	true -> {
+		str msg = "true";
+		num y = 1;
+		y >>= 1;
+	},
+	false -> {}
+}
+
+num y = 1;
+
+fit y {
+	1 -> {}
+	2 -> {}
+	_ -> {
+		str msg = "error";
+		y++;
+	}
 }

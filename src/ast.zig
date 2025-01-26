@@ -168,19 +168,21 @@ pub const Node = struct {
             fit_stmt: struct {
                 /// The expression for the fit statement.
                 exp: *Node,
-                /// The body of the fit statement.
-                body: *Node,
                 /// The branches of the fit statement.
-                branches: misc.Vector(u8), // index of parsed branch
+                branches: misc.Vector(FitBranch),
                 /// Indicates if the fit statement has a default branch.
                 has_default_branch: bool,
             },
-            branch_stmt: struct {
-                /// The expression for the branch statement.
-                exp: *Node,
-            },
         },
     } = null,
+};
+
+/// Represents the branches in a fit statement.
+pub const FitBranch = struct {
+    /// The condition of the branch statement.
+    condition: ?*Node = null,
+    /// The body of the branch statement.
+    body: *Node,
 };
 
 /// Checks if the node is an expression or a parenthesis.

@@ -617,14 +617,12 @@ pub const ParseProcess = struct {
             if (!misc.is_unary_operator(op)) {
                 self.transpile_proc.err("expected left operand for '{s}' operator", .{op});
             }
-            try self.parse_for_unary();
-            return;
+            return try self.parse_for_unary();
         }
         _ = try self.token_next(); // skip operator
         _ = self.node_pop();
         if (misc.is_left_operanded_unary_operator(op)) {
-            try self.parse_for_left_operanded_unary(&node_left.?, op);
-            return;
+            return try self.parse_for_left_operanded_unary(&node_left.?, op);
         }
         node_left.?.flags = .{ .inside_expression = true };
         t = try self.token_peek_next();
@@ -693,7 +691,12 @@ pub const ParseProcess = struct {
         hist.flags.inside_expression = true;
         return switch (t.?.type) {
             .Number, .Boolean => try self.parse_single_token_to_node(),
-            .Operator => try self.parse_expression(hist),
+            .Operator => {
+                if (hist.*.flags.in_fit_statement and mem.eql(u8, t.?.data.sval.items, "->")) {
+                    return false;
+                }
+                return try self.parse_expression(hist);
+            },
             .Identifier => try self.parse_identifier(),
             .Keyword => {
                 try self.parse_keyword(hist);
@@ -905,11 +908,71 @@ pub const ParseProcess = struct {
         body.* = body_node.?;
         const if_node = ast.Node{
             .type = .StatementIf,
-            .node_variant = .{ .statement = .{ .if_stmt = .{ .condition = condition, .body = body } } },
+            .node_variant = .{
+                .statement = .{
+                    .if_stmt = .{ .condition = condition, .body = body },
+                },
+            },
         };
         try self.transpile_proc.nodes.push(if_node);
         try self.parse_elif(hist);
         try self.parse_else(hist);
+    }
+
+    fn parse_fit_body(self: *Self, fit_node: *ast.Node, hist: *history.History) !void {
+        try self.expect_sym('{');
+        fit_node.*.node_variant.?.statement.fit_stmt.branches = misc.Vector(ast.FitBranch).init(self.allocator);
+        while (!try self.next_token_is_symbol('}')) {
+            var hist_down = history.History.down(self.allocator, hist, hist.flags);
+            defer hist_down.deinit();
+            try self.parse_expressionable_root(&hist_down);
+            const condition_node = self.node_pop();
+            const condition = try self.allocator.create(ast.Node);
+            if (condition_node.?.type == .Identifier and mem.eql(u8, condition_node.?.data.?.sval.items, "_")) {
+                // default case after should be the last branch
+                try self.expect_op("->");
+                try self.parse_body(&hist_down);
+                const body_node = self.node_pop();
+                const body = try self.allocator.create(ast.Node);
+                body.* = body_node.?;
+                try fit_node.*.node_variant.?.statement.fit_stmt.branches.push(.{ .body = body, .condition = null });
+                if (try self.next_token_is_operator(",")) {
+                    _ = try self.token_next(); // skip ,
+                }
+                break;
+            }
+            condition.* = condition_node.?;
+            try self.expect_op("->");
+            try self.parse_body(&hist_down);
+            const body_node = self.node_pop();
+            const body = try self.allocator.create(ast.Node);
+            body.* = body_node.?;
+            try fit_node.*.node_variant.?.statement.fit_stmt.branches.push(.{ .body = body, .condition = condition });
+            if (try self.next_token_is_operator(",")) {
+                _ = try self.token_next(); // skip ,
+            }
+        }
+        try self.expect_sym('}');
+    }
+
+    fn parse_fit_statement(self: *Self, hist: *history.History) !void {
+        var fit_node: ast.Node = .{
+            .type = .StatementFit,
+            .node_variant = .{
+                .statement = .{ .fit_stmt = undefined },
+            },
+        };
+        hist.*.flags.in_fit_statement = true;
+        try self.expect_keyword("fit");
+        var new_hist = history.History.init(self.allocator, .{ .in_fit_statement = true });
+        defer new_hist.deinit();
+        try self.parse_expressionable_root(&new_hist);
+        const condition_node = self.node_pop();
+        const condition = try self.allocator.create(ast.Node);
+        condition.* = condition_node.?;
+        fit_node.node_variant.?.statement.fit_stmt.exp = condition;
+        try self.parse_fit_body(&fit_node, &new_hist);
+        try self.transpile_proc.nodes.push(fit_node);
     }
 
     /// Parses a keyword token.
@@ -943,7 +1006,7 @@ pub const ParseProcess = struct {
         } else if (mem.eql(u8, "if", sval)) {
             return try self.parse_if_statement(hist);
         } else if (mem.eql(u8, "fit", sval)) {
-            // @compileError("TODO: parse fit keyword");
+            return try self.parse_fit_statement(hist);
         } else if (mem.eql(u8, "ret", sval)) {
             return try self.parse_return(hist);
         } else if (mem.eql(u8, "true", sval)) {
