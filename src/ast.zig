@@ -82,15 +82,19 @@ pub const Node = struct {
     } = null,
     /// The token data associated with the node.
     data: ?token.TokenData = null,
+    /// The variant data associated with the node.
     node_variant: ?union(enum) {
+        /// The import node.
         import: struct {
             /// The path of the import.
             path: []const u8,
         },
+        /// The boolean node.
         boolean: struct {
             /// The boolean value of the node.
             val: bool,
         },
+        /// The expression node.
         exp: struct {
             /// The left-hand side of the expression.
             left: ?*Node,
@@ -99,10 +103,12 @@ pub const Node = struct {
             /// The operator used in the expression.
             op: []const u8,
         },
+        /// The expression in parentheses node.
         paren: struct {
             /// The expression inside the parentheses.
             exp: *Node,
         },
+        /// The variable node.
         variable: struct {
             /// The data type of the variable.
             type: dtype.DataType,
@@ -111,6 +117,7 @@ pub const Node = struct {
             /// The value of the variable.
             val: ?*Node = null,
         },
+        /// The unary node.
         unary: struct {
             /// Indicates if the unary operator is left-operanded.
             is_left_operanded_unary: bool = false,
@@ -124,20 +131,26 @@ pub const Node = struct {
                 depth: usize,
             } = null,
         },
+        /// The tenary node.
         tenary: struct {
+            /// The condition of the tenary expression.
+            condition: *Node,
             /// The expression for the true condition.
             true: *Node,
             /// The expression for the false condition.
             false: *Node,
         },
+        /// The bracket node.
         bracket: struct {
             /// The inner expression of the bracket.
             inner: *Node,
         },
+        /// The body node.
         body: struct {
             /// The statements inside the body.
             statements: misc.Vector(*Node),
         },
+        /// The function node.
         function: struct {
             /// The return type of the function.
             rtype: ?dtype.DataType = null,
@@ -148,6 +161,7 @@ pub const Node = struct {
             /// The body of the function.
             body: ?*Node = null,
         },
+        /// The statement node.
         statement: union {
             /// The return statement node.
             return_stmt: *Node,

@@ -193,6 +193,19 @@ pub const ParseProcess = struct {
         return token.is_symbol(t, c);
     }
 
+    /// Parses a statement.
+    ///
+    /// This function peeks at the next token and determines if it is a keyword.
+    /// If it is a keyword, it parses it accordingly. Otherwise, it parses an expressionable root.
+    /// It also handles symbols and ensures the statement ends with a semicolon.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `hist`: A pointer to the history of parsing operations.
+    ///
+    /// Errors:
+    /// - Returns an error if any parsing operation fails.
+    /// - Logs an error message if any expected token is not found.
     fn parse_statement(self: *Self, hist: *history.History) !void {
         var t = try self.token_peek_next();
         if (t.?.type == .Keyword) {
@@ -208,6 +221,20 @@ pub const ParseProcess = struct {
         try self.expect_sym(';');
     }
 
+    /// Parses multiple statements within a body.
+    ///
+    /// This function initializes a vector to hold statement nodes and creates a body node.
+    /// It processes each statement within the body, handling nested history contexts, and
+    /// ensures proper closure of the body with a closing brace. The resulting body node is added
+    /// to the list of nodes to be transpiled.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `hist`: A pointer to the history of parsing operations.
+    ///
+    /// Errors:
+    /// - Returns an error if any parsing operation fails.
+    /// - Logs an error message if any expected token is not found.
     fn parse_body_multiple_statements(self: *Self, hist: *history.History) !void {
         var stmts = misc.Vector(*ast.Node).init(self.allocator);
         try self.make_body_node(misc.Vector(*ast.Node).init(self.allocator));
@@ -232,6 +259,17 @@ pub const ParseProcess = struct {
         try self.transpile_proc.nodes.push(body_node.?);
     }
 
+    /// Parses a body.
+    ///
+    /// This function parses multiple statements within a body by delegating to
+    /// `parse_body_multiple_statements`.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `hist`: A pointer to the history of parsing operations.
+    ///
+    /// Errors:
+    /// - Returns an error if any parsing operation fails.
     fn parse_body(self: *Self, hist: *history.History) !void {
         try self.parse_body_multiple_statements(hist);
     }
@@ -254,16 +292,57 @@ pub const ParseProcess = struct {
         self.transpile_proc.err("invalid symbol", .{});
     }
 
+    /// Checks if the next token is an operator.
+    ///
+    /// This function peeks at the next token and checks if it matches the specified
+    /// operator. It returns `true` if the next token is the expected operator, `false` otherwise.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `op`: The operator as a byte slice.
+    ///
+    /// Returns:
+    /// - `bool`: `true` if the next token is the expected operator, `false` otherwise.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the next token fails.
     fn next_token_is_operator(self: *Self, op: []const u8) !bool {
         const t = try self.token_peek_next();
         return token.is_operator(t, op);
     }
 
+    /// Checks if the next token is a keyword.
+    ///
+    /// This function peeks at the next token and checks if it matches the specified
+    /// keyword. It returns `true` if the next token is the expected keyword, `false` otherwise.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `keyword`: The keyword as a byte slice.
+    ///
+    /// Returns:
+    /// - `bool`: `true` if the next token is the expected keyword, `false` otherwise.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the next token fails.
     fn next_token_is_keyword(self: *Self, keyword: []const u8) !bool {
         const t = try self.token_peek_next();
         return token.is_keyword(t, keyword);
     }
 
+    /// Gets the pointer depth.
+    ///
+    /// This function checks the next tokens to determine the depth of pointers (`*`),
+    /// incrementing the depth for each pointer token found. It returns the total pointer depth.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    ///
+    /// Returns:
+    /// - `usize`: The total depth of pointers.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the next token fails.
     fn parse_get_pointer_depth(self: *Self) !usize {
         var depth: u8 = 0;
         while (try self.next_token_is_operator("*")) {
@@ -273,6 +352,18 @@ pub const ParseProcess = struct {
         return depth;
     }
 
+    /// Parses a datatype.
+    ///
+    /// This function expects a datatype keyword and retrieves its pointer depth,
+    /// type, and type string. If the datatype is unknown, it logs an error message.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `dt`: A pointer to the datatype being parsed.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the next token fails.
+    /// - Logs an error message if the next token is not a datatype keyword.
     fn parse_datatype(self: *Self, dt: *dtype.DataType) !void {
         const dt_token = try self.token_next();
         if (dt_token.?.type != .Keyword) {
@@ -290,6 +381,21 @@ pub const ParseProcess = struct {
         dt.*.type_str = dt_token.?.data.sval;
     }
 
+    /// Parses a single token to a node.
+    ///
+    /// This function processes a single token, such as a number, identifier, string,
+    /// or boolean, and converts it to the corresponding AST node. If the token is not
+    /// of an expected type, it logs an error message.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    ///
+    /// Returns:
+    /// - `bool`: `true` if a single token was successfully parsed, `false` otherwise.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the next token fails.
+    /// - Logs an error message if the next token is not of an expected type.
     fn parse_single_token_to_node(self: *Self) !bool {
         const t = try self.token_next();
         switch (t.?.type) {
@@ -326,6 +432,16 @@ pub const ParseProcess = struct {
         return true;
     }
 
+    /// Parses additional expressions.
+    ///
+    /// This function checks if the next token is an operator and, if so,
+    /// processes it as part of an additional expression.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the next token fails.
     fn parse_additional_expression(self: *Self) !void {
         const t = try self.token_peek_next();
         if (t.?.type == .Operator) {
@@ -335,6 +451,20 @@ pub const ParseProcess = struct {
         }
     }
 
+    /// Parses a parenthesis expression.
+    ///
+    /// This function expects a parenthesis expression, including handling
+    /// of left nodes, expressionable roots, and proper closing of the parenthesis.
+    /// It adds the resulting parenthesis expression node to the list of nodes
+    /// to be transpiled.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `hist`: A pointer to the history of parsing operations.
+    ///
+    /// Errors:
+    /// - Returns an error if any parsing operation fails.
+    /// - Logs an error message if any expected token is not found.
     fn parse_for_parenthesis(self: *Self, hist: *history.History) !void {
         try self.expect_op("(");
         var left_node: ?ast.Node = null;
@@ -375,6 +505,17 @@ pub const ParseProcess = struct {
         try self.parse_additional_expression();
     }
 
+    /// Parses a comma-separated expression.
+    ///
+    /// This function processes a comma-separated expression, creating and adding
+    /// the resulting expression node to the list of nodes to be transpiled.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `hist`: A pointer to the history of parsing operations.
+    ///
+    /// Errors:
+    /// - Returns an error if any parsing operation fails.
     fn parse_for_comma(self: *Self, hist: *history.History) !void {
         _ = try self.token_next(); // skip ,
         const left_node = self.node_pop();
@@ -396,6 +537,19 @@ pub const ParseProcess = struct {
         });
     }
 
+    /// Parses a bracket expression.
+    ///
+    /// This function expects a bracket expression, including handling of left nodes,
+    /// expressionable roots, and proper closing of the bracket. It adds the resulting
+    /// bracket expression node to the list of nodes to be transpiled.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `hist`: A pointer to the history of parsing operations.
+    ///
+    /// Errors:
+    /// - Returns an error if any parsing operation fails.
+    /// - Logs an error message if any expected token is not found.
     fn parse_for_bracket(self: *Self, hist: *history.History) !void {
         const left_node = self.transpile_proc.nodes.back();
         if (left_node != null) {
@@ -430,11 +584,36 @@ pub const ParseProcess = struct {
         }
     }
 
+    /// Peeks at the expressionable node on top of the stack.
+    ///
+    /// This function returns the node on top of the stack if it is expressionable,
+    /// or `null` otherwise.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    ///
+    /// Returns:
+    /// - `?ast.Node`: The expressionable node on top of the stack, or `null` if not found.
+    ///
+    /// Errors:
+    /// - Returns an error if accessing the node stack fails.
     fn node_peek_expressionable_or_null(self: *Self) !?ast.Node {
         const n = self.transpile_proc.nodes.back();
         return if (n != null and ast.node_is_expressionable(n.?)) n.? else null;
     }
 
+    /// Parses an indirection unary expression.
+    ///
+    /// This function processes an indirection unary expression by retrieving the
+    /// pointer depth and creating the corresponding unary node with the operand.
+    /// It adds the resulting unary node to the list of nodes to be transpiled.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    ///
+    /// Errors:
+    /// - Returns an error if any parsing operation fails.
+    /// - Logs an error message if any expected token is not found.
     fn parse_for_indirection_unary(self: *Self) !void {
         const depth = try self.parse_get_pointer_depth();
         var hist = history.History.init(self.allocator, .{ .expression_is_unary = true });
@@ -457,6 +636,17 @@ pub const ParseProcess = struct {
         try self.transpile_proc.nodes.push(unary_node.?);
     }
 
+    /// Parses a normal unary expression.
+    ///
+    /// This function processes a normal unary expression, creating the corresponding
+    /// unary node with the operand and adding it to the list of nodes to be transpiled.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    ///
+    /// Errors:
+    /// - Returns an error if any parsing operation fails.
+    /// - Logs an error message if any expected token is not found.
     fn parse_for_normal_unary(self: *Self) !void {
         const unary_op = (try self.token_next()).?.data.sval.items;
         var hist = history.History.init(self.allocator, .{ .expression_is_unary = true });
@@ -476,6 +666,18 @@ pub const ParseProcess = struct {
         });
     }
 
+    /// Parses a unary expression.
+    ///
+    /// This function processes a unary expression, determining if it is an indirection
+    /// or normal unary expression, and then parsing it accordingly. It also handles
+    /// additional expressions if present.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    ///
+    /// Errors:
+    /// - Returns an error if any parsing operation fails.
+    /// - Logs an error message if any expected token is not found.
     fn parse_for_unary(self: *Self) !void {
         const t = try self.token_peek_next();
         const unary_op = t.?.data.sval.items;
@@ -487,6 +689,19 @@ pub const ParseProcess = struct {
         try self.parse_additional_expression();
     }
 
+    /// Parses a left-operanded unary expression.
+    ///
+    /// This function processes a left-operanded unary expression, creating the
+    /// corresponding unary node with the left operand and operator, and adding
+    /// it to the list of nodes to be transpiled.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `node_left`: A pointer to the left operand node.
+    /// - `unary_op`: The unary operator as a byte slice.
+    ///
+    /// Errors:
+    /// - Returns an error if any parsing operation fails.
     fn parse_for_left_operanded_unary(self: *Self, node_left: *ast.Node, unary_op: []const u8) !void {
         try self.transpile_proc.nodes.push(ast.Node{
             .type = .Unary,
@@ -500,6 +715,20 @@ pub const ParseProcess = struct {
         });
     }
 
+    /// Creates an expression node.
+    ///
+    /// This function creates an expression node with the given left and right nodes
+    /// and the specified operator. It then adds the expression node to the list of
+    /// nodes to be transpiled.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `left_node`: A pointer to the left node of the expression.
+    /// - `right_node`: A pointer to the right node of the expression.
+    /// - `op`: The operator as a byte slice.
+    ///
+    /// Errors:
+    /// - Returns an error if creating the node fails.
     fn make_expression_node(self: *Self, left_node: *ast.Node, right_node: *ast.Node, op: []const u8) !void {
         var exp_node = ast.Node{
             .type = .Expression,
@@ -514,11 +743,35 @@ pub const ParseProcess = struct {
         try self.create_node(&exp_node);
     }
 
+    /// Creates a body node.
+    ///
+    /// This function creates a body node with the given statements and adds it
+    /// to the list of nodes to be transpiled.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `stmts`: A vector of pointers to the statement nodes.
+    ///
+    /// Errors:
+    /// - Returns an error if creating the node fails.
     fn make_body_node(self: *Self, stmts: misc.Vector(*ast.Node)) !void {
         var body_node = ast.Node{ .type = .Body, .node_variant = .{ .body = .{ .statements = stmts } } };
         try self.create_node(&body_node);
     }
 
+    /// Gets the precedence for an operator.
+    ///
+    /// This function iterates through the operator precedence groups to find
+    /// the precedence level of the given operator. It also sets the provided group
+    /// pointer to the matching group.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `op`: The operator as a byte slice.
+    /// - `group`: A pointer to the optional precedence group.
+    ///
+    /// Returns:
+    /// - `i8`: The precedence level of the operator, or -1 if not found.
     fn parse_get_precedence_for_operator(_: Self, op: []const u8, group: *?expressionable.OpPrecedenceGroup) i8 {
         for (0..expressionable.TOTAL_OPERATOR_GROUPS) |i| {
             var j: u8 = 0;
@@ -534,6 +787,18 @@ pub const ParseProcess = struct {
         return -1;
     }
 
+    /// Checks if the left operator has priority over the right operator.
+    ///
+    /// This function determines if the left operator has higher or equal precedence
+    /// compared to the right operator, taking into account associativity.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `op_left`: The left operator as a byte slice.
+    /// - `op_right`: The right operator as a byte slice.
+    ///
+    /// Returns:
+    /// - `bool`: `true` if the left operator has priority, `false` otherwise.
     fn parse_left_has_priority(self: *Self, op_left: []const u8, op_right: []const u8) bool {
         var left_group: ?expressionable.OpPrecedenceGroup = null;
         var right_group: ?expressionable.OpPrecedenceGroup = null;
@@ -548,6 +813,17 @@ pub const ParseProcess = struct {
         return left_prec <= right_prec;
     }
 
+    /// Shifts the children of an expression node to the left.
+    ///
+    /// This function rearranges the children of the given expression node,
+    /// shifting them to the left to maintain proper precedence order.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `node`: A pointer to the expression node.
+    ///
+    /// Errors:
+    /// - Returns an error if any parsing operation fails.
     fn parse_node_shift_children_left(self: *Self, node: *ast.Node) !void {
         const right_op = node.*.node_variant.?.exp.right.?.*.node_variant.?.exp.op;
         var new_exp_left_node = node.*.node_variant.?.exp.left.?.*;
@@ -564,6 +840,17 @@ pub const ParseProcess = struct {
         node.*.node_variant.?.exp.op = right_op;
     }
 
+    /// Moves the right-left child of an expression node to the left.
+    ///
+    /// This function rearranges the children of the given expression node,
+    /// moving the right-left child to the left to maintain proper precedence order.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `node`: A pointer to the expression node.
+    ///
+    /// Errors:
+    /// - Returns an error if any parsing operation fails.
     fn parse_node_move_right_left_to_left(self: *Self, node: *ast.Node) !void {
         try self.make_expression_node(
             node.*.node_variant.?.exp.left.?,
@@ -581,6 +868,17 @@ pub const ParseProcess = struct {
         node.*.node_variant.?.exp.op = new_op;
     }
 
+    /// Reorders an expression node for proper precedence.
+    ///
+    /// This function recursively reorders the children of the given expression node
+    /// to maintain proper operator precedence.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `node`: A pointer to the expression node.
+    ///
+    /// Errors:
+    /// - Returns an error if any parsing operation fails.
     fn parse_reorder_expression(self: *Self, node: *ast.Node) !void {
         if (node.*.type != .Expression) {
             return;
@@ -609,6 +907,18 @@ pub const ParseProcess = struct {
         }
     }
 
+    /// Parses a normal expression.
+    ///
+    /// This function parses a normal expression by handling operators,
+    /// expressionable tokens, and rearranging nodes as needed to maintain
+    /// proper precedence.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `hist`: A pointer to the history of parsing operations.
+    ///
+    /// Errors:
+    /// - Returns an error if any parsing operation fails.
     fn parse_normal_expression(self: *Self, hist: *history.History) !void {
         var t = try self.token_peek_next();
         const op = t.?.data.sval.items;
@@ -650,6 +960,22 @@ pub const ParseProcess = struct {
         try self.transpile_proc.nodes.push(exp_node.?);
     }
 
+    /// Parses an expression.
+    ///
+    /// This function parses an expression, handling different types of tokens
+    /// such as parenthesis, commas, brackets, and operators. It rearranges nodes
+    /// as needed to maintain proper precedence.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `hist`: A pointer to the history of parsing operations.
+    ///
+    /// Returns:
+    /// - `bool`: `true` if an expression was successfully parsed, `false` otherwise.
+    ///
+    /// Errors:
+    /// - Returns an error if any parsing operation fails.
+    /// - Logs an error message if any expected token is not found.
     fn parse_expression(self: *Self, hist: *history.History) !bool {
         const t = try self.token_peek_next();
         if (hist.flags.expression_is_unary and !misc.is_unary_operand_compatible(t.?)) {
@@ -667,6 +993,18 @@ pub const ParseProcess = struct {
         return true;
     }
 
+    /// Parses an identifier token.
+    ///
+    /// This function peeks at the next token and checks if it is an identifier.
+    /// If it is not an identifier, it logs an error message. It then parses the token
+    /// to a node if it is valid.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the next token fails.
+    /// - Logs an error message if the next token is not an identifier.
     fn parse_identifier(self: *Self) !bool {
         const t = try self.token_peek_next();
         if (t != null and t.?.type != .Identifier) {
@@ -675,6 +1013,18 @@ pub const ParseProcess = struct {
         return try self.parse_single_token_to_node();
     }
 
+    /// Parses a string token.
+    ///
+    /// This function peeks at the next token and checks if it is a string.
+    /// If it is not a string, it logs an error message. It then parses the token
+    /// to a node if it is valid.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the next token fails.
+    /// - Logs an error message if the next token is not a string.
     fn parse_string(self: *Self) !bool {
         const t = try self.token_peek_next();
         if (t != null and t.?.type != .String) {
@@ -683,6 +1033,22 @@ pub const ParseProcess = struct {
         return try self.parse_single_token_to_node();
     }
 
+    /// Parses a single expressionable token.
+    ///
+    /// This function peeks at the next token and attempts to parse it if it is
+    /// a number, boolean, operator, identifier, keyword, or string. It handles
+    /// specific cases within a fit statement.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `hist`: A pointer to the history of parsing operations.
+    ///
+    /// Returns:
+    /// - `bool`: `true` if a token was successfully parsed, `false` otherwise.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the next token fails.
+    /// - Logs an error message if any expected token is not found.
     fn parse_expressionable_single(self: *Self, hist: *history.History) !bool {
         const t = try self.token_peek_next();
         if (t == null) {
@@ -707,16 +1073,51 @@ pub const ParseProcess = struct {
         };
     }
 
+    /// Parses multiple expressionable tokens.
+    ///
+    /// This function continues to parse tokens until no more expressionable tokens
+    /// are found.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `hist`: A pointer to the history of parsing operations.
+    ///
+    /// Errors:
+    /// - Returns an error if any parsing operation fails.
     fn parse_expressionable(self: *Self, hist: *history.History) anyerror!void {
         while (try self.parse_expressionable_single(hist)) {}
     }
 
+    /// Parses the root of an expressionable token.
+    ///
+    /// This function parses expressionable tokens and adds the resulting node
+    /// to the list of nodes to be transpiled.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `hist`: A pointer to the history of parsing operations.
+    ///
+    /// Errors:
+    /// - Returns an error if any parsing operation fails.
     fn parse_expressionable_root(self: *Self, hist: *history.History) anyerror!void {
         try self.parse_expressionable(hist);
         const n = self.node_pop();
         try self.transpile_proc.nodes.push(n.?);
     }
 
+    /// Parses array brackets.
+    ///
+    /// This function processes array bracket tokens, updating the datatype with
+    /// array information and adding bracket nodes to the list of nodes to be transpiled.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `dt`: A pointer to the datatype being parsed.
+    /// - `hist`: A pointer to the history of parsing operations.
+    ///
+    /// Errors:
+    /// - Returns an error if any parsing operation fails.
+    /// - Logs an error message if any expected token is not found.
     fn parse_array_brackets(self: *Self, dt: *dtype.DataType, hist: *history.History) !void {
         dt.*.array.?.brackets = misc.Vector(ast.Node).init(self.allocator);
         while (try self.next_token_is_operator("[")) {
@@ -740,6 +1141,19 @@ pub const ParseProcess = struct {
         }
     }
 
+    /// Parses a variable declaration.
+    ///
+    /// This function processes variable declaration tokens, including array brackets
+    /// and assignment. It adds the variable node to the list of nodes to be transpiled.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `dt`: A pointer to the datatype being parsed.
+    /// - `hist`: A pointer to the history of parsing operations.
+    ///
+    /// Errors:
+    /// - Returns an error if any parsing operation fails.
+    /// - Logs an error message if any expected token is not found.
     fn parse_variable(self: *Self, dt: *dtype.DataType, hist: *history.History) !void {
         if (try self.next_token_is_operator("[")) {
             try self.parse_array_brackets(dt, hist);
@@ -770,12 +1184,37 @@ pub const ParseProcess = struct {
         });
     }
 
+    /// Parses a full variable declaration.
+    ///
+    /// This function processes the datatype and the variable declaration,
+    /// adding the variable node to the list of nodes to be transpiled.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `hist`: A pointer to the history of parsing operations.
+    ///
+    /// Errors:
+    /// - Returns an error if any parsing operation fails.
     fn parse_full_variable(self: *Self, hist: *history.History) !void {
         var dt: dtype.DataType = undefined;
         try self.parse_datatype(&dt);
         try self.parse_variable(&dt, hist);
     }
 
+    /// Parses function arguments.
+    ///
+    /// This function processes tokens representing function arguments,
+    /// including handling of variadic arguments, and returns a vector of argument nodes.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `hist`: A pointer to the history of parsing operations.
+    ///
+    /// Returns:
+    /// - `misc.Vector(*ast.Node)`: A vector of argument nodes.
+    ///
+    /// Errors:
+    /// - Returns an error if any parsing operation fails.
     fn parse_function_args(self: *Self, hist: *history.History) !misc.Vector(*ast.Node) {
         var args = misc.Vector(*ast.Node).init(self.allocator);
         while (!try self.next_token_is_symbol(')')) {
@@ -798,6 +1237,18 @@ pub const ParseProcess = struct {
         return args;
     }
 
+    /// Parses a function declaration.
+    ///
+    /// This function expects the 'fun' keyword, followed by the function's name, arguments,
+    /// return type, and body. It creates a function node and adds it to the list of nodes
+    /// to be transpiled.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    ///
+    /// Errors:
+    /// - Returns an error if any parsing operation fails.
+    /// - Logs an error message if any expected token is not found.
     fn parse_function(self: *Self) !void {
         _ = try self.token_next(); // skip fun
         var function_node: ast.Node = ast.Node{
@@ -844,6 +1295,18 @@ pub const ParseProcess = struct {
         try self.transpile_proc.nodes.push(function_node);
     }
 
+    /// Parses a return statement.
+    ///
+    /// This function expects the 'ret' keyword, followed by an optional expression, and a semicolon.
+    /// It creates a return statement node and adds it to the list of nodes to be transpiled.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `hist`: A pointer to the history of parsing operations.
+    ///
+    /// Errors:
+    /// - Returns an error if any parsing operation fails.
+    /// - Logs an error message if any expected token is not found.
     fn parse_return(self: *Self, hist: *history.History) !void {
         _ = try self.token_next(); // skip ret
         if (try self.next_token_is_symbol(';')) {
@@ -864,6 +1327,18 @@ pub const ParseProcess = struct {
         try self.expect_sym(';');
     }
 
+    /// Parses an elif statement.
+    ///
+    /// This function expects the 'elif' keyword, followed by a condition expression and a body.
+    /// It creates an elif statement node and adds it to the list of nodes to be transpiled.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `hist`: A pointer to the history of parsing operations.
+    ///
+    /// Errors:
+    /// - Returns an error if any parsing operation fails.
+    /// - Logs an error message if any expected token is not found.
     fn parse_elif(self: *Self, hist: *history.History) !void {
         if (try self.next_token_is_keyword("elif")) {
             _ = try self.token_next(); // skip elif
@@ -882,6 +1357,18 @@ pub const ParseProcess = struct {
         }
     }
 
+    /// Parses an else statement.
+    ///
+    /// This function expects the 'else' keyword followed by a body. It creates an else statement
+    /// node and adds it to the list of nodes to be transpiled.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `hist`: A pointer to the history of parsing operations.
+    ///
+    /// Errors:
+    /// - Returns an error if any parsing operation fails.
+    /// - Logs an error message if any expected token is not found.
     fn parse_else(self: *Self, hist: *history.History) !void {
         if (try self.next_token_is_keyword("else")) {
             _ = try self.token_next(); // skip else
@@ -896,6 +1383,19 @@ pub const ParseProcess = struct {
         }
     }
 
+    /// Parses an if statement.
+    ///
+    /// This function expects the 'if' keyword, followed by a condition expression, a body,
+    /// and optionally elif and else clauses. It creates an if statement node and adds it to
+    /// the list of nodes to be transpiled.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `hist`: A pointer to the history of parsing operations.
+    ///
+    /// Errors:
+    /// - Returns an error if any parsing operation fails.
+    /// - Logs an error message if any expected token is not found.
     fn parse_if_statement(self: *Self, hist: *history.History) !void {
         try self.expect_keyword("if");
         try self.parse_expressionable_root(hist);
@@ -919,6 +1419,19 @@ pub const ParseProcess = struct {
         try self.parse_else(hist);
     }
 
+    /// Parses the body of a fit statement.
+    ///
+    /// This function expects the body of a fit statement, starting with '{' and ending with '}'.
+    /// It processes each branch within the body and adds it to the fit_node.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `fit_node`: A pointer to the fit statement node.
+    /// - `hist`: A pointer to the history of parsing operations.
+    ///
+    /// Errors:
+    /// - Returns an error if any parsing operation fails.
+    /// - Logs an error message if any expected token is not found.
     fn parse_fit_body(self: *Self, fit_node: *ast.Node, hist: *history.History) !void {
         try self.expect_sym('{');
         fit_node.*.node_variant.?.statement.fit_stmt.branches = misc.Vector(ast.FitBranch).init(self.allocator);
@@ -955,6 +1468,18 @@ pub const ParseProcess = struct {
         try self.expect_sym('}');
     }
 
+    /// Parses a fit statement.
+    ///
+    /// This function expects the 'fit' keyword followed by an expression and a body.
+    /// It creates a new fit statement node and adds it to the list of nodes to be transpiled.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    /// - `hist`: A pointer to the history of parsing operations.
+    ///
+    /// Errors:
+    /// - Returns an error if any parsing operation fails.
+    /// - Logs an error message if any expected token is not found.
     fn parse_fit_statement(self: *Self, hist: *history.History) !void {
         var fit_node: ast.Node = .{
             .type = .StatementFit,
@@ -975,6 +1500,17 @@ pub const ParseProcess = struct {
         try self.transpile_proc.nodes.push(fit_node);
     }
 
+    /// Parses an import statement.
+    ///
+    /// This function expects an import statement, retrieves the folder and file identifiers,
+    /// and adds the import node to the list of nodes to be transpiled.
+    ///
+    /// Parameters:
+    /// - `self`: A pointer to the current parser instance.
+    ///
+    /// Errors:
+    /// - Returns an error if any parsing operation fails.
+    /// - Logs an error message if any expected token is not found.
     fn parse_import(self: *Self) !void {
         _ = try self.token_next(); // skip imp
         const folder_token = try self.token_next();
