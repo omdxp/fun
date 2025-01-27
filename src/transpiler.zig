@@ -2,15 +2,15 @@ const std = @import("std");
 const fs = std.fs;
 const mem = std.mem;
 const token = @import("./token.zig");
+const ast = @import("./ast.zig");
+const misc = @import("./misc.zig");
 
 /// TranspileProcessFlags is an enumeration that defines flags for the transpile process.
-///
-/// Each flag is represented as a bit in an 8-bit unsigned integer.
-pub const TranspileProcessFlags = enum(u8) {
+pub const TranspileProcessFlags = packed struct {
     /// Flag to indicate execution process.
-    TranspileProcessExec = 0b0000_0001,
+    exec: bool = false,
     /// Flag to indicate output file process.
-    TranspileProcessOutf = 0b0000_0010,
+    outf: bool = false,
 };
 
 /// `TranspileProcess` represents the state and configuration of a transpilation process.
@@ -23,8 +23,11 @@ pub const TranspileProcess = struct {
     ifile: fs.File,
     /// `ofile` is the output file where the transpiled code will be written.
     ofile: fs.File,
-    /// `tokens` is a list of tokens generated from the input file.
-    tokens: std.ArrayList(token.Token),
+    /// `tokens` is a vector of tokens generated from the input file.
+    tokens: misc.Vector(token.Token),
+    /// `nodes` is a list of AST (Abstract Syntax Tree) nodes.
+    /// This vector holds the nodes that are part of the AST being processed by the transpiler.
+    nodes: misc.Vector(ast.Node),
     /// The allocator to be used for memory allocation operations.
     allocator: mem.Allocator,
 
@@ -55,7 +58,8 @@ pub const TranspileProcess = struct {
             .pos = .{ .col = 1, .line = 1, .filename = ifilepath },
             .ifile = ifile,
             .ofile = ofile,
-            .tokens = std.ArrayList(token.Token).init(allocator),
+            .tokens = misc.Vector(token.Token).init(allocator),
+            .nodes = misc.Vector(ast.Node).init(allocator),
             .allocator = allocator,
         };
     }
@@ -67,14 +71,16 @@ pub const TranspileProcess = struct {
     ///
     /// Parameters:
     /// - `self`: The instance of the transpiler.
-    /// - `msg`: The error message to log.
-    pub fn error_message(self: Self, msg: []const u8) void {
+    /// - `fmt`: The format string for the error message.
+    /// - `args`: The arguments for the format string.
+    pub fn err(self: *Self, comptime fmt: []const u8, args: anytype) void {
         self.deinit();
-        std.debug.panic("Error: {s} on line {d}, col {d} in file {s}", .{
+        const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
+        std.debug.panic("Error: {s} in {s}:{d}:{d}\n", .{
             msg,
+            self.pos.filename,
             self.pos.line,
             self.pos.col,
-            self.pos.filename,
         });
     }
 
@@ -85,13 +91,15 @@ pub const TranspileProcess = struct {
     ///
     /// Parameters:
     /// - `self`: The instance of the transpiler.
-    /// - `msg`: The warning message to log.
-    pub fn warn_message(self: Self, msg: []const u8) void {
-        std.debug.print("Warning: {s} on line {d}, col {d} in file {s}\n", .{
+    /// - `fmt`: The format string for the warning message.
+    /// - `args`: The arguments for the format string.
+    pub fn warn(self: *Self, fmt: []const u8, args: anytype) void {
+        const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
+        std.debug.print("Warning: {s} in {s}:{d}:{d}\n", .{
             msg,
+            self.pos.filename,
             self.pos.line,
             self.pos.col,
-            self.pos.filename,
         });
     }
 
@@ -111,6 +119,7 @@ pub const TranspileProcess = struct {
         self.ifile.close();
         self.ofile.close();
         self.tokens.deinit();
+        self.nodes.deinit();
     }
 };
 
@@ -127,15 +136,15 @@ test "TranspileProcess init and deinit" {
     }
 
     // Initialize TranspileProcess
-    var process = try TranspileProcess.init(allocator, ifilepath, ofilepath, .TranspileProcessExec);
+    var process = try TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
     defer process.deinit();
 
     // Check initial state
-    try std.testing.expect(process.flags == .TranspileProcessExec);
+    try std.testing.expect(process.flags.outf);
     try std.testing.expect(process.pos.line == 1);
     try std.testing.expect(process.pos.col == 1);
     try std.testing.expect(mem.eql(u8, process.pos.filename, ifilepath));
-    try std.testing.expect(process.tokens.items.len == 0);
+    try std.testing.expect(process.tokens.items().len == 0);
 
     // Delete test files
     try fs.cwd().deleteFile(ifilepath);
