@@ -1,6 +1,8 @@
 const std = @import("std");
 const mem = std.mem;
+const fs = std.fs;
 const transpiler = @import("./transpiler.zig");
+const lexer = @import("./lexer.zig");
 const token = @import("./token.zig");
 const ast = @import("./ast.zig");
 const misc = @import("./misc.zig");
@@ -209,8 +211,7 @@ pub const ParseProcess = struct {
     fn parse_statement(self: *Self, hist: *history.History) !void {
         var t = try self.token_peek_next();
         if (t.?.type == .Keyword) {
-            try self.parse_keyword(hist);
-            return;
+            return try self.parse_keyword(hist);
         }
         try self.parse_expressionable_root(hist);
         t = try self.token_peek_next();
@@ -402,6 +403,7 @@ pub const ParseProcess = struct {
             .Number => {
                 var number_node = ast.Node{
                     .type = .Number,
+                    .pos = self.*.transpile_proc.*.pos,
                     .data = .{ .llnum = t.?.data.llnum },
                 };
                 try self.create_node(&number_node);
@@ -409,6 +411,7 @@ pub const ParseProcess = struct {
             .Identifier => {
                 var ident_node = ast.Node{
                     .type = .Identifier,
+                    .pos = self.*.transpile_proc.*.pos,
                     .data = .{ .sval = t.?.data.sval },
                 };
                 try self.create_node(&ident_node);
@@ -423,6 +426,7 @@ pub const ParseProcess = struct {
             .Boolean => {
                 var bool_node = ast.Node{
                     .type = .Boolean,
+                    .pos = self.*.transpile_proc.*.pos,
                     .data = .{ .bval = t.?.data.bval },
                 };
                 try self.create_node(&bool_node);
@@ -483,6 +487,7 @@ pub const ParseProcess = struct {
         exp.* = exp_node;
         try self.transpile_proc.nodes.push(ast.Node{
             .type = .ExpressionParenthesis,
+            .pos = self.*.transpile_proc.*.pos,
             .node_variant = .{ .paren = .{ .exp = exp } },
         });
         if (left_node != null) {
@@ -493,6 +498,7 @@ pub const ParseProcess = struct {
             right.* = parenthesis_node.?;
             try self.transpile_proc.nodes.push(ast.Node{
                 .type = .Expression,
+                .pos = self.*.transpile_proc.*.pos,
                 .node_variant = .{
                     .exp = .{
                         .left = left,
@@ -527,6 +533,7 @@ pub const ParseProcess = struct {
         right.* = right_node.?;
         try self.transpile_proc.nodes.push(ast.Node{
             .type = .Expression,
+            .pos = self.*.transpile_proc.*.pos,
             .node_variant = .{
                 .exp = .{
                     .left = left,
@@ -563,6 +570,7 @@ pub const ParseProcess = struct {
         inner.* = exp_node.?;
         try self.transpile_proc.nodes.push(ast.Node{
             .type = .Bracket,
+            .pos = self.*.transpile_proc.*.pos,
             .node_variant = .{ .bracket = .{ .inner = inner } },
         });
         if (left_node != null) {
@@ -573,6 +581,7 @@ pub const ParseProcess = struct {
             right.* = bracket_node.?;
             try self.transpile_proc.nodes.push(ast.Node{
                 .type = .Expression,
+                .pos = self.*.transpile_proc.*.pos,
                 .node_variant = .{
                     .exp = .{
                         .left = left,
@@ -624,6 +633,7 @@ pub const ParseProcess = struct {
         operand.* = unary_operand_node.?;
         try self.transpile_proc.nodes.push(ast.Node{
             .type = .Unary,
+            .pos = self.*.transpile_proc.*.pos,
             .node_variant = .{
                 .unary = .{
                     .op = "*",
@@ -657,6 +667,7 @@ pub const ParseProcess = struct {
         operand.* = unary_operand_node.?;
         try self.transpile_proc.nodes.push(ast.Node{
             .type = .Unary,
+            .pos = self.*.transpile_proc.*.pos,
             .node_variant = .{
                 .unary = .{
                     .op = unary_op,
@@ -705,6 +716,7 @@ pub const ParseProcess = struct {
     fn parse_for_left_operanded_unary(self: *Self, node_left: *ast.Node, unary_op: []const u8) !void {
         try self.transpile_proc.nodes.push(ast.Node{
             .type = .Unary,
+            .pos = self.*.transpile_proc.*.pos,
             .node_variant = .{
                 .unary = .{
                     .op = unary_op,
@@ -732,6 +744,7 @@ pub const ParseProcess = struct {
     fn make_expression_node(self: *Self, left_node: *ast.Node, right_node: *ast.Node, op: []const u8) !void {
         var exp_node = ast.Node{
             .type = .Expression,
+            .pos = self.*.transpile_proc.*.pos,
             .node_variant = .{
                 .exp = .{
                     .left = left_node,
@@ -755,7 +768,13 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if creating the node fails.
     fn make_body_node(self: *Self, stmts: misc.Vector(*ast.Node)) !void {
-        var body_node = ast.Node{ .type = .Body, .node_variant = .{ .body = .{ .statements = stmts } } };
+        var body_node = ast.Node{
+            .type = .Body,
+            .pos = self.*.transpile_proc.*.pos,
+            .node_variant = .{
+                .body = .{ .statements = stmts },
+            },
+        };
         try self.create_node(&body_node);
     }
 
@@ -1122,6 +1141,7 @@ pub const ParseProcess = struct {
         dt.*.array.?.brackets = misc.Vector(ast.Node).init(self.allocator);
         while (try self.next_token_is_operator("[")) {
             try self.expect_op("[");
+            dt.*.flags.?.is_array = true;
             if (try self.next_token_is_symbol(']')) {
                 try self.expect_sym(']');
                 break;
@@ -1133,11 +1153,11 @@ pub const ParseProcess = struct {
             exp.* = exp_node.?;
             try self.transpile_proc.nodes.push(ast.Node{
                 .type = .Bracket,
+                .pos = self.transpile_proc.*.pos,
                 .node_variant = .{ .bracket = .{ .inner = exp } },
             });
             const bracket_node = self.node_pop();
             try dt.*.array.?.brackets.push(bracket_node.?);
-            dt.*.flags.?.is_array = true;
         }
     }
 
@@ -1174,6 +1194,7 @@ pub const ParseProcess = struct {
         }
         try self.transpile_proc.nodes.push(ast.Node{
             .type = .Variable,
+            .pos = self.*.transpile_proc.*.pos,
             .node_variant = .{
                 .variable = .{
                     .name = ident_token.?.data.sval,
@@ -1253,6 +1274,7 @@ pub const ParseProcess = struct {
         _ = try self.token_next(); // skip fun
         var function_node: ast.Node = ast.Node{
             .type = .Function,
+            .pos = self.*.transpile_proc.*.pos,
             .node_variant = .{ .function = .{} },
         };
         var dt: dtype.DataType = undefined;
@@ -1281,7 +1303,7 @@ pub const ParseProcess = struct {
         }
         function_node.node_variant.?.function.rtype = dt;
         if (try self.next_token_is_symbol('{')) {
-            var hist_body = history.History.init(self.allocator, .{});
+            var hist_body = history.History.init(self.allocator, .{ .inside_function_body = true });
             defer hist_body.deinit();
             try self.parse_body(&hist_body);
             const body_node = self.node_pop();
@@ -1313,6 +1335,7 @@ pub const ParseProcess = struct {
             try self.expect_sym(';');
             try self.transpile_proc.nodes.push(ast.Node{
                 .type = .StatementReturn,
+                .pos = self.*.transpile_proc.*.pos,
             });
             return;
         }
@@ -1322,6 +1345,7 @@ pub const ParseProcess = struct {
         exp.* = exp_node.?;
         try self.transpile_proc.nodes.push(ast.Node{
             .type = .StatementReturn,
+            .pos = self.*.transpile_proc.*.pos,
             .node_variant = .{ .statement = .{ .return_stmt = exp } },
         });
         try self.expect_sym(';');
@@ -1350,10 +1374,12 @@ pub const ParseProcess = struct {
             const body_node = self.node_pop();
             const body = try self.allocator.create(ast.Node);
             body.* = body_node.?;
-            try self.transpile_proc.nodes.push(ast.Node{
+            var elif_node = ast.Node{
                 .type = .StatementElseIf,
+                .pos = self.*.transpile_proc.*.pos,
                 .node_variant = .{ .statement = .{ .elif_stmt = .{ .condition = condition, .body = body } } },
-            });
+            };
+            try self.create_node(&elif_node);
         }
     }
 
@@ -1376,10 +1402,12 @@ pub const ParseProcess = struct {
             const body_node = self.node_pop();
             const body = try self.allocator.create(ast.Node);
             body.* = body_node.?;
-            try self.transpile_proc.nodes.push(ast.Node{
+            var else_node = ast.Node{
                 .type = .StatementElse,
+                .pos = self.*.transpile_proc.*.pos,
                 .node_variant = .{ .statement = .{ .else_stmt = .{ .body = body } } },
-            });
+            };
+            try self.create_node(&else_node);
         }
     }
 
@@ -1406,15 +1434,16 @@ pub const ParseProcess = struct {
         const body_node = self.node_pop();
         const body = try self.allocator.create(ast.Node);
         body.* = body_node.?;
-        const if_node = ast.Node{
+        var if_node = ast.Node{
             .type = .StatementIf,
+            .pos = self.transpile_proc.*.pos,
             .node_variant = .{
                 .statement = .{
                     .if_stmt = .{ .condition = condition, .body = body },
                 },
             },
         };
-        try self.transpile_proc.nodes.push(if_node);
+        try self.create_node(&if_node);
         try self.parse_elif(hist);
         try self.parse_else(hist);
     }
@@ -1535,6 +1564,7 @@ pub const ParseProcess = struct {
         try self.expect_sym(';');
         try self.transpile_proc.nodes.push(ast.Node{
             .type = .Import,
+            .pos = self.*.transpile_proc.*.pos,
             .node_variant = .{ .import = .{ .path = try import_name.toOwnedSlice() } },
         });
     }
@@ -1576,12 +1606,14 @@ pub const ParseProcess = struct {
         } else if (mem.eql(u8, "true", sval)) {
             try self.transpile_proc.nodes.push(ast.Node{
                 .type = .Boolean,
+                .pos = self.*.transpile_proc.*.pos,
                 .node_variant = .{ .boolean = .{ .val = true } },
             });
             return;
         } else if (mem.eql(u8, "false", sval)) {
             try self.transpile_proc.nodes.push(ast.Node{
                 .type = .Boolean,
+                .pos = self.*.transpile_proc.*.pos,
                 .node_variant = .{ .boolean = .{ .val = false } },
             });
             return;
@@ -1649,3 +1681,172 @@ pub const ParseProcess = struct {
         while (try self.next()) {}
     }
 };
+
+test "ParseProcess parse_function" {
+    const ifilepath = "ParseProcess_parse_function.fn";
+    const ofilepath = "ParseProcess_parse_function.c";
+    // Mock input file
+    {
+        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
+        defer file.close();
+        const input = "fun test() { ret; }";
+        try file.writeAll(input);
+    }
+
+    const allocator = std.heap.page_allocator;
+    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
+    var lex_proc = lexer.LexProcess.init(allocator, &transpile_proc);
+    var parse_proc = ParseProcess.init(allocator, &transpile_proc);
+
+    defer transpile_proc.deinit();
+    defer lex_proc.deinit();
+
+    try lex_proc.lex();
+    try transpile_proc.tokens.push_slice(lex_proc.tokens.items());
+    try parse_proc.parse();
+    const nodes = transpile_proc.nodes.items();
+    try std.testing.expectEqual(1, nodes.len);
+    try std.testing.expectEqual(nodes[0].type, .Function);
+    try std.testing.expectEqualStrings("test", nodes[0].node_variant.?.function.name.?.items);
+
+    // Delete test files
+    try fs.cwd().deleteFile(ifilepath);
+    try fs.cwd().deleteFile(ofilepath);
+}
+
+test "ParseProcess parse_if_statement" {
+    const ifilepath = "ParseProcess_parse_if_statement.fn";
+    const ofilepath = "ParseProcess_parse_if_statement.c";
+    // Mock input file
+    {
+        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
+        defer file.close();
+        const input = "if true { ret; }";
+        try file.writeAll(input);
+    }
+
+    // const allocator = std.testing.allocator;
+    const allocator = std.heap.page_allocator;
+    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
+    var lex_proc = lexer.LexProcess.init(allocator, &transpile_proc);
+    var parse_proc = ParseProcess.init(allocator, &transpile_proc);
+
+    defer {
+        lex_proc.deinit();
+        transpile_proc.deinit();
+    }
+
+    try lex_proc.lex();
+    try transpile_proc.tokens.push_slice(lex_proc.tokens.items());
+    try parse_proc.parse();
+    const nodes = transpile_proc.nodes.items();
+    try std.testing.expectEqual(1, nodes.len);
+    try std.testing.expectEqual(nodes[0].type, .StatementIf);
+
+    // Delete test files
+    try fs.cwd().deleteFile(ifilepath);
+    try fs.cwd().deleteFile(ofilepath);
+}
+
+test "ParseProcess parse_return" {
+    const ifilepath = "ParseProcess_parse_return.fn";
+    const ofilepath = "ParseProcess_parse_return.c";
+    // Mock input file
+    {
+        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
+        defer file.close();
+        const input = "ret 42;";
+        try file.writeAll(input);
+    }
+
+    // const allocator = std.testing.allocator;
+    const allocator = std.heap.page_allocator;
+    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
+    var lex_proc = lexer.LexProcess.init(allocator, &transpile_proc);
+    var parse_proc = ParseProcess.init(allocator, &transpile_proc);
+
+    defer {
+        lex_proc.deinit();
+        transpile_proc.deinit();
+    }
+
+    try lex_proc.lex();
+    try transpile_proc.tokens.push_slice(lex_proc.tokens.items());
+    try parse_proc.parse();
+    const nodes = transpile_proc.nodes.items();
+    try std.testing.expectEqual(1, nodes.len);
+    try std.testing.expectEqual(nodes[0].type, .StatementReturn);
+
+    // Delete test files
+    try fs.cwd().deleteFile(ifilepath);
+    try fs.cwd().deleteFile(ofilepath);
+}
+
+test "ParseProcess parse_variable" {
+    const ifilepath = "ParseProcess_parse_variable.fn";
+    const ofilepath = "ParseProcess_parse_variable.c";
+    // Mock input file
+    {
+        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
+        defer file.close();
+        const input = "num x = 10;";
+        try file.writeAll(input);
+    }
+
+    // const allocator = std.testing.allocator;
+    const allocator = std.heap.page_allocator;
+    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
+    var lex_proc = lexer.LexProcess.init(allocator, &transpile_proc);
+    var parse_proc = ParseProcess.init(allocator, &transpile_proc);
+
+    defer {
+        lex_proc.deinit();
+        transpile_proc.deinit();
+    }
+
+    try lex_proc.lex();
+    try transpile_proc.tokens.push_slice(lex_proc.tokens.items());
+    try parse_proc.parse();
+    const nodes = transpile_proc.nodes.items();
+    try std.testing.expectEqual(1, nodes.len);
+    try std.testing.expectEqual(nodes[0].type, .Variable);
+    try std.testing.expectEqualStrings("x", nodes[0].node_variant.?.variable.name.items);
+
+    // Delete test files
+    try fs.cwd().deleteFile(ifilepath);
+    try fs.cwd().deleteFile(ofilepath);
+}
+
+test "ParseProcess parse_expression" {
+    const ifilepath = "ParseProcess_parse_expression.fn";
+    const ofilepath = "ParseProcess_parse_expression.c";
+    // Mock input file
+    {
+        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
+        defer file.close();
+        const input = "1 + 2 * 3";
+        try file.writeAll(input);
+    }
+
+    // const allocator = std.testing.allocator;
+    const allocator = std.heap.page_allocator;
+    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
+    var lex_proc = lexer.LexProcess.init(allocator, &transpile_proc);
+    var parse_proc = ParseProcess.init(allocator, &transpile_proc);
+
+    defer {
+        lex_proc.deinit();
+        transpile_proc.deinit();
+    }
+
+    try lex_proc.lex();
+    try transpile_proc.tokens.push_slice(lex_proc.tokens.items());
+    try parse_proc.parse();
+    const nodes = transpile_proc.nodes.items();
+    try std.testing.expectEqual(1, nodes.len);
+    try std.testing.expectEqual(nodes[0].type, .Expression);
+
+    // Delete test files
+    try fs.cwd().deleteFile(ifilepath);
+    try fs.cwd().deleteFile(ofilepath);
+}

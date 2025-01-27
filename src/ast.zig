@@ -162,7 +162,7 @@ pub const Node = struct {
             body: ?*Node = null,
         },
         /// The statement node.
-        statement: union {
+        statement: union(enum) {
             /// The return statement node.
             return_stmt: *Node,
             /// The if statement node.
