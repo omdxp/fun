@@ -1,9 +1,11 @@
 const std = @import("std");
 const fs = std.fs;
 const mem = std.mem;
+const assert = std.debug.assert;
 const token = @import("./token.zig");
 const ast = @import("./ast.zig");
 const misc = @import("./misc.zig");
+const scope = @import("./scope.zig");
 
 /// TranspileProcessFlags is an enumeration that defines flags for the transpile process.
 pub const TranspileProcessFlags = packed struct {
@@ -28,6 +30,13 @@ pub const TranspileProcess = struct {
     /// `nodes` is a list of AST (Abstract Syntax Tree) nodes.
     /// This vector holds the nodes that are part of the AST being processed by the transpiler.
     nodes: misc.Vector(ast.Node),
+    /// Represents a scope structure used in the transpiler.
+    scope: ?struct {
+        /// A pointer to the root scope.
+        root: ?*scope.Scope,
+        /// A pointer to the current scope.
+        current: ?*scope.Scope,
+    } = null,
     /// The allocator to be used for memory allocation operations.
     allocator: mem.Allocator,
 
@@ -101,6 +110,115 @@ pub const TranspileProcess = struct {
             self.pos.line,
             self.pos.col,
         });
+    }
+
+    /// Initializes the root scope for the transpiler.
+    ///
+    /// This function initializes the root scope and sets it as the current scope.
+    ///
+    /// Parameters:
+    /// - `self`: The instance of the transpiler.
+    ///
+    /// Returns:
+    /// - `scope.Scope`: The initialized root scope.
+    pub fn init_root_scope(self: *Self) scope.Scope {
+        assert(self.scope == null);
+        const root_scope = scope.Scope.init_root(self.allocator);
+        self.scope = .{
+            .root = root_scope,
+            .current = root_scope,
+        };
+        return root_scope;
+    }
+
+    /// Deinitializes the root scope for the transpiler.
+    ///
+    /// This function deinitializes the root scope and sets the current scope to null.
+    ///
+    /// Parameters:
+    /// - `self`: The instance of the transpiler.
+    pub fn deinit_root_scope(self: *Self) void {
+        assert(self.scope != null);
+        assert(self.scope.?.current != null);
+        assert(self.scope.?.root != null);
+        self.scope.?.root.?.deinit();
+        self.scope.?.current.?.deinit();
+        self.scope.?.root = null;
+        self.scope.?.current = null;
+    }
+
+    /// Creates a new scope for the transpiler.
+    ///
+    /// This function initializes a new scope and sets its parent to the current scope.
+    ///
+    /// Parameters:
+    /// - `self`: The instance of the transpiler.
+    ///
+    /// Returns:
+    /// - `scope.Scope`: The initialized new scope.
+    pub fn new_scope(self: *Self) scope.Scope {
+        assert(self.scope != null);
+        assert(self.scope.?.root != null);
+        assert(self.scope.?.current != null);
+        var nc = scope.Scope.init(self.allocator);
+        nc.parent = self.scope.?.current;
+        return nc;
+    }
+
+    /// Retrieves the last entity from the current scope, stopping at a specified scope.
+    ///
+    /// This function retrieves the last entity from the current scope, stopping at the specified stop scope.
+    ///
+    /// Parameters:
+    /// - `self`: The instance of the transpiler.
+    /// - `stop_scope`: The scope to stop at when retrieving the last entity.
+    ///
+    /// Returns:
+    /// - `?*anyopaque`: The last entity from the current scope, or `null` if not found.
+    pub fn last_scope_entity_stop_at(self: *Self, stop_scope: ?*scope.Scope) ?*anyopaque {
+        return scope.Scope.last_entity_from_scope_stop_at(self.scope.?.current, stop_scope);
+    }
+
+    /// Retrieves the last entity from the current scope.
+    ///
+    /// This function retrieves the last entity from the current scope.
+    ///
+    /// Parameters:
+    /// - `self`: The instance of the transpiler.
+    ///
+    /// Returns:
+    /// - `?*anyopaque`: The last entity from the current scope, or `null` if not found.
+    pub fn last_scope_entity(self: *Self) ?*anyopaque {
+        return self.last_scope_entity_stop_at(null);
+    }
+
+    /// Pushes an entity to the current scope.
+    ///
+    /// This function adds the specified entity pointer to the entities of the current scope.
+    ///
+    /// Parameters:
+    /// - `self`: The instance of the transpiler.
+    /// - `ptr`: The pointer to the entity to be added.
+    ///
+    /// Errors:
+    /// - Returns an error if the entity could not be added.
+    pub fn push_scope_entity(self: *Self, ptr: *anyopaque) !void {
+        try self.scope.?.current.?.entities.push(ptr);
+    }
+
+    /// Finishes the current scope and sets the parent scope as the current scope.
+    ///
+    /// This function deinitializes the current scope and sets its parent scope as the new current scope.
+    ///
+    /// Parameters:
+    /// - `self`: The instance of the transpiler.
+    pub fn finish_scope(self: *Self) void {
+        const new_current_scope = self.scope.?.current.?.parent;
+        self.scope.?.current.?.deinit();
+        self.scope.?.current = new_current_scope;
+        if (self.scope.?.root != null and self.scope.?.current == null) {
+            self.scope.?.root = null;
+        }
     }
 
     /// Deinitializes the transpiler by closing input and output files and deinitializing tokens.
