@@ -57,7 +57,7 @@ pub const Scope = struct {
     ///
     /// Returns:
     /// - `?*anyopaque`: The next entity, or `null` if there are no more entities.
-    pub fn iterate_back(self: Self) ?*anyopaque {
+    pub fn iterate_back(self: *Self) ?*anyopaque {
         if (self.entities.count == 0) {
             return null;
         }
@@ -118,3 +118,95 @@ pub const Scope = struct {
         }
     }
 };
+
+test "Scope can be initialized and deinitialized" {
+    const allocator = std.heap.page_allocator;
+    var scope = Scope.init(allocator);
+    defer scope.deinit();
+
+    try std.testing.expect(scope.entities.count == 0);
+    try std.testing.expect(scope.parent == null);
+}
+
+test "Scope can add and retrieve entities" {
+    const allocator = std.heap.page_allocator;
+    var scope = Scope.init(allocator);
+    defer scope.deinit();
+
+    var dummy_entity1: i32 = 42;
+    var dummy_entity2: i32 = 100;
+
+    try scope.entities.push(@ptrCast(@alignCast(&dummy_entity1)));
+    try scope.entities.push(@ptrCast(@alignCast(&dummy_entity2)));
+    var res: *i32 = @ptrCast(@alignCast(scope.last_entity_at_scope().?));
+    try std.testing.expect(res == &dummy_entity2);
+    scope.start_iteration();
+    res = @ptrCast(@alignCast(scope.iterate_back().?));
+    try std.testing.expect(res == &dummy_entity1);
+    res = @ptrCast(@alignCast(scope.iterate_back().?));
+    try std.testing.expect(res == &dummy_entity2);
+    try std.testing.expect(scope.iterate_back() == null);
+}
+
+test "Scope can handle nested scopes" {
+    const allocator = std.heap.page_allocator;
+    var root_scope = Scope.init(allocator);
+    defer root_scope.deinit();
+
+    var nested_scope = Scope.init(allocator);
+    nested_scope.parent = &root_scope;
+    // defer nested_scope.deinit(); // TODO: get back here to fix incorrect alignment error
+
+    var dummy_entity1: i32 = 42;
+    var dummy_entity2: i32 = 100;
+
+    try root_scope.entities.push(&dummy_entity1);
+    try nested_scope.entities.push(&dummy_entity2);
+
+    var res: *i32 = @ptrCast(@alignCast(root_scope.last_entity_at_scope().?));
+    try std.testing.expect(res == &dummy_entity1);
+    res = @ptrCast(@alignCast(nested_scope.last_entity_at_scope().?));
+    try std.testing.expect(res == &dummy_entity2);
+
+    // Test last_entity_from_scope_stop_at
+    res = @ptrCast(@alignCast(nested_scope.last_entity_from_scope_stop_at(&root_scope).?));
+    try std.testing.expect(res == &dummy_entity2);
+    res = @ptrCast(@alignCast(root_scope.last_entity_from_scope_stop_at(null).?));
+    try std.testing.expect(res == &dummy_entity1);
+}
+
+test "Scope iteration and peek decrement works correctly" {
+    const allocator = std.heap.page_allocator;
+    var scope = Scope.init(allocator);
+    defer scope.deinit();
+
+    var dummy_entity1: i32 = 1;
+    var dummy_entity2: i32 = 2;
+    var dummy_entity3: i32 = 3;
+
+    try scope.entities.push(&dummy_entity1);
+    try scope.entities.push(&dummy_entity2);
+    try scope.entities.push(&dummy_entity3);
+
+    // Test forward iteration
+    scope.entities.flags.peek_decrement = false;
+    scope.start_iteration();
+    var res: *i32 = @ptrCast(@alignCast(scope.iterate_back().?));
+    try std.testing.expect(res == &dummy_entity1);
+    res = @ptrCast(@alignCast(scope.iterate_back().?));
+    try std.testing.expect(res == &dummy_entity2);
+    res = @ptrCast(@alignCast(scope.iterate_back().?));
+    try std.testing.expect(res == &dummy_entity3);
+    try std.testing.expect(scope.iterate_back() == null);
+
+    // Test backward iteration
+    scope.entities.flags.peek_decrement = true;
+    scope.start_iteration();
+    res = @ptrCast(@alignCast(scope.iterate_back().?));
+    try std.testing.expect(res == &dummy_entity3);
+    res = @ptrCast(@alignCast(scope.iterate_back().?));
+    try std.testing.expect(res == &dummy_entity2);
+    res = @ptrCast(@alignCast(scope.iterate_back().?));
+    try std.testing.expect(res == &dummy_entity1);
+    try std.testing.expect(scope.iterate_back() == null);
+}
