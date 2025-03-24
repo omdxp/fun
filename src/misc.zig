@@ -2,6 +2,7 @@ const std = @import("std");
 const mem = std.mem;
 const dtype = @import("./dtype.zig");
 const token = @import("./token.zig");
+const ast = @import("./ast.zig");
 
 /// Checks if the given character is an alphabetic letter.
 ///
@@ -288,6 +289,234 @@ pub fn is_left_operanded_unary_operator(op: []const u8) bool {
     return mem.eql(u8, "++", op) or mem.eql(u8, "--", op);
 }
 
+/// Prints indentation based on the specified depth.
+///
+/// This function prints a specified number of indentation levels to the provided writer.
+/// Each indentation level consists of two spaces.
+///
+/// Parameters:
+/// - `writer (anytype)`: The writer to which the indentation will be printed.
+/// - `depth (usize)`: The number of indentation levels to print.
+///
+/// Errors:
+/// - Returns an error if the writer fails to print the indentation.
+fn print_indent(writer: anytype, depth: usize) !void {
+    var i: usize = 0;
+    while (i < depth) : (i += 1) {
+        try writer.print("  ", .{});
+    }
+}
+
+// Prints the details of an AST node.
+///
+/// This function recursively prints the details of the provided AST node to the specified writer,
+/// with indentation based on the specified depth. It handles various node types such as expressions,
+/// functions, variables, numbers, strings, identifiers, bodies, imports, unary operations, booleans,
+/// and different statement types.
+///
+/// Parameters:
+/// - `node (ast.Node)`: The AST node to print.
+/// - `writer (anytype)`: The writer to which the node details will be printed.
+/// - `depth (usize)`: The current indentation depth.
+///
+/// Errors:
+/// - Returns an error if the writer fails to print the node details.
+pub fn print_node(node: ast.Node, writer: anytype, depth: usize) !void {
+    try print_indent(writer, depth);
+    try writer.print("Node Type: {s}\n", .{@tagName(node.type)});
+
+    switch (node.type) {
+        .Expression => {
+            if (node.node_variant != null and node.node_variant.?.exp.op.len > 0) {
+                try print_indent(writer, depth + 1);
+                try writer.print("Operator: {s}\n", .{node.node_variant.?.exp.op});
+                if (node.node_variant.?.exp.left) |left| {
+                    try print_indent(writer, depth + 1);
+                    try writer.print("Left:\n", .{});
+                    try print_node(left.*, writer, depth + 2);
+                }
+                if (node.node_variant.?.exp.right) |right| {
+                    try print_indent(writer, depth + 1);
+                    try writer.print("Right:\n", .{});
+                    try print_node(right.*, writer, depth + 2);
+                }
+            }
+        },
+        .Function => {
+            if (node.node_variant.?.function.name) |name| {
+                try print_indent(writer, depth + 1);
+                try writer.print("Name: {s}\n", .{name.items});
+            }
+            if (node.node_variant.?.function.args) |args| {
+                try print_indent(writer, depth + 1);
+                try writer.print("Arguments count: {d}\n", .{args.count});
+                for (args.items(), 0..) |arg, i| {
+                    try print_indent(writer, depth + 1);
+                    try writer.print("Arg {d}:\n", .{i});
+                    try print_node(arg.*, writer, depth + 2);
+                }
+            }
+            if (node.node_variant.?.function.body) |body| {
+                try print_indent(writer, depth + 1);
+                try writer.print("Body:\n", .{});
+                try print_node(body.*, writer, depth + 2);
+            }
+        },
+        .Variable => {
+            if (node.node_variant.?.variable.name.items.len > 0) {
+                try print_indent(writer, depth + 1);
+                try writer.print("Name: {s}\n", .{node.node_variant.?.variable.name.items});
+            }
+            if (node.node_variant.?.variable.type.type_str.items.len > 0) {
+                try print_indent(writer, depth + 1);
+                try writer.print("Type: {s}", .{node.node_variant.?.variable.type.type_str.items});
+                if (node.node_variant.?.variable.type.flags.?.is_pointer) {
+                    try writer.print(" (pointer depth: {d})", .{node.node_variant.?.variable.type.pointer_depth});
+                }
+                try writer.print("\n", .{});
+            }
+            if (node.node_variant.?.variable.val) |val| {
+                try print_indent(writer, depth + 1);
+                try writer.print("Value:\n", .{});
+                try print_node(val.*, writer, depth + 2);
+            }
+        },
+        .Number => {
+            if (node.data) |data| {
+                try print_indent(writer, depth + 1);
+                try writer.print("Value: {d}\n", .{data.llnum});
+            }
+        },
+        .String => {
+            if (node.data) |data| {
+                try print_indent(writer, depth + 1);
+                try writer.print("Value: \"{s}\"\n", .{data.sval.items});
+            }
+        },
+        .Identifier => {
+            if (node.data) |data| {
+                try print_indent(writer, depth + 1);
+                try writer.print("Name: {s}\n", .{data.sval.items});
+            }
+        },
+        .Body => {
+            if (node.node_variant != null and node.node_variant.?.body.statements.count > 0) {
+                try print_indent(writer, depth + 1);
+                try writer.print("Statements count: {d}\n", .{node.node_variant.?.body.statements.count});
+                for (node.node_variant.?.body.statements.items(), 0..) |stmt, i| {
+                    try print_indent(writer, depth + 1);
+                    try writer.print("Statement {d}:\n", .{i});
+                    try print_node(stmt.*, writer, depth + 2);
+                }
+            }
+        },
+        .Import => {
+            if (node.node_variant != null and node.node_variant.?.import.path.len > 0) {
+                try print_indent(writer, depth + 1);
+                try writer.print("Path: {s}\n", .{node.node_variant.?.import.path});
+            }
+        },
+        .Unary => {
+            if (node.node_variant != null) {
+                try print_indent(writer, depth + 1);
+                try writer.print("Operator: {s}\n", .{node.node_variant.?.unary.op});
+                if (node.node_variant.?.unary.indirection) |ind| {
+                    try print_indent(writer, depth + 1);
+                    try writer.print("Indirection depth: {d}\n", .{ind.depth});
+                }
+                try print_indent(writer, depth + 1);
+                try writer.print("Operand:\n", .{});
+                try print_node(node.node_variant.?.unary.operand.*, writer, depth + 2);
+            }
+        },
+        .Boolean => {
+            if (node.node_variant != null) {
+                try print_indent(writer, depth + 1);
+                try writer.print("Value: {}\n", .{node.node_variant.?.boolean.val});
+            }
+        },
+        .StatementIf => {
+            if (node.node_variant != null) {
+                try print_indent(writer, depth + 1);
+                try writer.print("Condition:\n", .{});
+                try print_node(node.node_variant.?.statement.if_stmt.condition.*, writer, depth + 2);
+                try print_indent(writer, depth + 1);
+                try writer.print("Body:\n", .{});
+                try print_node(node.node_variant.?.statement.if_stmt.body.*, writer, depth + 2);
+            }
+        },
+        .StatementElseIf => {
+            if (node.node_variant != null) {
+                try print_indent(writer, depth + 1);
+                try writer.print("Condition:\n", .{});
+                try print_node(node.node_variant.?.statement.elif_stmt.condition.*, writer, depth + 2);
+                try print_indent(writer, depth + 1);
+                try writer.print("Body:\n", .{});
+                try print_node(node.node_variant.?.statement.elif_stmt.body.*, writer, depth + 2);
+            }
+        },
+        .StatementElse => {
+            if (node.node_variant != null) {
+                try print_indent(writer, depth + 1);
+                try writer.print("Body:\n", .{});
+                try print_node(node.node_variant.?.statement.else_stmt.body.*, writer, depth + 2);
+            }
+        },
+        .StatementFit => {
+            if (node.node_variant != null) {
+                try print_indent(writer, depth + 1);
+                try writer.print("Expression:\n", .{});
+                try print_node(node.node_variant.?.statement.fit_stmt.exp.*, writer, depth + 2);
+                if (node.node_variant.?.statement.fit_stmt.branches.count > 0) {
+                    try print_indent(writer, depth + 1);
+                    try writer.print("Branches ({d}):\n", .{node.node_variant.?.statement.fit_stmt.branches.count});
+                    for (node.node_variant.?.statement.fit_stmt.branches.items(), 0..) |branch, i| {
+                        try print_indent(writer, depth + 2);
+                        try writer.print("Branch {d}:\n", .{i});
+                        if (branch.condition) |condition| {
+                            try print_indent(writer, depth + 3);
+                            try writer.print("Condition:\n", .{});
+                            try print_node(condition.*, writer, depth + 4);
+                        } else {
+                            try print_indent(writer, depth + 3);
+                            try writer.print("Default branch\n", .{});
+                        }
+                        try print_indent(writer, depth + 3);
+                        try writer.print("Body:\n", .{});
+                        try print_node(branch.body.*, writer, depth + 4);
+                    }
+                }
+            }
+        },
+        .Bracket => {
+            if (node.node_variant != null) {
+                try print_indent(writer, depth + 1);
+                try writer.print("Index:\n", .{});
+                try print_node(node.node_variant.?.bracket.inner.*, writer, depth + 2);
+            }
+        },
+        .ExpressionParenthesis => {
+            if (node.node_variant != null) {
+                try print_indent(writer, depth + 1);
+                try writer.print("Inner:\n", .{});
+                try print_node(node.node_variant.?.paren.exp.*, writer, depth + 2);
+            }
+        },
+        .StatementReturn => {
+            if (node.node_variant != null) {
+                try print_indent(writer, depth + 1);
+                try writer.print("Value:\n", .{});
+                try print_node(node.node_variant.?.statement.return_stmt.*, writer, depth + 2);
+            }
+        },
+        else => {
+            // Print the node type for unhandled node types
+            try print_indent(writer, depth + 1);
+            try writer.print("(Unhandled node type details)\n", .{});
+        },
+    }
+}
+
 /// Creates a generic Vector type with the specified element type.
 ///
 /// This function defines a generic Vector type with various methods for manipulating
@@ -460,7 +689,7 @@ pub fn Vector(comptime T: type) type {
         ///
         /// Returns:
         /// - `bool`: `true` if the Vector is empty, otherwise `false`.
-        pub fn is_empty(self: *Self) bool {
+        pub fn is_empty(self: Self) bool {
             return self.data.items.len == 0;
         }
 

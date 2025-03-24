@@ -66,6 +66,14 @@ pub const NodeType = enum {
     Blank,
 };
 
+/// Represents a binded node.
+pub const BindedNode = struct {
+    /// The owner of the node.
+    owner: ?*Node,
+    /// The function associated with the node.
+    function: ?*Node,
+};
+
 /// Represents a node in the abstract syntax tree (AST).
 pub const Node = struct {
     /// Flags representing characteristics of the node.
@@ -74,12 +82,8 @@ pub const Node = struct {
     type: NodeType,
     /// The position of the node in the source code.
     pos: ?token.Pos = null,
-    binded: ?struct {
-        /// The owner of the node.
-        owner: ?*Node,
-        /// The function associated with the node.
-        function: ?*Node,
-    } = null,
+    /// The binded node associated with the node.
+    binded: ?*BindedNode = null,
     /// The token data associated with the node.
     data: ?token.TokenData = null,
     /// The variant data associated with the node.
@@ -97,7 +101,7 @@ pub const Node = struct {
         /// The expression node.
         exp: struct {
             /// The left-hand side of the expression.
-            left: ?*Node,
+            left: ?*Node = null,
             /// The right-hand side of the expression.
             right: ?*Node = null,
             /// The operator used in the expression.
@@ -111,7 +115,7 @@ pub const Node = struct {
         /// The variable node.
         variable: struct {
             /// The data type of the variable.
-            type: dtype.DataType,
+            type: *dtype.DataType,
             /// The name of the variable.
             name: std.ArrayList(u8),
             /// The value of the variable.
