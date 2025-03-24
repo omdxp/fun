@@ -10,10 +10,6 @@ const history = @import("./history.zig");
 const dtype = @import("./dtype.zig");
 const expressionable = @import("./expressionable.zig");
 
-var parser_last_token: token.Token = undefined;
-var parser_current_body: ast.Node = undefined;
-var parser_current_function: ast.Node = undefined;
-
 /// Represents the parsing process in the transpiler.
 ///
 /// This struct handles the parsing process within the transpiler, including
@@ -21,8 +17,12 @@ var parser_current_function: ast.Node = undefined;
 pub const ParseProcess = struct {
     /// The transpilation process associated with the parsing process.
     transpile_proc: *transpiler.TranspileProcess,
-    /// The allocator to be used for memory allocation operations.
-    allocator: mem.Allocator,
+    /// The last token processed by the parser.
+    parser_last_token: token.Token = undefined,
+    /// The current body node being processed by the parser.
+    parser_current_body: ?ast.Node = null,
+    /// The current function node being processed by the parser.
+    parser_current_function: ?ast.Node = null,
 
     const Self = @This();
 
@@ -35,10 +35,9 @@ pub const ParseProcess = struct {
     ///
     /// Returns:
     /// - `Self`: The initialized `ParseProcess` instance.
-    pub fn init(allocator: mem.Allocator, transpile_proc: *transpiler.TranspileProcess) Self {
+    pub fn init(transpile_proc: *transpiler.TranspileProcess) Self {
         return Self{
             .transpile_proc = transpile_proc,
-            .allocator = allocator,
         };
     }
 
@@ -98,14 +97,32 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if adding the node to the node list fails.
     fn create_node(self: *Self, n: *ast.Node) !void {
-        const owner = try self.allocator.create(ast.Node);
-        owner.* = parser_current_body;
-        const function = try self.allocator.create(ast.Node);
-        function.* = parser_current_function;
-        n.binded = .{
-            .owner = owner,
-            .function = function,
+        var is_bound = false;
+        var binded: ast.BindedNode = .{
+            .owner = null,
+            .function = null,
         };
+        if (self.parser_current_body) |body| {
+            if (body.binded != null) {
+                const owner = try self.transpile_proc.allocator.create(ast.Node);
+                owner.* = body;
+                binded.owner = owner;
+                is_bound = true;
+            }
+        }
+        if (self.parser_current_function) |func| {
+            const function = try self.transpile_proc.allocator.create(ast.Node);
+            function.* = func;
+            binded.function = function;
+            is_bound = true;
+        }
+        if (is_bound) {
+            const b = try self.transpile_proc.allocator.create(ast.BindedNode);
+            b.* = binded;
+            n.binded = b;
+        } else {
+            n.binded = null;
+        }
         try self.transpile_proc.nodes.push(n.*);
     }
 
@@ -157,7 +174,7 @@ pub const ParseProcess = struct {
         try self.ignore_nl_or_comment(&next_token);
         if (next_token != null) {
             self.transpile_proc.pos = next_token.?.pos;
-            parser_last_token = next_token.?;
+            self.parser_last_token = next_token.?;
         }
         return self.transpile_proc.tokens.peek();
     }
@@ -237,26 +254,36 @@ pub const ParseProcess = struct {
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
     fn parse_body_multiple_statements(self: *Self, hist: *history.History) !void {
-        var stmts = misc.Vector(*ast.Node).init(self.allocator);
-        try self.make_body_node(misc.Vector(*ast.Node).init(self.allocator));
+        var stmts = misc.Vector(*ast.Node).init(self.transpile_proc.allocator);
+        try self.make_body_node();
         var body_node = self.node_pop();
-        const owner = try self.allocator.create(ast.Node);
-        owner.* = parser_current_body;
-        body_node.?.binded.?.owner = owner;
-        parser_current_body = body_node.?;
+        if (self.parser_current_body) |body| {
+            const owner = try self.transpile_proc.allocator.create(ast.Node);
+            owner.* = body;
+            body_node.?.binded.?.owner = owner;
+        } else {
+            if (body_node.?.binded != null) {
+                body_node.?.binded.?.owner = null;
+            }
+        }
+        self.parser_current_body = body_node.?;
         try self.expect_sym('{');
         while (!try self.next_token_is_symbol('}')) {
-            var hist_down = history.History.down(self.allocator, hist, hist.flags);
+            var hist_down = history.History.down(self.transpile_proc.allocator, hist, hist.flags);
             defer hist_down.deinit();
             try self.parse_statement(&hist_down);
             const stmt_node = self.node_pop();
-            const stmt = try self.allocator.create(ast.Node);
+            const stmt = try self.transpile_proc.allocator.create(ast.Node);
             stmt.* = stmt_node.?;
             try stmts.push(stmt);
         }
         try self.expect_sym('}');
-        parser_current_body = body_node.?.binded.?.owner.?.*;
-        body_node.?.node_variant.?.body.statements = stmts;
+        if (body_node.?.binded != null) {
+            if (body_node.?.binded.?.owner) |owner| {
+                self.parser_current_body = owner.*;
+            }
+        }
+        body_node.?.node_variant = .{ .body = .{ .statements = stmts } };
         try self.transpile_proc.nodes.push(body_node.?);
     }
 
@@ -285,7 +312,7 @@ pub const ParseProcess = struct {
     /// - Returns an error if reading the next token fails or if pushing the node fails.
     fn parse_symbol(self: *Self) anyerror!void {
         if (try self.next_token_is_symbol('{')) {
-            var hist = history.History.init(self.allocator, .{ .is_global_scope = true });
+            var hist = history.History.init(self.transpile_proc.allocator, .{ .is_global_scope = true });
             try self.parse_body(&hist);
             const body_node = self.node_pop();
             try self.transpile_proc.nodes.push(body_node.?);
@@ -379,7 +406,8 @@ pub const ParseProcess = struct {
         if (dt.*.type.? == .Unknown) {
             self.transpile_proc.err("unknown datatype", .{});
         }
-        dt.*.type_str = dt_token.?.data.sval;
+        dt.*.type_str = try std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, dt_token.?.data.sval.items.len);
+        try dt.*.type_str.appendSlice(dt_token.?.data.sval.items);
     }
 
     /// Parses a single token to a node.
@@ -449,7 +477,7 @@ pub const ParseProcess = struct {
     fn parse_additional_expression(self: *Self) !void {
         const t = try self.token_peek_next();
         if (t.?.type == .Operator) {
-            var hist = history.History.init(self.allocator, .{});
+            var hist = history.History.init(self.transpile_proc.allocator, .{});
             defer hist.deinit();
             try self.parse_expressionable(&hist);
         }
@@ -483,8 +511,15 @@ pub const ParseProcess = struct {
             exp_node = self.node_pop().?;
         }
         try self.expect_sym(')');
-        const exp = try self.allocator.create(ast.Node);
+        const exp = try self.transpile_proc.allocator.create(ast.Node);
         exp.* = exp_node;
+        if (exp_node.type == .Expression) {
+            exp.*.node_variant.?.exp.left = try self.transpile_proc.allocator.create(ast.Node);
+            exp.*.node_variant.?.exp.left.?.* = exp_node.node_variant.?.exp.left.?.*;
+            exp.*.node_variant.?.exp.right = try self.transpile_proc.allocator.create(ast.Node);
+            exp.*.node_variant.?.exp.right.?.* = exp_node.node_variant.?.exp.right.?.*;
+            exp.*.node_variant.?.exp.op = exp_node.node_variant.?.exp.op;
+        }
         try self.transpile_proc.nodes.push(ast.Node{
             .type = .ExpressionParenthesis,
             .pos = self.*.transpile_proc.*.pos,
@@ -492,9 +527,9 @@ pub const ParseProcess = struct {
         });
         if (left_node != null) {
             const parenthesis_node = self.node_pop();
-            const left = try self.allocator.create(ast.Node);
+            const left = try self.transpile_proc.allocator.create(ast.Node);
             left.* = left_node.?;
-            const right = try self.allocator.create(ast.Node);
+            const right = try self.transpile_proc.allocator.create(ast.Node);
             right.* = parenthesis_node.?;
             try self.transpile_proc.nodes.push(ast.Node{
                 .type = .Expression,
@@ -527,9 +562,9 @@ pub const ParseProcess = struct {
         const left_node = self.node_pop();
         try self.parse_expressionable_root(hist);
         const right_node = self.node_pop();
-        const left = try self.allocator.create(ast.Node);
+        const left = try self.transpile_proc.allocator.create(ast.Node);
         left.* = left_node.?;
-        const right = try self.allocator.create(ast.Node);
+        const right = try self.transpile_proc.allocator.create(ast.Node);
         right.* = right_node.?;
         try self.transpile_proc.nodes.push(ast.Node{
             .type = .Expression,
@@ -566,8 +601,15 @@ pub const ParseProcess = struct {
         try self.parse_expressionable_root(hist);
         try self.expect_sym(']');
         const exp_node = self.node_pop();
-        const inner = try self.allocator.create(ast.Node);
+        const inner = try self.transpile_proc.allocator.create(ast.Node);
         inner.* = exp_node.?;
+        if (exp_node.?.type == .Expression) {
+            inner.*.node_variant.?.exp.left = try self.transpile_proc.allocator.create(ast.Node);
+            inner.*.node_variant.?.exp.left.?.* = exp_node.?.node_variant.?.exp.left.?.*;
+            inner.*.node_variant.?.exp.right = try self.transpile_proc.allocator.create(ast.Node);
+            inner.*.node_variant.?.exp.right.?.* = exp_node.?.node_variant.?.exp.right.?.*;
+            inner.*.node_variant.?.exp.op = exp_node.?.node_variant.?.exp.op;
+        }
         try self.transpile_proc.nodes.push(ast.Node{
             .type = .Bracket,
             .pos = self.*.transpile_proc.*.pos,
@@ -575,9 +617,9 @@ pub const ParseProcess = struct {
         });
         if (left_node != null) {
             const bracket_node = self.node_pop();
-            const left = try self.allocator.create(ast.Node);
+            const left = try self.transpile_proc.allocator.create(ast.Node);
             left.* = left_node.?;
-            const right = try self.allocator.create(ast.Node);
+            const right = try self.transpile_proc.allocator.create(ast.Node);
             right.* = bracket_node.?;
             try self.transpile_proc.nodes.push(ast.Node{
                 .type = .Expression,
@@ -625,11 +667,11 @@ pub const ParseProcess = struct {
     /// - Logs an error message if any expected token is not found.
     fn parse_for_indirection_unary(self: *Self) !void {
         const depth = try self.parse_get_pointer_depth();
-        var hist = history.History.init(self.allocator, .{ .expression_is_unary = true });
+        var hist = history.History.init(self.transpile_proc.allocator, .{ .expression_is_unary = true });
         defer hist.deinit();
         try self.parse_expressionable(&hist);
         const unary_operand_node = self.node_pop();
-        const operand = try self.allocator.create(ast.Node);
+        const operand = try self.transpile_proc.allocator.create(ast.Node);
         operand.* = unary_operand_node.?;
         try self.transpile_proc.nodes.push(ast.Node{
             .type = .Unary,
@@ -659,11 +701,11 @@ pub const ParseProcess = struct {
     /// - Logs an error message if any expected token is not found.
     fn parse_for_normal_unary(self: *Self) !void {
         const unary_op = (try self.token_next()).?.data.sval.items;
-        var hist = history.History.init(self.allocator, .{ .expression_is_unary = true });
+        var hist = history.History.init(self.transpile_proc.allocator, .{ .expression_is_unary = true });
         defer hist.deinit();
         try self.parse_expressionable(&hist);
         const unary_operand_node = self.node_pop();
-        const operand = try self.allocator.create(ast.Node);
+        const operand = try self.transpile_proc.allocator.create(ast.Node);
         operand.* = unary_operand_node.?;
         try self.transpile_proc.nodes.push(ast.Node{
             .type = .Unary,
@@ -742,7 +784,8 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if creating the node fails.
     fn make_expression_node(self: *Self, left_node: *ast.Node, right_node: *ast.Node, op: []const u8) !void {
-        var exp_node = ast.Node{
+        const exp_node = try self.transpile_proc.allocator.create(ast.Node);
+        exp_node.* = ast.Node{
             .type = .Expression,
             .pos = self.*.transpile_proc.*.pos,
             .node_variant = .{
@@ -753,7 +796,7 @@ pub const ParseProcess = struct {
                 },
             },
         };
-        try self.create_node(&exp_node);
+        try self.create_node(exp_node);
     }
 
     /// Creates a body node.
@@ -763,19 +806,16 @@ pub const ParseProcess = struct {
     ///
     /// Parameters:
     /// - `self`: A pointer to the current parser instance.
-    /// - `stmts`: A vector of pointers to the statement nodes.
     ///
     /// Errors:
     /// - Returns an error if creating the node fails.
-    fn make_body_node(self: *Self, stmts: misc.Vector(*ast.Node)) !void {
-        var body_node = ast.Node{
+    fn make_body_node(self: *Self) !void {
+        const body_node = try self.transpile_proc.allocator.create(ast.Node); // leak
+        body_node.* = ast.Node{
             .type = .Body,
             .pos = self.*.transpile_proc.*.pos,
-            .node_variant = .{
-                .body = .{ .statements = stmts },
-            },
         };
-        try self.create_node(&body_node);
+        try self.create_node(body_node);
     }
 
     /// Gets the precedence for an operator.
@@ -850,9 +890,9 @@ pub const ParseProcess = struct {
         try self.make_expression_node(&new_exp_left_node, &new_exp_right_node, node.*.node_variant.?.exp.op);
         const new_left_operand = self.node_pop();
         const new_right_operand = node.*.node_variant.?.exp.right.?.*.node_variant.?.exp.right.?.*;
-        const left = try self.allocator.create(ast.Node);
+        const left = try self.transpile_proc.allocator.create(ast.Node);
         left.* = new_left_operand.?;
-        const right = try self.allocator.create(ast.Node);
+        const right = try self.transpile_proc.allocator.create(ast.Node);
         right.* = new_right_operand;
         node.*.node_variant.?.exp.left = left;
         node.*.node_variant.?.exp.right = right;
@@ -878,9 +918,9 @@ pub const ParseProcess = struct {
         );
         const completed_node = self.node_pop();
         const new_op = node.*.node_variant.?.exp.right.?.*.node_variant.?.exp.op;
-        const left = try self.allocator.create(ast.Node);
+        const left = try self.transpile_proc.allocator.create(ast.Node);
         left.* = completed_node.?;
-        const right = try self.allocator.create(ast.Node);
+        const right = try self.transpile_proc.allocator.create(ast.Node);
         right.* = node.*.node_variant.?.exp.right.?.*.node_variant.?.exp.right.?.*;
         node.*.node_variant.?.exp.left = left;
         node.*.node_variant.?.exp.right = right;
@@ -957,7 +997,7 @@ pub const ParseProcess = struct {
         t = try self.token_peek_next();
         if (t.?.type == .Operator) {
             if (mem.eql(u8, t.?.data.sval.items, "(")) {
-                var hist_down = history.History.down(self.allocator, hist, hist.flags);
+                var hist_down = history.History.down(self.transpile_proc.allocator, hist, hist.flags);
                 defer hist_down.deinit();
                 hist_down.flags.parenthesis_not_function_call = true;
                 try self.parse_for_parenthesis(&hist_down);
@@ -967,7 +1007,7 @@ pub const ParseProcess = struct {
                 self.transpile_proc.err("expected expressionable for '{s}' operator", .{op});
             }
         } else {
-            var hist_down = history.History.down(self.allocator, hist, hist.flags);
+            var hist_down = history.History.down(self.transpile_proc.allocator, hist, hist.flags);
             defer hist_down.deinit();
             try self.parse_expressionable(&hist_down);
         }
@@ -1138,7 +1178,7 @@ pub const ParseProcess = struct {
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
     fn parse_array_brackets(self: *Self, dt: *dtype.DataType, hist: *history.History) !void {
-        dt.*.array.?.brackets = misc.Vector(ast.Node).init(self.allocator);
+        var brackets = misc.Vector(ast.Node).init(self.transpile_proc.allocator);
         while (try self.next_token_is_operator("[")) {
             try self.expect_op("[");
             dt.*.flags.?.is_array = true;
@@ -1149,15 +1189,25 @@ pub const ParseProcess = struct {
             try self.parse_expressionable_root(hist);
             try self.expect_sym(']');
             const exp_node = self.node_pop();
-            const exp = try self.allocator.create(ast.Node);
+            const exp = try self.transpile_proc.allocator.create(ast.Node);
             exp.* = exp_node.?;
+            if (exp_node.?.type == .Expression) {
+                exp.*.node_variant.?.exp.left = try self.transpile_proc.allocator.create(ast.Node);
+                exp.*.node_variant.?.exp.left.?.* = exp_node.?.node_variant.?.exp.left.?.*;
+                exp.*.node_variant.?.exp.right = try self.transpile_proc.allocator.create(ast.Node);
+                exp.*.node_variant.?.exp.right.?.* = exp_node.?.node_variant.?.exp.right.?.*;
+                exp.*.node_variant.?.exp.op = exp_node.?.node_variant.?.exp.op;
+            }
             try self.transpile_proc.nodes.push(ast.Node{
                 .type = .Bracket,
                 .pos = self.transpile_proc.*.pos,
                 .node_variant = .{ .bracket = .{ .inner = exp } },
             });
             const bracket_node = self.node_pop();
-            try dt.*.array.?.brackets.push(bracket_node.?);
+            try brackets.push(bracket_node.?);
+        }
+        if (brackets.count > 0) {
+            dt.*.array = .{ .brackets = brackets };
         }
     }
 
@@ -1179,30 +1229,47 @@ pub const ParseProcess = struct {
             try self.parse_array_brackets(dt, hist);
         }
         const ident_token = try self.token_next();
-        if (ident_token.?.type != .Identifier) {
-            self.transpile_proc.err("expected indentifier, got '{}'", .{ident_token.?.type});
+        if (ident_token == null or ident_token.?.type != .Identifier) {
+            self.transpile_proc.err("expected indentifier", .{});
         }
         var value_node: ?ast.Node = null;
-        if (try self.next_token_is_operator("=")) {
+        const has_value = try self.next_token_is_operator("=");
+        if (has_value) {
             _ = try self.token_next(); // skip =
             try self.parse_expressionable_root(hist);
             value_node = self.node_pop();
-        }
-        const val = try self.allocator.create(ast.Node);
-        if (value_node != null) {
+            const val = try self.transpile_proc.allocator.create(ast.Node);
             val.* = value_node.?;
-        }
-        try self.transpile_proc.nodes.push(ast.Node{
-            .type = .Variable,
-            .pos = self.*.transpile_proc.*.pos,
-            .node_variant = .{
-                .variable = .{
-                    .name = ident_token.?.data.sval,
-                    .type = dt.*,
-                    .val = val,
+            if (value_node.?.type == .Expression) {
+                val.*.node_variant.?.exp.left = try self.transpile_proc.allocator.create(ast.Node);
+                val.*.node_variant.?.exp.left.?.* = value_node.?.node_variant.?.exp.left.?.*;
+                val.*.node_variant.?.exp.right = try self.transpile_proc.allocator.create(ast.Node);
+                val.*.node_variant.?.exp.right.?.* = value_node.?.node_variant.?.exp.right.?.*;
+                val.*.node_variant.?.exp.op = value_node.?.node_variant.?.exp.op;
+            }
+            try self.transpile_proc.nodes.push(ast.Node{
+                .type = .Variable,
+                .pos = self.*.transpile_proc.*.pos,
+                .node_variant = .{
+                    .variable = .{
+                        .name = ident_token.?.data.sval,
+                        .type = dt,
+                        .val = val,
+                    },
                 },
-            },
-        });
+            });
+        } else {
+            try self.transpile_proc.nodes.push(ast.Node{
+                .type = .Variable,
+                .pos = self.*.transpile_proc.*.pos,
+                .node_variant = .{
+                    .variable = .{
+                        .name = ident_token.?.data.sval,
+                        .type = dt,
+                    },
+                },
+            });
+        }
     }
 
     /// Parses a full variable declaration.
@@ -1217,9 +1284,16 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     fn parse_full_variable(self: *Self, hist: *history.History) !void {
-        var dt: dtype.DataType = undefined;
-        try self.parse_datatype(&dt);
-        try self.parse_variable(&dt, hist);
+        const dt = try self.transpile_proc.allocator.create(dtype.DataType);
+        dt.* = dtype.DataType{
+            .array = null,
+            .pointer_depth = 0,
+            .type = .Unknown,
+            .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
+            .flags = .{},
+        };
+        try self.parse_datatype(dt);
+        try self.parse_variable(dt, hist);
     }
 
     /// Parses function arguments.
@@ -1237,7 +1311,7 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     fn parse_function_args(self: *Self, hist: *history.History) !misc.Vector(*ast.Node) {
-        var args = misc.Vector(*ast.Node).init(self.allocator);
+        var args = misc.Vector(*ast.Node).init(self.transpile_proc.allocator);
         while (!try self.next_token_is_symbol(')')) {
             if (try self.next_token_is_operator(".")) { // variadic
                 for (0..3) |_| {
@@ -1247,7 +1321,7 @@ pub const ParseProcess = struct {
             }
             try self.parse_full_variable(hist);
             const arg_node = self.node_pop();
-            const arg = try self.allocator.create(ast.Node);
+            const arg = try self.transpile_proc.allocator.create(ast.Node);
             arg.* = arg_node.?;
             try args.push(arg);
             if (!try self.next_token_is_operator(",")) {
@@ -1272,7 +1346,7 @@ pub const ParseProcess = struct {
     /// - Logs an error message if any expected token is not found.
     fn parse_function(self: *Self) !void {
         _ = try self.token_next(); // skip fun
-        var function_node: ast.Node = ast.Node{
+        var function_node = ast.Node{
             .type = .Function,
             .pos = self.*.transpile_proc.*.pos,
             .node_variant = .{ .function = .{} },
@@ -1283,9 +1357,9 @@ pub const ParseProcess = struct {
             self.transpile_proc.err("expected indentifier, got '{}'", .{ident_token.?.type});
         }
         function_node.node_variant.?.function.name = ident_token.?.data.sval;
-        parser_current_function = function_node;
+        self.parser_current_function = function_node;
         try self.expect_op("(");
-        var hist_args = history.History.init(self.allocator, .{});
+        var hist_args = history.History.init(self.transpile_proc.allocator, .{});
         defer hist_args.deinit();
         const args = try self.parse_function_args(&hist_args);
         try self.expect_sym(')');
@@ -1294,7 +1368,7 @@ pub const ParseProcess = struct {
         if (rtype_token != null and rtype_token.?.type == .Keyword and misc.keyword_is_datatype(rtype_token.?.data.sval.items)) {
             try self.parse_datatype(&dt);
         } else {
-            var type_str = std.ArrayList(u8).init(self.allocator);
+            var type_str = std.ArrayList(u8).init(self.transpile_proc.allocator);
             try type_str.appendSlice("void");
             dt = dtype.DataType{
                 .type = .Void,
@@ -1303,17 +1377,17 @@ pub const ParseProcess = struct {
         }
         function_node.node_variant.?.function.rtype = dt;
         if (try self.next_token_is_symbol('{')) {
-            var hist_body = history.History.init(self.allocator, .{ .inside_function_body = true });
+            var hist_body = history.History.init(self.transpile_proc.allocator, .{ .inside_function_body = true });
             defer hist_body.deinit();
             try self.parse_body(&hist_body);
             const body_node = self.node_pop();
-            const body = try self.allocator.create(ast.Node);
+            const body = try self.transpile_proc.allocator.create(ast.Node);
             body.* = body_node.?;
             function_node.node_variant.?.function.body = body;
         } else {
             try self.expect_sym(';');
         }
-        parser_current_function = undefined;
+        self.parser_current_function = null;
         try self.transpile_proc.nodes.push(function_node);
     }
 
@@ -1341,8 +1415,15 @@ pub const ParseProcess = struct {
         }
         try self.parse_expressionable_root(hist);
         const exp_node = self.node_pop();
-        const exp = try self.allocator.create(ast.Node);
+        const exp = try self.transpile_proc.allocator.create(ast.Node);
         exp.* = exp_node.?;
+        if (exp.*.type == .Expression) {
+            exp.*.node_variant.?.exp.left = try self.transpile_proc.allocator.create(ast.Node);
+            exp.*.node_variant.?.exp.left.?.* = exp_node.?.node_variant.?.exp.left.?.*;
+            exp.*.node_variant.?.exp.right = try self.transpile_proc.allocator.create(ast.Node);
+            exp.*.node_variant.?.exp.right.?.* = exp_node.?.node_variant.?.exp.right.?.*;
+            exp.*.node_variant.?.exp.op = exp_node.?.node_variant.?.exp.op;
+        }
         try self.transpile_proc.nodes.push(ast.Node{
             .type = .StatementReturn,
             .pos = self.*.transpile_proc.*.pos,
@@ -1368,11 +1449,18 @@ pub const ParseProcess = struct {
             _ = try self.token_next(); // skip elif
             try self.parse_expressionable_root(hist);
             const condition_node = self.node_pop();
-            const condition = try self.allocator.create(ast.Node);
+            const condition = try self.transpile_proc.allocator.create(ast.Node);
             condition.* = condition_node.?;
+            if (condition_node.?.type == .Expression) {
+                condition.*.node_variant.?.exp.left = try self.transpile_proc.allocator.create(ast.Node);
+                condition.*.node_variant.?.exp.left.?.* = condition_node.?.node_variant.?.exp.left.?.*;
+                condition.*.node_variant.?.exp.right = try self.transpile_proc.allocator.create(ast.Node);
+                condition.*.node_variant.?.exp.right.?.* = condition_node.?.node_variant.?.exp.right.?.*;
+                condition.*.node_variant.?.exp.op = condition_node.?.node_variant.?.exp.op;
+            }
             try self.parse_body(hist);
             const body_node = self.node_pop();
-            const body = try self.allocator.create(ast.Node);
+            const body = try self.transpile_proc.allocator.create(ast.Node);
             body.* = body_node.?;
             var elif_node = ast.Node{
                 .type = .StatementElseIf,
@@ -1400,7 +1488,7 @@ pub const ParseProcess = struct {
             _ = try self.token_next(); // skip else
             try self.parse_body(hist);
             const body_node = self.node_pop();
-            const body = try self.allocator.create(ast.Node);
+            const body = try self.transpile_proc.allocator.create(ast.Node);
             body.* = body_node.?;
             var else_node = ast.Node{
                 .type = .StatementElse,
@@ -1428,13 +1516,21 @@ pub const ParseProcess = struct {
         try self.expect_keyword("if");
         try self.parse_expressionable_root(hist);
         const condition_node = self.node_pop();
-        const condition = try self.allocator.create(ast.Node);
+        const condition = try self.transpile_proc.allocator.create(ast.Node);
         condition.* = condition_node.?;
+        if (condition_node.?.type == .Expression) {
+            condition.*.node_variant.?.exp.left = try self.transpile_proc.allocator.create(ast.Node);
+            condition.*.node_variant.?.exp.left.?.* = condition_node.?.node_variant.?.exp.left.?.*;
+            condition.*.node_variant.?.exp.right = try self.transpile_proc.allocator.create(ast.Node);
+            condition.*.node_variant.?.exp.right.?.* = condition_node.?.node_variant.?.exp.right.?.*;
+            condition.*.node_variant.?.exp.op = condition_node.?.node_variant.?.exp.op;
+        }
         try self.parse_body(hist);
         const body_node = self.node_pop();
-        const body = try self.allocator.create(ast.Node);
+        const body = try self.transpile_proc.allocator.create(ast.Node);
         body.* = body_node.?;
-        var if_node = ast.Node{
+        const if_node = try self.transpile_proc.allocator.create(ast.Node); // leak
+        if_node.* = ast.Node{
             .type = .StatementIf,
             .pos = self.transpile_proc.*.pos,
             .node_variant = .{
@@ -1443,7 +1539,7 @@ pub const ParseProcess = struct {
                 },
             },
         };
-        try self.create_node(&if_node);
+        try self.create_node(if_node);
         try self.parse_elif(hist);
         try self.parse_else(hist);
     }
@@ -1463,19 +1559,19 @@ pub const ParseProcess = struct {
     /// - Logs an error message if any expected token is not found.
     fn parse_fit_body(self: *Self, fit_node: *ast.Node, hist: *history.History) !void {
         try self.expect_sym('{');
-        fit_node.*.node_variant.?.statement.fit_stmt.branches = misc.Vector(ast.FitBranch).init(self.allocator);
+        fit_node.*.node_variant.?.statement.fit_stmt.branches = misc.Vector(ast.FitBranch).init(self.transpile_proc.allocator);
         while (!try self.next_token_is_symbol('}')) {
-            var hist_down = history.History.down(self.allocator, hist, hist.flags);
+            var hist_down = history.History.down(self.transpile_proc.allocator, hist, hist.flags);
             defer hist_down.deinit();
             try self.parse_expressionable_root(&hist_down);
             const condition_node = self.node_pop();
-            const condition = try self.allocator.create(ast.Node);
+            const condition = try self.transpile_proc.allocator.create(ast.Node);
             if (condition_node.?.type == .Identifier and mem.eql(u8, condition_node.?.data.?.sval.items, "_")) {
                 // default case after should be the last branch
                 try self.expect_op("->");
                 try self.parse_body(&hist_down);
                 const body_node = self.node_pop();
-                const body = try self.allocator.create(ast.Node);
+                const body = try self.transpile_proc.allocator.create(ast.Node);
                 body.* = body_node.?;
                 try fit_node.*.node_variant.?.statement.fit_stmt.branches.push(.{ .body = body, .condition = null });
                 if (try self.next_token_is_operator(",")) {
@@ -1484,10 +1580,17 @@ pub const ParseProcess = struct {
                 break;
             }
             condition.* = condition_node.?;
+            if (condition_node.?.type == .Expression) {
+                condition.*.node_variant.?.exp.left = try self.transpile_proc.allocator.create(ast.Node);
+                condition.*.node_variant.?.exp.left.?.* = condition_node.?.node_variant.?.exp.left.?.*;
+                condition.*.node_variant.?.exp.right = try self.transpile_proc.allocator.create(ast.Node);
+                condition.*.node_variant.?.exp.right.?.* = condition_node.?.node_variant.?.exp.right.?.*;
+                condition.*.node_variant.?.exp.op = condition_node.?.node_variant.?.exp.op;
+            }
             try self.expect_op("->");
             try self.parse_body(&hist_down);
             const body_node = self.node_pop();
-            const body = try self.allocator.create(ast.Node);
+            const body = try self.transpile_proc.allocator.create(ast.Node);
             body.* = body_node.?;
             try fit_node.*.node_variant.?.statement.fit_stmt.branches.push(.{ .body = body, .condition = condition });
             if (try self.next_token_is_operator(",")) {
@@ -1518,12 +1621,19 @@ pub const ParseProcess = struct {
         };
         hist.*.flags.in_fit_statement = true;
         try self.expect_keyword("fit");
-        var new_hist = history.History.init(self.allocator, .{ .in_fit_statement = true });
+        var new_hist = history.History.init(self.transpile_proc.allocator, .{ .in_fit_statement = true });
         defer new_hist.deinit();
         try self.parse_expressionable_root(&new_hist);
         const condition_node = self.node_pop();
-        const condition = try self.allocator.create(ast.Node);
+        const condition = try self.transpile_proc.allocator.create(ast.Node);
         condition.* = condition_node.?;
+        if (condition_node.?.type == .Expression) {
+            condition.*.node_variant.?.exp.left = try self.transpile_proc.allocator.create(ast.Node);
+            condition.*.node_variant.?.exp.left.?.* = condition_node.?.node_variant.?.exp.left.?.*;
+            condition.*.node_variant.?.exp.right = try self.transpile_proc.allocator.create(ast.Node);
+            condition.*.node_variant.?.exp.right.?.* = condition_node.?.node_variant.?.exp.right.?.*;
+            condition.*.node_variant.?.exp.op = condition_node.?.node_variant.?.exp.op;
+        }
         fit_node.node_variant.?.statement.fit_stmt.exp = condition;
         try self.parse_fit_body(&fit_node, &new_hist);
         try self.transpile_proc.nodes.push(fit_node);
@@ -1546,7 +1656,7 @@ pub const ParseProcess = struct {
         if (folder_token.?.type != .Identifier) {
             self.transpile_proc.err("expected folder identifier, got '{?}'", .{folder_token.?.type});
         }
-        var import_name = std.ArrayList(u8).init(self.allocator);
+        var import_name = std.ArrayList(u8).init(self.transpile_proc.allocator);
         defer import_name.deinit();
         try import_name.appendSlice(folder_token.?.data.sval.items);
 
@@ -1586,9 +1696,16 @@ pub const ParseProcess = struct {
         const t = try self.token_peek_next();
         const sval = t.?.data.sval.items;
         if (misc.keyword_is_datatype(sval)) {
-            var dt: dtype.DataType = undefined;
-            try self.parse_datatype(&dt);
-            try self.parse_variable(&dt, hist);
+            const dt = try self.transpile_proc.allocator.create(dtype.DataType);
+            dt.* = dtype.DataType{
+                .array = null,
+                .pointer_depth = 0,
+                .type = .Unknown,
+                .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
+                .flags = .{},
+            };
+            try self.parse_datatype(dt);
+            try self.parse_variable(dt, hist);
             try self.expect_sym(';');
             return;
         }
@@ -1631,7 +1748,7 @@ pub const ParseProcess = struct {
     /// - Returns an error if initializing the history or parsing the keyword fails.
     fn parse_global_keyword(self: *Self) !void {
         var hist = history.History.init(
-            self.allocator,
+            self.transpile_proc.allocator,
             .{ .is_global_scope = true },
         );
         defer hist.deinit();
@@ -1659,7 +1776,7 @@ pub const ParseProcess = struct {
         }
         try switch (t.?.type) {
             .Number, .Identifier, .String => {
-                var hist = history.History.init(self.allocator, .{});
+                var hist = history.History.init(self.transpile_proc.allocator, .{});
                 defer hist.deinit();
                 try self.parse_expressionable(&hist);
             },
@@ -1693,16 +1810,17 @@ test "ParseProcess parse_function" {
         try file.writeAll(input);
     }
 
-    const allocator = std.heap.page_allocator;
+    const allocator = std.testing.allocator;
     var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
-    var lex_proc = lexer.LexProcess.init(allocator, &transpile_proc);
-    var parse_proc = ParseProcess.init(allocator, &transpile_proc);
+    var lex_proc = lexer.LexProcess.init(&transpile_proc);
+    var parse_proc = ParseProcess.init(&transpile_proc);
 
-    defer transpile_proc.deinit();
-    defer lex_proc.deinit();
+    defer {
+        lex_proc.deinit();
+        transpile_proc.deinit();
+    }
 
     try lex_proc.lex();
-    try transpile_proc.tokens.push_slice(lex_proc.tokens.items());
     try parse_proc.parse();
     const nodes = transpile_proc.nodes.items();
     try std.testing.expectEqual(1, nodes.len);
@@ -1726,10 +1844,10 @@ test "ParseProcess parse_if_statement" {
     }
 
     // const allocator = std.testing.allocator;
-    const allocator = std.heap.page_allocator;
+    const allocator = std.testing.allocator;
     var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
-    var lex_proc = lexer.LexProcess.init(allocator, &transpile_proc);
-    var parse_proc = ParseProcess.init(allocator, &transpile_proc);
+    var lex_proc = lexer.LexProcess.init(&transpile_proc);
+    var parse_proc = ParseProcess.init(&transpile_proc);
 
     defer {
         lex_proc.deinit();
@@ -1737,7 +1855,6 @@ test "ParseProcess parse_if_statement" {
     }
 
     try lex_proc.lex();
-    try transpile_proc.tokens.push_slice(lex_proc.tokens.items());
     try parse_proc.parse();
     const nodes = transpile_proc.nodes.items();
     try std.testing.expectEqual(1, nodes.len);
@@ -1760,10 +1877,10 @@ test "ParseProcess parse_return" {
     }
 
     // const allocator = std.testing.allocator;
-    const allocator = std.heap.page_allocator;
+    const allocator = std.testing.allocator;
     var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
-    var lex_proc = lexer.LexProcess.init(allocator, &transpile_proc);
-    var parse_proc = ParseProcess.init(allocator, &transpile_proc);
+    var lex_proc = lexer.LexProcess.init(&transpile_proc);
+    var parse_proc = ParseProcess.init(&transpile_proc);
 
     defer {
         lex_proc.deinit();
@@ -1771,7 +1888,6 @@ test "ParseProcess parse_return" {
     }
 
     try lex_proc.lex();
-    try transpile_proc.tokens.push_slice(lex_proc.tokens.items());
     try parse_proc.parse();
     const nodes = transpile_proc.nodes.items();
     try std.testing.expectEqual(1, nodes.len);
@@ -1794,10 +1910,10 @@ test "ParseProcess parse_variable" {
     }
 
     // const allocator = std.testing.allocator;
-    const allocator = std.heap.page_allocator;
+    const allocator = std.testing.allocator;
     var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
-    var lex_proc = lexer.LexProcess.init(allocator, &transpile_proc);
-    var parse_proc = ParseProcess.init(allocator, &transpile_proc);
+    var lex_proc = lexer.LexProcess.init(&transpile_proc);
+    var parse_proc = ParseProcess.init(&transpile_proc);
 
     defer {
         lex_proc.deinit();
@@ -1805,7 +1921,6 @@ test "ParseProcess parse_variable" {
     }
 
     try lex_proc.lex();
-    try transpile_proc.tokens.push_slice(lex_proc.tokens.items());
     try parse_proc.parse();
     const nodes = transpile_proc.nodes.items();
     try std.testing.expectEqual(1, nodes.len);
@@ -1829,10 +1944,10 @@ test "ParseProcess parse_expression" {
     }
 
     // const allocator = std.testing.allocator;
-    const allocator = std.heap.page_allocator;
+    const allocator = std.testing.allocator;
     var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
-    var lex_proc = lexer.LexProcess.init(allocator, &transpile_proc);
-    var parse_proc = ParseProcess.init(allocator, &transpile_proc);
+    var lex_proc = lexer.LexProcess.init(&transpile_proc);
+    var parse_proc = ParseProcess.init(&transpile_proc);
 
     defer {
         lex_proc.deinit();
@@ -1840,7 +1955,6 @@ test "ParseProcess parse_expression" {
     }
 
     try lex_proc.lex();
-    try transpile_proc.tokens.push_slice(lex_proc.tokens.items());
     try parse_proc.parse();
     const nodes = transpile_proc.nodes.items();
     try std.testing.expectEqual(1, nodes.len);

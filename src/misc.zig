@@ -460,7 +460,7 @@ pub fn Vector(comptime T: type) type {
         ///
         /// Returns:
         /// - `bool`: `true` if the Vector is empty, otherwise `false`.
-        pub fn is_empty(self: *Self) bool {
+        pub fn is_empty(self: Self) bool {
             return self.data.items.len == 0;
         }
 

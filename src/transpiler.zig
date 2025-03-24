@@ -103,6 +103,145 @@ pub const TranspileProcess = struct {
         });
     }
 
+    /// Deinitializes the node and all its resources.
+    /// Recursively frees memory allocated for child nodes and their resources.
+    ///
+    /// Parameters:
+    ///   - `self`: The instance of the transpiler to deinitialize.
+    ///   - `node`: The node to deinitialize
+    fn deinit_node(self: *Self, node: ast.Node) void {
+        const allocator = self.allocator;
+        if (node.binded) |b| {
+            if (b.owner) |owner| {
+                self.deinit_node(owner.*);
+                allocator.destroy(owner);
+            }
+            if (b.function) |function| {
+                self.deinit_node(function.*);
+                allocator.destroy(function);
+            }
+            allocator.destroy(b);
+        }
+        if (node.data) |data| {
+            switch (data) {
+                .sval => |list| if (list.items.len > 0) list.deinit(),
+                else => {},
+            }
+        }
+        if (node.node_variant) |variant| {
+            switch (variant) {
+                .exp => |*exp| {
+                    if (exp.left) |left| {
+                        self.deinit_node(left.*);
+                        allocator.destroy(left);
+                    }
+                    if (exp.right) |right| {
+                        self.deinit_node(right.*);
+                        allocator.destroy(right);
+                    }
+                },
+                .paren => |paren| {
+                    self.deinit_node(paren.exp.*);
+                    allocator.destroy(paren.exp);
+                },
+                .variable => |variable| {
+                    if (variable.val) |val| {
+                        self.deinit_node(val.*);
+                        allocator.destroy(val);
+                    }
+                    variable.type.type_str.deinit();
+                    if (variable.type.array) |array| {
+                        if (!array.brackets.is_empty()) {
+                            for (array.brackets.items()) |bracket| {
+                                self.deinit_node(bracket);
+                            }
+                        }
+                        array.brackets.deinit();
+                    }
+                    allocator.destroy(variable.type);
+                    variable.name.deinit();
+                },
+                .unary => |unary| {
+                    self.deinit_node(unary.operand.*);
+                    allocator.destroy(unary.operand);
+                },
+                .tenary => |tenary| {
+                    self.deinit_node(tenary.condition.*);
+                    allocator.destroy(tenary.condition);
+                    self.deinit_node(tenary.true.*);
+                    allocator.destroy(tenary.true);
+                    self.deinit_node(tenary.false.*);
+                    allocator.destroy(tenary.false);
+                },
+                .bracket => |bracket| {
+                    self.deinit_node(bracket.inner.*);
+                    allocator.destroy(bracket.inner);
+                },
+                .body => |body| {
+                    for (body.statements.items()) |statement| {
+                        self.deinit_node(statement.*);
+                        allocator.destroy(statement);
+                    }
+                    body.statements.deinit();
+                },
+                .function => |function| {
+                    if (function.args) |args| {
+                        for (args.items()) |arg| {
+                            self.deinit_node(arg.*);
+                            allocator.destroy(arg);
+                        }
+                        args.deinit();
+                    }
+                    if (function.body) |body| {
+                        self.deinit_node(body.*);
+                        allocator.destroy(body);
+                    }
+                    if (function.rtype) |rtype| {
+                        rtype.type_str.deinit();
+                    }
+                },
+                .statement => |statement| {
+                    switch (statement) {
+                        .return_stmt => |ret| {
+                            self.deinit_node(ret.*);
+                            allocator.destroy(ret);
+                        },
+                        .if_stmt => |if_s| {
+                            self.deinit_node(if_s.condition.*);
+                            allocator.destroy(if_s.condition);
+                            self.deinit_node(if_s.body.*);
+                            allocator.destroy(if_s.body);
+                        },
+                        .elif_stmt => |elif| {
+                            self.deinit_node(elif.condition.*);
+                            allocator.destroy(elif.condition);
+                            self.deinit_node(elif.body.*);
+                            allocator.destroy(elif.body);
+                        },
+                        .else_stmt => |else_s| {
+                            self.deinit_node(else_s.body.*);
+                            allocator.destroy(else_s.body);
+                        },
+                        .fit_stmt => |fit| {
+                            self.deinit_node(fit.exp.*);
+                            allocator.destroy(fit.exp);
+                            for (fit.branches.items()) |branch| {
+                                if (branch.condition) |condition| {
+                                    self.deinit_node(condition.*);
+                                    allocator.destroy(condition);
+                                }
+                                self.deinit_node(branch.body.*);
+                                allocator.destroy(branch.body);
+                            }
+                            fit.branches.deinit();
+                        },
+                    }
+                },
+                else => {},
+            }
+        }
+    }
+
     /// Deinitializes the transpiler by closing input and output files and deinitializing tokens.
     ///
     /// This function performs the following actions:
@@ -115,10 +254,19 @@ pub const TranspileProcess = struct {
     ///
     /// Returns:
     /// - This function does not return any value.
-    pub fn deinit(self: Self) void {
+    pub fn deinit(self: *Self) void {
         self.ifile.close();
         self.ofile.close();
+        for (self.tokens.items()) |t| {
+            switch (t.data) {
+                .sval => t.data.sval.deinit(),
+                else => {},
+            }
+        }
         self.tokens.deinit();
+        for (self.nodes.items()) |node| {
+            self.deinit_node(node);
+        }
         self.nodes.deinit();
     }
 };
