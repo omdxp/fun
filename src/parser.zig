@@ -684,7 +684,7 @@ pub const ParseProcess = struct {
             },
         });
         var unary_node = self.node_pop();
-        unary_node.?.node_variant.?.unary.indirection.?.depth = depth;
+        unary_node.?.node_variant.?.unary.indirection = .{ .depth = depth };
         try self.transpile_proc.nodes.push(unary_node.?);
     }
 
