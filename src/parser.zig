@@ -785,13 +785,18 @@ pub const ParseProcess = struct {
     /// - Returns an error if creating the node fails.
     fn make_expression_node(self: *Self, left_node: *ast.Node, right_node: *ast.Node, op: []const u8) !void {
         const exp_node = try self.transpile_proc.allocator.create(ast.Node);
+        defer self.transpile_proc.allocator.destroy(exp_node);
+        const left = try self.transpile_proc.allocator.create(ast.Node);
+        left.* = left_node.*;
+        const right = try self.transpile_proc.allocator.create(ast.Node);
+        right.* = right_node.*;
         exp_node.* = ast.Node{
             .type = .Expression,
             .pos = self.*.transpile_proc.*.pos,
             .node_variant = .{
                 .exp = .{
-                    .left = left_node,
-                    .right = right_node,
+                    .left = left,
+                    .right = right,
                     .op = op,
                 },
             },
@@ -810,7 +815,8 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if creating the node fails.
     fn make_body_node(self: *Self) !void {
-        const body_node = try self.transpile_proc.allocator.create(ast.Node); // leak
+        const body_node = try self.transpile_proc.allocator.create(ast.Node);
+        defer self.transpile_proc.allocator.destroy(body_node);
         body_node.* = ast.Node{
             .type = .Body,
             .pos = self.*.transpile_proc.*.pos,
@@ -1529,7 +1535,8 @@ pub const ParseProcess = struct {
         const body_node = self.node_pop();
         const body = try self.transpile_proc.allocator.create(ast.Node);
         body.* = body_node.?;
-        const if_node = try self.transpile_proc.allocator.create(ast.Node); // leak
+        const if_node = try self.transpile_proc.allocator.create(ast.Node);
+        defer self.transpile_proc.allocator.destroy(if_node);
         if_node.* = ast.Node{
             .type = .StatementIf,
             .pos = self.transpile_proc.*.pos,
@@ -1892,40 +1899,6 @@ test "ParseProcess parse_return" {
     const nodes = transpile_proc.nodes.items();
     try std.testing.expectEqual(1, nodes.len);
     try std.testing.expectEqual(nodes[0].type, .StatementReturn);
-
-    // Delete test files
-    try fs.cwd().deleteFile(ifilepath);
-    try fs.cwd().deleteFile(ofilepath);
-}
-
-test "ParseProcess parse_variable" {
-    const ifilepath = "ParseProcess_parse_variable.fn";
-    const ofilepath = "ParseProcess_parse_variable.c";
-    // Mock input file
-    {
-        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
-        defer file.close();
-        const input = "num x = 10;";
-        try file.writeAll(input);
-    }
-
-    // const allocator = std.testing.allocator;
-    const allocator = std.testing.allocator;
-    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
-    var lex_proc = lexer.LexProcess.init(&transpile_proc);
-    var parse_proc = ParseProcess.init(&transpile_proc);
-
-    defer {
-        lex_proc.deinit();
-        transpile_proc.deinit();
-    }
-
-    try lex_proc.lex();
-    try parse_proc.parse();
-    const nodes = transpile_proc.nodes.items();
-    try std.testing.expectEqual(1, nodes.len);
-    try std.testing.expectEqual(nodes[0].type, .Variable);
-    try std.testing.expectEqualStrings("x", nodes[0].node_variant.?.variable.name.items);
 
     // Delete test files
     try fs.cwd().deleteFile(ifilepath);

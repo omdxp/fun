@@ -241,6 +241,7 @@ pub const LexProcess = struct {
 
         if (misc.is_boolean_keyword(buffer.items)) {
             const bval = if (mem.eql(u8, "true", buffer.items)) true else false;
+            buffer.deinit();
             return token.Token{
                 .type = .Boolean,
                 .data = .{ .bval = bval },

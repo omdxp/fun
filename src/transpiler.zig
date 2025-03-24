@@ -130,7 +130,7 @@ pub const TranspileProcess = struct {
         }
         if (node.node_variant) |variant| {
             switch (variant) {
-                .exp => |*exp| {
+                .exp => |exp| {
                     if (exp.left) |left| {
                         self.deinit_node(left.*);
                         allocator.destroy(left);
