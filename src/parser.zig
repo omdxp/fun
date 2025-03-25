@@ -282,6 +282,9 @@ pub const ParseProcess = struct {
         if (t.?.type == .Keyword) {
             return try self.parse_keyword(hist);
         }
+        if (t.?.type == .Symbol and token.is_symbol(t, '{')) {
+            return try self.parse_body(hist);
+        }
         try self.parse_expressionable_root(hist);
         t = try self.token_peek_next();
         if (t.?.type == .Symbol and t.?.data.cval != ';') {
@@ -367,7 +370,7 @@ pub const ParseProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if any parsing operation fails.
-    fn parse_body(self: *Self, hist: *history.History) !void {
+    fn parse_body(self: *Self, hist: *history.History) anyerror!void {
         _ = try self.transpile_proc.new_scope();
         try self.parse_body_multiple_statements(hist);
         self.transpile_proc.finish_scope();
