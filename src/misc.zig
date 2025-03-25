@@ -678,7 +678,7 @@ pub fn Vector(comptime T: type) type {
         ///
         /// Returns:
         /// - `?T`: The last element in the Vector, or `null` if the Vector is empty.
-        pub fn back(self: *Self) ?T {
+        pub fn back(self: Self) ?T {
             if (self.data.items.len == 0) {
                 return null;
             }
