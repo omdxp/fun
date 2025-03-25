@@ -1,6 +1,8 @@
 .{
-    .name = "fun",
+    .name = .fun,
     .version = "0.0.0",
+    .fingerprint = 0x4b59af6c7b1fc75a,
+    .minimum_zig_version = "0.14.0",
     .dependencies = .{},
     .paths = .{
         "build.zig",

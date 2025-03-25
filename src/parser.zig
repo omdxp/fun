@@ -986,8 +986,8 @@ pub const ParseProcess = struct {
         }
         if ((node.*.node_variant.?.exp.left != null and ast.node_is_array(node.*.node_variant.?.exp.left.?.*) and node.*.node_variant.?.exp.right != null and ast.node_is_assignment(node.*.node_variant.?.exp.right.?.*)) or
             ((ast.node_is_expression(node.*.node_variant.?.exp.left.?.*, "()") or
-            ast.node_is_expression(node.*.node_variant.?.exp.left.?.*, "[]")) and
-            ast.node_is_expression(node.*.node_variant.?.exp.right.?.*, ",")))
+                ast.node_is_expression(node.*.node_variant.?.exp.left.?.*, "[]")) and
+                ast.node_is_expression(node.*.node_variant.?.exp.right.?.*, ",")))
         {
             try self.parse_node_move_right_left_to_left(node);
         }

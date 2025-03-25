@@ -8,7 +8,7 @@ const ast = @import("./ast.zig");
 const misc = @import("./misc.zig");
 
 pub fn main() !void {
-    var gpa = heap.GeneralPurposeAllocator(.{ .thread_safe = true, .safety = true }){};
+    var gpa = heap.DebugAllocator(.{ .thread_safe = true, .safety = true }){};
     defer _ = gpa.deinit();
     var arena = heap.ArenaAllocator.init(gpa.allocator());
     defer arena.deinit();
