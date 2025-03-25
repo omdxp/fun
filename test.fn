@@ -1,10 +1,29 @@
-fun test() {
-    num x = 0;
-    {
-        num y = 1;
-        {
-            num z = 2;
-            x = z;
-        }
+imp std.io;
+
+fun add(num one, num two) num {
+    ret one + two;
+}
+
+fun main(str[] args) {
+    num res = add(1, 2); // add two numbers
+    if res == 3 {
+        printf("%d is 3", res);
+    } elif res < 3 {
+        printf("%d is less than 3", res);
+    } else {
+        printf("%d is above than 3", res);
     }
+
+    bin x = false;
+    fit x {
+        true -> {
+			printf("x is true");
+		}
+        false -> {
+			printf("x is false");
+		}
+    }
+
+    str hello = "Hello, World!";
+    printf("%s\n", hello);
 }

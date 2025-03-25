@@ -713,11 +713,11 @@ pub const LexProcess = struct {
                 break;
             }
 
-            if (c.? == '\\') {
-                try self.handle_escape(&buffer);
-            } else {
-                try buffer.append(c.?);
-            }
+            // if (c.? == '\\') {
+            //     try self.handle_escape(&buffer);
+            // } else {
+            try buffer.append(c.?);
+            // }
         }
 
         return token.Token{
