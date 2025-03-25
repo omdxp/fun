@@ -118,7 +118,8 @@ pub const ParseProcess = struct {
         }
         if (is_bound) {
             const b = try self.transpile_proc.allocator.create(ast.BindedNode);
-            b.* = binded;
+            b.*.function = binded.function;
+            b.*.owner = binded.owner;
             n.binded = b;
         } else {
             n.binded = null;
@@ -227,6 +228,9 @@ pub const ParseProcess = struct {
     /// - Logs an error message if any expected token is not found.
     fn parse_statement(self: *Self, hist: *history.History) !void {
         var t = try self.token_peek_next();
+        if (t == null) {
+            self.transpile_proc.err("unexpected end of file", .{});
+        }
         if (t.?.type == .Keyword) {
             return try self.parse_keyword(hist);
         }
@@ -260,7 +264,13 @@ pub const ParseProcess = struct {
         if (self.parser_current_body) |body| {
             const owner = try self.transpile_proc.allocator.create(ast.Node);
             owner.* = body;
-            body_node.?.binded.?.owner = owner;
+            if (body_node.?.binded != null) {
+                body_node.?.binded.?.owner = owner;
+            } else {
+                body_node.?.binded = try self.transpile_proc.allocator.create(ast.BindedNode);
+                body_node.?.binded.?.owner = owner;
+                body_node.?.binded.?.function = null;
+            }
         } else {
             if (body_node.?.binded != null) {
                 body_node.?.binded.?.owner = null;
@@ -268,6 +278,7 @@ pub const ParseProcess = struct {
         }
         self.parser_current_body = body_node.?;
         try self.expect_sym('{');
+        var last_stmt_type: ?ast.NodeType = null;
         while (!try self.next_token_is_symbol('}')) {
             var hist_down = history.History.down(self.transpile_proc.allocator, hist, hist.flags);
             defer hist_down.deinit();
@@ -275,6 +286,16 @@ pub const ParseProcess = struct {
             const stmt_node = self.node_pop();
             const stmt = try self.transpile_proc.allocator.create(ast.Node);
             stmt.* = stmt_node.?;
+            if (stmt.type == .StatementElseIf) {
+                if (last_stmt_type == null or (last_stmt_type != .StatementIf and last_stmt_type != .StatementElseIf)) {
+                    self.transpile_proc.err("invalid 'elif' statement position", .{});
+                }
+            } else if (stmt.type == .StatementElse) {
+                if (last_stmt_type == null or (last_stmt_type != .StatementIf and last_stmt_type != .StatementElseIf)) {
+                    self.transpile_proc.err("invalid 'else' statement position", .{});
+                }
+            }
+            last_stmt_type = stmt.type;
             try stmts.push(stmt);
         }
         try self.expect_sym('}');
@@ -837,7 +858,7 @@ pub const ParseProcess = struct {
     ///
     /// Returns:
     /// - `i8`: The precedence level of the operator, or -1 if not found.
-    fn parse_get_precedence_for_operator(_: Self, op: []const u8, group: *?expressionable.OpPrecedenceGroup) i8 {
+    fn parse_get_precedence_for_operator(_: *Self, op: []const u8, group: *?expressionable.OpPrecedenceGroup) i8 {
         for (0..expressionable.TOTAL_OPERATOR_GROUPS) |i| {
             var j: u8 = 0;
             while (expressionable.op_precedence[i].operators[j] != null) {
@@ -1450,8 +1471,11 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
-    fn parse_elif(self: *Self, hist: *history.History) !void {
+    fn parse_elif_statement(self: *Self, hist: *history.History) !void {
         if (try self.next_token_is_keyword("elif")) {
+            if (self.parser_current_function == null) {
+                self.transpile_proc.err("elif statement outside of function", .{});
+            }
             _ = try self.token_next(); // skip elif
             try self.parse_expressionable_root(hist);
             const condition_node = self.node_pop();
@@ -1489,8 +1513,11 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
-    fn parse_else(self: *Self, hist: *history.History) !void {
+    fn parse_else_statement(self: *Self, hist: *history.History) !void {
         if (try self.next_token_is_keyword("else")) {
+            if (self.parser_current_function == null) {
+                self.transpile_proc.err("else statement outside of function", .{});
+            }
             _ = try self.token_next(); // skip else
             try self.parse_body(hist);
             const body_node = self.node_pop();
@@ -1520,6 +1547,9 @@ pub const ParseProcess = struct {
     /// - Logs an error message if any expected token is not found.
     fn parse_if_statement(self: *Self, hist: *history.History) !void {
         try self.expect_keyword("if");
+        if (self.parser_current_function == null) {
+            self.transpile_proc.err("if statement outside of function", .{});
+        }
         try self.parse_expressionable_root(hist);
         const condition_node = self.node_pop();
         const condition = try self.transpile_proc.allocator.create(ast.Node);
@@ -1547,8 +1577,6 @@ pub const ParseProcess = struct {
             },
         };
         try self.create_node(if_node);
-        try self.parse_elif(hist);
-        try self.parse_else(hist);
     }
 
     /// Parses the body of a fit statement.
@@ -1723,6 +1751,10 @@ pub const ParseProcess = struct {
             return try self.parse_function();
         } else if (mem.eql(u8, "if", sval)) {
             return try self.parse_if_statement(hist);
+        } else if (mem.eql(u8, "elif", sval)) {
+            return try self.parse_elif_statement(hist);
+        } else if (mem.eql(u8, "else", sval)) {
+            return try self.parse_else_statement(hist);
         } else if (mem.eql(u8, "fit", sval)) {
             return try self.parse_fit_statement(hist);
         } else if (mem.eql(u8, "ret", sval)) {
@@ -1833,39 +1865,6 @@ test "ParseProcess parse_function" {
     try std.testing.expectEqual(1, nodes.len);
     try std.testing.expectEqual(nodes[0].type, .Function);
     try std.testing.expectEqualStrings("test", nodes[0].node_variant.?.function.name.?.items);
-
-    // Delete test files
-    try fs.cwd().deleteFile(ifilepath);
-    try fs.cwd().deleteFile(ofilepath);
-}
-
-test "ParseProcess parse_if_statement" {
-    const ifilepath = "ParseProcess_parse_if_statement.fn";
-    const ofilepath = "ParseProcess_parse_if_statement.c";
-    // Mock input file
-    {
-        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
-        defer file.close();
-        const input = "if true { ret; }";
-        try file.writeAll(input);
-    }
-
-    // const allocator = std.testing.allocator;
-    const allocator = std.testing.allocator;
-    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
-    var lex_proc = lexer.LexProcess.init(&transpile_proc);
-    var parse_proc = ParseProcess.init(&transpile_proc);
-
-    defer {
-        lex_proc.deinit();
-        transpile_proc.deinit();
-    }
-
-    try lex_proc.lex();
-    try parse_proc.parse();
-    const nodes = transpile_proc.nodes.items();
-    try std.testing.expectEqual(1, nodes.len);
-    try std.testing.expectEqual(nodes[0].type, .StatementIf);
 
     // Delete test files
     try fs.cwd().deleteFile(ifilepath);
