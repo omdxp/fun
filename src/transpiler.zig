@@ -215,12 +215,12 @@ pub const TranspileProcess = struct {
     ///
     /// Parameters:
     /// - `self`: The instance of the transpiler.
-    /// - `ptr`: The scope entity to be added.
+    /// - `entity`: The scope entity to be added.
     ///
     /// Errors:
     /// - Returns an error if the entity could not be added.
-    pub fn push_scope_entity(self: *Self, ptr: *scope.ScopeEntity) !void {
-        try self.scope.?.current.?.entities.push(ptr);
+    pub fn push_scope_entity(self: *Self, entity: *scope.ScopeEntity) !void {
+        try self.scope.?.current.?.entities.push(entity);
     }
 
     /// Finishes the current scope and sets the parent scope as the current scope.
@@ -234,9 +234,9 @@ pub const TranspileProcess = struct {
         self.scope.?.current.?.deinit();
         self.allocator.destroy(self.scope.?.current.?);
         self.scope.?.current = new_current_scope;
-        // if (self.scope.?.root != null and self.scope.?.current == null) {
-        //     self.scope.?.root = null;
-        // }
+        if (self.scope.?.root != null and self.scope.?.current == null) {
+            self.scope.?.root = null;
+        }
     }
 
     /// Deinitializes the node and all its resources.

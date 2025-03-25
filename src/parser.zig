@@ -1327,7 +1327,8 @@ pub const ParseProcess = struct {
                 val.*.node_variant.?.exp.right.?.* = value_node.?.node_variant.?.exp.right.?.*;
                 val.*.node_variant.?.exp.op = value_node.?.node_variant.?.exp.op;
             }
-            var node = ast.Node{
+            const node = try self.transpile_proc.allocator.create(ast.Node);
+            node.* = ast.Node{
                 .type = .Variable,
                 .pos = self.*.transpile_proc.*.pos,
                 .node_variant = .{
@@ -1338,11 +1339,12 @@ pub const ParseProcess = struct {
                     },
                 },
             };
-            const scope_entity = try self.new_scope_entity(&node, .{});
+            const scope_entity = try self.new_scope_entity(node, .{});
             try self.transpile_proc.push_scope_entity(scope_entity);
-            try self.transpile_proc.nodes.push(node);
+            try self.transpile_proc.nodes.push(node.*);
         } else {
-            var node = ast.Node{
+            const node = try self.transpile_proc.allocator.create(ast.Node);
+            node.* = ast.Node{
                 .type = .Variable,
                 .pos = self.*.transpile_proc.*.pos,
                 .node_variant = .{
@@ -1352,9 +1354,9 @@ pub const ParseProcess = struct {
                     },
                 },
             };
-            const scope_entity = try self.new_scope_entity(&node, .{});
+            const scope_entity = try self.new_scope_entity(node, .{});
             try self.transpile_proc.push_scope_entity(scope_entity);
-            try self.transpile_proc.nodes.push(node);
+            try self.transpile_proc.nodes.push(node.*);
         }
     }
 
