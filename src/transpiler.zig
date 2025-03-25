@@ -132,6 +132,14 @@ pub const TranspileProcess = struct {
         return root_scope.*;
     }
 
+    /// Deinitializes a scope and its parent scopes recursively.
+    ///
+    /// This function deinitializes the given scope and its parent scopes recursively.
+    /// It destroys the memory allocated for each scope using the provided allocator.
+    ///
+    /// Parameters:
+    /// - `self`: The instance of the transpiler.
+    /// - `s`: The scope to deinitialize.
     fn deinit_scope(self: *Self, s: *scope.Scope) void {
         if (s.parent) |parent| {
             self.deinit_scope(parent);
