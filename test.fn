@@ -1,53 +1,10 @@
-imp std.io;
-
-// Function to add two numbers using pointers
-fun add(num* one, num* two) num {
-    ret *one + *two;
-}
-
-// Main function
-fun main(str[] args) {
-    // Initialize variables
-    num a = 5;
-    num b = 10;
-
-    // Use pointers for addition
-    num* pa = &a;
-    num* pb = &b;
-    num sum = add(pa, pb);
-
-    printf("Sum of %d and %d is %d\n", a, b, sum);
-
-    // Conditional checks
-    if sum > 10 {
-        printf("%d is greater than 10\n", sum);
-    } elif sum == 10 {
-        printf("%d is equal to 10\n", sum);
-    } else {
-        printf("%d is less than 10\n", sum);
-    }
-
-    // Manually handling array access
-    num[5] arr;
-    arr[0] = 1;
-    arr[1] = 2;
-    arr[2] = 3;
-    arr[3] = 4;
-    arr[4] = 5;
-
-    // Binary flag example with fit statement
-    bin flag = true;
-    fit flag {
-        true -> {
-            printf("Flag is true\n");
-        }
-        false -> {
-            printf("Flag is false\n");
+fun test() {
+    num x = 0;
+    {
+        num y = 1;
+        {
+            num z = 2;
+            x = z;
         }
     }
-
-    // String manipulation
-    str greeting = "Hello";
-    str name = "Omar";
-    printf("%s, %s!\n", greeting, name);
 }

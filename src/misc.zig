@@ -529,10 +529,16 @@ pub fn print_node(node: ast.Node, writer: anytype, depth: usize) !void {
 /// - `type`: The defined Vector type.
 pub fn Vector(comptime T: type) type {
     return struct {
+        /// A packed struct containing flags for various operations.
+        flags: packed struct {
+            /// A boolean flag initialized to `false`. This flag can be used to indicate
+            /// whether a peek operation should decrement a counter or not.
+            peek_decrement: bool = false,
+        },
         /// The internal ArrayList for storing elements.
         data: std.ArrayList(T),
         /// The peek index for accessing elements without removing them.
-        pindex: usize = 0,
+        pindex: isize = 0,
         /// The count of elements in the Vector.
         count: usize = 0,
 
@@ -547,6 +553,7 @@ pub fn Vector(comptime T: type) type {
         /// - `Self`: The initialized Vector instance.
         pub fn init(allocator: mem.Allocator) Self {
             return Self{
+                .flags = .{ .peek_decrement = false },
                 .data = std.ArrayList(T).init(allocator),
             };
         }
@@ -580,7 +587,10 @@ pub fn Vector(comptime T: type) type {
         /// Returns:
         /// - `?T`: The element at the peek index, or `null` if the index is out of bounds.
         pub fn peek_no_increment(self: *Self) ?T {
-            return self.at(self.pindex);
+            if (self.pindex < 0 or self.pindex >= self.count) {
+                return null;
+            }
+            return self.at(@intCast(self.pindex));
         }
 
         /// Peeks at the element at the peek index and increments the peek index.
@@ -590,7 +600,11 @@ pub fn Vector(comptime T: type) type {
         pub fn peek(self: *Self) ?T {
             const res = self.peek_no_increment();
             if (res != null) {
-                self.pindex += 1;
+                if (self.flags.peek_decrement) {
+                    self.pindex -= 1;
+                } else {
+                    self.pindex += 1;
+                }
             }
             return res;
         }
@@ -607,12 +621,13 @@ pub fn Vector(comptime T: type) type {
         /// Parameters:
         /// - `index (usize)`: The index to set the peek pointer to.
         pub fn set_peek_pointer(self: *Self, index: usize) void {
-            self.pindex = index;
+            self.pindex = @intCast(index);
         }
 
         /// Sets the peek pointer to the end of the Vector.
         pub fn set_peek_pointer_end(self: *Self) void {
-            self.pindex = self.data.items.len;
+            if (self.data.items.len > 0)
+                self.pindex = @intCast(self.data.items.len - 1);
         }
 
         /// Pushes an element onto the Vector.
@@ -793,6 +808,7 @@ test "Vector can set peek pointer" {
     try std.testing.expectEqual(100, vec.peek().?);
 
     vec.set_peek_pointer_end();
+    try std.testing.expectEqual(100, vec.peek().?);
     try std.testing.expectEqual(null, vec.peek());
 }
 
@@ -846,4 +862,76 @@ test "Vector can peek at element without incrementing the peek index" {
 
     // Ensure that the peek index has only incremented by 1
     try std.testing.expectEqual(100, vec.peek().?); // This should now return 100 and increment the peek index
+}
+
+test "Vector can peek and decrement index when peek_decrement is true" {
+    const allocator = std.testing.allocator;
+    var vec = Vector(u8).init(allocator);
+    defer vec.deinit();
+
+    try vec.push(42);
+    try vec.push(100);
+
+    vec.flags.peek_decrement = true;
+    vec.set_peek_pointer_end();
+
+    // Peek and expect decrement
+    try std.testing.expectEqual(100, vec.peek().?);
+    try std.testing.expectEqual(42, vec.peek().?); // After decrement, it should peek 42 again
+
+    // Reset flag and check normal increment behavior
+    vec.flags.peek_decrement = false;
+    try std.testing.expectEqual(null, vec.peek()); // After increment, it should be out of bounds
+}
+
+test "Vector can push and retrieve elements with peek_decrement flag" {
+    const allocator = std.testing.allocator;
+    var vec = Vector(u8).init(allocator);
+    defer vec.deinit();
+
+    try vec.push(42);
+    try vec.push(100);
+
+    vec.flags.peek_decrement = true;
+    vec.set_peek_pointer_end();
+
+    // Peek without decrement
+    try std.testing.expectEqual(100, vec.peek_no_increment().?);
+
+    // Peek and decrement
+    try std.testing.expectEqual(100, vec.peek().?);
+    try std.testing.expectEqual(42, vec.peek().?); // After decrement, it should peek 42 again
+
+    // Pop the last peeked element
+    vec.pop();
+    try std.testing.expectEqual(1, vec.count);
+    try std.testing.expectEqual(42, vec.back().?);
+}
+
+test "Vector peek pointer increment and decrement with peek_decrement flag" {
+    const allocator = std.testing.allocator;
+    var vec = Vector(u8).init(allocator);
+    defer vec.deinit();
+
+    try vec.push(1);
+    try vec.push(2);
+    try vec.push(3);
+    try vec.push(4);
+
+    // Test increment behavior
+    try std.testing.expectEqual(1, vec.peek().?);
+    try std.testing.expectEqual(2, vec.peek().?);
+    try std.testing.expectEqual(3, vec.peek().?);
+    try std.testing.expectEqual(4, vec.peek().?);
+
+    vec.set_peek_pointer(3); // Set the pointer to the end
+
+    vec.flags.peek_decrement = true;
+    vec.set_peek_pointer_end();
+
+    // Test decrement behavior
+    try std.testing.expectEqual(4, vec.peek().?);
+    try std.testing.expectEqual(3, vec.peek().?);
+    try std.testing.expectEqual(2, vec.peek().?);
+    try std.testing.expectEqual(1, vec.peek().?);
 }

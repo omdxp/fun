@@ -9,6 +9,7 @@ const misc = @import("./misc.zig");
 const history = @import("./history.zig");
 const dtype = @import("./dtype.zig");
 const expressionable = @import("./expressionable.zig");
+const scope = @import("./scope.zig");
 
 /// Represents the parsing process in the transpiler.
 ///
@@ -79,6 +80,19 @@ pub const ParseProcess = struct {
         }
     }
 
+    /// Expects the next token to be a specific keyword.
+    ///
+    /// This function retrieves the next token and checks if it matches the specified keyword (`keyword`).
+    /// If the next token is not the expected keyword, it logs an error message indicating that
+    /// the expected keyword was not found.
+    ///
+    /// Parameters:
+    /// - `self`: The instance of the parser.
+    /// - `keyword ( []const u8 )`: The expected keyword.
+    ///
+    /// Errors:
+    /// - Returns an error if reading the next token fails.
+    /// - Logs an error message if the next token is not the expected keyword.
     fn expect_keyword(self: *Self, keyword: []const u8) !void {
         const t = try self.token_next();
         if (t == null or t.?.type != .Keyword or !mem.eql(u8, keyword, t.?.data.sval.items)) {
@@ -125,6 +139,40 @@ pub const ParseProcess = struct {
             n.binded = null;
         }
         try self.transpile_proc.nodes.push(n.*);
+    }
+
+    /// Creates a new scope entity.
+    ///
+    /// This function initializes a new scope entity with the provided node and flags.
+    ///
+    /// Parameters:
+    /// - `self`: The instance of the parser.
+    /// - `node (*ast.Node)`: The node to associate with the scope entity.
+    /// - `flags (scope.ScopeEntityFlags)`: The flags to set for the scope entity.
+    ///
+    /// Returns:
+    /// - `*scope.ScopeEntity`: The initialized scope entity.
+    ///
+    /// Errors:
+    /// - Returns an error if creating the scope entity fails.
+    fn new_scope_entity(self: *Self, node: *ast.Node, flags: scope.ScopeEntityFlags) !*scope.ScopeEntity {
+        var entity = try self.transpile_proc.allocator.create(scope.ScopeEntity);
+        entity.node = node;
+        entity.flags = flags;
+        return entity;
+    }
+
+    /// Retrieves the last entity from the current scope, stopping at the global scope.
+    ///
+    /// This function retrieves the last entity from the current scope, stopping at the global scope.
+    ///
+    /// Parameters:
+    /// - `self`: The instance of the parser.
+    ///
+    /// Returns:
+    /// - `*scope.ScopeEntity`: The last entity from the current scope, or `null` if not found.
+    fn scope_last_entity_stop_global_scope(self: *Self) *scope.ScopeEntity {
+        return self.transpile_proc.last_scope_entity_stop_at(self.transpile_proc.scope.?.root);
     }
 
     /// Skips newline, comment, and newline separator tokens.
@@ -234,6 +282,9 @@ pub const ParseProcess = struct {
         if (t.?.type == .Keyword) {
             return try self.parse_keyword(hist);
         }
+        if (t.?.type == .Symbol and token.is_symbol(t, '{')) {
+            return try self.parse_body(hist);
+        }
         try self.parse_expressionable_root(hist);
         t = try self.token_peek_next();
         if (t.?.type == .Symbol and t.?.data.cval != ';') {
@@ -319,8 +370,10 @@ pub const ParseProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if any parsing operation fails.
-    fn parse_body(self: *Self, hist: *history.History) !void {
+    fn parse_body(self: *Self, hist: *history.History) anyerror!void {
+        _ = try self.transpile_proc.new_scope();
         try self.parse_body_multiple_statements(hist);
+        self.transpile_proc.finish_scope();
     }
 
     /// Parses a symbol token.
@@ -1274,7 +1327,8 @@ pub const ParseProcess = struct {
                 val.*.node_variant.?.exp.right.?.* = value_node.?.node_variant.?.exp.right.?.*;
                 val.*.node_variant.?.exp.op = value_node.?.node_variant.?.exp.op;
             }
-            try self.transpile_proc.nodes.push(ast.Node{
+            const node = try self.transpile_proc.allocator.create(ast.Node);
+            node.* = ast.Node{
                 .type = .Variable,
                 .pos = self.*.transpile_proc.*.pos,
                 .node_variant = .{
@@ -1284,9 +1338,13 @@ pub const ParseProcess = struct {
                         .val = val,
                     },
                 },
-            });
+            };
+            const scope_entity = try self.new_scope_entity(node, .{});
+            try self.transpile_proc.push_scope_entity(scope_entity);
+            try self.transpile_proc.nodes.push(node.*);
         } else {
-            try self.transpile_proc.nodes.push(ast.Node{
+            const node = try self.transpile_proc.allocator.create(ast.Node);
+            node.* = ast.Node{
                 .type = .Variable,
                 .pos = self.*.transpile_proc.*.pos,
                 .node_variant = .{
@@ -1295,7 +1353,10 @@ pub const ParseProcess = struct {
                         .type = dt,
                     },
                 },
-            });
+            };
+            const scope_entity = try self.new_scope_entity(node, .{});
+            try self.transpile_proc.push_scope_entity(scope_entity);
+            try self.transpile_proc.nodes.push(node.*);
         }
     }
 
@@ -1338,12 +1399,14 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     fn parse_function_args(self: *Self, hist: *history.History) !misc.Vector(*ast.Node) {
+        _ = try self.transpile_proc.new_scope();
         var args = misc.Vector(*ast.Node).init(self.transpile_proc.allocator);
         while (!try self.next_token_is_symbol(')')) {
             if (try self.next_token_is_operator(".")) { // variadic
                 for (0..3) |_| {
                     try self.expect_op(".");
                 }
+                self.transpile_proc.finish_scope();
                 return args;
             }
             try self.parse_full_variable(hist);
@@ -1356,6 +1419,7 @@ pub const ParseProcess = struct {
             }
             _ = try self.token_next(); // skip ,
         }
+        self.transpile_proc.finish_scope();
         return args;
     }
 
@@ -1372,6 +1436,7 @@ pub const ParseProcess = struct {
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
     fn parse_function(self: *Self) !void {
+        _ = try self.transpile_proc.new_scope();
         _ = try self.token_next(); // skip fun
         var function_node = ast.Node{
             .type = .Function,
@@ -1416,6 +1481,7 @@ pub const ParseProcess = struct {
         }
         self.parser_current_function = null;
         try self.transpile_proc.nodes.push(function_node);
+        self.transpile_proc.finish_scope();
     }
 
     /// Parses a return statement.
@@ -1834,6 +1900,8 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if reading the next token fails.
     pub fn parse(self: *Self) !void {
+        _ = try self.transpile_proc.init_root_scope();
+        defer self.transpile_proc.deinit_root_scope();
         while (try self.next()) {}
     }
 };
