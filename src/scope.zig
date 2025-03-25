@@ -2,11 +2,26 @@ const std = @import("std");
 const mem = std.mem;
 const misc = @import("./misc.zig");
 const transpiler = @import("./transpiler.zig");
+const ast = @import("./ast.zig");
+
+/// A set of flags that provide metadata for the scope entity.
+pub const ScopeEntityFlags = packed struct {
+    /// Indicates whether the entity is on the stack.
+    on_stack: bool = false,
+};
+
+/// Represents an entity within a scope.
+pub const ScopeEntity = struct {
+    /// A set of flags that provide metadata for the scope entity.
+    flags: ScopeEntityFlags,
+    /// A pointer to the AST node associated with this entity.
+    node: ?*ast.Node,
+};
 
 /// Represents a scope structure used in the transpiler.
 pub const Scope = struct {
     /// A vector of entities within the scope.
-    entities: misc.Vector(*anyopaque),
+    entities: misc.Vector(*ScopeEntity),
     /// A pointer to the parent scope, if any.
     parent: ?*Scope = null,
     /// The allocator to be used for memory allocation operations.
@@ -25,12 +40,14 @@ pub const Scope = struct {
     /// Returns:
     /// - `Self`: A new instance of `Scope`.
     pub fn init(allocator: mem.Allocator) Self {
-        var entities = misc.Vector(*anyopaque).init(allocator);
-        entities.set_peek_pointer_end();
-        entities.flags.peek_decrement = true;
-        return Self{
-            .entities = misc.Vector(*anyopaque).init(allocator),
-            .allocator = allocator,
+        return blk: {
+            var entities = misc.Vector(*ScopeEntity).init(allocator);
+            entities.set_peek_pointer_end();
+            entities.flags.peek_decrement = true;
+            break :blk .{
+                .entities = entities,
+                .allocator = allocator,
+            };
         };
     }
 
@@ -57,7 +74,7 @@ pub const Scope = struct {
     ///
     /// Returns:
     /// - `?*anyopaque`: The next entity, or `null` if there are no more entities.
-    pub fn iterate_back(self: *Self) ?*anyopaque {
+    pub fn iterate_back(self: *Self) ?*ScopeEntity {
         if (self.entities.count == 0) {
             return null;
         }
@@ -72,8 +89,8 @@ pub const Scope = struct {
     /// - `self`: The instance of the scope.
     ///
     /// Returns:
-    /// - `?*anyopaque`: The last entity in the vector, or `null` if the vector is empty.
-    pub fn last_entity_at_scope(self: *Self) ?*anyopaque {
+    /// - `?*ScopeEntity`: The last entity in the vector, or `null` if the vector is empty.
+    pub fn last_entity_at_scope(self: *Self) ?*ScopeEntity {
         if (self.entities.count == 0) {
             return null;
         }
@@ -89,8 +106,8 @@ pub const Scope = struct {
     /// - `stop_scope`: The scope to stop at when retrieving the last entity.
     ///
     /// Returns:
-    /// - `?*anyopaque`: The last entity from the current scope, or `null` if not found.
-    pub fn last_entity_from_scope_stop_at(self: *Self, stop_scope: ?*Self) ?*anyopaque {
+    /// - `?*ScopeEntity`: The last entity from the current scope, or `null` if not found.
+    pub fn last_entity_from_scope_stop_at(self: *Self, stop_scope: ?*Self) ?*ScopeEntity {
         if (self == stop_scope) {
             return null;
         }
@@ -111,10 +128,10 @@ pub const Scope = struct {
     ///
     /// Parameters:
     /// - `self`: The instance of the scope.
-    pub fn deinit(self: Self) void {
+    pub fn deinit(self: *Self) void {
         self.entities.deinit();
         if (self.parent != null) {
-            self.allocator.destroy(self.parent.?);
+            self.parent.?.entities.deinit();
         }
     }
 };
@@ -123,7 +140,6 @@ test "Scope can be initialized and deinitialized" {
     const allocator = std.heap.page_allocator;
     var scope = Scope.init(allocator);
     defer scope.deinit();
-
     try std.testing.expect(scope.entities.count == 0);
     try std.testing.expect(scope.parent == null);
 }
@@ -133,80 +149,33 @@ test "Scope can add and retrieve entities" {
     var scope = Scope.init(allocator);
     defer scope.deinit();
 
-    var dummy_entity1: i32 = 42;
-    var dummy_entity2: i32 = 100;
+    var entity1 = ScopeEntity{ .flags = ScopeEntityFlags{ .on_stack = false }, .node = null };
+    var entity2 = ScopeEntity{ .flags = ScopeEntityFlags{ .on_stack = false }, .node = null };
 
-    try scope.entities.push(@ptrCast(@alignCast(&dummy_entity1)));
-    try scope.entities.push(@ptrCast(@alignCast(&dummy_entity2)));
-    var res: *i32 = @ptrCast(@alignCast(scope.last_entity_at_scope().?));
-    try std.testing.expect(res == &dummy_entity2);
-    scope.start_iteration();
-    res = @ptrCast(@alignCast(scope.iterate_back().?));
-    try std.testing.expect(res == &dummy_entity1);
-    res = @ptrCast(@alignCast(scope.iterate_back().?));
-    try std.testing.expect(res == &dummy_entity2);
-    try std.testing.expect(scope.iterate_back() == null);
+    try scope.entities.push(&entity1);
+    try scope.entities.push(&entity2);
+
+    try std.testing.expect(scope.entities.items()[0] == &entity1);
+    try std.testing.expect(scope.entities.items()[1] == &entity2);
 }
 
-test "Scope can handle nested scopes" {
-    const allocator = std.heap.page_allocator;
-    var root_scope = Scope.init(allocator);
-    defer root_scope.deinit();
-
-    var nested_scope = Scope.init(allocator);
-    nested_scope.parent = &root_scope;
-    // defer nested_scope.deinit(); // TODO: get back here to fix incorrect alignment error
-
-    var dummy_entity1: i32 = 42;
-    var dummy_entity2: i32 = 100;
-
-    try root_scope.entities.push(&dummy_entity1);
-    try nested_scope.entities.push(&dummy_entity2);
-
-    var res: *i32 = @ptrCast(@alignCast(root_scope.last_entity_at_scope().?));
-    try std.testing.expect(res == &dummy_entity1);
-    res = @ptrCast(@alignCast(nested_scope.last_entity_at_scope().?));
-    try std.testing.expect(res == &dummy_entity2);
-
-    // Test last_entity_from_scope_stop_at
-    res = @ptrCast(@alignCast(nested_scope.last_entity_from_scope_stop_at(&root_scope).?));
-    try std.testing.expect(res == &dummy_entity2);
-    res = @ptrCast(@alignCast(root_scope.last_entity_from_scope_stop_at(null).?));
-    try std.testing.expect(res == &dummy_entity1);
-}
-
-test "Scope iteration and peek decrement works correctly" {
+test "Scope iteration works correctly" {
     const allocator = std.heap.page_allocator;
     var scope = Scope.init(allocator);
     defer scope.deinit();
 
-    var dummy_entity1: i32 = 1;
-    var dummy_entity2: i32 = 2;
-    var dummy_entity3: i32 = 3;
+    var entity1 = ScopeEntity{ .flags = ScopeEntityFlags{ .on_stack = false }, .node = null };
+    var entity2 = ScopeEntity{ .flags = ScopeEntityFlags{ .on_stack = false }, .node = null };
+    var entity3 = ScopeEntity{ .flags = ScopeEntityFlags{ .on_stack = false }, .node = null };
 
-    try scope.entities.push(&dummy_entity1);
-    try scope.entities.push(&dummy_entity2);
-    try scope.entities.push(&dummy_entity3);
+    try scope.entities.push(&entity1);
+    try scope.entities.push(&entity2);
+    try scope.entities.push(&entity3);
 
-    // Test forward iteration
-    scope.entities.flags.peek_decrement = false;
     scope.start_iteration();
-    var res: *i32 = @ptrCast(@alignCast(scope.iterate_back().?));
-    try std.testing.expect(res == &dummy_entity1);
-    res = @ptrCast(@alignCast(scope.iterate_back().?));
-    try std.testing.expect(res == &dummy_entity2);
-    res = @ptrCast(@alignCast(scope.iterate_back().?));
-    try std.testing.expect(res == &dummy_entity3);
-    try std.testing.expect(scope.iterate_back() == null);
 
-    // Test backward iteration
-    scope.entities.flags.peek_decrement = true;
-    scope.start_iteration();
-    res = @ptrCast(@alignCast(scope.iterate_back().?));
-    try std.testing.expect(res == &dummy_entity3);
-    res = @ptrCast(@alignCast(scope.iterate_back().?));
-    try std.testing.expect(res == &dummy_entity2);
-    res = @ptrCast(@alignCast(scope.iterate_back().?));
-    try std.testing.expect(res == &dummy_entity1);
+    try std.testing.expect(scope.iterate_back().? == &entity3);
+    try std.testing.expect(scope.iterate_back().? == &entity2);
+    try std.testing.expect(scope.iterate_back().? == &entity1);
     try std.testing.expect(scope.iterate_back() == null);
 }

@@ -121,14 +121,23 @@ pub const TranspileProcess = struct {
     ///
     /// Returns:
     /// - `scope.Scope`: The initialized root scope.
-    pub fn init_root_scope(self: *Self) scope.Scope {
+    pub fn init_root_scope(self: *Self) !scope.Scope {
         assert(self.scope == null);
-        const root_scope = scope.Scope.init_root(self.allocator);
+        const root_scope = try self.allocator.create(scope.Scope);
+        root_scope.* = scope.Scope.init(self.allocator);
         self.scope = .{
             .root = root_scope,
             .current = root_scope,
         };
-        return root_scope;
+        return root_scope.*;
+    }
+
+    fn deinit_scope(self: *Self, s: *scope.Scope) void {
+        if (s.parent) |parent| {
+            self.deinit_scope(parent);
+            self.allocator.destroy(parent);
+        }
+        s.deinit();
     }
 
     /// Deinitializes the root scope for the transpiler.
@@ -139,10 +148,10 @@ pub const TranspileProcess = struct {
     /// - `self`: The instance of the transpiler.
     pub fn deinit_root_scope(self: *Self) void {
         assert(self.scope != null);
-        assert(self.scope.?.current != null);
-        assert(self.scope.?.root != null);
-        self.scope.?.root.?.deinit();
-        self.scope.?.current.?.deinit();
+        if (self.scope.?.current) |current_scope| {
+            self.deinit_scope(current_scope);
+            self.allocator.destroy(current_scope);
+        }
         self.scope.?.root = null;
         self.scope.?.current = null;
     }
@@ -156,13 +165,13 @@ pub const TranspileProcess = struct {
     ///
     /// Returns:
     /// - `scope.Scope`: The initialized new scope.
-    pub fn new_scope(self: *Self) scope.Scope {
+    pub fn new_scope(self: *Self) !scope.Scope {
         assert(self.scope != null);
-        assert(self.scope.?.root != null);
-        assert(self.scope.?.current != null);
-        var nc = scope.Scope.init(self.allocator);
+        const nc = try self.allocator.create(scope.Scope);
+        nc.* = scope.Scope.init(self.allocator);
         nc.parent = self.scope.?.current;
-        return nc;
+        self.scope.?.current = nc;
+        return nc.*;
     }
 
     /// Retrieves the last entity from the current scope, stopping at a specified scope.
@@ -198,11 +207,11 @@ pub const TranspileProcess = struct {
     ///
     /// Parameters:
     /// - `self`: The instance of the transpiler.
-    /// - `ptr`: The pointer to the entity to be added.
+    /// - `ptr`: The scope entity to be added.
     ///
     /// Errors:
     /// - Returns an error if the entity could not be added.
-    pub fn push_scope_entity(self: *Self, ptr: *anyopaque) !void {
+    pub fn push_scope_entity(self: *Self, ptr: *scope.ScopeEntity) !void {
         try self.scope.?.current.?.entities.push(ptr);
     }
 
@@ -215,10 +224,11 @@ pub const TranspileProcess = struct {
     pub fn finish_scope(self: *Self) void {
         const new_current_scope = self.scope.?.current.?.parent;
         self.scope.?.current.?.deinit();
+        self.allocator.destroy(self.scope.?.current.?);
         self.scope.?.current = new_current_scope;
-        if (self.scope.?.root != null and self.scope.?.current == null) {
-            self.scope.?.root = null;
-        }
+        // if (self.scope.?.root != null and self.scope.?.current == null) {
+        //     self.scope.?.root = null;
+        // }
     }
 
     /// Deinitializes the node and all its resources.
