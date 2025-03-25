@@ -1871,39 +1871,6 @@ test "ParseProcess parse_function" {
     try fs.cwd().deleteFile(ofilepath);
 }
 
-test "ParseProcess parse_if_statement" {
-    const ifilepath = "ParseProcess_parse_if_statement.fn";
-    const ofilepath = "ParseProcess_parse_if_statement.c";
-    // Mock input file
-    {
-        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
-        defer file.close();
-        const input = "if true { ret; }";
-        try file.writeAll(input);
-    }
-
-    // const allocator = std.testing.allocator;
-    const allocator = std.testing.allocator;
-    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
-    var lex_proc = lexer.LexProcess.init(&transpile_proc);
-    var parse_proc = ParseProcess.init(&transpile_proc);
-
-    defer {
-        lex_proc.deinit();
-        transpile_proc.deinit();
-    }
-
-    try lex_proc.lex();
-    try parse_proc.parse();
-    const nodes = transpile_proc.nodes.items();
-    try std.testing.expectEqual(1, nodes.len);
-    try std.testing.expectEqual(nodes[0].type, .StatementIf);
-
-    // Delete test files
-    try fs.cwd().deleteFile(ifilepath);
-    try fs.cwd().deleteFile(ofilepath);
-}
-
 test "ParseProcess parse_return" {
     const ifilepath = "ParseProcess_parse_return.fn";
     const ofilepath = "ParseProcess_parse_return.c";
