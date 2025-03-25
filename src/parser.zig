@@ -1473,6 +1473,9 @@ pub const ParseProcess = struct {
     /// - Logs an error message if any expected token is not found.
     fn parse_elif_statement(self: *Self, hist: *history.History) !void {
         if (try self.next_token_is_keyword("elif")) {
+            if (self.parser_current_function == null) {
+                self.transpile_proc.err("elif statement outside of function", .{});
+            }
             _ = try self.token_next(); // skip elif
             try self.parse_expressionable_root(hist);
             const condition_node = self.node_pop();
@@ -1512,6 +1515,9 @@ pub const ParseProcess = struct {
     /// - Logs an error message if any expected token is not found.
     fn parse_else_statement(self: *Self, hist: *history.History) !void {
         if (try self.next_token_is_keyword("else")) {
+            if (self.parser_current_function == null) {
+                self.transpile_proc.err("else statement outside of function", .{});
+            }
             _ = try self.token_next(); // skip else
             try self.parse_body(hist);
             const body_node = self.node_pop();
@@ -1541,6 +1547,9 @@ pub const ParseProcess = struct {
     /// - Logs an error message if any expected token is not found.
     fn parse_if_statement(self: *Self, hist: *history.History) !void {
         try self.expect_keyword("if");
+        if (self.parser_current_function == null) {
+            self.transpile_proc.err("if statement outside of function", .{});
+        }
         try self.parse_expressionable_root(hist);
         const condition_node = self.node_pop();
         const condition = try self.transpile_proc.allocator.create(ast.Node);
