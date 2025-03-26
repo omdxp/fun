@@ -184,16 +184,16 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
     if (!is_file) {
         temp_name = try std.fmt.allocPrint(allocator, "temp_{d}.c", .{std.time.timestamp()});
         errdefer if (temp_name) |name| allocator.free(name);
-        
+
         const temp_file = try fs.cwd().createFile(temp_name.?, .{});
         try temp_file.writeAll(c_file_or_content);
         temp_file.close();
-        
+
         c_path = temp_name.?;
     } else {
         c_path = c_file_or_content;
     }
-    
+
     // Make sure to clean up temp file in all cases when it's not a permanent file
     defer if (!is_file and temp_name != null) {
         fs.cwd().deleteFile(temp_name.?) catch {};
