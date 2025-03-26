@@ -73,7 +73,7 @@ pub const Scope = struct {
     /// - `self`: The instance of the scope.
     ///
     /// Returns:
-    /// - `?*anyopaque`: The next entity, or `null` if there are no more entities.
+    /// - `?*ScopeEntity`: The next entity, or `null` if there are no more entities.
     pub fn iterate_back(self: *Self) ?*ScopeEntity {
         if (self.entities.count == 0) {
             return null;

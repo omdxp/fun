@@ -204,8 +204,8 @@ pub const TranspileProcess = struct {
     /// - `stop_scope`: The scope to stop at when retrieving the last entity.
     ///
     /// Returns:
-    /// - `?*anyopaque`: The last entity from the current scope, or `null` if not found.
-    pub fn last_scope_entity_stop_at(self: *Self, stop_scope: ?*scope.Scope) ?*anyopaque {
+    /// - `?*ScopeEntity`: The last entity from the current scope, or `null` if not found.
+    pub fn last_scope_entity_stop_at(self: *Self, stop_scope: ?*scope.Scope) ?*scope.ScopeEntity {
         return scope.Scope.last_entity_from_scope_stop_at(self.scope.?.current, stop_scope);
     }
 
@@ -217,8 +217,8 @@ pub const TranspileProcess = struct {
     /// - `self`: The instance of the transpiler.
     ///
     /// Returns:
-    /// - `?*anyopaque`: The last entity from the current scope, or `null` if not found.
-    pub fn last_scope_entity(self: *Self) ?*anyopaque {
+    /// - `?*ScopeEntity`: The last entity from the current scope, or `null` if not found.
+    pub fn last_scope_entity(self: *Self) ?*scope.ScopeEntity {
         return self.last_scope_entity_stop_at(null);
     }
 
