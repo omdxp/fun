@@ -24,11 +24,11 @@ fun main(str[] args) {
     bin x = false;
     fit x {
         true -> {
-			printf("x is true");
-		}
+            printf("x is true");
+        }
         false -> {
-			printf("x is false");
-		}
+            printf("x is false");
+        }
     }
 
     str hello = "Hello, World!";

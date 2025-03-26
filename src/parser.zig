@@ -1545,6 +1545,9 @@ pub const ParseProcess = struct {
             _ = try self.token_next(); // skip elif
             try self.parse_expressionable_root(hist);
             const condition_node = self.node_pop();
+            if (condition_node.?.type == .Expression and mem.eql(u8, condition_node.?.node_variant.?.exp.op, "=")) {
+                self.transpile_proc.err("expected expression, got assignment", .{});
+            }
             const condition = try self.transpile_proc.allocator.create(ast.Node);
             condition.* = condition_node.?;
             if (condition_node.?.type == .Expression) {
@@ -1618,6 +1621,9 @@ pub const ParseProcess = struct {
         }
         try self.parse_expressionable_root(hist);
         const condition_node = self.node_pop();
+        if (condition_node.?.type == .Expression and mem.eql(u8, condition_node.?.node_variant.?.exp.op, "=")) {
+            self.transpile_proc.err("expected expression, got assignment", .{});
+        }
         const condition = try self.transpile_proc.allocator.create(ast.Node);
         condition.* = condition_node.?;
         if (condition_node.?.type == .Expression) {
@@ -1666,6 +1672,9 @@ pub const ParseProcess = struct {
             defer hist_down.deinit();
             try self.parse_expressionable_root(&hist_down);
             const condition_node = self.node_pop();
+            if (condition_node.?.type == .Expression and mem.eql(u8, condition_node.?.node_variant.?.exp.op, "=")) {
+                self.transpile_proc.err("expected expression, got assignment", .{});
+            }
             const condition = try self.transpile_proc.allocator.create(ast.Node);
             if (condition_node.?.type == .Identifier and mem.eql(u8, condition_node.?.data.?.sval.items, "_")) {
                 // default case after should be the last branch
