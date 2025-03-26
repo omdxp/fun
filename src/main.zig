@@ -4,38 +4,84 @@ const token = @import("./token.zig");
 const transpiler = @import("./transpiler.zig");
 const lexer = @import("./lexer.zig");
 const parser = @import("./parser.zig");
-const ast = @import("./ast.zig");
 const misc = @import("./misc.zig");
+const cli = @import("./cli.zig");
 
-pub fn main() !void {
+fn print_error_and_exit(err: anyerror) noreturn {
+    const stderr = std.io.getStdErr().writer();
+
+    if (err == cli.CliError.MissingInputFile) {
+        stderr.writeAll("Error: Input file is required\n") catch {};
+        std.process.exit(1);
+    } else if (err == cli.CliError.MissingOutputFile) {
+        stderr.writeAll("Error: Output file name is required when using -out flag\n") catch {};
+        std.process.exit(1);
+    } else if (err == cli.CliError.InvalidInputExtension) {
+        stderr.writeAll("Error: Input file must have .fn extension\n") catch {};
+        std.process.exit(1);
+    } else if (err == cli.CliError.InvalidOutputExtension) {
+        stderr.writeAll("Error: Output file must have .c extension\n") catch {};
+        std.process.exit(1);
+    } else if (err == cli.CliError.CompilationFailed) {
+        std.process.exit(1);
+    } else if (err == cli.CliError.ExecutionFailed) {
+        std.process.exit(1);
+    } else if (err == cli.CliError.ShowHelp) {
+        std.process.exit(0);
+    } else if (err == error.FileNotFound) {
+        stderr.writeAll("Error: Input file not found\n") catch {};
+        std.process.exit(1);
+    } else {
+        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+        std.process.exit(1);
+    }
+}
+
+pub fn main() void {
     var gpa = heap.DebugAllocator(.{ .thread_safe = true, .safety = true }){};
     defer _ = gpa.deinit();
     var arena = heap.ArenaAllocator.init(gpa.allocator());
     defer arena.deinit();
     const global_allocator = arena.allocator();
-    const ifilepath = "./test.fn";
-    const ofilepath = "./test.c";
-    var tp = try transpiler.TranspileProcess.init(
+
+    const options = cli.parse_args(global_allocator) catch |err| print_error_and_exit(err);
+
+    var tp = transpiler.TranspileProcess.init(
         global_allocator,
-        ifilepath,
-        ofilepath,
-        .{ .outf = true },
-    );
+        options.input_file,
+        options.output_file,
+        .{
+            .exec = options.exec,
+            .outf = options.outf,
+            .ast = options.print_ast,
+        },
+    ) catch |err| print_error_and_exit(err);
+
     var lp = lexer.LexProcess.init(&tp);
     var pp = parser.ParseProcess.init(&tp);
     defer {
         lp.deinit();
         tp.deinit();
     }
-    try lp.lex();
-    try pp.parse();
 
-    // Print all nodes
+    lp.lex() catch |err| print_error_and_exit(err);
+    pp.parse() catch |err| print_error_and_exit(err);
+
     const stdout = std.io.getStdOut().writer();
-    try stdout.print("\n=== AST Nodes ===\n", .{});
-    for (tp.nodes.items(), 0..) |node, i| {
-        try stdout.print("\nNode {d}:\n", .{i});
-        try misc.print_node(node, stdout, 0);
+    if (tp.flags.ast) {
+        stdout.print("\n=== AST Nodes ===\n", .{}) catch |err| print_error_and_exit(err);
+        for (tp.nodes.items(), 0..) |node, i| {
+            stdout.print("\nNode {d}:\n", .{i}) catch |err| print_error_and_exit(err);
+            misc.print_node(node, stdout, 0) catch |err| print_error_and_exit(err);
+        }
+    }
+
+    if (tp.flags.exec) {
+        if (tp.flags.outf) {
+            cli.compile_and_run(global_allocator, options.output_file, true) catch |err| print_error_and_exit(err);
+        } else if (tp.get_output()) |output| {
+            cli.compile_and_run(global_allocator, output, false) catch |err| print_error_and_exit(err);
+        }
     }
 }
 

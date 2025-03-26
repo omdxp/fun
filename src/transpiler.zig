@@ -9,10 +9,12 @@ const scope = @import("./scope.zig");
 
 /// TranspileProcessFlags is an enumeration that defines flags for the transpile process.
 pub const TranspileProcessFlags = packed struct {
-    /// Flag to indicate execution process.
-    exec: bool = false,
-    /// Flag to indicate output file process.
+    /// Flag to indicate execution process. When true, the output will be compiled and executed.
+    exec: bool = true,
+    /// Flag to indicate output file process. When true, the .c file will be generated.
     outf: bool = false,
+    /// Flag to print AST nodes. When true, prints the Abstract Syntax Tree nodes.
+    ast: bool = false,
 };
 
 /// `TranspileProcess` represents the state and configuration of a transpilation process.
@@ -24,7 +26,10 @@ pub const TranspileProcess = struct {
     /// `ifile` is the input file being read for transpilation.
     ifile: fs.File,
     /// `ofile` is the output file where the transpiled code will be written.
-    ofile: fs.File,
+    /// Only used when outf flag is true.
+    ofile: ?fs.File,
+    /// Buffer to store generated C code when outf is false
+    outbuf: ?std.ArrayList(u8),
     /// `tokens` is a vector of tokens generated from the input file.
     tokens: misc.Vector(token.Token),
     /// `nodes` is a list of AST (Abstract Syntax Tree) nodes.
@@ -60,13 +65,21 @@ pub const TranspileProcess = struct {
     /// - Returns an error if opening the input file or creating the output file fails.
     pub fn init(allocator: mem.Allocator, ifilepath: []const u8, ofilepath: []const u8, flags: TranspileProcessFlags) !Self {
         const ifile = try fs.cwd().openFile(ifilepath, .{ .mode = .read_write });
-        const ofile = try fs.cwd().createFile(ofilepath, .{ .read = true });
+        var ofile: ?fs.File = null;
+        var outbuf: ?std.ArrayList(u8) = null;
+
+        if (flags.outf) {
+            ofile = try fs.cwd().createFile(ofilepath, .{ .read = true });
+        } else {
+            outbuf = std.ArrayList(u8).init(allocator);
+        }
 
         return Self{
             .flags = flags,
             .pos = .{ .col = 1, .line = 1, .filename = ifilepath },
             .ifile = ifile,
             .ofile = ofile,
+            .outbuf = outbuf,
             .tokens = misc.Vector(token.Token).init(allocator),
             .nodes = misc.Vector(ast.Node).init(allocator),
             .allocator = allocator,
@@ -392,7 +405,12 @@ pub const TranspileProcess = struct {
     /// - This function does not return any value.
     pub fn deinit(self: *Self) void {
         self.ifile.close();
-        self.ofile.close();
+        if (self.ofile) |f| {
+            f.close();
+        }
+        if (self.outbuf) |*buf| {
+            buf.deinit();
+        }
         for (self.tokens.items()) |t| {
             switch (t.data) {
                 .sval => t.data.sval.deinit(),
@@ -404,6 +422,25 @@ pub const TranspileProcess = struct {
             self.deinit_node(node);
         }
         self.nodes.deinit();
+    }
+
+    /// Gets the output as a string. Only valid when outf is false.
+    pub fn get_output(self: *Self) ?[]const u8 {
+        if (self.outbuf) |*buf| {
+            return buf.items;
+        }
+        return null;
+    }
+
+    /// Write to output (either file or buffer)
+    pub fn write(self: *Self, bytes: []const u8) !void {
+        if (self.flags.outf) {
+            if (self.ofile) |f| {
+                try f.writeAll(bytes);
+            }
+        } else if (self.outbuf) |*buf| {
+            try buf.appendSlice(bytes);
+        }
     }
 };
 
