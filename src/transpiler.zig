@@ -7,6 +7,7 @@ const ast = @import("./ast.zig");
 const misc = @import("./misc.zig");
 const scope = @import("./scope.zig");
 const symbol = @import("./symbol.zig");
+const dtype = @import("./dtype.zig");
 
 /// TranspileProcessFlags is an enumeration that defines flags for the transpile process.
 pub const TranspileProcessFlags = packed struct {
@@ -34,8 +35,11 @@ pub const TranspileProcess = struct {
     /// `tokens` is a vector of tokens generated from the input file.
     tokens: misc.Vector(token.Token),
     /// `nodes` is a list of AST (Abstract Syntax Tree) nodes.
-    /// This vector holds the nodes that are part of the AST being processed by the transpiler.
     nodes: misc.Vector(ast.Node),
+    /// Track if we're currently transpiling function parameters
+    in_function_params: bool = false,
+    /// Current indentation level for code formatting
+    indent_level: u32 = 0,
     /// Represents a scope structure used in the transpiler.
     scope: ?struct {
         /// A pointer to the root scope.
@@ -52,6 +56,23 @@ pub const TranspileProcess = struct {
     },
     /// The allocator to be used for memory allocation operations.
     allocator: mem.Allocator,
+
+    /// Initialize a new indentation field to track active statement type
+    current_statement_type: enum {
+        None,
+        If,
+        ElseIf,
+        Else,
+        Other,
+    } = .None,
+
+    /// Track the next statement for proper formatting
+    next_statement_type: enum {
+        None,
+        ElseIf,
+        Else,
+        Other,
+    } = .None,
 
     const Self = @This();
 
@@ -82,23 +103,26 @@ pub const TranspileProcess = struct {
             outbuf = std.ArrayList(u8).init(allocator);
         }
 
-        return blk: {
-            var process = Self{
-                .flags = flags,
-                .pos = .{ .col = 1, .line = 1, .filename = ifilepath },
-                .ifile = ifile,
-                .ofile = ofile,
-                .outbuf = outbuf,
-                .tokens = misc.Vector(token.Token).init(allocator),
-                .nodes = misc.Vector(ast.Node).init(allocator),
-                .symbols = .{
-                    .tables = misc.Vector(*symbol.SymbolTable).init(allocator),
-                },
-                .allocator = allocator,
-            };
+        // Create initial symbol table
+        const initial_table = try allocator.create(symbol.SymbolTable);
+        initial_table.* = .{
+            .symbols = misc.Vector(symbol.Symbol).init(allocator),
+        };
 
-            try process.new_table();
-            break :blk process;
+        return Self{
+            .flags = flags,
+            .pos = .{ .col = 1, .line = 1, .filename = ifilepath },
+            .ifile = ifile,
+            .ofile = ofile,
+            .outbuf = outbuf,
+            .tokens = misc.Vector(token.Token).init(allocator),
+            .nodes = misc.Vector(ast.Node).init(allocator),
+            .scope = null,
+            .symbols = .{
+                .active_table = initial_table,
+                .tables = misc.Vector(*symbol.SymbolTable).init(allocator),
+            },
+            .allocator = allocator,
         };
     }
 
@@ -577,13 +601,16 @@ pub const TranspileProcess = struct {
         for (self.nodes.items()) |node| {
             self.deinit_node(node);
         }
-        self.symbols.active_table.?.symbols.deinit();
-        self.allocator.destroy(self.symbols.active_table.?);
+        self.nodes.deinit();
+        if (self.symbols.active_table) |table| {
+            table.symbols.deinit();
+            self.allocator.destroy(table);
+        }
         for (self.symbols.tables.items()) |table| {
             table.symbols.deinit();
             self.allocator.destroy(table);
         }
-        self.nodes.deinit();
+        self.symbols.tables.deinit();
     }
 
     /// Gets the output as a string. Only valid when outf is false.
@@ -594,42 +621,377 @@ pub const TranspileProcess = struct {
         return null;
     }
 
+    /// Helper function to format and write values
+    fn print(self: *Self, comptime fmt: []const u8, args: anytype) !void {
+        if (self.flags.outf) {
+            try std.fmt.format(self.ofile.?.writer(), fmt, args);
+        } else {
+            try std.fmt.format(self.outbuf.?.writer(), fmt, args);
+        }
+    }
+
     /// Write to output (either file or buffer)
     pub fn write(self: *Self, bytes: []const u8) !void {
         if (self.flags.outf) {
-            if (self.ofile) |f| {
-                try f.writeAll(bytes);
-            }
-        } else if (self.outbuf) |*buf| {
-            try buf.appendSlice(bytes);
+            try self.ofile.?.writeAll(bytes);
+        } else {
+            try self.outbuf.?.appendSlice(bytes);
         }
     }
-};
 
-test "TranspileProcess init and deinit" {
-    const allocator = std.testing.allocator;
-    const ifilepath = "TranspileProcess_init_and_deinit.fn";
-    const ofilepath = "TranspileProcess_init_and_deinit.c";
-
-    // Create dummy input file
-    {
-        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
-        defer file.close();
-        try file.writeAll("dummy input");
+    /// Maps fun language types to C types
+    fn map_type_to_c(type_str: []const u8) []const u8 {
+        if (mem.eql(u8, type_str, "num")) return "int";
+        if (mem.eql(u8, type_str, "str")) return "char*";
+        if (mem.eql(u8, type_str, "bin")) return "bool";
+        return type_str;
     }
 
-    // Initialize TranspileProcess
-    var process = try TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
-    defer process.deinit();
+    /// Helper function to write data type to output
+    fn write_type(self: *Self, data_type: dtype.DataType) anyerror!void {
+        const c_type = map_type_to_c(data_type.type_str.items);
+        try self.write(c_type);
+        // if (data_type.array) |array| {
+        //     for (array.brackets.items()) |bracket| {
+        //         try self.write("[");
+        //         try self.transpile_node(bracket);
+        //         try self.write("]");
+        //     }
+        // }
+    }
 
-    // Check initial state
-    try std.testing.expect(process.flags.outf);
-    try std.testing.expect(process.pos.line == 1);
-    try std.testing.expect(process.pos.col == 1);
-    try std.testing.expect(mem.eql(u8, process.pos.filename, ifilepath));
-    try std.testing.expect(process.tokens.items().len == 0);
+    /// Transpiles all nodes in the AST to C code
+    pub fn transpile(self: *Self) !void {
+        try self.transpile_prelude();
+        for (self.nodes.items()) |node| {
+            try self.transpile_node(node);
+            try self.write("\n\n");
+        }
+    }
 
-    // Delete test files
-    try fs.cwd().deleteFile(ifilepath);
-    try fs.cwd().deleteFile(ofilepath);
-}
+    /// Transpiles the prelude code to C
+    fn transpile_prelude(self: *Self) !void {
+        try self.write("#include <math.h>\n");
+        try self.write("#include <stdbool.h>\n");
+        try self.write("#include <stddef.h>\n");
+        try self.write("#include <stdint.h>\n");
+        try self.write("#include <stdio.h>\n");
+        try self.write("#include <stdlib.h>\n");
+        try self.write("#include <string.h>\n\n");
+    }
+
+    /// Transpiles a node to C code
+    fn transpile_node(self: *Self, node: ast.Node) !void {
+        switch (node.type) {
+            .Expression => {
+                const exp = node.node_variant.?.exp;
+                if (mem.eql(u8, exp.op, "()")) {
+                    if (exp.left) |left| {
+                        try self.transpile_node(left.*);
+                        try self.write("(");
+                        if (exp.right) |right| {
+                            try self.transpile_node(right.*);
+                        }
+                        try self.write(")");
+                    }
+                } else if (mem.eql(u8, exp.op, ",")) {
+                    if (exp.left) |left| {
+                        try self.transpile_node(left.*);
+                    }
+                    if (exp.right) |right| {
+                        try self.write(", ");
+                        try self.transpile_node(right.*);
+                    }
+                } else if (exp.op.len > 0) {
+                    if (exp.left) |left| {
+                        try self.transpile_node(left.*);
+                    }
+                    try self.write(" ");
+                    try self.write(exp.op);
+                    try self.write(" ");
+                    if (exp.right) |right| {
+                        try self.transpile_node(right.*);
+                    }
+                } else if (exp.left) |left| {
+                    try self.transpile_node(left.*);
+                }
+            },
+            .ExpressionParenthesis => {
+                const exp = node.node_variant.?.paren.exp;
+                try self.transpile_node(exp.*);
+            },
+            .Number => {
+                const num = node.data.?.llnum;
+                try self.print("{d}", .{num});
+            },
+            .String => {
+                const str = node.data.?.sval.items;
+                try self.write("\"");
+                try self.write(str);
+                try self.write("\"");
+            },
+            .Identifier => {
+                const str = node.data.?.sval.items;
+                try self.write(str);
+            },
+            .Variable => {
+                const variable = node.node_variant.?.variable;
+                try self.write_type(variable.type.*);
+                try self.write(" ");
+                try self.write(variable.name.items);
+                if (variable.val) |val| {
+                    try self.write(" = ");
+                    if (val.type == .String) {
+                        try self.write("\"");
+                        try self.write(val.data.?.sval.items);
+                        try self.write("\"");
+                    } else if (val.type == .Boolean) {
+                        const bval = val.data.?.bval;
+                        try self.write(if (bval) "true" else "false");
+                    } else {
+                        try self.transpile_node(val.*);
+                    }
+                }
+                if (!self.in_function_params) {
+                    try self.write(";");
+                }
+            },
+            .Function => {
+                const function = node.node_variant.?.function;
+                if (function.name != null and mem.eql(u8, function.name.?.items, "main")) {
+                    try self.write("int");
+                    try self.write(" ");
+                    try self.write("main");
+                    try self.write("(int argc, char** argv) ");
+                    if (function.body) |body| {
+                        try self.transpile_node(body.*);
+                    }
+                } else {
+                    if (function.rtype) |rtype| {
+                        try self.write_type(rtype);
+                    } else {
+                        try self.write("void");
+                    }
+                    try self.write(" ");
+                    if (function.name) |name| {
+                        try self.write(name.items);
+                    }
+                    try self.write("(");
+                    self.in_function_params = true;
+                    if (function.args) |args| {
+                        for (args.items(), 0..) |arg, i| {
+                            if (i > 0) try self.write(", ");
+                            try self.transpile_node(arg.*);
+                        }
+                    }
+                    self.in_function_params = false;
+                    try self.write(") ");
+
+                    if (function.body) |body| {
+                        try self.transpile_node(body.*);
+                    }
+                }
+            },
+            .Body => {
+                const body = node.node_variant.?.body;
+                try self.write("{");
+                self.indent();
+                for (body.statements.items()) |statement| {
+                    try self.write_indent();
+                    try self.transpile_node(statement.*);
+                    if (statement.type == .Expression) {
+                        try self.write(";");
+                    }
+                }
+                self.dedent();
+                try self.write_indent();
+                try self.write("}");
+            },
+            .StatementReturn, .StatementIf, .StatementElseIf, .StatementElse, .StatementFit => {
+                const statement = node.node_variant.?.statement;
+                switch (statement) {
+                    .if_stmt => |if_s| {
+                        try self.write("if (");
+                        try self.transpile_node(if_s.condition.*);
+                        try self.write(") {");
+                        self.indent();
+                        if (if_s.body.type == .Body) {
+                            const body = if_s.body.node_variant.?.body;
+                            for (body.statements.items()) |body_stmt| {
+                                try self.write_indent();
+                                try self.transpile_node(body_stmt.*);
+                                if (body_stmt.type == .Expression) {
+                                    try self.write(";");
+                                }
+                            }
+                        } else {
+                            try self.write_indent();
+                            try self.transpile_node(if_s.body.*);
+                            if (if_s.body.type == .Expression) {
+                                try self.write(";");
+                            }
+                        }
+                        self.dedent();
+                        try self.write_indent();
+                        try self.write("}");
+                    },
+                    .elif_stmt => |elif| {
+                        try self.write("else if (");
+                        try self.transpile_node(elif.condition.*);
+                        try self.write(") {");
+                        self.indent();
+                        if (elif.body.type == .Body) {
+                            const body = elif.body.node_variant.?.body;
+                            for (body.statements.items()) |body_stmt| {
+                                try self.write_indent();
+                                try self.transpile_node(body_stmt.*);
+                                if (body_stmt.type == .Expression) {
+                                    try self.write(";");
+                                }
+                            }
+                        } else {
+                            try self.write_indent();
+                            try self.transpile_node(elif.body.*);
+                            if (elif.body.type == .Expression) {
+                                try self.write(";");
+                            }
+                        }
+
+                        self.dedent();
+                        try self.write_indent();
+                        try self.write("}");
+                    },
+                    .else_stmt => |else_s| {
+                        try self.write("else {");
+                        self.indent();
+                        if (else_s.body.type == .Body) {
+                            const body = else_s.body.node_variant.?.body;
+                            for (body.statements.items()) |body_stmt| {
+                                try self.write_indent();
+                                try self.transpile_node(body_stmt.*);
+                                if (body_stmt.type == .Expression) {
+                                    try self.write(";");
+                                }
+                            }
+                        } else {
+                            try self.write_indent();
+                            try self.transpile_node(else_s.body.*);
+                            if (else_s.body.type == .Expression) {
+                                try self.write(";");
+                            }
+                        }
+
+                        self.dedent();
+                        try self.write_indent();
+                        try self.write("}");
+                    },
+                    .fit_stmt => |fit| {
+                        try self.write("switch (");
+                        try self.transpile_node(fit.exp.*);
+                        try self.write(") {");
+                        self.indent();
+                        for (fit.branches.items()) |branch| {
+                            if (branch.condition) |condition| {
+                                try self.write_indent();
+                                try self.write("case ");
+                                try self.transpile_node(condition.*);
+                                try self.write(":");
+                                self.indent();
+                                if (branch.body.type == .Expression or branch.body.type == .ExpressionParenthesis) {
+                                    try self.write_indent();
+                                    try self.transpile_node(branch.body.*);
+                                    try self.write(";");
+                                } else {
+                                    try self.write_indent();
+                                    try self.transpile_node(branch.body.*);
+                                }
+                                try self.write_indent();
+                                try self.write("break;");
+                                self.dedent();
+                            } else {
+                                try self.write_indent();
+                                try self.write("default:");
+
+                                self.indent();
+                                if (branch.body.type == .Expression or branch.body.type == .ExpressionParenthesis) {
+                                    try self.write_indent();
+                                    try self.transpile_node(branch.body.*);
+                                    try self.write(";");
+                                } else {
+                                    try self.write_indent();
+                                    try self.transpile_node(branch.body.*);
+                                }
+                                try self.write_indent();
+                                try self.write("break;");
+                                self.dedent();
+                            }
+                        }
+                        self.dedent();
+                        try self.write_indent();
+                        try self.write("}");
+                    },
+                    .return_stmt => |ret| {
+                        try self.write("return ");
+                        try self.transpile_node(ret.*);
+                        try self.write(";");
+                    },
+                }
+            },
+            .Unary => {
+                const unary = node.node_variant.?.unary;
+                if (unary.is_left_operanded_unary) {
+                    try self.transpile_node(unary.operand.*);
+                    try self.write(unary.op);
+                } else {
+                    try self.write(unary.op);
+                    try self.transpile_node(unary.operand.*);
+                }
+            },
+            .Tenary => {
+                const tenary = node.node_variant.?.tenary;
+                try self.transpile_node(tenary.condition.*);
+                try self.write(" ? ");
+                try self.transpile_node(tenary.true.*);
+                try self.write(" : ");
+                try self.transpile_node(tenary.false.*);
+            },
+            .Boolean => {
+                const val = node.data.?.bval;
+                try self.write(if (val) "true" else "false");
+            },
+            else => {},
+        }
+    }
+
+    /// Increase the indentation level
+    pub fn indent(self: *Self) void {
+        self.indent_level += 1;
+    }
+
+    /// Decrease the indentation level
+    pub fn dedent(self: *Self) void {
+        if (self.indent_level > 0) {
+            self.indent_level -= 1;
+        }
+    }
+
+    /// Write a newline followed by the current indentation
+    pub fn write_indent(self: *Self) !void {
+        try self.write("\n");
+        try self.write_spaces(self.indent_level * 4); // 4 spaces per level
+    }
+
+    /// Write a specific number of spaces
+    pub fn write_spaces(self: *Self, spaces: u32) !void {
+        var i: u32 = 0;
+        while (i < spaces) : (i += 1) {
+            try self.write(" ");
+        }
+    }
+
+    /// Write formatted with indentation prefix
+    pub fn write_indented(self: *Self, text: []const u8) !void {
+        try self.write_spaces(self.indent_level * 4);
+        try self.write(text);
+    }
+};

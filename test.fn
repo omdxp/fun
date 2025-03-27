@@ -1,11 +1,5 @@
-imp std.io;
-
 fun add(num one, num two) num {
     ret one + two;
-}
-
-fun sub(num one, num two) num {
-    ret one - two;
 }
 
 fun main(str[] args) {

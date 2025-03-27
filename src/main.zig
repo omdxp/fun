@@ -76,6 +76,8 @@ pub fn main() void {
         }
     }
 
+    tp.transpile() catch |err| print_error_and_exit(err);
+
     if (tp.flags.exec) {
         if (tp.flags.outf) {
             cli.compile_and_run(global_allocator, options.output_file, true) catch |err| print_error_and_exit(err);
