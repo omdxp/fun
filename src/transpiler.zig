@@ -6,6 +6,7 @@ const token = @import("./token.zig");
 const ast = @import("./ast.zig");
 const misc = @import("./misc.zig");
 const scope = @import("./scope.zig");
+const symbol = @import("./symbol.zig");
 
 /// TranspileProcessFlags is an enumeration that defines flags for the transpile process.
 pub const TranspileProcessFlags = packed struct {
@@ -42,6 +43,13 @@ pub const TranspileProcess = struct {
         /// A pointer to the current scope.
         current: ?*scope.Scope,
     } = null,
+    /// Represents a struct containing the active symbol table and a list of symbol tables.
+    symbols: struct {
+        /// The active symbol table.
+        active_table: ?*symbol.SymbolTable = null,
+        /// A list of symbol tables.
+        tables: misc.Vector(symbol.SymbolTable),
+    },
     /// The allocator to be used for memory allocation operations.
     allocator: mem.Allocator,
 
@@ -82,6 +90,9 @@ pub const TranspileProcess = struct {
             .outbuf = outbuf,
             .tokens = misc.Vector(token.Token).init(allocator),
             .nodes = misc.Vector(ast.Node).init(allocator),
+            .symbols = .{
+                .tables = misc.Vector(symbol.SymbolTable).init(allocator),
+            },
             .allocator = allocator,
         };
     }
@@ -123,6 +134,146 @@ pub const TranspileProcess = struct {
             self.pos.line,
             self.pos.col,
         });
+    }
+
+    /// Creates a new symbol table and sets it as the active table.
+    ///
+    /// This function creates a new symbol table and initializes its symbols vector.
+    /// If there is an existing active table, it is pushed to the list of tables before
+    /// the new table is created and set as the active table.
+    ///
+    /// Parameters:
+    /// - `self`: The instance of the transpiler.
+    ///
+    /// Errors:
+    /// - Returns an error if creating the new symbol table or initializing its symbols fails.
+    pub fn new_table(self: *Self) !void {
+        if (self.symbols.active_table) |table| {
+            try self.symbols.tables.push(table);
+        }
+        const table = try self.allocator.create(symbol.SymbolTable);
+        table.*.symbols = misc.Vector(symbol.Symbol).init(self.allocator);
+        self.symbols.active_table = table;
+    }
+
+    /// Ends the current active symbol table and restores the previous one.
+    ///
+    /// This function removes the current active symbol table from the list of tables
+    /// and sets the last table in the list as the new active table.
+    ///
+    /// Parameters:
+    /// - `self`: The instance of the transpiler.
+    pub fn end_table(self: *Self) void {
+        const last_table = self.symbols.tables.back();
+        self.symbols.active_table = last_table;
+        self.symbols.tables.pop();
+    }
+
+    /// Pushes a symbol to the active symbol table.
+    ///
+    /// This function adds the specified symbol to the active symbol table.
+    ///
+    /// Parameters:
+    /// - `self`: The instance of the transpiler.
+    /// - `s (symbol.Symbol)`: The symbol to be added.
+    ///
+    /// Errors:
+    /// - Returns an error if the symbol cannot be added to the active symbol table.
+    pub fn push_symbol(self: *Self, s: symbol.Symbol) !void {
+        try self.symbols.active_table.?.symbols.push(s);
+    }
+
+    /// Retrieves a symbol by name from the active symbol table.
+    ///
+    /// This function searches for a symbol with the specified name in the active symbol table.
+    ///
+    /// Parameters:
+    /// - `self`: The instance of the transpiler.
+    /// - `name ( []const u8 )`: The name of the symbol to search for.
+    ///
+    /// Returns:
+    /// - `?symbol.Symbol`: The symbol if found, otherwise `null`.
+    pub fn get_symbol(self: *Self, name: []const u8) ?symbol.Symbol {
+        for (self.symbols.active_table.?.symbols.items()) |s| {
+            if (mem.eql(u8, s.name, name)) {
+                return s;
+            }
+        }
+        return null;
+    }
+
+    /// Retrieves a native function symbol by name from all symbol tables.
+    ///
+    /// This function searches for a symbol with the specified name and type `NativeFunction`
+    /// in all symbol tables.
+    ///
+    /// Parameters:
+    /// - `self`: The instance of the transpiler.
+    /// - `name ( []const u8 )`: The name of the native function to search for.
+    ///
+    /// Returns:
+    /// - `?symbol.Symbol`: The native function symbol if found, otherwise `null`.
+    pub fn get_symbol_for_native_function(self: *Self, name: []const u8) ?symbol.Symbol {
+        for (self.symbols.tables.items()) |table| {
+            for (table.symbols.items()) |s| {
+                if (s.type == symbol.SymbolType.NativeFunction and mem.eql(u8, s.name, name)) {
+                    return s;
+                }
+            }
+        }
+        return null;
+    }
+
+    /// Registers a new symbol in the active symbol table.
+    ///
+    /// This function checks if a symbol with the same name already exists in the active symbol table.
+    /// If it does, an error is logged. Otherwise, the symbol is added to the active symbol table.
+    ///
+    /// Parameters:
+    /// - `self`: The instance of the transpiler.
+    /// - `s (symbol.Symbol)`: The symbol to register.
+    ///
+    /// Errors:
+    /// - Logs an error if a symbol with the same name already exists.
+    /// - Returns an error if the symbol cannot be added to the active symbol table.
+    pub fn register_symbol(self: *Self, s: symbol.Symbol) !void {
+        if (self.get_symbol(s.name)) {
+            self.err("Symbol '{s}' already defined", s.name);
+        }
+        try self.push_symbol(s);
+    }
+
+    /// Registers a symbol for a given AST node.
+    ///
+    /// This function creates a symbol for the provided AST node and registers it in the active symbol table.
+    /// The symbol type is set to `Node`, and the symbol name is derived from the node's variant (e.g., variable or function).
+    ///
+    /// Parameters:
+    /// - `self`: The instance of the transpiler.
+    /// - `node (*ast.Node)`: The AST node for which the symbol will be registered.
+    ///
+    /// Errors:
+    /// - Returns an error if registering the symbol fails.
+    pub fn register_node_symbol(self: *Self, node: *ast.Node) !void {
+        switch (node.node_variant) {
+            .variable => |variable| {
+                const s = symbol.Symbol{
+                    .type = symbol.SymbolType.Node,
+                    .name = variable.name,
+                    .data = node,
+                };
+                try self.register_symbol(s);
+            },
+            .function => |function| {
+                const s = symbol.Symbol{
+                    .type = symbol.SymbolType.Node,
+                    .name = function.name,
+                    .data = node,
+                };
+                try self.register_symbol(s);
+            },
+            else => {},
+        }
     }
 
     /// Initializes the root scope for the transpiler.
@@ -420,6 +571,9 @@ pub const TranspileProcess = struct {
         self.tokens.deinit();
         for (self.nodes.items()) |node| {
             self.deinit_node(node);
+        }
+        for (self.symbols.tables.items()) |table| {
+            table.symbols.deinit();
         }
         self.nodes.deinit();
     }
