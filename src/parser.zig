@@ -1869,6 +1869,7 @@ pub const ParseProcess = struct {
 
         try self.parse_keyword(&hist);
         const n = self.node_pop();
+        try self.transpile_proc.register_node_symbol(n.?);
         try self.transpile_proc.nodes.push(n.?);
     }
 

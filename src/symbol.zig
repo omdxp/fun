@@ -18,7 +18,12 @@ pub const Symbol = struct {
     /// The name of the symbol.
     name: []const u8,
     /// A pointer to the data associated with the symbol.
-    data: *anyopaque,
+    data: ?union {
+        /// A node symbol.
+        node: ast.Node,
+        /// A native function symbol.
+        native_function: *anyopaque,
+    } = null,
 };
 
 /// Represents a symbol table, which maps symbol names to symbols.
@@ -28,9 +33,9 @@ pub const SymbolTable = struct {
 };
 
 /// Get a node symbol from a symbol.
-pub fn get_node_symbol(s: Symbol) ?*ast.Node {
+pub fn get_node_symbol(s: Symbol) ?ast.Node {
     if (s.type == SymbolType.Node) {
-        return s.data;
+        return s.data.?.node;
     }
     return null;
 }

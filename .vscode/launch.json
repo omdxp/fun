@@ -6,7 +6,11 @@
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/zig-out/bin/fun",
-            "args": [],
+            "args": [
+                "-in",
+                "test.fn",
+                "-no-exec",
+            ],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "environment": [],

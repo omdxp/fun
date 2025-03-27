@@ -4,6 +4,10 @@ fun add(num one, num two) num {
     ret one + two;
 }
 
+fun sub(num one, num two) num {
+    ret one - two;
+}
+
 fun main(str[] args) {
     num res = add(1, 2); // add two numbers
     if res == 3 {

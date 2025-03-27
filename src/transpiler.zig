@@ -112,8 +112,8 @@ pub const TranspileProcess = struct {
     /// - `fmt`: The format string for the error message.
     /// - `args`: The arguments for the format string.
     pub fn err(self: *Self, comptime fmt: []const u8, args: anytype) void {
-        self.deinit();
         const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
+        self.deinit();
         std.debug.panic("Error: {s} in {s}:{d}:{d}\n", .{
             msg,
             self.pos.filename,
@@ -242,8 +242,8 @@ pub const TranspileProcess = struct {
     /// - Logs an error if a symbol with the same name already exists.
     /// - Returns an error if the symbol cannot be added to the active symbol table.
     pub fn register_symbol(self: *Self, s: symbol.Symbol) !void {
-        if (self.get_symbol(s.name)) {
-            self.err("Symbol '{s}' already defined", s.name);
+        if (self.get_symbol(s.name) != null) {
+            self.err("Symbol '{s}' already defined", .{s.name});
         }
         try self.push_symbol(s);
     }
@@ -259,21 +259,21 @@ pub const TranspileProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if registering the symbol fails.
-    pub fn register_node_symbol(self: *Self, node: *ast.Node) !void {
-        switch (node.node_variant) {
+    pub fn register_node_symbol(self: *Self, node: ast.Node) !void {
+        switch (node.node_variant.?) {
             .variable => |variable| {
                 const s = symbol.Symbol{
                     .type = symbol.SymbolType.Node,
-                    .name = variable.name,
-                    .data = node,
+                    .name = variable.name.items,
+                    .data = .{ .node = node },
                 };
                 try self.register_symbol(s);
             },
             .function => |function| {
                 const s = symbol.Symbol{
                     .type = symbol.SymbolType.Node,
-                    .name = function.name,
-                    .data = node,
+                    .name = function.name.?.items,
+                    .data = .{ .node = node },
                 };
                 try self.register_symbol(s);
             },
