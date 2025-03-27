@@ -6,7 +6,6 @@ const lexer = @import("./lexer.zig");
 const parser = @import("./parser.zig");
 const misc = @import("./misc.zig");
 const cli = @import("./cli.zig");
-const symbol = @import("./symbol.zig");
 
 fn print_error_and_exit(err: anyerror) noreturn {
     const stderr = std.io.getStdErr().writer();
