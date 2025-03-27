@@ -48,7 +48,7 @@ pub const TranspileProcess = struct {
         /// The active symbol table.
         active_table: ?*symbol.SymbolTable = null,
         /// A list of symbol tables.
-        tables: misc.Vector(symbol.SymbolTable),
+        tables: misc.Vector(*symbol.SymbolTable),
     },
     /// The allocator to be used for memory allocation operations.
     allocator: mem.Allocator,
@@ -82,18 +82,23 @@ pub const TranspileProcess = struct {
             outbuf = std.ArrayList(u8).init(allocator);
         }
 
-        return Self{
-            .flags = flags,
-            .pos = .{ .col = 1, .line = 1, .filename = ifilepath },
-            .ifile = ifile,
-            .ofile = ofile,
-            .outbuf = outbuf,
-            .tokens = misc.Vector(token.Token).init(allocator),
-            .nodes = misc.Vector(ast.Node).init(allocator),
-            .symbols = .{
-                .tables = misc.Vector(symbol.SymbolTable).init(allocator),
-            },
-            .allocator = allocator,
+        return blk: {
+            var process = Self{
+                .flags = flags,
+                .pos = .{ .col = 1, .line = 1, .filename = ifilepath },
+                .ifile = ifile,
+                .ofile = ofile,
+                .outbuf = outbuf,
+                .tokens = misc.Vector(token.Token).init(allocator),
+                .nodes = misc.Vector(ast.Node).init(allocator),
+                .symbols = .{
+                    .tables = misc.Vector(*symbol.SymbolTable).init(allocator),
+                },
+                .allocator = allocator,
+            };
+
+            try process.new_table();
+            break :blk process;
         };
     }
 
@@ -572,8 +577,11 @@ pub const TranspileProcess = struct {
         for (self.nodes.items()) |node| {
             self.deinit_node(node);
         }
+        self.symbols.active_table.?.symbols.deinit();
+        self.allocator.destroy(self.symbols.active_table.?);
         for (self.symbols.tables.items()) |table| {
             table.symbols.deinit();
+            self.allocator.destroy(table);
         }
         self.nodes.deinit();
     }
