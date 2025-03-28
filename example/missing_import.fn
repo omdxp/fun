@@ -1,0 +1,6 @@
+// This file tries to import a non-existent file
+imp nonexistent_file;
+
+fun main() {
+    printf("This should show an error about the missing import\n");
+}

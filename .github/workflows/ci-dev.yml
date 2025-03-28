@@ -22,7 +22,7 @@ jobs:
       - uses: goto-bus-stop/setup-zig@v2
         with:
           version: 0.14.0
-      - run: zig build -fincremental run -- -in test.fn -no-exec -ast
+      - run: zig build -fincremental run -- -in example/test.fn -no-exec -ast
   lint:
     runs-on: ubuntu-latest
     steps:

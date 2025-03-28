@@ -1,0 +1,7 @@
+imp std.io;
+imp custom;
+
+fun main() {
+    num result = add(5, 10);
+    printf("The result of adding 5 and 10 is: %d\n", result);
+}
