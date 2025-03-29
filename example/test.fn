@@ -4,5 +4,19 @@ imp folder.subfolder.subfolder2.subfolder3.custom2;
 
 fun main() {
     num result = add(5, 10);
-    printf("The result of adding 5 and 10 is: %d\n", result);
+    if result != 15 {
+        printf("Error: Expected 15, got %d\n", result);
+    } else {
+        printf("The result of adding 5 and 10 is: %d\n", result);
+    }
+    
+    result = sub(10, 5);
+    fit result {
+        5 -> {
+            printf("The result of subtracting 5 from 10 is: %d\n", result);
+        }
+        _ -> {
+            printf("Error: Expected 5, got %d\n", result);
+        }
+    }
 }

@@ -5,6 +5,7 @@ const process = std.process;
 const Child = std.process.Child;
 const transpiler = @import("./transpiler.zig");
 const misc = @import("./misc.zig");
+const builtin = @import("builtin");
 
 /// Errors that can occur during CLI operations
 pub const CliError = error{
@@ -171,8 +172,14 @@ pub fn parse_args(allocator: mem.Allocator) !CliOptions {
 /// Returns:
 /// - Might return error.CompilationFailed if GCC compilation fails.
 /// - Might return other errors from file operations or process execution.
-pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, is_file: bool) !void {
-    const exe_file = try std.fmt.allocPrint(allocator, "temp_{d}.out", .{std.time.timestamp()});
+pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, is_file: bool, input_file: []const u8) !void {
+    const input_path = std.fs.path.basename(input_file);
+    const extension_index = std.mem.lastIndexOf(u8, input_path, ".");
+    var exe_file_name: []const u8 = input_path;
+    if (extension_index) |index| {
+        exe_file_name = input_path[0..index];
+    }
+    const exe_file = try std.fmt.allocPrint(allocator, "{s}.out", .{exe_file_name});
     defer allocator.free(exe_file);
 
     const stdout = std.io.getStdOut().writer();
@@ -220,9 +227,21 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
 
     // Run the compiled program
     {
+        var exe_file_for_os: []const u8 = undefined;
+        // Windows requires .\ prefix for executables
+        // Linux and MacOS require ./ prefix for executables
+        // This is a workaround for the fact that Zig doesn't have a built-in way to check the OS
+        // and we don't want to use std.os directly
+        if (builtin.target.os.tag == .windows) {
+            exe_file_for_os = try std.fmt.allocPrint(allocator, ".\\{s}", .{exe_file});
+        } else {
+            exe_file_for_os = try std.fmt.allocPrint(allocator, "./{s}", .{exe_file});
+        }
+        errdefer allocator.free(exe_file_for_os);
+
         const result = try process.Child.run(.{
             .allocator = allocator,
-            .argv = &[_][]const u8{exe_file},
+            .argv = &[_][]const u8{exe_file_for_os},
         });
         defer {
             allocator.free(result.stdout);

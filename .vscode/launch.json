@@ -9,7 +9,6 @@
             "args": [
                 "-in",
                 "example/test.fn",
-                "-no-exec",
             ],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
