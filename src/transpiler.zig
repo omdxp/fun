@@ -133,7 +133,7 @@ pub const TranspileProcess = struct {
         // Initialize import-related structures
         var imported_files = std.StringHashMap(bool).init(allocator);
         try imported_files.put(ifilepath, true); // Mark current file as imported
-        
+
         var import_chain = std.ArrayList([]const u8).init(allocator);
         try import_chain.append(try allocator.dupe(u8, ifilepath));
 
@@ -752,16 +752,9 @@ pub const TranspileProcess = struct {
         // Write standard library includes and prelude
         try self.transpile_prelude();
 
-        // Output content from child imports first
+        // Output content from child imports recursively
         if (!self.is_importing) {
-            for (self.children.items) |child| {
-                for (child.nodes.items()) |node| {
-                    if (node.type != .Import) { // Skip import nodes in child files
-                        try self.transpile_node(node);
-                        try self.write("\n\n");
-                    }
-                }
-            }
+            try self.transpile_children_recursive(self);
         }
 
         // Now output the main file content
@@ -769,6 +762,22 @@ pub const TranspileProcess = struct {
             if (node.type != .Import) { // Skip import nodes as they've been processed
                 try self.transpile_node(node);
                 try self.write("\n\n");
+            }
+        }
+    }
+
+    // Helper function to recursively transpile children
+    fn transpile_children_recursive(self: *Self, parent_proc: *TranspileProcess) !void {
+        for (parent_proc.children.items) |child| {
+            // Recursively transpile the child's children first
+            try self.transpile_children_recursive(child);
+
+            // Then, transpile the child's own nodes (excluding imports)
+            for (child.nodes.items()) |node| {
+                if (node.type != .Import) {
+                    try self.transpile_node(node);
+                    try self.write("\n\n");
+                }
             }
         }
     }
@@ -1143,7 +1152,6 @@ pub const TranspileProcess = struct {
                 return;
             }
         }
-
         try self.std_imports.append(header_name);
     }
 
@@ -1155,12 +1163,7 @@ pub const TranspileProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if processing the import fails.
-    fn process_local_import(self: *Self, import_path: []const u8) !void {
-        if (self.is_importing) {
-            self.err("Imports cannot be nested", .{});
-            return;
-        }
-
+    fn process_local_import(self: *Self, import_path: []const u8) anyerror!void {
         // Get full path of the file to import
         var file_path = std.ArrayList(u8).init(self.allocator);
         defer file_path.deinit();
@@ -1202,7 +1205,7 @@ pub const TranspileProcess = struct {
             return;
         };
         defer self.allocator.free(file_contents);
-        
+
         // Check if the file imports us directly (crude but effective)
         const our_name = std.fs.path.stem(self.input_file_path);
         var import_line = std.ArrayList(u8).init(self.allocator);
@@ -1210,20 +1213,19 @@ pub const TranspileProcess = struct {
         try import_line.appendSlice("imp ");
         try import_line.appendSlice(our_name);
         try import_line.appendSlice(";");
-        
+
         // Check if the target file imports us
         if (std.mem.indexOf(u8, file_contents, import_line.items)) |_| {
             const basename1 = std.fs.path.basename(self.input_file_path);
             const basename2 = std.fs.path.basename(full_path);
-            
-            self.err("CIRCULAR IMPORT DETECTED: '{s}' imports '{s}', but '{s}' also imports '{s}', creating a circular dependency",
-                .{ basename1, basename2, basename2, basename1 });
+
+            self.err("CIRCULAR IMPORT DETECTED: '{s}' imports '{s}', but '{s}' also imports '{s}', creating a circular dependency", .{ basename1, basename2, basename2, basename1 });
             return;
         }
 
         // Mark this file as imported
         try self.imported_files.put(try self.allocator.dupe(u8, full_path), true);
-        
+
         // Create and initialize child transpile process
         var import_proc = try self.allocator.create(TranspileProcess);
         errdefer self.allocator.destroy(import_proc);
@@ -1231,7 +1233,6 @@ pub const TranspileProcess = struct {
         import_proc.* = try TranspileProcess.init(self.allocator, full_path, "temp.c", .{ .outf = false });
 
         import_proc.parent = self;
-        import_proc.is_importing = true;
 
         // Copy the import chain and add the current import for tracking
         for (self.import_chain.items) |chain_path| {
@@ -1255,8 +1256,36 @@ pub const TranspileProcess = struct {
         try lex_proc.lex();
         try parse_proc.parse();
 
+        // Process imports within the imported file
+        for (import_proc.nodes.items()) |node| {
+            if (node.type == .Import) {
+                try import_proc.process_import(node);
+            }
+        }
+
         // Add to children list
         try self.children.append(import_proc);
+    }
+
+    // Helper function to recursively collect std imports from children
+    fn collect_std_imports_recursive(self: *Self, target_list: *std.ArrayList([]const u8), current_proc: *TranspileProcess) !void {
+        for (current_proc.children.items) |child| {
+            // Collect from the child itself
+            for (child.std_imports.items) |header| {
+                var already_exists = false;
+                for (target_list.items) |existing| {
+                    if (mem.eql(u8, existing, header)) {
+                        already_exists = true;
+                        break;
+                    }
+                }
+                if (!already_exists) {
+                    try target_list.append(try self.allocator.dupe(u8, header)); // Dupe needed as child might be deallocated
+                }
+            }
+            // Recurse into the child's children
+            try self.collect_std_imports_recursive(target_list, child);
+        }
     }
 
     /// Write the standard library imports to the output
@@ -1267,29 +1296,41 @@ pub const TranspileProcess = struct {
     /// Errors:
     /// - Returns an error if writing the imports fails.
     fn write_std_imports(self: *Self) !void {
+        // Only the top-level process should collect and write all std imports
         if (!self.is_importing) {
-            for (self.children.items) |child| {
-                for (child.std_imports.items) |header| {
-                    var already_exists = false;
-                    for (self.std_imports.items) |existing| {
-                        if (mem.eql(u8, existing, header)) {
-                            already_exists = true;
-                            break;
-                        }
-                    }
+            var all_std_imports = std.ArrayList([]const u8).init(self.allocator);
+            defer {
+                // Free the duplicated strings in the collected list
+                for (all_std_imports.items) |item| {
+                    self.allocator.free(item);
+                }
+                all_std_imports.deinit();
+            }
 
-                    if (!already_exists) {
-                        const header_copy = try self.allocator.dupe(u8, header);
-                        try self.std_imports.append(header_copy);
+            // Add imports from the main process itself
+            for (self.std_imports.items) |header| {
+                // Check for duplicates before adding
+                var already_exists = false;
+                for (all_std_imports.items) |existing| {
+                    if (mem.eql(u8, existing, header)) {
+                        already_exists = true;
+                        break;
                     }
                 }
+                if (!already_exists) {
+                    try all_std_imports.append(try self.allocator.dupe(u8, header));
+                }
             }
-        }
 
-        for (self.std_imports.items) |header| {
-            try self.write("#include <");
-            try self.write(header);
-            try self.write(">\n");
+            // Recursively collect imports from all children
+            try self.collect_std_imports_recursive(&all_std_imports, self);
+
+            // Write the collected unique imports
+            for (all_std_imports.items) |header| {
+                try self.write("#include <");
+                try self.write(header);
+                try self.write(">\n");
+            }
         }
     }
 };

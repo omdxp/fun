@@ -1,0 +1,5 @@
+imp std.io;
+
+fun grand_child() {
+	printf("grand_child\n");
+}

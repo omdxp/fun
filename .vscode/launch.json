@@ -8,7 +8,7 @@
             "program": "${workspaceFolder}/zig-out/bin/fun",
             "args": [
                 "-in",
-                "example/test.fn",
+                "example/imports.fn",
                 "-no-exec",
             ],
             "stopAtEntry": false,
