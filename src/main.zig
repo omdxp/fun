@@ -76,11 +76,13 @@ pub fn main() void {
         }
     }
 
+    tp.transpile() catch |err| print_error_and_exit(err);
+
     if (tp.flags.exec) {
         if (tp.flags.outf) {
-            cli.compile_and_run(global_allocator, options.output_file, true) catch |err| print_error_and_exit(err);
+            cli.compile_and_run(global_allocator, options.output_file, true, options.input_file) catch |err| print_error_and_exit(err);
         } else if (tp.get_output()) |output| {
-            cli.compile_and_run(global_allocator, output, false) catch |err| print_error_and_exit(err);
+            cli.compile_and_run(global_allocator, output, false, options.input_file) catch |err| print_error_and_exit(err);
         }
     }
 }

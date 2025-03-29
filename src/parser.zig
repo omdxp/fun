@@ -1766,19 +1766,24 @@ pub const ParseProcess = struct {
         if (folder_token.?.type != .Identifier) {
             self.transpile_proc.err("expected folder identifier, got '{?}'", .{folder_token.?.type});
         }
+
         var import_name = std.ArrayList(u8).init(self.transpile_proc.allocator);
         defer import_name.deinit();
         try import_name.appendSlice(folder_token.?.data.sval.items);
 
-        const next_token = try self.token_peek_next();
-        if (next_token != null and next_token.?.type == .Operator and misc.is_access_operator(next_token.?.data.sval.items)) {
+        while (true) {
+            const next_token = try self.token_peek_next();
+            if (next_token == null or next_token.?.type != .Operator or !misc.is_access_operator(next_token.?.data.sval.items)) {
+                break; // Stop if there's no dot operator
+            }
+
             _ = try self.token_next(); // skip dot
-            const file_token = try self.token_next();
-            if (file_token.?.type != .Identifier) {
-                self.transpile_proc.err("expected file identifier, got '{?}'", .{file_token.?.type});
+            const part_token = try self.token_next();
+            if (part_token.?.type != .Identifier) {
+                self.transpile_proc.err("expected identifier after '.', got '{?}'", .{part_token.?.type});
             }
             try import_name.append('.');
-            try import_name.appendSlice(file_token.?.data.sval.items);
+            try import_name.appendSlice(part_token.?.data.sval.items);
         }
 
         try self.expect_sym(';');

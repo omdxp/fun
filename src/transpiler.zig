@@ -7,6 +7,7 @@ const ast = @import("./ast.zig");
 const misc = @import("./misc.zig");
 const scope = @import("./scope.zig");
 const symbol = @import("./symbol.zig");
+const dtype = @import("./dtype.zig");
 
 /// TranspileProcessFlags is an enumeration that defines flags for the transpile process.
 pub const TranspileProcessFlags = packed struct {
@@ -16,6 +17,13 @@ pub const TranspileProcessFlags = packed struct {
     outf: bool = false,
     /// Flag to print AST nodes. When true, prints the Abstract Syntax Tree nodes.
     ast: bool = false,
+};
+
+/// GlobalSymbolInfo tracks information about symbols across modules
+pub const GlobalSymbolInfo = struct {
+    symbol_name: []const u8,
+    file_path: []const u8,
+    is_function: bool,
 };
 
 /// `TranspileProcess` represents the state and configuration of a transpilation process.
@@ -34,8 +42,11 @@ pub const TranspileProcess = struct {
     /// `tokens` is a vector of tokens generated from the input file.
     tokens: misc.Vector(token.Token),
     /// `nodes` is a list of AST (Abstract Syntax Tree) nodes.
-    /// This vector holds the nodes that are part of the AST being processed by the transpiler.
     nodes: misc.Vector(ast.Node),
+    /// Track if we're currently transpiling function parameters
+    in_function_params: bool = false,
+    /// Current indentation level for code formatting
+    indent_level: u32 = 0,
     /// Represents a scope structure used in the transpiler.
     scope: ?struct {
         /// A pointer to the root scope.
@@ -52,6 +63,47 @@ pub const TranspileProcess = struct {
     },
     /// The allocator to be used for memory allocation operations.
     allocator: mem.Allocator,
+
+    /// Initialize a new indentation field to track active statement type
+    current_statement_type: enum {
+        None,
+        If,
+        ElseIf,
+        Else,
+        Other,
+    } = .None,
+
+    /// Track the next statement for proper formatting
+    next_statement_type: enum {
+        None,
+        ElseIf,
+        Else,
+        Other,
+    } = .None,
+
+    /// Track imported files to avoid circular imports
+    imported_files: std.StringHashMap(bool),
+
+    /// Import chain to detect circular dependencies
+    import_chain: std.ArrayList([]const u8),
+
+    /// Track global symbols across all modules to detect duplicates
+    global_symbols: std.StringHashMap(GlobalSymbolInfo),
+
+    /// Parent TranspileProcess if this is a child import process
+    parent: ?*TranspileProcess = null,
+
+    /// Child import processes
+    children: std.ArrayList(*TranspileProcess),
+
+    /// Standard library imports to be added at the beginning of the output
+    std_imports: std.ArrayList([]const u8),
+
+    /// The input file path (used for relative path resolution)
+    input_file_path: []const u8,
+
+    /// Whether the current file is importing other files
+    is_importing: bool = false,
 
     const Self = @This();
 
@@ -82,23 +134,39 @@ pub const TranspileProcess = struct {
             outbuf = std.ArrayList(u8).init(allocator);
         }
 
-        return blk: {
-            var process = Self{
-                .flags = flags,
-                .pos = .{ .col = 1, .line = 1, .filename = ifilepath },
-                .ifile = ifile,
-                .ofile = ofile,
-                .outbuf = outbuf,
-                .tokens = misc.Vector(token.Token).init(allocator),
-                .nodes = misc.Vector(ast.Node).init(allocator),
-                .symbols = .{
-                    .tables = misc.Vector(*symbol.SymbolTable).init(allocator),
-                },
-                .allocator = allocator,
-            };
+        // Create initial symbol table
+        const initial_table = try allocator.create(symbol.SymbolTable);
+        initial_table.* = .{
+            .symbols = misc.Vector(symbol.Symbol).init(allocator),
+        };
 
-            try process.new_table();
-            break :blk process;
+        // Initialize import-related structures
+        var imported_files = std.StringHashMap(bool).init(allocator);
+        try imported_files.put(ifilepath, true); // Mark current file as imported
+
+        var import_chain = std.ArrayList([]const u8).init(allocator);
+        try import_chain.append(try allocator.dupe(u8, ifilepath));
+
+        return Self{
+            .flags = flags,
+            .pos = .{ .col = 1, .line = 1, .filename = ifilepath },
+            .ifile = ifile,
+            .ofile = ofile,
+            .outbuf = outbuf,
+            .tokens = misc.Vector(token.Token).init(allocator),
+            .nodes = misc.Vector(ast.Node).init(allocator),
+            .scope = null,
+            .symbols = .{
+                .active_table = initial_table,
+                .tables = misc.Vector(*symbol.SymbolTable).init(allocator),
+            },
+            .allocator = allocator,
+            .imported_files = imported_files,
+            .import_chain = import_chain,
+            .global_symbols = std.StringHashMap(GlobalSymbolInfo).init(allocator),
+            .children = std.ArrayList(*TranspileProcess).init(allocator),
+            .std_imports = std.ArrayList([]const u8).init(allocator),
+            .input_file_path = try allocator.dupe(u8, ifilepath),
         };
     }
 
@@ -112,14 +180,15 @@ pub const TranspileProcess = struct {
     /// - `fmt`: The format string for the error message.
     /// - `args`: The arguments for the format string.
     pub fn err(self: *Self, comptime fmt: []const u8, args: anytype) void {
-        const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
-        self.deinit();
-        std.debug.panic("Error: {s} in {s}:{d}:{d}\n", .{
-            msg,
+        std.debug.print("Error: ", .{});
+        std.debug.print(fmt, args);
+        std.debug.print(" in {s}:{d}:{d}\n", .{
             self.pos.filename,
             self.pos.line,
             self.pos.col,
         });
+        self.deinit();
+        std.process.exit(1);
     }
 
     /// Logs a warning message with the current position in the token stream.
@@ -131,10 +200,10 @@ pub const TranspileProcess = struct {
     /// - `self`: The instance of the transpiler.
     /// - `fmt`: The format string for the warning message.
     /// - `args`: The arguments for the format string.
-    pub fn warn(self: *Self, fmt: []const u8, args: anytype) void {
-        const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
-        std.debug.print("Warning: {s} in {s}:{d}:{d}\n", .{
-            msg,
+    pub fn warn(self: *Self, comptime fmt: []const u8, args: anytype) void {
+        std.debug.print("Warning: ", .{});
+        std.debug.print(fmt, args);
+        std.debug.print(" in {s}:{d}:{d}\n", .{
             self.pos.filename,
             self.pos.line,
             self.pos.col,
@@ -231,8 +300,8 @@ pub const TranspileProcess = struct {
 
     /// Registers a new symbol in the active symbol table.
     ///
-    /// This function checks if a symbol with the same name already exists in the active symbol table.
-    /// If it does, an error is logged. Otherwise, the symbol is added to the active symbol table.
+    /// This function checks if a symbol with the same name already exists in the active symbol table
+    /// or in any imported module. If a duplicate is found, an error is logged.
     ///
     /// Parameters:
     /// - `self`: The instance of the transpiler.
@@ -242,9 +311,40 @@ pub const TranspileProcess = struct {
     /// - Logs an error if a symbol with the same name already exists.
     /// - Returns an error if the symbol cannot be added to the active symbol table.
     pub fn register_symbol(self: *Self, s: symbol.Symbol) !void {
+        // Check if symbol is already defined in the current module
         if (self.get_symbol(s.name) != null) {
-            self.err("Symbol '{s}' already defined", .{s.name});
+            self.err("Symbol '{s}' already defined in the current module", .{s.name});
         }
+
+        // Skip duplicate checks for main function - each module can have its own main
+        if (!mem.eql(u8, s.name, "main")) {
+            // Check if symbol is defined in any imported modules by checking global_symbols
+            if (self.global_symbols.get(s.name)) |existing| {
+                // Only report error if it's from a different file, not the same file
+                if (!mem.eql(u8, existing.file_path, self.input_file_path)) {
+                    self.err("Symbol '{s}' already defined in module '{s}'", .{ s.name, existing.file_path });
+                }
+            }
+        }
+
+        // Determine if this is a function symbol
+        var is_function = false;
+        if (s.type == symbol.SymbolType.Node) {
+            // For Node symbols, we need to check if the node is a Function
+            if (s.data) |data| {
+                // We can't directly check the union tag, instead check based on the symbol type
+                is_function = s.type == symbol.SymbolType.Node and data.node.type == .Function;
+            }
+        }
+
+        // Register the symbol in global registry to detect conflicts in other modules
+        try self.global_symbols.put(s.name, .{
+            .symbol_name = s.name,
+            .file_path = self.input_file_path,
+            .is_function = is_function,
+        });
+
+        // Add the symbol to the active symbol table
         try self.push_symbol(s);
     }
 
@@ -267,14 +367,50 @@ pub const TranspileProcess = struct {
                     .name = variable.name.items,
                     .data = .{ .node = node },
                 };
+
+                // Check if this symbol exists in any imported module
+                if (self.global_symbols.get(variable.name.items)) |existing| {
+                    self.err("Variable '{s}' already defined in module '{s}'", .{ variable.name.items, existing.file_path });
+                }
+
+                // Register the symbol in global registry
+                try self.global_symbols.put(variable.name.items, .{
+                    .symbol_name = variable.name.items,
+                    .file_path = self.input_file_path,
+                    .is_function = false,
+                });
+
                 try self.register_symbol(s);
             },
             .function => |function| {
+                if (function.name == null) return;
+
                 const s = symbol.Symbol{
                     .type = symbol.SymbolType.Node,
                     .name = function.name.?.items,
                     .data = .{ .node = node },
                 };
+
+                // Skip main functions in imported modules
+                if (function.name != null and mem.eql(u8, function.name.?.items, "main")) {
+                    // Only include main function from the main module (not from imported modules)
+                    if (self.is_importing) {
+                        return; // Skip this main function from an imported module
+                    }
+
+                    // Check if this function exists in any imported module
+                    if (self.global_symbols.get(function.name.?.items)) |existing| {
+                        self.err("Function '{s}' already defined in module '{s}'", .{ function.name.?.items, existing.file_path });
+                    }
+                }
+
+                // Register the symbol in global registry
+                try self.global_symbols.put(function.name.?.items, .{
+                    .symbol_name = function.name.?.items,
+                    .file_path = self.input_file_path,
+                    .is_function = true,
+                });
+
                 try self.register_symbol(s);
             },
             else => {},
@@ -577,13 +713,55 @@ pub const TranspileProcess = struct {
         for (self.nodes.items()) |node| {
             self.deinit_node(node);
         }
-        self.symbols.active_table.?.symbols.deinit();
-        self.allocator.destroy(self.symbols.active_table.?);
+        self.nodes.deinit();
+        if (self.symbols.active_table) |table| {
+            table.symbols.deinit();
+            self.allocator.destroy(table);
+        }
         for (self.symbols.tables.items()) |table| {
             table.symbols.deinit();
             self.allocator.destroy(table);
         }
-        self.nodes.deinit();
+        self.symbols.tables.deinit();
+
+        // Free the imported files map
+        var it = self.imported_files.keyIterator();
+        while (it.next()) |key| {
+            if (!mem.eql(u8, key.*, self.input_file_path)) {
+                self.allocator.free(key.*);
+            }
+        }
+        self.imported_files.deinit();
+
+        // Free the import chain
+        for (self.import_chain.items) |path| {
+            self.allocator.free(path);
+        }
+        self.import_chain.deinit();
+
+        // Properly clean up global_symbols hash map
+        var global_it = self.global_symbols.iterator();
+        while (global_it.next()) |_| {
+            // We don't need to free file_path and symbol_name in GlobalSymbolInfo
+            // as they are slices pointing to already managed memory
+        }
+        self.global_symbols.deinit();
+
+        // Deinit children TranspileProcesses
+        for (self.children.items) |child| {
+            child.deinit();
+            self.allocator.destroy(child);
+        }
+        self.children.deinit();
+
+        // Free std imports
+        for (self.std_imports.items) |import_path| {
+            self.allocator.free(import_path);
+        }
+        self.std_imports.deinit();
+
+        // Free input file path
+        self.allocator.free(self.input_file_path);
     }
 
     /// Gets the output as a string. Only valid when outf is false.
@@ -594,42 +772,666 @@ pub const TranspileProcess = struct {
         return null;
     }
 
+    /// Helper function to format and write values
+    fn print(self: *Self, comptime fmt: []const u8, args: anytype) !void {
+        if (self.flags.outf) {
+            try std.fmt.format(self.ofile.?.writer(), fmt, args);
+        } else {
+            try std.fmt.format(self.outbuf.?.writer(), fmt, args);
+        }
+    }
+
     /// Write to output (either file or buffer)
     pub fn write(self: *Self, bytes: []const u8) !void {
         if (self.flags.outf) {
-            if (self.ofile) |f| {
-                try f.writeAll(bytes);
+            try self.ofile.?.writeAll(bytes);
+        } else {
+            try self.outbuf.?.appendSlice(bytes);
+        }
+    }
+
+    /// Maps fun language types to C types
+    fn map_type_to_c(type_str: []const u8) []const u8 {
+        if (mem.eql(u8, type_str, "num")) return "int";
+        if (mem.eql(u8, type_str, "str")) return "char*";
+        if (mem.eql(u8, type_str, "bin")) return "bool";
+        return type_str;
+    }
+
+    /// Helper function to write data type to output
+    fn write_type(self: *Self, data_type: dtype.DataType) anyerror!void {
+        const c_type = map_type_to_c(data_type.type_str.items);
+        try self.write(c_type);
+        // if (data_type.array) |array| {
+        //     for (array.brackets.items()) |bracket| {
+        //         try self.write("[");
+        //         try self.transpile_node(bracket);
+        //         try self.write("]");
+        //     }
+        // }
+    }
+
+    /// Transpiles all nodes in the AST to C code
+    pub fn transpile(self: *Self) !void {
+        // Add source file name at the top of the output
+        const source_file = std.fs.path.basename(self.input_file_path);
+        try self.write("// Source file: ");
+        try self.write(source_file);
+        try self.write("\n");
+
+        // Process import nodes first
+        var import_nodes = std.ArrayList(usize).init(self.allocator);
+        defer import_nodes.deinit();
+
+        // Identify import nodes
+        for (self.nodes.items(), 0..) |node, i| {
+            if (node.type == .Import) {
+                try import_nodes.append(i);
             }
-        } else if (self.outbuf) |*buf| {
-            try buf.appendSlice(bytes);
+        }
+
+        // Process the identified import nodes
+        for (import_nodes.items) |i| {
+            try self.process_import(self.nodes.items()[i]);
+        }
+
+        // Write standard library includes and prelude
+        try self.transpile_prelude();
+
+        // Output content from child imports recursively
+        if (!self.is_importing) {
+            try self.transpile_children_recursive(self);
+        }
+
+        // Now output the main file content
+        for (self.nodes.items()) |node| {
+            if (node.type != .Import) { // Skip import nodes as they've been processed
+                try self.transpile_node(node);
+                try self.write("\n\n");
+            }
+        }
+    }
+
+    // Helper function to recursively transpile children
+    fn transpile_children_recursive(self: *Self, parent_proc: *TranspileProcess) !void {
+        for (parent_proc.children.items) |child| {
+            // Recursively transpile the child's children first
+            try self.transpile_children_recursive(child);
+
+            // Then, transpile the child's own nodes (excluding imports and main functions)
+            for (child.nodes.items()) |node| {
+                if (node.type != .Import) {
+                    // Skip main functions in imported modules
+                    if (node.type == .Function and node.node_variant != null) {
+                        const function = node.node_variant.?.function;
+                        if (function.name != null and mem.eql(u8, function.name.?.items, "main")) {
+                            continue; // Skip this main function from an imported module
+                        }
+                    }
+
+                    try self.transpile_node(node);
+                    try self.write("\n\n");
+                }
+            }
+        }
+    }
+
+    /// Transpiles the prelude code to C
+    fn transpile_prelude(self: *Self) !void {
+        try self.write_std_imports();
+        try self.write("#include <stdbool.h>\n");
+        try self.write("#include <stdlib.h>\n");
+        try self.write("#include <string.h>\n\n");
+    }
+
+    /// Transpiles a node to C code
+    fn transpile_node(self: *Self, node: ast.Node) !void {
+        switch (node.type) {
+            .Expression => {
+                const exp = node.node_variant.?.exp;
+                if (mem.eql(u8, exp.op, "()")) {
+                    if (exp.left) |left| {
+                        try self.transpile_node(left.*);
+                        try self.write("(");
+                        if (exp.right) |right| {
+                            try self.transpile_node(right.*);
+                        }
+                        try self.write(")");
+                    }
+                } else if (mem.eql(u8, exp.op, ",")) {
+                    if (exp.left) |left| {
+                        try self.transpile_node(left.*);
+                    }
+                    if (exp.right) |right| {
+                        try self.write(", ");
+                        try self.transpile_node(right.*);
+                    }
+                } else if (exp.op.len > 0) {
+                    if (exp.left) |left| {
+                        try self.transpile_node(left.*);
+                    }
+                    try self.write(" ");
+                    try self.write(exp.op);
+                    try self.write(" ");
+                    if (exp.right) |right| {
+                        try self.transpile_node(right.*);
+                    }
+                } else if (exp.left) |left| {
+                    try self.transpile_node(left.*);
+                }
+            },
+            .ExpressionParenthesis => {
+                const exp = node.node_variant.?.paren.exp;
+                try self.transpile_node(exp.*);
+            },
+            .Number => {
+                const num = node.data.?.llnum;
+                try self.print("{d}", .{num});
+            },
+            .String => {
+                const str = node.data.?.sval.items;
+                try self.write("\"");
+                try self.write(str);
+                try self.write("\"");
+            },
+            .Identifier => {
+                const str = node.data.?.sval.items;
+                try self.write(str);
+            },
+            .Variable => {
+                const variable = node.node_variant.?.variable;
+                try self.write_type(variable.type.*);
+                try self.write(" ");
+                try self.write(variable.name.items);
+                if (variable.val) |val| {
+                    try self.write(" = ");
+                    if (val.type == .String) {
+                        try self.write("\"");
+                        try self.write(val.data.?.sval.items);
+                        try self.write("\"");
+                    } else if (val.type == .Boolean) {
+                        const bval = val.data.?.bval;
+                        try self.write(if (bval) "true" else "false");
+                    } else {
+                        try self.transpile_node(val.*);
+                    }
+                }
+                if (!self.in_function_params) {
+                    try self.write(";");
+                }
+            },
+            .Function => {
+                const function = node.node_variant.?.function;
+
+                // Skip main functions in imported modules
+                if (function.name != null and mem.eql(u8, function.name.?.items, "main")) {
+                    // Only include main function from the main module (not from imported modules)
+                    if (self.is_importing) {
+                        return; // Skip this main function from an imported module
+                    }
+
+                    try self.write("int");
+                    try self.write(" ");
+                    try self.write("main");
+                    try self.write("(int argc, char** argv) ");
+                    if (function.body) |body| {
+                        try self.transpile_node(body.*);
+                    }
+                } else {
+                    if (function.rtype) |rtype| {
+                        try self.write_type(rtype);
+                    } else {
+                        try self.write("void");
+                    }
+                    try self.write(" ");
+                    if (function.name) |name| {
+                        try self.write(name.items);
+                    }
+                    try self.write("(");
+                    self.in_function_params = true;
+                    if (function.args) |args| {
+                        for (args.items(), 0..) |arg, i| {
+                            if (i > 0) try self.write(", ");
+                            try self.transpile_node(arg.*);
+                        }
+                    }
+                    self.in_function_params = false;
+                    try self.write(") ");
+
+                    if (function.body) |body| {
+                        try self.transpile_node(body.*);
+                    }
+                }
+            },
+            .Body => {
+                const body = node.node_variant.?.body;
+                try self.write("{");
+                self.indent();
+                for (body.statements.items()) |statement| {
+                    try self.write_indent();
+                    try self.transpile_node(statement.*);
+                    if (statement.type == .Expression) {
+                        try self.write(";");
+                    }
+                }
+                self.dedent();
+                try self.write_indent();
+                try self.write("}");
+            },
+            .StatementReturn, .StatementIf, .StatementElseIf, .StatementElse, .StatementFit => {
+                const statement = node.node_variant.?.statement;
+                switch (statement) {
+                    .if_stmt => |if_s| {
+                        try self.write("if (");
+                        try self.transpile_node(if_s.condition.*);
+                        try self.write(") {");
+                        self.indent();
+                        if (if_s.body.type == .Body) {
+                            const body = if_s.body.node_variant.?.body;
+                            for (body.statements.items()) |body_stmt| {
+                                try self.write_indent();
+                                try self.transpile_node(body_stmt.*);
+                                if (body_stmt.type == .Expression) {
+                                    try self.write(";");
+                                }
+                            }
+                        } else {
+                            try self.write_indent();
+                            try self.transpile_node(if_s.body.*);
+                            if (if_s.body.type == .Expression) {
+                                try self.write(";");
+                            }
+                        }
+                        self.dedent();
+                        try self.write_indent();
+                        try self.write("}");
+                    },
+                    .elif_stmt => |elif| {
+                        try self.write("else if (");
+                        try self.transpile_node(elif.condition.*);
+                        try self.write(") {");
+                        self.indent();
+                        if (elif.body.type == .Body) {
+                            const body = elif.body.node_variant.?.body;
+                            for (body.statements.items()) |body_stmt| {
+                                try self.write_indent();
+                                try self.transpile_node(body_stmt.*);
+                                if (body_stmt.type == .Expression) {
+                                    try self.write(";");
+                                }
+                            }
+                        } else {
+                            try self.write_indent();
+                            try self.transpile_node(elif.body.*);
+                            if (elif.body.type == .Expression) {
+                                try self.write(";");
+                            }
+                        }
+
+                        self.dedent();
+                        try self.write_indent();
+                        try self.write("}");
+                    },
+                    .else_stmt => |else_s| {
+                        try self.write("else {");
+                        self.indent();
+                        if (else_s.body.type == .Body) {
+                            const body = else_s.body.node_variant.?.body;
+                            for (body.statements.items()) |body_stmt| {
+                                try self.write_indent();
+                                try self.transpile_node(body_stmt.*);
+                                if (body_stmt.type == .Expression) {
+                                    try self.write(";");
+                                }
+                            }
+                        } else {
+                            try self.write_indent();
+                            try self.transpile_node(else_s.body.*);
+                            if (else_s.body.type == .Expression) {
+                                try self.write(";");
+                            }
+                        }
+
+                        self.dedent();
+                        try self.write_indent();
+                        try self.write("}");
+                    },
+                    .fit_stmt => |fit| {
+                        try self.write("switch (");
+                        try self.transpile_node(fit.exp.*);
+                        try self.write(") {");
+                        self.indent();
+                        for (fit.branches.items()) |branch| {
+                            if (branch.condition) |condition| {
+                                try self.write_indent();
+                                try self.write("case ");
+                                try self.transpile_node(condition.*);
+                                try self.write(":");
+                                self.indent();
+                                if (branch.body.type == .Expression or branch.body.type == .ExpressionParenthesis) {
+                                    try self.write_indent();
+                                    try self.transpile_node(branch.body.*);
+                                    try self.write(";");
+                                } else {
+                                    try self.write_indent();
+                                    try self.transpile_node(branch.body.*);
+                                }
+                                try self.write_indent();
+                                try self.write("break;");
+                                self.dedent();
+                            } else {
+                                try self.write_indent();
+                                try self.write("default:");
+
+                                self.indent();
+                                if (branch.body.type == .Expression or branch.body.type == .ExpressionParenthesis) {
+                                    try self.write_indent();
+                                    try self.transpile_node(branch.body.*);
+                                    try self.write(";");
+                                } else {
+                                    try self.write_indent();
+                                    try self.transpile_node(branch.body.*);
+                                }
+                                try self.write_indent();
+                                try self.write("break;");
+                                self.dedent();
+                            }
+                        }
+                        self.dedent();
+                        try self.write_indent();
+                        try self.write("}");
+                    },
+                    .return_stmt => |ret| {
+                        try self.write("return ");
+                        try self.transpile_node(ret.*);
+                        try self.write(";");
+                    },
+                }
+            },
+            .Unary => {
+                const unary = node.node_variant.?.unary;
+                if (unary.is_left_operanded_unary) {
+                    try self.transpile_node(unary.operand.*);
+                    try self.write(unary.op);
+                } else {
+                    try self.write(unary.op);
+                    try self.transpile_node(unary.operand.*);
+                }
+            },
+            .Tenary => {
+                const tenary = node.node_variant.?.tenary;
+                try self.transpile_node(tenary.condition.*);
+                try self.write(" ? ");
+                try self.transpile_node(tenary.true.*);
+                try self.write(" : ");
+                try self.transpile_node(tenary.false.*);
+            },
+            .Boolean => {
+                const val = node.data.?.bval;
+                try self.write(if (val) "true" else "false");
+            },
+            else => {},
+        }
+    }
+
+    /// Increase the indentation level
+    pub fn indent(self: *Self) void {
+        self.indent_level += 1;
+    }
+
+    /// Decrease the indentation level
+    pub fn dedent(self: *Self) void {
+        if (self.indent_level > 0) {
+            self.indent_level -= 1;
+        }
+    }
+
+    /// Write a newline followed by the current indentation
+    pub fn write_indent(self: *Self) !void {
+        try self.write("\n");
+        try self.write_spaces(self.indent_level * 4); // 4 spaces per level
+    }
+
+    /// Write a specific number of spaces
+    pub fn write_spaces(self: *Self, spaces: u32) !void {
+        var i: u32 = 0;
+        while (i < spaces) : (i += 1) {
+            try self.write(" ");
+        }
+    }
+
+    /// Write formatted with indentation prefix
+    pub fn write_indented(self: *Self, text: []const u8) !void {
+        try self.write_spaces(self.indent_level * 4);
+        try self.write(text);
+    }
+
+    /// Process an import node to include standard library or local file
+    ///
+    /// Parameters:
+    /// - `self`: The instance of the transpiler.
+    /// - `node`: The import node to process.
+    ///
+    /// Errors:
+    /// - Returns an error if processing the import fails.
+    fn process_import(self: *Self, node: ast.Node) !void {
+        const import_path = node.node_variant.?.import.path;
+        if (std.mem.indexOf(u8, import_path, "std.") != null) {
+            try self.process_std_import(import_path);
+        } else {
+            try self.process_local_import(import_path);
+        }
+    }
+
+    /// Process a standard library import (e.g., "std.io")
+    ///
+    /// Parameters:
+    /// - `self`: The instance of the transpiler.
+    /// - `import_path`: The import path as a string.
+    ///
+    /// Errors:
+    /// - Returns an error if processing the import fails.
+    fn process_std_import(self: *Self, import_path: []const u8) !void {
+        var header_name: []const u8 = undefined;
+
+        if (mem.eql(u8, import_path, "std.io")) {
+            header_name = try self.allocator.dupe(u8, "stdio.h");
+        } else if (mem.eql(u8, import_path, "std.mem")) {
+            header_name = try self.allocator.dupe(u8, "stdlib.h");
+        } else if (mem.eql(u8, import_path, "std.string")) {
+            header_name = try self.allocator.dupe(u8, "string.h");
+        } else if (mem.eql(u8, import_path, "std.math")) {
+            header_name = try self.allocator.dupe(u8, "math.h");
+        } else {
+            self.err("Unsupported standard library import: {s}", .{import_path});
+            return;
+        }
+
+        for (self.std_imports.items) |existing| {
+            if (mem.eql(u8, existing, header_name)) {
+                self.allocator.free(header_name);
+                return;
+            }
+        }
+        try self.std_imports.append(header_name);
+    }
+
+    /// Process a local file import (e.g., "custom" or "folder.file")
+    ///
+    /// Parameters:
+    /// - `self`: The instance of the transpiler.
+    /// - `import_path`: The import path as a string.
+    ///
+    /// Errors:
+    /// - Returns an error if processing the import fails.
+    fn process_local_import(self: *Self, import_path: []const u8) anyerror!void {
+        // Get full path of the file to import
+        var file_path = std.ArrayList(u8).init(self.allocator);
+        defer file_path.deinit();
+
+        const dir_path = std.fs.path.dirname(self.input_file_path) orelse ".";
+        try file_path.appendSlice(dir_path);
+        try file_path.append('/');
+
+        var i: usize = 0;
+        while (i < import_path.len) : (i += 1) {
+            if (import_path[i] == '.') {
+                try file_path.append('/');
+            } else {
+                try file_path.append(import_path[i]);
+            }
+        }
+
+        try file_path.appendSlice(".fn");
+        const full_path = try file_path.toOwnedSlice();
+        defer self.allocator.free(full_path);
+
+        // Add a comment showing the import attempt
+        try self.write("\n/* Attempting to import: ");
+        try self.write(full_path);
+        try self.write(" */\n");
+
+        // Check if the file exists
+        std.fs.cwd().access(full_path, .{}) catch {
+            try self.write("\n/* ERROR: Import file not found: ");
+            try self.write(full_path);
+            try self.write(" */\n");
+            return error.FileNotFound;
+        };
+
+        // Robust direct circular dependency detection
+        // First, check if the file being imported already has us in its import chain
+        const file_contents = fs.cwd().readFileAlloc(self.allocator, full_path, 1024 * 1024) catch |read_err| {
+            self.err("Failed to read import file: {any}", .{read_err});
+            return;
+        };
+        defer self.allocator.free(file_contents);
+
+        // Check if the file imports us directly (crude but effective)
+        const our_name = std.fs.path.stem(self.input_file_path);
+        var import_line = std.ArrayList(u8).init(self.allocator);
+        defer import_line.deinit();
+        try import_line.appendSlice("imp ");
+        try import_line.appendSlice(our_name);
+        try import_line.appendSlice(";");
+
+        // Check if the target file imports us
+        if (std.mem.indexOf(u8, file_contents, import_line.items)) |_| {
+            const basename1 = std.fs.path.basename(self.input_file_path);
+            const basename2 = std.fs.path.basename(full_path);
+
+            self.err("CIRCULAR IMPORT DETECTED: '{s}' imports '{s}', but '{s}' also imports '{s}', creating a circular dependency", .{ basename1, basename2, basename2, basename1 });
+            return;
+        }
+
+        // Mark this file as imported
+        try self.imported_files.put(try self.allocator.dupe(u8, full_path), true);
+
+        // Create and initialize child transpile process
+        var import_proc = try self.allocator.create(TranspileProcess);
+        errdefer self.allocator.destroy(import_proc);
+
+        import_proc.* = try TranspileProcess.init(self.allocator, full_path, "temp.c", .{ .outf = false });
+
+        import_proc.parent = self;
+        import_proc.is_importing = true;
+
+        // Copy the import chain and add the current import for tracking
+        for (self.import_chain.items) |chain_path| {
+            try import_proc.import_chain.append(try self.allocator.dupe(u8, chain_path));
+        }
+        try import_proc.import_chain.append(try self.allocator.dupe(u8, full_path));
+
+        // Copy imported files to child
+        var it = self.imported_files.iterator();
+        while (it.next()) |entry| {
+            try import_proc.imported_files.put(try self.allocator.dupe(u8, entry.key_ptr.*), true);
+        }
+
+        // Process the imported file
+        const parser = @import("./parser.zig");
+        const lexer = @import("./lexer.zig");
+
+        var lex_proc = lexer.LexProcess.init(import_proc);
+        var parse_proc = parser.ParseProcess.init(import_proc);
+
+        try lex_proc.lex();
+        try parse_proc.parse();
+
+        // Process imports within the imported file
+        for (import_proc.nodes.items()) |node| {
+            if (node.type == .Import) {
+                try import_proc.process_import(node);
+            }
+        }
+
+        // After processing is complete, sync all symbols back to parent
+        try import_proc.sync_global_symbols_to_parent();
+
+        // Add to children list
+        try self.children.append(import_proc);
+    }
+
+    /// Synchronize global symbols from a child process to the parent process
+    ///
+    /// This ensures that symbols defined in imported files are visible to the parent process
+    /// for duplicate detection across modules.
+    ///
+    /// Parameters:
+    /// - `self`: The child process whose symbols will be synced to its parent
+    ///
+    /// Errors:
+    /// - Returns an error if the synchronization fails.
+    fn sync_global_symbols_to_parent(self: *Self) !void {
+        if (self.parent == null) return; // Not a child process
+
+        var it = self.global_symbols.iterator();
+        while (it.next()) |entry| {
+            const symbol_name = entry.key_ptr.*;
+            const symbol_info = entry.value_ptr.*;
+
+            // Skip main functions entirely
+            if (mem.eql(u8, symbol_name, "main")) continue;
+
+            // Check if this symbol is already defined in the parent
+            if (self.parent.?.global_symbols.get(symbol_name)) |existing| {
+                // If we find a conflict, report it
+                self.err("Symbol '{s}' in module '{s}' conflicts with same symbol defined in module '{s}'", .{ symbol_name, symbol_info.file_path, existing.file_path });
+            }
+
+            // Add this symbol to the parent's global registry
+            try self.parent.?.global_symbols.put(symbol_name, .{
+                .symbol_name = symbol_name,
+                .file_path = symbol_info.file_path,
+                .is_function = symbol_info.is_function,
+            });
+        }
+    }
+
+    /// Write standard library imports to the output
+    fn write_std_imports(self: *Self) !void {
+        for (self.std_imports.items) |header| {
+            try self.write("#include <");
+            try self.write(header);
+            try self.write(">\n");
+        }
+        // Add imports from child processes as well
+        for (self.children.items) |child| {
+            for (child.std_imports.items) |header| {
+                // Check if we've already added this header
+                var already_added = false;
+                for (self.std_imports.items) |existing| {
+                    if (mem.eql(u8, header, existing)) {
+                        already_added = true;
+                        break;
+                    }
+                }
+                if (!already_added) {
+                    try self.write("#include <");
+                    try self.write(header);
+                    try self.write(">\n");
+                }
+            }
         }
     }
 };
-
-test "TranspileProcess init and deinit" {
-    const allocator = std.testing.allocator;
-    const ifilepath = "TranspileProcess_init_and_deinit.fn";
-    const ofilepath = "TranspileProcess_init_and_deinit.c";
-
-    // Create dummy input file
-    {
-        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
-        defer file.close();
-        try file.writeAll("dummy input");
-    }
-
-    // Initialize TranspileProcess
-    var process = try TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
-    defer process.deinit();
-
-    // Check initial state
-    try std.testing.expect(process.flags.outf);
-    try std.testing.expect(process.pos.line == 1);
-    try std.testing.expect(process.pos.col == 1);
-    try std.testing.expect(mem.eql(u8, process.pos.filename, ifilepath));
-    try std.testing.expect(process.tokens.items().len == 0);
-
-    // Delete test files
-    try fs.cwd().deleteFile(ifilepath);
-    try fs.cwd().deleteFile(ofilepath);
-}

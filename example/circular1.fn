@@ -1,0 +1,6 @@
+// This file imports circular2.fn to test circular dependency detection
+imp circular2;
+
+fun hello() {
+    printf("Hello from circular1\n");
+}
