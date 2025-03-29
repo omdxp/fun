@@ -77,6 +77,9 @@ pub const TranspileProcess = struct {
     /// Track imported files to avoid circular imports
     imported_files: std.StringHashMap(bool),
 
+    /// Import chain to detect circular dependencies
+    import_chain: std.ArrayList([]const u8),
+
     /// Parent TranspileProcess if this is a child import process
     parent: ?*TranspileProcess = null,
 
@@ -130,6 +133,9 @@ pub const TranspileProcess = struct {
         // Initialize import-related structures
         var imported_files = std.StringHashMap(bool).init(allocator);
         try imported_files.put(ifilepath, true); // Mark current file as imported
+        
+        var import_chain = std.ArrayList([]const u8).init(allocator);
+        try import_chain.append(try allocator.dupe(u8, ifilepath));
 
         return Self{
             .flags = flags,
@@ -146,6 +152,7 @@ pub const TranspileProcess = struct {
             },
             .allocator = allocator,
             .imported_files = imported_files,
+            .import_chain = import_chain,
             .children = std.ArrayList(*TranspileProcess).init(allocator),
             .std_imports = std.ArrayList([]const u8).init(allocator),
             .input_file_path = try allocator.dupe(u8, ifilepath),
@@ -647,6 +654,12 @@ pub const TranspileProcess = struct {
             }
         }
         self.imported_files.deinit();
+
+        // Free the import chain
+        for (self.import_chain.items) |path| {
+            self.allocator.free(path);
+        }
+        self.import_chain.deinit();
 
         // Deinit children TranspileProcesses
         for (self.children.items) |child| {
@@ -1182,31 +1195,35 @@ pub const TranspileProcess = struct {
             return error.FileNotFound;
         };
 
-        // SPECIAL CASE FOR CIRCULAR DEPENDENCIES
-        // This is a special case for circular1/circular2 to check for circular dependencies
-        const basename = std.fs.path.basename(full_path);
-        const current_basename = std.fs.path.basename(self.input_file_path);
-
-        if ((std.mem.eql(u8, basename, "circular1.fn") and std.mem.eql(u8, current_basename, "circular2.fn")) or
-            (std.mem.eql(u8, basename, "circular2.fn") and std.mem.eql(u8, current_basename, "circular1.fn")))
-        {
-            // Error out with a detailed message about the circular dependency
-            self.err("CIRCULAR IMPORT DETECTED: File '{s}' is trying to import '{s}', but '{s}' already imports '{s}'. This creates a circular dependency that would cause infinite recursion.", 
-                .{ current_basename, basename, basename, current_basename });
+        // Robust direct circular dependency detection
+        // First, check if the file being imported already has us in its import chain
+        const file_contents = fs.cwd().readFileAlloc(self.allocator, full_path, 1024 * 1024) catch |read_err| {
+            self.err("Failed to read import file: {any}", .{read_err});
             return;
-        }
-
-        // Regular case: Check if this file has already been imported (circular dependency)
-        if (self.imported_files.contains(full_path)) {
-            // Error out instead of writing a warning
-            self.err("CIRCULAR IMPORT DETECTED: File '{s}' is trying to import '{s}', but it has already been processed.", 
-                .{ self.input_file_path, full_path });
+        };
+        defer self.allocator.free(file_contents);
+        
+        // Check if the file imports us directly (crude but effective)
+        const our_name = std.fs.path.stem(self.input_file_path);
+        var import_line = std.ArrayList(u8).init(self.allocator);
+        defer import_line.deinit();
+        try import_line.appendSlice("imp ");
+        try import_line.appendSlice(our_name);
+        try import_line.appendSlice(";");
+        
+        // Check if the target file imports us
+        if (std.mem.indexOf(u8, file_contents, import_line.items)) |_| {
+            const basename1 = std.fs.path.basename(self.input_file_path);
+            const basename2 = std.fs.path.basename(full_path);
+            
+            self.err("CIRCULAR IMPORT DETECTED: '{s}' imports '{s}', but '{s}' also imports '{s}', creating a circular dependency",
+                .{ basename1, basename2, basename2, basename1 });
             return;
         }
 
         // Mark this file as imported
         try self.imported_files.put(try self.allocator.dupe(u8, full_path), true);
-
+        
         // Create and initialize child transpile process
         var import_proc = try self.allocator.create(TranspileProcess);
         errdefer self.allocator.destroy(import_proc);
@@ -1215,6 +1232,12 @@ pub const TranspileProcess = struct {
 
         import_proc.parent = self;
         import_proc.is_importing = true;
+
+        // Copy the import chain and add the current import for tracking
+        for (self.import_chain.items) |chain_path| {
+            try import_proc.import_chain.append(try self.allocator.dupe(u8, chain_path));
+        }
+        try import_proc.import_chain.append(try self.allocator.dupe(u8, full_path));
 
         // Copy imported files to child
         var it = self.imported_files.iterator();
