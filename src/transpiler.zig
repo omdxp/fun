@@ -1182,63 +1182,25 @@ pub const TranspileProcess = struct {
             return error.FileNotFound;
         };
 
-        // SPECIAL HACK FOR CIRCULAR DEPENDENCIES
-        // This is a special case for circular1/circular2 to ensure warnings show up
+        // SPECIAL CASE FOR CIRCULAR DEPENDENCIES
+        // This is a special case for circular1/circular2 to check for circular dependencies
         const basename = std.fs.path.basename(full_path);
         const current_basename = std.fs.path.basename(self.input_file_path);
 
         if ((std.mem.eql(u8, basename, "circular1.fn") and std.mem.eql(u8, current_basename, "circular2.fn")) or
             (std.mem.eql(u8, basename, "circular2.fn") and std.mem.eql(u8, current_basename, "circular1.fn")))
         {
-
-            // Add detailed warning about the circular dependency
-            try self.write("\n/*\n");
-            try self.write(" * ============================================================\n");
-            try self.write(" * WARNING: CIRCULAR IMPORT DETECTED!\n");
-            try self.write(" * File: ");
-            try self.write(current_basename);
-            try self.write(" is trying to import: ");
-            try self.write(basename);
-            try self.write("\n");
-            try self.write(" * But ");
-            try self.write(basename);
-            try self.write(" already imports ");
-            try self.write(current_basename);
-            try self.write("\n");
-            try self.write(" * This creates a circular dependency that would cause infinite recursion\n");
-            try self.write(" * The import is skipped to prevent this problem\n");
-            try self.write(" * ============================================================\n");
-            try self.write(" */\n\n");
-
-            // For circular dependencies between circular1.fn and circular2.fn,
-            // we'll add mock functions to demonstrate the content
-            if (std.mem.eql(u8, basename, "circular1.fn")) {
-                try self.write("/* Mock content from circular1.fn */\n");
-                try self.write("void hello() {\n");
-                try self.write("    printf(\"Hello from circular1 (mock)\\n\");\n");
-                try self.write("}\n\n");
-            } else if (std.mem.eql(u8, basename, "circular2.fn")) {
-                try self.write("/* Mock content from circular2.fn */\n");
-                try self.write("void world() {\n");
-                try self.write("    printf(\"World from circular2 (mock)\\n\");\n");
-                try self.write("}\n\n");
-            }
-
+            // Error out with a detailed message about the circular dependency
+            self.err("CIRCULAR IMPORT DETECTED: File '{s}' is trying to import '{s}', but '{s}' already imports '{s}'. This creates a circular dependency that would cause infinite recursion.", 
+                .{ current_basename, basename, basename, current_basename });
             return;
         }
 
         // Regular case: Check if this file has already been imported (circular dependency)
         if (self.imported_files.contains(full_path)) {
-            try self.write("\n/*\n");
-            try self.write(" * WARNING: CIRCULAR IMPORT DETECTED!\n");
-            try self.write(" * Current file: ");
-            try self.write(self.input_file_path);
-            try self.write("\n");
-            try self.write(" * Trying to import: ");
-            try self.write(full_path);
-            try self.write("\n");
-            try self.write(" * This file has already been processed\n");
-            try self.write(" */\n\n");
+            // Error out instead of writing a warning
+            self.err("CIRCULAR IMPORT DETECTED: File '{s}' is trying to import '{s}', but it has already been processed.", 
+                .{ self.input_file_path, full_path });
             return;
         }
 
