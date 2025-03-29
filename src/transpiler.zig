@@ -739,6 +739,14 @@ pub const TranspileProcess = struct {
         }
         self.import_chain.deinit();
 
+        // Properly clean up global_symbols hash map
+        var global_it = self.global_symbols.iterator();
+        while (global_it.next()) |_| {
+            // We don't need to free file_path and symbol_name in GlobalSymbolInfo
+            // as they are slices pointing to already managed memory
+        }
+        self.global_symbols.deinit();
+
         // Deinit children TranspileProcesses
         for (self.children.items) |child| {
             child.deinit();
