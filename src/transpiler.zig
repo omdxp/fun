@@ -19,6 +19,13 @@ pub const TranspileProcessFlags = packed struct {
     ast: bool = false,
 };
 
+/// GlobalSymbolInfo tracks information about symbols across modules
+pub const GlobalSymbolInfo = struct {
+    symbol_name: []const u8,
+    file_path: []const u8,
+    is_function: bool,
+};
+
 /// `TranspileProcess` represents the state and configuration of a transpilation process.
 pub const TranspileProcess = struct {
     /// `flags` is a set of flags that control the behavior of the transpilation process.
@@ -79,6 +86,9 @@ pub const TranspileProcess = struct {
 
     /// Import chain to detect circular dependencies
     import_chain: std.ArrayList([]const u8),
+
+    /// Track global symbols across all modules to detect duplicates
+    global_symbols: std.StringHashMap(GlobalSymbolInfo),
 
     /// Parent TranspileProcess if this is a child import process
     parent: ?*TranspileProcess = null,
@@ -153,6 +163,7 @@ pub const TranspileProcess = struct {
             .allocator = allocator,
             .imported_files = imported_files,
             .import_chain = import_chain,
+            .global_symbols = std.StringHashMap(GlobalSymbolInfo).init(allocator),
             .children = std.ArrayList(*TranspileProcess).init(allocator),
             .std_imports = std.ArrayList([]const u8).init(allocator),
             .input_file_path = try allocator.dupe(u8, ifilepath),
@@ -289,8 +300,8 @@ pub const TranspileProcess = struct {
 
     /// Registers a new symbol in the active symbol table.
     ///
-    /// This function checks if a symbol with the same name already exists in the active symbol table.
-    /// If it does, an error is logged. Otherwise, the symbol is added to the active symbol table.
+    /// This function checks if a symbol with the same name already exists in the active symbol table
+    /// or in any imported module. If a duplicate is found, an error is logged.
     ///
     /// Parameters:
     /// - `self`: The instance of the transpiler.
@@ -300,9 +311,40 @@ pub const TranspileProcess = struct {
     /// - Logs an error if a symbol with the same name already exists.
     /// - Returns an error if the symbol cannot be added to the active symbol table.
     pub fn register_symbol(self: *Self, s: symbol.Symbol) !void {
+        // Check if symbol is already defined in the current module
         if (self.get_symbol(s.name) != null) {
-            self.err("Symbol '{s}' already defined", .{s.name});
+            self.err("Symbol '{s}' already defined in the current module", .{s.name});
         }
+
+        // Skip duplicate checks for main function - each module can have its own main
+        if (!mem.eql(u8, s.name, "main")) {
+            // Check if symbol is defined in any imported modules by checking global_symbols
+            if (self.global_symbols.get(s.name)) |existing| {
+                // Only report error if it's from a different file, not the same file
+                if (!mem.eql(u8, existing.file_path, self.input_file_path)) {
+                    self.err("Symbol '{s}' already defined in module '{s}'", .{ s.name, existing.file_path });
+                }
+            }
+        }
+
+        // Determine if this is a function symbol
+        var is_function = false;
+        if (s.type == symbol.SymbolType.Node) {
+            // For Node symbols, we need to check if the node is a Function
+            if (s.data) |data| {
+                // We can't directly check the union tag, instead check based on the symbol type
+                is_function = s.type == symbol.SymbolType.Node and data.node.type == .Function;
+            }
+        }
+
+        // Register the symbol in global registry to detect conflicts in other modules
+        try self.global_symbols.put(s.name, .{
+            .symbol_name = s.name,
+            .file_path = self.input_file_path,
+            .is_function = is_function,
+        });
+
+        // Add the symbol to the active symbol table
         try self.push_symbol(s);
     }
 
@@ -325,14 +367,50 @@ pub const TranspileProcess = struct {
                     .name = variable.name.items,
                     .data = .{ .node = node },
                 };
+
+                // Check if this symbol exists in any imported module
+                if (self.global_symbols.get(variable.name.items)) |existing| {
+                    self.err("Variable '{s}' already defined in module '{s}'", .{ variable.name.items, existing.file_path });
+                }
+
+                // Register the symbol in global registry
+                try self.global_symbols.put(variable.name.items, .{
+                    .symbol_name = variable.name.items,
+                    .file_path = self.input_file_path,
+                    .is_function = false,
+                });
+
                 try self.register_symbol(s);
             },
             .function => |function| {
+                if (function.name == null) return;
+
                 const s = symbol.Symbol{
                     .type = symbol.SymbolType.Node,
                     .name = function.name.?.items,
                     .data = .{ .node = node },
                 };
+
+                // Skip main functions in imported modules
+                if (function.name != null and mem.eql(u8, function.name.?.items, "main")) {
+                    // Only include main function from the main module (not from imported modules)
+                    if (self.is_importing) {
+                        return; // Skip this main function from an imported module
+                    }
+
+                    // Check if this function exists in any imported module
+                    if (self.global_symbols.get(function.name.?.items)) |existing| {
+                        self.err("Function '{s}' already defined in module '{s}'", .{ function.name.?.items, existing.file_path });
+                    }
+                }
+
+                // Register the symbol in global registry
+                try self.global_symbols.put(function.name.?.items, .{
+                    .symbol_name = function.name.?.items,
+                    .file_path = self.input_file_path,
+                    .is_function = true,
+                });
+
                 try self.register_symbol(s);
             },
             else => {},
@@ -772,9 +850,17 @@ pub const TranspileProcess = struct {
             // Recursively transpile the child's children first
             try self.transpile_children_recursive(child);
 
-            // Then, transpile the child's own nodes (excluding imports)
+            // Then, transpile the child's own nodes (excluding imports and main functions)
             for (child.nodes.items()) |node| {
                 if (node.type != .Import) {
+                    // Skip main functions in imported modules
+                    if (node.type == .Function and node.node_variant != null) {
+                        const function = node.node_variant.?.function;
+                        if (function.name != null and mem.eql(u8, function.name.?.items, "main")) {
+                            continue; // Skip this main function from an imported module
+                        }
+                    }
+
                     try self.transpile_node(node);
                     try self.write("\n\n");
                 }
@@ -868,7 +954,14 @@ pub const TranspileProcess = struct {
             },
             .Function => {
                 const function = node.node_variant.?.function;
+
+                // Skip main functions in imported modules
                 if (function.name != null and mem.eql(u8, function.name.?.items, "main")) {
+                    // Only include main function from the main module (not from imported modules)
+                    if (self.is_importing) {
+                        return; // Skip this main function from an imported module
+                    }
+
                     try self.write("int");
                     try self.write(" ");
                     try self.write("main");
@@ -1233,6 +1326,7 @@ pub const TranspileProcess = struct {
         import_proc.* = try TranspileProcess.init(self.allocator, full_path, "temp.c", .{ .outf = false });
 
         import_proc.parent = self;
+        import_proc.is_importing = true;
 
         // Copy the import chain and add the current import for tracking
         for (self.import_chain.items) |chain_path| {
@@ -1263,73 +1357,72 @@ pub const TranspileProcess = struct {
             }
         }
 
+        // After processing is complete, sync all symbols back to parent
+        try import_proc.sync_global_symbols_to_parent();
+
         // Add to children list
         try self.children.append(import_proc);
     }
 
-    // Helper function to recursively collect std imports from children
-    fn collect_std_imports_recursive(self: *Self, target_list: *std.ArrayList([]const u8), current_proc: *TranspileProcess) !void {
-        for (current_proc.children.items) |child| {
-            // Collect from the child itself
-            for (child.std_imports.items) |header| {
-                var already_exists = false;
-                for (target_list.items) |existing| {
-                    if (mem.eql(u8, existing, header)) {
-                        already_exists = true;
-                        break;
-                    }
-                }
-                if (!already_exists) {
-                    try target_list.append(try self.allocator.dupe(u8, header)); // Dupe needed as child might be deallocated
-                }
+    /// Synchronize global symbols from a child process to the parent process
+    ///
+    /// This ensures that symbols defined in imported files are visible to the parent process
+    /// for duplicate detection across modules.
+    ///
+    /// Parameters:
+    /// - `self`: The child process whose symbols will be synced to its parent
+    ///
+    /// Errors:
+    /// - Returns an error if the synchronization fails.
+    fn sync_global_symbols_to_parent(self: *Self) !void {
+        if (self.parent == null) return; // Not a child process
+
+        var it = self.global_symbols.iterator();
+        while (it.next()) |entry| {
+            const symbol_name = entry.key_ptr.*;
+            const symbol_info = entry.value_ptr.*;
+
+            // Skip main functions entirely
+            if (mem.eql(u8, symbol_name, "main")) continue;
+
+            // Check if this symbol is already defined in the parent
+            if (self.parent.?.global_symbols.get(symbol_name)) |existing| {
+                // If we find a conflict, report it
+                self.err("Symbol '{s}' in module '{s}' conflicts with same symbol defined in module '{s}'", .{ symbol_name, symbol_info.file_path, existing.file_path });
             }
-            // Recurse into the child's children
-            try self.collect_std_imports_recursive(target_list, child);
+
+            // Add this symbol to the parent's global registry
+            try self.parent.?.global_symbols.put(symbol_name, .{
+                .symbol_name = symbol_name,
+                .file_path = symbol_info.file_path,
+                .is_function = symbol_info.is_function,
+            });
         }
     }
 
-    /// Write the standard library imports to the output
-    ///
-    /// Parameters:
-    /// - `self`: The instance of the transpiler.
-    ///
-    /// Errors:
-    /// - Returns an error if writing the imports fails.
+    /// Write standard library imports to the output
     fn write_std_imports(self: *Self) !void {
-        // Only the top-level process should collect and write all std imports
-        if (!self.is_importing) {
-            var all_std_imports = std.ArrayList([]const u8).init(self.allocator);
-            defer {
-                // Free the duplicated strings in the collected list
-                for (all_std_imports.items) |item| {
-                    self.allocator.free(item);
-                }
-                all_std_imports.deinit();
-            }
-
-            // Add imports from the main process itself
-            for (self.std_imports.items) |header| {
-                // Check for duplicates before adding
-                var already_exists = false;
-                for (all_std_imports.items) |existing| {
-                    if (mem.eql(u8, existing, header)) {
-                        already_exists = true;
+        for (self.std_imports.items) |header| {
+            try self.write("#include <");
+            try self.write(header);
+            try self.write(">\n");
+        }
+        // Add imports from child processes as well
+        for (self.children.items) |child| {
+            for (child.std_imports.items) |header| {
+                // Check if we've already added this header
+                var already_added = false;
+                for (self.std_imports.items) |existing| {
+                    if (mem.eql(u8, header, existing)) {
+                        already_added = true;
                         break;
                     }
                 }
-                if (!already_exists) {
-                    try all_std_imports.append(try self.allocator.dupe(u8, header));
+                if (!already_added) {
+                    try self.write("#include <");
+                    try self.write(header);
+                    try self.write(">\n");
                 }
-            }
-
-            // Recursively collect imports from all children
-            try self.collect_std_imports_recursive(&all_std_imports, self);
-
-            // Write the collected unique imports
-            for (all_std_imports.items) |header| {
-                try self.write("#include <");
-                try self.write(header);
-                try self.write(">\n");
             }
         }
     }

@@ -1,5 +1,6 @@
 imp std.io;
 imp custom;
+imp folder.subfolder.subfolder2.subfolder3.custom2;
 
 fun main() {
     num result = add(5, 10);

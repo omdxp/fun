@@ -1,3 +1,8 @@
-fun add(num x, num y) num {
-	ret x + y;
+fun sub(num x, num y) num {
+	ret x - y;
+}
+
+fun main() {
+	num result = sub(10, 5);
+	printf("The result of subtracting 5 from 10 is: %d\n", result);
 }
