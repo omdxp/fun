@@ -1,0 +1,6 @@
+imp std.io;
+imp relative.parent;
+
+fun main() {
+	parent();
+}

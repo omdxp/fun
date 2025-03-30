@@ -1,3 +1,5 @@
+imp std.io;
+
 fun sub(num x, num y) num {
 	ret x - y;
 }

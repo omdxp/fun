@@ -1,6 +1,7 @@
 const std = @import("std");
 const mem = std.mem;
-const dtype = @import("./dtype.zig");
+const semantics = @import("semantics");
+const dtype = semantics.dtype;
 
 /// Represents the different types of tokens that can be encountered in the source code.
 pub const TokenType = enum {

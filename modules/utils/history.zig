@@ -1,6 +1,6 @@
 const std = @import("std");
 const mem = std.mem;
-const misc = @import("./misc.zig");
+const misc = @import("misc.zig");
 
 /// Flags representing various states in the history.
 pub const HistoryFlags = packed struct {

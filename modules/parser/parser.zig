@@ -1,15 +1,15 @@
 const std = @import("std");
 const mem = std.mem;
 const fs = std.fs;
-const transpiler = @import("./transpiler.zig");
-const lexer = @import("./lexer.zig");
-const token = @import("./token.zig");
-const ast = @import("./ast.zig");
-const misc = @import("./misc.zig");
-const history = @import("./history.zig");
-const dtype = @import("./dtype.zig");
-const expressionable = @import("./expressionable.zig");
-const scope = @import("./scope.zig");
+const codegen = @import("codegen");
+const lexer = @import("lexer");
+const token = lexer.token;
+const ast = @import("ast");
+const expressionable = ast.expressionable;
+const utils = @import("utils");
+const semantics = @import("semantics");
+const dtype = semantics.dtype;
+const scope = semantics.scope;
 
 /// Represents the parsing process in the transpiler.
 ///
@@ -17,7 +17,7 @@ const scope = @import("./scope.zig");
 /// the associated transpilation process and methods for parsing.
 pub const ParseProcess = struct {
     /// The transpilation process associated with the parsing process.
-    transpile_proc: *transpiler.TranspileProcess,
+    transpile_proc: *codegen.TranspileProcess,
     /// The last token processed by the parser.
     parser_last_token: token.Token = undefined,
     /// The current body node being processed by the parser.
@@ -36,7 +36,7 @@ pub const ParseProcess = struct {
     ///
     /// Returns:
     /// - `Self`: The initialized `ParseProcess` instance.
-    pub fn init(transpile_proc: *transpiler.TranspileProcess) Self {
+    pub fn init(transpile_proc: *codegen.TranspileProcess) Self {
         return Self{
             .transpile_proc = transpile_proc,
         };
@@ -274,7 +274,7 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
-    fn parse_statement(self: *Self, hist: *history.History) !void {
+    fn parse_statement(self: *Self, hist: *utils.History) !void {
         var t = try self.token_peek_next();
         if (t == null) {
             self.transpile_proc.err("unexpected end of file", .{});
@@ -308,8 +308,8 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
-    fn parse_body_multiple_statements(self: *Self, hist: *history.History) !void {
-        var stmts = misc.Vector(*ast.Node).init(self.transpile_proc.allocator);
+    fn parse_body_multiple_statements(self: *Self, hist: *utils.History) !void {
+        var stmts = utils.Vector(*ast.Node).init(self.transpile_proc.allocator);
         try self.make_body_node();
         var body_node = self.node_pop();
         if (self.parser_current_body) |body| {
@@ -331,7 +331,7 @@ pub const ParseProcess = struct {
         try self.expect_sym('{');
         var last_stmt_type: ?ast.NodeType = null;
         while (!try self.next_token_is_symbol('}')) {
-            var hist_down = history.History.down(self.transpile_proc.allocator, hist, hist.flags);
+            var hist_down = utils.History.down(self.transpile_proc.allocator, hist, hist.flags);
             defer hist_down.deinit();
             try self.parse_statement(&hist_down);
             const stmt_node = self.node_pop();
@@ -370,7 +370,7 @@ pub const ParseProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if any parsing operation fails.
-    fn parse_body(self: *Self, hist: *history.History) anyerror!void {
+    fn parse_body(self: *Self, hist: *utils.History) anyerror!void {
         _ = try self.transpile_proc.new_scope();
         try self.parse_body_multiple_statements(hist);
         self.transpile_proc.finish_scope();
@@ -386,7 +386,7 @@ pub const ParseProcess = struct {
     /// - Returns an error if reading the next token fails or if pushing the node fails.
     fn parse_symbol(self: *Self) anyerror!void {
         if (try self.next_token_is_symbol('{')) {
-            var hist = history.History.init(self.transpile_proc.allocator, .{ .is_global_scope = true });
+            var hist = utils.History.init(self.transpile_proc.allocator, .{ .is_global_scope = true });
             try self.parse_body(&hist);
             const body_node = self.node_pop();
             try self.transpile_proc.nodes.push(body_node.?);
@@ -476,7 +476,7 @@ pub const ParseProcess = struct {
             dt.*.flags.?.is_pointer = true;
             dt.*.pointer_depth = ptr_depth;
         }
-        dt.*.type = misc.get_datatype_type(dt_token.?.data.sval.items);
+        dt.*.type = utils.get_datatype_type(dt_token.?.data.sval.items);
         if (dt.*.type.? == .Unknown) {
             self.transpile_proc.err("unknown datatype", .{});
         }
@@ -551,7 +551,7 @@ pub const ParseProcess = struct {
     fn parse_additional_expression(self: *Self) !void {
         const t = try self.token_peek_next();
         if (t.?.type == .Operator) {
-            var hist = history.History.init(self.transpile_proc.allocator, .{});
+            var hist = utils.History.init(self.transpile_proc.allocator, .{});
             defer hist.deinit();
             try self.parse_expressionable(&hist);
         }
@@ -571,7 +571,7 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
-    fn parse_for_parenthesis(self: *Self, hist: *history.History) !void {
+    fn parse_for_parenthesis(self: *Self, hist: *utils.History) !void {
         try self.expect_op("(");
         var left_node: ?ast.Node = null;
         const tmp_node = self.transpile_proc.nodes.back();
@@ -631,7 +631,7 @@ pub const ParseProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if any parsing operation fails.
-    fn parse_for_comma(self: *Self, hist: *history.History) !void {
+    fn parse_for_comma(self: *Self, hist: *utils.History) !void {
         _ = try self.token_next(); // skip ,
         const left_node = self.node_pop();
         try self.parse_expressionable_root(hist);
@@ -666,7 +666,7 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
-    fn parse_for_bracket(self: *Self, hist: *history.History) !void {
+    fn parse_for_bracket(self: *Self, hist: *utils.History) !void {
         const left_node = self.transpile_proc.nodes.back();
         if (left_node != null) {
             _ = self.node_pop();
@@ -741,7 +741,7 @@ pub const ParseProcess = struct {
     /// - Logs an error message if any expected token is not found.
     fn parse_for_indirection_unary(self: *Self) !void {
         const depth = try self.parse_get_pointer_depth();
-        var hist = history.History.init(self.transpile_proc.allocator, .{ .expression_is_unary = true });
+        var hist = utils.History.init(self.transpile_proc.allocator, .{ .expression_is_unary = true });
         defer hist.deinit();
         try self.parse_expressionable(&hist);
         const unary_operand_node = self.node_pop();
@@ -775,7 +775,7 @@ pub const ParseProcess = struct {
     /// - Logs an error message if any expected token is not found.
     fn parse_for_normal_unary(self: *Self) !void {
         const unary_op = (try self.token_next()).?.data.sval.items;
-        var hist = history.History.init(self.transpile_proc.allocator, .{ .expression_is_unary = true });
+        var hist = utils.History.init(self.transpile_proc.allocator, .{ .expression_is_unary = true });
         defer hist.deinit();
         try self.parse_expressionable(&hist);
         const unary_operand_node = self.node_pop();
@@ -808,7 +808,7 @@ pub const ParseProcess = struct {
     fn parse_for_unary(self: *Self) !void {
         const t = try self.token_peek_next();
         const unary_op = t.?.data.sval.items;
-        if (misc.is_indirection_operator(unary_op)) {
+        if (utils.is_indirection_operator(unary_op)) {
             try self.parse_for_indirection_unary();
             return;
         }
@@ -1058,36 +1058,36 @@ pub const ParseProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if any parsing operation fails.
-    fn parse_normal_expression(self: *Self, hist: *history.History) !void {
+    fn parse_normal_expression(self: *Self, hist: *utils.History) !void {
         var t = try self.token_peek_next();
         const op = t.?.data.sval.items;
         var node_left = try self.node_peek_expressionable_or_null();
         if (node_left == null) {
-            if (!misc.is_unary_operator(op)) {
+            if (!utils.is_unary_operator(op)) {
                 self.transpile_proc.err("expected left operand for '{s}' operator", .{op});
             }
             return try self.parse_for_unary();
         }
         _ = try self.token_next(); // skip operator
         _ = self.node_pop();
-        if (misc.is_left_operanded_unary_operator(op)) {
+        if (utils.is_left_operanded_unary_operator(op)) {
             return try self.parse_for_left_operanded_unary(&node_left.?, op);
         }
         node_left.?.flags = .{ .inside_expression = true };
         t = try self.token_peek_next();
         if (t.?.type == .Operator) {
             if (mem.eql(u8, t.?.data.sval.items, "(")) {
-                var hist_down = history.History.down(self.transpile_proc.allocator, hist, hist.flags);
+                var hist_down = utils.History.down(self.transpile_proc.allocator, hist, hist.flags);
                 defer hist_down.deinit();
                 hist_down.flags.parenthesis_not_function_call = true;
                 try self.parse_for_parenthesis(&hist_down);
-            } else if (misc.is_unary_operator(t.?.data.sval.items)) {
+            } else if (utils.is_unary_operator(t.?.data.sval.items)) {
                 try self.parse_for_unary();
             } else {
                 self.transpile_proc.err("expected expressionable for '{s}' operator", .{op});
             }
         } else {
-            var hist_down = history.History.down(self.transpile_proc.allocator, hist, hist.flags);
+            var hist_down = utils.History.down(self.transpile_proc.allocator, hist, hist.flags);
             defer hist_down.deinit();
             try self.parse_expressionable(&hist_down);
         }
@@ -1115,9 +1115,9 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
-    fn parse_expression(self: *Self, hist: *history.History) !bool {
+    fn parse_expression(self: *Self, hist: *utils.History) !bool {
         const t = try self.token_peek_next();
-        if (hist.flags.expression_is_unary and !misc.is_unary_operand_compatible(t.?)) {
+        if (hist.flags.expression_is_unary and !utils.is_unary_operand_compatible(t.?)) {
             return false;
         }
         if (mem.eql(u8, "(", t.?.data.sval.items)) {
@@ -1188,7 +1188,7 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if reading the next token fails.
     /// - Logs an error message if any expected token is not found.
-    fn parse_expressionable_single(self: *Self, hist: *history.History) !bool {
+    fn parse_expressionable_single(self: *Self, hist: *utils.History) !bool {
         const t = try self.token_peek_next();
         if (t == null) {
             return false;
@@ -1223,7 +1223,7 @@ pub const ParseProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if any parsing operation fails.
-    fn parse_expressionable(self: *Self, hist: *history.History) anyerror!void {
+    fn parse_expressionable(self: *Self, hist: *utils.History) anyerror!void {
         while (try self.parse_expressionable_single(hist)) {}
     }
 
@@ -1238,7 +1238,7 @@ pub const ParseProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if any parsing operation fails.
-    fn parse_expressionable_root(self: *Self, hist: *history.History) anyerror!void {
+    fn parse_expressionable_root(self: *Self, hist: *utils.History) anyerror!void {
         try self.parse_expressionable(hist);
         const n = self.node_pop();
         try self.transpile_proc.nodes.push(n.?);
@@ -1257,8 +1257,8 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
-    fn parse_array_brackets(self: *Self, dt: *dtype.DataType, hist: *history.History) !void {
-        var brackets = misc.Vector(ast.Node).init(self.transpile_proc.allocator);
+    fn parse_array_brackets(self: *Self, dt: *dtype.DataType, hist: *utils.History) !void {
+        var brackets = utils.Vector(ast.Node).init(self.transpile_proc.allocator);
         while (try self.next_token_is_operator("[")) {
             try self.expect_op("[");
             dt.*.flags.?.is_array = true;
@@ -1304,7 +1304,7 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
-    fn parse_variable(self: *Self, dt: *dtype.DataType, hist: *history.History) !void {
+    fn parse_variable(self: *Self, dt: *dtype.DataType, hist: *utils.History) !void {
         if (try self.next_token_is_operator("[")) {
             try self.parse_array_brackets(dt, hist);
         }
@@ -1371,7 +1371,7 @@ pub const ParseProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if any parsing operation fails.
-    fn parse_full_variable(self: *Self, hist: *history.History) !void {
+    fn parse_full_variable(self: *Self, hist: *utils.History) !void {
         const dt = try self.transpile_proc.allocator.create(dtype.DataType);
         dt.* = dtype.DataType{
             .array = null,
@@ -1398,9 +1398,9 @@ pub const ParseProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if any parsing operation fails.
-    fn parse_function_args(self: *Self, hist: *history.History) !misc.Vector(*ast.Node) {
+    fn parse_function_args(self: *Self, hist: *utils.History) !utils.Vector(*ast.Node) {
         _ = try self.transpile_proc.new_scope();
-        var args = misc.Vector(*ast.Node).init(self.transpile_proc.allocator);
+        var args = utils.Vector(*ast.Node).init(self.transpile_proc.allocator);
         while (!try self.next_token_is_symbol(')')) {
             if (try self.next_token_is_operator(".")) { // variadic
                 for (0..3) |_| {
@@ -1451,13 +1451,13 @@ pub const ParseProcess = struct {
         function_node.node_variant.?.function.name = ident_token.?.data.sval;
         self.parser_current_function = function_node;
         try self.expect_op("(");
-        var hist_args = history.History.init(self.transpile_proc.allocator, .{});
+        var hist_args = utils.History.init(self.transpile_proc.allocator, .{});
         defer hist_args.deinit();
         const args = try self.parse_function_args(&hist_args);
         try self.expect_sym(')');
         function_node.node_variant.?.function.args = args;
         const rtype_token = try self.token_peek_next();
-        if (rtype_token != null and rtype_token.?.type == .Keyword and misc.keyword_is_datatype(rtype_token.?.data.sval.items)) {
+        if (rtype_token != null and rtype_token.?.type == .Keyword and utils.keyword_is_datatype(rtype_token.?.data.sval.items)) {
             try self.parse_datatype(&dt);
         } else {
             var type_str = std.ArrayList(u8).init(self.transpile_proc.allocator);
@@ -1469,7 +1469,7 @@ pub const ParseProcess = struct {
         }
         function_node.node_variant.?.function.rtype = dt;
         if (try self.next_token_is_symbol('{')) {
-            var hist_body = history.History.init(self.transpile_proc.allocator, .{ .inside_function_body = true });
+            var hist_body = utils.History.init(self.transpile_proc.allocator, .{ .inside_function_body = true });
             defer hist_body.deinit();
             try self.parse_body(&hist_body);
             const body_node = self.node_pop();
@@ -1496,7 +1496,7 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
-    fn parse_return(self: *Self, hist: *history.History) !void {
+    fn parse_return(self: *Self, hist: *utils.History) !void {
         _ = try self.token_next(); // skip ret
         if (try self.next_token_is_symbol(';')) {
             try self.expect_sym(';');
@@ -1537,7 +1537,7 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
-    fn parse_elif_statement(self: *Self, hist: *history.History) !void {
+    fn parse_elif_statement(self: *Self, hist: *utils.History) !void {
         if (try self.next_token_is_keyword("elif")) {
             if (self.parser_current_function == null) {
                 self.transpile_proc.err("elif statement outside of function", .{});
@@ -1582,7 +1582,7 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
-    fn parse_else_statement(self: *Self, hist: *history.History) !void {
+    fn parse_else_statement(self: *Self, hist: *utils.History) !void {
         if (try self.next_token_is_keyword("else")) {
             if (self.parser_current_function == null) {
                 self.transpile_proc.err("else statement outside of function", .{});
@@ -1614,7 +1614,7 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
-    fn parse_if_statement(self: *Self, hist: *history.History) !void {
+    fn parse_if_statement(self: *Self, hist: *utils.History) !void {
         try self.expect_keyword("if");
         if (self.parser_current_function == null) {
             self.transpile_proc.err("if statement outside of function", .{});
@@ -1664,11 +1664,11 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
-    fn parse_fit_body(self: *Self, fit_node: *ast.Node, hist: *history.History) !void {
+    fn parse_fit_body(self: *Self, fit_node: *ast.Node, hist: *utils.History) !void {
         try self.expect_sym('{');
-        fit_node.*.node_variant.?.statement.fit_stmt.branches = misc.Vector(ast.FitBranch).init(self.transpile_proc.allocator);
+        fit_node.*.node_variant.?.statement.fit_stmt.branches = utils.Vector(ast.FitBranch).init(self.transpile_proc.allocator);
         while (!try self.next_token_is_symbol('}')) {
-            var hist_down = history.History.down(self.transpile_proc.allocator, hist, hist.flags);
+            var hist_down = utils.History.down(self.transpile_proc.allocator, hist, hist.flags);
             defer hist_down.deinit();
             try self.parse_expressionable_root(&hist_down);
             const condition_node = self.node_pop();
@@ -1722,7 +1722,7 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
-    fn parse_fit_statement(self: *Self, hist: *history.History) !void {
+    fn parse_fit_statement(self: *Self, hist: *utils.History) !void {
         var fit_node: ast.Node = .{
             .type = .StatementFit,
             .node_variant = .{
@@ -1731,7 +1731,7 @@ pub const ParseProcess = struct {
         };
         hist.*.flags.in_fit_statement = true;
         try self.expect_keyword("fit");
-        var new_hist = history.History.init(self.transpile_proc.allocator, .{ .in_fit_statement = true });
+        var new_hist = utils.History.init(self.transpile_proc.allocator, .{ .in_fit_statement = true });
         defer new_hist.deinit();
         try self.parse_expressionable_root(&new_hist);
         const condition_node = self.node_pop();
@@ -1773,7 +1773,7 @@ pub const ParseProcess = struct {
 
         while (true) {
             const next_token = try self.token_peek_next();
-            if (next_token == null or next_token.?.type != .Operator or !misc.is_access_operator(next_token.?.data.sval.items)) {
+            if (next_token == null or next_token.?.type != .Operator or !utils.is_access_operator(next_token.?.data.sval.items)) {
                 break; // Stop if there's no dot operator
             }
 
@@ -1803,14 +1803,14 @@ pub const ParseProcess = struct {
     /// it logs an error message indicating an invalid keyword.
     ///
     /// Parameters:
-    /// - `hist (*history.History)`: The history context for the parse operation.
+    /// - `hist (*utils.History)`: The history context for the parse operation.
     ///
     /// Errors:
     /// - Returns an error if reading the next token fails.
-    fn parse_keyword(self: *Self, hist: *history.History) anyerror!void {
+    fn parse_keyword(self: *Self, hist: *utils.History) anyerror!void {
         const t = try self.token_peek_next();
         const sval = t.?.data.sval.items;
-        if (misc.keyword_is_datatype(sval)) {
+        if (utils.keyword_is_datatype(sval)) {
             const dt = try self.transpile_proc.allocator.create(dtype.DataType);
             dt.* = dtype.DataType{
                 .array = null,
@@ -1866,7 +1866,7 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if initializing the history or parsing the keyword fails.
     fn parse_global_keyword(self: *Self) !void {
-        var hist = history.History.init(
+        var hist = utils.History.init(
             self.transpile_proc.allocator,
             .{ .is_global_scope = true },
         );
@@ -1896,7 +1896,7 @@ pub const ParseProcess = struct {
         }
         try switch (t.?.type) {
             .Number, .Identifier, .String => {
-                var hist = history.History.init(self.transpile_proc.allocator, .{});
+                var hist = utils.History.init(self.transpile_proc.allocator, .{});
                 defer hist.deinit();
                 try self.parse_expressionable(&hist);
             },
@@ -1933,7 +1933,7 @@ test "ParseProcess parse_function" {
     }
 
     const allocator = std.testing.allocator;
-    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
+    var transpile_proc = try codegen.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
     var lex_proc = lexer.LexProcess.init(&transpile_proc);
     var parse_proc = ParseProcess.init(&transpile_proc);
 
@@ -1967,7 +1967,7 @@ test "ParseProcess parse_return" {
 
     // const allocator = std.testing.allocator;
     const allocator = std.testing.allocator;
-    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
+    var transpile_proc = try codegen.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
     var lex_proc = lexer.LexProcess.init(&transpile_proc);
     var parse_proc = ParseProcess.init(&transpile_proc);
 
@@ -2000,7 +2000,7 @@ test "ParseProcess parse_expression" {
 
     // const allocator = std.testing.allocator;
     const allocator = std.testing.allocator;
-    var transpile_proc = try transpiler.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
+    var transpile_proc = try codegen.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
     var lex_proc = lexer.LexProcess.init(&transpile_proc);
     var parse_proc = ParseProcess.init(&transpile_proc);
 

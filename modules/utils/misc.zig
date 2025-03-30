@@ -1,8 +1,8 @@
 const std = @import("std");
 const mem = std.mem;
-const dtype = @import("./dtype.zig");
-const token = @import("./token.zig");
-const ast = @import("./ast.zig");
+const dtype = @import("semantics").dtype;
+const token = @import("lexer").token;
+const ast = @import("ast");
 
 /// Checks if the given character is an alphabetic letter.
 ///

@@ -1,5 +1,5 @@
-const ast = @import("./ast.zig");
-const misc = @import("./misc.zig");
+const ast = @import("ast");
+const utils = @import("utils");
 
 /// Represents the type of a symbol, which can either be a function or a variable.
 pub const SymbolType = enum {
@@ -29,7 +29,7 @@ pub const Symbol = struct {
 /// Represents a symbol table, which maps symbol names to symbols.
 pub const SymbolTable = struct {
     /// The symbols in the table.
-    symbols: misc.Vector(Symbol),
+    symbols: utils.Vector(Symbol),
 };
 
 /// Get a node symbol from a symbol.

@@ -1,5 +1,0 @@
-imp parent;
-
-fun main() {
-	parent();
-}

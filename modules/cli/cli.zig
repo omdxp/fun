@@ -3,8 +3,8 @@ const mem = std.mem;
 const fs = std.fs;
 const process = std.process;
 const Child = std.process.Child;
-const transpiler = @import("./transpiler.zig");
-const misc = @import("./misc.zig");
+const codegen = @import("codegen");
+const utils = @import("utils");
 const builtin = @import("builtin");
 
 /// Errors that can occur during CLI operations
