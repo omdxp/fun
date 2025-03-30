@@ -1,6 +1,6 @@
 const std = @import("std");
-const ast = @import("./ast.zig");
-const misc = @import("./misc.zig");
+const ast = @import("ast");
+const utils = @import("utils");
 
 /// Flags representing characteristics of a data type.
 pub const DataTypeFlags = packed struct {
@@ -46,6 +46,6 @@ pub const DataType = struct {
     /// Information about the array dimensions and brackets.
     array: ?struct {
         /// The dimensions of the array.
-        brackets: misc.Vector(ast.Node),
+        brackets: utils.Vector(ast.Node),
     } = null,
 };

@@ -1,0 +1,4 @@
+imp duplicate_symbols.mod1;
+imp duplicate_symbols.mod2;
+
+fun main() {}

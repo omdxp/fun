@@ -6,6 +6,9 @@ on:
     branches:
       - main
 
+env:
+  zig_version: 0.14.0
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -13,21 +16,21 @@ jobs:
       - uses: actions/checkout@v2
       - uses: goto-bus-stop/setup-zig@v2
         with:
-          version: 0.14.0
-      - run: zig build -fincremental test
+          version: ${{ env.zig_version }}
+      - run: zig build test # usingnamespace is not supported for incremental compilation
   run:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
       - uses: goto-bus-stop/setup-zig@v2
         with:
-          version: 0.14.0
-      - run: zig build -fincremental run -- -in example/test.fn
+          version: ${{ env.zig_version }}
+      - run: zig build run -- -in example/test.fn # usingnamespace is not supported for incremental compilation
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
       - uses: goto-bus-stop/setup-zig@v2
         with:
-          version: 0.14.0
+          version: ${{ env.zig_version }}
       - run: zig fmt --check .

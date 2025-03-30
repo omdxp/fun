@@ -1,8 +1,8 @@
 const std = @import("std");
 const mem = std.mem;
-const misc = @import("./misc.zig");
-const transpiler = @import("./transpiler.zig");
-const ast = @import("./ast.zig");
+const utils = @import("utils");
+const codegen = @import("codegen");
+const ast = @import("ast");
 
 /// A set of flags that provide metadata for the scope entity.
 pub const ScopeEntityFlags = packed struct {
@@ -21,7 +21,7 @@ pub const ScopeEntity = struct {
 /// Represents a scope structure used in the transpiler.
 pub const Scope = struct {
     /// A vector of entities within the scope.
-    entities: misc.Vector(*ScopeEntity),
+    entities: utils.Vector(*ScopeEntity),
     /// A pointer to the parent scope, if any.
     parent: ?*Scope = null,
     /// The allocator to be used for memory allocation operations.
@@ -41,7 +41,7 @@ pub const Scope = struct {
     /// - `Self`: A new instance of `Scope`.
     pub fn init(allocator: mem.Allocator) Self {
         return blk: {
-            var entities = misc.Vector(*ScopeEntity).init(allocator);
+            var entities = utils.Vector(*ScopeEntity).init(allocator);
             entities.set_peek_pointer_end();
             entities.flags.peek_decrement = true;
             break :blk .{

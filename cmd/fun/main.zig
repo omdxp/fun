@@ -1,11 +1,11 @@
 const std = @import("std");
 const heap = std.heap;
-const token = @import("./token.zig");
-const transpiler = @import("./transpiler.zig");
-const lexer = @import("./lexer.zig");
-const parser = @import("./parser.zig");
-const misc = @import("./misc.zig");
-const cli = @import("./cli.zig");
+const token = @import("lexer").token;
+const codegen = @import("codegen");
+const lexer = @import("lexer");
+const parser = @import("parser");
+const utils = @import("utils");
+const cli = @import("cli");
 
 fn print_error_and_exit(err: anyerror) noreturn {
     const stderr = std.io.getStdErr().writer();
@@ -46,7 +46,7 @@ pub fn main() void {
 
     const options = cli.parse_args(global_allocator) catch |err| print_error_and_exit(err);
 
-    var tp = transpiler.TranspileProcess.init(
+    var tp = codegen.TranspileProcess.init(
         global_allocator,
         options.input_file,
         options.output_file,
@@ -72,7 +72,7 @@ pub fn main() void {
         stdout.print("\n=== AST Nodes ===\n", .{}) catch |err| print_error_and_exit(err);
         for (tp.nodes.items(), 0..) |node, i| {
             stdout.print("\nNode {d}:\n", .{i}) catch |err| print_error_and_exit(err);
-            misc.print_node(node, stdout, 0) catch |err| print_error_and_exit(err);
+            utils.print_node(node, stdout, 0) catch |err| print_error_and_exit(err);
         }
     }
 

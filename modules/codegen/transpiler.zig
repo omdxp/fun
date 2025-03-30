@@ -2,12 +2,15 @@ const std = @import("std");
 const fs = std.fs;
 const mem = std.mem;
 const assert = std.debug.assert;
-const token = @import("./token.zig");
-const ast = @import("./ast.zig");
-const misc = @import("./misc.zig");
-const scope = @import("./scope.zig");
-const symbol = @import("./symbol.zig");
-const dtype = @import("./dtype.zig");
+const parser = @import("parser");
+const lexer = @import("lexer");
+const token = lexer.token;
+const ast = @import("ast");
+const utils = @import("utils");
+const semantics = @import("semantics");
+const scope = semantics.scope;
+const symbol = semantics.symbol;
+const dtype = semantics.dtype;
 
 /// TranspileProcessFlags is an enumeration that defines flags for the transpile process.
 pub const TranspileProcessFlags = packed struct {
@@ -40,9 +43,9 @@ pub const TranspileProcess = struct {
     /// Buffer to store generated C code when outf is false
     outbuf: ?std.ArrayList(u8),
     /// `tokens` is a vector of tokens generated from the input file.
-    tokens: misc.Vector(token.Token),
+    tokens: utils.Vector(token.Token),
     /// `nodes` is a list of AST (Abstract Syntax Tree) nodes.
-    nodes: misc.Vector(ast.Node),
+    nodes: utils.Vector(ast.Node),
     /// Track if we're currently transpiling function parameters
     in_function_params: bool = false,
     /// Current indentation level for code formatting
@@ -59,7 +62,7 @@ pub const TranspileProcess = struct {
         /// The active symbol table.
         active_table: ?*symbol.SymbolTable = null,
         /// A list of symbol tables.
-        tables: misc.Vector(*symbol.SymbolTable),
+        tables: utils.Vector(*symbol.SymbolTable),
     },
     /// The allocator to be used for memory allocation operations.
     allocator: mem.Allocator,
@@ -137,7 +140,7 @@ pub const TranspileProcess = struct {
         // Create initial symbol table
         const initial_table = try allocator.create(symbol.SymbolTable);
         initial_table.* = .{
-            .symbols = misc.Vector(symbol.Symbol).init(allocator),
+            .symbols = utils.Vector(symbol.Symbol).init(allocator),
         };
 
         // Initialize import-related structures
@@ -153,12 +156,12 @@ pub const TranspileProcess = struct {
             .ifile = ifile,
             .ofile = ofile,
             .outbuf = outbuf,
-            .tokens = misc.Vector(token.Token).init(allocator),
-            .nodes = misc.Vector(ast.Node).init(allocator),
+            .tokens = utils.Vector(token.Token).init(allocator),
+            .nodes = utils.Vector(ast.Node).init(allocator),
             .scope = null,
             .symbols = .{
                 .active_table = initial_table,
-                .tables = misc.Vector(*symbol.SymbolTable).init(allocator),
+                .tables = utils.Vector(*symbol.SymbolTable).init(allocator),
             },
             .allocator = allocator,
             .imported_files = imported_files,
@@ -226,7 +229,7 @@ pub const TranspileProcess = struct {
             try self.symbols.tables.push(table);
         }
         const table = try self.allocator.create(symbol.SymbolTable);
-        table.*.symbols = misc.Vector(symbol.Symbol).init(self.allocator);
+        table.*.symbols = utils.Vector(symbol.Symbol).init(self.allocator);
         self.symbols.active_table = table;
     }
 
@@ -1349,9 +1352,6 @@ pub const TranspileProcess = struct {
         }
 
         // Process the imported file
-        const parser = @import("./parser.zig");
-        const lexer = @import("./lexer.zig");
-
         var lex_proc = lexer.LexProcess.init(import_proc);
         var parse_proc = parser.ParseProcess.init(import_proc);
 

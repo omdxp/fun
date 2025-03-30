@@ -1,8 +1,10 @@
 const std = @import("std");
 const mem = std.mem;
-const token = @import("./token.zig");
-const dtype = @import("./dtype.zig");
-const misc = @import("./misc.zig");
+const token = @import("lexer").token;
+const semantics = @import("semantics");
+const dtype = semantics.dtype;
+const utils = @import("utils");
+pub const expressionable = @import("expressionable.zig");
 
 /// Flags representing characteristics of a node.
 pub const NodeFlags = packed struct {
@@ -152,7 +154,7 @@ pub const Node = struct {
         /// The body node.
         body: struct {
             /// The statements inside the body.
-            statements: misc.Vector(*Node),
+            statements: utils.Vector(*Node),
         },
         /// The function node.
         function: struct {
@@ -161,7 +163,7 @@ pub const Node = struct {
             /// The name of the function.
             name: ?std.ArrayList(u8) = null,
             /// The arguments of the function.
-            args: ?misc.Vector(*Node) = null,
+            args: ?utils.Vector(*Node) = null,
             /// The body of the function.
             body: ?*Node = null,
         },
@@ -193,7 +195,7 @@ pub const Node = struct {
                 /// The expression for the fit statement.
                 exp: *Node,
                 /// The branches of the fit statement.
-                branches: misc.Vector(FitBranch),
+                branches: utils.Vector(FitBranch),
                 /// Indicates if the fit statement has a default branch.
                 has_default_branch: bool,
             },
@@ -278,7 +280,7 @@ pub fn node_is_expressionable(n: Node) bool {
 /// Parameters:
 /// - `n (Node)`: The node to check.
 pub fn node_is_array(n: Node) bool {
-    return n.type == .Expression and misc.is_array_operator(n.node_variant.?.exp.op);
+    return n.type == .Expression and utils.is_array_operator(n.node_variant.?.exp.op);
 }
 
 /// Checks if the node is an assignment expression.

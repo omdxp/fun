@@ -4,7 +4,7 @@
         {
             "label": "build",
             "type": "shell",
-            "command": "zig build -fincremental",
+            "command": "zig build", // usingnamespace is not supported for incremental compilation
             "problemMatcher": [],
             "group": {
                 "kind": "build",

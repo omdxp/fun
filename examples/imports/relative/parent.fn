@@ -1,7 +1,5 @@
 imp child;
 
-num x = 1;
-
 fun parent() {
 	child();
 }

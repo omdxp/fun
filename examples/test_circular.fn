@@ -1,5 +1,5 @@
 // This file imports circular1.fn to trigger and debug circular dependency detection
-imp circular1;
+imp error_cases.circular_dependency.circular1;
 
 fun test_circular() {
     printf("Testing circular dependency detection\n");
