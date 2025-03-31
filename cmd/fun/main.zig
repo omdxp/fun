@@ -1,11 +1,14 @@
 const std = @import("std");
 const heap = std.heap;
+const builtin = @import("builtin");
 const token = @import("lexer").token;
 const codegen = @import("codegen");
 const lexer = @import("lexer");
 const parser = @import("parser");
 const utils = @import("utils");
 const cli = @import("cli");
+
+var debug_allocator: heap.DebugAllocator(.{}) = .init;
 
 fn print_error_and_exit(err: anyerror) noreturn {
     const stderr = std.io.getStdErr().writer();
@@ -38,9 +41,17 @@ fn print_error_and_exit(err: anyerror) noreturn {
 }
 
 pub fn main() void {
-    var gpa = heap.DebugAllocator(.{ .thread_safe = true, .safety = true }){};
-    defer _ = gpa.deinit();
-    var arena = heap.ArenaAllocator.init(gpa.allocator());
+    const gpa, const is_debug = blk: {
+        if (builtin.target.os.tag == .wasi) break :blk .{ heap.wasm_allocator, false };
+        break :blk switch (builtin.mode) {
+            .Debug, .ReleaseSafe => .{ debug_allocator.allocator(), true },
+            .ReleaseFast, .ReleaseSmall => .{ heap.smp_allocator, false },
+        };
+    };
+    defer if (is_debug) {
+        _ = debug_allocator.deinit();
+    };
+    var arena = heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const global_allocator = arena.allocator();
 
