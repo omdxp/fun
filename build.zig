@@ -117,11 +117,11 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     // --- Define Unit Tests ---
-    // Create a test module that imports all other modules to run tests
+    // Create single consolidated test module
     const test_module = b.createModule(.{
-        .root_source_file = b.path("cmd/fun/main.zig"), // Assuming tests can be run from/imported by main
+        .root_source_file = b.path("tests/main_test.zig"),
         .target = target,
-        .optimize = .Debug, // Use Debug optimize for tests
+        .optimize = .Debug,
     });
 
     // Add all modules as imports to the test module
