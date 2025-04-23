@@ -4,6 +4,7 @@ const mem = std.mem;
 const assert = std.debug.assert;
 const parser = @import("parser");
 const lexer = @import("lexer");
+const LexError = lexer.LexError;
 const token = lexer.token;
 const ast = @import("ast");
 const utils = @import("utils");
@@ -22,6 +23,8 @@ pub const TranspileError = error{
     FileReadError,
     /// Error indicating that a file cannot be written.
     FileWriteError,
+    /// Error indicating a file seek operation failed.
+    FileSeekError,
     /// Error indicating a failure when writing to the output buffer.
     BufferWriteError,
     /// Error indicating memory allocation failure.
@@ -39,6 +42,9 @@ pub const TranspileError = error{
     /// Error indicating unsupported AST node type.
     UnsupportedNodeType,
 };
+
+/// General errors that can occur during the transpilation process.
+pub const GeneralError = TranspileError || LexError;
 
 /// TranspileProcessFlags is an enumeration that defines flags for the transpile process.
 pub const TranspileProcessFlags = packed struct {
@@ -935,7 +941,7 @@ pub const TranspileProcess = struct {
     }
 
     /// Transpiles all nodes in the AST to C code
-    pub fn transpile(self: *Self) TranspileError!void {
+    pub fn transpile(self: *Self) GeneralError!void {
         // Add source file name at the top of the output
         const source_file = std.fs.path.basename(self.input_file_path);
         try self.write("// Source file: ");
@@ -1340,7 +1346,7 @@ pub const TranspileProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if processing the import fails.
-    fn process_import(self: *Self, node: ast.Node) TranspileError!void {
+    fn process_import(self: *Self, node: ast.Node) GeneralError!void {
         const import_path = node.node_variant.?.import.path;
         if (std.mem.indexOf(u8, import_path, "std.") != null) {
             try self.process_std_import(import_path);
@@ -1406,7 +1412,7 @@ pub const TranspileProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if processing the import fails.
-    fn process_local_import(self: *Self, import_path: []const u8) TranspileError!void {
+    fn process_local_import(self: *Self, import_path: []const u8) GeneralError!void {
         // Get full path of the file to import
         var file_path = std.ArrayList(u8).init(self.allocator);
         defer file_path.deinit();

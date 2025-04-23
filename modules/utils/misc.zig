@@ -637,7 +637,7 @@ pub fn Vector(comptime T: type) type {
         ///
         /// Errors:
         /// - Returns an error if the element could not be appended.
-        pub fn push(self: *Self, elem: T) !void {
+        pub fn push(self: *Self, elem: T) mem.Allocator.Error!void {
             try self.data.append(elem);
             self.count += 1;
         }
