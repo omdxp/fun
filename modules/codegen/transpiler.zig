@@ -3,6 +3,7 @@ const fs = std.fs;
 const mem = std.mem;
 const assert = std.debug.assert;
 const parser = @import("parser");
+const ParseError = parser.ParseError;
 const lexer = @import("lexer");
 const LexError = lexer.LexError;
 const token = lexer.token;
@@ -44,7 +45,7 @@ pub const TranspileError = error{
 };
 
 /// General errors that can occur during the transpilation process.
-pub const GeneralError = TranspileError || LexError;
+pub const GeneralError = TranspileError || LexError || ParseError;
 
 /// TranspileProcessFlags is an enumeration that defines flags for the transpile process.
 pub const TranspileProcessFlags = packed struct {
