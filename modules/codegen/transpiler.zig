@@ -12,6 +12,34 @@ const scope = semantics.scope;
 const symbol = semantics.symbol;
 const dtype = semantics.dtype;
 
+/// Errors that can occur during the transpilation process.
+pub const TranspileError = error{
+    /// Error indicating that a file is not found.
+    FileNotFound,
+    /// Error indicating that a file cannot be opened.
+    FileOpenError,
+    /// Error indicating that a file cannot be read.
+    FileReadError,
+    /// Error indicating that a file cannot be written.
+    FileWriteError,
+    /// Error indicating a failure when writing to the output buffer.
+    BufferWriteError,
+    /// Error indicating memory allocation failure.
+    MemoryAllocationFailed,
+    /// TODO: Error indicating that a symbol is not defined.
+    SymbolNotDefined,
+    /// Error indicating that a symbol is already defined.
+    DuplicateSymbol,
+    /// Error indicating unsupported import.
+    UnsupportedImport,
+    /// Error indicating circular import.
+    CircularImport,
+    /// Error indicating that the import path is invalid.
+    InvalidImportPath,
+    /// Error indicating unsupported AST node type.
+    UnsupportedNodeType,
+};
+
 /// TranspileProcessFlags is an enumeration that defines flags for the transpile process.
 pub const TranspileProcessFlags = packed struct {
     /// Flag to indicate execution process. When true, the output will be compiled and executed.
@@ -126,29 +154,63 @@ pub const TranspileProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if opening the input file or creating the output file fails.
-    pub fn init(allocator: mem.Allocator, ifilepath: []const u8, ofilepath: []const u8, flags: TranspileProcessFlags) !Self {
-        const ifile = try fs.cwd().openFile(ifilepath, .{ .mode = .read_write });
+    pub fn init(allocator: mem.Allocator, ifilepath: []const u8, ofilepath: []const u8, flags: TranspileProcessFlags) TranspileError!Self {
+        const ifile = fs.cwd().openFile(ifilepath, .{ .mode = .read_write }) catch |e| {
+            std.debug.print("Error opening input file '{s}': {s}\\n", .{ ifilepath, @errorName(e) });
+            return TranspileError.FileOpenError;
+        };
+        errdefer ifile.close();
+
         var ofile: ?fs.File = null;
         var outbuf: ?std.ArrayList(u8) = null;
 
         if (flags.outf) {
-            ofile = try fs.cwd().createFile(ofilepath, .{ .read = true });
+            ofile = fs.cwd().createFile(ofilepath, .{ .read = true }) catch |e| {
+                std.debug.print("Error creating output file '{s}': {s}\\n", .{ ofilepath, @errorName(e) });
+                return TranspileError.FileOpenError;
+            };
+            errdefer if (ofile) |f| f.close();
         } else {
             outbuf = std.ArrayList(u8).init(allocator);
         }
 
         // Create initial symbol table
-        const initial_table = try allocator.create(symbol.SymbolTable);
+        const initial_table = allocator.create(symbol.SymbolTable) catch |e| {
+            std.debug.print("Error creating initial symbol table: {s}\\n", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
+        errdefer allocator.destroy(initial_table);
         initial_table.* = .{
             .symbols = utils.Vector(symbol.Symbol).init(allocator),
         };
+        errdefer initial_table.symbols.deinit();
 
         // Initialize import-related structures
         var imported_files = std.StringHashMap(bool).init(allocator);
-        try imported_files.put(ifilepath, true); // Mark current file as imported
+        errdefer imported_files.deinit();
+        imported_files.put(ifilepath, true) catch |e| {
+            std.debug.print("Error adding file '{s}' to imported files: {s}\\n", .{ ifilepath, @errorName(e) });
+            return TranspileError.MemoryAllocationFailed;
+        }; // Mark current file as imported
 
         var import_chain = std.ArrayList([]const u8).init(allocator);
-        try import_chain.append(try allocator.dupe(u8, ifilepath));
+        errdefer import_chain.deinit();
+
+        const initial_path = allocator.dupe(u8, ifilepath) catch |e| {
+            std.debug.print("Error duplicating initial path '{s}': {s}\\n", .{ ifilepath, @errorName(e) });
+            return TranspileError.MemoryAllocationFailed;
+        };
+        errdefer allocator.free(initial_path);
+        import_chain.append(initial_path) catch |e| {
+            std.debug.print("Error adding initial path '{s}' to import chain: {s}\\n", .{ initial_path, @errorName(e) });
+            return TranspileError.MemoryAllocationFailed;
+        };
+
+        const input_file_path = allocator.dupe(u8, ifilepath) catch |e| {
+            std.debug.print("Error duplicating input file path '{s}': {s}\\n", .{ ifilepath, @errorName(e) });
+            return TranspileError.MemoryAllocationFailed;
+        };
+        errdefer allocator.free(input_file_path);
 
         return Self{
             .flags = flags,
@@ -169,7 +231,7 @@ pub const TranspileProcess = struct {
             .global_symbols = std.StringHashMap(GlobalSymbolInfo).init(allocator),
             .children = std.ArrayList(*TranspileProcess).init(allocator),
             .std_imports = std.ArrayList([]const u8).init(allocator),
-            .input_file_path = try allocator.dupe(u8, ifilepath),
+            .input_file_path = input_file_path,
         };
     }
 
@@ -182,7 +244,7 @@ pub const TranspileProcess = struct {
     /// - `self`: The instance of the transpiler.
     /// - `fmt`: The format string for the error message.
     /// - `args`: The arguments for the format string.
-    pub fn err(self: *Self, comptime fmt: []const u8, args: anytype) void {
+    pub fn err(self: *Self, comptime fmt: []const u8, args: anytype) noreturn {
         std.debug.print("Error: ", .{});
         std.debug.print(fmt, args);
         std.debug.print(" in {s}:{d}:{d}\n", .{
@@ -224,11 +286,17 @@ pub const TranspileProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if creating the new symbol table or initializing its symbols fails.
-    pub fn new_table(self: *Self) !void {
+    pub fn new_table(self: *Self) TranspileError!void {
         if (self.symbols.active_table) |table| {
-            try self.symbols.tables.push(table);
+            self.symbols.tables.push(table) catch |e| {
+                std.debug.print("Error pushing symbol table: {s}\\n", .{@errorName(e)});
+                return TranspileError.MemoryAllocationFailed;
+            };
         }
-        const table = try self.allocator.create(symbol.SymbolTable);
+        const table = self.allocator.create(symbol.SymbolTable) catch |e| {
+            std.debug.print("Error creating new symbol table: {s}\\n", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
         table.*.symbols = utils.Vector(symbol.Symbol).init(self.allocator);
         self.symbols.active_table = table;
     }
@@ -256,8 +324,11 @@ pub const TranspileProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if the symbol cannot be added to the active symbol table.
-    pub fn push_symbol(self: *Self, s: symbol.Symbol) !void {
-        try self.symbols.active_table.?.symbols.push(s);
+    pub fn push_symbol(self: *Self, s: symbol.Symbol) TranspileError!void {
+        self.symbols.active_table.?.symbols.push(s) catch |e| {
+            std.debug.print("Error pushing symbol '{s}': {s}\\n", .{ s.name, @errorName(e) });
+            return TranspileError.MemoryAllocationFailed;
+        };
     }
 
     /// Retrieves a symbol by name from the active symbol table.
@@ -313,10 +384,14 @@ pub const TranspileProcess = struct {
     /// Errors:
     /// - Logs an error if a symbol with the same name already exists.
     /// - Returns an error if the symbol cannot be added to the active symbol table.
-    pub fn register_symbol(self: *Self, s: symbol.Symbol) !void {
+    pub fn register_symbol(self: *Self, s: symbol.Symbol) TranspileError!void {
         // Check if symbol is already defined in the current module
         if (self.get_symbol(s.name) != null) {
-            self.err("Symbol '{s}' already defined in the current module", .{s.name});
+            // self.err("Symbol '{s}' already defined in the current module", .{s.name});
+            std.debug.print("Error: Symbol '{s}' already defined in the current module '{s}' at line {d}, col {d}\\n", .{
+                s.name, self.pos.filename, self.pos.line, self.pos.col,
+            });
+            return TranspileError.DuplicateSymbol;
         }
 
         // Skip duplicate checks for main function - each module can have its own main
@@ -325,7 +400,11 @@ pub const TranspileProcess = struct {
             if (self.global_symbols.get(s.name)) |existing| {
                 // Only report error if it's from a different file, not the same file
                 if (!mem.eql(u8, existing.file_path, self.input_file_path)) {
-                    self.err("Symbol '{s}' already defined in module '{s}'", .{ s.name, existing.file_path });
+                    // self.err("Symbol '{s}' already defined in module '{s}'", .{ s.name, existing.file_path });
+                    std.debug.print("Error: Symbol '{s}' already defined in module '{s}' at line {d}, col {d}\\n", .{
+                        s.name, existing.file_path, self.pos.line, self.pos.col,
+                    });
+                    return TranspileError.DuplicateSymbol;
                 }
             }
         }
@@ -341,11 +420,14 @@ pub const TranspileProcess = struct {
         }
 
         // Register the symbol in global registry to detect conflicts in other modules
-        try self.global_symbols.put(s.name, .{
+        self.global_symbols.put(s.name, .{
             .symbol_name = s.name,
             .file_path = self.input_file_path,
             .is_function = is_function,
-        });
+        }) catch |e| {
+            std.debug.print("Error registering symbol '{s}': {s}\\n", .{ s.name, @errorName(e) });
+            return TranspileError.MemoryAllocationFailed;
+        };
 
         // Add the symbol to the active symbol table
         try self.push_symbol(s);
@@ -362,7 +444,7 @@ pub const TranspileProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if registering the symbol fails.
-    pub fn register_node_symbol(self: *Self, node: ast.Node) !void {
+    pub fn register_node_symbol(self: *Self, node: ast.Node) TranspileError!void {
         switch (node.node_variant.?) {
             .variable => |variable| {
                 const s = symbol.Symbol{
@@ -373,15 +455,22 @@ pub const TranspileProcess = struct {
 
                 // Check if this symbol exists in any imported module
                 if (self.global_symbols.get(variable.name.items)) |existing| {
-                    self.err("Variable '{s}' already defined in module '{s}'", .{ variable.name.items, existing.file_path });
+                    // self.err("Variable '{s}' already defined in module '{s}'", .{ variable.name.items, existing.file_path });
+                    std.debug.print("Error: Variable '{s}' already defined in module '{s}' (referenced in '{s}' at line {d}, col {d})\\n", .{
+                        variable.name.items, existing.file_path, self.pos.filename, self.pos.line, self.pos.col,
+                    });
+                    return TranspileError.DuplicateSymbol;
                 }
 
                 // Register the symbol in global registry
-                try self.global_symbols.put(variable.name.items, .{
+                self.global_symbols.put(variable.name.items, .{
                     .symbol_name = variable.name.items,
                     .file_path = self.input_file_path,
                     .is_function = false,
-                });
+                }) catch |e| {
+                    std.debug.print("Error registering symbol '{s}': {s}\\n", .{ variable.name.items, @errorName(e) });
+                    return TranspileError.MemoryAllocationFailed;
+                };
 
                 try self.register_symbol(s);
             },
@@ -403,16 +492,23 @@ pub const TranspileProcess = struct {
 
                     // Check if this function exists in any imported module
                     if (self.global_symbols.get(function.name.?.items)) |existing| {
-                        self.err("Function '{s}' already defined in module '{s}'", .{ function.name.?.items, existing.file_path });
+                        // self.err("Function '{s}' already defined in module '{s}'", .{ function.name.?.items, existing.file_path });
+                        std.debug.print("Error: Function '{s}' already defined in module '{s}' (referenced in '{s}' at line {d}, col {d})\\n", .{
+                            function.name.?.items, existing.file_path, self.pos.filename, self.pos.line, self.pos.col,
+                        });
+                        return TranspileError.DuplicateSymbol;
                     }
                 }
 
                 // Register the symbol in global registry
-                try self.global_symbols.put(function.name.?.items, .{
+                self.global_symbols.put(function.name.?.items, .{
                     .symbol_name = function.name.?.items,
                     .file_path = self.input_file_path,
                     .is_function = true,
-                });
+                }) catch |e| {
+                    std.debug.print("Error registering symbol '{s}': {s}\\n", .{ function.name.?.items, @errorName(e) });
+                    return TranspileError.MemoryAllocationFailed;
+                };
 
                 try self.register_symbol(s);
             },
@@ -429,9 +525,13 @@ pub const TranspileProcess = struct {
     ///
     /// Returns:
     /// - `scope.Scope`: The initialized root scope.
-    pub fn init_root_scope(self: *Self) !scope.Scope {
+    pub fn init_root_scope(self: *Self) TranspileError!scope.Scope {
         assert(self.scope == null);
-        const root_scope = try self.allocator.create(scope.Scope);
+        const root_scope = self.allocator.create(scope.Scope) catch |e| {
+            std.debug.print("Error creating root scope: {s}\\n", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
+        errdefer self.allocator.destroy(root_scope);
         root_scope.* = scope.Scope.init(self.allocator);
         self.scope = .{
             .root = root_scope,
@@ -481,9 +581,13 @@ pub const TranspileProcess = struct {
     ///
     /// Returns:
     /// - `scope.Scope`: The initialized new scope.
-    pub fn new_scope(self: *Self) !scope.Scope {
+    pub fn new_scope(self: *Self) TranspileError!scope.Scope {
         assert(self.scope != null);
-        const nc = try self.allocator.create(scope.Scope);
+        const nc = self.allocator.create(scope.Scope) catch |e| {
+            std.debug.print("Error creating new scope: {s}\\n", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
+        errdefer self.allocator.destroy(nc);
         nc.* = scope.Scope.init(self.allocator);
         nc.parent = self.scope.?.current;
         self.scope.?.current = nc;
@@ -527,8 +631,11 @@ pub const TranspileProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if the entity could not be added.
-    pub fn push_scope_entity(self: *Self, entity: *scope.ScopeEntity) !void {
-        try self.scope.?.current.?.entities.push(entity);
+    pub fn push_scope_entity(self: *Self, entity: *scope.ScopeEntity) TranspileError!void {
+        self.scope.?.current.?.entities.push(entity) catch |e| {
+            std.debug.print("Error pushing scope entity: {s}\\n", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
     }
 
     /// Finishes the current scope and sets the parent scope as the current scope.
@@ -776,20 +883,32 @@ pub const TranspileProcess = struct {
     }
 
     /// Helper function to format and write values
-    fn print(self: *Self, comptime fmt: []const u8, args: anytype) !void {
+    fn print(self: *Self, comptime fmt: []const u8, args: anytype) TranspileError!void {
         if (self.flags.outf) {
-            try std.fmt.format(self.ofile.?.writer(), fmt, args);
+            std.fmt.format(self.ofile.?.writer(), fmt, args) catch |e| {
+                std.debug.print("Error writing to output file: {s}\\n", .{@errorName(e)});
+                return TranspileError.FileWriteError;
+            };
         } else {
-            try std.fmt.format(self.outbuf.?.writer(), fmt, args);
+            std.fmt.format(self.outbuf.?.writer(), fmt, args) catch |e| {
+                std.debug.print("Error writing to output buffer: {s}\\n", .{@errorName(e)});
+                return TranspileError.BufferWriteError;
+            };
         }
     }
 
     /// Write to output (either file or buffer)
-    pub fn write(self: *Self, bytes: []const u8) !void {
+    pub fn write(self: *Self, bytes: []const u8) TranspileError!void {
         if (self.flags.outf) {
-            try self.ofile.?.writeAll(bytes);
+            self.ofile.?.writeAll(bytes) catch |e| {
+                std.debug.print("Error writing to output file: {s}\\n", .{@errorName(e)});
+                return TranspileError.FileWriteError;
+            };
         } else {
-            try self.outbuf.?.appendSlice(bytes);
+            self.outbuf.?.appendSlice(bytes) catch |e| {
+                std.debug.print("Error writing to output buffer: {s}\\n", .{@errorName(e)});
+                return TranspileError.BufferWriteError;
+            };
         }
     }
 
@@ -802,9 +921,10 @@ pub const TranspileProcess = struct {
     }
 
     /// Helper function to write data type to output
-    fn write_type(self: *Self, data_type: dtype.DataType) anyerror!void {
+    fn write_type(self: *Self, data_type: dtype.DataType) TranspileError!void {
         const c_type = map_type_to_c(data_type.type_str.items);
         try self.write(c_type);
+        // TODO: Handle array types
         // if (data_type.array) |array| {
         //     for (array.brackets.items()) |bracket| {
         //         try self.write("[");
@@ -815,7 +935,7 @@ pub const TranspileProcess = struct {
     }
 
     /// Transpiles all nodes in the AST to C code
-    pub fn transpile(self: *Self) !void {
+    pub fn transpile(self: *Self) TranspileError!void {
         // Add source file name at the top of the output
         const source_file = std.fs.path.basename(self.input_file_path);
         try self.write("// Source file: ");
@@ -829,7 +949,10 @@ pub const TranspileProcess = struct {
         // Identify import nodes
         for (self.nodes.items(), 0..) |node, i| {
             if (node.type == .Import) {
-                try import_nodes.append(i);
+                import_nodes.append(i) catch |e| {
+                    std.debug.print("Error adding import node index '{d}': {s}\\n", .{ i, @errorName(e) });
+                    return TranspileError.MemoryAllocationFailed;
+                };
             }
         }
 
@@ -856,7 +979,7 @@ pub const TranspileProcess = struct {
     }
 
     // Helper function to recursively transpile children
-    fn transpile_children_recursive(self: *Self, parent_proc: *TranspileProcess) !void {
+    fn transpile_children_recursive(self: *Self, parent_proc: *TranspileProcess) TranspileError!void {
         for (parent_proc.children.items) |child| {
             // Recursively transpile the child's children first
             try self.transpile_children_recursive(child);
@@ -880,7 +1003,7 @@ pub const TranspileProcess = struct {
     }
 
     /// Transpiles the prelude code to C
-    fn transpile_prelude(self: *Self) !void {
+    fn transpile_prelude(self: *Self) TranspileError!void {
         try self.write_std_imports();
         try self.write("#include <stdbool.h>\n");
         try self.write("#include <stdlib.h>\n");
@@ -888,7 +1011,7 @@ pub const TranspileProcess = struct {
     }
 
     /// Transpiles a node to C code
-    fn transpile_node(self: *Self, node: ast.Node) !void {
+    fn transpile_node(self: *Self, node: ast.Node) TranspileError!void {
         switch (node.type) {
             .Expression => {
                 const exp = node.node_variant.?.exp;
@@ -1190,13 +1313,13 @@ pub const TranspileProcess = struct {
     }
 
     /// Write a newline followed by the current indentation
-    pub fn write_indent(self: *Self) !void {
+    pub fn write_indent(self: *Self) TranspileError!void {
         try self.write("\n");
         try self.write_spaces(self.indent_level * 4); // 4 spaces per level
     }
 
     /// Write a specific number of spaces
-    pub fn write_spaces(self: *Self, spaces: u32) !void {
+    pub fn write_spaces(self: *Self, spaces: u32) TranspileError!void {
         var i: u32 = 0;
         while (i < spaces) : (i += 1) {
             try self.write(" ");
@@ -1204,7 +1327,7 @@ pub const TranspileProcess = struct {
     }
 
     /// Write formatted with indentation prefix
-    pub fn write_indented(self: *Self, text: []const u8) !void {
+    pub fn write_indented(self: *Self, text: []const u8) TranspileError!void {
         try self.write_spaces(self.indent_level * 4);
         try self.write(text);
     }
@@ -1217,7 +1340,7 @@ pub const TranspileProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if processing the import fails.
-    fn process_import(self: *Self, node: ast.Node) !void {
+    fn process_import(self: *Self, node: ast.Node) TranspileError!void {
         const import_path = node.node_variant.?.import.path;
         if (std.mem.indexOf(u8, import_path, "std.") != null) {
             try self.process_std_import(import_path);
@@ -1234,20 +1357,33 @@ pub const TranspileProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if processing the import fails.
-    fn process_std_import(self: *Self, import_path: []const u8) !void {
+    fn process_std_import(self: *Self, import_path: []const u8) TranspileError!void {
         var header_name: []const u8 = undefined;
 
         if (mem.eql(u8, import_path, "std.io")) {
-            header_name = try self.allocator.dupe(u8, "stdio.h");
+            header_name = self.allocator.dupe(u8, "stdio.h") catch |e| {
+                self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
+                return TranspileError.MemoryAllocationFailed;
+            };
         } else if (mem.eql(u8, import_path, "std.mem")) {
-            header_name = try self.allocator.dupe(u8, "stdlib.h");
+            header_name = self.allocator.dupe(u8, "stdlib.h") catch |e| {
+                self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
+                return TranspileError.MemoryAllocationFailed;
+            };
         } else if (mem.eql(u8, import_path, "std.string")) {
-            header_name = try self.allocator.dupe(u8, "string.h");
+            header_name = self.allocator.dupe(u8, "string.h") catch |e| {
+                self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
+                return TranspileError.MemoryAllocationFailed;
+            };
         } else if (mem.eql(u8, import_path, "std.math")) {
-            header_name = try self.allocator.dupe(u8, "math.h");
+            header_name = self.allocator.dupe(u8, "math.h") catch |e| {
+                self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
+                return TranspileError.MemoryAllocationFailed;
+            };
         } else {
-            self.err("Unsupported standard library import: {s}", .{import_path});
-            return;
+            // self.err("Unsupported standard library import: {s}", .{import_path});
+            std.debug.print("Unsupported standard library import: {s}\\n", .{import_path});
+            return TranspileError.UnsupportedImport;
         }
 
         for (self.std_imports.items) |existing| {
@@ -1256,7 +1392,10 @@ pub const TranspileProcess = struct {
                 return;
             }
         }
-        try self.std_imports.append(header_name);
+        self.std_imports.append(header_name) catch |e| {
+            self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
     }
 
     /// Process a local file import (e.g., "custom" or "folder.file")
@@ -1267,26 +1406,45 @@ pub const TranspileProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if processing the import fails.
-    fn process_local_import(self: *Self, import_path: []const u8) anyerror!void {
+    fn process_local_import(self: *Self, import_path: []const u8) TranspileError!void {
         // Get full path of the file to import
         var file_path = std.ArrayList(u8).init(self.allocator);
         defer file_path.deinit();
 
         const dir_path = std.fs.path.dirname(self.input_file_path) orelse ".";
-        try file_path.appendSlice(dir_path);
-        try file_path.append('/');
+        file_path.appendSlice(dir_path) catch |e| {
+            std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
+        file_path.append('/') catch |e| {
+            std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
 
         var i: usize = 0;
         while (i < import_path.len) : (i += 1) {
             if (import_path[i] == '.') {
-                try file_path.append('/');
+                file_path.append('/') catch |e| {
+                    std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+                    return TranspileError.MemoryAllocationFailed;
+                };
             } else {
-                try file_path.append(import_path[i]);
+                file_path.append(import_path[i]) catch |e| {
+                    std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+                    return TranspileError.MemoryAllocationFailed;
+                };
             }
         }
 
-        try file_path.appendSlice(".fn");
-        const full_path = try file_path.toOwnedSlice();
+        file_path.appendSlice(".fn") catch |e| {
+            std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
+        const full_path = file_path.toOwnedSlice() catch |e| {
+            std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
+        errdefer self.allocator.free(full_path);
         defer self.allocator.free(full_path);
 
         // Add a comment showing the import attempt
@@ -1299,14 +1457,15 @@ pub const TranspileProcess = struct {
             try self.write("\n/* ERROR: Import file not found: ");
             try self.write(full_path);
             try self.write(" */\n");
-            return error.FileNotFound;
+            return TranspileError.FileNotFound;
         };
 
         // Robust direct circular dependency detection
         // First, check if the file being imported already has us in its import chain
         const file_contents = fs.cwd().readFileAlloc(self.allocator, full_path, 1024 * 1024) catch |read_err| {
-            self.err("Failed to read import file: {any}", .{read_err});
-            return;
+            // self.err("Failed to read import file: {any}", .{read_err});
+            std.debug.print("Failed to read import file: {s}\\n", .{@errorName(read_err)});
+            return TranspileError.FileReadError;
         };
         defer self.allocator.free(file_contents);
 
@@ -1314,24 +1473,46 @@ pub const TranspileProcess = struct {
         const our_name = std.fs.path.stem(self.input_file_path);
         var import_line = std.ArrayList(u8).init(self.allocator);
         defer import_line.deinit();
-        try import_line.appendSlice("imp ");
-        try import_line.appendSlice(our_name);
-        try import_line.appendSlice(";");
+        import_line.appendSlice("imp ") catch |e| {
+            std.debug.print("Failed to allocate memory for import line: {s}\\n", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
+        import_line.appendSlice(our_name) catch |e| {
+            std.debug.print("Failed to allocate memory for import line: {s}\\n", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
+        import_line.appendSlice(";") catch |e| {
+            std.debug.print("Failed to allocate memory for import line: {s}\\n", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
 
         // Check if the target file imports us
         if (std.mem.indexOf(u8, file_contents, import_line.items)) |_| {
             const basename1 = std.fs.path.basename(self.input_file_path);
             const basename2 = std.fs.path.basename(full_path);
 
-            self.err("CIRCULAR IMPORT DETECTED: '{s}' imports '{s}', but '{s}' also imports '{s}', creating a circular dependency", .{ basename1, basename2, basename2, basename1 });
-            return;
+            // self.err("CIRCULAR IMPORT DETECTED: '{s}' imports '{s}', but '{s}' also imports '{s}', creating a circular dependency", .{ basename1, basename2, basename2, basename1 });
+            std.debug.print("CIRCULAR IMPORT DETECTED: '{s}' imports '{s}', but '{s}' also imports '{s}', creating a circular dependency\\n", .{ basename1, basename2, basename2, basename1 });
+            return TranspileError.CircularImport;
         }
 
         // Mark this file as imported
-        try self.imported_files.put(try self.allocator.dupe(u8, full_path), true);
+        const full_path_copy = self.allocator.dupe(u8, full_path) catch |e| {
+            std.debug.print("Failed to allocate memory for full path copy: {s}\\n", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
+        errdefer self.allocator.free(full_path_copy);
+
+        self.imported_files.put(full_path_copy, true) catch |e| {
+            std.debug.print("Failed to allocate memory for imported file: {s}\\n", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
 
         // Create and initialize child transpile process
-        var import_proc = try self.allocator.create(TranspileProcess);
+        var import_proc = self.allocator.create(TranspileProcess) catch |e| {
+            std.debug.print("Failed to allocate memory for import process: {s}\\n", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
         errdefer self.allocator.destroy(import_proc);
 
         import_proc.* = try TranspileProcess.init(self.allocator, full_path, "temp.c", .{ .outf = false });
@@ -1341,14 +1522,41 @@ pub const TranspileProcess = struct {
 
         // Copy the import chain and add the current import for tracking
         for (self.import_chain.items) |chain_path| {
-            try import_proc.import_chain.append(try self.allocator.dupe(u8, chain_path));
+            const chain_path_copy = self.allocator.dupe(u8, chain_path) catch |e| {
+                std.debug.print("Failed to allocate memory for import chain copy: {s}\\n", .{@errorName(e)});
+                return TranspileError.MemoryAllocationFailed;
+            };
+            errdefer self.allocator.free(chain_path_copy);
+
+            import_proc.import_chain.append(chain_path_copy) catch |e| {
+                std.debug.print("Failed to allocate memory for import chain: {s}\\n", .{@errorName(e)});
+                return TranspileError.MemoryAllocationFailed;
+            };
         }
-        try import_proc.import_chain.append(try self.allocator.dupe(u8, full_path));
+        const import_path_copy = self.allocator.dupe(u8, full_path) catch |e| {
+            std.debug.print("Failed to allocate memory for import path copy: {s}\\n", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
+        errdefer self.allocator.free(import_path_copy);
+
+        import_proc.import_chain.append(import_path_copy) catch |e| {
+            std.debug.print("Failed to allocate memory for import chain: {s}\\n", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
 
         // Copy imported files to child
         var it = self.imported_files.iterator();
         while (it.next()) |entry| {
-            try import_proc.imported_files.put(try self.allocator.dupe(u8, entry.key_ptr.*), true);
+            const imported_file_copy = self.allocator.dupe(u8, entry.key_ptr.*) catch |e| {
+                std.debug.print("Failed to allocate memory for imported file copy: {s}\\n", .{@errorName(e)});
+                return TranspileError.MemoryAllocationFailed;
+            };
+            errdefer self.allocator.free(imported_file_copy);
+
+            import_proc.imported_files.put(imported_file_copy, true) catch |e| {
+                std.debug.print("Failed to allocate memory for imported file: {s}\\n", .{@errorName(e)});
+                return TranspileError.MemoryAllocationFailed;
+            };
         }
 
         // Process the imported file
@@ -1369,7 +1577,10 @@ pub const TranspileProcess = struct {
         try import_proc.sync_global_symbols_to_parent();
 
         // Add to children list
-        try self.children.append(import_proc);
+        self.children.append(import_proc) catch |e| {
+            std.debug.print("Failed to allocate memory for child process: {s}\\n", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
     }
 
     /// Synchronize global symbols from a child process to the parent process
@@ -1382,7 +1593,7 @@ pub const TranspileProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if the synchronization fails.
-    fn sync_global_symbols_to_parent(self: *Self) !void {
+    fn sync_global_symbols_to_parent(self: *Self) TranspileError!void {
         if (self.parent == null) return; // Not a child process
 
         var it = self.global_symbols.iterator();
@@ -1396,20 +1607,25 @@ pub const TranspileProcess = struct {
             // Check if this symbol is already defined in the parent
             if (self.parent.?.global_symbols.get(symbol_name)) |existing| {
                 // If we find a conflict, report it
-                self.err("Symbol '{s}' in module '{s}' conflicts with same symbol defined in module '{s}'", .{ symbol_name, symbol_info.file_path, existing.file_path });
+                // self.err("Symbol '{s}' in module '{s}' conflicts with same symbol defined in module '{s}'", .{ symbol_name, symbol_info.file_path, existing.file_path });
+                std.debug.print("Symbol '{s}' in module '{s}' conflicts with same symbol defined in module '{s}'\\n", .{ symbol_name, symbol_info.file_path, existing.file_path });
+                return TranspileError.DuplicateSymbol;
             }
 
             // Add this symbol to the parent's global registry
-            try self.parent.?.global_symbols.put(symbol_name, .{
+            self.parent.?.global_symbols.put(symbol_name, .{
                 .symbol_name = symbol_name,
                 .file_path = symbol_info.file_path,
                 .is_function = symbol_info.is_function,
-            });
+            }) catch |e| {
+                std.debug.print("Failed to allocate memory for global symbol: {s}\\n", .{@errorName(e)});
+                return TranspileError.MemoryAllocationFailed;
+            };
         }
     }
 
     /// Write standard library imports to the output
-    fn write_std_imports(self: *Self) !void {
+    fn write_std_imports(self: *Self) TranspileError!void {
         for (self.std_imports.items) |header| {
             try self.write("#include <");
             try self.write(header);
