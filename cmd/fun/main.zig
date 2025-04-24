@@ -13,31 +13,35 @@ var debug_allocator: heap.DebugAllocator(.{}) = .init;
 fn print_error_and_exit(err: anyerror) noreturn {
     const stderr = std.io.getStdErr().writer();
 
-    if (err == cli.CliError.MissingInputFile) {
-        stderr.writeAll("Error: Input file is required\n") catch {};
-        std.process.exit(1);
-    } else if (err == cli.CliError.MissingOutputFile) {
-        stderr.writeAll("Error: Output file name is required when using -out flag\n") catch {};
-        std.process.exit(1);
-    } else if (err == cli.CliError.InvalidInputExtension) {
-        stderr.writeAll("Error: Input file must have .fn extension\n") catch {};
-        std.process.exit(1);
-    } else if (err == cli.CliError.InvalidOutputExtension) {
-        stderr.writeAll("Error: Output file must have .c extension\n") catch {};
-        std.process.exit(1);
-    } else if (err == cli.CliError.CompilationFailed) {
-        std.process.exit(1);
-    } else if (err == cli.CliError.ExecutionFailed) {
-        std.process.exit(1);
-    } else if (err == cli.CliError.ShowHelp) {
-        std.process.exit(0);
-    } else if (err == error.FileNotFound) {
-        stderr.writeAll("Error: Input file not found\n") catch {};
-        std.process.exit(1);
-    } else {
-        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
-        std.process.exit(1);
+    switch (err) {
+        cli.CliError.MissingInputFile => {
+            _ = stderr.writeAll("Error: Input file is required\n") catch {};
+        },
+        cli.CliError.MissingOutputFile => {
+            _ = stderr.writeAll("Error: Output file name is required when using -out flag\n") catch {};
+        },
+        cli.CliError.InvalidInputExtension => {
+            _ = stderr.writeAll("Error: Input file must have .fn extension\n") catch {};
+        },
+        cli.CliError.InvalidOutputExtension => {
+            _ = stderr.writeAll("Error: Output file must have .c extension\n") catch {};
+        },
+        cli.CliError.CompilationFailed => {
+            _ = stderr.writeAll("Error: C compilation failed.\n") catch {};
+        },
+        cli.CliError.ExecutionFailed => {
+            _ = stderr.writeAll("Error: Execution of compiled code failed.\n") catch {};
+        },
+        cli.CliError.ShowHelp => {
+            std.process.exit(0);
+        },
+        error.FileNotFound => {
+            _ = stderr.writeAll("Error: Input file not found\n") catch {};
+        },
+        else => {},
     }
+
+    std.process.exit(1);
 }
 
 pub fn main() void {
