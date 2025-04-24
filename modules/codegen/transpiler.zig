@@ -251,16 +251,16 @@ pub const TranspileProcess = struct {
     /// - `self`: The instance of the transpiler.
     /// - `fmt`: The format string for the error message.
     /// - `args`: The arguments for the format string.
-    pub fn err(self: *Self, comptime fmt: []const u8, args: anytype) noreturn {
-        std.debug.print("Error: ", .{});
-        std.debug.print(fmt, args);
-        std.debug.print(" in {s}:{d}:{d}\n", .{
+    pub fn err(self: *Self, comptime fmt: []const u8, args: anytype) void {
+        const stderr = std.io.getStdErr().writer();
+        stderr.print("Error: ", .{}) catch unreachable;
+        stderr.print(fmt, args) catch unreachable;
+        stderr.print(" in {s}:{d}:{d}\n", .{
             self.pos.filename,
             self.pos.line,
             self.pos.col,
-        });
+        }) catch unreachable;
         self.deinit();
-        std.process.exit(1);
     }
 
     /// Logs a warning message with the current position in the token stream.
@@ -273,13 +273,14 @@ pub const TranspileProcess = struct {
     /// - `fmt`: The format string for the warning message.
     /// - `args`: The arguments for the format string.
     pub fn warn(self: *Self, comptime fmt: []const u8, args: anytype) void {
-        std.debug.print("Warning: ", .{});
-        std.debug.print(fmt, args);
-        std.debug.print(" in {s}:{d}:{d}\n", .{
+        const stdout = std.io.getStdOut().writer();
+        stdout.print("Warning: ", .{}) catch unreachable;
+        stdout.print(fmt, args) catch unreachable;
+        stdout.print(" in {s}:{d}:{d}\n", .{
             self.pos.filename,
             self.pos.line,
             self.pos.col,
-        });
+        }) catch unreachable;
     }
 
     /// Creates a new symbol table and sets it as the active table.
@@ -394,10 +395,7 @@ pub const TranspileProcess = struct {
     pub fn register_symbol(self: *Self, s: symbol.Symbol) TranspileError!void {
         // Check if symbol is already defined in the current module
         if (self.get_symbol(s.name) != null) {
-            // self.err("Symbol '{s}' already defined in the current module", .{s.name});
-            std.debug.print("Error: Symbol '{s}' already defined in the current module '{s}' at line {d}, col {d}\\n", .{
-                s.name, self.pos.filename, self.pos.line, self.pos.col,
-            });
+            self.err("Symbol '{s}' already defined in the current module", .{s.name});
             return TranspileError.DuplicateSymbol;
         }
 
@@ -407,10 +405,7 @@ pub const TranspileProcess = struct {
             if (self.global_symbols.get(s.name)) |existing| {
                 // Only report error if it's from a different file, not the same file
                 if (!mem.eql(u8, existing.file_path, self.input_file_path)) {
-                    // self.err("Symbol '{s}' already defined in module '{s}'", .{ s.name, existing.file_path });
-                    std.debug.print("Error: Symbol '{s}' already defined in module '{s}' at line {d}, col {d}\\n", .{
-                        s.name, existing.file_path, self.pos.line, self.pos.col,
-                    });
+                    self.err("Symbol '{s}' already defined in module '{s}'", .{ s.name, existing.file_path });
                     return TranspileError.DuplicateSymbol;
                 }
             }
@@ -462,10 +457,7 @@ pub const TranspileProcess = struct {
 
                 // Check if this symbol exists in any imported module
                 if (self.global_symbols.get(variable.name.items)) |existing| {
-                    // self.err("Variable '{s}' already defined in module '{s}'", .{ variable.name.items, existing.file_path });
-                    std.debug.print("Error: Variable '{s}' already defined in module '{s}' (referenced in '{s}' at line {d}, col {d})\\n", .{
-                        variable.name.items, existing.file_path, self.pos.filename, self.pos.line, self.pos.col,
-                    });
+                    self.err("Variable '{s}' already defined in module '{s}'", .{ variable.name.items, existing.file_path });
                     return TranspileError.DuplicateSymbol;
                 }
 
@@ -499,10 +491,7 @@ pub const TranspileProcess = struct {
 
                     // Check if this function exists in any imported module
                     if (self.global_symbols.get(function.name.?.items)) |existing| {
-                        // self.err("Function '{s}' already defined in module '{s}'", .{ function.name.?.items, existing.file_path });
-                        std.debug.print("Error: Function '{s}' already defined in module '{s}' (referenced in '{s}' at line {d}, col {d})\\n", .{
-                            function.name.?.items, existing.file_path, self.pos.filename, self.pos.line, self.pos.col,
-                        });
+                        self.err("Function '{s}' already defined in module '{s}'", .{ function.name.?.items, existing.file_path });
                         return TranspileError.DuplicateSymbol;
                     }
                 }
@@ -1388,8 +1377,7 @@ pub const TranspileProcess = struct {
                 return TranspileError.MemoryAllocationFailed;
             };
         } else {
-            // self.err("Unsupported standard library import: {s}", .{import_path});
-            std.debug.print("Unsupported standard library import: {s}\\n", .{import_path});
+            self.err("Unsupported standard library import: {s}", .{import_path});
             return TranspileError.UnsupportedImport;
         }
 
@@ -1470,8 +1458,7 @@ pub const TranspileProcess = struct {
         // Robust direct circular dependency detection
         // First, check if the file being imported already has us in its import chain
         const file_contents = fs.cwd().readFileAlloc(self.allocator, full_path, 1024 * 1024) catch |read_err| {
-            // self.err("Failed to read import file: {any}", .{read_err});
-            std.debug.print("Failed to read import file: {s}\\n", .{@errorName(read_err)});
+            self.err("Failed to read import file: {any}", .{read_err});
             return TranspileError.FileReadError;
         };
         defer self.allocator.free(file_contents);
@@ -1498,8 +1485,7 @@ pub const TranspileProcess = struct {
             const basename1 = std.fs.path.basename(self.input_file_path);
             const basename2 = std.fs.path.basename(full_path);
 
-            // self.err("CIRCULAR IMPORT DETECTED: '{s}' imports '{s}', but '{s}' also imports '{s}', creating a circular dependency", .{ basename1, basename2, basename2, basename1 });
-            std.debug.print("CIRCULAR IMPORT DETECTED: '{s}' imports '{s}', but '{s}' also imports '{s}', creating a circular dependency\\n", .{ basename1, basename2, basename2, basename1 });
+            self.err("CIRCULAR IMPORT DETECTED: '{s}' imports '{s}', but '{s}' also imports '{s}', creating a circular dependency", .{ basename1, basename2, basename2, basename1 });
             return TranspileError.CircularImport;
         }
 
@@ -1614,8 +1600,7 @@ pub const TranspileProcess = struct {
             // Check if this symbol is already defined in the parent
             if (self.parent.?.global_symbols.get(symbol_name)) |existing| {
                 // If we find a conflict, report it
-                // self.err("Symbol '{s}' in module '{s}' conflicts with same symbol defined in module '{s}'", .{ symbol_name, symbol_info.file_path, existing.file_path });
-                std.debug.print("Symbol '{s}' in module '{s}' conflicts with same symbol defined in module '{s}'\\n", .{ symbol_name, symbol_info.file_path, existing.file_path });
+                self.err("Symbol '{s}' in module '{s}' conflicts with same symbol defined in module '{s}'", .{ symbol_name, symbol_info.file_path, existing.file_path });
                 return TranspileError.DuplicateSymbol;
             }
 

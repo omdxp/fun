@@ -372,8 +372,7 @@ pub const LexProcess = struct {
         defer s.deinit();
 
         const number: c_longlong = std.fmt.parseInt(c_longlong, s.items, 10) catch {
-            // self.transpile_proc.err("failed to parse number '{s}'", .{s.items});
-            std.debug.print("failed to parse number '{s}'\n", .{s.items});
+            self.transpile_proc.err("failed to parse number '{s}'", .{s.items});
             return LexError.InvalidNumber;
         };
         return number;
@@ -478,8 +477,7 @@ pub const LexProcess = struct {
     fn finish_expression(self: *Self) LexError!void {
         self.curr_exp_count -= 1;
         if (self.curr_exp_count < 0) {
-            // self.transpile_proc.err("expression was never opened", .{});
-            std.debug.print("expression was never opened\n", .{});
+            self.transpile_proc.err("expression was never opened", .{});
             return LexError.InvalidExpression;
         }
     }
@@ -571,8 +569,7 @@ pub const LexProcess = struct {
                 try self.read_op_flush_back_keep_first(&buffer);
             }
         } else if (!utils.op_valid(buffer.items)) {
-            // self.transpile_proc.err("operator '{?}' not valid", .{op});
-            std.debug.print("operator '{?}' not valid\n", .{op});
+            self.transpile_proc.err("operator '{?}' not valid", .{op});
             return LexError.InvalidOperator;
         }
 
@@ -637,8 +634,7 @@ pub const LexProcess = struct {
         defer number_str.deinit();
         self.validate_binary_string(number_str.items);
         const number: c_longlong = std.fmt.parseInt(c_longlong, number_str.items, 2) catch {
-            // self.transpile_proc.err("failed to parse number '{s}'", .{number_str.items});
-            std.debug.print("failed to parse number '{s}'\n", .{number_str.items});
+            self.transpile_proc.err("failed to parse number '{s}'", .{number_str.items});
             return LexError.InvalidNumber;
         };
 
@@ -680,8 +676,7 @@ pub const LexProcess = struct {
         _ = try self.next_char(); // skip special character 'x'
         const number_str = try self.read_hex_number_str();
         const number: c_longlong = std.fmt.parseInt(c_longlong, number_str.items, 16) catch {
-            // self.transpile_proc.err("failed to parse number '{s}'", .{number_str.items});
-            std.debug.print("failed to parse number '{s}'\n", .{number_str.items});
+            self.transpile_proc.err("failed to parse number '{s}'", .{number_str.items});
             return LexError.InvalidNumber;
         };
 
@@ -712,8 +707,7 @@ pub const LexProcess = struct {
             'b' => t = try self.token_make_special_number_binary(),
             'x' => t = try self.token_make_number_hexadecimal(),
             else => {
-                // self.transpile_proc.err("character '{c}' not valid for special numbers", .{c.?});
-                std.debug.print("character '{c}' not valid for special numbers\n", .{c.?});
+                self.transpile_proc.err("character '{c}' not valid for special numbers", .{c.?});
                 return LexError.InvalidNumber;
             },
         }
@@ -735,8 +729,7 @@ pub const LexProcess = struct {
     fn handle_escape_number(self: *Self, buf: *std.ArrayList(u8)) LexError!void {
         const num = try self.read_number();
         if (num > 255) {
-            // self.transpile_proc.err("characters must be between 0 and 255, got '{}'", .{num});
-            std.debug.print("characters must be between 0 and 255, got '{}'\n", .{num});
+            self.transpile_proc.err("characters must be between 0 and 255, got '{}'", .{num});
             return LexError.InvalidNumber;
         }
 
@@ -788,8 +781,7 @@ pub const LexProcess = struct {
         while (true) {
             const c = try self.next_char();
             if (c == null) {
-                // self.transpile_proc.err("unexpected end of file while reading string", .{});
-                std.debug.print("unexpected end of file while reading string\n", .{});
+                self.transpile_proc.err("unexpected end of file while reading string", .{});
                 return LexError.FileReadError;
             }
 
@@ -838,8 +830,7 @@ pub const LexProcess = struct {
 
         const nc = try self.next_char();
         if (nc.? != '\'') {
-            // self.transpile_proc.err("expected ' got '{c}'", .{nc.?});
-            std.debug.print("expected ' got '{c}'\n", .{nc.?});
+            self.transpile_proc.err("expected ' got '{c}'", .{nc.?});
             return LexError.InvalidCharacter;
         }
 
@@ -883,8 +874,7 @@ pub const LexProcess = struct {
             else => {
                 t = try self.read_special_token();
                 if (t == null) {
-                    // self.transpile_proc.err("unexpected token '{c}'", .{c.?});
-                    std.debug.print("unexpected token '{c}'\n", .{c.?});
+                    self.transpile_proc.err("unexpected token '{c}'", .{c.?});
                     return LexError.InvalidCharacter;
                 }
             },

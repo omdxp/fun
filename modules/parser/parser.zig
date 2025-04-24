@@ -79,8 +79,7 @@ pub const ParseProcess = struct {
     fn expect_sym(self: *Self, c: u8) ParseError!void {
         const t = self.token_next();
         if (t == null or t.?.type != .Symbol or t.?.data.cval != c) {
-            // self.transpile_proc.err("expected symbol '{c}'", .{c});
-            std.debug.print("expected symbol '{c}', got '{?}'", .{ c, t.?.type });
+            self.transpile_proc.err("expected symbol '{c}'", .{c});
             return ParseError.InvalidSymbol;
         }
     }
@@ -100,8 +99,7 @@ pub const ParseProcess = struct {
     fn expect_op(self: *Self, op: []const u8) ParseError!void {
         const t = self.token_next();
         if (t == null or t.?.type != .Operator or !mem.eql(u8, op, t.?.data.sval.items)) {
-            // self.transpile_proc.err("expected operator '{s}'", .{op});
-            std.debug.print("expected operator '{s}', got '{?}'", .{ op, t.?.type });
+            self.transpile_proc.err("expected operator '{s}'", .{op});
             return ParseError.InvalidOperator;
         }
     }
@@ -122,8 +120,7 @@ pub const ParseProcess = struct {
     fn expect_keyword(self: *Self, keyword: []const u8) ParseError!void {
         const t = self.token_next();
         if (t == null or t.?.type != .Keyword or !mem.eql(u8, keyword, t.?.data.sval.items)) {
-            // self.transpile_proc.err("expected keyword '{s}'", .{keyword});
-            std.debug.print("expected keyword '{s}', got '{?}'", .{ keyword, t.?.type });
+            self.transpile_proc.err("expected keyword '{s}'", .{keyword});
             return ParseError.InvalidKeyword;
         }
     }
@@ -315,8 +312,7 @@ pub const ParseProcess = struct {
     fn parse_statement(self: *Self, hist: *utils.History) ParseError!void {
         var t = self.token_peek_next();
         if (t == null) {
-            // self.transpile_proc.err("unexpected end of file", .{});
-            std.debug.print("unexpected end of file", .{});
+            self.transpile_proc.err("unexpected end of file", .{});
             return ParseError.FileReadError;
         }
         if (t.?.type == .Keyword) {
@@ -391,14 +387,12 @@ pub const ParseProcess = struct {
             stmt.* = stmt_node.?;
             if (stmt.type == .StatementElseIf) {
                 if (last_stmt_type == null or (last_stmt_type != .StatementIf and last_stmt_type != .StatementElseIf)) {
-                    // self.transpile_proc.err("invalid 'elif' statement position", .{});
-                    std.debug.print("invalid 'elif' statement position", .{});
+                    self.transpile_proc.err("invalid 'elif' statement position", .{});
                     return ParseError.InvalidKeyword;
                 }
             } else if (stmt.type == .StatementElse) {
                 if (last_stmt_type == null or (last_stmt_type != .StatementIf and last_stmt_type != .StatementElseIf)) {
-                    // self.transpile_proc.err("invalid 'else' statement position", .{});
-                    std.debug.print("invalid 'else' statement position", .{});
+                    self.transpile_proc.err("invalid 'else' statement position", .{});
                     return ParseError.InvalidKeyword;
                 }
             }
@@ -456,8 +450,7 @@ pub const ParseProcess = struct {
                 return ParseError.MemoryAllocationFailed;
             };
         }
-        // self.transpile_proc.err("invalid symbol", .{});
-        std.debug.print("invalid symbol", .{});
+        self.transpile_proc.err("invalid symbol", .{});
         return ParseError.InvalidSymbol;
     }
 
@@ -527,8 +520,7 @@ pub const ParseProcess = struct {
     fn parse_datatype(self: *Self, dt: *dtype.DataType) ParseError!void {
         const dt_token = self.token_next();
         if (dt_token.?.type != .Keyword) {
-            // self.transpile_proc.err("expected datatype, got '{?}'", .{dt_token.?.type});
-            std.debug.print("expected datatype, got '{?}'", .{dt_token.?.type});
+            self.transpile_proc.err("expected datatype, got '{?}'", .{dt_token.?.type});
             return ParseError.InvalidDataType;
         }
         const ptr_depth = self.parse_get_pointer_depth();
@@ -538,8 +530,7 @@ pub const ParseProcess = struct {
         }
         dt.*.type = utils.get_datatype_type(dt_token.?.data.sval.items);
         if (dt.*.type.? == .Unknown) {
-            // self.transpile_proc.err("unknown datatype", .{});
-            std.debug.print("unknown datatype", .{});
+            self.transpile_proc.err("unknown datatype", .{});
             return ParseError.InvalidDataType;
         }
         dt.*.type_str = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, dt_token.?.data.sval.items.len) catch |e| {
@@ -602,8 +593,7 @@ pub const ParseProcess = struct {
                 try self.create_node(&bool_node);
             },
             else => {
-                // self.transpile_proc.err("expected single token, got '{?}'", .{t.?.type});
-                std.debug.print("expected single token, got '{?}'", .{t.?.type});
+                self.transpile_proc.err("expected single token, got '{?}'", .{t.?.type});
                 return ParseError.InvalidToken;
             },
         }
@@ -1248,8 +1238,7 @@ pub const ParseProcess = struct {
         var node_left = self.node_peek_expressionable_or_null();
         if (node_left == null) {
             if (!utils.is_unary_operator(op)) {
-                // self.transpile_proc.err("expected left operand for '{s}' operator", .{op});
-                std.debug.print("expected left operand for '{s}' operator", .{op});
+                self.transpile_proc.err("expected left operand for '{s}' operator", .{op});
                 return ParseError.InvalidOperand;
             }
             return try self.parse_for_unary();
@@ -1270,8 +1259,7 @@ pub const ParseProcess = struct {
             } else if (utils.is_unary_operator(t.?.data.sval.items)) {
                 try self.parse_for_unary();
             } else {
-                // self.transpile_proc.err("expected expressionable for '{s}' operator", .{op});
-                std.debug.print("expected expressionable for '{s}' operator", .{op});
+                self.transpile_proc.err("expected expressionable for '{s}' operator", .{op});
                 return ParseError.InvalidOperand;
             }
         } else {
@@ -1338,8 +1326,7 @@ pub const ParseProcess = struct {
     fn parse_identifier(self: *Self) ParseError!bool {
         const t = self.token_peek_next();
         if (t != null and t.?.type != .Identifier) {
-            // self.transpile_proc.err("expected identifier, got '{?}'", .{t.?.type});
-            std.debug.print("expected identifier, got '{?}'", .{t.?.type});
+            self.transpile_proc.err("expected identifier, got '{?}'", .{t.?.type});
             return ParseError.InvalidIdentifier;
         }
         return try self.parse_single_token_to_node();
@@ -1360,8 +1347,7 @@ pub const ParseProcess = struct {
     fn parse_string(self: *Self) !bool {
         const t = self.token_peek_next();
         if (t != null and t.?.type != .String) {
-            // self.transpile_proc.err("expected string, got '{?}'", .{t.?.type});
-            std.debug.print("expected string, got '{?}'", .{t.?.type});
+            self.transpile_proc.err("expected string, got '{?}'", .{t.?.type});
             return ParseError.InvalidString;
         }
         return try self.parse_single_token_to_node();
@@ -1526,8 +1512,7 @@ pub const ParseProcess = struct {
         }
         const ident_token = self.token_next();
         if (ident_token == null or ident_token.?.type != .Identifier) {
-            // self.transpile_proc.err("expected indentifier", .{});
-            std.debug.print("expected identifier, got '{?}'\n", .{ident_token.?.type});
+            self.transpile_proc.err("expected indentifier", .{});
             return ParseError.InvalidIdentifier;
         }
         var value_node: ?ast.Node = null;
@@ -1701,8 +1686,7 @@ pub const ParseProcess = struct {
         var dt: dtype.DataType = undefined;
         const ident_token = self.token_next();
         if (ident_token.?.type != .Identifier) {
-            // self.transpile_proc.err("expected indentifier, got '{}'", .{ident_token.?.type});
-            std.debug.print("expected identifier, got '{?}'\n", .{ident_token.?.type});
+            self.transpile_proc.err("expected indentifier, got '{}'", .{ident_token.?.type});
             return ParseError.InvalidIdentifier;
         }
         function_node.node_variant.?.function.name = ident_token.?.data.sval;
@@ -1825,16 +1809,14 @@ pub const ParseProcess = struct {
     fn parse_elif_statement(self: *Self, hist: *utils.History) ParseError!void {
         if (self.next_token_is_keyword("elif")) {
             if (self.parser_current_function == null) {
-                // self.transpile_proc.err("elif statement outside of function", .{});
-                std.debug.print("elif statement outside of function\n", .{});
+                self.transpile_proc.err("elif statement outside of function", .{});
                 return ParseError.InvalidStatement;
             }
             _ = self.token_next(); // skip elif
             try self.parse_expressionable_root(hist);
             const condition_node = self.node_pop();
             if (condition_node.?.type == .Expression and mem.eql(u8, condition_node.?.node_variant.?.exp.op, "=")) {
-                // self.transpile_proc.err("expected expression, got assignment", .{});
-                std.debug.print("expected expression, got assignment\n", .{});
+                self.transpile_proc.err("expected expression, got assignment", .{});
                 return ParseError.InvalidExpression;
             }
             const condition = self.transpile_proc.allocator.create(ast.Node) catch |e| {
@@ -1890,8 +1872,7 @@ pub const ParseProcess = struct {
     fn parse_else_statement(self: *Self, hist: *utils.History) ParseError!void {
         if (self.next_token_is_keyword("else")) {
             if (self.parser_current_function == null) {
-                // self.transpile_proc.err("else statement outside of function", .{});
-                std.debug.print("else statement outside of function\n", .{});
+                self.transpile_proc.err("else statement outside of function", .{});
                 return ParseError.InvalidStatement;
             }
             _ = self.token_next(); // skip else
@@ -1928,15 +1909,13 @@ pub const ParseProcess = struct {
     fn parse_if_statement(self: *Self, hist: *utils.History) ParseError!void {
         try self.expect_keyword("if");
         if (self.parser_current_function == null) {
-            // self.transpile_proc.err("if statement outside of function", .{});
-            std.debug.print("if statement outside of function\n", .{});
+            self.transpile_proc.err("if statement outside of function", .{});
             return ParseError.InvalidStatement;
         }
         try self.parse_expressionable_root(hist);
         const condition_node = self.node_pop();
         if (condition_node.?.type == .Expression and mem.eql(u8, condition_node.?.node_variant.?.exp.op, "=")) {
-            // self.transpile_proc.err("expected expression, got assignment", .{});
-            std.debug.print("expected expression, got assignment\n", .{});
+            self.transpile_proc.err("expected expression, got assignment", .{});
             return ParseError.InvalidExpression;
         }
         const condition = self.transpile_proc.allocator.create(ast.Node) catch |e| {
@@ -2008,8 +1987,7 @@ pub const ParseProcess = struct {
             try self.parse_expressionable_root(&hist_down);
             const condition_node = self.node_pop();
             if (condition_node.?.type == .Expression and mem.eql(u8, condition_node.?.node_variant.?.exp.op, "=")) {
-                // self.transpile_proc.err("expected expression, got assignment", .{});
-                std.debug.print("expected expression, got assignment\n", .{});
+                self.transpile_proc.err("expected expression, got assignment", .{});
                 return ParseError.InvalidExpression;
             }
             const condition = self.transpile_proc.allocator.create(ast.Node) catch |e| {
@@ -2142,8 +2120,7 @@ pub const ParseProcess = struct {
         _ = self.token_next(); // skip imp
         const folder_token = self.token_next();
         if (folder_token.?.type != .Identifier) {
-            // self.transpile_proc.err("expected folder identifier, got '{?}'", .{folder_token.?.type});
-            std.debug.print("expected folder identifier, got '{?}'\n", .{folder_token.?.type});
+            self.transpile_proc.err("expected folder identifier, got '{?}'", .{folder_token.?.type});
             return ParseError.InvalidIdentifier;
         }
 
@@ -2163,8 +2140,7 @@ pub const ParseProcess = struct {
             _ = self.token_next(); // skip dot
             const part_token = self.token_next();
             if (part_token.?.type != .Identifier) {
-                // self.transpile_proc.err("expected identifier after '.', got '{?}'", .{part_token.?.type});
-                std.debug.print("expected identifier after '.', got '{?}'\n", .{part_token.?.type});
+                self.transpile_proc.err("expected identifier after '.', got '{?}'", .{part_token.?.type});
                 return ParseError.InvalidIdentifier;
             }
             import_name.append('.') catch |e| {

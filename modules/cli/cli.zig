@@ -7,14 +7,21 @@ const codegen = @import("codegen");
 const utils = @import("utils");
 const builtin = @import("builtin");
 
-/// Errors that can occur during CLI operations
+/// Errors that can occur during CLI operations.
 pub const CliError = error{
+    /// Error indicating that the required input file was not provided.
     MissingInputFile,
+    /// Error indicating that the required output file was not specified.
     MissingOutputFile,
+    /// Error indicating that the input file has an invalid or unsupported extension.
     InvalidInputExtension,
+    /// Error indicating that the output file has an invalid or unsupported extension.
     InvalidOutputExtension,
+    /// Error indicating that the compilation process failed.
     CompilationFailed,
+    /// Error indicating that the execution process failed.
     ExecutionFailed,
+    /// Error indicating that help information should be displayed.
     ShowHelp,
 };
 
