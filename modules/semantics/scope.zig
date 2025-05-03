@@ -16,6 +16,8 @@ pub const ScopeEntity = struct {
     flags: ScopeEntityFlags,
     /// A pointer to the AST node associated with this entity.
     node: ?*ast.Node,
+    /// Entity name.
+    name: []const u8,
 };
 
 /// Represents a scope structure used in the transpiler.
@@ -118,6 +120,25 @@ pub const Scope = struct {
         const parent = self.parent;
         if (parent != null) {
             return last_entity_from_scope_stop_at(parent.?, stop_scope);
+        }
+        return null;
+    }
+
+    /// Gets entity by name.
+    ///
+    /// This function retrieves an entity by its name from the current scope.
+    ///
+    /// Parameters:
+    /// - `self`: The instance of the scope.
+    /// - `name`: The name of the entity to retrieve.
+    ///
+    /// Returns:
+    /// - `?*ScopeEntity`: The entity with the specified name, or `null` if not found.
+    pub fn get_entity_by_name(self: *Self, name: []const u8) ?*ScopeEntity {
+        for (self.entities.items()) |entity| {
+            if (std.mem.eql(u8, entity.name, name)) {
+                return entity;
+            }
         }
         return null;
     }

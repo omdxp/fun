@@ -203,6 +203,12 @@ pub const ParseProcess = struct {
         errdefer self.transpile_proc.allocator.destroy(entity);
         entity.node = node;
         entity.flags = flags;
+        entity.name = switch (node.type) {
+            .Identifier => node.data.?.sval.items,
+            .Function => node.data.?.sval.items,
+            .Variable => node.node_variant.?.variable.name.items,
+            else => unreachable,
+        };
         return entity;
     }
 
@@ -570,6 +576,12 @@ pub const ParseProcess = struct {
                 try self.create_node(&number_node);
             },
             .Identifier => {
+                if (self.transpile_proc.get_scope_entity(t.?.data.sval.items) == null) {
+                    if (self.transpile_proc.get_symbol(t.?.data.sval.items) == null) {
+                        self.transpile_proc.err("unknown identifier '{s}'", .{t.?.data.sval.items});
+                        return ParseError.InvalidIdentifier;
+                    }
+                }
                 var ident_node = ast.Node{
                     .type = .Identifier,
                     .pos = self.*.transpile_proc.*.pos,
@@ -1559,6 +1571,10 @@ pub const ParseProcess = struct {
                 },
             };
             const scope_entity = try self.new_scope_entity(node, .{});
+            if (self.transpile_proc.get_scope_entity(scope_entity.name) != null) {
+                self.transpile_proc.err("variable '{s}' already declared", .{scope_entity.name});
+                return ParseError.VariableAlreadyDeclared;
+            }
             try self.transpile_proc.push_scope_entity(scope_entity);
             self.transpile_proc.nodes.push(node.*) catch |e| {
                 std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});
@@ -2259,7 +2275,7 @@ pub const ParseProcess = struct {
 
         try self.parse_keyword(&hist);
         const n = self.node_pop();
-        try self.transpile_proc.register_node_symbol(n.?);
+        try self.transpile_proc.register_global_node_symbol(n.?);
         self.transpile_proc.nodes.push(n.?) catch |e| {
             std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});
             return ParseError.MemoryAllocationFailed;

@@ -1,0 +1,13 @@
+num g = 1;
+
+fun global() {
+	num x = 1;
+	num y = 2;
+	z = x + y; // Error: undeclared symbol 'z'
+	g = 2;
+}
+
+fun main() {
+	num a = 3;
+	num b = 4;
+}

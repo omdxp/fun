@@ -30,10 +30,12 @@ pub const TranspileError = error{
     BufferWriteError,
     /// Error indicating memory allocation failure.
     MemoryAllocationFailed,
-    /// TODO: Error indicating that a symbol is not defined.
+    /// Error indicating that a symbol is not defined.
     SymbolNotDefined,
     /// Error indicating that a symbol is already defined.
     DuplicateSymbol,
+    /// Error indicating that a variable is already declared.
+    VariableAlreadyDeclared,
     /// Error indicating unsupported import.
     UnsupportedImport,
     /// Error indicating circular import.
@@ -189,6 +191,7 @@ pub const TranspileProcess = struct {
         errdefer allocator.destroy(initial_table);
         initial_table.* = .{
             .symbols = utils.Vector(symbol.Symbol).init(allocator),
+            .name = "",
         };
         errdefer initial_table.symbols.deinit();
 
@@ -358,6 +361,45 @@ pub const TranspileProcess = struct {
         return null;
     }
 
+    /// Retrieves a symbol by name from a specific symbol table.
+    ///
+    /// This function searches for a symbol with the specified name in the given symbol table.
+    ///
+    /// Parameters:
+    /// - `self`: The instance of the transpiler.
+    /// - `table`: The symbol table to search in.
+    /// - `name ( []const u8 )`: The name of the symbol to search for.
+    ///
+    /// Returns:
+    /// - `?symbol.Symbol`: The symbol if found, otherwise `null`.
+    pub fn get_symbol_from_table(_: *Self, table: *symbol.SymbolTable, name: []const u8) ?symbol.Symbol {
+        for (table.symbols.items()) |s| {
+            if (mem.eql(u8, s.name, name)) {
+                return s;
+            }
+        }
+        return null;
+    }
+
+    /// Retrieves a symbol table by its name.
+    ///
+    /// This function searches for a symbol table with the specified name in the list of symbol tables.
+    ///
+    /// Parameters:
+    /// - `self`: The instance of the transpiler.
+    /// - `name ( []const u8 )`: The name of the symbol table to search for.
+    ///
+    /// Returns:
+    /// - `?*symbol.SymbolTable`: The symbol table if found, otherwise `null`.
+    pub fn get_symbol_table(self: *Self, name: []const u8) ?*symbol.SymbolTable {
+        for (self.symbols.tables.items()) |table| {
+            if (mem.eql(u8, table.name, name)) {
+                return table;
+            }
+        }
+        return null;
+    }
+
     /// Retrieves a native function symbol by name from all symbol tables.
     ///
     /// This function searches for a symbol with the specified name and type `NativeFunction`
@@ -446,13 +488,14 @@ pub const TranspileProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if registering the symbol fails.
-    pub fn register_node_symbol(self: *Self, node: ast.Node) TranspileError!void {
+    pub fn register_global_node_symbol(self: *Self, node: ast.Node) TranspileError!void {
         switch (node.node_variant.?) {
             .variable => |variable| {
                 const s = symbol.Symbol{
                     .type = symbol.SymbolType.Node,
                     .name = variable.name.items,
                     .data = .{ .node = node },
+                    .symbol_table = null,
                 };
 
                 // Check if this symbol exists in any imported module
@@ -480,6 +523,7 @@ pub const TranspileProcess = struct {
                     .type = symbol.SymbolType.Node,
                     .name = function.name.?.items,
                     .data = .{ .node = node },
+                    .symbol_table = null,
                 };
 
                 // Skip main functions in imported modules
@@ -588,6 +632,20 @@ pub const TranspileProcess = struct {
         nc.parent = self.scope.?.current;
         self.scope.?.current = nc;
         return nc.*;
+    }
+
+    /// Retrieves a scope entity by name from the current scope.
+    ///
+    /// This function searches for a scope entity with the specified name in the current scope.
+    ///
+    /// Parameters:
+    /// - `self`: The instance of the transpiler.
+    /// - `name`: The name of the scope entity to search for.
+    ///
+    /// Returns:
+    /// - `?*ScopeEntity`: The scope entity if found, otherwise `null`.
+    pub fn get_scope_entity(self: *Self, name: []const u8) ?*scope.ScopeEntity {
+        return self.scope.?.current.?.get_entity_by_name(name);
     }
 
     /// Retrieves the last entity from the current scope, stopping at a specified scope.
@@ -1058,6 +1116,10 @@ pub const TranspileProcess = struct {
             },
             .Identifier => {
                 const str = node.data.?.sval.items;
+                // if (self.get_symbol(str) == null) {
+                //     self.err("Symbol '{s}' not found", .{str});
+                //     return TranspileError.SymbolNotDefined;
+                // }
                 try self.write(str);
             },
             .Variable => {

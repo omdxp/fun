@@ -24,12 +24,16 @@ pub const Symbol = struct {
         /// A native function symbol.
         native_function: *anyopaque,
     } = null,
+    /// A pointer to the symbol table that contains this symbol.
+    symbol_table: ?*SymbolTable = null,
 };
 
 /// Represents a symbol table, which maps symbol names to symbols.
 pub const SymbolTable = struct {
     /// The symbols in the table.
     symbols: utils.Vector(Symbol),
+    /// The sumbol table's name.
+    name: []const u8,
 };
 
 /// Get a node symbol from a symbol.
