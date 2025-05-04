@@ -749,8 +749,7 @@ pub const TranspileProcess = struct {
     /// - `self`: The instance of the transpiler.
     pub fn finish_scope(self: *Self) void {
         const new_current_scope = self.scope.?.current.?.parent;
-        // self.scope.?.current.?.deinit();
-        // self.allocator.destroy(self.scope.?.current.?);
+        self.allocator.destroy(self.scope.?.current.?);
         self.scope.?.current = new_current_scope;
         if (self.scope.?.root != null and self.scope.?.current == null) {
             self.scope.?.root = null;
