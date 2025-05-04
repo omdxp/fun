@@ -1,0 +1,4 @@
+fun function(num a, num b) {
+	a = b;
+	c = 3; // undeclared symbol 'c'
+}

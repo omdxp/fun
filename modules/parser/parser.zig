@@ -203,6 +203,12 @@ pub const ParseProcess = struct {
         errdefer self.transpile_proc.allocator.destroy(entity);
         entity.node = node;
         entity.flags = flags;
+        entity.name = switch (node.type) {
+            .Identifier => node.data.?.sval.items,
+            .Function => node.data.?.sval.items,
+            .Variable => node.node_variant.?.variable.name.items,
+            else => "",
+        };
         return entity;
     }
 
@@ -324,8 +330,7 @@ pub const ParseProcess = struct {
         try self.parse_expressionable_root(hist);
         t = self.token_peek_next();
         if (t.?.type == .Symbol and t.?.data.cval != ';') {
-            try self.parse_symbol();
-            return;
+            return try self.parse_symbol();
         }
         try self.expect_sym(';');
     }
@@ -379,6 +384,10 @@ pub const ParseProcess = struct {
             defer hist_down.deinit();
             try self.parse_statement(&hist_down);
             const stmt_node = self.node_pop();
+            if (stmt_node.?.type == .Function) {
+                self.transpile_proc.err("invalid function statement", .{});
+                return ParseError.InvalidStatement;
+            }
             const stmt = self.transpile_proc.allocator.create(ast.Node) catch |e| {
                 std.debug.print("Error creating node: {s}", .{@errorName(e)});
                 return ParseError.MemoryAllocationFailed;
@@ -570,6 +579,12 @@ pub const ParseProcess = struct {
                 try self.create_node(&number_node);
             },
             .Identifier => {
+                if (self.transpile_proc.get_scope_entity(t.?.data.sval.items) == null) {
+                    if (self.transpile_proc.get_symbol(t.?.data.sval.items) == null) {
+                        self.transpile_proc.err("unknown identifier '{s}'", .{t.?.data.sval.items});
+                        return ParseError.InvalidIdentifier;
+                    }
+                }
                 var ident_node = ast.Node{
                     .type = .Identifier,
                     .pos = self.*.transpile_proc.*.pos,
@@ -1559,6 +1574,10 @@ pub const ParseProcess = struct {
                 },
             };
             const scope_entity = try self.new_scope_entity(node, .{});
+            if (self.transpile_proc.get_scope_entity(scope_entity.name) != null) {
+                self.transpile_proc.err("variable '{s}' already declared", .{scope_entity.name});
+                return ParseError.VariableAlreadyDeclared;
+            }
             try self.transpile_proc.push_scope_entity(scope_entity);
             self.transpile_proc.nodes.push(node.*) catch |e| {
                 std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});
@@ -1632,7 +1651,6 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     fn parse_function_args(self: *Self, hist: *utils.History) ParseError!utils.Vector(*ast.Node) {
-        _ = try self.transpile_proc.new_scope();
         var args = utils.Vector(*ast.Node).init(self.transpile_proc.allocator);
         while (!self.next_token_is_symbol(')')) {
             if (self.next_token_is_operator(".")) { // variadic
@@ -1659,7 +1677,6 @@ pub const ParseProcess = struct {
             }
             _ = self.token_next(); // skip ,
         }
-        self.transpile_proc.finish_scope();
         return args;
     }
 
@@ -1712,6 +1729,7 @@ pub const ParseProcess = struct {
             };
         }
         function_node.node_variant.?.function.rtype = dt;
+        try self.transpile_proc.register_global_node_symbol(function_node);
         if (self.next_token_is_symbol('{')) {
             var hist_body = utils.History.init(self.transpile_proc.allocator, .{ .inside_function_body = true });
             defer hist_body.deinit();
@@ -2167,6 +2185,26 @@ pub const ParseProcess = struct {
             std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});
             return ParseError.MemoryAllocationFailed;
         };
+        // TODO: (std should be written in fun) For now, std imports will register general global symbols
+        if (mem.eql(u8, path, "std.io")) {
+            var type_str = std.ArrayList(u8).init(self.transpile_proc.allocator);
+            errdefer type_str.deinit();
+            type_str.appendSlice("void") catch |e| {
+                std.debug.print("Error appending to type_str: {s}\n", .{@errorName(e)});
+                return ParseError.MemoryAllocationFailed;
+            };
+            var printf_name = std.ArrayList(u8).init(self.transpile_proc.allocator);
+            errdefer printf_name.deinit();
+            printf_name.appendSlice("printf") catch |e| {
+                std.debug.print("Error appending to printf_name: {s}\n", .{@errorName(e)});
+                return ParseError.MemoryAllocationFailed;
+            };
+            try self.transpile_proc.register_global_node_symbol(ast.Node{
+                .type = .Function,
+                .pos = self.*.transpile_proc.*.pos,
+                .node_variant = .{ .function = .{ .name = printf_name, .args = null, .rtype = dtype.DataType{ .type = .Void, .type_str = type_str }, .body = null } },
+            });
+        }
     }
 
     /// Parses a keyword token.
@@ -2259,7 +2297,9 @@ pub const ParseProcess = struct {
 
         try self.parse_keyword(&hist);
         const n = self.node_pop();
-        try self.transpile_proc.register_node_symbol(n.?);
+        if (n.?.type != .Function) {
+            try self.transpile_proc.register_global_node_symbol(n.?);
+        }
         self.transpile_proc.nodes.push(n.?) catch |e| {
             std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});
             return ParseError.MemoryAllocationFailed;

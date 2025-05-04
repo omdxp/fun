@@ -1,0 +1,7 @@
+imp std.io;
+
+fun outer() {
+	fun inner() {
+		printf("This is an inner function.");
+	} // This is an error: function cannot be declared inside another function
+}

@@ -1,0 +1,13 @@
+fun rec() {
+	num x = 1;
+	{
+		num y = 2;
+		{
+			num z = x + y;
+			num t = 2;
+			{
+				x = a; // Error: undeclared symbol 'a'
+			}
+		}
+	}
+}

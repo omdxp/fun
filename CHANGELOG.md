@@ -87,6 +87,15 @@ All notable changes to this project will be documented in this file.
 - Enhance error handling in transpilation and lexical analysis processes
 - Enhance error handling in transpilation and parsing processes
 - Improve error handling and reporting across CLI, parser, lexer, and transpiler modules
+- Enhance error handling and reporting in transpilation, parsing, and CLI modules
+- Add Code of Conduct, contributing guidelines, and comprehensive documentation for the fun language
+- Add error handling for undeclared and already declared variables in transpilation process
+- Add error cases for already declared and undeclared variables in examples
+- Add example for undeclared symbols in specific scopes
+- Add example for undeclared symbols in function arguments and clean up scope handling in parser
+- Enhance global symbol registration in ParseProcess and handle std.io imports
+- Improve entity initialization in scope tests by adding names to entities
+- Add error handling for invalid function declarations in parser and update examples
 
 ### 🐛 Bug Fixes
 

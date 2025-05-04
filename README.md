@@ -1,43 +1,50 @@
 # fun
 
-fun is a statically-typed programming language that transpiles to C. It aims to provide the safety and performance of static typing while leveraging the power and efficiency of C.
+[![CI](https://img.shields.io/github/actions/workflow/status/omdxp/fun/ci-dev.yml?branch=main)](https://github.com/omdxp/fun/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-There will be a lot to come along the way. Here is a glimpse:
+A statically-typed programming language that transpiles to C, designed for safety, performance, and leveraging the power of C. Written in Zig.
 
-```fun
-imp std.io;
+---
 
-fun add(num one, num two) num {
-    ret one + two;
-}
+## Table of Contents
+- [fun](#fun)
+  - [Table of Contents](#table-of-contents)
+  - [Features](#features)
+  - [Installation](#installation)
+  - [CLI Usage](#cli-usage)
+  - [Quickstart](#quickstart)
+  - [Examples](#examples)
+  - [Project Structure](#project-structure)
+  - [Contributing](#contributing)
+  - [Changelog](#changelog)
+  - [License](#license)
 
-fun main(str[] args) {
-    num res = add(1, 2); // add two numbers
-    if res == 3 {
-        printf("%d is 3", res);
-    } elif res < 3 {
-        printf("%d is less than 3", res);
-    } else {
-        printf("%d is above than 3", res);
-    }
+---
 
-    bin x = false;
-    fit x {
-        true -> {
-            printf("x is true");
-        }
-        false -> {
-            printf("x is false");
-        }
-    }
+## Features
+- Statically-typed language with C-like performance
+- Transpiles to readable C code
+- Simple, expressive syntax
+- Imports and modularity
+- Pattern matching with `fit` statement
+- Type-safe variables and functions
+- CLI with multiple output and debug options
+- AST printing and analysis
+- Comprehensive error handling
+- Example and test suite
 
-    str hello = "Hello, World!";
-    printf("%s\n", hello);
-}
+## Installation
+
+Requires [Zig](https://ziglang.org/) (v0.14.0+ recommended).
+
+```bash
+zig build
 ```
 
+This will build the `fun` compiler in `zig-out/bin/fun`.
+
 ## CLI Usage
-The fun compiler provides several command-line options to control the compilation process:
 
 ```
 Usage: fun -in <input_file> [-out <output_file>] [-no-exec] [-outf] [-ast] [-help]
@@ -51,32 +58,49 @@ Arguments:
   -help            Show this help message
 ```
 
-### Examples
+## Quickstart
 
-1. Basic compilation and execution:
-   ```bash
-   fun -in program.fn
-   ```
-   This will compile program.fn and execute it immediately. The generated C file will be temporary.
+Write your first program in `hello.fn`:
 
-2. Generate C file without execution:
-   ```bash
-   fun -in program.fn -no-exec -outf
-   ```
-   This will generate program.c without compiling or executing it.
+```fun
+imp std.io;
 
-3. Specify output file:
-   ```bash
-   fun -in program.fn -out custom.c
-   ```
-   This will generate the C code in custom.c and automatically set -outf to true.
+fun main(str[] args) {
+    printf("Hello, World!\n");
+}
+```
 
-4. View AST nodes:
-   ```bash
-   fun -in program.fn -ast
-   ```
-   This will show the Abstract Syntax Tree nodes during compilation.
+Compile and run:
+
+```bash
+zig build
+./zig-out/bin/fun -in hello.fn
+```
+
+## Examples
+
+Explore the [`examples/`](examples/) directory for more:
+- Basic: [`test.fn`](examples/test.fn)
+- Advanced: [`advanced/custom_functions.fn`](examples/advanced/custom_functions.fn)
+- Imports: [`imports/main.fn`](examples/imports/main.fn)
+- Error cases: [`error_cases/`](examples/error_cases/)
+
+## Project Structure
+
+- `cmd/` — CLI entrypoint
+- `modules/` — Core compiler modules (lexer, parser, codegen, semantics, utils, etc.)
+- `examples/` — Example programs
+- `tests/` — Test suite
+- `build.zig` — Zig build script
+
+## Contributing
+
+Contributions are welcome! Please open issues or pull requests. See [CONTRIBUTING.md](CONTRIBUTING.md) if available.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for release notes and development history.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.

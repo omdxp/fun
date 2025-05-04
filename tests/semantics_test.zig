@@ -17,8 +17,8 @@ test "Scope can add and retrieve entities" {
     var scope = Scope.init(allocator);
     defer scope.deinit();
 
-    var entity1 = ScopeEntity{ .flags = ScopeEntityFlags{ .on_stack = false }, .node = null };
-    var entity2 = ScopeEntity{ .flags = ScopeEntityFlags{ .on_stack = false }, .node = null };
+    var entity1 = ScopeEntity{ .flags = ScopeEntityFlags{ .on_stack = false }, .node = null, .name = "entity1" };
+    var entity2 = ScopeEntity{ .flags = ScopeEntityFlags{ .on_stack = false }, .node = null, .name = "entity2" };
 
     try scope.entities.push(&entity1);
     try scope.entities.push(&entity2);
@@ -32,9 +32,9 @@ test "Scope iteration works correctly" {
     var scope = Scope.init(allocator);
     defer scope.deinit();
 
-    var entity1 = ScopeEntity{ .flags = ScopeEntityFlags{ .on_stack = false }, .node = null };
-    var entity2 = ScopeEntity{ .flags = ScopeEntityFlags{ .on_stack = false }, .node = null };
-    var entity3 = ScopeEntity{ .flags = ScopeEntityFlags{ .on_stack = false }, .node = null };
+    var entity1 = ScopeEntity{ .flags = ScopeEntityFlags{ .on_stack = false }, .node = null, .name = "entity1" };
+    var entity2 = ScopeEntity{ .flags = ScopeEntityFlags{ .on_stack = false }, .node = null, .name = "entity2" };
+    var entity3 = ScopeEntity{ .flags = ScopeEntityFlags{ .on_stack = false }, .node = null, .name = "entity3" };
 
     try scope.entities.push(&entity1);
     try scope.entities.push(&entity2);
