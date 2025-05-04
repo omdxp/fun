@@ -1725,6 +1725,7 @@ pub const ParseProcess = struct {
             };
         }
         function_node.node_variant.?.function.rtype = dt;
+        try self.transpile_proc.register_global_node_symbol(function_node);
         if (self.next_token_is_symbol('{')) {
             var hist_body = utils.History.init(self.transpile_proc.allocator, .{ .inside_function_body = true });
             defer hist_body.deinit();
@@ -2180,6 +2181,26 @@ pub const ParseProcess = struct {
             std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});
             return ParseError.MemoryAllocationFailed;
         };
+        // TODO: (std should be written in fun) For now, std imports will register general global symbols
+        if (mem.eql(u8, path, "std.io")) {
+            var type_str = std.ArrayList(u8).init(self.transpile_proc.allocator);
+            errdefer type_str.deinit();
+            type_str.appendSlice("void") catch |e| {
+                std.debug.print("Error appending to type_str: {s}\n", .{@errorName(e)});
+                return ParseError.MemoryAllocationFailed;
+            };
+            var printf_name = std.ArrayList(u8).init(self.transpile_proc.allocator);
+            errdefer printf_name.deinit();
+            printf_name.appendSlice("printf") catch |e| {
+                std.debug.print("Error appending to printf_name: {s}\n", .{@errorName(e)});
+                return ParseError.MemoryAllocationFailed;
+            };
+            try self.transpile_proc.register_global_node_symbol(ast.Node{
+                .type = .Function,
+                .pos = self.*.transpile_proc.*.pos,
+                .node_variant = .{ .function = .{ .name = printf_name, .args = null, .rtype = dtype.DataType{ .type = .Void, .type_str = type_str }, .body = null } },
+            });
+        }
     }
 
     /// Parses a keyword token.
@@ -2272,7 +2293,9 @@ pub const ParseProcess = struct {
 
         try self.parse_keyword(&hist);
         const n = self.node_pop();
-        try self.transpile_proc.register_global_node_symbol(n.?);
+        if (n.?.type != .Function) {
+            try self.transpile_proc.register_global_node_symbol(n.?);
+        }
         self.transpile_proc.nodes.push(n.?) catch |e| {
             std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});
             return ParseError.MemoryAllocationFailed;
