@@ -384,6 +384,10 @@ pub const ParseProcess = struct {
             defer hist_down.deinit();
             try self.parse_statement(&hist_down);
             const stmt_node = self.node_pop();
+            if (stmt_node.?.type == .Function) {
+                self.transpile_proc.err("invalid function statement", .{});
+                return ParseError.InvalidStatement;
+            }
             const stmt = self.transpile_proc.allocator.create(ast.Node) catch |e| {
                 std.debug.print("Error creating node: {s}", .{@errorName(e)});
                 return ParseError.MemoryAllocationFailed;

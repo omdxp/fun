@@ -9,6 +9,9 @@ fun factorial(num n) num {
 }
 
 fun main() {
+    fun example() {
+        printf("Hello, World!\n");
+    }
     num number = 5;
     num result = factorial(number);
     printf("The factorial of %d is: %d\n", number, result);
