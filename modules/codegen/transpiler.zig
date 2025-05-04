@@ -644,8 +644,57 @@ pub const TranspileProcess = struct {
     ///
     /// Returns:
     /// - `?*ScopeEntity`: The scope entity if found, otherwise `null`.
-    pub fn get_scope_entity(self: *Self, name: []const u8) ?*scope.ScopeEntity {
+    pub fn get_current_scope_entity(self: *Self, name: []const u8) ?*scope.ScopeEntity {
+        if (self.scope.?.current == null) {
+            return null;
+        }
         return self.scope.?.current.?.get_entity_by_name(name);
+    }
+
+    /// Retrieves a scope entity by name from a specific scope.
+    ///
+    /// This function searches for a scope entity with the specified name in the given scope.
+    ///
+    /// Parameters:
+    /// - `self`: The instance of the transpiler.
+    /// - `name`: The name of the scope entity to search for.
+    /// - `scope`: The scope to search in.
+    ///
+    /// Returns:
+    /// - `?*ScopeEntity`: The scope entity if found, otherwise `null`.
+    pub fn get_scope_entity_from_scope(_: *Self, name: []const u8, s: ?*scope.Scope) ?*scope.ScopeEntity {
+        if (s == null) {
+            return null;
+        }
+        return s.?.get_entity_by_name(name);
+    }
+
+    /// Retrieves a scope entity by name recursively from the current scope.
+    ///
+    /// This function searches for a scope entity with the specified name in the current scope
+    /// and its parent scopes.
+    ///
+    /// Parameters:
+    /// - `self`: The instance of the transpiler.
+    /// - `name`: The name of the scope entity to search for.
+    ///
+    /// Returns:
+    /// - `?*ScopeEntity`: The scope entity if found, otherwise `null`.
+    pub fn get_scope_entity(self: *Self, name: []const u8) ?*scope.ScopeEntity {
+        var entity = self.get_current_scope_entity(name);
+        if (entity) |e| {
+            return e;
+        }
+        var current = self.scope.?.current;
+        while (current.?.parent) |parent| {
+            current = parent;
+            entity = self.get_scope_entity_from_scope(name, current);
+            if (entity) |e| {
+                return e;
+            }
+        }
+        current = self.scope.?.root;
+        return null;
     }
 
     /// Retrieves the last entity from the current scope, stopping at a specified scope.
@@ -700,8 +749,8 @@ pub const TranspileProcess = struct {
     /// - `self`: The instance of the transpiler.
     pub fn finish_scope(self: *Self) void {
         const new_current_scope = self.scope.?.current.?.parent;
-        self.scope.?.current.?.deinit();
-        self.allocator.destroy(self.scope.?.current.?);
+        // self.scope.?.current.?.deinit();
+        // self.allocator.destroy(self.scope.?.current.?);
         self.scope.?.current = new_current_scope;
         if (self.scope.?.root != null and self.scope.?.current == null) {
             self.scope.?.root = null;

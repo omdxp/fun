@@ -207,7 +207,7 @@ pub const ParseProcess = struct {
             .Identifier => node.data.?.sval.items,
             .Function => node.data.?.sval.items,
             .Variable => node.node_variant.?.variable.name.items,
-            else => unreachable,
+            else => "",
         };
         return entity;
     }
@@ -330,8 +330,7 @@ pub const ParseProcess = struct {
         try self.parse_expressionable_root(hist);
         t = self.token_peek_next();
         if (t.?.type == .Symbol and t.?.data.cval != ';') {
-            try self.parse_symbol();
-            return;
+            return try self.parse_symbol();
         }
         try self.expect_sym(';');
     }
