@@ -1647,7 +1647,6 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     fn parse_function_args(self: *Self, hist: *utils.History) ParseError!utils.Vector(*ast.Node) {
-        _ = try self.transpile_proc.new_scope();
         var args = utils.Vector(*ast.Node).init(self.transpile_proc.allocator);
         while (!self.next_token_is_symbol(')')) {
             if (self.next_token_is_operator(".")) { // variadic
@@ -1674,7 +1673,6 @@ pub const ParseProcess = struct {
             }
             _ = self.token_next(); // skip ,
         }
-        self.transpile_proc.finish_scope();
         return args;
     }
 
