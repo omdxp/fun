@@ -252,7 +252,9 @@ pub const ParseProcess = struct {
     fn token_peek_next(self: *Self) ?token.Token {
         var next_token = self.transpile_proc.tokens.peek_no_increment();
         self.ignore_nl_or_comment(&next_token);
-        return self.transpile_proc.tokens.peek_no_increment();
+        const peek_token = self.transpile_proc.tokens.peek_no_increment();
+        self.transpile_proc.current_token = peek_token;
+        return peek_token;
     }
 
     /// Retrieves the next token.
@@ -269,7 +271,9 @@ pub const ParseProcess = struct {
             self.transpile_proc.pos = next_token.?.pos;
             self.parser_last_token = next_token.?;
         }
-        return self.transpile_proc.tokens.peek();
+        next_token = self.transpile_proc.tokens.peek();
+        self.transpile_proc.current_token = next_token;
+        return next_token;
     }
 
     /// Pops the last node from the transpiler's node stack.

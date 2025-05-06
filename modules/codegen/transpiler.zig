@@ -145,6 +145,9 @@ pub const TranspileProcess = struct {
     /// Whether the current file is importing other files
     is_importing: bool = false,
 
+    /// The current token being processed
+    current_token: ?token.Token = null,
+
     const Self = @This();
 
     /// Initializes a new instance of `TranspileProcess`.
@@ -224,7 +227,7 @@ pub const TranspileProcess = struct {
 
         return Self{
             .flags = flags,
-            .pos = .{ .col = 1, .line = 1, .filename = ifilepath },
+            .pos = .{ .col = 1, .line = 1, .start_col = 1, .end_col = 1, .filename = ifilepath },
             .ifile = ifile,
             .ofile = ofile,
             .outbuf = outbuf,
@@ -247,7 +250,7 @@ pub const TranspileProcess = struct {
 
     /// Logs an error message with the current position in the token stream.
     ///
-    /// This function logs an error message along with the line number, column number,
+    /// This function logs an error message along with the line number, column span.,
     /// and filename where the error occurred, then panics.
     ///
     /// Parameters:
@@ -256,19 +259,20 @@ pub const TranspileProcess = struct {
     /// - `args`: The arguments for the format string.
     pub fn err(self: *Self, comptime fmt: []const u8, args: anytype) void {
         const stderr = std.io.getStdErr().writer();
-        stderr.print("Error: ", .{}) catch unreachable;
+        stderr.print("\n[Error]\n", .{}) catch unreachable;
         stderr.print(fmt, args) catch unreachable;
-        stderr.print(" in {s}:{d}:{d}\n", .{
-            self.pos.filename,
-            self.pos.line,
-            self.pos.col,
+        stderr.print("\nLocation: {s}:{d}:{d}-{d}\n", .{
+            self.current_token.?.pos.filename,
+            self.current_token.?.pos.line,
+            self.current_token.?.pos.start_col,
+            self.current_token.?.pos.end_col,
         }) catch unreachable;
         self.deinit();
     }
 
     /// Logs a warning message with the current position in the token stream.
     ///
-    /// This function logs a warning message along with the line number, column number,
+    /// This function logs a warning message along with the line number, column span,
     /// and filename where the warning occurred.
     ///
     /// Parameters:
@@ -277,12 +281,13 @@ pub const TranspileProcess = struct {
     /// - `args`: The arguments for the format string.
     pub fn warn(self: *Self, comptime fmt: []const u8, args: anytype) void {
         const stdout = std.io.getStdOut().writer();
-        stdout.print("Warning: ", .{}) catch unreachable;
+        stdout.print("\n[Warning]\n", .{}) catch unreachable;
         stdout.print(fmt, args) catch unreachable;
-        stdout.print(" in {s}:{d}:{d}\n", .{
-            self.pos.filename,
-            self.pos.line,
-            self.pos.col,
+        stdout.print("\nLocation: {s}:{d}:{d}-{d}\n", .{
+            self.current_token.?.pos.filename,
+            self.current_token.?.pos.line,
+            self.current_token.?.pos.start_col,
+            self.current_token.?.pos.end_col,
         }) catch unreachable;
     }
 

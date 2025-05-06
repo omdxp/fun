@@ -852,8 +852,12 @@ pub const LexProcess = struct {
     /// Errors:
     /// - Returns an error if reading the next token fails.
     fn read_next_token(self: *Self) LexError!?token.Token {
+        const start_col = self.transpile_proc.pos.col;
+
         var t = try self.handle_comment();
         if (t != null) {
+            t.?.pos.start_col = start_col;
+            t.?.pos.end_col = self.transpile_proc.pos.col;
             return t;
         }
 
@@ -880,6 +884,12 @@ pub const LexProcess = struct {
             },
         }
 
+        if (t != null) {
+            t.?.pos.start_col = start_col;
+            t.?.pos.end_col = self.transpile_proc.pos.col;
+        }
+
+        self.transpile_proc.current_token = t;
         return t;
     }
 
