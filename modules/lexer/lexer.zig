@@ -61,7 +61,6 @@ pub const LexProcess = struct {
     /// Errors:
     /// - Returns an error if reading from the input file fails.
     pub fn next_char(self: *Self) LexError!?u8 {
-        self.transpile_proc.pos.col += 1;
         var buffer: [1]u8 = undefined;
         const readBytes = self.transpile_proc.ifile.read(buffer[0..]) catch |e| {
             if (e == fs.File.ReadError.Unexpected) {
@@ -75,9 +74,13 @@ pub const LexProcess = struct {
         }
 
         const c = buffer[0];
+
+        // Advance cursor after reading a character.
         if (c == '\n') {
             self.transpile_proc.pos.line += 1;
             self.transpile_proc.pos.col = 1;
+        } else {
+            self.transpile_proc.pos.col += 1;
         }
 
         if (self.in_expression()) {
@@ -145,15 +148,19 @@ pub const LexProcess = struct {
             std.debug.print("Error seeking in file: {s}\n", .{@errorName(e)});
             return LexError.FileSeekError;
         };
-        var buffer: [1]u8 = [_]u8{c};
-        _ = self.transpile_proc.ifile.write(buffer[0..]) catch |e| {
-            std.debug.print("Error writing to file: {s}\n", .{@errorName(e)});
-            return LexError.FileWriteError;
-        };
-        self.transpile_proc.ifile.seekTo(pos - 1) catch |e| {
-            std.debug.print("Error seeking in file: {s}\n", .{@errorName(e)});
-            return LexError.FileSeekError;
-        };
+
+        // IMPORTANT: do not write back into the user's source file.
+        // `push_char` is meant to implement a simple "unread" for lookahead.
+        // We only need to rewind the file cursor and update our tracked column.
+        if (c == '\n') {
+            // We currently never push back newlines. If that changes, we'd need
+            // a way to restore the previous line length.
+            self.transpile_proc.err("internal lexer error: attempted to push back newline", .{});
+            return LexError.InvalidExpression;
+        }
+        if (self.transpile_proc.pos.col > 1) {
+            self.transpile_proc.pos.col -= 1;
+        }
     }
 
     /// Reads characters from the input file based on a given condition.
@@ -192,7 +199,7 @@ pub const LexProcess = struct {
         var buffer = std.ArrayList(u8).init(self.transpile_proc.allocator);
         try self.getc_if(&buffer, struct {
             fn call(_c: u8) bool {
-                return _c != '\n';
+                return _c != '\n' and _c != '\r';
             }
         }.call);
 
@@ -852,8 +859,16 @@ pub const LexProcess = struct {
     /// Errors:
     /// - Returns an error if reading the next token fails.
     fn read_next_token(self: *Self) LexError!?token.Token {
+        const start_line = self.transpile_proc.pos.line;
+        const start_col = self.transpile_proc.pos.col;
+
         var t = try self.handle_comment();
         if (t != null) {
+            t.?.pos.line = start_line;
+            t.?.pos.col = start_col;
+            t.?.pos.start_col = start_col;
+            t.?.pos.end_line = self.transpile_proc.pos.line;
+            t.?.pos.end_col = self.transpile_proc.pos.col;
             return t;
         }
 
@@ -870,7 +885,7 @@ pub const LexProcess = struct {
             '0'...'9' => t = try self.token_make_number(),
             'b', 'x' => t = try self.token_make_special_number(),
             '\n' => t = try self.token_make_newline(),
-            ' ', '\t' => t = try self.handle_whitespace(),
+            ' ', '\t', '\r' => t = try self.handle_whitespace(),
             else => {
                 t = try self.read_special_token();
                 if (t == null) {
@@ -880,6 +895,15 @@ pub const LexProcess = struct {
             },
         }
 
+        if (t != null) {
+            t.?.pos.line = start_line;
+            t.?.pos.col = start_col;
+            t.?.pos.start_col = start_col;
+            t.?.pos.end_line = self.transpile_proc.pos.line;
+            t.?.pos.end_col = self.transpile_proc.pos.col;
+        }
+
+        self.transpile_proc.current_token = t;
         return t;
     }
 

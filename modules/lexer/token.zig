@@ -57,8 +57,17 @@ pub const TokenData = union(enum) {
 pub const Pos = struct {
     /// The line number where the token is located.
     line: u32,
-    /// The column number where the token is located.
+    /// The column number where the token starts.
     col: u32,
+    /// The starting column number of the token.
+    start_col: u32,
+    /// The ending column number of the token.
+    end_col: u32,
+    /// The ending line number of the token span.
+    ///
+    /// For most tokens this is the same as `line`, but for tokens that cross
+    /// a newline boundary (e.g. a NewLine token) it will differ.
+    end_line: u32 = 0,
     /// The name of the file where the token is located.
     filename: []const u8,
 };
@@ -69,7 +78,7 @@ pub const Token = struct {
     type: TokenType,
     /// The data associated with the token.
     data: TokenData,
-    /// The current position of the token.
+    /// The span (start and end positions) of the token.
     pos: Pos,
     /// The type of the numeric literal, if the token is a number.
     num: ?struct {

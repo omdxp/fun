@@ -104,6 +104,9 @@ pub fn parse_args(allocator: mem.Allocator) !CliOptions {
     // Skip executable name
     _ = args.skip();
 
+    // NOTE: `argsWithAllocator` can yield slices whose backing storage does not
+    // outlive the iterator (platform dependent). Always dupe any argv slices we
+    // intend to keep.
     var input_file: ?[]const u8 = null;
     var output_file: ?[]const u8 = null;
     var exec = true;
@@ -121,14 +124,14 @@ pub fn parse_args(allocator: mem.Allocator) !CliOptions {
             if (!std.mem.endsWith(u8, file, ".fn")) {
                 return CliError.InvalidInputExtension;
             }
-            input_file = file;
+            input_file = try allocator.dupe(u8, file);
         } else if (std.mem.eql(u8, arg, "-out")) {
             const file = args.next() orelse return CliError.MissingOutputFile;
             // Validate output file extension
             if (!std.mem.endsWith(u8, file, ".c")) {
                 return CliError.InvalidOutputExtension;
             }
-            output_file = file;
+            output_file = try allocator.dupe(u8, file);
             outf = true; // When -out is provided, automatically set outf to true
         } else if (std.mem.eql(u8, arg, "-no-exec")) {
             exec = false;
@@ -143,16 +146,12 @@ pub fn parse_args(allocator: mem.Allocator) !CliOptions {
 
     const ofilepath = if (output_file) |path| path else blk: {
         // Create default output path by replacing extension with .c
-        var path_buffer = std.ArrayList(u8).init(allocator);
         const input_path = std.fs.path.basename(ifilepath);
         const extension_index = std.mem.lastIndexOf(u8, input_path, ".");
         if (extension_index) |index| {
-            try path_buffer.appendSlice(input_path[0..index]);
-        } else {
-            try path_buffer.appendSlice(input_path);
+            break :blk try std.fmt.allocPrint(allocator, "{s}.c", .{input_path[0..index]});
         }
-        try path_buffer.appendSlice(".c");
-        break :blk path_buffer.items;
+        break :blk try std.fmt.allocPrint(allocator, "{s}.c", .{input_path});
     };
 
     return CliOptions{
