@@ -6,7 +6,7 @@ pub const Associativity = enum { LeftToRight, RightToLeft };
 /// Maximum number of operators in a precedence group.
 pub const MAX_OPERATORS_IN_GROUP = 12;
 /// Total number of operator precedence groups.
-pub const TOTAL_OPERATOR_GROUPS = 13;
+pub const TOTAL_OPERATOR_GROUPS = 14;
 
 /// Structure representing an operator precedence group.
 pub const OpPrecedenceGroup = struct {
@@ -60,6 +60,11 @@ pub const op_precedence = [_]OpPrecedenceGroup{
     },
     OpPrecedenceGroup{
         .operators = [_]?[]const u8{ "||", null, null, null, null, null, null, null, null, null, null, null },
+        .associativity = .LeftToRight,
+    },
+    // Range operator
+    OpPrecedenceGroup{
+        .operators = [_]?[]const u8{ "..", null, null, null, null, null, null, null, null, null, null, null },
         .associativity = .LeftToRight,
     },
     OpPrecedenceGroup{

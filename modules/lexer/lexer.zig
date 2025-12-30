@@ -880,7 +880,7 @@ pub const LexProcess = struct {
         switch (c.?) {
             '"' => t = try self.token_make_string(),
             '\'' => t = try self.token_make_character(),
-            '+', '-', '*', '>', '<', '^', '%', '!', '=', '~', '|', '&', '(', '[', ',', '.' => t = try self.token_make_operator(),
+            '+', '-', '*', '>', '<', '^', '%', '!', '=', '~', '|', '&', '(', '[', ',', '.', ':' => t = try self.token_make_operator(),
             '{', '}', ';', ')', ']' => t = try self.token_make_symbol(),
             '0'...'9' => t = try self.token_make_number(),
             'b', 'x' => t = try self.token_make_special_number(),

@@ -65,7 +65,10 @@ pub fn is_keyword(str: []const u8) bool {
         mem.eql(u8, "else", str) or mem.eql(u8, "bin", str) or
         mem.eql(u8, "true", str) or mem.eql(u8, "false", str) or
         mem.eql(u8, "fit", str) or mem.eql(u8, "ret", str) or
-        mem.eql(u8, "chr", str);
+        mem.eql(u8, "chr", str) or
+        mem.eql(u8, "for", str) or
+        mem.eql(u8, "break", str) or
+        mem.eql(u8, "continue", str);
 }
 
 /// Checks if the given character is a boolean keyword.
@@ -92,7 +95,7 @@ pub fn is_boolean_keyword(str: []const u8) bool {
 /// Parameters:
 /// - `op (u8)`: The operator to check.
 pub fn op_treated_as_one(op: u8) bool {
-    return op == '(' or op == '[' or op == ',' or op == '.' or op == '*';
+    return op == '(' or op == '[' or op == ',' or op == '*';
 }
 
 /// Checks if an operator is a single character operator.
@@ -109,7 +112,7 @@ pub fn is_single_operator(op: u8) bool {
     return op == '+' or op == '-' or op == '/' or op == '*' or op == '=' or
         op == '>' or op == '<' or op == '|' or op == '&' or op == '^' or
         op == '%' or op == '~' or op == '!' or op == '(' or op == '[' or
-        op == ',' or op == '.';
+        op == ',' or op == '.' or op == ':';
 }
 
 /// Checks if an operator is valid.
@@ -131,7 +134,8 @@ pub fn op_valid(op: []const u8) bool {
         mem.eql(u8, "||", op) or mem.eql(u8, "&&", op) or mem.eql(u8, "|", op) or mem.eql(u8, "&", op) or
         mem.eql(u8, "++", op) or mem.eql(u8, "--", op) or mem.eql(u8, "=", op) or mem.eql(u8, "!=", op) or
         mem.eql(u8, "==", op) or mem.eql(u8, "(", op) or mem.eql(u8, "[", op) or
-        mem.eql(u8, ",", op) or mem.eql(u8, ".", op) or mem.eql(u8, "...", op) or mem.eql(u8, "~", op) or
+        mem.eql(u8, ",", op) or mem.eql(u8, ".", op) or mem.eql(u8, "..", op) or mem.eql(u8, "...", op) or
+        mem.eql(u8, ":", op) or mem.eql(u8, "::", op) or mem.eql(u8, "~", op) or
         mem.eql(u8, "%", op) or mem.eql(u8, "->", op);
 }
 

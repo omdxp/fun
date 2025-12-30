@@ -1,0 +1,19 @@
+imp std.io;
+
+fun main() {
+  // for range
+  for i : 0..10 {
+    printf("%d\n", i);
+  }
+
+  // for array
+  num[] arr = [1, 2, 3];
+
+  for item : arr {
+    printf("%d\n", item);
+  }
+
+  for i, item :: arr {
+    printf("arr[%d]=%d\n", i, item);
+  }
+}

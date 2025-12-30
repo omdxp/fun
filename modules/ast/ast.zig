@@ -171,6 +171,22 @@ pub const Node = struct {
         statement: union(enum) {
             /// The return statement node.
             return_stmt: *Node,
+            /// The for statement node.
+            for_stmt: union(enum) {
+                /// For range: `for i : start..end { ... }`
+                range: struct {
+                    index_name: []const u8,
+                    range: *Node,
+                    body: *Node,
+                },
+                /// For iterable array: `for item : arr { ... }` or `for i, item :: arr { ... }`
+                iter: struct {
+                    index_name: ?[]const u8 = null,
+                    item_name: []const u8,
+                    iterable: *Node,
+                    body: *Node,
+                },
+            },
             /// The if statement node.
             if_stmt: struct {
                 /// The condition of the if statement.

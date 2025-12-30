@@ -83,6 +83,13 @@ pub const TranspileProcess = struct {
     tokens: utils.Vector(token.Token),
     /// `nodes` is a list of AST (Abstract Syntax Tree) nodes.
     nodes: utils.Vector(ast.Node),
+
+    /// Heap-allocated node containers that are referenced by other structures (e.g. scope entities)
+    /// but whose contents are owned/deinitialized via `nodes`.
+    owned_nodes: std.ArrayList(*ast.Node),
+
+    /// Heap-allocated scope entities created by the parser.
+    owned_scope_entities: std.ArrayList(*scope.ScopeEntity),
     /// Track if we're currently transpiling function parameters
     in_function_params: bool = false,
     /// Current indentation level for code formatting
@@ -373,6 +380,8 @@ pub const TranspileProcess = struct {
             .outbuf = outbuf,
             .tokens = utils.Vector(token.Token).init(allocator),
             .nodes = utils.Vector(ast.Node).init(allocator),
+            .owned_nodes = std.ArrayList(*ast.Node).init(allocator),
+            .owned_scope_entities = std.ArrayList(*scope.ScopeEntity).init(allocator),
             .scope = null,
             .symbols = .{
                 .active_table = initial_table,
@@ -836,6 +845,9 @@ pub const TranspileProcess = struct {
     /// Returns:
     /// - `?*ScopeEntity`: The scope entity if found, otherwise `null`.
     pub fn get_scope_entity(self: *Self, name: []const u8) ?*scope.ScopeEntity {
+        if (self.scope == null or self.scope.?.current == null) {
+            return null;
+        }
         var entity = self.get_current_scope_entity(name);
         if (entity) |e| {
             return e;
@@ -904,6 +916,8 @@ pub const TranspileProcess = struct {
     /// - `self`: The instance of the transpiler.
     pub fn finish_scope(self: *Self) void {
         const new_current_scope = self.scope.?.current.?.parent;
+        // Free the current scope's allocations (entities vector, etc.).
+        self.scope.?.current.?.deinit();
         self.allocator.destroy(self.scope.?.current.?);
         self.scope.?.current = new_current_scope;
         if (self.scope.?.root != null and self.scope.?.current == null) {
@@ -917,7 +931,7 @@ pub const TranspileProcess = struct {
     /// Parameters:
     ///   - `self`: The instance of the transpiler to deinitialize.
     ///   - `node`: The node to deinitialize
-    fn deinit_node(self: *Self, node: ast.Node) void {
+    pub fn deinit_node(self: *Self, node: ast.Node) void {
         const allocator = self.allocator;
         if (node.binded) |b| {
             if (b.owner) |owner| {
@@ -930,14 +944,15 @@ pub const TranspileProcess = struct {
             }
             allocator.destroy(b);
         }
-        if (node.data) |data| {
-            switch (data) {
-                .sval => |list| if (list.items.len > 0) list.deinit(),
-                else => {},
-            }
-        }
+        // NOTE: `ast.Node.data.sval` is borrowed from the token stream.
+        // Tokens own and free their string buffers in `TranspileProcess.deinit()`.
+        // Deinitializing `.sval` here would double-free.
         if (node.node_variant) |variant| {
             switch (variant) {
+                .import => |imp| {
+                    // Import paths are allocated by the parser (toOwnedSlice).
+                    self.allocator.free(imp.path);
+                },
                 .exp => |exp| {
                     if (exp.left) |left| {
                         self.deinit_node(left.*);
@@ -1014,6 +1029,22 @@ pub const TranspileProcess = struct {
                             self.deinit_node(ret.*);
                             allocator.destroy(ret);
                         },
+                        .for_stmt => |for_s| {
+                            switch (for_s) {
+                                .range => |fr| {
+                                    self.deinit_node(fr.range.*);
+                                    allocator.destroy(fr.range);
+                                    self.deinit_node(fr.body.*);
+                                    allocator.destroy(fr.body);
+                                },
+                                .iter => |fi| {
+                                    self.deinit_node(fi.iterable.*);
+                                    allocator.destroy(fi.iterable);
+                                    self.deinit_node(fi.body.*);
+                                    allocator.destroy(fi.body);
+                                },
+                            }
+                        },
                         .if_stmt => |if_s| {
                             self.deinit_node(if_s.condition.*);
                             allocator.destroy(if_s.condition);
@@ -1081,6 +1112,17 @@ pub const TranspileProcess = struct {
             self.deinit_node(node);
         }
         self.nodes.deinit();
+
+        // Free heap allocations that are not part of the `nodes` vector itself.
+        for (self.owned_scope_entities.items) |entity| {
+            self.allocator.destroy(entity);
+        }
+        self.owned_scope_entities.deinit();
+
+        for (self.owned_nodes.items) |node_ptr| {
+            self.allocator.destroy(node_ptr);
+        }
+        self.owned_nodes.deinit();
         if (self.symbols.active_table) |table| {
             table.symbols.deinit();
             self.allocator.destroy(table);
@@ -1310,6 +1352,19 @@ pub const TranspileProcess = struct {
                         try self.write(", ");
                         try self.transpile_node(right.*);
                     }
+                } else if (mem.eql(u8, exp.op, "[]")) {
+                    if (exp.left) |left| {
+                        try self.transpile_node(left.*);
+                    }
+                    try self.write("[");
+                    if (exp.right) |right| {
+                        if (right.type == .Bracket) {
+                            try self.transpile_node(right.node_variant.?.bracket.inner.*);
+                        } else {
+                            try self.transpile_node(right.*);
+                        }
+                    }
+                    try self.write("]");
                 } else if (exp.op.len > 0) {
                     if (exp.left) |left| {
                         try self.transpile_node(left.*);
@@ -1351,6 +1406,28 @@ pub const TranspileProcess = struct {
                 try self.write_type(variable.type.*);
                 try self.write(" ");
                 try self.write(variable.name.items);
+
+                // Array declarators come after the variable name in C.
+                if (variable.type.flags != null and variable.type.flags.?.is_array) {
+                    if (variable.type.array) |array| {
+                        if (!array.brackets.is_empty()) {
+                            for (array.brackets.items()) |bracket_node| {
+                                try self.write("[");
+                                if (bracket_node.type == .Bracket) {
+                                    try self.transpile_node(bracket_node.node_variant.?.bracket.inner.*);
+                                } else {
+                                    try self.transpile_node(bracket_node);
+                                }
+                                try self.write("]");
+                            }
+                        } else {
+                            try self.write("[]");
+                        }
+                    } else {
+                        try self.write("[]");
+                    }
+                }
+
                 if (variable.val) |val| {
                     try self.write(" = ");
                     if (val.type == .String) {
@@ -1360,6 +1437,11 @@ pub const TranspileProcess = struct {
                     } else if (val.type == .Boolean) {
                         const bval = val.data.?.bval;
                         try self.write(if (bval) "true" else "false");
+                    } else if (val.type == .Bracket) {
+                        // Array literal: `[1, 2, 3]` becomes `{1, 2, 3}` in C.
+                        try self.write("{");
+                        try self.transpile_node(val.node_variant.?.bracket.inner.*);
+                        try self.write("}");
                     } else {
                         try self.transpile_node(val.*);
                     }
@@ -1426,7 +1508,7 @@ pub const TranspileProcess = struct {
                 try self.write_indent();
                 try self.write("}");
             },
-            .StatementReturn, .StatementIf, .StatementElseIf, .StatementElse, .StatementFit => {
+            .StatementReturn, .StatementIf, .StatementElseIf, .StatementElse, .StatementFit, .StatementFor => {
                 const statement = node.node_variant.?.statement;
                 switch (statement) {
                     .if_stmt => |if_s| {
@@ -1504,6 +1586,117 @@ pub const TranspileProcess = struct {
                         try self.write_indent();
                         try self.write("}");
                     },
+                    .for_stmt => |for_s| {
+                        switch (for_s) {
+                            .range => |fr| {
+                                if (fr.range.type != .Expression or !mem.eql(u8, fr.range.node_variant.?.exp.op, "..")) {
+                                    return TranspileError.UnsupportedNodeType;
+                                }
+                                const range_exp = fr.range.node_variant.?.exp;
+                                const start = range_exp.left orelse return TranspileError.UnsupportedNodeType;
+                                const end = range_exp.right orelse return TranspileError.UnsupportedNodeType;
+
+                                try self.write("for (int ");
+                                try self.write(fr.index_name);
+                                try self.write(" = ");
+                                try self.transpile_node(start.*);
+                                try self.write("; ");
+                                try self.write(fr.index_name);
+                                try self.write(" < ");
+                                try self.transpile_node(end.*);
+                                try self.write("; ");
+                                try self.write(fr.index_name);
+                                try self.write("++) {");
+                                self.indent();
+
+                                if (fr.body.type == .Body) {
+                                    const body = fr.body.node_variant.?.body;
+                                    for (body.statements.items()) |body_stmt| {
+                                        try self.write_indent();
+                                        try self.transpile_node(body_stmt.*);
+                                        if (body_stmt.type == .Expression) {
+                                            try self.write(";");
+                                        }
+                                    }
+                                } else {
+                                    try self.write_indent();
+                                    try self.transpile_node(fr.body.*);
+                                    if (fr.body.type == .Expression) {
+                                        try self.write(";");
+                                    }
+                                }
+
+                                self.dedent();
+                                try self.write_indent();
+                                try self.write("}");
+                            },
+                            .iter => |fi| {
+                                // We only support iterating array identifiers for now.
+                                if (fi.iterable.type != .Identifier) {
+                                    self.err("for-each loops currently require an array identifier", .{});
+                                    return TranspileError.UnsupportedNodeType;
+                                }
+                                const arr_name = fi.iterable.data.?.sval.items;
+
+                                const idx_name = fi.index_name orelse "__fun_i";
+
+                                try self.write("for (int ");
+                                try self.write(idx_name);
+                                try self.write(" = 0; ");
+                                try self.write(idx_name);
+                                try self.write(" < (int)(sizeof(");
+                                try self.write(arr_name);
+                                try self.write(")/sizeof(");
+                                try self.write(arr_name);
+                                try self.write("[0])); ");
+                                try self.write(idx_name);
+                                try self.write("++) {");
+                                self.indent();
+
+                                // Declare the item binding each iteration.
+                                // If we can find the array type in scope, use it.
+                                var item_c_type: []const u8 = "int";
+                                if (self.get_scope_entity(arr_name)) |ent| {
+                                    if (ent.node) |arr_node| {
+                                        if (arr_node.type == .Variable) {
+                                            const dt = arr_node.node_variant.?.variable.type.*;
+                                            item_c_type = map_type_to_c(dt.type_str.items);
+                                        }
+                                    }
+                                }
+                                try self.write_indent();
+                                try self.write(item_c_type);
+                                try self.write(" ");
+                                try self.write(fi.item_name);
+                                try self.write(" = ");
+                                try self.write(arr_name);
+                                try self.write("[");
+                                try self.write(idx_name);
+                                try self.write("];");
+
+                                if (fi.body.type == .Body) {
+                                    const body = fi.body.node_variant.?.body;
+                                    for (body.statements.items()) |body_stmt| {
+                                        try self.write_indent();
+                                        try self.transpile_node(body_stmt.*);
+                                        if (body_stmt.type == .Expression) {
+                                            try self.write(";");
+                                        }
+                                    }
+                                } else {
+                                    try self.write_indent();
+                                    try self.transpile_node(fi.body.*);
+                                    if (fi.body.type == .Expression) {
+                                        try self.write(";");
+                                    }
+                                }
+
+                                self.dedent();
+                                try self.write_indent();
+                                try self.write("}");
+                            },
+                        }
+                    },
                     .fit_stmt => |fit| {
                         try self.write("switch (");
                         try self.transpile_node(fit.exp.*);
@@ -1555,6 +1748,12 @@ pub const TranspileProcess = struct {
                         try self.write(";");
                     },
                 }
+            },
+            .StatementBreak => {
+                try self.write("break;");
+            },
+            .StatementContinue => {
+                try self.write("continue;");
             },
             .Unary => {
                 const unary = node.node_variant.?.unary;
