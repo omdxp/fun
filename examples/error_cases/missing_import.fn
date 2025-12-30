@@ -2,4 +2,5 @@
 imp nonexistent_file;
 
 fun main() {
+	printf("This should show an error about the missing import\n");
 }

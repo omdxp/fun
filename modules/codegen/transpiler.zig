@@ -203,6 +203,39 @@ pub const TranspileProcess = struct {
             return TranspileError.FileNotFound;
         };
 
+        // Early direct circular import detection (A imports B, and B imports A).
+        // This is intentionally lightweight and mirrors the check in process_local_import.
+        {
+            const file_contents = fs.cwd().readFileAlloc(self.allocator, full_path, 1024 * 1024) catch |read_err| {
+                self.err("Failed to read import file: {any}", .{read_err});
+                return TranspileError.FileReadError;
+            };
+            defer self.allocator.free(file_contents);
+
+            const our_name = std.fs.path.stem(self.input_file_path);
+            var import_line = std.ArrayList(u8).init(self.allocator);
+            defer import_line.deinit();
+            import_line.appendSlice("imp ") catch |e| {
+                std.debug.print("Failed to allocate memory for import line: {s}\\n", .{@errorName(e)});
+                return TranspileError.MemoryAllocationFailed;
+            };
+            import_line.appendSlice(our_name) catch |e| {
+                std.debug.print("Failed to allocate memory for import line: {s}\\n", .{@errorName(e)});
+                return TranspileError.MemoryAllocationFailed;
+            };
+            import_line.appendSlice(";") catch |e| {
+                std.debug.print("Failed to allocate memory for import line: {s}\\n", .{@errorName(e)});
+                return TranspileError.MemoryAllocationFailed;
+            };
+
+            if (std.mem.indexOf(u8, file_contents, import_line.items)) |_| {
+                const basename1 = std.fs.path.basename(self.input_file_path);
+                const basename2 = std.fs.path.basename(full_path);
+                self.err("CIRCULAR IMPORT DETECTED: '{s}' imports '{s}', but '{s}' also imports '{s}', creating a circular dependency", .{ basename1, basename2, basename2, basename1 });
+                return TranspileError.CircularImport;
+            }
+        }
+
         var import_proc = try TranspileProcess.init(self.allocator, full_path, "temp.c", .{ .exec = false, .outf = false, .ast = false });
         defer import_proc.deinit();
 

@@ -2,4 +2,5 @@
 imp circular1;
 
 fun world() {
+	printf("World from circular2\n");
 }

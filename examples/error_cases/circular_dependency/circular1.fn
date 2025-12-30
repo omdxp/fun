@@ -2,4 +2,5 @@
 imp circular2;
 
 fun hello() {
+	printf("Hello from circular1\n");
 }
