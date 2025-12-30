@@ -9,6 +9,7 @@ comptime {
     _ = @import("utils_test.zig");
     _ = @import("cli_test.zig");
     _ = @import("imports_test.zig");
+    _ = @import("for_test.zig");
 }
 
 test {

@@ -29,6 +29,9 @@ fn print_error_and_exit(err: anyerror) noreturn {
         cli.CliError.CompilationFailed => {
             _ = stderr.writeAll("Error: C compilation failed.\n") catch {};
         },
+        cli.CliError.MissingCCompiler => {
+            _ = stderr.writeAll("Error: C compiler not found (requires `zig` on PATH for `zig cc`).\n") catch {};
+        },
         cli.CliError.ExecutionFailed => {
             _ = stderr.writeAll("Error: Execution of compiled code failed.\n") catch {};
         },

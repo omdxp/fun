@@ -150,9 +150,8 @@ pub const Scope = struct {
     /// Parameters:
     /// - `self`: The instance of the scope.
     pub fn deinit(self: *Self) void {
+        // Scope does not own the entity pointers.
+        // (Some call-sites may store pointers to stack-allocated entities.)
         self.entities.deinit();
-        if (self.parent != null) {
-            self.parent.?.entities.deinit();
-        }
     }
 };

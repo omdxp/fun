@@ -150,6 +150,10 @@ pub const ParseProcess = struct {
                 };
                 errdefer self.transpile_proc.allocator.destroy(owner);
                 owner.* = body;
+                // Binded nodes are only used for context; avoid copying ownership-bearing fields.
+                owner.*.binded = null;
+                owner.*.data = null;
+                owner.*.node_variant = null;
                 binded.owner = owner;
                 is_bound = true;
             }
@@ -161,6 +165,10 @@ pub const ParseProcess = struct {
             };
             errdefer self.transpile_proc.allocator.destroy(function);
             function.* = func;
+            // Binded nodes are only used for context; avoid copying ownership-bearing fields.
+            function.*.binded = null;
+            function.*.data = null;
+            function.*.node_variant = null;
             binded.function = function;
             is_bound = true;
         }
@@ -182,7 +190,6 @@ pub const ParseProcess = struct {
         };
     }
 
-    /// Creates a new scope entity.
     ///
     /// This function initializes a new scope entity with the provided node and flags.
     ///
@@ -358,28 +365,35 @@ pub const ParseProcess = struct {
         var stmts = utils.Vector(*ast.Node).init(self.transpile_proc.allocator);
         try self.make_body_node();
         var body_node = self.node_pop();
+        // `make_body_node()` already created a binded context for this body (via `create_node`).
+        // Do not overwrite `binded.owner` here; doing so can orphan the previous owner allocation.
         if (self.parser_current_body) |body| {
-            const owner = self.transpile_proc.allocator.create(ast.Node) catch |e| {
-                std.debug.print("Error creating node: {s}", .{@errorName(e)});
-                return ParseError.MemoryAllocationFailed;
-            };
-            errdefer self.transpile_proc.allocator.destroy(owner);
-            owner.* = body;
-            if (body_node.?.binded != null) {
-                body_node.?.binded.?.owner = owner;
-            } else {
-                body_node.?.binded = self.transpile_proc.allocator.create(ast.BindedNode) catch |e| {
+            const has_owner = body_node.?.binded != null and body_node.?.binded.?.owner != null;
+            if (!has_owner) {
+                const owner = self.transpile_proc.allocator.create(ast.Node) catch |e| {
                     std.debug.print("Error creating node: {s}", .{@errorName(e)});
                     return ParseError.MemoryAllocationFailed;
                 };
-                errdefer self.transpile_proc.allocator.destroy(body_node.?.binded.?);
-                body_node.?.binded.?.owner = owner;
-                body_node.?.binded.?.function = null;
+                errdefer self.transpile_proc.allocator.destroy(owner);
+                owner.* = body;
+                // Binded nodes are only used for context; avoid copying ownership-bearing fields.
+                owner.*.binded = null;
+                owner.*.data = null;
+                owner.*.node_variant = null;
+                if (body_node.?.binded != null) {
+                    body_node.?.binded.?.owner = owner;
+                } else {
+                    body_node.?.binded = self.transpile_proc.allocator.create(ast.BindedNode) catch |e| {
+                        std.debug.print("Error creating node: {s}", .{@errorName(e)});
+                        return ParseError.MemoryAllocationFailed;
+                    };
+                    errdefer self.transpile_proc.allocator.destroy(body_node.?.binded.?);
+                    body_node.?.binded.?.owner = owner;
+                    body_node.?.binded.?.function = null;
+                }
             }
-        } else {
-            if (body_node.?.binded != null) {
-                body_node.?.binded.?.owner = null;
-            }
+        } else if (body_node.?.binded != null) {
+            body_node.?.binded.?.owner = null;
         }
         self.parser_current_body = body_node.?;
         try self.expect_sym('{');
@@ -673,21 +687,6 @@ pub const ParseProcess = struct {
         };
         errdefer self.transpile_proc.allocator.destroy(exp);
         exp.* = exp_node;
-        if (exp_node.type == .Expression) {
-            exp.*.node_variant.?.exp.left = self.transpile_proc.allocator.create(ast.Node) catch |e| {
-                std.debug.print("Error creating node: {s}", .{@errorName(e)});
-                return ParseError.MemoryAllocationFailed;
-            };
-            errdefer self.transpile_proc.allocator.destroy(exp.*.node_variant.?.exp.left.?);
-            exp.*.node_variant.?.exp.left.?.* = exp_node.node_variant.?.exp.left.?.*;
-            exp.*.node_variant.?.exp.right = self.transpile_proc.allocator.create(ast.Node) catch |e| {
-                std.debug.print("Error creating node: {s}", .{@errorName(e)});
-                return ParseError.MemoryAllocationFailed;
-            };
-            errdefer self.transpile_proc.allocator.destroy(exp.*.node_variant.?.exp.right.?);
-            exp.*.node_variant.?.exp.right.?.* = exp_node.node_variant.?.exp.right.?.*;
-            exp.*.node_variant.?.exp.op = exp_node.node_variant.?.exp.op;
-        }
         self.transpile_proc.nodes.push(ast.Node{
             .type = .ExpressionParenthesis,
             .pos = self.*.transpile_proc.*.pos,
@@ -786,7 +785,9 @@ pub const ParseProcess = struct {
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
     fn parse_for_bracket(self: *Self, hist: *utils.History) ParseError!void {
-        const left_node = self.transpile_proc.nodes.back();
+        // Only treat `[...]` as an indexing operation when there's a valid expressionable left operand.
+        // Otherwise it's an array literal.
+        const left_node = self.node_peek_expressionable_or_null();
         if (left_node != null) {
             _ = self.node_pop();
         }
@@ -800,21 +801,6 @@ pub const ParseProcess = struct {
         };
         errdefer self.transpile_proc.allocator.destroy(inner);
         inner.* = exp_node.?;
-        if (exp_node.?.type == .Expression) {
-            inner.*.node_variant.?.exp.left = self.transpile_proc.allocator.create(ast.Node) catch |e| {
-                std.debug.print("Error creating node: {s}", .{@errorName(e)});
-                return ParseError.MemoryAllocationFailed;
-            };
-            errdefer self.transpile_proc.allocator.destroy(inner.*.node_variant.?.exp.left.?);
-            inner.*.node_variant.?.exp.left.?.* = exp_node.?.node_variant.?.exp.left.?.*;
-            inner.*.node_variant.?.exp.right = self.transpile_proc.allocator.create(ast.Node) catch |e| {
-                std.debug.print("Error creating node: {s}", .{@errorName(e)});
-                return ParseError.MemoryAllocationFailed;
-            };
-            errdefer self.transpile_proc.allocator.destroy(inner.*.node_variant.?.exp.right.?);
-            inner.*.node_variant.?.exp.right.?.* = exp_node.?.node_variant.?.exp.right.?.*;
-            inner.*.node_variant.?.exp.op = exp_node.?.node_variant.?.exp.op;
-        }
         self.transpile_proc.nodes.push(ast.Node{
             .type = .Bracket,
             .pos = self.*.transpile_proc.*.pos,
@@ -1479,21 +1465,6 @@ pub const ParseProcess = struct {
             };
             errdefer self.transpile_proc.allocator.destroy(exp);
             exp.* = exp_node.?;
-            if (exp_node.?.type == .Expression) {
-                exp.*.node_variant.?.exp.left = self.transpile_proc.allocator.create(ast.Node) catch |e| {
-                    std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
-                    return ParseError.MemoryAllocationFailed;
-                };
-                errdefer self.transpile_proc.allocator.destroy(exp.*.node_variant.?.exp.left.?);
-                exp.*.node_variant.?.exp.left.?.* = exp_node.?.node_variant.?.exp.left.?.*;
-                exp.*.node_variant.?.exp.right = self.transpile_proc.allocator.create(ast.Node) catch |e| {
-                    std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
-                    return ParseError.MemoryAllocationFailed;
-                };
-                errdefer self.transpile_proc.allocator.destroy(exp.*.node_variant.?.exp.right.?);
-                exp.*.node_variant.?.exp.right.?.* = exp_node.?.node_variant.?.exp.right.?.*;
-                exp.*.node_variant.?.exp.op = exp_node.?.node_variant.?.exp.op;
-            }
             self.transpile_proc.nodes.push(ast.Node{
                 .type = .Bracket,
                 .pos = self.transpile_proc.*.pos,
@@ -1535,6 +1506,18 @@ pub const ParseProcess = struct {
             self.transpile_proc.err("expected indentifier", .{});
             return ParseError.InvalidIdentifier;
         }
+
+        // Variable nodes own their name string (and deinit it). Token strings are also deinitialized
+        // by `TranspileProcess.deinit()`, so we must deep-copy here to avoid double-free.
+        var name = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, ident_token.?.data.sval.items.len) catch |e| {
+            std.debug.print("Error creating variable name: {s}\n", .{@errorName(e)});
+            return ParseError.MemoryAllocationFailed;
+        };
+        errdefer name.deinit();
+        name.appendSlice(ident_token.?.data.sval.items) catch |e| {
+            std.debug.print("Error appending to variable name: {s}\n", .{@errorName(e)});
+            return ParseError.MemoryAllocationFailed;
+        };
         var value_node: ?ast.Node = null;
         const has_value = self.next_token_is_operator("=");
         if (has_value) {
@@ -1547,69 +1530,84 @@ pub const ParseProcess = struct {
             };
             errdefer self.transpile_proc.allocator.destroy(val);
             val.* = value_node.?;
-            if (value_node.?.type == .Expression) {
-                val.*.node_variant.?.exp.left = self.transpile_proc.allocator.create(ast.Node) catch |e| {
-                    std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
-                    return ParseError.MemoryAllocationFailed;
-                };
-                errdefer self.transpile_proc.allocator.destroy(val.*.node_variant.?.exp.left.?);
-                val.*.node_variant.?.exp.left.?.* = value_node.?.node_variant.?.exp.left.?.*;
-                val.*.node_variant.?.exp.right = self.transpile_proc.allocator.create(ast.Node) catch |e| {
-                    std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
-                    return ParseError.MemoryAllocationFailed;
-                };
-                errdefer self.transpile_proc.allocator.destroy(val.*.node_variant.?.exp.right.?);
-                val.*.node_variant.?.exp.right.?.* = value_node.?.node_variant.?.exp.right.?.*;
-                val.*.node_variant.?.exp.op = value_node.?.node_variant.?.exp.op;
-            }
             const node = self.transpile_proc.allocator.create(ast.Node) catch |e| {
                 std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
                 return ParseError.MemoryAllocationFailed;
             };
-            errdefer self.transpile_proc.allocator.destroy(node);
+            errdefer {
+                self.transpile_proc.deinit_node(node.*);
+                self.transpile_proc.allocator.destroy(node);
+            }
             node.* = ast.Node{
                 .type = .Variable,
                 .pos = self.*.transpile_proc.*.pos,
                 .node_variant = .{
                     .variable = .{
-                        .name = ident_token.?.data.sval,
+                        .name = name,
                         .type = dt,
                         .val = val,
                     },
                 },
             };
+            // Ownership of `name` transferred to the node.
+            name = std.ArrayList(u8).init(self.transpile_proc.allocator);
             const scope_entity = try self.new_scope_entity(node, .{});
             if (self.transpile_proc.get_scope_entity(scope_entity.name) != null) {
                 self.transpile_proc.err("variable '{s}' already declared", .{scope_entity.name});
                 return ParseError.VariableAlreadyDeclared;
             }
-            try self.transpile_proc.push_scope_entity(scope_entity);
             self.transpile_proc.nodes.push(node.*) catch |e| {
                 std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});
                 return ParseError.MemoryAllocationFailed;
             };
+            self.transpile_proc.owned_nodes.append(node) catch |e| {
+                std.debug.print("Error tracking node allocation: {s}\n", .{@errorName(e)});
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer _ = self.transpile_proc.owned_nodes.pop();
+            self.transpile_proc.owned_scope_entities.append(scope_entity) catch |e| {
+                std.debug.print("Error tracking scope entity allocation: {s}\n", .{@errorName(e)});
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer _ = self.transpile_proc.owned_scope_entities.pop();
+            try self.transpile_proc.push_scope_entity(scope_entity);
         } else {
             const node = self.transpile_proc.allocator.create(ast.Node) catch |e| {
                 std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
                 return ParseError.MemoryAllocationFailed;
             };
-            errdefer self.transpile_proc.allocator.destroy(node);
+            errdefer {
+                self.transpile_proc.deinit_node(node.*);
+                self.transpile_proc.allocator.destroy(node);
+            }
             node.* = ast.Node{
                 .type = .Variable,
                 .pos = self.*.transpile_proc.*.pos,
                 .node_variant = .{
                     .variable = .{
-                        .name = ident_token.?.data.sval,
+                        .name = name,
                         .type = dt,
                     },
                 },
             };
+            // Ownership of `name` transferred to the node.
+            name = std.ArrayList(u8).init(self.transpile_proc.allocator);
             const scope_entity = try self.new_scope_entity(node, .{});
-            try self.transpile_proc.push_scope_entity(scope_entity);
             self.transpile_proc.nodes.push(node.*) catch |e| {
                 std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});
                 return ParseError.MemoryAllocationFailed;
             };
+            self.transpile_proc.owned_nodes.append(node) catch |e| {
+                std.debug.print("Error tracking node allocation: {s}\\n", .{@errorName(e)});
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer _ = self.transpile_proc.owned_nodes.pop();
+            self.transpile_proc.owned_scope_entities.append(scope_entity) catch |e| {
+                std.debug.print("Error tracking scope entity allocation: {s}\\n", .{@errorName(e)});
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer _ = self.transpile_proc.owned_scope_entities.pop();
+            try self.transpile_proc.push_scope_entity(scope_entity);
         }
     }
 
@@ -2252,6 +2250,8 @@ pub const ParseProcess = struct {
             return try self.parse_import();
         } else if (mem.eql(u8, "fun", sval)) {
             return try self.parse_function();
+        } else if (mem.eql(u8, "for", sval)) {
+            return try self.parse_for_statement(hist);
         } else if (mem.eql(u8, "if", sval)) {
             return try self.parse_if_statement(hist);
         } else if (mem.eql(u8, "elif", sval)) {
@@ -2262,6 +2262,22 @@ pub const ParseProcess = struct {
             return try self.parse_fit_statement(hist);
         } else if (mem.eql(u8, "ret", sval)) {
             return try self.parse_return(hist);
+        } else if (mem.eql(u8, "break", sval)) {
+            _ = self.token_next(); // skip break
+            self.transpile_proc.nodes.push(ast.Node{ .type = .StatementBreak, .pos = self.*.transpile_proc.*.pos }) catch |e| {
+                std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});
+                return ParseError.MemoryAllocationFailed;
+            };
+            try self.expect_sym(';');
+            return;
+        } else if (mem.eql(u8, "continue", sval)) {
+            _ = self.token_next(); // skip continue
+            self.transpile_proc.nodes.push(ast.Node{ .type = .StatementContinue, .pos = self.*.transpile_proc.*.pos }) catch |e| {
+                std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});
+                return ParseError.MemoryAllocationFailed;
+            };
+            try self.expect_sym(';');
+            return;
         } else if (mem.eql(u8, "true", sval)) {
             self.transpile_proc.nodes.push(ast.Node{
                 .type = .Boolean,
@@ -2285,6 +2301,142 @@ pub const ParseProcess = struct {
         }
 
         self.transpile_proc.err("invalid keyword", .{});
+    }
+
+    fn alloc_node_copy_shallow(self: *Self, node: ast.Node) ParseError!*ast.Node {
+        const out = self.transpile_proc.allocator.create(ast.Node) catch |e| {
+            std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
+            return ParseError.MemoryAllocationFailed;
+        };
+        errdefer self.transpile_proc.allocator.destroy(out);
+        out.* = node;
+        if (node.type == .Expression) {
+            if (node.node_variant.?.exp.left) |left| {
+                out.*.node_variant.?.exp.left = self.transpile_proc.allocator.create(ast.Node) catch |e| {
+                    std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
+                    return ParseError.MemoryAllocationFailed;
+                };
+                errdefer self.transpile_proc.allocator.destroy(out.*.node_variant.?.exp.left.?);
+                out.*.node_variant.?.exp.left.?.* = left.*;
+            }
+            if (node.node_variant.?.exp.right) |right| {
+                out.*.node_variant.?.exp.right = self.transpile_proc.allocator.create(ast.Node) catch |e| {
+                    std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
+                    return ParseError.MemoryAllocationFailed;
+                };
+                errdefer self.transpile_proc.allocator.destroy(out.*.node_variant.?.exp.right.?);
+                out.*.node_variant.?.exp.right.?.* = right.*;
+            }
+            out.*.node_variant.?.exp.op = node.node_variant.?.exp.op;
+        }
+        return out;
+    }
+
+    fn push_loop_scope_entity(self: *Self, entity: *scope.ScopeEntity) ParseError!void {
+        if (self.transpile_proc.get_scope_entity(entity.name) != null) {
+            self.transpile_proc.err("variable '{s}' already declared", .{entity.name});
+            return ParseError.VariableAlreadyDeclared;
+        }
+        self.transpile_proc.push_scope_entity(entity) catch |e| {
+            std.debug.print("Error pushing scope entity: {s}\n", .{@errorName(e)});
+            return ParseError.MemoryAllocationFailed;
+        };
+    }
+
+    fn parse_for_statement(self: *Self, hist: *utils.History) ParseError!void {
+        try self.expect_keyword("for");
+        if (self.parser_current_function == null) {
+            self.transpile_proc.err("for statement outside of function", .{});
+            return ParseError.InvalidStatement;
+        }
+
+        const first = self.token_next();
+        if (first == null or first.?.type != .Identifier) {
+            self.transpile_proc.err("expected identifier after 'for'", .{});
+            return ParseError.InvalidIdentifier;
+        }
+
+        var index_name: ?[]const u8 = null;
+        var item_name: []const u8 = first.?.data.sval.items;
+        var used_double_colon = false;
+
+        if (self.next_token_is_operator(",")) {
+            index_name = item_name;
+            _ = self.token_next(); // skip ,
+            const second = self.token_next();
+            if (second == null or second.?.type != .Identifier) {
+                self.transpile_proc.err("expected identifier after ',' in for loop", .{});
+                return ParseError.InvalidIdentifier;
+            }
+            item_name = second.?.data.sval.items;
+            try self.expect_op("::");
+            used_double_colon = true;
+        } else {
+            try self.expect_op(":");
+        }
+
+        try self.parse_expressionable_root(hist);
+        const iterable_node = self.node_pop().?;
+
+        // Parse body in a loop scope (so loop variables are valid identifiers).
+        _ = try self.transpile_proc.new_scope();
+
+        var index_entity: ?scope.ScopeEntity = null;
+        var item_entity: ?scope.ScopeEntity = null;
+
+        if (iterable_node.type == .Expression and std.mem.eql(u8, iterable_node.node_variant.?.exp.op, "..")) {
+            if (used_double_colon) {
+                self.transpile_proc.err("range for loop does not support 'i, item ::' form", .{});
+                return ParseError.InvalidStatement;
+            }
+            item_entity = .{ .flags = .{ .on_stack = true }, .node = null, .name = item_name };
+            try self.push_loop_scope_entity(&item_entity.?);
+        } else {
+            // For now, iterable for-loops require an identifier (array variable).
+            if (iterable_node.type != .Identifier) {
+                self.transpile_proc.err("for-each loops currently require an array identifier", .{});
+                return ParseError.InvalidExpression;
+            }
+            if (index_name) |iname| {
+                index_entity = .{ .flags = .{ .on_stack = true }, .node = null, .name = iname };
+                try self.push_loop_scope_entity(&index_entity.?);
+            }
+            item_entity = .{ .flags = .{ .on_stack = true }, .node = null, .name = item_name };
+            try self.push_loop_scope_entity(&item_entity.?);
+        }
+
+        try self.parse_body_multiple_statements(hist);
+        self.transpile_proc.finish_scope();
+        const body_node = self.node_pop().?;
+
+        // Transfer ownership of the already-allocated AST subtrees into the for-statement.
+        const body_ptr = self.transpile_proc.allocator.create(ast.Node) catch |e| {
+            std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
+            return ParseError.MemoryAllocationFailed;
+        };
+        errdefer self.transpile_proc.allocator.destroy(body_ptr);
+        body_ptr.* = body_node;
+
+        var for_node = ast.Node{ .type = .StatementFor, .pos = self.*.transpile_proc.*.pos };
+        if (iterable_node.type == .Expression and std.mem.eql(u8, iterable_node.node_variant.?.exp.op, "..")) {
+            const range_ptr = self.transpile_proc.allocator.create(ast.Node) catch |e| {
+                std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer self.transpile_proc.allocator.destroy(range_ptr);
+            range_ptr.* = iterable_node;
+            for_node.node_variant = .{ .statement = .{ .for_stmt = .{ .range = .{ .index_name = item_name, .range = range_ptr, .body = body_ptr } } } };
+        } else {
+            const iterable_ptr = self.transpile_proc.allocator.create(ast.Node) catch |e| {
+                std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer self.transpile_proc.allocator.destroy(iterable_ptr);
+            iterable_ptr.* = iterable_node;
+            for_node.node_variant = .{ .statement = .{ .for_stmt = .{ .iter = .{ .index_name = index_name, .item_name = item_name, .iterable = iterable_ptr, .body = body_ptr } } } };
+        }
+
+        try self.create_node(&for_node);
     }
 
     /// Parses a global keyword token.
