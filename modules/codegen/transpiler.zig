@@ -150,6 +150,113 @@ pub const TranspileProcess = struct {
 
     const Self = @This();
 
+    fn build_full_import_path(self: *Self, import_path: []const u8) TranspileError![]const u8 {
+        var file_path = std.ArrayList(u8).init(self.allocator);
+        defer file_path.deinit();
+
+        const dir_path = std.fs.path.dirname(self.input_file_path) orelse ".";
+        file_path.appendSlice(dir_path) catch |e| {
+            std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
+        file_path.append('/') catch |e| {
+            std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
+
+        for (import_path) |ch| {
+            if (ch == '.') {
+                file_path.append('/') catch |e| {
+                    std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+                    return TranspileError.MemoryAllocationFailed;
+                };
+            } else {
+                file_path.append(ch) catch |e| {
+                    std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+                    return TranspileError.MemoryAllocationFailed;
+                };
+            }
+        }
+
+        file_path.appendSlice(".fn") catch |e| {
+            std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
+
+        return file_path.toOwnedSlice() catch |e| {
+            std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
+    }
+
+    /// Preload global symbol names from an import path before parsing the rest of the file.
+    ///
+    /// This enables identifier validation in the parser to recognize functions defined in
+    /// locally imported modules.
+    pub fn preload_import_global_symbols(self: *Self, import_path: []const u8) GeneralError!void {
+        if (std.mem.indexOf(u8, import_path, "std.") != null) return;
+
+        const full_path = try self.build_full_import_path(import_path);
+        defer self.allocator.free(full_path);
+
+        std.fs.cwd().access(full_path, .{}) catch {
+            return TranspileError.FileNotFound;
+        };
+
+        var import_proc = try TranspileProcess.init(self.allocator, full_path, "temp.c", .{ .exec = false, .outf = false, .ast = false });
+        defer import_proc.deinit();
+
+        var lex_proc = lexer.LexProcess.init(&import_proc);
+        defer lex_proc.deinit();
+        try lex_proc.lex();
+
+        const tokens = import_proc.tokens.items();
+        var i: usize = 0;
+        while (i < tokens.len) : (i += 1) {
+            const t = tokens[i];
+            if (t.type != .Keyword) continue;
+            if (!mem.eql(u8, t.data.sval.items, "fun")) continue;
+
+            var j: usize = i + 1;
+            while (j < tokens.len and token.is_nl_or_comment_or_newline_separator(tokens[j])) : (j += 1) {}
+            if (j >= tokens.len) continue;
+
+            const name_tok = tokens[j];
+            if (name_tok.type != .Identifier) continue;
+
+            const name = name_tok.data.sval.items;
+            if (mem.eql(u8, name, "main")) continue;
+
+            if (self.global_symbols.get(name)) |existing| {
+                if (!mem.eql(u8, existing.file_path, full_path) and !mem.eql(u8, existing.file_path, self.input_file_path)) {
+                    self.err("Symbol '{s}' already defined in module '{s}'", .{ name, existing.file_path });
+                    return TranspileError.DuplicateSymbol;
+                }
+            }
+
+            const name_copy = self.allocator.dupe(u8, name) catch |e| {
+                std.debug.print("Error duplicating symbol name '{any}': {s}\\n", .{ name, @errorName(e) });
+                return TranspileError.MemoryAllocationFailed;
+            };
+            errdefer self.allocator.free(name_copy);
+
+            const path_copy = self.allocator.dupe(u8, full_path) catch |e| {
+                std.debug.print("Error duplicating file path '{any}': {s}\\n", .{ full_path, @errorName(e) });
+                return TranspileError.MemoryAllocationFailed;
+            };
+            errdefer self.allocator.free(path_copy);
+
+            self.global_symbols.put(name_copy, .{
+                .symbol_name = name_copy,
+                .file_path = path_copy,
+                .is_function = true,
+            }) catch |e| {
+                std.debug.print("Error registering imported symbol '{any}': {s}\\n", .{ name_copy, @errorName(e) });
+                return TranspileError.MemoryAllocationFailed;
+            };
+        }
+    }
+
     /// Initializes a new instance of `TranspileProcess`.
     ///
     /// This function opens the input file in read-only mode and creates the output file
@@ -261,12 +368,17 @@ pub const TranspileProcess = struct {
         const stderr = std.io.getStdErr().writer();
         stderr.print("\n[Error]\n", .{}) catch unreachable;
         stderr.print(fmt, args) catch unreachable;
-        stderr.print("\nLocation: {s}:{d}:{d}-{d}\n", .{
-            self.current_token.?.pos.filename,
-            self.current_token.?.pos.line,
-            self.current_token.?.pos.start_col,
-            self.current_token.?.pos.end_col,
-        }) catch unreachable;
+
+        if (self.current_token) |ct| {
+            const end_line = if (ct.pos.end_line == 0) ct.pos.line else ct.pos.end_line;
+            if (end_line == ct.pos.line) {
+                stderr.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, ct.pos.end_col }) catch unreachable;
+            } else {
+                stderr.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, end_line, ct.pos.end_col }) catch unreachable;
+            }
+        } else {
+            stderr.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch unreachable;
+        }
         self.deinit();
     }
 
@@ -283,12 +395,17 @@ pub const TranspileProcess = struct {
         const stdout = std.io.getStdOut().writer();
         stdout.print("\n[Warning]\n", .{}) catch unreachable;
         stdout.print(fmt, args) catch unreachable;
-        stdout.print("\nLocation: {s}:{d}:{d}-{d}\n", .{
-            self.current_token.?.pos.filename,
-            self.current_token.?.pos.line,
-            self.current_token.?.pos.start_col,
-            self.current_token.?.pos.end_col,
-        }) catch unreachable;
+
+        if (self.current_token) |ct| {
+            const end_line = if (ct.pos.end_line == 0) ct.pos.line else ct.pos.end_line;
+            if (end_line == ct.pos.line) {
+                stdout.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, ct.pos.end_col }) catch unreachable;
+            } else {
+                stdout.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, end_line, ct.pos.end_col }) catch unreachable;
+            }
+        } else {
+            stdout.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch unreachable;
+        }
     }
 
     /// Creates a new symbol table and sets it as the active table.
@@ -958,9 +1075,30 @@ pub const TranspileProcess = struct {
 
         // Properly clean up global_symbols hash map
         var global_it = self.global_symbols.iterator();
-        while (global_it.next()) |_| {
-            // We don't need to free file_path and symbol_name in GlobalSymbolInfo
-            // as they are slices pointing to already managed memory
+        while (global_it.next()) |entry| {
+            // Many entries point at memory owned by:
+            // - this process (e.g. `self.input_file_path`),
+            // - or a still-live child process (during parent deinit, children are
+            //   deinitialized after the parent's global_symbols map).
+            //
+            // Some entries (e.g. preloaded import symbols) may be backed by fresh
+            // allocations and must be freed here.
+            const fp = entry.value_ptr.file_path;
+
+            var borrowed = mem.eql(u8, fp, self.input_file_path);
+            if (!borrowed) {
+                for (self.children.items) |child| {
+                    if (mem.eql(u8, fp, child.input_file_path)) {
+                        borrowed = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!borrowed) {
+                self.allocator.free(entry.value_ptr.file_path);
+                self.allocator.free(entry.key_ptr.*);
+            }
         }
         self.global_symbols.deinit();
 
@@ -1714,9 +1852,15 @@ pub const TranspileProcess = struct {
 
             // Check if this symbol is already defined in the parent
             if (self.parent.?.global_symbols.get(symbol_name)) |existing| {
-                // If we find a conflict, report it
-                self.err("Symbol '{s}' in module '{s}' conflicts with same symbol defined in module '{s}'", .{ symbol_name, symbol_info.file_path, existing.file_path });
-                return TranspileError.DuplicateSymbol;
+                // If we find a conflict from a different file, report it.
+                // Allow duplicates from the same file path (e.g. when symbols were
+                // preloaded earlier for parsing).
+                if (!mem.eql(u8, existing.file_path, symbol_info.file_path)) {
+                    self.err("Symbol '{s}' in module '{s}' conflicts with same symbol defined in module '{s}'", .{ symbol_name, symbol_info.file_path, existing.file_path });
+                    return TranspileError.DuplicateSymbol;
+                }
+
+                continue;
             }
 
             // Add this symbol to the parent's global registry

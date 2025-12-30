@@ -63,6 +63,11 @@ pub const Pos = struct {
     start_col: u32,
     /// The ending column number of the token.
     end_col: u32,
+    /// The ending line number of the token span.
+    ///
+    /// For most tokens this is the same as `line`, but for tokens that cross
+    /// a newline boundary (e.g. a NewLine token) it will differ.
+    end_line: u32 = 0,
     /// The name of the file where the token is located.
     filename: []const u8,
 };

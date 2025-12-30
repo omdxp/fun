@@ -12,6 +12,7 @@ const utils = @import("utils");
 const semantics = @import("semantics");
 const dtype = semantics.dtype;
 const scope = semantics.scope;
+const symbol = semantics.symbol;
 
 /// Errors that can occur during parsing process.
 pub const ParseError = error{
@@ -584,7 +585,7 @@ pub const ParseProcess = struct {
             },
             .Identifier => {
                 if (self.transpile_proc.get_scope_entity(t.?.data.sval.items) == null) {
-                    if (self.transpile_proc.get_symbol(t.?.data.sval.items) == null) {
+                    if (self.transpile_proc.get_symbol(t.?.data.sval.items) == null and self.transpile_proc.global_symbols.get(t.?.data.sval.items) == null) {
                         self.transpile_proc.err("unknown identifier '{s}'", .{t.?.data.sval.items});
                         return ParseError.InvalidIdentifier;
                     }
@@ -2181,6 +2182,13 @@ pub const ParseProcess = struct {
             return ParseError.MemoryAllocationFailed;
         };
         errdefer self.transpile_proc.allocator.free(path);
+
+        // Preload imported function names so identifier validation during parsing works.
+        // Standard library imports are handled specially.
+        if (!std.mem.startsWith(u8, path, "std.")) {
+            try self.transpile_proc.preload_import_global_symbols(path);
+        }
+
         self.transpile_proc.nodes.push(ast.Node{
             .type = .Import,
             .pos = self.*.transpile_proc.*.pos,
@@ -2189,25 +2197,19 @@ pub const ParseProcess = struct {
             std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});
             return ParseError.MemoryAllocationFailed;
         };
-        // TODO: (std should be written in fun) For now, std imports will register general global symbols
+
+        // Standard library imports may provide names (e.g. printf) that should be
+        // usable in the current module, but must not participate in cross-module
+        // duplicate detection.
         if (mem.eql(u8, path, "std.io")) {
-            var type_str = std.ArrayList(u8).init(self.transpile_proc.allocator);
-            errdefer type_str.deinit();
-            type_str.appendSlice("void") catch |e| {
-                std.debug.print("Error appending to type_str: {s}\n", .{@errorName(e)});
-                return ParseError.MemoryAllocationFailed;
-            };
-            var printf_name = std.ArrayList(u8).init(self.transpile_proc.allocator);
-            errdefer printf_name.deinit();
-            printf_name.appendSlice("printf") catch |e| {
-                std.debug.print("Error appending to printf_name: {s}\n", .{@errorName(e)});
-                return ParseError.MemoryAllocationFailed;
-            };
-            try self.transpile_proc.register_global_node_symbol(ast.Node{
-                .type = .Function,
-                .pos = self.*.transpile_proc.*.pos,
-                .node_variant = .{ .function = .{ .name = printf_name, .args = null, .rtype = dtype.DataType{ .type = .Void, .type_str = type_str }, .body = null } },
-            });
+            if (self.transpile_proc.get_symbol("printf") == null) {
+                try self.transpile_proc.push_symbol(.{
+                    .type = symbol.SymbolType.NativeFunction,
+                    .name = "printf",
+                    .data = null,
+                    .symbol_table = null,
+                });
+            }
         }
     }
 
