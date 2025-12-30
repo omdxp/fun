@@ -110,6 +110,9 @@ pub fn build(b: *std.Build) void {
     }
 
     const run_cmd = b.addRunArtifact(exe);
+    // Make `zig build run -- -in .\relative\path.fn` resolve relative paths
+    // from the project root (instead of Zig's cache directory).
+    run_cmd.cwd = b.path(".");
     if (b.args) |args| {
         run_cmd.addArgs(args);
     }

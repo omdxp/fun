@@ -19,6 +19,8 @@ pub const CliError = error{
     InvalidOutputExtension,
     /// Error indicating that the compilation process failed.
     CompilationFailed,
+    /// Error indicating that a C compiler could not be found.
+    MissingCCompiler,
     /// Error indicating that the execution process failed.
     ExecutionFailed,
     /// Error indicating that help information should be displayed.
@@ -185,8 +187,22 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
     if (extension_index) |index| {
         exe_file_name = input_path[0..index];
     }
-    const exe_file = try std.fmt.allocPrint(allocator, "{s}.out", .{exe_file_name});
+    const exe_file = blk: {
+        if (builtin.target.os.tag == .windows) {
+            break :blk try std.fmt.allocPrint(allocator, "{s}.exe", .{exe_file_name});
+        }
+        break :blk try allocator.dupe(u8, exe_file_name);
+    };
     defer allocator.free(exe_file);
+
+    const pdb_file: ?[]const u8 = if (builtin.target.os.tag == .windows)
+        try std.fmt.allocPrint(allocator, "{s}.pdb", .{exe_file_name})
+    else
+        null;
+    defer if (pdb_file) |p| allocator.free(p);
+    defer if (pdb_file) |p| {
+        fs.cwd().deleteFile(p) catch {};
+    };
 
     const stdout = std.io.getStdOut().writer();
     const stderr = std.io.getStdErr().writer();
@@ -215,11 +231,16 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
 
     // Compile the C file
     {
-        const gcc_args = [_][]const u8{ "gcc", c_path, "-o", exe_file };
-        const result = try process.Child.run(.{
+        // Use `zig cc` instead of relying on a system `gcc`.
+        // This is more portable across platforms (especially Windows).
+        const cc_args = [_][]const u8{ "zig", "cc", "-g0", c_path, "-o", exe_file };
+        const result = process.Child.run(.{
             .allocator = allocator,
-            .argv = &gcc_args,
-        });
+            .argv = &cc_args,
+        }) catch |err| switch (err) {
+            error.FileNotFound => return CliError.MissingCCompiler,
+            else => return err,
+        };
         defer {
             allocator.free(result.stdout);
             allocator.free(result.stderr);
