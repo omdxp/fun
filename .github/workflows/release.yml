@@ -42,7 +42,9 @@ jobs:
 
       - name: Install git-cliff
         run: |
-          curl -sSL https://github.com/orhun/git-cliff/releases/download/v1.3.0/git-cliff-x86_64-unknown-linux-gnu.tar.gz | tar xz
+          version="2.11.0"
+          wget "https://github.com/orhun/git-cliff/releases/download/v${version}/git-cliff-${version}-x86_64-unknown-linux-gnu.tar.gz"
+          tar -xzf git-cliff-${version}-x86_64-unknown-linux-gnu.tar.gz
           sudo mv git-cliff /usr/local/bin/
 
       - name: Generate and commit CHANGELOG.md
