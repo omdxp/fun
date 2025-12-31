@@ -391,7 +391,12 @@ fn token_text(allocator: mem.Allocator, t: token.Token) ![]const u8 {
         },
         .String => std.fmt.allocPrint(allocator, "\"{s}\"", .{t.data.sval.items}),
         .Boolean => allocator.dupe(u8, if (t.data.bval) "true" else "false"),
-        .Comment => std.fmt.allocPrint(allocator, "//{s}", .{std.mem.trim(u8, t.data.sval.items, " \t")}),
+        .Comment => blk: {
+            // Always emit exactly one space after //
+            const trimmed = std.mem.trim(u8, t.data.sval.items, " \t");
+            const out = try std.fmt.allocPrint(allocator, "// {s}", .{trimmed});
+            break :blk out;
+        },
         .NewLine => allocator.dupe(u8, "\n"),
     };
 }

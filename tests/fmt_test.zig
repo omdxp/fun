@@ -61,7 +61,7 @@ test "-fmt formats file in-place" {
         "fun add(num a, num b) num {\n" ++
         "    ret a + b;\n" ++
         "}\n" ++
-        "//comment\n" ++
+        "// comment\n" ++
         "if true {\n" ++
         "    ret 1;\n" ++
         "} else {\n" ++
