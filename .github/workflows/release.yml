@@ -45,6 +45,10 @@ jobs:
       - name: Install git-cliff
         run: cargo install git-cliff --version 2.11.0
 
+      - name: Debug GH_PAT
+        run: |
+          if [ -z "${{ secrets.GH_PAT }}" ]; then echo "GH_PAT is empty"; else echo "GH_PAT is set"; fi
+
       - name: Generate and commit CHANGELOG.md
         run: |
           git-cliff -o CHANGELOG.md
