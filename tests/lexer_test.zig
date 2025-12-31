@@ -233,3 +233,48 @@ test "LexProcess lex" {
     try fs.cwd().deleteFile(ifilepath);
     try fs.cwd().deleteFile(ofilepath);
 }
+
+test "LexProcess lexes multi-character operators" {
+    const ifilepath = "LexProcess_multi_ops.fn";
+    const ofilepath = "LexProcess_multi_ops.c";
+    {
+        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
+        defer file.close();
+        const input = "1==2!=3<=4>=5&&6||7..8...9->10";
+        try file.writeAll(input);
+    }
+
+    const allocator = std.testing.allocator;
+    var transpile_proc = try codegen.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
+    var lex_proc = LexProcess.init(&transpile_proc);
+    defer {
+        transpile_proc.deinit();
+        lex_proc.deinit();
+    }
+
+    try lex_proc.lex();
+    const toks = transpile_proc.tokens.items();
+
+    // Expected token stream: N op N op N op N op N op N op N op N op N op N
+    // Validate the operators in order.
+    var ops = std.ArrayList([]const u8).init(allocator);
+    defer ops.deinit();
+    for (toks) |t| {
+        if (t.type == .Operator) {
+            try ops.append(t.data.sval.items);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 9), ops.items.len);
+    try std.testing.expectEqualStrings("==", ops.items[0]);
+    try std.testing.expectEqualStrings("!=", ops.items[1]);
+    try std.testing.expectEqualStrings("<=", ops.items[2]);
+    try std.testing.expectEqualStrings(">=", ops.items[3]);
+    try std.testing.expectEqualStrings("&&", ops.items[4]);
+    try std.testing.expectEqualStrings("||", ops.items[5]);
+    try std.testing.expectEqualStrings("..", ops.items[6]);
+    try std.testing.expectEqualStrings("...", ops.items[7]);
+    try std.testing.expectEqualStrings("->", ops.items[8]);
+
+    try fs.cwd().deleteFile(ifilepath);
+    try fs.cwd().deleteFile(ofilepath);
+}

@@ -187,6 +187,15 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
     if (extension_index) |index| {
         exe_file_name = input_path[0..index];
     }
+
+    // In tests, multiple runs can collide on the same output exe/pdb name, and on Windows
+    // that can lead to file-lock stalls. Make the output name unique.
+    const exe_file_name_owned: ?[]const u8 = if (builtin.is_test)
+        try std.fmt.allocPrint(allocator, "{s}_{d}", .{ exe_file_name, std.time.nanoTimestamp() })
+    else
+        null;
+    defer if (exe_file_name_owned) |n| allocator.free(n);
+    if (exe_file_name_owned) |n| exe_file_name = n;
     const exe_file = blk: {
         if (builtin.target.os.tag == .windows) {
             break :blk try std.fmt.allocPrint(allocator, "{s}.exe", .{exe_file_name});
@@ -194,6 +203,8 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
         break :blk try allocator.dupe(u8, exe_file_name);
     };
     defer allocator.free(exe_file);
+    // Always attempt cleanup even on early returns.
+    defer fs.cwd().deleteFile(exe_file) catch {};
 
     const pdb_file: ?[]const u8 = if (builtin.target.os.tag == .windows)
         try std.fmt.allocPrint(allocator, "{s}.pdb", .{exe_file_name})
@@ -204,7 +215,10 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
         fs.cwd().deleteFile(p) catch {};
     };
 
-    const stdout = std.io.getStdOut().writer();
+    // When `zig build test` runs tests with `--listen=-`, stdout is used for the
+    // test runner protocol. Writing arbitrary output to stdout from tests can
+    // corrupt the protocol and appear as a hang.
+    const stdout = if (builtin.is_test) std.io.getStdErr().writer() else std.io.getStdOut().writer();
     const stderr = std.io.getStdErr().writer();
 
     // If content is provided instead of a file, write it to a temporary file first
@@ -232,11 +246,39 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
     // Compile the C file
     {
         // Use `zig cc` instead of relying on a system `gcc`.
-        // This is more portable across platforms (especially Windows).
-        const cc_args = [_][]const u8{ "zig", "cc", "-g0", c_path, "-o", exe_file };
+        // NOTE: When `fun` itself is built/tested via Zig, invoking `zig` from within
+        // Zig tests can deadlock on shared cache locks. To avoid that, give this nested
+        // `zig cc` invocation its own cache directories.
+        // IMPORTANT: Do not create/delete a fresh cache tree per call.
+        // On Windows this can be extremely slow (or appear hung) due to file locking/AV.
+        // Reuse stable cache dirs under the project's .zig-cache.
+        const global_cache_dir_rel = ".zig-cache/fun_cli_global_cache";
+        const local_cache_dir_rel = ".zig-cache/fun_cli_local_cache";
+        try fs.cwd().makePath(global_cache_dir_rel);
+        try fs.cwd().makePath(local_cache_dir_rel);
+
+        const global_cache_dir_abs = try fs.cwd().realpathAlloc(allocator, global_cache_dir_rel);
+        defer allocator.free(global_cache_dir_abs);
+        const local_cache_dir_abs = try fs.cwd().realpathAlloc(allocator, local_cache_dir_rel);
+        defer allocator.free(local_cache_dir_abs);
+
+        var env_map = try process.getEnvMap(allocator);
+        defer env_map.deinit();
+        try env_map.put("ZIG_GLOBAL_CACHE_DIR", global_cache_dir_abs);
+        try env_map.put("ZIG_LOCAL_CACHE_DIR", local_cache_dir_abs);
+
+        const cc_args = [_][]const u8{
+            "zig",
+            "cc",
+            "-g0",
+            c_path,
+            "-o",
+            exe_file,
+        };
         const result = process.Child.run(.{
             .allocator = allocator,
             .argv = &cc_args,
+            .env_map = &env_map,
         }) catch |err| switch (err) {
             error.FileNotFound => return CliError.MissingCCompiler,
             else => return err,
@@ -264,7 +306,7 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
         } else {
             exe_file_for_os = try std.fmt.allocPrint(allocator, "./{s}", .{exe_file});
         }
-        errdefer allocator.free(exe_file_for_os);
+        defer allocator.free(exe_file_for_os);
 
         const result = try process.Child.run(.{
             .allocator = allocator,
@@ -283,6 +325,5 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
         try stdout.print("{s}", .{result.stdout});
     }
 
-    // Clean up executable
-    fs.cwd().deleteFile(exe_file) catch {};
+    // Executable cleanup handled via defer above.
 }
