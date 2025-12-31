@@ -752,7 +752,11 @@ pub const TranspileProcess = struct {
                     return .{ .base = lt.base, .is_array = false, .pointer_depth = lt.pointer_depth };
                 }
 
-                if (mem.eql(u8, op, "=") or mem.endsWith(u8, op, "=")) {
+                const is_assign = mem.eql(u8, op, "=") or
+                    mem.eql(u8, op, "+=") or mem.eql(u8, op, "-=") or mem.eql(u8, op, "*=") or mem.eql(u8, op, "/=") or
+                    mem.eql(u8, op, "<<=") or mem.eql(u8, op, ">>=");
+
+                if (is_assign) {
                     const left = exp.left orelse return .{ .base = .Unknown };
                     const right = exp.right orelse return .{ .base = .Unknown };
                     const lt = try self.infer_expr_type(left.*, env, fns);
