@@ -56,6 +56,8 @@ jobs:
       - name: Build fun for ${{ matrix.target }}
         run: |
           zig build -Dtarget=${{ matrix.target }} -Drelease=true
+          if [ -f zig-out/bin/fun ]; then mv zig-out/bin/fun zig-out/bin/fun-${{ matrix.target }}; fi
+          if [ -f zig-out/bin/fun.exe ]; then mv zig-out/bin/fun.exe zig-out/bin/fun-${{ matrix.target }}.exe; fi
 
       # Step 4: Upload the built binary as a workflow artifact
       - name: Upload artifact
@@ -63,8 +65,8 @@ jobs:
         with:
           name: fun-${{ matrix.target }}
           path: |
-            zig-out/bin/fun
-            zig-out/bin/fun.exe
+            zig-out/bin/fun-${{ matrix.target }}
+            zig-out/bin/fun-${{ matrix.target }}.exe
 
 
 # =============================================================
@@ -88,7 +90,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/**/fun
-            artifacts/**/fun.exe
+            artifacts/**/fun-*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
