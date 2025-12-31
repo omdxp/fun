@@ -487,6 +487,18 @@ pub const LexProcess = struct {
             self.transpile_proc.err("expression was never opened", .{});
             return LexError.InvalidExpression;
         }
+
+        // Free expression buffers when we leave the outermost expression.
+        if (self.curr_exp_count == 0) {
+            if (self.parenthesis_buf) |*buf| {
+                buf.deinit();
+                self.parenthesis_buf = null;
+            }
+            if (self.arg_str_buf) |*buf| {
+                buf.deinit();
+                self.arg_str_buf = null;
+            }
+        }
     }
 
     /// Creates a symbol token from the input file.
@@ -933,8 +945,14 @@ pub const LexProcess = struct {
     ///
     /// Parameters:
     /// - `self (Self)`: The current instance to deinitialize.
-    pub fn deinit(self: Self) void {
-        if (self.parenthesis_buf != null) self.parenthesis_buf.?.deinit();
-        if (self.arg_str_buf != null) self.arg_str_buf.?.deinit();
+    pub fn deinit(self: *Self) void {
+        if (self.parenthesis_buf) |*buf| {
+            buf.deinit();
+            self.parenthesis_buf = null;
+        }
+        if (self.arg_str_buf) |*buf| {
+            buf.deinit();
+            self.arg_str_buf = null;
+        }
     }
 };
