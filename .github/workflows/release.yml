@@ -1,0 +1,90 @@
+# =============================================================
+# Zig 'fun' Compiler Release Workflow
+#
+# This workflow builds the 'fun' binary for multiple platforms
+# and uploads the resulting artifacts for each release.
+#
+# - Triggers: Manual (workflow_dispatch) or GitHub Release publish
+# - Matrix build: Linux, Windows, macOS (x86_64 & aarch64)
+# - Artifacts: Built executables for each target
+# =============================================================
+
+name: Release
+
+# Workflow triggers:
+# - Manually via GitHub UI (workflow_dispatch)
+# - Automatically when a new GitHub Release is published
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.2.3)'
+        required: true
+  release:
+    types: [published]
+
+
+jobs:
+  build-matrix:
+    name: Build fun for all targets
+    runs-on: ubuntu-latest
+    # Only run this job for manual or release events
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'release'
+    strategy:
+      matrix:
+        zig_version: [0.14.0]
+        target:
+          # Supported build targets (add/remove as needed)
+          - x86_64-linux-gnu
+          - x86_64-windows-gnu
+          - x86_64-macos
+          - aarch64-linux-gnu
+          - aarch64-macos
+          - aarch64-windows-gnu
+    steps:
+      # Step 1: Checkout the repository code
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Step 2: Install the required Zig toolchain
+      - name: Set up Zig ${{ matrix.zig_version }}
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ matrix.zig_version }}
+
+      # Step 3: Build the 'fun' binary for the current matrix target
+      - name: Build fun for ${{ matrix.target }}
+        run: |
+          zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
+
+      # Step 4: Upload the built binary as a workflow artifact
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fun-${{ matrix.target }}
+          path: zig-out/bin/fun*
+
+
+# =============================================================
+# Release Asset Upload Job
+# This job runs only on GitHub Release events and uploads all
+# built artifacts as assets to the published release.
+# =============================================================
+
+  upload-release-assets:
+    name: Upload release assets
+    needs: build-matrix
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Upload all artifacts to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
