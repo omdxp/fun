@@ -11,6 +11,7 @@ comptime {
     _ = @import("imports_test.zig");
     _ = @import("for_test.zig");
     _ = @import("fit_exhaustive_test.zig");
+    _ = @import("typecheck_test.zig");
 }
 
 test {
