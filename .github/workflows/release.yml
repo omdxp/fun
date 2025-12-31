@@ -45,7 +45,8 @@ jobs:
           version="2.11.0"
           wget "https://github.com/orhun/git-cliff/releases/download/v${version}/git-cliff-${version}-x86_64-unknown-linux-gnu.tar.gz"
           tar -xzf git-cliff-${version}-x86_64-unknown-linux-gnu.tar.gz
-          sudo mv git-cliff-${version}-x86_64-unknown-linux-gnu/git-cliff /usr/local/bin/git-cliff
+          cd git-cliff-${version}-x86_64-unknown-linux-gnu
+          sudo mv git-cliff /usr/local/bin/git-cliff
 
       - name: Generate and commit CHANGELOG.md
         run: |
