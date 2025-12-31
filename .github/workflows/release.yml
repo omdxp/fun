@@ -29,6 +29,8 @@ jobs:
     name: Update and commit CHANGELOG.md
     runs-on: ubuntu-latest
     if: github.event_name == 'release'
+    env:
+      GITHUB_TOKEN: ${{ secrets.GH_PAT }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -49,8 +51,6 @@ jobs:
           git add CHANGELOG.md
           git commit -m "docs: update CHANGELOG.md for release" || echo "No changes to commit"
           git push origin HEAD:${GITHUB_REF#refs/heads/}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   build-matrix:
     name: Build fun for all targets
     runs-on: ubuntu-latest
