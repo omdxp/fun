@@ -2163,6 +2163,12 @@ pub const TranspileProcess = struct {
                 try self.write("}");
             },
             .StatementReturn, .StatementIf, .StatementElseIf, .StatementElse, .StatementFit, .StatementFor => {
+                // `ret;` is represented as StatementReturn with no node_variant.
+                if (node.type == .StatementReturn and node.node_variant == null) {
+                    try self.write("return;");
+                    return;
+                }
+
                 const statement = node.node_variant.?.statement;
                 switch (statement) {
                     .if_stmt => |if_s| {

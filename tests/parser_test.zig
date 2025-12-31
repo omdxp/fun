@@ -3,6 +3,7 @@ const fs = std.fs;
 const ParseProcess = @import("parser").ParseProcess;
 const lexer = @import("lexer");
 const codegen = @import("codegen");
+const ast = @import("ast");
 
 test "ParseProcess parse_function" {
     const ifilepath = "ParseProcess_parse_function.fn";
@@ -99,6 +100,101 @@ test "ParseProcess parse_expression" {
     try std.testing.expectEqual(nodes[0].type, .Expression);
 
     // Delete test files
+    try fs.cwd().deleteFile(ifilepath);
+    try fs.cwd().deleteFile(ofilepath);
+}
+
+test "ParseProcess parses array literal vs indexing" {
+    const ifilepath = "ParseProcess_array_literal_vs_index.fn";
+    const ofilepath = "ParseProcess_array_literal_vs_index.c";
+
+    {
+        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
+        defer file.close();
+        const input =
+            "fun main() {\n" ++
+            "  num[] arr = [1, 2, 3];\n" ++
+            "  num x = arr[0];\n" ++
+            "}\n";
+        try file.writeAll(input);
+    }
+
+    const allocator = std.testing.allocator;
+    var transpile_proc = try codegen.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
+    var lex_proc = lexer.LexProcess.init(&transpile_proc);
+    var parse_proc = ParseProcess.init(&transpile_proc);
+
+    defer {
+        lex_proc.deinit();
+        transpile_proc.deinit();
+    }
+
+    try lex_proc.lex();
+    try parse_proc.parse();
+
+    const nodes = transpile_proc.nodes.items();
+    try std.testing.expectEqual(@as(usize, 1), nodes.len);
+    try std.testing.expectEqual(ast.NodeType.Function, nodes[0].type);
+
+    const fun_body = nodes[0].node_variant.?.function.body.?;
+    try std.testing.expectEqual(ast.NodeType.Body, fun_body.type);
+
+    const stmts = fun_body.node_variant.?.body.statements.items();
+    try std.testing.expect(stmts.len >= 2);
+
+    const arr_decl = stmts[0].*;
+    try std.testing.expectEqual(ast.NodeType.Variable, arr_decl.type);
+    const arr_val = arr_decl.node_variant.?.variable.val.?;
+    try std.testing.expectEqual(ast.NodeType.Bracket, arr_val.type);
+
+    const x_decl = stmts[1].*;
+    try std.testing.expectEqual(ast.NodeType.Variable, x_decl.type);
+    const x_val = x_decl.node_variant.?.variable.val.?;
+    try std.testing.expectEqual(ast.NodeType.Expression, x_val.type);
+    try std.testing.expectEqualStrings("[]", x_val.node_variant.?.exp.op);
+
+    try fs.cwd().deleteFile(ifilepath);
+    try fs.cwd().deleteFile(ofilepath);
+}
+
+test "ParseProcess parses if condition with == operator" {
+    const ifilepath = "ParseProcess_if_condition_eq.fn";
+    const ofilepath = "ParseProcess_if_condition_eq.c";
+
+    {
+        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
+        defer file.close();
+        const input =
+            "fun main() {\n" ++
+            "  num n = 0;\n" ++
+            "  if n == 0 { ret; }\n" ++
+            "}\n";
+        try file.writeAll(input);
+    }
+
+    const allocator = std.testing.allocator;
+    var transpile_proc = try codegen.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
+    var lex_proc = lexer.LexProcess.init(&transpile_proc);
+    var parse_proc = ParseProcess.init(&transpile_proc);
+
+    defer {
+        lex_proc.deinit();
+        transpile_proc.deinit();
+    }
+
+    try lex_proc.lex();
+    try parse_proc.parse();
+
+    const nodes = transpile_proc.nodes.items();
+    const fun_body = nodes[0].node_variant.?.function.body.?;
+    const stmts = fun_body.node_variant.?.body.statements.items();
+    // var decl + if
+    try std.testing.expect(stmts.len >= 2);
+    try std.testing.expectEqual(ast.NodeType.StatementIf, stmts[1].type);
+    const cond = stmts[1].node_variant.?.statement.if_stmt.condition;
+    try std.testing.expectEqual(ast.NodeType.Expression, cond.type);
+    try std.testing.expectEqualStrings("==", cond.node_variant.?.exp.op);
+
     try fs.cwd().deleteFile(ifilepath);
     try fs.cwd().deleteFile(ofilepath);
 }

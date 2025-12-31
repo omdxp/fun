@@ -215,3 +215,60 @@ test "Vector peek pointer increment and decrement with peek_decrement flag" {
     try std.testing.expectEqual(2, vec.peek().?);
     try std.testing.expectEqual(1, vec.peek().?);
 }
+
+test "misc keyword and operator helpers" {
+    try std.testing.expect(utils.keyword_is_datatype("num"));
+    try std.testing.expect(utils.keyword_is_datatype("str"));
+    try std.testing.expect(!utils.keyword_is_datatype("void"));
+
+    try std.testing.expect(utils.is_keyword("fun"));
+    try std.testing.expect(utils.is_keyword("if"));
+    try std.testing.expect(!utils.is_keyword("nope"));
+
+    try std.testing.expect(utils.is_boolean_keyword("true"));
+    try std.testing.expect(utils.is_boolean_keyword("false"));
+    try std.testing.expect(!utils.is_boolean_keyword("True"));
+
+    try std.testing.expect(utils.op_valid("=="));
+    try std.testing.expect(utils.op_valid("!="));
+    try std.testing.expect(utils.op_valid(">="));
+    try std.testing.expect(utils.op_valid("<="));
+    try std.testing.expect(utils.op_valid(".."));
+    try std.testing.expect(utils.op_valid("..."));
+    try std.testing.expect(utils.op_valid("->"));
+    try std.testing.expect(!utils.op_valid("?"));
+
+    try std.testing.expect(utils.is_unary_operator("!"));
+    try std.testing.expect(utils.is_unary_operator("++"));
+    try std.testing.expect(!utils.is_unary_operator("=="));
+
+    try std.testing.expect(utils.is_left_operanded_unary_operator("++"));
+    try std.testing.expect(!utils.is_left_operanded_unary_operator("!"));
+}
+
+test "misc escape and datatype helpers" {
+    try std.testing.expectEqual(@as(u8, '\n'), utils.get_escape_char('n'));
+    try std.testing.expectEqual(@as(u8, '\\'), utils.get_escape_char('\\'));
+    try std.testing.expectEqual(@as(u8, 0), utils.get_escape_char('x'));
+
+    try std.testing.expectEqual(@import("semantics").dtype.DataTypeType.Num, utils.get_datatype_type("num"));
+    try std.testing.expectEqual(@import("semantics").dtype.DataTypeType.Unknown, utils.get_datatype_type("wat"));
+}
+
+test "print_node writes something" {
+    const ast = @import("ast");
+
+    const num_node = ast.Node{ .type = .Number };
+    const id_node = ast.Node{ .type = .Identifier };
+    const expr_node = ast.Node{
+        .type = .Expression,
+        .node_variant = .{ .exp = .{ .op = "==", .left = @constCast(&id_node), .right = @constCast(&num_node) } },
+    };
+
+    var buf: [1024]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    try utils.print_node(expr_node, fbs.writer(), 0);
+    const out = fbs.getWritten();
+    try std.testing.expect(out.len > 0);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Node Type") != null);
+}
