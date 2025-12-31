@@ -4,6 +4,8 @@ const fs = std.fs;
 const process = std.process;
 const Child = std.process.Child;
 const codegen = @import("codegen");
+const lexer = @import("lexer");
+const token = lexer.token;
 const utils = @import("utils");
 const builtin = @import("builtin");
 
@@ -43,6 +45,9 @@ pub const CliOptions = struct {
     /// Flag to control AST node printing.
     /// When true, the Abstract Syntax Tree nodes will be printed during transpilation.
     print_ast: bool,
+
+    /// Flag to format the input `.fn` file in-place.
+    fmt: bool,
 };
 
 /// Prints the usage information for the transpiler command-line interface.
@@ -57,10 +62,11 @@ pub const CliOptions = struct {
 /// - Might return an error if writing to the output fails.
 fn print_usage(writer: anytype) !void {
     try writer.writeAll(
-        \\Usage: fun -in <input_file> [-out <output_file>] [-no-exec] [-outf] [-ast] [-help]
+        \\Usage: fun -in <input_file> [-fmt] [-out <output_file>] [-no-exec] [-outf] [-ast] [-help]
         \\
         \\Arguments:
         \\  -in      <file>  Input file to compile (required)
+        \\  -fmt            Format the input file in-place (optional)
         \\  -out     <file>  Output file (optional, defaults to input filename with .c extension)
         \\  -no-exec         Disable automatic compilation and execution (optional, execution enabled by default)
         \\  -outf            Generate .c output file (optional, disabled by default)
@@ -114,6 +120,7 @@ pub fn parse_args(allocator: mem.Allocator) !CliOptions {
     var exec = true;
     var outf = false;
     var print_ast = false;
+    var fmt = false;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-help")) {
@@ -141,6 +148,8 @@ pub fn parse_args(allocator: mem.Allocator) !CliOptions {
             outf = true;
         } else if (std.mem.eql(u8, arg, "-ast")) {
             print_ast = true;
+        } else if (std.mem.eql(u8, arg, "-fmt")) {
+            fmt = true;
         }
     }
 
@@ -162,7 +171,236 @@ pub fn parse_args(allocator: mem.Allocator) !CliOptions {
         .exec = exec,
         .outf = outf,
         .print_ast = print_ast,
+        .fmt = fmt,
     };
+}
+
+fn token_text(allocator: mem.Allocator, t: token.Token) ![]const u8 {
+    return switch (t.type) {
+        .Identifier, .Keyword, .Operator => allocator.dupe(u8, t.data.sval.items),
+        .Symbol => blk: {
+            var buf: [1]u8 = .{t.data.cval};
+            break :blk allocator.dupe(u8, buf[0..]);
+        },
+        .Number => {
+            const base = try std.fmt.allocPrint(allocator, "{d}", .{t.data.llnum});
+            errdefer allocator.free(base);
+            return switch (t.num.?.type) {
+                .Normal => base,
+                .Long => std.mem.concat(allocator, u8, &.{ base, "L" }) catch |e| {
+                    allocator.free(base);
+                    return e;
+                },
+                .Float => std.mem.concat(allocator, u8, &.{ base, "f" }) catch |e| {
+                    allocator.free(base);
+                    return e;
+                },
+                else => base,
+            };
+        },
+        .String => std.fmt.allocPrint(allocator, "\"{s}\"", .{t.data.sval.items}),
+        .Boolean => allocator.dupe(u8, if (t.data.bval) "true" else "false"),
+        .Comment => std.fmt.allocPrint(allocator, "//{s}", .{std.mem.trim(u8, t.data.sval.items, " \t")}),
+        .NewLine => allocator.dupe(u8, "\n"),
+    };
+}
+
+fn is_closing_symbol(c: u8) bool {
+    return c == ')' or c == ']';
+}
+
+fn is_word_like(t: token.Token) bool {
+    return switch (t.type) {
+        .Identifier, .Keyword, .Number, .String, .Boolean => true,
+        else => false,
+    };
+}
+
+fn operator_needs_spaces(op: []const u8) bool {
+    // Operators that should not be surrounded by spaces are handled separately by symbols.
+    // Keep this conservative.
+    return !std.mem.eql(u8, op, ",") and
+        !std.mem.eql(u8, op, ".") and
+        !std.mem.eql(u8, op, "(") and
+        !std.mem.eql(u8, op, "[");
+}
+
+pub fn format_file_in_place(allocator: mem.Allocator, input_file: []const u8) !void {
+    // Lex tokens from the file.
+    var tp = try codegen.TranspileProcess.init(
+        allocator,
+        input_file,
+        "__fmt_unused__.c",
+        .{ .exec = false, .outf = false, .ast = false },
+    );
+    defer tp.deinit();
+    var lp = lexer.LexProcess.init(&tp);
+    defer lp.deinit();
+    try lp.lex();
+
+    var out = std.ArrayList(u8).init(allocator);
+    defer out.deinit();
+
+    var indent: usize = 0;
+    var at_line_start = true;
+    var prev_token: ?token.Token = null;
+
+    const tokens = tp.tokens.items();
+    var i: usize = 0;
+    while (i < tokens.len) : (i += 1) {
+        const t = tokens[i];
+        if (t.type == .NewLine) continue;
+
+        if (t.type == .Comment) {
+            if (!at_line_start) {
+                try out.append('\n');
+                at_line_start = true;
+            }
+            if (at_line_start) {
+                try out.appendNTimes(' ', indent * 4);
+            }
+            const s = try token_text(allocator, t);
+            defer allocator.free(s);
+            try out.appendSlice(s);
+            try out.append('\n');
+            at_line_start = true;
+            prev_token = null;
+            continue;
+        }
+
+        // Handle closing brace with optional same-line `elif`/`else`.
+        if (t.type == .Symbol and t.data.cval == '}') {
+            if (!at_line_start) {
+                try out.append('\n');
+                at_line_start = true;
+            }
+            if (indent > 0) indent -= 1;
+            try out.appendNTimes(' ', indent * 4);
+            try out.append('}');
+
+            // Look ahead for `elif`/`else`.
+            var j = i + 1;
+            while (j < tokens.len and (tokens[j].type == .NewLine or tokens[j].type == .Comment)) : (j += 1) {}
+            if (j < tokens.len and tokens[j].type == .Keyword) {
+                const kw = tokens[j].data.sval.items;
+                if (std.mem.eql(u8, kw, "elif") or std.mem.eql(u8, kw, "else")) {
+                    try out.append(' ');
+                    at_line_start = false;
+                    prev_token = t;
+                    continue;
+                }
+            }
+
+            try out.append('\n');
+            at_line_start = true;
+            prev_token = t;
+            continue;
+        }
+
+        // Indent at start of line.
+        if (at_line_start) {
+            try out.appendNTimes(' ', indent * 4);
+            at_line_start = false;
+        }
+
+        // Decide whether to add a space before this token.
+        if (prev_token) |pt| {
+            const needs_space = blk: {
+                if (t.type == .Symbol) {
+                    const c = t.data.cval;
+                    if (c == ',' or c == ';' or c == ')' or c == ']' or c == '}' or c == ':') break :blk false;
+                    if (c == '{') break :blk true;
+                    if (c == '(' or c == '[') {
+                        // No space for calls/indexing: `foo(`, `arr[`.
+                        break :blk false;
+                    }
+                }
+                if (pt.type == .Symbol) {
+                    const pc = pt.data.cval;
+                    if (pc == '(' or pc == '[' or pc == '{') break :blk false;
+                }
+                if (t.type == .Operator) {
+                    break :blk operator_needs_spaces(t.data.sval.items);
+                }
+                if (pt.type == .Operator) {
+                    break :blk operator_needs_spaces(pt.data.sval.items);
+                }
+                if (is_word_like(pt) and is_word_like(t)) break :blk true;
+                if (pt.type == .Symbol and is_closing_symbol(pt.data.cval) and is_word_like(t)) break :blk true;
+                break :blk false;
+            };
+            if (needs_space) {
+                const last = if (out.items.len > 0) out.items[out.items.len - 1] else 0;
+                if (last != ' ' and last != '\n' and last != '\t') try out.append(' ');
+            }
+        }
+
+        // Emit token.
+        if (t.type == .Symbol) {
+            const c = t.data.cval;
+            if (c == '{') {
+                try out.append('{');
+                try out.append('\n');
+                indent += 1;
+                at_line_start = true;
+                prev_token = null;
+                continue;
+            }
+            if (c == ';') {
+                try out.append(';');
+                try out.append('\n');
+                at_line_start = true;
+                prev_token = null;
+                continue;
+            }
+            if (c == ',') {
+                try out.append(',');
+                try out.append(' ');
+                prev_token = null;
+                continue;
+            }
+            if (c == ':') {
+                try out.append(':');
+                try out.append(' ');
+                prev_token = null;
+                continue;
+            }
+            try out.append(c);
+            prev_token = t;
+            continue;
+        }
+
+        if (t.type == .Operator and std.mem.eql(u8, t.data.sval.items, ",")) {
+            try out.append(',');
+            try out.append(' ');
+            prev_token = null;
+            continue;
+        }
+
+        if (t.type == .Operator and (std.mem.eql(u8, t.data.sval.items, "(") or std.mem.eql(u8, t.data.sval.items, "["))) {
+            const s = try token_text(allocator, t);
+            defer allocator.free(s);
+            try out.appendSlice(s);
+            prev_token = t;
+            continue;
+        }
+
+        const s = try token_text(allocator, t);
+        defer allocator.free(s);
+        try out.appendSlice(s);
+
+        prev_token = t;
+    }
+
+    // Ensure exactly one trailing newline.
+    if (out.items.len == 0 or out.items[out.items.len - 1] != '\n') {
+        try out.append('\n');
+    }
+
+    // Overwrite input file in-place.
+    try tp.ifile.seekTo(0);
+    try tp.ifile.setEndPos(0);
+    _ = try tp.ifile.writeAll(out.items);
 }
 
 /// Compiles and runs the generated C code.

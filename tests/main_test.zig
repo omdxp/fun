@@ -8,6 +8,7 @@ comptime {
     _ = @import("codegen_test.zig");
     _ = @import("utils_test.zig");
     _ = @import("cli_test.zig");
+    _ = @import("fmt_test.zig");
     _ = @import("imports_test.zig");
     _ = @import("for_test.zig");
     _ = @import("fit_exhaustive_test.zig");
