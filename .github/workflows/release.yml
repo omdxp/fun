@@ -25,33 +25,6 @@ on:
 
 
 jobs:
-  update-changelog:
-    name: Update and commit CHANGELOG.md
-    runs-on: ubuntu-latest
-    if: github.event_name == 'release'
-    env:
-      GITHUB_TOKEN: ${{ secrets.GH_PAT }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up git user
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Install git-cliff
-        run: cargo install git-cliff --version 2.11.0
-
-      - name: Generate and commit CHANGELOG.md
-        run: |
-          git-cliff -o CHANGELOG.md
-          git add CHANGELOG.md
-          git commit -m "docs: update CHANGELOG.md for release" || echo "No changes to commit"
-          git remote set-url origin https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.repository }}.git
-          git push origin HEAD:${GITHUB_REF#refs/heads/}
   build-matrix:
     name: Build fun for all targets
     runs-on: ubuntu-latest
@@ -100,7 +73,7 @@ jobs:
 
   upload-release-assets:
     name: Upload release assets
-    needs: [build-matrix, update-changelog]
+    needs: [build-matrix]
     runs-on: ubuntu-latest
     if: github.event_name == 'release'
     steps:
