@@ -65,6 +65,11 @@ pub fn main() void {
 
     const options = cli.parse_args(global_allocator) catch |err| print_error_and_exit(err);
 
+    if (options.fmt_all) {
+        cli.format_file_and_imports_in_place(global_allocator, options.input_file) catch |err| print_error_and_exit(err);
+        return;
+    }
+
     if (options.fmt) {
         cli.format_file_in_place(global_allocator, options.input_file) catch |err| print_error_and_exit(err);
         return;

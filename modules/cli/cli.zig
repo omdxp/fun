@@ -48,6 +48,9 @@ pub const CliOptions = struct {
 
     /// Flag to format the input `.fn` file in-place.
     fmt: bool,
+
+    /// Flag to format the input file and all locally imported modules (skips `std.*`).
+    fmt_all: bool,
 };
 
 /// Prints the usage information for the transpiler command-line interface.
@@ -62,11 +65,12 @@ pub const CliOptions = struct {
 /// - Might return an error if writing to the output fails.
 fn print_usage(writer: anytype) !void {
     try writer.writeAll(
-        \\Usage: fun -in <input_file> [-fmt] [-out <output_file>] [-no-exec] [-outf] [-ast] [-help]
+        \\Usage: fun -in <input_file> [-fmt | -fmt-all] [-out <output_file>] [-no-exec] [-outf] [-ast] [-help]
         \\
         \\Arguments:
         \\  -in      <file>  Input file to compile (required)
         \\  -fmt            Format the input file in-place (optional)
+        \\  -fmt-all        Format the input file and all locally imported modules (optional)
         \\  -out     <file>  Output file (optional, defaults to input filename with .c extension)
         \\  -no-exec         Disable automatic compilation and execution (optional, execution enabled by default)
         \\  -outf            Generate .c output file (optional, disabled by default)
@@ -121,6 +125,7 @@ pub fn parse_args(allocator: mem.Allocator) !CliOptions {
     var outf = false;
     var print_ast = false;
     var fmt = false;
+    var fmt_all = false;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-help")) {
@@ -150,6 +155,8 @@ pub fn parse_args(allocator: mem.Allocator) !CliOptions {
             print_ast = true;
         } else if (std.mem.eql(u8, arg, "-fmt")) {
             fmt = true;
+        } else if (std.mem.eql(u8, arg, "-fmt-all")) {
+            fmt_all = true;
         }
     }
 
@@ -172,7 +179,191 @@ pub fn parse_args(allocator: mem.Allocator) !CliOptions {
         .outf = outf,
         .print_ast = print_ast,
         .fmt = fmt,
+        .fmt_all = fmt_all,
     };
+}
+
+fn build_full_import_path_for_formatter(allocator: mem.Allocator, input_file_path: []const u8, import_path: []const u8) ![]const u8 {
+    var file_path = std.ArrayList(u8).init(allocator);
+    defer file_path.deinit();
+
+    const dir_path = std.fs.path.dirname(input_file_path) orelse ".";
+    try file_path.appendSlice(dir_path);
+    try file_path.append('/');
+
+    for (import_path) |ch| {
+        if (ch == '.') {
+            try file_path.append('/');
+        } else {
+            try file_path.append(ch);
+        }
+    }
+    try file_path.appendSlice(".fn");
+
+    return file_path.toOwnedSlice();
+}
+
+fn freeOwnedStringMap(allocator: mem.Allocator, map: *std.StringHashMap(void)) void {
+    var it = map.keyIterator();
+    while (it.next()) |k| {
+        allocator.free(k.*);
+    }
+    map.deinit();
+}
+
+fn parse_local_import_paths(allocator: mem.Allocator, input_file: []const u8) !std.ArrayList([]const u8) {
+    var result = std.ArrayList([]const u8).init(allocator);
+    errdefer {
+        for (result.items) |p| allocator.free(p);
+        result.deinit();
+    }
+
+    var tp = try codegen.TranspileProcess.init(
+        allocator,
+        input_file,
+        "__fmt_unused__.c",
+        .{ .exec = false, .outf = false, .ast = false },
+    );
+    defer tp.deinit();
+    var lp = lexer.LexProcess.init(&tp);
+    defer lp.deinit();
+    try lp.lex();
+
+    const tokens = tp.tokens.items();
+    var brace_depth: isize = 0;
+    var paren_depth: isize = 0;
+    var bracket_depth: isize = 0;
+    var can_start_stmt = true;
+
+    var i: usize = 0;
+    while (i < tokens.len) : (i += 1) {
+        const t = tokens[i];
+        if (t.type == .NewLine) continue;
+        if (t.type == .Comment) continue;
+
+        const is_top = brace_depth == 0;
+        const is_stmt_start = is_top and paren_depth == 0 and bracket_depth == 0 and can_start_stmt;
+
+        if (is_stmt_start and t.type == .Keyword and std.mem.eql(u8, t.data.sval.items, "imp")) {
+            // Parse `imp foo.bar;`
+            var j: usize = i + 1;
+            while (j < tokens.len and (tokens[j].type == .NewLine or tokens[j].type == .Comment)) : (j += 1) {}
+            if (j >= tokens.len or tokens[j].type != .Identifier) {
+                // Let the normal compiler path handle detailed errors; formatter just ignores malformed imports.
+                continue;
+            }
+
+            var import_name = std.ArrayList(u8).init(allocator);
+            defer import_name.deinit();
+            try import_name.appendSlice(tokens[j].data.sval.items);
+            j += 1;
+
+            while (true) {
+                while (j < tokens.len and (tokens[j].type == .NewLine or tokens[j].type == .Comment)) : (j += 1) {}
+                if (j >= tokens.len) break;
+                if (tokens[j].type != .Operator or !utils.is_access_operator(tokens[j].data.sval.items)) break;
+                j += 1;
+
+                while (j < tokens.len and (tokens[j].type == .NewLine or tokens[j].type == .Comment)) : (j += 1) {}
+                if (j >= tokens.len or tokens[j].type != .Identifier) break;
+                try import_name.append('.');
+                try import_name.appendSlice(tokens[j].data.sval.items);
+                j += 1;
+            }
+
+            const imp_path = try import_name.toOwnedSlice();
+            if (!std.mem.startsWith(u8, imp_path, "std.")) {
+                try result.append(imp_path);
+            } else {
+                allocator.free(imp_path);
+            }
+
+            i = j;
+            can_start_stmt = true;
+            continue;
+        }
+
+        // Track depth/boundaries.
+        if (t.type == .Operator) {
+            if (std.mem.eql(u8, t.data.sval.items, "(")) paren_depth += 1;
+            if (std.mem.eql(u8, t.data.sval.items, "[")) bracket_depth += 1;
+        }
+        if (t.type == .Symbol) {
+            if (t.data.cval == ')') {
+                if (paren_depth > 0) paren_depth -= 1;
+            }
+            if (t.data.cval == ']') {
+                if (bracket_depth > 0) bracket_depth -= 1;
+            }
+            if (t.data.cval == '{') brace_depth += 1;
+            if (t.data.cval == '}' and brace_depth > 0) brace_depth -= 1;
+
+            if (t.data.cval == ';' and brace_depth == 0) {
+                can_start_stmt = true;
+            } else if (t.data.cval == '}' and brace_depth == 0) {
+                can_start_stmt = true;
+            } else if (t.data.cval != ';') {
+                can_start_stmt = false;
+            }
+        } else {
+            can_start_stmt = false;
+        }
+    }
+
+    return result;
+}
+
+fn format_file_and_imports_recursive(
+    allocator: mem.Allocator,
+    file_path: []const u8,
+    visiting: *std.StringHashMap(void),
+    visited: *std.StringHashMap(void),
+) !void {
+    const canonical = try std.fs.cwd().realpathAlloc(allocator, file_path);
+    errdefer allocator.free(canonical);
+
+    if (visited.contains(canonical)) {
+        allocator.free(canonical);
+        return;
+    }
+    if (visiting.contains(canonical)) {
+        // Cycle detected; stop recursion.
+        allocator.free(canonical);
+        return;
+    }
+
+    // Store owned canonical path in `visiting`.
+    try visiting.put(canonical, {});
+
+    // Format current file.
+    try format_file_in_place(allocator, canonical);
+
+    // Discover local imports and recurse.
+    var imports = try parse_local_import_paths(allocator, canonical);
+    defer {
+        for (imports.items) |p| allocator.free(p);
+        imports.deinit();
+    }
+
+    for (imports.items) |imp| {
+        const rel = try build_full_import_path_for_formatter(allocator, canonical, imp);
+        defer allocator.free(rel);
+        try format_file_and_imports_recursive(allocator, rel, visiting, visited);
+    }
+
+    // Move from visiting -> visited.
+    _ = visiting.remove(canonical);
+    try visited.put(canonical, {});
+}
+
+pub fn format_file_and_imports_in_place(allocator: mem.Allocator, input_file: []const u8) !void {
+    var visiting = std.StringHashMap(void).init(allocator);
+    defer freeOwnedStringMap(allocator, &visiting);
+
+    var visited = std.StringHashMap(void).init(allocator);
+    defer freeOwnedStringMap(allocator, &visited);
+
+    try format_file_and_imports_recursive(allocator, input_file, &visiting, &visited);
 }
 
 fn token_text(allocator: mem.Allocator, t: token.Token) ![]const u8 {
@@ -225,6 +416,185 @@ fn operator_needs_spaces(op: []const u8) bool {
         !std.mem.eql(u8, op, "[");
 }
 
+fn is_builtin_type_keyword(kw: []const u8) bool {
+    return std.mem.eql(u8, kw, "num") or
+        std.mem.eql(u8, kw, "str") or
+        std.mem.eql(u8, kw, "bin") or
+        std.mem.eql(u8, kw, "chr");
+}
+
+fn appendAll(dst: *std.ArrayList(token.Token), src: []const token.Token) !void {
+    for (src) |t| {
+        try dst.append(t);
+    }
+}
+
+const EmitState = struct {
+    indent: *usize,
+    at_line_start: *bool,
+    prev_token: *?token.Token,
+    out: *std.ArrayList(u8),
+    allocator: mem.Allocator,
+};
+
+fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
+    var idx: usize = 0;
+    while (idx < toks.len) : (idx += 1) {
+        const t2 = toks[idx];
+        if (t2.type == .NewLine) continue;
+
+        if (t2.type == .Comment) {
+            if (!state.at_line_start.*) {
+                try state.out.append('\n');
+                state.at_line_start.* = true;
+            }
+            if (state.at_line_start.*) {
+                try state.out.appendNTimes(' ', state.indent.* * 4);
+            }
+            const s2 = try token_text(state.allocator, t2);
+            defer state.allocator.free(s2);
+            try state.out.appendSlice(s2);
+            try state.out.append('\n');
+            state.at_line_start.* = true;
+            state.prev_token.* = null;
+            continue;
+        }
+
+        // Handle closing brace with optional same-line `elif`/`else`.
+        if (t2.type == .Symbol and t2.data.cval == '}') {
+            if (!state.at_line_start.*) {
+                try state.out.append('\n');
+                state.at_line_start.* = true;
+            }
+            if (state.indent.* > 0) state.indent.* -= 1;
+            try state.out.appendNTimes(' ', state.indent.* * 4);
+            try state.out.append('}');
+
+            // Look ahead for `elif`/`else`.
+            var j2 = idx + 1;
+            while (j2 < toks.len and (toks[j2].type == .NewLine or toks[j2].type == .Comment)) : (j2 += 1) {}
+            if (j2 < toks.len and toks[j2].type == .Keyword) {
+                const kw2 = toks[j2].data.sval.items;
+                if (std.mem.eql(u8, kw2, "elif") or std.mem.eql(u8, kw2, "else")) {
+                    try state.out.append(' ');
+                    state.at_line_start.* = false;
+                    state.prev_token.* = t2;
+                    continue;
+                }
+            }
+
+            try state.out.append('\n');
+            state.at_line_start.* = true;
+
+            // Add a blank line between top-level function declarations.
+            if (state.indent.* == 0) {
+                var k2 = idx + 1;
+                while (k2 < toks.len and (toks[k2].type == .NewLine or toks[k2].type == .Comment)) : (k2 += 1) {}
+                if (k2 < toks.len and toks[k2].type == .Keyword and std.mem.eql(u8, toks[k2].data.sval.items, "fun")) {
+                    try state.out.append('\n');
+                    state.at_line_start.* = true;
+                }
+            }
+
+            state.prev_token.* = t2;
+            continue;
+        }
+
+        // Indent at start of line.
+        if (state.at_line_start.*) {
+            try state.out.appendNTimes(' ', state.indent.* * 4);
+            state.at_line_start.* = false;
+        }
+
+        // Decide whether to add a space before this token.
+        if (state.prev_token.*) |pt2| {
+            const needs_space = blk: {
+                if (t2.type == .Symbol) {
+                    const c2 = t2.data.cval;
+                    if (c2 == ',' or c2 == ';' or c2 == ')' or c2 == ']' or c2 == '}' or c2 == ':') break :blk false;
+                    if (c2 == '{') break :blk true;
+                    if (c2 == '(' or c2 == '[') {
+                        // No space for calls/indexing: `foo(`, `arr[`.
+                        break :blk false;
+                    }
+                }
+                if (pt2.type == .Symbol) {
+                    const pc2 = pt2.data.cval;
+                    if (pc2 == '(' or pc2 == '[' or pc2 == '{') break :blk false;
+                }
+                if (t2.type == .Operator) {
+                    break :blk operator_needs_spaces(t2.data.sval.items);
+                }
+                if (pt2.type == .Operator) {
+                    break :blk operator_needs_spaces(pt2.data.sval.items);
+                }
+                if (is_word_like(pt2) and is_word_like(t2)) break :blk true;
+                if (pt2.type == .Symbol and is_closing_symbol(pt2.data.cval) and is_word_like(t2)) break :blk true;
+                break :blk false;
+            };
+            if (needs_space) {
+                const last2 = if (state.out.items.len > 0) state.out.items[state.out.items.len - 1] else 0;
+                if (last2 != ' ' and last2 != '\n' and last2 != '\t') try state.out.append(' ');
+            }
+        }
+
+        // Emit token.
+        if (t2.type == .Symbol) {
+            const c2 = t2.data.cval;
+            if (c2 == '{') {
+                try state.out.append('{');
+                try state.out.append('\n');
+                state.indent.* += 1;
+                state.at_line_start.* = true;
+                state.prev_token.* = null;
+                continue;
+            }
+            if (c2 == ';') {
+                try state.out.append(';');
+                try state.out.append('\n');
+                state.at_line_start.* = true;
+                state.prev_token.* = null;
+                continue;
+            }
+            if (c2 == ',') {
+                try state.out.append(',');
+                try state.out.append(' ');
+                state.prev_token.* = null;
+                continue;
+            }
+            if (c2 == ':') {
+                try state.out.append(':');
+                try state.out.append(' ');
+                state.prev_token.* = null;
+                continue;
+            }
+            try state.out.append(c2);
+            state.prev_token.* = t2;
+            continue;
+        }
+
+        if (t2.type == .Operator and std.mem.eql(u8, t2.data.sval.items, ",")) {
+            try state.out.append(',');
+            try state.out.append(' ');
+            state.prev_token.* = null;
+            continue;
+        }
+
+        if (t2.type == .Operator and (std.mem.eql(u8, t2.data.sval.items, "(") or std.mem.eql(u8, t2.data.sval.items, "["))) {
+            const s2 = try token_text(state.allocator, t2);
+            defer state.allocator.free(s2);
+            try state.out.appendSlice(s2);
+            state.prev_token.* = t2;
+            continue;
+        }
+
+        const s2 = try token_text(state.allocator, t2);
+        defer state.allocator.free(s2);
+        try state.out.appendSlice(s2);
+        state.prev_token.* = t2;
+    }
+}
+
 pub fn format_file_in_place(allocator: mem.Allocator, input_file: []const u8) !void {
     // Lex tokens from the file.
     var tp = try codegen.TranspileProcess.init(
@@ -246,151 +616,128 @@ pub fn format_file_in_place(allocator: mem.Allocator, input_file: []const u8) !v
     var prev_token: ?token.Token = null;
 
     const tokens = tp.tokens.items();
+
+    // Partition top-level imports + global vars into groups.
+    var imports = std.ArrayList(token.Token).init(allocator);
+    defer imports.deinit();
+    var globals = std.ArrayList(token.Token).init(allocator);
+    defer globals.deinit();
+    var rest = std.ArrayList(token.Token).init(allocator);
+    defer rest.deinit();
+    var pending_comments = std.ArrayList(token.Token).init(allocator);
+    defer pending_comments.deinit();
+
+    var brace_depth: isize = 0;
+    var paren_depth: isize = 0;
+    var bracket_depth: isize = 0;
+    var can_start_stmt = true;
     var i: usize = 0;
     while (i < tokens.len) : (i += 1) {
         const t = tokens[i];
         if (t.type == .NewLine) continue;
 
-        if (t.type == .Comment) {
-            if (!at_line_start) {
-                try out.append('\n');
-                at_line_start = true;
-            }
-            if (at_line_start) {
-                try out.appendNTimes(' ', indent * 4);
-            }
-            const s = try token_text(allocator, t);
-            defer allocator.free(s);
-            try out.appendSlice(s);
-            try out.append('\n');
-            at_line_start = true;
-            prev_token = null;
+        const is_top = brace_depth == 0;
+        const is_stmt_start = is_top and paren_depth == 0 and bracket_depth == 0 and can_start_stmt;
+
+        if (is_top and t.type == .Comment) {
+            try pending_comments.append(t);
             continue;
         }
 
-        // Handle closing brace with optional same-line `elif`/`else`.
-        if (t.type == .Symbol and t.data.cval == '}') {
-            if (!at_line_start) {
-                try out.append('\n');
-                at_line_start = true;
-            }
-            if (indent > 0) indent -= 1;
-            try out.appendNTimes(' ', indent * 4);
-            try out.append('}');
+        const is_kw = t.type == .Keyword;
+        const kw = if (is_kw) t.data.sval.items else "";
 
-            // Look ahead for `elif`/`else`.
-            var j = i + 1;
-            while (j < tokens.len and (tokens[j].type == .NewLine or tokens[j].type == .Comment)) : (j += 1) {}
-            if (j < tokens.len and tokens[j].type == .Keyword) {
-                const kw = tokens[j].data.sval.items;
-                if (std.mem.eql(u8, kw, "elif") or std.mem.eql(u8, kw, "else")) {
-                    try out.append(' ');
-                    at_line_start = false;
-                    prev_token = t;
-                    continue;
+        const starts_import_stmt = is_stmt_start and is_kw and std.mem.eql(u8, kw, "imp");
+        const starts_global_stmt = is_stmt_start and is_kw and is_builtin_type_keyword(kw);
+
+        if (starts_import_stmt or starts_global_stmt) {
+            // Collect up to ';'
+            var stmt = std.ArrayList(token.Token).init(allocator);
+            defer stmt.deinit();
+            try appendAll(&stmt, pending_comments.items);
+            pending_comments.clearRetainingCapacity();
+
+            try stmt.append(t);
+
+            var j: usize = i + 1;
+            while (j < tokens.len) : (j += 1) {
+                const tt = tokens[j];
+                if (tt.type == .NewLine) continue;
+                try stmt.append(tt);
+                if (tt.type == .Symbol and tt.data.cval == ';') {
+                    break;
                 }
             }
 
-            try out.append('\n');
-            at_line_start = true;
-            prev_token = t;
+            if (starts_import_stmt) {
+                try appendAll(&imports, stmt.items);
+            } else {
+                try appendAll(&globals, stmt.items);
+            }
+
+            i = j;
+            can_start_stmt = true;
             continue;
         }
 
-        // Indent at start of line.
-        if (at_line_start) {
-            try out.appendNTimes(' ', indent * 4);
-            at_line_start = false;
+        // Not a top-level import/global-var statement: keep in place.
+        if (pending_comments.items.len > 0) {
+            try appendAll(&rest, pending_comments.items);
+            pending_comments.clearRetainingCapacity();
         }
+        try rest.append(t);
 
-        // Decide whether to add a space before this token.
-        if (prev_token) |pt| {
-            const needs_space = blk: {
-                if (t.type == .Symbol) {
-                    const c = t.data.cval;
-                    if (c == ',' or c == ';' or c == ')' or c == ']' or c == '}' or c == ':') break :blk false;
-                    if (c == '{') break :blk true;
-                    if (c == '(' or c == '[') {
-                        // No space for calls/indexing: `foo(`, `arr[`.
-                        break :blk false;
-                    }
-                }
-                if (pt.type == .Symbol) {
-                    const pc = pt.data.cval;
-                    if (pc == '(' or pc == '[' or pc == '{') break :blk false;
-                }
-                if (t.type == .Operator) {
-                    break :blk operator_needs_spaces(t.data.sval.items);
-                }
-                if (pt.type == .Operator) {
-                    break :blk operator_needs_spaces(pt.data.sval.items);
-                }
-                if (is_word_like(pt) and is_word_like(t)) break :blk true;
-                if (pt.type == .Symbol and is_closing_symbol(pt.data.cval) and is_word_like(t)) break :blk true;
-                break :blk false;
-            };
-            if (needs_space) {
-                const last = if (out.items.len > 0) out.items[out.items.len - 1] else 0;
-                if (last != ' ' and last != '\n' and last != '\t') try out.append(' ');
-            }
+        // Track structural depth and statement boundaries.
+        if (t.type == .Operator) {
+            if (std.mem.eql(u8, t.data.sval.items, "(")) paren_depth += 1;
+            if (std.mem.eql(u8, t.data.sval.items, "[")) bracket_depth += 1;
         }
-
-        // Emit token.
         if (t.type == .Symbol) {
-            const c = t.data.cval;
-            if (c == '{') {
-                try out.append('{');
-                try out.append('\n');
-                indent += 1;
-                at_line_start = true;
-                prev_token = null;
-                continue;
+            if (t.data.cval == ')') {
+                if (paren_depth > 0) paren_depth -= 1;
             }
-            if (c == ';') {
-                try out.append(';');
-                try out.append('\n');
-                at_line_start = true;
-                prev_token = null;
-                continue;
+            if (t.data.cval == ']') {
+                if (bracket_depth > 0) bracket_depth -= 1;
             }
-            if (c == ',') {
-                try out.append(',');
-                try out.append(' ');
-                prev_token = null;
-                continue;
+            if (t.data.cval == '{') brace_depth += 1;
+            if (t.data.cval == '}' and brace_depth > 0) brace_depth -= 1;
+            if (t.data.cval == ';' and brace_depth == 0) {
+                can_start_stmt = true;
+            } else if (t.data.cval == '}' and brace_depth == 0) {
+                can_start_stmt = true;
+            } else if (t.data.cval != ';') {
+                can_start_stmt = false;
             }
-            if (c == ':') {
-                try out.append(':');
-                try out.append(' ');
-                prev_token = null;
-                continue;
-            }
-            try out.append(c);
-            prev_token = t;
-            continue;
+        } else {
+            // Any non-comment, non-newline token consumes the statement start.
+            can_start_stmt = false;
         }
-
-        if (t.type == .Operator and std.mem.eql(u8, t.data.sval.items, ",")) {
-            try out.append(',');
-            try out.append(' ');
-            prev_token = null;
-            continue;
-        }
-
-        if (t.type == .Operator and (std.mem.eql(u8, t.data.sval.items, "(") or std.mem.eql(u8, t.data.sval.items, "["))) {
-            const s = try token_text(allocator, t);
-            defer allocator.free(s);
-            try out.appendSlice(s);
-            prev_token = t;
-            continue;
-        }
-
-        const s = try token_text(allocator, t);
-        defer allocator.free(s);
-        try out.appendSlice(s);
-
-        prev_token = t;
     }
+
+    if (pending_comments.items.len > 0) {
+        try appendAll(&rest, pending_comments.items);
+        pending_comments.clearRetainingCapacity();
+    }
+
+    var state: EmitState = .{ .indent = &indent, .at_line_start = &at_line_start, .prev_token = &prev_token, .out = &out, .allocator = allocator };
+
+    if (imports.items.len > 0) {
+        try emitTokens(&state, imports.items);
+        if (out.items.len > 0 and out.items[out.items.len - 1] != '\n') try out.append('\n');
+        try out.append('\n');
+        at_line_start = true;
+        prev_token = null;
+    }
+
+    if (globals.items.len > 0) {
+        try emitTokens(&state, globals.items);
+        if (out.items.len > 0 and out.items[out.items.len - 1] != '\n') try out.append('\n');
+        try out.append('\n');
+        at_line_start = true;
+        prev_token = null;
+    }
+
+    try emitTokens(&state, rest.items);
 
     // Ensure exactly one trailing newline.
     if (out.items.len == 0 or out.items[out.items.len - 1] != '\n') {
@@ -454,9 +801,9 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
     };
 
     // When `zig build test` runs tests with `--listen=-`, stdout is used for the
-    // test runner protocol. Writing arbitrary output to stdout from tests can
-    // corrupt the protocol and appear as a hang.
-    const stdout = if (builtin.is_test) std.io.getStdErr().writer() else std.io.getStdOut().writer();
+    // test runner protocol. Also, noisy test stderr makes it look like failures.
+    // Keep tests quiet, but preserve normal CLI output.
+    const stdout = if (builtin.is_test) std.io.null_writer else std.io.getStdOut().writer();
     const stderr = std.io.getStdErr().writer();
 
     // If content is provided instead of a file, write it to a temporary file first
@@ -527,7 +874,9 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
         }
 
         if (result.term.Exited != 0) {
-            try stderr.print("Compilation error:\n{s}", .{result.stderr});
+            if (!builtin.is_test) {
+                try stderr.print("Compilation error:\n{s}", .{result.stderr});
+            }
             return CliError.CompilationFailed;
         }
     }
@@ -556,7 +905,9 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
         }
 
         if (result.term.Exited != 0) {
-            try stderr.print("Runtime error: {s}", .{result.stderr});
+            if (!builtin.is_test) {
+                try stderr.print("Runtime error: {s}", .{result.stderr});
+            }
             return CliError.ExecutionFailed;
         }
 
