@@ -62,7 +62,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fun-${{ matrix.target }}
-          path: zig-out/bin/fun*
+          path: |
+            zig-out/bin/fun
+            zig-out/bin/fun.exe
 
 
 # =============================================================
@@ -85,6 +87,8 @@ jobs:
       - name: Upload all artifacts to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**
+          files: |
+            artifacts/**/fun
+            artifacts/**/fun.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
