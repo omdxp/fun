@@ -50,6 +50,7 @@ jobs:
           git-cliff -o CHANGELOG.md
           git add CHANGELOG.md
           git commit -m "docs: update CHANGELOG.md for release" || echo "No changes to commit"
+          git remote set-url origin https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.repository }}.git
           git push origin HEAD:${GITHUB_REF#refs/heads/}
   build-matrix:
     name: Build fun for all targets
