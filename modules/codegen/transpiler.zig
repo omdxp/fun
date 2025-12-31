@@ -44,6 +44,19 @@ pub const TranspileError = error{
     InvalidImportPath,
     /// Error indicating unsupported AST node type.
     UnsupportedNodeType,
+
+    /// Error indicating a type mismatch.
+    TypeMismatch,
+    /// Error indicating a function call has the wrong number of arguments.
+    WrongArgCount,
+    /// Error indicating a return statement does not match the function return type.
+    ReturnTypeMismatch,
+    /// Error indicating a condition expression has an invalid type.
+    InvalidConditionType,
+    /// Error indicating an expression is not callable.
+    NotCallable,
+    /// Error indicating an index operation is applied to a non-array.
+    IndexNonArray,
 };
 
 /// General errors that can occur during the transpilation process.
@@ -480,6 +493,551 @@ pub const TranspileProcess = struct {
             },
             else => null,
         };
+    }
+
+    const CheckedType = struct {
+        base: dtype.DataTypeType,
+        is_array: bool = false,
+        pointer_depth: usize = 0,
+
+        fn eql(a: CheckedType, b: CheckedType) bool {
+            return a.base == b.base and a.is_array == b.is_array and a.pointer_depth == b.pointer_depth;
+        }
+    };
+
+    const FnSig = struct {
+        rtype: CheckedType,
+        args: []CheckedType,
+    };
+
+    const TypeEnv = struct {
+        allocator: mem.Allocator,
+        scopes: std.ArrayList(std.StringHashMap(CheckedType)),
+
+        fn init(allocator: mem.Allocator) TypeEnv {
+            return .{
+                .allocator = allocator,
+                .scopes = std.ArrayList(std.StringHashMap(CheckedType)).init(allocator),
+            };
+        }
+
+        fn deinit(self: *TypeEnv) void {
+            for (self.scopes.items) |*scope_map| {
+                scope_map.deinit();
+            }
+            self.scopes.deinit();
+        }
+
+        fn push(self: *TypeEnv) TranspileError!void {
+            self.scopes.append(std.StringHashMap(CheckedType).init(self.allocator)) catch {
+                return TranspileError.MemoryAllocationFailed;
+            };
+        }
+
+        fn pop(self: *TypeEnv) void {
+            if (self.scopes.pop()) |popped| {
+                var last = popped;
+                last.deinit();
+            }
+        }
+
+        fn put_current(self: *TypeEnv, name: []const u8, ty: CheckedType) TranspileError!void {
+            if (self.scopes.items.len == 0) return TranspileError.MemoryAllocationFailed;
+            var scope_map = &self.scopes.items[self.scopes.items.len - 1];
+            scope_map.put(name, ty) catch {
+                return TranspileError.MemoryAllocationFailed;
+            };
+        }
+
+        fn get(self: *TypeEnv, name: []const u8) ?CheckedType {
+            var i: usize = self.scopes.items.len;
+            while (i > 0) : (i -= 1) {
+                if (self.scopes.items[i - 1].get(name)) |t| return t;
+            }
+            return null;
+        }
+    };
+
+    fn report_type_error(self: *Self, node: ?ast.Node, comptime fmt: []const u8, args: anytype) void {
+        const stderr = std.io.getStdErr().writer();
+        stderr.print("\n[TypeError]\n", .{}) catch unreachable;
+        stderr.print(fmt, args) catch unreachable;
+
+        if (node) |n| {
+            if (n.pos) |p| {
+                const end_line = if (p.end_line == 0) p.line else p.end_line;
+                if (end_line == p.line) {
+                    stderr.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col }) catch unreachable;
+                } else {
+                    stderr.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col }) catch unreachable;
+                }
+                return;
+            }
+        }
+        stderr.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch unreachable;
+    }
+
+    fn type_from_dtype(dt: *const dtype.DataType) CheckedType {
+        const base = dt.type orelse .Unknown;
+        return .{
+            .base = base,
+            .is_array = (dt.flags != null and dt.flags.?.is_array),
+            .pointer_depth = dt.pointer_depth,
+        };
+    }
+
+    fn flatten_call_args(self: *Self, node: ast.Node, out: *std.ArrayList(ast.Node)) TranspileError!void {
+        if (node.type == .Expression and node.node_variant != null and mem.eql(u8, node.node_variant.?.exp.op, ",")) {
+            const exp = node.node_variant.?.exp;
+            if (exp.left) |left| try self.flatten_call_args(left.*, out);
+            if (exp.right) |right| try self.flatten_call_args(right.*, out);
+            return;
+        }
+        out.append(node) catch {
+            return TranspileError.MemoryAllocationFailed;
+        };
+    }
+
+    fn infer_expr_type(self: *Self, node: ast.Node, env: *TypeEnv, fns: *const std.StringHashMap(FnSig)) TranspileError!CheckedType {
+        switch (node.type) {
+            .Bracket => {
+                // Array literal: `[a, b, c]`. The parser stores elements under `bracket.inner`.
+                const inner = node.node_variant.?.bracket.inner.*;
+
+                var elems = std.ArrayList(ast.Node).init(self.allocator);
+                defer elems.deinit();
+                try self.flatten_call_args(inner, &elems);
+
+                var elem_type: ?CheckedType = null;
+                for (elems.items) |elem_node| {
+                    const t = try self.infer_expr_type(elem_node, env, fns);
+                    if (elem_type == null) {
+                        elem_type = t;
+                        continue;
+                    }
+                    if (!CheckedType.eql(t, elem_type.?)) {
+                        self.report_type_error(node, "array literal elements must share a type", .{});
+                        return TranspileError.TypeMismatch;
+                    }
+                }
+
+                return .{
+                    .base = if (elem_type) |et| et.base else .Unknown,
+                    .is_array = true,
+                    .pointer_depth = 0,
+                };
+            },
+            .Number => return .{ .base = .Num },
+            .String => return .{ .base = .Str },
+            .Boolean => return .{ .base = .Bin },
+            .Identifier => {
+                if (node.data == null) return .{ .base = .Unknown };
+                const name = node.data.?.sval.items;
+                if (env.get(name)) |t| return t;
+                // If it's a known function name used as a value, it's not a first-class function.
+                if (fns.get(name) != null) {
+                    self.report_type_error(node, "function '{s}' is not a value", .{name});
+                    return TranspileError.NotCallable;
+                }
+                return .{ .base = .Unknown };
+            },
+            .ExpressionParenthesis => {
+                return try self.infer_expr_type(node.node_variant.?.paren.exp.*, env, fns);
+            },
+            .Unary => {
+                const u = node.node_variant.?.unary;
+                const operand_t = try self.infer_expr_type(u.operand.*, env, fns);
+                if (mem.eql(u8, u.op, "!")) {
+                    if (operand_t.base != .Bin) {
+                        self.report_type_error(node, "unary '!' expects bin operand", .{});
+                        return TranspileError.TypeMismatch;
+                    }
+                    return .{ .base = .Bin };
+                }
+                if (mem.eql(u8, u.op, "-") or mem.eql(u8, u.op, "+")) {
+                    if (operand_t.base != .Num) {
+                        self.report_type_error(node, "unary '{s}' expects num operand", .{u.op});
+                        return TranspileError.TypeMismatch;
+                    }
+                    return .{ .base = .Num };
+                }
+                if (mem.eql(u8, u.op, "++") or mem.eql(u8, u.op, "--")) {
+                    if (operand_t.base != .Num) {
+                        self.report_type_error(node, "unary '{s}' expects num operand", .{u.op});
+                        return TranspileError.TypeMismatch;
+                    }
+                    return .{ .base = .Num };
+                }
+                return operand_t;
+            },
+            .Tenary => {
+                const t = node.node_variant.?.tenary;
+                const cond_t = try self.infer_expr_type(t.condition.*, env, fns);
+                if (cond_t.base != .Bin) {
+                    self.report_type_error(node, "tenary condition must be bin", .{});
+                    return TranspileError.InvalidConditionType;
+                }
+                const a = try self.infer_expr_type(t.true.*, env, fns);
+                const b = try self.infer_expr_type(t.false.*, env, fns);
+                if (!CheckedType.eql(a, b)) {
+                    self.report_type_error(node, "tenary branches must have the same type", .{});
+                    return TranspileError.TypeMismatch;
+                }
+                return a;
+            },
+            .Expression => {
+                const exp = node.node_variant.?.exp;
+                const op = exp.op;
+
+                if (mem.eql(u8, op, "()")) {
+                    const callee = exp.left orelse {
+                        self.report_type_error(node, "invalid call expression", .{});
+                        return TranspileError.NotCallable;
+                    };
+
+                    if (callee.type != .Identifier or callee.data == null) {
+                        self.report_type_error(node, "only calling named functions is supported", .{});
+                        return TranspileError.NotCallable;
+                    }
+
+                    const fname = callee.data.?.sval.items;
+                    const sig = fns.get(fname) orelse {
+                        // External/stdlib function (e.g. printf). Skip type checking.
+                        return .{ .base = .Unknown };
+                    };
+
+                    var args_nodes = std.ArrayList(ast.Node).init(self.allocator);
+                    defer args_nodes.deinit();
+                    if (exp.right) |right| {
+                        try self.flatten_call_args(right.*, &args_nodes);
+                    }
+
+                    if (args_nodes.items.len != sig.args.len) {
+                        self.report_type_error(node, "function '{s}' expects {d} args, got {d}", .{ fname, sig.args.len, args_nodes.items.len });
+                        return TranspileError.WrongArgCount;
+                    }
+
+                    for (args_nodes.items, 0..) |arg_node, idx| {
+                        const actual = try self.infer_expr_type(arg_node, env, fns);
+                        const expected = sig.args[idx];
+                        if (expected.base != .Unknown and actual.base != .Unknown and !CheckedType.eql(actual, expected)) {
+                            self.report_type_error(node, "type mismatch in call to '{s}' argument {d}", .{ fname, idx + 1 });
+                            return TranspileError.TypeMismatch;
+                        }
+                    }
+
+                    return sig.rtype;
+                }
+
+                if (mem.eql(u8, op, ",")) {
+                    // Comma expression type is the RHS type.
+                    if (exp.right) |right| return try self.infer_expr_type(right.*, env, fns);
+                    if (exp.left) |left| return try self.infer_expr_type(left.*, env, fns);
+                    return .{ .base = .Unknown };
+                }
+
+                if (mem.eql(u8, op, "[]")) {
+                    const left = exp.left orelse return .{ .base = .Unknown };
+                    const right = exp.right orelse return .{ .base = .Unknown };
+                    const lt = try self.infer_expr_type(left.*, env, fns);
+                    const rt = try self.infer_expr_type(right.*, env, fns);
+                    if (!lt.is_array) {
+                        self.report_type_error(node, "indexing requires an array", .{});
+                        return TranspileError.IndexNonArray;
+                    }
+                    if (rt.base != .Num) {
+                        self.report_type_error(node, "array index must be num", .{});
+                        return TranspileError.TypeMismatch;
+                    }
+                    return .{ .base = lt.base, .is_array = false, .pointer_depth = lt.pointer_depth };
+                }
+
+                const is_assign = mem.eql(u8, op, "=") or
+                    mem.eql(u8, op, "+=") or mem.eql(u8, op, "-=") or mem.eql(u8, op, "*=") or mem.eql(u8, op, "/=") or
+                    mem.eql(u8, op, "<<=") or mem.eql(u8, op, ">>=");
+
+                if (is_assign) {
+                    const left = exp.left orelse return .{ .base = .Unknown };
+                    const right = exp.right orelse return .{ .base = .Unknown };
+                    const lt = try self.infer_expr_type(left.*, env, fns);
+                    const rt = try self.infer_expr_type(right.*, env, fns);
+
+                    // For compound assignments, require numeric types.
+                    if (!mem.eql(u8, op, "=")) {
+                        if (lt.base != .Num or rt.base != .Num) {
+                            self.report_type_error(node, "compound assignment '{s}' expects num", .{op});
+                            return TranspileError.TypeMismatch;
+                        }
+                        return .{ .base = .Num };
+                    }
+
+                    if (lt.base != .Unknown and rt.base != .Unknown and !CheckedType.eql(lt, rt)) {
+                        self.report_type_error(node, "type mismatch in assignment", .{});
+                        return TranspileError.TypeMismatch;
+                    }
+                    return lt;
+                }
+
+                const l: CheckedType = if (exp.left) |left| try self.infer_expr_type(left.*, env, fns) else CheckedType{ .base = .Unknown };
+                const r: CheckedType = if (exp.right) |right| try self.infer_expr_type(right.*, env, fns) else CheckedType{ .base = .Unknown };
+
+                if (mem.eql(u8, op, "+") or mem.eql(u8, op, "-") or mem.eql(u8, op, "*") or mem.eql(u8, op, "/") or mem.eql(u8, op, "%")) {
+                    if (l.base != .Num or r.base != .Num) {
+                        self.report_type_error(node, "operator '{s}' expects num operands", .{op});
+                        return TranspileError.TypeMismatch;
+                    }
+                    return .{ .base = .Num };
+                }
+
+                if (mem.eql(u8, op, "<") or mem.eql(u8, op, "<=") or mem.eql(u8, op, ">") or mem.eql(u8, op, ">=")) {
+                    if (l.base != .Num or r.base != .Num) {
+                        self.report_type_error(node, "comparison '{s}' expects num operands", .{op});
+                        return TranspileError.TypeMismatch;
+                    }
+                    return .{ .base = .Bin };
+                }
+
+                if (mem.eql(u8, op, "==") or mem.eql(u8, op, "!=")) {
+                    if (l.base != .Unknown and r.base != .Unknown and !CheckedType.eql(l, r)) {
+                        self.report_type_error(node, "equality '{s}' expects both sides to have the same type", .{op});
+                        return TranspileError.TypeMismatch;
+                    }
+                    return .{ .base = .Bin };
+                }
+
+                if (mem.eql(u8, op, "&&") or mem.eql(u8, op, "||")) {
+                    if (l.base != .Bin or r.base != .Bin) {
+                        self.report_type_error(node, "logical '{s}' expects bin operands", .{op});
+                        return TranspileError.TypeMismatch;
+                    }
+                    return .{ .base = .Bin };
+                }
+
+                if (mem.eql(u8, op, "..")) {
+                    if (l.base != .Num or r.base != .Num) {
+                        self.report_type_error(node, "range '..' expects num endpoints", .{});
+                        return TranspileError.TypeMismatch;
+                    }
+                    return .{ .base = .Unknown };
+                }
+
+                return l;
+            },
+            else => return .{ .base = .Unknown },
+        }
+    }
+
+    fn check_body(self: *Self, body: *ast.Node, env: *TypeEnv, fns: *const std.StringHashMap(FnSig), fn_rtype: CheckedType) TranspileError!void {
+        if (body.type != .Body) return;
+
+        try env.push();
+        defer env.pop();
+
+        const stmts = body.node_variant.?.body.statements;
+        for (stmts.items()) |stmt_ptr| {
+            const stmt = stmt_ptr.*;
+            switch (stmt.type) {
+                .Variable => {
+                    const v = stmt.node_variant.?.variable;
+                    const name = v.name.items;
+                    const vtype = type_from_dtype(v.type);
+                    try env.put_current(name, vtype);
+                    if (v.val) |val| {
+                        const init_t = try self.infer_expr_type(val.*, env, fns);
+                        if (vtype.base != .Unknown and init_t.base != .Unknown and !CheckedType.eql(vtype, init_t)) {
+                            self.report_type_error(stmt, "type mismatch in initialization of '{s}'", .{name});
+                            return TranspileError.TypeMismatch;
+                        }
+                    }
+                },
+                .StatementReturn => {
+                    const has_expr = stmt.node_variant != null;
+                    if (fn_rtype.base == .Void) {
+                        if (has_expr) {
+                            self.report_type_error(stmt, "void function cannot return a value", .{});
+                            return TranspileError.ReturnTypeMismatch;
+                        }
+                    } else {
+                        if (!has_expr) {
+                            self.report_type_error(stmt, "non-void function must return a value", .{});
+                            return TranspileError.ReturnTypeMismatch;
+                        }
+                        const rv = stmt.node_variant.?.statement.return_stmt;
+                        const rt = try self.infer_expr_type(rv.*, env, fns);
+                        if (rt.base != .Unknown and !CheckedType.eql(fn_rtype, rt)) {
+                            self.report_type_error(stmt, "return type mismatch", .{});
+                            return TranspileError.ReturnTypeMismatch;
+                        }
+                    }
+                },
+                .StatementIf => {
+                    const ifs = stmt.node_variant.?.statement.if_stmt;
+                    const ct = try self.infer_expr_type(ifs.condition.*, env, fns);
+                    if (ct.base != .Bin) {
+                        self.report_type_error(stmt, "if condition must be bin", .{});
+                        return TranspileError.InvalidConditionType;
+                    }
+                    try self.check_body(ifs.body, env, fns, fn_rtype);
+                },
+                .StatementElseIf => {
+                    const elif = stmt.node_variant.?.statement.elif_stmt;
+                    const ct = try self.infer_expr_type(elif.condition.*, env, fns);
+                    if (ct.base != .Bin) {
+                        self.report_type_error(stmt, "elif condition must be bin", .{});
+                        return TranspileError.InvalidConditionType;
+                    }
+                    try self.check_body(elif.body, env, fns, fn_rtype);
+                },
+                .StatementElse => {
+                    const els = stmt.node_variant.?.statement.else_stmt;
+                    try self.check_body(els.body, env, fns, fn_rtype);
+                },
+                .StatementFit => {
+                    const fit = stmt.node_variant.?.statement.fit_stmt;
+                    const target_t = try self.infer_expr_type(fit.exp.*, env, fns);
+                    for (fit.branches.items()) |branch| {
+                        if (branch.condition) |cond| {
+                            const ct = try self.infer_expr_type(cond.*, env, fns);
+                            if (target_t.base != .Unknown and ct.base != .Unknown and !CheckedType.eql(target_t, ct)) {
+                                self.report_type_error(stmt, "fit branch condition type must match fit expression type", .{});
+                                return TranspileError.TypeMismatch;
+                            }
+                        }
+                        try self.check_body(branch.body, env, fns, fn_rtype);
+                    }
+                },
+                .StatementFor => {
+                    const f = stmt.node_variant.?.statement.for_stmt;
+                    switch (f) {
+                        .range => |fr| {
+                            // for i : start..end { ... }
+                            const range_node = fr.range.*;
+                            if (range_node.type != .Expression or !mem.eql(u8, range_node.node_variant.?.exp.op, "..")) {
+                                self.report_type_error(stmt, "for-range expects '..'", .{});
+                                return TranspileError.TypeMismatch;
+                            }
+                            _ = try self.infer_expr_type(range_node, env, fns);
+                            try env.push();
+                            defer env.pop();
+                            try env.put_current(fr.index_name, .{ .base = .Num });
+                            try self.check_body(fr.body, env, fns, fn_rtype);
+                        },
+                        .iter => |fi| {
+                            const it_t = try self.infer_expr_type(fi.iterable.*, env, fns);
+                            if (!it_t.is_array) {
+                                self.report_type_error(stmt, "for-iter expects array iterable", .{});
+                                return TranspileError.TypeMismatch;
+                            }
+                            try env.push();
+                            defer env.pop();
+                            if (fi.index_name) |iname| try env.put_current(iname, .{ .base = .Num });
+                            try env.put_current(fi.item_name, .{ .base = it_t.base });
+                            try self.check_body(fi.body, env, fns, fn_rtype);
+                        },
+                    }
+                },
+                .Body => {
+                    try self.check_body(stmt_ptr, env, fns, fn_rtype);
+                },
+                else => {
+                    // Expression statements, break/continue, etc.
+                    _ = try self.infer_expr_type(stmt, env, fns);
+                },
+            }
+        }
+    }
+
+    fn collect_fn_sigs(self: *Self, proc: *Self, fns: *std.StringHashMap(FnSig), owned_args: *std.ArrayList([]CheckedType)) TranspileError!void {
+        for (proc.nodes.items()) |node| {
+            if (node.type != .Function or node.node_variant == null) continue;
+            const fnv = node.node_variant.?.function;
+            if (fnv.name == null) continue;
+            const name = fnv.name.?.items;
+
+            const args_vec = fnv.args orelse utils.Vector(*ast.Node).init(proc.allocator);
+            const args_len = args_vec.count;
+            var args_slice = proc.allocator.alloc(CheckedType, args_len) catch {
+                return TranspileError.MemoryAllocationFailed;
+            };
+            errdefer proc.allocator.free(args_slice);
+
+            var i: usize = 0;
+            for (args_vec.items()) |arg_ptr| {
+                const arg = arg_ptr.*;
+                if (arg.type == .Variable and arg.node_variant != null) {
+                    args_slice[i] = type_from_dtype(arg.node_variant.?.variable.type);
+                } else {
+                    args_slice[i] = .{ .base = .Unknown };
+                }
+                i += 1;
+            }
+
+            owned_args.append(args_slice) catch {
+                return TranspileError.MemoryAllocationFailed;
+            };
+            fns.put(name, .{
+                .rtype = if (fnv.rtype) |rt| type_from_dtype(&rt) else .{ .base = .Void },
+                .args = args_slice,
+            }) catch {
+                return TranspileError.MemoryAllocationFailed;
+            };
+        }
+
+        for (proc.children.items) |child| {
+            try self.collect_fn_sigs(child, fns, owned_args);
+        }
+    }
+
+    fn typecheck_all(self: *Self) TranspileError!void {
+        var fns = std.StringHashMap(FnSig).init(self.allocator);
+        defer fns.deinit();
+        var owned_args = std.ArrayList([]CheckedType).init(self.allocator);
+        defer {
+            for (owned_args.items) |slice| self.allocator.free(slice);
+            owned_args.deinit();
+        }
+
+        try self.collect_fn_sigs(self, &fns, &owned_args);
+
+        // Check this module and all imported modules.
+        try typecheck_module(self, &fns);
+        for (self.children.items) |child| {
+            try typecheck_module(child, &fns);
+        }
+    }
+
+    fn typecheck_module(proc: *Self, fns: *const std.StringHashMap(FnSig)) TranspileError!void {
+        for (proc.nodes.items()) |node| {
+            if (node.type != .Function or node.node_variant == null) continue;
+            const fnv = node.node_variant.?.function;
+            const fn_rtype: CheckedType = if (fnv.rtype) |rt| type_from_dtype(&rt) else CheckedType{ .base = .Void };
+
+            var fn_env = TypeEnv.init(proc.allocator);
+            defer fn_env.deinit();
+            try fn_env.push();
+
+            // Add module-level globals (nodes without binded context).
+            for (proc.nodes.items()) |gn| {
+                if (gn.type == .Variable and gn.node_variant != null and gn.binded == null) {
+                    const v = gn.node_variant.?.variable;
+                    try fn_env.put_current(v.name.items, type_from_dtype(v.type));
+                }
+            }
+
+            // Add args.
+            if (fnv.args) |args| {
+                for (args.items()) |arg_ptr| {
+                    const arg = arg_ptr.*;
+                    if (arg.type != .Variable or arg.node_variant == null) continue;
+                    const v = arg.node_variant.?.variable;
+                    try fn_env.put_current(v.name.items, type_from_dtype(v.type));
+                }
+            }
+
+            if (fnv.body) |body| {
+                try proc.check_body(body, &fn_env, fns, fn_rtype);
+            }
+        }
     }
 
     fn warn_if_fit_not_exhausted(self: *Self, condition: *ast.Node, branches: []const ast.FitBranch) void {
@@ -1357,6 +1915,9 @@ pub const TranspileProcess = struct {
         for (import_nodes.items) |i| {
             try self.process_import(self.nodes.items()[i]);
         }
+
+        // Type check after imports are parsed (so imported signatures are available).
+        try self.typecheck_all();
 
         // Write standard library includes and prelude
         try self.transpile_prelude();

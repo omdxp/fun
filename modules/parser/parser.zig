@@ -1707,7 +1707,9 @@ pub const ParseProcess = struct {
             .pos = self.*.transpile_proc.*.pos,
             .node_variant = .{ .function = .{} },
         };
-        var dt: dtype.DataType = undefined;
+        // Initialize `dt` so optional fields are well-defined before `parse_datatype()`.
+        // `parse_datatype()` will set `type`/`flags` and overwrite `type_str`.
+        var dt: dtype.DataType = .{ .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator) };
         const ident_token = self.token_next();
         if (ident_token.?.type != .Identifier) {
             self.transpile_proc.err("expected indentifier, got '{}'", .{ident_token.?.type});
@@ -1793,21 +1795,6 @@ pub const ParseProcess = struct {
         };
         errdefer self.transpile_proc.allocator.destroy(exp);
         exp.* = exp_node.?;
-        if (exp.*.type == .Expression) {
-            exp.*.node_variant.?.exp.left = self.transpile_proc.allocator.create(ast.Node) catch |e| {
-                std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
-                return ParseError.MemoryAllocationFailed;
-            };
-            errdefer self.transpile_proc.allocator.destroy(exp.*.node_variant.?.exp.left.?);
-            exp.*.node_variant.?.exp.left.?.* = exp_node.?.node_variant.?.exp.left.?.*;
-            exp.*.node_variant.?.exp.right = self.transpile_proc.allocator.create(ast.Node) catch |e| {
-                std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
-                return ParseError.MemoryAllocationFailed;
-            };
-            errdefer self.transpile_proc.allocator.destroy(exp.*.node_variant.?.exp.right.?);
-            exp.*.node_variant.?.exp.right.?.* = exp_node.?.node_variant.?.exp.right.?.*;
-            exp.*.node_variant.?.exp.op = exp_node.?.node_variant.?.exp.op;
-        }
         self.transpile_proc.nodes.push(ast.Node{
             .type = .StatementReturn,
             .pos = self.*.transpile_proc.*.pos,
@@ -1850,21 +1837,6 @@ pub const ParseProcess = struct {
             };
             errdefer self.transpile_proc.allocator.destroy(condition);
             condition.* = condition_node.?;
-            if (condition_node.?.type == .Expression) {
-                condition.*.node_variant.?.exp.left = self.transpile_proc.allocator.create(ast.Node) catch |e| {
-                    std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
-                    return ParseError.MemoryAllocationFailed;
-                };
-                errdefer self.transpile_proc.allocator.destroy(condition.*.node_variant.?.exp.left.?);
-                condition.*.node_variant.?.exp.left.?.* = condition_node.?.node_variant.?.exp.left.?.*;
-                condition.*.node_variant.?.exp.right = self.transpile_proc.allocator.create(ast.Node) catch |e| {
-                    std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
-                    return ParseError.MemoryAllocationFailed;
-                };
-                errdefer self.transpile_proc.allocator.destroy(condition.*.node_variant.?.exp.right.?);
-                condition.*.node_variant.?.exp.right.?.* = condition_node.?.node_variant.?.exp.right.?.*;
-                condition.*.node_variant.?.exp.op = condition_node.?.node_variant.?.exp.op;
-            }
             try self.parse_body(hist);
             const body_node = self.node_pop();
             const body = self.transpile_proc.allocator.create(ast.Node) catch |e| {
@@ -1949,21 +1921,6 @@ pub const ParseProcess = struct {
         };
         errdefer self.transpile_proc.allocator.destroy(condition);
         condition.* = condition_node.?;
-        if (condition_node.?.type == .Expression) {
-            condition.*.node_variant.?.exp.left = self.transpile_proc.allocator.create(ast.Node) catch |e| {
-                std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
-                return ParseError.MemoryAllocationFailed;
-            };
-            errdefer self.transpile_proc.allocator.destroy(condition.*.node_variant.?.exp.left.?);
-            condition.*.node_variant.?.exp.left.?.* = condition_node.?.node_variant.?.exp.left.?.*;
-            condition.*.node_variant.?.exp.right = self.transpile_proc.allocator.create(ast.Node) catch |e| {
-                std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
-                return ParseError.MemoryAllocationFailed;
-            };
-            errdefer self.transpile_proc.allocator.destroy(condition.*.node_variant.?.exp.right.?);
-            condition.*.node_variant.?.exp.right.?.* = condition_node.?.node_variant.?.exp.right.?.*;
-            condition.*.node_variant.?.exp.op = condition_node.?.node_variant.?.exp.op;
-        }
         try self.parse_body(hist);
         const body_node = self.node_pop();
         const body = self.transpile_proc.allocator.create(ast.Node) catch |e| {
@@ -2045,21 +2002,6 @@ pub const ParseProcess = struct {
             };
             errdefer self.transpile_proc.allocator.destroy(condition);
             condition.* = condition_node.?;
-            if (condition_node.?.type == .Expression) {
-                condition.*.node_variant.?.exp.left = self.transpile_proc.allocator.create(ast.Node) catch |e| {
-                    std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
-                    return ParseError.MemoryAllocationFailed;
-                };
-                errdefer self.transpile_proc.allocator.destroy(condition.*.node_variant.?.exp.left.?);
-                condition.*.node_variant.?.exp.left.?.* = condition_node.?.node_variant.?.exp.left.?.*;
-                condition.*.node_variant.?.exp.right = self.transpile_proc.allocator.create(ast.Node) catch |e| {
-                    std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
-                    return ParseError.MemoryAllocationFailed;
-                };
-                errdefer self.transpile_proc.allocator.destroy(condition.*.node_variant.?.exp.right.?);
-                condition.*.node_variant.?.exp.right.?.* = condition_node.?.node_variant.?.exp.right.?.*;
-                condition.*.node_variant.?.exp.op = condition_node.?.node_variant.?.exp.op;
-            }
             try self.expect_op("->");
             try self.parse_body(&hist_down);
             const body_node = self.node_pop();

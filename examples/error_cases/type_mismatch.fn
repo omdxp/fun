@@ -1,0 +1,17 @@
+// Demonstrates fun's new type checking errors.
+//
+// Run:
+//   fun -in .\examples\error_cases\type_mismatch.fn
+//
+// Expected:
+// - A [TypeError] explaining the mismatch.
+
+fun add(num a, num b) num {
+  ret a + b;
+}
+
+fun main() {
+  num x = "hello";      // invalid: str assigned to num
+  num y = add(1, true); // invalid: bin passed where num is expected
+  if 123 { ret; }       // invalid: condition must be bin
+}
