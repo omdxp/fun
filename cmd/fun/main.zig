@@ -38,6 +38,7 @@ fn print_error_and_exit(err: anyerror) noreturn {
         cli.CliError.ShowHelp => {
             std.process.exit(0);
         },
+        // Formatting uses the same lexer/transpiler error types; they are printed elsewhere.
         error.FileNotFound => {
             _ = stderr.writeAll("Error: Input file not found\n") catch {};
         },
@@ -63,6 +64,16 @@ pub fn main() void {
     const global_allocator = arena.allocator();
 
     const options = cli.parse_args(global_allocator) catch |err| print_error_and_exit(err);
+
+    if (options.fmt_all) {
+        cli.format_file_and_imports_in_place(global_allocator, options.input_file) catch |err| print_error_and_exit(err);
+        return;
+    }
+
+    if (options.fmt) {
+        cli.format_file_in_place(global_allocator, options.input_file) catch |err| print_error_and_exit(err);
+        return;
+    }
 
     var tp = codegen.TranspileProcess.init(
         global_allocator,
