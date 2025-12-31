@@ -598,10 +598,14 @@ pub const ParseProcess = struct {
                 try self.create_node(&number_node);
             },
             .Identifier => {
-                if (self.transpile_proc.get_scope_entity(t.?.data.sval.items) == null) {
-                    if (self.transpile_proc.get_symbol(t.?.data.sval.items) == null and self.transpile_proc.global_symbols.get(t.?.data.sval.items) == null) {
-                        self.transpile_proc.err("unknown identifier '{s}'", .{t.?.data.sval.items});
-                        return ParseError.InvalidIdentifier;
+                // `_` is a wildcard identifier (used by `fit` default branches).
+                // It should be accepted even if it's not declared.
+                if (!mem.eql(u8, t.?.data.sval.items, "_")) {
+                    if (self.transpile_proc.get_scope_entity(t.?.data.sval.items) == null) {
+                        if (self.transpile_proc.get_symbol(t.?.data.sval.items) == null and self.transpile_proc.global_symbols.get(t.?.data.sval.items) == null) {
+                            self.transpile_proc.err("unknown identifier '{s}'", .{t.?.data.sval.items});
+                            return ParseError.InvalidIdentifier;
+                        }
                     }
                 }
                 var ident_node = ast.Node{
@@ -2011,12 +2015,10 @@ pub const ParseProcess = struct {
                 self.transpile_proc.err("expected expression, got assignment", .{});
                 return ParseError.InvalidExpression;
             }
-            const condition = self.transpile_proc.allocator.create(ast.Node) catch |e| {
-                std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
-                return ParseError.MemoryAllocationFailed;
-            };
-            errdefer self.transpile_proc.allocator.destroy(condition);
             if (condition_node.?.type == .Identifier and mem.eql(u8, condition_node.?.data.?.sval.items, "_")) {
+                // `_` is a special wildcard for the default branch. The parsed identifier node
+                // is not part of the resulting AST (condition=null), so we must free it now.
+                self.transpile_proc.deinit_node(condition_node.?);
                 // default case after should be the last branch
                 try self.expect_op("->");
                 try self.parse_body(&hist_down);
@@ -2036,6 +2038,12 @@ pub const ParseProcess = struct {
                 }
                 break;
             }
+
+            const condition = self.transpile_proc.allocator.create(ast.Node) catch |e| {
+                std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer self.transpile_proc.allocator.destroy(condition);
             condition.* = condition_node.?;
             if (condition_node.?.type == .Expression) {
                 condition.*.node_variant.?.exp.left = self.transpile_proc.allocator.create(ast.Node) catch |e| {

@@ -84,6 +84,9 @@ pub const TranspileProcess = struct {
     /// `nodes` is a list of AST (Abstract Syntax Tree) nodes.
     nodes: utils.Vector(ast.Node),
 
+    /// Accumulates warning text emitted during transpilation (useful for tests/tooling).
+    warnings: std.ArrayList(u8),
+
     /// Heap-allocated node containers that are referenced by other structures (e.g. scope entities)
     /// but whose contents are owned/deinitialized via `nodes`.
     owned_nodes: std.ArrayList(*ast.Node),
@@ -380,6 +383,7 @@ pub const TranspileProcess = struct {
             .outbuf = outbuf,
             .tokens = utils.Vector(token.Token).init(allocator),
             .nodes = utils.Vector(ast.Node).init(allocator),
+            .warnings = std.ArrayList(u8).init(allocator),
             .owned_nodes = std.ArrayList(*ast.Node).init(allocator),
             .owned_scope_entities = std.ArrayList(*scope.ScopeEntity).init(allocator),
             .scope = null,
@@ -395,6 +399,11 @@ pub const TranspileProcess = struct {
             .std_imports = std.ArrayList([]const u8).init(allocator),
             .input_file_path = input_file_path,
         };
+    }
+
+    pub fn get_warnings(self: *Self) ?[]const u8 {
+        if (self.warnings.items.len == 0) return null;
+        return self.warnings.items;
     }
 
     /// Logs an error message with the current position in the token stream.
@@ -434,19 +443,75 @@ pub const TranspileProcess = struct {
     /// - `fmt`: The format string for the warning message.
     /// - `args`: The arguments for the format string.
     pub fn warn(self: *Self, comptime fmt: []const u8, args: anytype) void {
-        const stdout = std.io.getStdOut().writer();
-        stdout.print("\n[Warning]\n", .{}) catch unreachable;
-        stdout.print(fmt, args) catch unreachable;
+        const stderr = std.io.getStdErr().writer();
+        stderr.print("\n[Warning]\n", .{}) catch unreachable;
+        stderr.print(fmt, args) catch unreachable;
+
+        self.warnings.writer().print("\n[Warning]\n", .{}) catch unreachable;
+        self.warnings.writer().print(fmt, args) catch unreachable;
 
         if (self.current_token) |ct| {
             const end_line = if (ct.pos.end_line == 0) ct.pos.line else ct.pos.end_line;
             if (end_line == ct.pos.line) {
-                stdout.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, ct.pos.end_col }) catch unreachable;
+                stderr.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, ct.pos.end_col }) catch unreachable;
+                self.warnings.writer().print("\nLocation: {s}:{d}:{d}-{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, ct.pos.end_col }) catch unreachable;
             } else {
-                stdout.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, end_line, ct.pos.end_col }) catch unreachable;
+                stderr.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, end_line, ct.pos.end_col }) catch unreachable;
+                self.warnings.writer().print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, end_line, ct.pos.end_col }) catch unreachable;
             }
         } else {
-            stdout.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch unreachable;
+            stderr.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch unreachable;
+            self.warnings.writer().print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch unreachable;
+        }
+    }
+
+    fn infer_simple_dtype(self: *Self, node: ast.Node) ?dtype.DataTypeType {
+        return switch (node.type) {
+            .Boolean => .Bin,
+            .Number => .Num,
+            .String => .Str,
+            .Identifier => blk: {
+                if (node.data == null) break :blk null;
+                const name = node.data.?.sval.items;
+                const ent = self.get_scope_entity(name) orelse break :blk null;
+                const ent_node = ent.node orelse break :blk null;
+                if (ent_node.type != .Variable) break :blk null;
+                break :blk ent_node.node_variant.?.variable.type.type;
+            },
+            else => null,
+        };
+    }
+
+    fn warn_if_fit_not_exhausted(self: *Self, condition: *ast.Node, branches: []const ast.FitBranch) void {
+        // If there is any default branch, treat it as exhausted.
+        for (branches) |branch| {
+            if (branch.condition == null) return;
+        }
+
+        const cond_type = self.infer_simple_dtype(condition.*) orelse return;
+        if (cond_type != .Bin) return;
+
+        var has_true = false;
+        var has_false = false;
+        for (branches) |branch| {
+            const cond = branch.condition orelse continue;
+            if (cond.type == .Boolean) {
+                if (cond.data != null and cond.data.?.bval) {
+                    has_true = true;
+                } else {
+                    has_false = true;
+                }
+            }
+        }
+
+        if (!(has_true and has_false)) {
+            if (!has_true and !has_false) {
+                self.warn("fit statement is not exhausted for bin condition (missing true and false branches)", .{});
+            } else if (!has_true) {
+                self.warn("fit statement is not exhausted for bin condition (missing true branch)", .{});
+            } else {
+                self.warn("fit statement is not exhausted for bin condition (missing false branch)", .{});
+            }
         }
     }
 
@@ -774,6 +839,7 @@ pub const TranspileProcess = struct {
         }
         self.scope.?.root = null;
         self.scope.?.current = null;
+        self.scope = null;
     }
 
     /// Creates a new scope for the transpiler.
@@ -1113,6 +1179,8 @@ pub const TranspileProcess = struct {
         }
         self.nodes.deinit();
 
+        self.warnings.deinit();
+
         // Free heap allocations that are not part of the `nodes` vector itself.
         for (self.owned_scope_entities.items) |entity| {
             self.allocator.destroy(entity);
@@ -1256,6 +1324,15 @@ pub const TranspileProcess = struct {
 
     /// Transpiles all nodes in the AST to C code
     pub fn transpile(self: *Self) GeneralError!void {
+        // The parser uses scopes only for parse-time identifier validation.
+        // Transpilation needs its own scope for type-driven features (e.g. warnings).
+        var did_init_scope = false;
+        if (self.scope == null or self.scope.?.current == null) {
+            _ = try self.init_root_scope();
+            did_init_scope = true;
+        }
+        defer if (did_init_scope) self.deinit_root_scope();
+
         // Add source file name at the top of the output
         const source_file = std.fs.path.basename(self.input_file_path);
         try self.write("// Source file: ");
@@ -1453,6 +1530,10 @@ pub const TranspileProcess = struct {
             .Function => {
                 const function = node.node_variant.?.function;
 
+                // Function scope (arguments live here; body gets its own nested scope).
+                _ = try self.new_scope();
+                defer self.finish_scope();
+
                 // Skip main functions in imported modules
                 if (function.name != null and mem.eql(u8, function.name.?.items, "main")) {
                     // Only include main function from the main module (not from imported modules)
@@ -1482,6 +1563,10 @@ pub const TranspileProcess = struct {
                     if (function.args) |args| {
                         for (args.items(), 0..) |arg, i| {
                             if (i > 0) try self.write(", ");
+                            // Make args visible for later type queries.
+                            if (arg.type == .Variable) {
+                                try self.register_scope_variable(arg);
+                            }
                             try self.transpile_node(arg.*);
                         }
                     }
@@ -1495,9 +1580,17 @@ pub const TranspileProcess = struct {
             },
             .Body => {
                 const body = node.node_variant.?.body;
+
+                // Each body introduces a new scope.
+                _ = try self.new_scope();
+                defer self.finish_scope();
+
                 try self.write("{");
                 self.indent();
                 for (body.statements.items()) |statement| {
+                    if (statement.type == .Variable) {
+                        try self.register_scope_variable(statement);
+                    }
                     try self.write_indent();
                     try self.transpile_node(statement.*);
                     if (statement.type == .Expression) {
@@ -1698,6 +1791,7 @@ pub const TranspileProcess = struct {
                         }
                     },
                     .fit_stmt => |fit| {
+                        self.warn_if_fit_not_exhausted(fit.exp, fit.branches.items());
                         try self.write("switch (");
                         try self.transpile_node(fit.exp.*);
                         try self.write(") {");
@@ -1779,6 +1873,29 @@ pub const TranspileProcess = struct {
             },
             else => {},
         }
+    }
+
+    fn register_scope_variable(self: *Self, var_node: *ast.Node) TranspileError!void {
+        if (self.scope == null or self.scope.?.current == null) return;
+        if (var_node.type != .Variable) return;
+
+        const ent = self.allocator.create(scope.ScopeEntity) catch |e| {
+            std.debug.print("Error creating scope entity: {s}\n", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
+        errdefer self.allocator.destroy(ent);
+
+        ent.* = .{
+            .flags = .{ .on_stack = false },
+            .node = var_node,
+            .name = var_node.node_variant.?.variable.name.items,
+        };
+
+        try self.push_scope_entity(ent);
+        self.owned_scope_entities.append(ent) catch |e| {
+            std.debug.print("Error tracking scope entity: {s}\n", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
     }
 
     /// Increase the indentation level

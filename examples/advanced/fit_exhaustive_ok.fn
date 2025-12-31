@@ -1,0 +1,16 @@
+// Demonstrates an exhaustive `fit` on `bin` (no warning).
+//
+// Run:
+//   fun -in .\examples\advanced\fit_exhaustive_ok.fn
+
+imp std.io;
+
+fun main() {
+  bin x = true;
+
+  // Exhaustive via default branch (`_`).
+  fit x {
+    true -> { printf("x was true\n"); },
+    _ -> { printf("x was false\n"); }
+  }
+}
