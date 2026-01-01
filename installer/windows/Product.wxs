@@ -34,6 +34,7 @@
     <DirectoryRef Id="INSTALLFOLDER">
       <!-- Component GUID MUST stay stable across releases once you ship MSI. -->
       <Component Id="PathEnv" Guid="ecd44697-c139-4b96-9998-7d09ceefd9b2">
+        <CreateFolder />
         <Environment
           Id="AddToPath"
           Name="PATH"
