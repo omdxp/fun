@@ -3,6 +3,10 @@
 imp std.io;
 imp std.time;
 fun main() {
-  num now = time(0);
-  printf("epoch_seconds=%d\n", now);
+  // `time()` returns a `time_t` and `ctime()` expects a `time_t*`.
+  time_t now = time(NULL);
+  printf("epoch_seconds=%lld\n", now);
+  // human-readable format
+  str time_str = ctime(&now);
+  printf("time_str=%s", time_str); // ctime() adds its own newline
 }
