@@ -737,8 +737,13 @@ pub const ParseProcess = struct {
                             if (self.transpile_proc.get_symbol(t.?.data.sval.items) == null and self.transpile_proc.global_symbols.get(t.?.data.sval.items) == null) {
                                 // Treat ALL_CAPS identifiers as C macro-style constants.
                                 if (!is_c_macro_ident) {
-                                    self.transpile_proc.err("unknown identifier '{s}'", .{t.?.data.sval.items});
-                                    return ParseError.InvalidIdentifier;
+                                    // Allow out-of-order function calls: if an unknown identifier is
+                                    // immediately called (`foo(...)`), accept it and defer validation
+                                    // to later passes / C compilation.
+                                    if (!self.next_token_is_operator("(")) {
+                                        self.transpile_proc.err("unknown identifier '{s}'", .{t.?.data.sval.items});
+                                        return ParseError.InvalidIdentifier;
+                                    }
                                 }
                             }
                         }

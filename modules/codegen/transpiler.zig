@@ -3628,6 +3628,12 @@ pub const TranspileProcess = struct {
             try self.emit_user_types_and_vtables();
         }
 
+        // Emit forward declarations for all functions so calls work even when
+        // function bodies are declared later in the file.
+        if (!self.is_importing) {
+            try self.emit_function_prototypes_all();
+        }
+
         // Output content from child imports recursively
         if (!self.is_importing) {
             try self.transpile_children_recursive(self);
@@ -3641,6 +3647,63 @@ pub const TranspileProcess = struct {
                 try self.write("\n\n");
             }
         }
+    }
+
+    fn emit_function_prototypes_all(self: *Self) TranspileError!void {
+        // Only the root module emits this block.
+        if (self.is_importing) return;
+        try self.write("\n// Function prototypes (allow out-of-order definitions)\n");
+        try self.emit_function_prototypes_module(self);
+        try self.write("\n");
+    }
+
+    fn emit_function_prototypes_module(self: *Self, proc: *Self) TranspileError!void {
+        for (proc.nodes.items()) |node| {
+            if (node.type != .Function or node.node_variant == null) continue;
+            const function = node.node_variant.?.function;
+            if (function.body == null) continue;
+            if (function.name != null and mem.eql(u8, function.name.?.items, "main")) continue;
+
+            try self.write_function_prototype(node);
+        }
+
+        for (proc.children.items) |child| {
+            try self.emit_function_prototypes_module(child);
+        }
+    }
+
+    fn write_function_prototype(self: *Self, node: ast.Node) TranspileError!void {
+        if (node.type != .Function or node.node_variant == null) return;
+        const function = node.node_variant.?.function;
+        if (function.body == null) return;
+
+        if (function.rtype) |rtype| {
+            try self.write_type(rtype);
+        } else {
+            try self.write("void");
+        }
+
+        try self.write(" ");
+        if (function.name) |name| {
+            try self.write(name.items);
+        }
+
+        try self.write("(");
+        self.in_function_params = true;
+        var wrote_any_param = false;
+        if (function.args) |args| {
+            for (args.items(), 0..) |arg, i| {
+                if (i > 0) try self.write(", ");
+                try self.transpile_node(arg.*);
+                wrote_any_param = true;
+            }
+        }
+        if (function.is_variadic) {
+            if (wrote_any_param) try self.write(", ");
+            try self.write("...");
+        }
+        self.in_function_params = false;
+        try self.write(");\n");
     }
 
     // Helper function to recursively transpile children

@@ -108,6 +108,29 @@ test "raw pointer maps to void*" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "function definitions can be out of order (prototypes emitted)" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_fn_prototype_order.fn";
+
+    const input =
+        "imp std.io;\n" ++
+        "fun main() {\n" ++
+        "  foo();\n" ++
+        "}\n" ++
+        "fun foo() {\n" ++
+        "  printf(\"ok\\n\");\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    const proto_idx = std.mem.indexOf(u8, out_owned, "void foo();") orelse return error.TestExpectedPrototype;
+    const main_idx = std.mem.indexOf(u8, out_owned, "int main") orelse return error.TestExpectedMain;
+    try std.testing.expect(proto_idx < main_idx);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
 test "std.time import adds time.h include" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_std_time.fn";
