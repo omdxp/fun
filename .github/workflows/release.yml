@@ -97,11 +97,37 @@ jobs:
           if ($tag -and $tag.StartsWith('v')) { $tag = $tag.Substring(1) }
           if (-not $tag) { $tag = '0.0.0' }
 
+          # WiX Product/@Version requires x.x.x.x with each x in [0, 65534].
+          # Accept tags like 1.2.3 or 1.2.3-beta and normalize.
+          $m = [regex]::Match($tag, '^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:\.(\d+))?')
+          if (-not $m.Success) {
+            $p = @(0,0,0,0)
+          } else {
+            $g2 = $m.Groups[2].Value
+            $g3 = $m.Groups[3].Value
+            $g4 = $m.Groups[4].Value
+            $n2 = 0; if ($g2) { $n2 = [int]$g2 }
+            $n3 = 0; if ($g3) { $n3 = [int]$g3 }
+            $n4 = 0; if ($g4) { $n4 = [int]$g4 }
+            $p = @(
+              [int]$m.Groups[1].Value,
+              $n2,
+              $n3,
+              $n4
+            )
+          }
+          for ($i = 0; $i -lt 4; $i++) {
+            if ($p[$i] -lt 0) { $p[$i] = 0 }
+            if ($p[$i] -gt 65534) { $p[$i] = 65534 }
+          }
+          $wixVersion = "$($p[0]).$($p[1]).$($p[2]).$($p[3])"
+
           New-Item -ItemType Directory -Force artifacts | Out-Null
 
           $src = "dist\fun-${{ matrix.target }}"
           $harvest = "dist\Harvest.wxs"
-          heat dir $src -cg FunFiles -dr INSTALLFOLDER -srd -sreg -sfrag -var var.SourceDir -out $harvest
+          # -ag makes heat emit Component Guid="*" (stable, deterministic GUIDs based on keypath)
+          heat dir $src -cg FunFiles -dr INSTALLFOLDER -ag -srd -sreg -sfrag -var var.SourceDir -out $harvest
 
           $product = "installer\windows\Product.wxs"
           $objDir = "dist\wixobj"
@@ -109,7 +135,7 @@ jobs:
 
           candle -nologo -ext WixUtilExtension -ext WixUIExtension `
             -dSourceDir=$src `
-            -dProductVersion=$tag `
+            -dProductVersion=$wixVersion `
             -out "$objDir\\" $product $harvest
 
           $msi = "artifacts\fun-${{ matrix.target }}-$tag.msi"
