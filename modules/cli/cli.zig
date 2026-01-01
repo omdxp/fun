@@ -934,23 +934,34 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
         }
         defer allocator.free(exe_file_for_os);
 
-        const result = try process.Child.run(.{
-            .allocator = allocator,
-            .argv = &[_][]const u8{exe_file_for_os},
-        });
-        defer {
-            allocator.free(result.stdout);
-            allocator.free(result.stderr);
-        }
-
-        if (result.term.Exited != 0) {
-            if (!builtin.is_test) {
-                try stderr.print("Runtime error: {s}", .{result.stderr});
+        if (builtin.is_test) {
+            const result = try process.Child.run(.{
+                .allocator = allocator,
+                .argv = &[_][]const u8{exe_file_for_os},
+            });
+            defer {
+                allocator.free(result.stdout);
+                allocator.free(result.stderr);
             }
-            return CliError.ExecutionFailed;
-        }
 
-        try stdout.print("{s}", .{result.stdout});
+            if (result.term.Exited != 0) {
+                return CliError.ExecutionFailed;
+            }
+
+            try stdout.print("{s}", .{result.stdout});
+        } else {
+            // In normal CLI usage we want the compiled program to behave like a normal
+            // executable: inherit stdin/stdout/stderr so interactive programs work.
+            var child = process.Child.init(&[_][]const u8{exe_file_for_os}, allocator);
+            child.stdin_behavior = .Inherit;
+            child.stdout_behavior = .Inherit;
+            child.stderr_behavior = .Inherit;
+            try child.spawn();
+            const term = try child.wait();
+            if (term.Exited != 0) {
+                return CliError.ExecutionFailed;
+            }
+        }
     }
 
     // Executable cleanup handled via defer above.

@@ -1,0 +1,8 @@
+// Real-world-ish: print the current time (epoch seconds).
+
+imp std.io;
+imp std.time;
+fun main() {
+  num now = time(0);
+  printf("epoch_seconds=%d\n", now);
+}

@@ -1,0 +1,28 @@
+// Real-world-ish: read an env var, parse an int, allocate a buffer, fill it with pseudo-random data.
+
+imp std.io;
+imp std.mem;
+imp std.string;
+
+fun main() {
+  str seed_s = getenv("FUN_SEED");
+  num seed = 12345;
+  if seed_s != 0 {
+    // strtol endptr is modeled as str in stubs; passing 0 is fine.
+    seed = strtol(seed_s, 0, 10);
+  }
+  srand(seed);
+
+  num n = 64;
+  raw* buf = malloc(n);
+  if buf == 0 {
+    printf("malloc failed\n");
+    exit(1);
+  }
+
+  num v = rand();
+  memset(buf, v, n);
+
+  printf("seed=%d len=%d first_byte=%d\n", seed, n, v);
+  free(buf);
+}

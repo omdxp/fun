@@ -178,6 +178,9 @@ pub const TranspileProcess = struct {
     did_emit_user_types: bool = false,
     /// Track if we're currently transpiling function parameters
     in_function_params: bool = false,
+
+    /// True while generating the C `main` body.
+    in_main: bool = false,
     /// Current indentation level for code formatting
     indent_level: u32 = 0,
     /// Represents a scope structure used in the transpiler.
@@ -1174,6 +1177,10 @@ pub const TranspileProcess = struct {
         return !t.is_array and t.pointer_depth == 0 and (t.base == .Num or t.base == .Dec);
     }
 
+    fn is_pointer_type(t: CheckedType) bool {
+        return !t.is_array and t.pointer_depth > 0;
+    }
+
     fn promote_numeric_type(a: CheckedType, b: CheckedType) dtype.DataTypeType {
         // Assumes `is_numeric_type(a)` and `is_numeric_type(b)`.
         if (a.base == .Dec or b.base == .Dec) return .Dec;
@@ -1204,6 +1211,11 @@ pub const TranspileProcess = struct {
             return true;
         }
 
+        // Treat `str` as a nullable reference type: allow `0` to convert to `str`.
+        if (!expected.is_array and expected.pointer_depth == 0 and expected.base == .Str and !actual.is_array and actual.pointer_depth == 0 and actual.is_null_literal) {
+            return true;
+        }
+
         if (expected.is_array != actual.is_array or expected.pointer_depth != actual.pointer_depth) return false;
 
         // `raw*` behaves like C `void*`: allow implicit conversion to/from any object pointer.
@@ -1218,7 +1230,22 @@ pub const TranspileProcess = struct {
 
     fn can_compare_or_match(a: CheckedType, b: CheckedType) bool {
         if (CheckedType.eql(a, b)) return true;
-        return is_numeric_type(a) and is_numeric_type(b);
+
+        // Numeric comparisons/coercion.
+        if (is_numeric_type(a) and is_numeric_type(b)) return true;
+
+        // C-style null pointer constant comparisons: allow `ptr == 0` / `ptr != 0`.
+        if (is_pointer_type(a) and !b.is_array and b.pointer_depth == 0 and b.is_null_literal) return true;
+        if (is_pointer_type(b) and !a.is_array and a.pointer_depth == 0 and a.is_null_literal) return true;
+
+        // Also allow `str` to compare against null constant: `s == 0` / `s != 0`.
+        if (!a.is_array and a.pointer_depth == 0 and a.base == .Str and !b.is_array and b.pointer_depth == 0 and b.is_null_literal) return true;
+        if (!b.is_array and b.pointer_depth == 0 and b.base == .Str and !a.is_array and a.pointer_depth == 0 and a.is_null_literal) return true;
+
+        // `raw*` behaves like `void*`: allow equality comparisons to other pointers.
+        if (is_pointer_type(a) and is_pointer_type(b) and (a.base == .Raw or b.base == .Raw)) return true;
+
+        return false;
     }
 
     fn flatten_call_args(self: *Self, node: ast.Node, out: *std.ArrayList(ast.Node)) TranspileError!void {
@@ -1695,6 +1722,18 @@ pub const TranspileProcess = struct {
                 .StatementFor => {
                     const f = stmt.node_variant.?.statement.for_stmt;
                     switch (f) {
+                        .cond => |fc| {
+                            if (fc.condition) |cond| {
+                                const ct = try self.infer_expr_type(cond.*, env, fns);
+                                if (ct.base != .Bin) {
+                                    self.report_type_error(stmt, "for condition must be bin", .{});
+                                    return TranspileError.InvalidConditionType;
+                                }
+                            }
+                            try env.push();
+                            defer env.pop();
+                            try self.check_body(fc.body, env, fns, fn_rtype);
+                        },
                         .range => |fr| {
                             // for i : start..end { ... }
                             const range_node = fr.range.*;
@@ -2493,6 +2532,14 @@ pub const TranspileProcess = struct {
                         },
                         .for_stmt => |for_s| {
                             switch (for_s) {
+                                .cond => |fc| {
+                                    if (fc.condition) |cond| {
+                                        self.deinit_node(cond.*);
+                                        allocator.destroy(cond);
+                                    }
+                                    self.deinit_node(fc.body.*);
+                                    allocator.destroy(fc.body);
+                                },
                                 .range => |fr| {
                                     self.deinit_node(fr.range.*);
                                     allocator.destroy(fr.range);
@@ -3490,6 +3537,9 @@ pub const TranspileProcess = struct {
                     try self.write("main");
                     try self.write("(int argc, char** argv) ");
                     if (function.body) |body| {
+                        const prev_in_main = self.in_main;
+                        self.in_main = true;
+                        defer self.in_main = prev_in_main;
                         try self.transpile_node(body.*);
                     }
                 } else {
@@ -3554,7 +3604,11 @@ pub const TranspileProcess = struct {
             .StatementReturn, .StatementIf, .StatementElseIf, .StatementElse, .StatementFit, .StatementFor => {
                 // `ret;` is represented as StatementReturn with no node_variant.
                 if (node.type == .StatementReturn and node.node_variant == null) {
-                    try self.write("return;");
+                    if (self.in_main) {
+                        try self.write("return 0;");
+                    } else {
+                        try self.write("return;");
+                    }
                     return;
                 }
 
@@ -3637,6 +3691,37 @@ pub const TranspileProcess = struct {
                     },
                     .for_stmt => |for_s| {
                         switch (for_s) {
+                            .cond => |fc| {
+                                if (fc.condition) |cond| {
+                                    try self.write("while (");
+                                    try self.transpile_node(cond.*);
+                                    try self.write(") {");
+                                } else {
+                                    try self.write("while (1) {");
+                                }
+                                self.indent();
+
+                                if (fc.body.type == .Body) {
+                                    const body = fc.body.node_variant.?.body;
+                                    for (body.statements.items()) |body_stmt| {
+                                        try self.write_indent();
+                                        try self.transpile_node(body_stmt.*);
+                                        if (body_stmt.type == .Expression) {
+                                            try self.write(";");
+                                        }
+                                    }
+                                } else {
+                                    try self.write_indent();
+                                    try self.transpile_node(fc.body.*);
+                                    if (fc.body.type == .Expression) {
+                                        try self.write(";");
+                                    }
+                                }
+
+                                self.dedent();
+                                try self.write_indent();
+                                try self.write("}");
+                            },
                             .range => |fr| {
                                 if (fr.range.type != .Expression or !mem.eql(u8, fr.range.node_variant.?.exp.op, "..")) {
                                     return TranspileError.UnsupportedNodeType;

@@ -1,0 +1,23 @@
+// Real-world-ish: copy up to 1024 bytes from stdin to a file, then report bytes.
+// When you run the produced C program, type input then EOF (Ctrl+Z+Enter on Windows).
+
+imp std.io;
+
+fun main() {
+  FILE* out = fopen("out.txt", "w");
+  if out == 0 {
+    perror("fopen");
+    ret;
+  }
+
+  num total = 0;
+  for total < 1024 {
+    num c = getchar();
+    if c == -1 { break; }
+    fputc(c, out);
+    total += 1;
+  }
+
+  fclose(out);
+  printf("wrote %d bytes to out.txt\n", total);
+}

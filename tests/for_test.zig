@@ -93,3 +93,48 @@ test "for array index and item transpiles" {
 
     try fs.cwd().deleteFile(ifilepath);
 }
+
+test "for condition transpiles to while" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "for_condition.fn";
+
+    const input =
+        "imp std.io;\n" ++
+        "fun main() {\n" ++
+        "  num i = 0;\n" ++
+        "  for i < 3 {\n" ++
+        "    printf(\"%d\\n\", i);\n" ++
+        "    i = i + 1;\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "while (i < 3)") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
+test "for infinite transpiles to while(1)" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "for_infinite.fn";
+
+    const input =
+        "imp std.io;\n" ++
+        "fun main() {\n" ++
+        "  num i = 0;\n" ++
+        "  for {\n" ++
+        "    if i == 3 { break; }\n" ++
+        "    printf(\"%d\\n\", i);\n" ++
+        "    i = i + 1;\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "while (1)") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}

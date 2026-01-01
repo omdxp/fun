@@ -1,0 +1,20 @@
+// Real-world-ish: simple request parsing via substring checks.
+
+imp std.io;
+imp std.string;
+
+fun main() {
+  str req = "GET /health HTTP/1.1";
+
+  printf("len=%d\n", strlen(req));
+
+  if strstr(req, "/health") != 0 {
+    printf("route=health\n");
+  } else {
+    printf("route=other\n");
+  }
+
+  if strcmp(req, "GET /health HTTP/1.1") == 0 {
+    printf("exact_match=1\n");
+  }
+}

@@ -1,0 +1,17 @@
+// Real-world-ish: compute Euclidean distance between two points.
+
+imp std.io;
+imp std.math;
+
+fun main() {
+  dec x1 = 1.0;
+  dec y1 = 2.0;
+  dec x2 = 4.0;
+  dec y2 = 6.0;
+
+  dec dx = x2 - x1;
+  dec dy = y2 - y1;
+  dec d = sqrt(dx * dx + dy * dy);
+
+  printf("distance=%f\n", d);
+}

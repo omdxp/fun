@@ -3161,6 +3161,96 @@ pub const ParseProcess = struct {
             return ParseError.InvalidStatement;
         }
 
+        // New syntax:
+        // - `for { ... }`           (infinite)
+        // - `for <cond> { ... }`    (condition loop)
+        // Existing syntax remains:
+        // - `for i : start..end { ... }`
+        // - `for item : arr { ... }` / `for i, item :: arr { ... }`
+        const next_tok = self.token_peek_next();
+        if (token.is_symbol(next_tok, '{')) {
+            // Infinite loop with no header.
+            _ = try self.transpile_proc.new_scope();
+            try self.parse_body_multiple_statements(hist);
+            self.transpile_proc.finish_scope();
+            const body_node = self.node_pop().?;
+
+            const body_ptr = self.transpile_proc.allocator.create(ast.Node) catch |e| {
+                std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer self.transpile_proc.allocator.destroy(body_ptr);
+            body_ptr.* = body_node;
+
+            var for_node = ast.Node{ .type = .StatementFor, .pos = if (for_token) |t| t.pos else null };
+            for_node.node_variant = .{ .statement = .{ .for_stmt = .{ .cond = .{ .condition = null, .body = body_ptr } } } };
+            try self.create_node(&for_node);
+            return;
+        }
+
+        // Disambiguate legacy `for <ident> : ...` from the new condition-loop form
+        // that can also start with an identifier: `for x != 0 { ... }`.
+        if (next_tok != null and next_tok.?.type == .Identifier) {
+            const after_ident = self.token_peek_n(1);
+            const is_legacy = token.is_operator(after_ident, ",") or token.is_operator(after_ident, ":");
+            if (!is_legacy) {
+                try self.parse_expressionable_root(hist);
+                const cond_node = self.node_pop().?;
+
+                _ = try self.transpile_proc.new_scope();
+                try self.parse_body_multiple_statements(hist);
+                self.transpile_proc.finish_scope();
+                const body_node = self.node_pop().?;
+
+                const cond_ptr = self.transpile_proc.allocator.create(ast.Node) catch |e| {
+                    std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
+                    return ParseError.MemoryAllocationFailed;
+                };
+                errdefer self.transpile_proc.allocator.destroy(cond_ptr);
+                cond_ptr.* = cond_node;
+
+                const body_ptr = self.transpile_proc.allocator.create(ast.Node) catch |e| {
+                    std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
+                    return ParseError.MemoryAllocationFailed;
+                };
+                errdefer self.transpile_proc.allocator.destroy(body_ptr);
+                body_ptr.* = body_node;
+
+                var for_node = ast.Node{ .type = .StatementFor, .pos = if (for_token) |t| t.pos else null };
+                for_node.node_variant = .{ .statement = .{ .for_stmt = .{ .cond = .{ .condition = cond_ptr, .body = body_ptr } } } };
+                try self.create_node(&for_node);
+                return;
+            }
+        } else if (next_tok != null and next_tok.?.type != .Identifier) {
+            // Condition-loop starting with a non-identifier token (e.g. `true`, `(<expr>)`).
+            try self.parse_expressionable_root(hist);
+            const cond_node = self.node_pop().?;
+
+            _ = try self.transpile_proc.new_scope();
+            try self.parse_body_multiple_statements(hist);
+            self.transpile_proc.finish_scope();
+            const body_node = self.node_pop().?;
+
+            const cond_ptr = self.transpile_proc.allocator.create(ast.Node) catch |e| {
+                std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer self.transpile_proc.allocator.destroy(cond_ptr);
+            cond_ptr.* = cond_node;
+
+            const body_ptr = self.transpile_proc.allocator.create(ast.Node) catch |e| {
+                std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer self.transpile_proc.allocator.destroy(body_ptr);
+            body_ptr.* = body_node;
+
+            var for_node = ast.Node{ .type = .StatementFor, .pos = if (for_token) |t| t.pos else null };
+            for_node.node_variant = .{ .statement = .{ .for_stmt = .{ .cond = .{ .condition = cond_ptr, .body = body_ptr } } } };
+            try self.create_node(&for_node);
+            return;
+        }
+
         const first = self.token_next();
         if (first == null or first.?.type != .Identifier) {
             self.transpile_proc.err("expected identifier after 'for'", .{});

@@ -1,0 +1,18 @@
+// Real-world-ish: normalize/sanitize user input characters.
+
+imp std.io;
+imp std.ctype;
+
+fun main() {
+  // Example: accept a single character (pretend it's user input)
+  // and normalize it to lowercase if it's a letter.
+  num c = 90;
+  if isalpha(c) != 0 {
+    c = tolower(c);
+  }
+  printf("normalized=%c\n", c);
+
+  // Classification examples
+  printf("isalnum('A')=%d\n", isalnum(65));
+  printf("isdigit('9')=%d\n", isdigit(57));
+}

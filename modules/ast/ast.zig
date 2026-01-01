@@ -199,6 +199,13 @@ pub const Node = struct {
             return_stmt: *Node,
             /// The for statement node.
             for_stmt: union(enum) {
+                /// Condition/infinite loop: `for { ... }` or `for cond { ... }`
+                ///
+                /// When `condition` is null, the loop is infinite.
+                cond: struct {
+                    condition: ?*Node = null,
+                    body: *Node,
+                },
                 /// For range: `for i : start..end { ... }`
                 range: struct {
                     index_name: []const u8,
