@@ -710,6 +710,13 @@ pub const TranspileProcess = struct {
         return init_with_stdlib_dir(allocator, ifilepath, ofilepath, flags, null);
     }
 
+    /// Same as `init`, but opens the input file read-write.
+    ///
+    /// This is required for operations that modify the input file in-place (e.g. the formatter).
+    pub fn init_rw(allocator: mem.Allocator, ifilepath: []const u8, ofilepath: []const u8, flags: TranspileProcessFlags) TranspileError!Self {
+        return init_with_stdlib_dir_mode(allocator, ifilepath, ofilepath, flags, null, .read_write);
+    }
+
     pub fn init_with_stdlib_dir(
         allocator: mem.Allocator,
         ifilepath: []const u8,
@@ -717,7 +724,18 @@ pub const TranspileProcess = struct {
         flags: TranspileProcessFlags,
         stdlib_dir_override: ?[]const u8,
     ) TranspileError!Self {
-        const ifile = fs.cwd().openFile(ifilepath, .{ .mode = .read_write }) catch |e| {
+        return init_with_stdlib_dir_mode(allocator, ifilepath, ofilepath, flags, stdlib_dir_override, .read_only);
+    }
+
+    fn init_with_stdlib_dir_mode(
+        allocator: mem.Allocator,
+        ifilepath: []const u8,
+        ofilepath: []const u8,
+        flags: TranspileProcessFlags,
+        stdlib_dir_override: ?[]const u8,
+        input_mode: fs.File.OpenMode,
+    ) TranspileError!Self {
+        const ifile = fs.cwd().openFile(ifilepath, .{ .mode = input_mode }) catch |e| {
             std.debug.print("Error opening input file '{s}': {s}\\n", .{ ifilepath, @errorName(e) });
             return TranspileError.FileOpenError;
         };

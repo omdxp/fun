@@ -655,7 +655,7 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
 
 pub fn format_file_in_place(allocator: mem.Allocator, input_file: []const u8) !void {
     // Lex tokens from the file.
-    var tp = try codegen.TranspileProcess.init(
+    var tp = try codegen.TranspileProcess.init_rw(
         allocator,
         input_file,
         "__fmt_unused__.c",
