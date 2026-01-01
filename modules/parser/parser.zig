@@ -1226,11 +1226,13 @@ pub const ParseProcess = struct {
     fn parse_left_has_priority(self: *Self, op_left: []const u8, op_right: []const u8) bool {
         var left_group: ?expressionable.OpPrecedenceGroup = null;
         var right_group: ?expressionable.OpPrecedenceGroup = null;
-        if (mem.eql(u8, op_left, op_right)) {
-            return false;
-        }
         const left_prec = self.parse_get_precedence_for_operator(op_left, &left_group);
         const right_prec = self.parse_get_precedence_for_operator(op_right, &right_group);
+
+        // If operators are the same, associativity decides.
+        if (mem.eql(u8, op_left, op_right)) {
+            return left_group.?.associativity == .LeftToRight;
+        }
         if (left_group.?.associativity == .RightToLeft) {
             return false;
         }
@@ -1867,9 +1869,14 @@ pub const ParseProcess = struct {
             self.transpile_proc.err("expected type name after 'impl'", .{});
             return ParseError.InvalidIdentifier;
         }
-        const quirk_tok = self.token_next();
-        if (quirk_tok == null or quirk_tok.?.type != .Identifier) {
-            self.transpile_proc.err("expected quirk name after type name", .{});
+
+        // `impl Type Quirk { ... }` (quirk impl) OR `impl Type { ... }` (plain impl).
+        const peek_after_type = self.token_peek_next();
+        var quirk_tok: ?token.Token = null;
+        if (peek_after_type != null and peek_after_type.?.type == .Identifier) {
+            quirk_tok = self.token_next();
+        } else if (peek_after_type == null or peek_after_type.?.type != .Symbol or peek_after_type.?.data.cval != '{') {
+            self.transpile_proc.err("expected quirk name or '{{' after type name", .{});
             return ParseError.InvalidIdentifier;
         }
 
@@ -1880,13 +1887,19 @@ pub const ParseProcess = struct {
         type_name.appendSlice(type_tok.?.data.sval.items) catch {
             return ParseError.MemoryAllocationFailed;
         };
-        var quirk_name = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, quirk_tok.?.data.sval.items.len) catch {
-            return ParseError.MemoryAllocationFailed;
-        };
-        errdefer quirk_name.deinit();
-        quirk_name.appendSlice(quirk_tok.?.data.sval.items) catch {
-            return ParseError.MemoryAllocationFailed;
-        };
+
+        var quirk_name: ?std.ArrayList(u8) = null;
+        errdefer if (quirk_name) |*qn| qn.deinit();
+        if (quirk_tok) |qt| {
+            var qn = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, qt.data.sval.items.len) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+            qn.appendSlice(qt.data.sval.items) catch {
+                qn.deinit();
+                return ParseError.MemoryAllocationFailed;
+            };
+            quirk_name = qn;
+        }
 
         try self.expect_sym('{');
 
@@ -1908,16 +1921,23 @@ pub const ParseProcess = struct {
                 return ParseError.InvalidIdentifier;
             }
 
-            // Build a regular function node with a generated name: `<Type>__<Quirk>__<method>`
+            // Build a regular function node with a generated name:
+            // - Quirk impl: `<Type>__<Quirk>__<method>`
+            // - Plain impl: `<Type>__<method>`
             var fn_node = ast.Node{
                 .type = .Function,
                 .pos = name_tok.?.pos,
                 .node_variant = .{ .function = .{} },
             };
 
-            const gen_name = std.fmt.allocPrint(self.transpile_proc.allocator, "{s}__{s}__{s}", .{ type_name.items, quirk_name.items, name_tok.?.data.sval.items }) catch {
-                return ParseError.MemoryAllocationFailed;
-            };
+            const gen_name = if (quirk_name) |qn|
+                (std.fmt.allocPrint(self.transpile_proc.allocator, "{s}__{s}__{s}", .{ type_name.items, qn.items, name_tok.?.data.sval.items }) catch {
+                    return ParseError.MemoryAllocationFailed;
+                })
+            else
+                (std.fmt.allocPrint(self.transpile_proc.allocator, "{s}__{s}", .{ type_name.items, name_tok.?.data.sval.items }) catch {
+                    return ParseError.MemoryAllocationFailed;
+                });
             defer self.transpile_proc.allocator.free(gen_name);
             fn_node.node_variant.?.function.name = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, gen_name.len) catch {
                 return ParseError.MemoryAllocationFailed;
@@ -1925,6 +1945,11 @@ pub const ParseProcess = struct {
             fn_node.node_variant.?.function.name.?.appendSlice(gen_name) catch {
                 return ParseError.MemoryAllocationFailed;
             };
+
+            // Mark that we're inside a function for statement parsing (`if`, `for`, `ret`, etc).
+            const prev_func = self.parser_current_function;
+            self.parser_current_function = fn_node;
+            defer self.parser_current_function = prev_func;
 
             // Function scope.
             _ = try self.transpile_proc.new_scope();
@@ -2497,8 +2522,19 @@ pub const ParseProcess = struct {
                 return ParseError.InvalidStatement;
             }
             _ = self.token_next(); // skip elif
-            try self.parse_expressionable_root(hist);
-            const condition_node = self.node_pop();
+
+            // Parse condition. If written as `elif (cond) ...`, do not let the condition
+            // parse consume the following statement tokens.
+            var condition_node: ?ast.Node = null;
+            if (self.next_token_is_operator("(")) {
+                try self.expect_op("(");
+                try self.parse_expressionable_root(hist);
+                condition_node = self.node_pop();
+                try self.expect_sym(')');
+            } else {
+                try self.parse_expressionable_root(hist);
+                condition_node = self.node_pop();
+            }
             if (condition_node.?.type == .Expression and mem.eql(u8, condition_node.?.node_variant.?.exp.op, "=")) {
                 self.transpile_proc.err("expected expression, got assignment", .{});
                 return ParseError.InvalidExpression;
@@ -2509,18 +2545,34 @@ pub const ParseProcess = struct {
             };
             errdefer self.transpile_proc.allocator.destroy(condition);
             condition.* = condition_node.?;
-            try self.parse_body(hist);
-            const body_node = self.node_pop();
-            const body = self.transpile_proc.allocator.create(ast.Node) catch |e| {
-                std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
-                return ParseError.MemoryAllocationFailed;
-            };
-            errdefer self.transpile_proc.allocator.destroy(body);
-            body.* = body_node.?;
+
+            // Body can be a block `{ ... }` or a single statement.
+            var body_ptr: *ast.Node = undefined;
+            if (self.next_token_is_symbol('{')) {
+                try self.parse_body(hist);
+                const body_node = self.node_pop();
+                body_ptr = self.transpile_proc.allocator.create(ast.Node) catch |e| {
+                    std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
+                    return ParseError.MemoryAllocationFailed;
+                };
+                errdefer self.transpile_proc.allocator.destroy(body_ptr);
+                body_ptr.* = body_node.?;
+            } else {
+                var hist_down = utils.History.down(self.transpile_proc.allocator, hist, hist.flags);
+                defer hist_down.deinit();
+                try self.parse_statement(&hist_down);
+                const stmt_node = self.node_pop();
+                body_ptr = self.transpile_proc.allocator.create(ast.Node) catch |e| {
+                    std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
+                    return ParseError.MemoryAllocationFailed;
+                };
+                errdefer self.transpile_proc.allocator.destroy(body_ptr);
+                body_ptr.* = stmt_node.?;
+            }
             var elif_node = ast.Node{
                 .type = .StatementElseIf,
                 .pos = if (elif_token) |t| t.pos else null,
-                .node_variant = .{ .statement = .{ .elif_stmt = .{ .condition = condition, .body = body } } },
+                .node_variant = .{ .statement = .{ .elif_stmt = .{ .condition = condition, .body = body_ptr } } },
             };
             try self.create_node(&elif_node);
         }
@@ -2546,18 +2598,34 @@ pub const ParseProcess = struct {
                 return ParseError.InvalidStatement;
             }
             _ = self.token_next(); // skip else
-            try self.parse_body(hist);
-            const body_node = self.node_pop();
-            const body = self.transpile_proc.allocator.create(ast.Node) catch |e| {
-                std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
-                return ParseError.MemoryAllocationFailed;
-            };
-            errdefer self.transpile_proc.allocator.destroy(body);
-            body.* = body_node.?;
+
+            // Body can be a block `{ ... }` or a single statement.
+            var body_ptr: *ast.Node = undefined;
+            if (self.next_token_is_symbol('{')) {
+                try self.parse_body(hist);
+                const body_node = self.node_pop();
+                body_ptr = self.transpile_proc.allocator.create(ast.Node) catch |e| {
+                    std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
+                    return ParseError.MemoryAllocationFailed;
+                };
+                errdefer self.transpile_proc.allocator.destroy(body_ptr);
+                body_ptr.* = body_node.?;
+            } else {
+                var hist_down = utils.History.down(self.transpile_proc.allocator, hist, hist.flags);
+                defer hist_down.deinit();
+                try self.parse_statement(&hist_down);
+                const stmt_node = self.node_pop();
+                body_ptr = self.transpile_proc.allocator.create(ast.Node) catch |e| {
+                    std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
+                    return ParseError.MemoryAllocationFailed;
+                };
+                errdefer self.transpile_proc.allocator.destroy(body_ptr);
+                body_ptr.* = stmt_node.?;
+            }
             var else_node = ast.Node{
                 .type = .StatementElse,
                 .pos = if (else_token) |t| t.pos else null,
-                .node_variant = .{ .statement = .{ .else_stmt = .{ .body = body } } },
+                .node_variant = .{ .statement = .{ .else_stmt = .{ .body = body_ptr } } },
             };
             try self.create_node(&else_node);
         }
@@ -2583,8 +2651,19 @@ pub const ParseProcess = struct {
             self.transpile_proc.err("if statement outside of function", .{});
             return ParseError.InvalidStatement;
         }
-        try self.parse_expressionable_root(hist);
-        const condition_node = self.node_pop();
+
+        // Parse condition. If written as `if (cond) ...`, do not let the condition
+        // parse consume the following statement tokens.
+        var condition_node: ?ast.Node = null;
+        if (self.next_token_is_operator("(")) {
+            try self.expect_op("(");
+            try self.parse_expressionable_root(hist);
+            condition_node = self.node_pop();
+            try self.expect_sym(')');
+        } else {
+            try self.parse_expressionable_root(hist);
+            condition_node = self.node_pop();
+        }
         if (condition_node.?.type == .Expression and mem.eql(u8, condition_node.?.node_variant.?.exp.op, "=")) {
             self.transpile_proc.err("expected expression, got assignment", .{});
             return ParseError.InvalidExpression;
@@ -2595,14 +2674,30 @@ pub const ParseProcess = struct {
         };
         errdefer self.transpile_proc.allocator.destroy(condition);
         condition.* = condition_node.?;
-        try self.parse_body(hist);
-        const body_node = self.node_pop();
-        const body = self.transpile_proc.allocator.create(ast.Node) catch |e| {
-            std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
-            return ParseError.MemoryAllocationFailed;
-        };
-        errdefer self.transpile_proc.allocator.destroy(body);
-        body.* = body_node.?;
+
+        // Body can be a block `{ ... }` or a single statement.
+        var body_ptr: *ast.Node = undefined;
+        if (self.next_token_is_symbol('{')) {
+            try self.parse_body(hist);
+            const body_node = self.node_pop();
+            body_ptr = self.transpile_proc.allocator.create(ast.Node) catch |e| {
+                std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer self.transpile_proc.allocator.destroy(body_ptr);
+            body_ptr.* = body_node.?;
+        } else {
+            var hist_down = utils.History.down(self.transpile_proc.allocator, hist, hist.flags);
+            defer hist_down.deinit();
+            try self.parse_statement(&hist_down);
+            const stmt_node = self.node_pop();
+            body_ptr = self.transpile_proc.allocator.create(ast.Node) catch |e| {
+                std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer self.transpile_proc.allocator.destroy(body_ptr);
+            body_ptr.* = stmt_node.?;
+        }
         const if_node = self.transpile_proc.allocator.create(ast.Node) catch |e| {
             std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
             return ParseError.MemoryAllocationFailed;
@@ -2614,7 +2709,7 @@ pub const ParseProcess = struct {
             .pos = if (if_token) |t| t.pos else null,
             .node_variant = .{
                 .statement = .{
-                    .if_stmt = .{ .condition = condition, .body = body },
+                    .if_stmt = .{ .condition = condition, .body = body_ptr },
                 },
             },
         };

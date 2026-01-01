@@ -1,0 +1,42 @@
+imp std.io;
+
+// Demonstrates that compounds can be declared in any order.
+// The compiler will handle forward references automatically.
+
+compound Segment {
+  Point a;
+  Point b;
+}
+
+compound List {
+  Node* head;
+}
+
+compound Point {
+  num x;
+  num y;
+}
+
+compound Node {
+  num v;
+  Node* next;
+}
+
+fun main() {
+  Segment s;
+  s.a.x = 1; s.a.y = 2;
+  s.b.x = 3; s.b.y = 4;
+
+  Node n1;
+  Node n2;
+  n1.v = 10;
+  n2.v = 20;
+  n1.next = &n2;
+  n2.next = 0;
+
+  List list;
+  list.head = &n1;
+
+  printf("segment a=(%d,%d) b=(%d,%d)\n", s.a.x, s.a.y, s.b.x, s.b.y);
+  printf("list head=%d next=%d\n", list.head.v, list.head.next.v);
+}

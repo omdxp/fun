@@ -58,6 +58,9 @@ pub const TranspileError = error{
     InvalidConditionType,
     /// Error indicating an expression is not callable.
     NotCallable,
+
+    /// Error indicating compounds have cyclic by-value dependencies.
+    CyclicCompoundDependency,
     /// Error indicating an index operation is applied to a non-array.
     IndexNonArray,
 };
@@ -513,7 +516,9 @@ pub const TranspileProcess = struct {
             if (n.type != .Impl or n.node_variant == null) continue;
             const imp = n.node_variant.?.impl;
             const type_name = imp.type_name.items;
-            const quirk_name = imp.quirk_name.items;
+
+            // Plain impl blocks (`impl Type { ... }`) are not part of the quirk registry.
+            const quirk_name = if (imp.quirk_name) |qn| qn.items else continue;
 
             const sig = reg.quirk_sig_by_name.get(quirk_name) orelse quirk_name;
 
@@ -1191,6 +1196,57 @@ pub const TranspileProcess = struct {
         return null;
     }
 
+    fn infer_compound_field_access_type(self: *Self, node: ast.Node, base: CheckedType, field_name: []const u8) TranspileError!CheckedType {
+        if (!is_user_named_type(base)) {
+            self.report_type_error(node, "field access requires a compound-typed value", .{});
+            return TranspileError.TypeMismatch;
+        }
+
+        if (base.pointer_depth > 1) {
+            self.report_type_error(node, "field access supports at most one pointer indirection", .{});
+            return TranspileError.TypeMismatch;
+        }
+
+        const fdt = self.lookup_compound_field(base.name.?, field_name) orelse {
+            self.report_type_error(node, "type '{s}' has no field '{s}'", .{ base.name.?, field_name });
+            return TranspileError.TypeMismatch;
+        };
+        return type_from_dtype(fdt);
+    }
+
+    fn lookup_plain_impl_method_fn_proc(self: *Self, proc: *Self, type_name: []const u8, method_name: []const u8) ?[]const u8 {
+        for (proc.owned_nodes.items) |n| {
+            if (n.type != .Impl or n.node_variant == null) continue;
+            const im = n.node_variant.?.impl;
+            if (im.quirk_name != null) continue; // only plain impl
+            if (!mem.eql(u8, im.type_name.items, type_name)) continue;
+
+            for (im.methods.items()) |m| {
+                if (m.type != .Function or m.node_variant == null) continue;
+                const fnv = m.node_variant.?.function;
+                if (fnv.name == null) continue;
+                const full = fnv.name.?.items;
+                // Expected: `<Type>__<method>`
+                if (!mem.startsWith(u8, full, type_name)) continue;
+                const need_len = type_name.len + 2 + method_name.len;
+                if (full.len != need_len) continue;
+                if (!mem.eql(u8, full[type_name.len .. type_name.len + 2], "__")) continue;
+                if (!mem.eql(u8, full[type_name.len + 2 ..], method_name)) continue;
+                return full;
+            }
+        }
+
+        for (proc.children.items) |child| {
+            if (self.lookup_plain_impl_method_fn_proc(child, type_name, method_name)) |n| return n;
+        }
+        return null;
+    }
+
+    fn lookup_plain_impl_method_fn(self: *Self, type_name: []const u8, method_name: []const u8) ?[]const u8 {
+        const root = self.get_root();
+        return self.lookup_plain_impl_method_fn_proc(root, type_name, method_name);
+    }
+
     fn is_numeric_type(t: CheckedType) bool {
         return !t.is_array and t.pointer_depth == 0 and (t.base == .Num or t.base == .Dec);
     }
@@ -1420,6 +1476,8 @@ pub const TranspileProcess = struct {
                     var maybe_sig: ?FnSig = null;
                     var call_rtype: CheckedType = .{ .base = .Unknown };
                     var method_sig: ?ast.QuirkMethodSig = null;
+                    var plain_method_sig: ?FnSig = null;
+                    var plain_method_name: ?[]const u8 = null;
 
                     if (callee.type == .Identifier and callee.data != null) {
                         const fname = callee.data.?.sval.items;
@@ -1431,7 +1489,7 @@ pub const TranspileProcess = struct {
                             return .{ .base = .Unknown };
                         }
                     } else if (callee.type == .Expression and callee.node_variant != null and mem.eql(u8, callee.node_variant.?.exp.op, ".")) {
-                        // Quirk method call: `q.method(...)`.
+                        // Method call: `x.method(...)`.
                         const dot = callee.node_variant.?.exp;
                         const recv = dot.left orelse {
                             self.report_type_error(node, "invalid method call", .{});
@@ -1447,18 +1505,39 @@ pub const TranspileProcess = struct {
                         }
 
                         const recv_t = try self.infer_expr_type(recv.*, env, fns);
+                        const mname = member.data.?.sval.items;
                         if (!is_user_named_type(recv_t)) {
-                            self.report_type_error(node, "method calls require a quirk-typed receiver", .{});
+                            self.report_type_error(node, "method calls require a named receiver", .{});
                             return TranspileError.NotCallable;
                         }
 
-                        const mname = member.data.?.sval.items;
-                        method_sig = self.lookup_quirk_method(recv_t.name.?, mname) orelse {
-                            self.report_type_error(node, "quirk '{s}' has no method '{s}'", .{ recv_t.name.?, mname });
-                            return TranspileError.NotCallable;
-                        };
+                        // If the receiver is a quirk type, typecheck against the quirk signature.
+                        // Otherwise, treat as a plain impl method call and typecheck against the
+                        // generated `Type__method` function signature.
+                        const reg = self.root_registry();
+                        const recv_is_quirk = if (reg) |r| r.quirk_sig_by_name.contains(recv_t.name.?) else false;
 
-                        call_rtype = type_from_dtype(&method_sig.?.rtype);
+                        if (recv_is_quirk) {
+                            method_sig = self.lookup_quirk_method(recv_t.name.?, mname) orelse {
+                                self.report_type_error(node, "quirk '{s}' has no method '{s}'", .{ recv_t.name.?, mname });
+                                return TranspileError.NotCallable;
+                            };
+                            call_rtype = type_from_dtype(&method_sig.?.rtype);
+                        } else {
+                            if (recv_t.pointer_depth > 1) {
+                                self.report_type_error(node, "method calls support at most one pointer indirection", .{});
+                                return TranspileError.NotCallable;
+                            }
+
+                            var buf: [256]u8 = undefined;
+                            const gen_name = std.fmt.bufPrint(&buf, "{s}__{s}", .{ recv_t.name.?, mname }) catch unreachable;
+                            plain_method_sig = fns.get(gen_name) orelse {
+                                self.report_type_error(node, "type '{s}' has no method '{s}'", .{ recv_t.name.?, mname });
+                                return TranspileError.NotCallable;
+                            };
+                            plain_method_name = mname;
+                            call_rtype = plain_method_sig.?.rtype;
+                        }
                     } else {
                         self.report_type_error(node, "only calling named functions or quirk methods is supported", .{});
                         return TranspileError.NotCallable;
@@ -1507,6 +1586,34 @@ pub const TranspileProcess = struct {
                                 return TranspileError.TypeMismatch;
                             }
                         }
+                    } else if (plain_method_sig) |psig| {
+                        // Plain impl method call. The generated function signature includes the
+                        // implicit `self` parameter as the first argument.
+                        if (!psig.is_variadic and psig.args.len == 0) {
+                            self.report_type_error(node, "invalid method signature", .{});
+                            return TranspileError.NotCallable;
+                        }
+
+                        const expected_user_args = if (psig.args.len > 0) psig.args.len - 1 else 0;
+                        if (!psig.is_variadic and args_nodes.items.len != expected_user_args) {
+                            self.report_type_error(node, "method '{s}' expects {d} args, got {d}", .{ plain_method_name orelse "<method>", expected_user_args, args_nodes.items.len });
+                            return TranspileError.WrongArgCount;
+                        }
+                        if (psig.is_variadic and args_nodes.items.len < expected_user_args) {
+                            self.report_type_error(node, "method '{s}' expects at least {d} args, got {d}", .{ plain_method_name orelse "<method>", expected_user_args, args_nodes.items.len });
+                            return TranspileError.WrongArgCount;
+                        }
+
+                        for (args_nodes.items, 0..) |arg_node, idx| {
+                            const sig_idx = idx + 1; // skip implicit self
+                            if (sig_idx >= psig.args.len) break; // variadic extras are not typechecked
+                            const actual = try self.infer_expr_type(arg_node, env, fns);
+                            const expected = psig.args[sig_idx];
+                            if (is_known_type(expected) and is_known_type(actual) and !(try self.can_implicit_coerce(expected, actual))) {
+                                self.report_type_error(node, "type mismatch in call to method '{s}' argument {d}", .{ plain_method_name orelse "<method>", idx + 1 });
+                                return TranspileError.TypeMismatch;
+                            }
+                        }
                     }
 
                     return call_rtype;
@@ -1515,28 +1622,51 @@ pub const TranspileProcess = struct {
                 if (mem.eql(u8, op, ".")) {
                     const left = exp.left orelse return .{ .base = .Unknown };
                     const right = exp.right orelse return .{ .base = .Unknown };
-                    if (right.type != .Identifier or right.data == null) {
-                        self.report_type_error(node, "field access requires an identifier", .{});
-                        return TranspileError.TypeMismatch;
+
+                    var lt = try self.infer_expr_type(left.*, env, fns);
+
+                    // The parser can encode chained field access right-associatively:
+                    // `rect.a.x` -> `rect . (a . x)`.
+                    // Support both `left . Identifier` and `left . (a . b . c)` forms.
+                    if (right.type == .Identifier and right.data != null) {
+                        return try self.infer_compound_field_access_type(node, lt, right.data.?.sval.items);
                     }
 
-                    const lt = try self.infer_expr_type(left.*, env, fns);
-                    if (!is_user_named_type(lt)) {
-                        self.report_type_error(node, "field access requires a compound-typed value", .{});
-                        return TranspileError.TypeMismatch;
+                    if (right.type == .Expression and right.node_variant != null and mem.eql(u8, right.node_variant.?.exp.op, ".")) {
+                        var cursor: ast.Node = right.*;
+                        while (true) {
+                            if (cursor.type == .Expression and cursor.node_variant != null and mem.eql(u8, cursor.node_variant.?.exp.op, ".")) {
+                                const dot = cursor.node_variant.?.exp;
+                                const seg = dot.left orelse {
+                                    self.report_type_error(node, "field access requires an identifier", .{});
+                                    return TranspileError.TypeMismatch;
+                                };
+                                if (seg.type != .Identifier or seg.data == null) {
+                                    self.report_type_error(node, "field access requires an identifier", .{});
+                                    return TranspileError.TypeMismatch;
+                                }
+                                lt = try self.infer_compound_field_access_type(node, lt, seg.data.?.sval.items);
+
+                                const next = dot.right orelse {
+                                    self.report_type_error(node, "field access requires an identifier", .{});
+                                    return TranspileError.TypeMismatch;
+                                };
+                                cursor = next.*;
+                                continue;
+                            }
+
+                            if (cursor.type == .Identifier and cursor.data != null) {
+                                lt = try self.infer_compound_field_access_type(node, lt, cursor.data.?.sval.items);
+                                return lt;
+                            }
+
+                            self.report_type_error(node, "field access requires an identifier", .{});
+                            return TranspileError.TypeMismatch;
+                        }
                     }
 
-                    if (lt.pointer_depth > 1) {
-                        self.report_type_error(node, "field access supports at most one pointer indirection", .{});
-                        return TranspileError.TypeMismatch;
-                    }
-
-                    const field_name = right.data.?.sval.items;
-                    const fdt = self.lookup_compound_field(lt.name.?, field_name) orelse {
-                        self.report_type_error(node, "type '{s}' has no field '{s}'", .{ lt.name.?, field_name });
-                        return TranspileError.TypeMismatch;
-                    };
-                    return type_from_dtype(fdt);
+                    self.report_type_error(node, "field access requires an identifier", .{});
+                    return TranspileError.TypeMismatch;
                 }
 
                 if (mem.eql(u8, op, ",")) {
@@ -1797,6 +1927,8 @@ pub const TranspileProcess = struct {
             if (fnv.name == null) continue;
             const name = fnv.name.?.items;
 
+            if (fns.contains(name)) continue;
+
             const args_vec = fnv.args orelse utils.Vector(*ast.Node).init(proc.allocator);
             const args_len = args_vec.count;
             var args_slice = proc.allocator.alloc(CheckedType, args_len) catch {
@@ -1825,6 +1957,50 @@ pub const TranspileProcess = struct {
             }) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
+        }
+
+        // Impl methods are nested under `.Impl` nodes, not in `proc.nodes`.
+        // Collect their generated function signatures too so method calls can be typechecked.
+        for (proc.owned_nodes.items) |n| {
+            if (n.type != .Impl or n.node_variant == null) continue;
+            const im = n.node_variant.?.impl;
+            for (im.methods.items()) |m| {
+                if (m.type != .Function or m.node_variant == null) continue;
+                const fnv = m.node_variant.?.function;
+                if (fnv.name == null) continue;
+                const name = fnv.name.?.items;
+
+                if (fns.contains(name)) continue;
+
+                const args_vec = fnv.args orelse utils.Vector(*ast.Node).init(proc.allocator);
+                const args_len = args_vec.count;
+                var args_slice = proc.allocator.alloc(CheckedType, args_len) catch {
+                    return TranspileError.MemoryAllocationFailed;
+                };
+                errdefer proc.allocator.free(args_slice);
+
+                var i: usize = 0;
+                for (args_vec.items()) |arg_ptr| {
+                    const arg = arg_ptr.*;
+                    if (arg.type == .Variable and arg.node_variant != null) {
+                        args_slice[i] = type_from_dtype(arg.node_variant.?.variable.type);
+                    } else {
+                        args_slice[i] = .{ .base = .Unknown };
+                    }
+                    i += 1;
+                }
+
+                owned_args.append(args_slice) catch {
+                    return TranspileError.MemoryAllocationFailed;
+                };
+                fns.put(name, .{
+                    .rtype = if (fnv.rtype) |rt| type_from_dtype(&rt) else .{ .base = .Void },
+                    .args = args_slice,
+                    .is_variadic = fnv.is_variadic,
+                }) catch {
+                    return TranspileError.MemoryAllocationFailed;
+                };
+            }
         }
 
         for (proc.children.items) |child| {
@@ -2535,7 +2711,9 @@ pub const TranspileProcess = struct {
                 },
                 .impl => |im| {
                     im.type_name.deinit();
-                    im.quirk_name.deinit();
+                    if (im.quirk_name) |*qn| {
+                        qn.deinit();
+                    }
                     for (im.methods.items()) |m| {
                         self.deinit_node(m.*);
                         allocator.destroy(m);
@@ -2850,6 +3028,10 @@ pub const TranspileProcess = struct {
                 if (ent_node.type != .Variable or ent_node.node_variant == null) return 0;
                 return ent_node.node_variant.?.variable.type.pointer_depth;
             },
+            .ExpressionParenthesis => {
+                if (node.node_variant == null) return 0;
+                return self.expr_pointer_depth_from_scope(node.node_variant.?.paren.exp.*);
+            },
             .Unary => {
                 const u = node.node_variant.?.unary;
                 const base = self.expr_pointer_depth_from_scope(u.operand.*);
@@ -2859,6 +3041,66 @@ pub const TranspileProcess = struct {
                 }
                 if (mem.eql(u8, u.op, "&")) return base + 1;
                 return base;
+            },
+            .Expression => {
+                if (node.node_variant == null) return 0;
+                const exp = node.node_variant.?.exp;
+                if (!mem.eql(u8, exp.op, ".")) return 0;
+                const left = exp.left orelse return 0;
+                const right = exp.right orelse return 0;
+                if (right.type != .Identifier or right.data == null) return 0;
+
+                // Determine the named (compound) type of the left expression.
+                const lt_name: []const u8 = blk: {
+                    if (left.type == .Identifier and left.data != null) {
+                        const dt = self.identifier_declared_dtype(left.data.?.sval.items) orelse break :blk "";
+                        if (dt.type != .Unknown) break :blk "";
+                        break :blk dt.type_str.items;
+                    }
+
+                    if (left.type == .Expression and left.node_variant != null and mem.eql(u8, left.node_variant.?.exp.op, ".")) {
+                        // For chained field access, we only support resolving compound types.
+                        // If we can't resolve, fall back to '.' (pointer depth 0).
+                        // NOTE: pointer depth of the left doesn't matter for field type lookup here.
+                        var cur: ast.Node = left.*;
+                        var base_name: []const u8 = "";
+
+                        // Walk to the left-most identifier to find the base variable's declared type.
+                        while (cur.type == .Expression and cur.node_variant != null and mem.eql(u8, cur.node_variant.?.exp.op, ".")) {
+                            const cur_left = cur.node_variant.?.exp.left orelse break;
+                            cur = cur_left.*;
+                        }
+                        if (cur.type == .Identifier and cur.data != null) {
+                            const dt0 = self.identifier_declared_dtype(cur.data.?.sval.items) orelse break :blk "";
+                            if (dt0.type != .Unknown) break :blk "";
+                            base_name = dt0.type_str.items;
+                        } else {
+                            break :blk "";
+                        }
+
+                        // Now replay the chain from the original left expression to compute the final named type.
+                        // We only care about the named type (base Unknown + name).
+                        var t: CheckedType = .{ .base = .Unknown, .name = base_name, .pointer_depth = 0 };
+                        cur = left.*;
+                        while (cur.type == .Expression and cur.node_variant != null and mem.eql(u8, cur.node_variant.?.exp.op, ".")) {
+                            const dot = cur.node_variant.?.exp;
+                            const seg = dot.right orelse break;
+                            if (seg.type != .Identifier or seg.data == null) break;
+                            const fdt = self.lookup_compound_field(t.name.?, seg.data.?.sval.items) orelse break;
+                            t = type_from_dtype(fdt);
+                            const nl = dot.left orelse break;
+                            cur = nl.*;
+                        }
+                        if (t.base != .Unknown or t.name == null) break :blk "";
+                        break :blk t.name.?;
+                    }
+
+                    break :blk "";
+                };
+                if (lt_name.len == 0) return 0;
+
+                const fdt = self.lookup_compound_field(lt_name, right.data.?.sval.items) orelse return 0;
+                return fdt.pointer_depth;
             },
             else => return 0,
         }
@@ -2906,9 +3148,103 @@ pub const TranspileProcess = struct {
         try self.write("// --- User types ---\n\n");
 
         // Compounds
-        var c_it = reg.compounds_by_name.iterator();
-        while (c_it.next()) |entry| {
-            const cnode = entry.value_ptr.*;
+        // NOTE: `std.StringHashMap` iteration order is not stable and can place
+        // dependent compounds before their dependencies (e.g. Rectangle before Point).
+        // Emit compounds in a stable order that respects by-value dependencies.
+        const root = self.get_root();
+
+        var compound_nodes = std.ArrayList(*ast.Node).init(self.allocator);
+        defer compound_nodes.deinit();
+
+        var seen_compounds = std.StringHashMap(bool).init(self.allocator);
+        defer seen_compounds.deinit();
+
+        for (root.nodes.items()) |n| {
+            if (n.type != .Compound or n.node_variant == null) continue;
+            const cname = n.node_variant.?.compound.name.items;
+            if (!reg.compounds_by_name.contains(cname)) continue;
+            if (seen_compounds.contains(cname)) continue;
+            seen_compounds.put(cname, true) catch {
+                return TranspileError.MemoryAllocationFailed;
+            };
+            compound_nodes.append(reg.compounds_by_name.get(cname).?) catch {
+                return TranspileError.MemoryAllocationFailed;
+            };
+        }
+
+        var emitted_compounds = std.StringHashMap(bool).init(self.allocator);
+        defer emitted_compounds.deinit();
+
+        var remaining = std.ArrayList(*ast.Node).init(self.allocator);
+        defer remaining.deinit();
+        remaining.appendSlice(compound_nodes.items) catch {
+            return TranspileError.MemoryAllocationFailed;
+        };
+
+        var ordered = std.ArrayList(*ast.Node).init(self.allocator);
+        defer ordered.deinit();
+
+        // Forward typedefs allow pointer fields (including self-pointers) to refer to
+        // types declared later.
+        for (compound_nodes.items) |cnode| {
+            if (cnode.node_variant == null) continue;
+            const c = cnode.node_variant.?.compound;
+            try self.write("typedef struct ");
+            try self.write(c.name.items);
+            try self.write(" ");
+            try self.write(c.name.items);
+            try self.write(";\n");
+        }
+        if (compound_nodes.items.len > 0) try self.write("\n");
+
+        while (remaining.items.len > 0) {
+            var progress = false;
+            var i: usize = 0;
+            while (i < remaining.items.len) {
+                const cnode = remaining.items[i];
+                if (cnode.node_variant == null) {
+                    _ = remaining.swapRemove(i);
+                    continue;
+                }
+                const c = cnode.node_variant.?.compound;
+
+                var deps_satisfied = true;
+                for (c.fields.items()) |f| {
+                    // Only enforce ordering for by-value named compound dependencies.
+                    // Pointer-typed fields can refer to incomplete types.
+                    if (f.dtype.pointer_depth != 0) continue;
+                    if (f.dtype.type != .Unknown) continue;
+                    if (f.dtype.type_str.items.len == 0) continue;
+                    const dep = f.dtype.type_str.items;
+                    if (!reg.compounds_by_name.contains(dep)) continue;
+                    if (!emitted_compounds.contains(dep)) {
+                        deps_satisfied = false;
+                        break;
+                    }
+                }
+
+                if (deps_satisfied) {
+                    ordered.append(cnode) catch {
+                        return TranspileError.MemoryAllocationFailed;
+                    };
+                    emitted_compounds.put(c.name.items, true) catch {
+                        return TranspileError.MemoryAllocationFailed;
+                    };
+                    _ = remaining.swapRemove(i);
+                    progress = true;
+                    continue;
+                }
+
+                i += 1;
+            }
+
+            if (!progress) {
+                self.report_error(null, "cyclic by-value compound dependency (use pointers to break the cycle)", .{});
+                return TranspileError.CyclicCompoundDependency;
+            }
+        }
+
+        for (ordered.items) |cnode| {
             if (cnode.node_variant == null) continue;
             const c = cnode.node_variant.?.compound;
 
@@ -3019,7 +3355,7 @@ pub const TranspileProcess = struct {
             if (impl_node.node_variant == null) continue;
             const im = impl_node.node_variant.?.impl;
             const type_name = im.type_name.items;
-            const quirk_name = im.quirk_name.items;
+            const quirk_name = if (im.quirk_name) |qn| qn.items else continue;
             const sig = reg.quirk_sig_by_name.get(quirk_name) orelse continue;
             const sig_h = self.quirk_sig_hash_cached(sig);
             const qnode = reg.quirks_by_sig.get(sig) orelse continue;
@@ -3164,6 +3500,61 @@ pub const TranspileProcess = struct {
             try self.write(" };\n");
             try self.write("}\n\n");
         }
+
+        // Plain impl method bodies (non-quirk): `impl Type { ... }`
+        try self.write("// --- Plain impl methods ---\n\n");
+        var emitted = std.StringHashMap(bool).init(self.backing_allocator);
+        defer emitted.deinit();
+        try self.emit_plain_impl_methods_module(self, &emitted);
+    }
+
+    fn emit_plain_impl_methods_module(self: *Self, proc: *Self, emitted: *std.StringHashMap(bool)) TranspileError!void {
+        for (proc.owned_nodes.items) |n| {
+            if (n.type != .Impl or n.node_variant == null) continue;
+            const im = n.node_variant.?.impl;
+            if (im.quirk_name != null) continue;
+
+            // Forward declare first, so bodies can call each other.
+            for (im.methods.items()) |m| {
+                if (m.type != .Function or m.node_variant == null) continue;
+                const fnv = m.node_variant.?.function;
+                if (fnv.name == null) continue;
+                const fname = fnv.name.?.items;
+                if (emitted.contains(fname)) continue;
+                emitted.put(fname, true) catch return TranspileError.MemoryAllocationFailed;
+
+                if (fnv.rtype) |rt| {
+                    try proc.write_type(rt);
+                } else {
+                    try proc.write("void");
+                }
+                try proc.write(" ");
+                try proc.write(fname);
+                try proc.write("(");
+                proc.in_function_params = true;
+                if (fnv.args) |args| {
+                    for (args.items(), 0..) |arg, i| {
+                        if (i > 0) try proc.write(", ");
+                        try proc.transpile_node(arg.*);
+                    }
+                }
+                proc.in_function_params = false;
+                try proc.write(");\n");
+            }
+            try proc.write("\n");
+
+            for (im.methods.items()) |m| {
+                if (m.type != .Function or m.node_variant == null) continue;
+                const fnv = m.node_variant.?.function;
+                if (fnv.body == null) continue;
+                try proc.transpile_node(m.*);
+                try proc.write("\n\n");
+            }
+        }
+
+        for (proc.children.items) |child| {
+            try self.emit_plain_impl_methods_module(child, emitted);
+        }
     }
 
     /// Transpiles all nodes in the AST to C code
@@ -3305,6 +3696,43 @@ pub const TranspileProcess = struct {
                                     try self.write(")");
                                     try self.write(")");
                                     return;
+                                }
+
+                                // Plain impl method call on compounds: `x.method(...)`.
+                                if (recv.?.type == .Identifier and recv.?.data != null and !self.identifier_is_quirk_typed(recv.?.data.?.sval.items)) {
+                                    const rname = recv.?.data.?.sval.items;
+                                    const dt = self.identifier_declared_dtype(rname) orelse null;
+                                    if (dt != null and dt.?.type == .Unknown and !self.is_quirk_name(dt.?.type_str.items) and (dt.?.pointer_depth == 0 or dt.?.pointer_depth == 1)) {
+                                        const type_name = dt.?.type_str.items;
+                                        const mname = member.?.data.?.sval.items;
+                                        if (self.lookup_plain_impl_method_fn(type_name, mname)) |fn_name| {
+                                            try self.write("(");
+                                            try self.write(fn_name);
+                                            try self.write("(");
+
+                                            if (dt.?.pointer_depth == 0) {
+                                                try self.write("&");
+                                                try self.transpile_node(recv.?.*);
+                                            } else {
+                                                try self.transpile_node(recv.?.*);
+                                            }
+
+                                            if (exp.right) |right| {
+                                                const inner = if (right.type == .ExpressionParenthesis and right.node_variant != null)
+                                                    right.node_variant.?.paren.exp.*
+                                                else
+                                                    right.*;
+                                                if (inner.type != .Blank) {
+                                                    try self.write(", ");
+                                                    try self.transpile_node(inner);
+                                                }
+                                            }
+
+                                            try self.write(")");
+                                            try self.write(")");
+                                            return;
+                                        }
+                                    }
                                 }
                             }
                         }

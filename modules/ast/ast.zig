@@ -190,7 +190,8 @@ pub const Node = struct {
 
         impl: struct {
             type_name: std.ArrayList(u8),
-            quirk_name: std.ArrayList(u8),
+            /// Optional quirk name. When null, this is a plain impl block: `impl Type { ... }`.
+            quirk_name: ?std.ArrayList(u8) = null,
             methods: utils.Vector(*Node),
         },
         /// The statement node.

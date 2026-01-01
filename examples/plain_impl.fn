@@ -1,0 +1,23 @@
+imp std.io;
+
+compound Point {
+  num x;
+  num y;
+}
+
+impl Point {
+  translate(num dx, num dy) {
+    self.x += dx;
+    self.y += dy;
+  }
+}
+
+fun main() {
+  Point p;
+  p.x = 1;
+  p.y = 2;
+
+  p.translate(3, 4);
+
+  printf("p=(%d,%d)\n", p.x, p.y);
+}
