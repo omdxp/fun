@@ -1,0 +1,26 @@
+imp std.io;
+
+compound Point {
+  num x;
+  num y;
+}
+
+quirk HasX {
+  getX() num;
+}
+
+impl Point HasX {
+  getX() num {
+    ret self.x;
+  }
+}
+
+fun main() {
+  Point p;
+  p.x = 41;
+  p.y = 1;
+
+  HasX hx = &p;
+  num v = hx.getX();
+  printf("getX=%d\n", v);
+}

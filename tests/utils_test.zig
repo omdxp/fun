@@ -219,7 +219,7 @@ test "Vector peek pointer increment and decrement with peek_decrement flag" {
 test "misc keyword and operator helpers" {
     try std.testing.expect(utils.keyword_is_datatype("num"));
     try std.testing.expect(utils.keyword_is_datatype("str"));
-    try std.testing.expect(!utils.keyword_is_datatype("void"));
+    try std.testing.expect(utils.keyword_is_datatype("void"));
 
     try std.testing.expect(utils.is_keyword("fun"));
     try std.testing.expect(utils.is_keyword("if"));

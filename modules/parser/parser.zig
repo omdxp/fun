@@ -265,6 +265,32 @@ pub const ParseProcess = struct {
         return peek_token;
     }
 
+    /// Peeks at the Nth next non-skippable token without incrementing.
+    ///
+    /// `n = 0` is equivalent to `token_peek_next()`.
+    fn token_peek_n(self: *Self, n: usize) ?token.Token {
+        var idx: isize = self.transpile_proc.tokens.pindex;
+        var seen: usize = 0;
+        while (true) {
+            const t = self.transpile_proc.tokens.at(@intCast(idx)) orelse return null;
+            if (!token.is_nl_or_comment_or_newline_separator(t)) {
+                if (seen == n) return t;
+                seen += 1;
+            }
+            idx += 1;
+        }
+    }
+
+    /// Peeks the previous non-skippable token (relative to the most recently consumed token).
+    fn token_peek_prev(self: *Self) ?token.Token {
+        var idx: isize = @as(isize, @intCast(self.transpile_proc.tokens.pindex)) - 2;
+        while (idx >= 0) : (idx -= 1) {
+            const t = self.transpile_proc.tokens.at(@intCast(idx)) orelse return null;
+            if (!token.is_nl_or_comment_or_newline_separator(t)) return t;
+        }
+        return null;
+    }
+
     /// Retrieves the next token.
     ///
     /// This function peeks at the next token without incrementing the token stream's position.
@@ -336,6 +362,43 @@ pub const ParseProcess = struct {
         if (t.?.type == .Keyword) {
             return try self.parse_keyword(hist);
         }
+
+        // User-defined type variable declarations start with an identifier datatype, e.g.:
+        // `Point p;`, `Point p = ...;`, `Point* p;`, `Point** p = ...;`
+        // Detect `<Identifier> [* ...] <Identifier>` and parse it as a variable declaration.
+        if (t.?.type == .Identifier) {
+            var off: usize = 1;
+            while (true) {
+                const tn = self.token_peek_n(off);
+                if (tn == null) break;
+                if (tn.?.type == .Operator and mem.eql(u8, tn.?.data.sval.items, "*")) {
+                    off += 1;
+                    continue;
+                }
+                break;
+            }
+
+            const t1 = self.token_peek_n(off);
+            if (t1 != null and t1.?.type == .Identifier) {
+                const dt = self.transpile_proc.allocator.create(dtype.DataType) catch |e| {
+                    std.debug.print("Error creating DataType: {}\n", .{e});
+                    return ParseError.MemoryAllocationFailed;
+                };
+                errdefer self.transpile_proc.allocator.destroy(dt);
+                dt.* = dtype.DataType{
+                    .array = null,
+                    .pointer_depth = 0,
+                    .type = .Unknown,
+                    .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
+                    .flags = .{},
+                };
+                try self.parse_datatype(dt);
+                try self.parse_variable(dt, hist);
+                try self.expect_sym(';');
+                return;
+            }
+        }
+
         if (t.?.type == .Symbol and token.is_symbol(t, '{')) {
             return try self.parse_body(hist);
         }
@@ -398,7 +461,14 @@ pub const ParseProcess = struct {
         self.parser_current_body = body_node.?;
         try self.expect_sym('{');
         var last_stmt_type: ?ast.NodeType = null;
-        while (!self.next_token_is_symbol('}')) {
+        while (true) {
+            const next_non_skippable = self.token_peek_n(0);
+            if (next_non_skippable == null) {
+                self.transpile_proc.err("unexpected end of file (expected '}}' to close body)", .{});
+                return ParseError.FileReadError;
+            }
+            if (token.is_symbol(next_non_skippable, '}')) break;
+
             var hist_down = utils.History.down(self.transpile_proc.allocator, hist, hist.flags);
             defer hist_down.deinit();
             try self.parse_statement(&hist_down);
@@ -477,6 +547,7 @@ pub const ParseProcess = struct {
                 std.debug.print("Error adding node to list: {s}", .{@errorName(e)});
                 return ParseError.MemoryAllocationFailed;
             };
+            return;
         }
         self.transpile_proc.err("invalid symbol", .{});
         return ParseError.InvalidSymbol;
@@ -547,8 +618,8 @@ pub const ParseProcess = struct {
     /// - Logs an error message if the next token is not a datatype keyword.
     fn parse_datatype(self: *Self, dt: *dtype.DataType) ParseError!void {
         const dt_token = self.token_next();
-        if (dt_token.?.type != .Keyword) {
-            self.transpile_proc.err("expected datatype, got '{?}'", .{dt_token.?.type});
+        if (dt_token == null or (dt_token.?.type != .Keyword and dt_token.?.type != .Identifier)) {
+            self.transpile_proc.err("expected datatype, got '{?}'", .{if (dt_token) |t| t.type else null});
             return ParseError.InvalidDataType;
         }
         const ptr_depth = self.parse_get_pointer_depth();
@@ -556,10 +627,15 @@ pub const ParseProcess = struct {
             dt.*.flags.?.is_pointer = true;
             dt.*.pointer_depth = ptr_depth;
         }
-        dt.*.type = utils.get_datatype_type(dt_token.?.data.sval.items);
-        if (dt.*.type.? == .Unknown) {
-            self.transpile_proc.err("unknown datatype", .{});
-            return ParseError.InvalidDataType;
+        // Builtins use `dt.type`, user-defined types keep `.Unknown` and rely on `type_str`.
+        if (dt_token.?.type == .Keyword and utils.keyword_is_datatype(dt_token.?.data.sval.items)) {
+            dt.*.type = utils.get_datatype_type(dt_token.?.data.sval.items);
+            if (dt.*.type.? == .Unknown) {
+                self.transpile_proc.err("unknown datatype", .{});
+                return ParseError.InvalidDataType;
+            }
+        } else {
+            dt.*.type = .Unknown;
         }
         dt.*.type_str = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, dt_token.?.data.sval.items.len) catch |e| {
             std.debug.print("Error creating type string: {s}", .{@errorName(e)});
@@ -622,13 +698,18 @@ pub const ParseProcess = struct {
                 }
             },
             .Identifier => {
+                const prev = self.token_peek_prev();
+                const is_member_access = prev != null and prev.?.type == .Operator and mem.eql(u8, prev.?.data.sval.items, ".");
+
                 // `_` is a wildcard identifier (used by `fit` default branches).
                 // It should be accepted even if it's not declared.
                 if (!mem.eql(u8, t.?.data.sval.items, "_")) {
-                    if (self.transpile_proc.get_scope_entity(t.?.data.sval.items) == null) {
-                        if (self.transpile_proc.get_symbol(t.?.data.sval.items) == null and self.transpile_proc.global_symbols.get(t.?.data.sval.items) == null) {
-                            self.transpile_proc.err("unknown identifier '{s}'", .{t.?.data.sval.items});
-                            return ParseError.InvalidIdentifier;
+                    if (!is_member_access) {
+                        if (self.transpile_proc.get_scope_entity(t.?.data.sval.items) == null) {
+                            if (self.transpile_proc.get_symbol(t.?.data.sval.items) == null and self.transpile_proc.global_symbols.get(t.?.data.sval.items) == null) {
+                                self.transpile_proc.err("unknown identifier '{s}'", .{t.?.data.sval.items});
+                                return ParseError.InvalidIdentifier;
+                            }
                         }
                     }
                 }
@@ -1038,7 +1119,6 @@ pub const ParseProcess = struct {
             std.debug.print("Error creating node: {s}", .{@errorName(e)});
             return ParseError.MemoryAllocationFailed;
         };
-        errdefer self.transpile_proc.allocator.destroy(exp_node);
         defer self.transpile_proc.allocator.destroy(exp_node);
         const left = self.transpile_proc.allocator.create(ast.Node) catch |e| {
             std.debug.print("Error creating node: {s}", .{@errorName(e)});
@@ -1156,27 +1236,45 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     fn parse_node_shift_children_left(self: *Self, node: *ast.Node) ParseError!void {
-        const right_op = node.*.node_variant.?.exp.right.?.*.node_variant.?.exp.op;
-        var new_exp_left_node = node.*.node_variant.?.exp.left.?.*;
-        var new_exp_right_node = node.*.node_variant.?.exp.right.?.*.node_variant.?.exp.left.?.*;
-        try self.make_expression_node(&new_exp_left_node, &new_exp_right_node, node.*.node_variant.?.exp.op);
-        const new_left_operand = self.node_pop();
-        const new_right_operand = node.*.node_variant.?.exp.right.?.*.node_variant.?.exp.right.?.*;
-        const left = self.transpile_proc.allocator.create(ast.Node) catch |e| {
+        const exp = &node.*.node_variant.?.exp;
+        const right_expr_ptr = exp.right orelse return;
+        if (right_expr_ptr.*.type != .Expression) return;
+
+        const right_exp = &right_expr_ptr.*.node_variant.?.exp;
+        const op2 = right_exp.op;
+
+        const a_ptr = exp.left orelse return;
+        const b_ptr = right_exp.left orelse return;
+        const c_ptr = right_exp.right orelse return;
+
+        const new_left_expr = self.transpile_proc.allocator.create(ast.Node) catch |e| {
             std.debug.print("Error creating node: {s}", .{@errorName(e)});
             return ParseError.MemoryAllocationFailed;
         };
-        errdefer self.transpile_proc.allocator.destroy(left);
-        left.* = new_left_operand.?;
-        const right = self.transpile_proc.allocator.create(ast.Node) catch |e| {
-            std.debug.print("Error creating node: {s}", .{@errorName(e)});
-            return ParseError.MemoryAllocationFailed;
+        errdefer self.transpile_proc.allocator.destroy(new_left_expr);
+        new_left_expr.* = ast.Node{
+            .type = .Expression,
+            .pos = node.*.pos,
+            .binded = null,
+            .node_variant = .{
+                .exp = .{
+                    .left = a_ptr,
+                    .right = b_ptr,
+                    .op = exp.op,
+                },
+            },
         };
-        errdefer self.transpile_proc.allocator.destroy(right);
-        right.* = new_right_operand;
-        node.*.node_variant.?.exp.left = left;
-        node.*.node_variant.?.exp.right = right;
-        node.*.node_variant.?.exp.op = right_op;
+
+        // Rewrite: ((a op1 b) op2 c)
+        exp.left = new_left_expr;
+        exp.right = c_ptr;
+        exp.op = op2;
+
+        // Destroy the old right-expression container, without freeing moved children.
+        right_exp.left = null;
+        right_exp.right = null;
+        self.transpile_proc.deinit_node(right_expr_ptr.*);
+        self.transpile_proc.allocator.destroy(right_expr_ptr);
     }
 
     /// Moves the right-left child of an expression node to the left.
@@ -1191,28 +1289,43 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     fn parse_node_move_right_left_to_left(self: *Self, node: *ast.Node) ParseError!void {
-        try self.make_expression_node(
-            node.*.node_variant.?.exp.left.?,
-            node.*.node_variant.?.exp.right.?.*.node_variant.?.exp.left.?,
-            node.*.node_variant.?.exp.op,
-        );
-        const completed_node = self.node_pop();
-        const new_op = node.*.node_variant.?.exp.right.?.*.node_variant.?.exp.op;
-        const left = self.transpile_proc.allocator.create(ast.Node) catch |e| {
+        const exp = &node.*.node_variant.?.exp;
+        const right_expr_ptr = exp.right orelse return;
+        if (right_expr_ptr.*.type != .Expression) return;
+
+        const right_exp = &right_expr_ptr.*.node_variant.?.exp;
+        const op2 = right_exp.op;
+
+        const a_ptr = exp.left orelse return;
+        const b_ptr = right_exp.left orelse return;
+        const c_ptr = right_exp.right orelse return;
+
+        const completed = self.transpile_proc.allocator.create(ast.Node) catch |e| {
             std.debug.print("Error creating node: {s}", .{@errorName(e)});
             return ParseError.MemoryAllocationFailed;
         };
-        errdefer self.transpile_proc.allocator.destroy(left);
-        left.* = completed_node.?;
-        const right = self.transpile_proc.allocator.create(ast.Node) catch |e| {
-            std.debug.print("Error creating node: {s}", .{@errorName(e)});
-            return ParseError.MemoryAllocationFailed;
+        errdefer self.transpile_proc.allocator.destroy(completed);
+        completed.* = ast.Node{
+            .type = .Expression,
+            .pos = node.*.pos,
+            .binded = null,
+            .node_variant = .{
+                .exp = .{
+                    .left = a_ptr,
+                    .right = b_ptr,
+                    .op = exp.op,
+                },
+            },
         };
-        errdefer self.transpile_proc.allocator.destroy(right);
-        right.* = node.*.node_variant.?.exp.right.?.*.node_variant.?.exp.right.?.*;
-        node.*.node_variant.?.exp.left = left;
-        node.*.node_variant.?.exp.right = right;
-        node.*.node_variant.?.exp.op = new_op;
+
+        exp.left = completed;
+        exp.right = c_ptr;
+        exp.op = op2;
+
+        right_exp.left = null;
+        right_exp.right = null;
+        self.transpile_proc.deinit_node(right_expr_ptr.*);
+        self.transpile_proc.allocator.destroy(right_expr_ptr);
     }
 
     /// Reorders an expression node for proper precedence.
@@ -1417,13 +1530,515 @@ pub const ParseProcess = struct {
                 }
                 return try self.parse_expression(hist);
             },
-            .Identifier => try self.parse_identifier(),
+            .Identifier => blk: {
+                // Support user-defined types at statement level: `Point p;`.
+                // If the next token is a known type name and the following token looks like a declaration,
+                // parse it as a variable declaration instead of an identifier expression.
+                const name = t.?.data.sval.items;
+                if (self.transpile_proc.get_symbol(name)) |sym| {
+                    if (sym.type == .Node and sym.data != null) {
+                        const n = sym.data.?.node;
+                        if (n.type == .Compound or n.type == .Quirk) {
+                            const t1 = self.token_peek_n(1);
+                            if (t1 != null and (t1.?.type == .Identifier or (t1.?.type == .Operator and (mem.eql(u8, t1.?.data.sval.items, "*") or mem.eql(u8, t1.?.data.sval.items, "["))))) {
+                                // Parse datatype + variable.
+                                const dt = self.transpile_proc.allocator.create(dtype.DataType) catch |e| {
+                                    std.debug.print("Error creating DataType: {}\n", .{e});
+                                    return ParseError.MemoryAllocationFailed;
+                                };
+                                errdefer self.transpile_proc.allocator.destroy(dt);
+                                dt.* = dtype.DataType{
+                                    .array = null,
+                                    .pointer_depth = 0,
+                                    .type = .Unknown,
+                                    .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
+                                    .flags = .{},
+                                };
+                                try self.parse_datatype(dt);
+                                try self.parse_variable(dt, hist);
+                                try self.expect_sym(';');
+                                break :blk true;
+                            }
+                        }
+                    }
+                }
+                break :blk try self.parse_identifier();
+            },
             .Keyword => {
                 try self.parse_keyword(hist);
                 return true;
             },
             .String => try self.parse_string(),
             else => false,
+        };
+    }
+
+    fn parse_compound(self: *Self) ParseError!void {
+        try self.expect_keyword("compound");
+
+        const name_tok = self.token_next();
+        if (name_tok == null or name_tok.?.type != .Identifier) {
+            self.transpile_proc.err("expected identifier after 'compound'", .{});
+            return ParseError.InvalidIdentifier;
+        }
+
+        var name = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, name_tok.?.data.sval.items.len) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+        errdefer name.deinit();
+        name.appendSlice(name_tok.?.data.sval.items) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+
+        try self.expect_sym('{');
+
+        var fields = utils.Vector(ast.CompoundField).init(self.transpile_proc.allocator);
+        errdefer {
+            for (fields.items()) |f| {
+                f.name.deinit();
+                f.dtype.type_str.deinit();
+                if (f.dtype.array) |array| {
+                    if (!array.brackets.is_empty()) {
+                        for (array.brackets.items()) |bracket| self.transpile_proc.deinit_node(bracket);
+                    }
+                    array.brackets.deinit();
+                }
+                self.transpile_proc.allocator.destroy(f.dtype);
+            }
+            fields.deinit();
+        }
+
+        while (!self.next_token_is_symbol('}')) {
+            // Parse field datatype
+            const dt = self.transpile_proc.allocator.create(dtype.DataType) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer self.transpile_proc.allocator.destroy(dt);
+            dt.* = dtype.DataType{
+                .array = null,
+                .pointer_depth = 0,
+                .type = .Unknown,
+                .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
+                .flags = .{},
+            };
+            var hist_tmp = utils.History.init(self.transpile_proc.allocator, .{});
+            defer hist_tmp.deinit();
+            try self.parse_datatype(dt);
+            // Allow array brackets after type name in field declarations.
+            if (self.next_token_is_operator("[")) {
+                try self.parse_array_brackets(dt, &hist_tmp);
+            }
+
+            // Parse one or more field names: `dec x, y;`
+            var field_count: usize = 0;
+            while (true) {
+                const field_tok = self.token_next();
+                if (field_tok == null or field_tok.?.type != .Identifier) {
+                    self.transpile_proc.err("expected field name", .{});
+                    return ParseError.InvalidIdentifier;
+                }
+                var fname = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, field_tok.?.data.sval.items.len) catch {
+                    return ParseError.MemoryAllocationFailed;
+                };
+                errdefer fname.deinit();
+                fname.appendSlice(field_tok.?.data.sval.items) catch {
+                    return ParseError.MemoryAllocationFailed;
+                };
+
+                // Each field owns its dtype (deep-copy type_str). For multi-name decls,
+                // only allow non-array types (arrays require bracket AST cloning).
+                if (field_count > 0 and dt.array != null) {
+                    self.transpile_proc.err("array fields cannot be declared in a combined list; declare them separately", .{});
+                    return ParseError.InvalidDataType;
+                }
+
+                const field_dt = self.transpile_proc.allocator.create(dtype.DataType) catch {
+                    return ParseError.MemoryAllocationFailed;
+                };
+                errdefer self.transpile_proc.allocator.destroy(field_dt);
+                field_dt.* = dt.*;
+                field_dt.*.type_str = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, dt.type_str.items.len) catch {
+                    return ParseError.MemoryAllocationFailed;
+                };
+                field_dt.*.type_str.appendSlice(dt.type_str.items) catch {
+                    return ParseError.MemoryAllocationFailed;
+                };
+
+                if (field_count > 0) {
+                    field_dt.*.array = null;
+                }
+
+                fields.push(.{ .name = fname, .dtype = field_dt }) catch {
+                    return ParseError.MemoryAllocationFailed;
+                };
+                field_count += 1;
+
+                if (!self.next_token_is_operator(",")) break;
+                _ = self.token_next(); // skip comma
+            }
+
+            // Original dt storage is now unused; destroy it.
+            dt.*.type_str.deinit();
+            self.transpile_proc.allocator.destroy(dt);
+
+            try self.expect_sym(';');
+        }
+        try self.expect_sym('}');
+
+        const node = self.transpile_proc.allocator.create(ast.Node) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+        errdefer {
+            self.transpile_proc.deinit_node(node.*);
+            self.transpile_proc.allocator.destroy(node);
+        }
+        node.* = ast.Node{
+            .type = .Compound,
+            .pos = self.*.transpile_proc.*.pos,
+            .node_variant = .{ .compound = .{ .name = name, .fields = fields } },
+        };
+
+        // Register as a symbol so it can be used as a datatype identifier.
+        try self.transpile_proc.push_symbol(.{ .type = .Node, .name = node.*.node_variant.?.compound.name.items, .data = .{ .node = node.* }, .symbol_table = null });
+
+        self.transpile_proc.nodes.push(node.*) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+        self.transpile_proc.owned_nodes.append(node) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+    }
+
+    fn parse_quirk(self: *Self) ParseError!void {
+        try self.expect_keyword("quirk");
+
+        const name_tok = self.token_next();
+        if (name_tok == null or name_tok.?.type != .Identifier) {
+            self.transpile_proc.err("expected identifier after 'quirk'", .{});
+            return ParseError.InvalidIdentifier;
+        }
+
+        var name = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, name_tok.?.data.sval.items.len) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+        errdefer name.deinit();
+        name.appendSlice(name_tok.?.data.sval.items) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+
+        try self.expect_sym('{');
+
+        var methods = utils.Vector(ast.QuirkMethodSig).init(self.transpile_proc.allocator);
+        errdefer {
+            for (methods.items()) |m| {
+                m.name.deinit();
+                m.rtype.type_str.deinit();
+                for (m.args.items()) |a| {
+                    a.name.deinit();
+                    a.dtype.type_str.deinit();
+                    if (a.dtype.array) |array| {
+                        if (!array.brackets.is_empty()) {
+                            for (array.brackets.items()) |bracket| self.transpile_proc.deinit_node(bracket);
+                        }
+                        array.brackets.deinit();
+                    }
+                    self.transpile_proc.allocator.destroy(a.dtype);
+                }
+                m.args.deinit();
+            }
+            methods.deinit();
+        }
+
+        while (!self.next_token_is_symbol('}')) {
+            const mname_tok = self.token_next();
+            if (mname_tok == null or mname_tok.?.type != .Identifier) {
+                self.transpile_proc.err("expected method name", .{});
+                return ParseError.InvalidIdentifier;
+            }
+            var mname = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, mname_tok.?.data.sval.items.len) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer mname.deinit();
+            mname.appendSlice(mname_tok.?.data.sval.items) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+
+            try self.expect_op("(");
+
+            var args = utils.Vector(ast.QuirkArg).init(self.transpile_proc.allocator);
+            errdefer args.deinit();
+            while (!self.next_token_is_symbol(')')) {
+                const adt = self.transpile_proc.allocator.create(dtype.DataType) catch {
+                    return ParseError.MemoryAllocationFailed;
+                };
+                errdefer self.transpile_proc.allocator.destroy(adt);
+                adt.* = dtype.DataType{ .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator), .flags = .{} };
+                var hist_tmp = utils.History.init(self.transpile_proc.allocator, .{});
+                defer hist_tmp.deinit();
+                try self.parse_datatype(adt);
+                if (self.next_token_is_operator("[")) {
+                    try self.parse_array_brackets(adt, &hist_tmp);
+                }
+
+                const aname_tok = self.token_next();
+                if (aname_tok == null or aname_tok.?.type != .Identifier) {
+                    self.transpile_proc.err("expected argument name", .{});
+                    return ParseError.InvalidIdentifier;
+                }
+                var aname = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, aname_tok.?.data.sval.items.len) catch {
+                    return ParseError.MemoryAllocationFailed;
+                };
+                errdefer aname.deinit();
+                aname.appendSlice(aname_tok.?.data.sval.items) catch {
+                    return ParseError.MemoryAllocationFailed;
+                };
+
+                args.push(.{ .name = aname, .dtype = adt }) catch {
+                    return ParseError.MemoryAllocationFailed;
+                };
+
+                if (!self.next_token_is_operator(",")) break;
+                _ = self.token_next();
+            }
+            try self.expect_sym(')');
+
+            // Optional return type; default to void.
+            var rtype: dtype.DataType = .{ .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator) };
+            const rtok = self.token_peek_next();
+            if (rtok != null and (rtok.?.type == .Keyword and utils.keyword_is_datatype(rtok.?.data.sval.items)) or rtok.?.type == .Identifier) {
+                try self.parse_datatype(&rtype);
+            } else {
+                rtype.type = .Void;
+                rtype.type_str.appendSlice("void") catch {
+                    return ParseError.MemoryAllocationFailed;
+                };
+            }
+
+            try self.expect_sym(';');
+            methods.push(.{ .name = mname, .rtype = rtype, .args = args }) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+        }
+
+        try self.expect_sym('}');
+
+        const node = self.transpile_proc.allocator.create(ast.Node) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+        errdefer {
+            self.transpile_proc.deinit_node(node.*);
+            self.transpile_proc.allocator.destroy(node);
+        }
+        node.* = ast.Node{
+            .type = .Quirk,
+            .pos = self.*.transpile_proc.*.pos,
+            .node_variant = .{ .quirk = .{ .name = name, .methods = methods } },
+        };
+
+        // Register as a symbol so it can be used as a datatype identifier.
+        try self.transpile_proc.push_symbol(.{ .type = .Node, .name = node.*.node_variant.?.quirk.name.items, .data = .{ .node = node.* }, .symbol_table = null });
+
+        self.transpile_proc.nodes.push(node.*) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+        self.transpile_proc.owned_nodes.append(node) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+    }
+
+    fn parse_impl(self: *Self) ParseError!void {
+        try self.expect_keyword("impl");
+        const type_tok = self.token_next();
+        if (type_tok == null or type_tok.?.type != .Identifier) {
+            self.transpile_proc.err("expected type name after 'impl'", .{});
+            return ParseError.InvalidIdentifier;
+        }
+        const quirk_tok = self.token_next();
+        if (quirk_tok == null or quirk_tok.?.type != .Identifier) {
+            self.transpile_proc.err("expected quirk name after type name", .{});
+            return ParseError.InvalidIdentifier;
+        }
+
+        var type_name = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, type_tok.?.data.sval.items.len) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+        errdefer type_name.deinit();
+        type_name.appendSlice(type_tok.?.data.sval.items) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+        var quirk_name = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, quirk_tok.?.data.sval.items.len) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+        errdefer quirk_name.deinit();
+        quirk_name.appendSlice(quirk_tok.?.data.sval.items) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+
+        try self.expect_sym('{');
+
+        var methods = utils.Vector(*ast.Node).init(self.transpile_proc.allocator);
+        errdefer {
+            for (methods.items()) |m| {
+                self.transpile_proc.deinit_node(m.*);
+                self.transpile_proc.allocator.destroy(m);
+            }
+            methods.deinit();
+        }
+
+        // Parse methods with syntax similar to functions but without the leading `fun` keyword.
+        // Example: `fun1() void { ... }`
+        while (!self.next_token_is_symbol('}')) {
+            const name_tok = self.token_next();
+            if (name_tok == null or name_tok.?.type != .Identifier) {
+                self.transpile_proc.err("expected method name in impl", .{});
+                return ParseError.InvalidIdentifier;
+            }
+
+            // Build a regular function node with a generated name: `<Type>__<Quirk>__<method>`
+            var fn_node = ast.Node{
+                .type = .Function,
+                .pos = self.*.transpile_proc.*.pos,
+                .node_variant = .{ .function = .{} },
+            };
+
+            const gen_name = std.fmt.allocPrint(self.transpile_proc.allocator, "{s}__{s}__{s}", .{ type_name.items, quirk_name.items, name_tok.?.data.sval.items }) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+            defer self.transpile_proc.allocator.free(gen_name);
+            fn_node.node_variant.?.function.name = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, gen_name.len) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+            fn_node.node_variant.?.function.name.?.appendSlice(gen_name) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+
+            // Function scope.
+            _ = try self.transpile_proc.new_scope();
+
+            try self.expect_op("(");
+
+            // Implicit `self` arg: `<Type>* self`
+            const self_dt = self.transpile_proc.allocator.create(dtype.DataType) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer self.transpile_proc.allocator.destroy(self_dt);
+            self_dt.* = dtype.DataType{
+                .array = null,
+                .pointer_depth = 1,
+                .type = .Unknown,
+                .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
+                .flags = .{ .is_pointer = true },
+            };
+            self_dt.type_str.appendSlice(type_name.items) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+
+            var self_name = std.ArrayList(u8).init(self.transpile_proc.allocator);
+            errdefer self_name.deinit();
+            self_name.appendSlice("self") catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+
+            const self_var_ptr = self.transpile_proc.allocator.create(ast.Node) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer self.transpile_proc.allocator.destroy(self_var_ptr);
+            self_var_ptr.* = ast.Node{
+                .type = .Variable,
+                .pos = self.*.transpile_proc.*.pos,
+                .node_variant = .{ .variable = .{ .name = self_name, .type = self_dt, .val = null } },
+            };
+            // Register `self` in scope for parsing identifier uses.
+            const self_entity = try self.new_scope_entity(self_var_ptr, .{});
+            self.transpile_proc.owned_scope_entities.append(self_entity) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer _ = self.transpile_proc.owned_scope_entities.pop();
+            try self.transpile_proc.push_scope_entity(self_entity);
+
+            var args = utils.Vector(*ast.Node).init(self.transpile_proc.allocator);
+            args.push(self_var_ptr) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+
+            // Parse additional explicit args (datatype name pairs), if any.
+            var hist_args = utils.History.init(self.transpile_proc.allocator, .{});
+            defer hist_args.deinit();
+            while (!self.next_token_is_symbol(')')) {
+                try self.parse_full_variable(&hist_args);
+                const arg_node = self.node_pop();
+                const arg_ptr = self.transpile_proc.allocator.create(ast.Node) catch {
+                    return ParseError.MemoryAllocationFailed;
+                };
+                errdefer self.transpile_proc.allocator.destroy(arg_ptr);
+                arg_ptr.* = arg_node.?;
+                args.push(arg_ptr) catch {
+                    return ParseError.MemoryAllocationFailed;
+                };
+                if (!self.next_token_is_operator(",")) break;
+                _ = self.token_next();
+            }
+            try self.expect_sym(')');
+
+            fn_node.node_variant.?.function.args = args;
+
+            // Optional return type; default void.
+            var rtype: dtype.DataType = .{ .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator) };
+            const rtok = self.token_peek_next();
+            if (rtok != null and ((rtok.?.type == .Keyword and utils.keyword_is_datatype(rtok.?.data.sval.items)) or rtok.?.type == .Identifier)) {
+                try self.parse_datatype(&rtype);
+                fn_node.node_variant.?.function.rtype = rtype;
+            }
+
+            // Body
+            if (self.next_token_is_symbol('{')) {
+                var hist_body = utils.History.init(self.transpile_proc.allocator, .{ .inside_function_body = true });
+                defer hist_body.deinit();
+                try self.parse_body(&hist_body);
+                const body_node = self.node_pop();
+                const body_ptr = self.transpile_proc.allocator.create(ast.Node) catch {
+                    return ParseError.MemoryAllocationFailed;
+                };
+                errdefer self.transpile_proc.allocator.destroy(body_ptr);
+                body_ptr.* = body_node.?;
+                fn_node.node_variant.?.function.body = body_ptr;
+            } else {
+                try self.expect_sym(';');
+            }
+
+            // End function scope opened above.
+            self.transpile_proc.finish_scope();
+
+            const fn_ptr = self.transpile_proc.allocator.create(ast.Node) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer self.transpile_proc.allocator.destroy(fn_ptr);
+            fn_ptr.* = fn_node;
+            methods.push(fn_ptr) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+        }
+
+        try self.expect_sym('}');
+
+        const node = self.transpile_proc.allocator.create(ast.Node) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+        errdefer {
+            self.transpile_proc.deinit_node(node.*);
+            self.transpile_proc.allocator.destroy(node);
+        }
+        node.* = ast.Node{
+            .type = .Impl,
+            .pos = self.*.transpile_proc.*.pos,
+            .node_variant = .{ .impl = .{ .type_name = type_name, .quirk_name = quirk_name, .methods = methods } },
+        };
+
+        self.transpile_proc.nodes.push(node.*) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+        self.transpile_proc.owned_nodes.append(node) catch {
+            return ParseError.MemoryAllocationFailed;
         };
     }
 
@@ -1739,7 +2354,18 @@ pub const ParseProcess = struct {
             self.transpile_proc.err("expected indentifier, got '{}'", .{ident_token.?.type});
             return ParseError.InvalidIdentifier;
         }
-        function_node.node_variant.?.function.name = ident_token.?.data.sval;
+        // Function nodes must own their name buffer. Token sval buffers are owned by the token stream
+        // and are deinitialized in `TranspileProcess.deinit()`.
+        var fname = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, ident_token.?.data.sval.items.len) catch |e| {
+            std.debug.print("Error creating function name: {s}\n", .{@errorName(e)});
+            return ParseError.MemoryAllocationFailed;
+        };
+        errdefer fname.deinit();
+        fname.appendSlice(ident_token.?.data.sval.items) catch |e| {
+            std.debug.print("Error appending to function name: {s}\n", .{@errorName(e)});
+            return ParseError.MemoryAllocationFailed;
+        };
+        function_node.node_variant.?.function.name = fname;
         self.parser_current_function = function_node;
         try self.expect_op("(");
         var hist_args = utils.History.init(self.transpile_proc.allocator, .{});
@@ -2222,6 +2848,12 @@ pub const ParseProcess = struct {
 
         if (mem.eql(u8, "imp", sval)) {
             return try self.parse_import();
+        } else if (mem.eql(u8, "compound", sval)) {
+            return try self.parse_compound();
+        } else if (mem.eql(u8, "quirk", sval)) {
+            return try self.parse_quirk();
+        } else if (mem.eql(u8, "impl", sval)) {
+            return try self.parse_impl();
         } else if (mem.eql(u8, "fun", sval)) {
             return try self.parse_function();
         } else if (mem.eql(u8, "for", sval)) {

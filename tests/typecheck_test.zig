@@ -190,3 +190,78 @@ test "typecheck chr literal and variable" {
 
     try runTranspileExpectOk(std.testing.allocator, "typecheck_chr_ok.fn", input);
 }
+
+test "typecheck compound field access ok" {
+    const input =
+        "compound Point {\n" ++
+        "  num x, y;\n" ++
+        "}\n" ++
+        "fun main() {\n" ++
+        "  Point p;\n" ++
+        "  num a = p.x;\n" ++
+        "  ret;\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_compound_field_ok.fn", input);
+}
+
+test "typecheck compound field missing errors" {
+    const input =
+        "compound Point {\n" ++
+        "  num x;\n" ++
+        "}\n" ++
+        "fun main() {\n" ++
+        "  Point p;\n" ++
+        "  num a = p.y;\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_compound_field_missing.fn", input);
+}
+
+test "typecheck quirk method call ok" {
+    const input =
+        "quirk HasX {\n" ++
+        "  getX() num;\n" ++
+        "}\n" ++
+        "fun main() {\n" ++
+        "  HasX h;\n" ++
+        "  num a = h.getX();\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_quirk_method_ok.fn", input);
+}
+
+test "typecheck quirk coercion from impl ok" {
+    const input =
+        "compound Point {\n" ++
+        "  num x;\n" ++
+        "}\n" ++
+        "quirk HasX {\n" ++
+        "  getX() num;\n" ++
+        "}\n" ++
+        "impl Point HasX {\n" ++
+        "  getX() num {\n" ++
+        "    ret self.x;\n" ++
+        "  }\n" ++
+        "}\n" ++
+        "fun main() {\n" ++
+        "  Point p;\n" ++
+        "  HasX h = &p;\n" ++
+        "  num a = h.getX();\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_quirk_coerce_ok.fn", input);
+}
+
+test "typecheck quirk method arg type mismatch errors" {
+    const input =
+        "quirk Q {\n" ++
+        "  foo(num a) void;\n" ++
+        "}\n" ++
+        "fun main() {\n" ++
+        "  Q q;\n" ++
+        "  q.foo(\"hi\");\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_quirk_method_arg_mismatch.fn", input);
+}
