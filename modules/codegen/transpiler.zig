@@ -79,6 +79,22 @@ pub const GlobalSymbolInfo = struct {
     is_function: bool,
 };
 
+const ImplKey = struct {
+    type_name: []const u8,
+    quirk_sig: []const u8,
+};
+
+const ImplKeyContext = struct {
+    pub fn hash(_: @This(), key: ImplKey) u64 {
+        const a = std.hash.Wyhash.hash(0, key.type_name);
+        return std.hash.Wyhash.hash(a, key.quirk_sig);
+    }
+
+    pub fn eql(_: @This(), a: ImplKey, b: ImplKey) bool {
+        return mem.eql(u8, a.type_name, b.type_name) and mem.eql(u8, a.quirk_sig, b.quirk_sig);
+    }
+};
+
 pub const TypeRegistry = struct {
     allocator: mem.Allocator,
 
@@ -91,10 +107,10 @@ pub const TypeRegistry = struct {
     /// Maps canonical signature key to the (first-seen) quirk definition node.
     quirks_by_sig: std.StringHashMap(*ast.Node),
 
-    /// Maps `<Type>|<QuirkSig>` to the impl definition node.
-    impls_by_key: std.StringHashMap(*ast.Node),
+    /// Maps `<Type> + <QuirkSig>` to the impl definition node.
+    impls_by_key: std.HashMap(ImplKey, *ast.Node, ImplKeyContext, 80),
 
-    /// Owned allocations for quirk signature keys and impl keys.
+    /// Owned allocations for quirk signature keys.
     owned_keys: std.ArrayList([]const u8),
 
     pub fn init(allocator: mem.Allocator) TypeRegistry {
@@ -103,7 +119,7 @@ pub const TypeRegistry = struct {
             .compounds_by_name = std.StringHashMap(*ast.Node).init(allocator),
             .quirk_sig_by_name = std.StringHashMap([]const u8).init(allocator),
             .quirks_by_sig = std.StringHashMap(*ast.Node).init(allocator),
-            .impls_by_key = std.StringHashMap(*ast.Node).init(allocator),
+            .impls_by_key = std.HashMap(ImplKey, *ast.Node, ImplKeyContext, 80).init(allocator),
             .owned_keys = std.ArrayList([]const u8).init(allocator),
         };
     }
@@ -172,6 +188,12 @@ pub const TranspileProcess = struct {
     },
     /// The allocator to be used for memory allocation operations.
     allocator: mem.Allocator,
+
+    /// Backing allocator used by this process's arena.
+    backing_allocator: mem.Allocator,
+
+    /// Arena used for AST/scopes/registries (simplifies ownership and cleanup).
+    arena: *std.heap.ArenaAllocator,
 
     /// Initialize a new indentation field to track active statement type
     current_statement_type: enum {
@@ -365,6 +387,7 @@ pub const TranspileProcess = struct {
     }
 
     fn collect_impls_module(self: *Self, proc: *Self, reg: *TypeRegistry) TranspileError!void {
+        _ = self;
         for (proc.owned_nodes.items) |n| {
             if (n.type != .Impl or n.node_variant == null) continue;
             const imp = n.node_variant.?.impl;
@@ -373,23 +396,12 @@ pub const TranspileProcess = struct {
 
             const sig = reg.quirk_sig_by_name.get(quirk_name) orelse quirk_name;
 
-            const key_len = type_name.len + 1 + sig.len;
-            var key_buf = self.allocator.alloc(u8, key_len) catch {
-                return TranspileError.MemoryAllocationFailed;
-            };
-            errdefer self.allocator.free(key_buf);
-            @memcpy(key_buf[0..type_name.len], type_name);
-            key_buf[type_name.len] = '|';
-            @memcpy(key_buf[type_name.len + 1 ..], sig);
-
-            if (reg.impls_by_key.contains(key_buf)) {
+            const key: ImplKey = .{ .type_name = type_name, .quirk_sig = sig };
+            if (reg.impls_by_key.contains(key)) {
                 return TranspileError.DuplicateSymbol;
             }
 
-            reg.impls_by_key.put(key_buf, n) catch {
-                return TranspileError.MemoryAllocationFailed;
-            };
-            reg.owned_keys.append(key_buf) catch {
+            reg.impls_by_key.put(key, n) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
         }
@@ -416,7 +428,8 @@ pub const TranspileProcess = struct {
     }
 
     fn build_full_import_path(self: *Self, import_path: []const u8) TranspileError![]const u8 {
-        var file_path = std.ArrayList(u8).init(self.allocator);
+        // This path is a temporary helper string; keep it off the arena.
+        var file_path = std.ArrayList(u8).init(self.backing_allocator);
         defer file_path.deinit();
 
         const dir_path = std.fs.path.dirname(self.input_file_path) orelse ".";
@@ -462,7 +475,7 @@ pub const TranspileProcess = struct {
         if (std.mem.indexOf(u8, import_path, "std.") != null) return;
 
         const full_path = try self.build_full_import_path(import_path);
-        defer self.allocator.free(full_path);
+        defer self.backing_allocator.free(full_path);
 
         std.fs.cwd().access(full_path, .{}) catch {
             return TranspileError.FileNotFound;
@@ -471,14 +484,14 @@ pub const TranspileProcess = struct {
         // Early direct circular import detection (A imports B, and B imports A).
         // This is intentionally lightweight and mirrors the check in process_local_import.
         {
-            const file_contents = fs.cwd().readFileAlloc(self.allocator, full_path, 1024 * 1024) catch |read_err| {
+            const file_contents = fs.cwd().readFileAlloc(self.backing_allocator, full_path, 1024 * 1024) catch |read_err| {
                 self.err("Failed to read import file: {any}", .{read_err});
                 return TranspileError.FileReadError;
             };
-            defer self.allocator.free(file_contents);
+            defer self.backing_allocator.free(file_contents);
 
             const our_name = std.fs.path.stem(self.input_file_path);
-            var import_line = std.ArrayList(u8).init(self.allocator);
+            var import_line = std.ArrayList(u8).init(self.backing_allocator);
             defer import_line.deinit();
             import_line.appendSlice("imp ") catch |e| {
                 std.debug.print("Failed to allocate memory for import line: {s}\\n", .{@errorName(e)});
@@ -501,7 +514,7 @@ pub const TranspileProcess = struct {
             }
         }
 
-        var import_proc = try TranspileProcess.init(self.allocator, full_path, "temp.c", .{ .exec = false, .outf = false, .ast = false });
+        var import_proc = try TranspileProcess.init(self.backing_allocator, full_path, "temp.c", .{ .exec = false, .outf = false, .ast = false });
         defer import_proc.deinit();
 
         var lex_proc = lexer.LexProcess.init(&import_proc);
@@ -578,6 +591,14 @@ pub const TranspileProcess = struct {
         };
         errdefer ifile.close();
 
+        const arena_ptr = allocator.create(std.heap.ArenaAllocator) catch {
+            return TranspileError.MemoryAllocationFailed;
+        };
+        errdefer allocator.destroy(arena_ptr);
+        arena_ptr.* = std.heap.ArenaAllocator.init(allocator);
+        errdefer arena_ptr.deinit();
+        const a = arena_ptr.allocator();
+
         var ofile: ?fs.File = null;
         var outbuf: ?std.ArrayList(u8) = null;
 
@@ -588,70 +609,68 @@ pub const TranspileProcess = struct {
             };
             errdefer if (ofile) |f| f.close();
         } else {
-            outbuf = std.ArrayList(u8).init(allocator);
+            outbuf = std.ArrayList(u8).init(a);
         }
 
         // Create initial symbol table
-        const initial_table = allocator.create(symbol.SymbolTable) catch |e| {
+        const initial_table = a.create(symbol.SymbolTable) catch |e| {
             std.debug.print("Error creating initial symbol table: {s}\\n", .{@errorName(e)});
             return TranspileError.MemoryAllocationFailed;
         };
-        errdefer allocator.destroy(initial_table);
+        errdefer a.destroy(initial_table);
         initial_table.* = .{
-            .symbols = utils.Vector(symbol.Symbol).init(allocator),
+            .symbols = utils.Vector(symbol.Symbol).init(a),
             .name = "",
         };
         errdefer initial_table.symbols.deinit();
 
         // Initialize import-related structures
-        var imported_files = std.StringHashMap(bool).init(allocator);
+        var imported_files = std.StringHashMap(bool).init(a);
         errdefer imported_files.deinit();
-        imported_files.put(ifilepath, true) catch |e| {
-            std.debug.print("Error adding file '{s}' to imported files: {s}\\n", .{ ifilepath, @errorName(e) });
-            return TranspileError.MemoryAllocationFailed;
-        }; // Mark current file as imported
 
-        var import_chain = std.ArrayList([]const u8).init(allocator);
+        var import_chain = std.ArrayList([]const u8).init(a);
         errdefer import_chain.deinit();
 
-        const initial_path = allocator.dupe(u8, ifilepath) catch |e| {
-            std.debug.print("Error duplicating initial path '{s}': {s}\\n", .{ ifilepath, @errorName(e) });
-            return TranspileError.MemoryAllocationFailed;
-        };
-        errdefer allocator.free(initial_path);
-        import_chain.append(initial_path) catch |e| {
-            std.debug.print("Error adding initial path '{s}' to import chain: {s}\\n", .{ initial_path, @errorName(e) });
-            return TranspileError.MemoryAllocationFailed;
-        };
-
-        const input_file_path = allocator.dupe(u8, ifilepath) catch |e| {
+        const input_file_path = a.dupe(u8, ifilepath) catch |e| {
             std.debug.print("Error duplicating input file path '{s}': {s}\\n", .{ ifilepath, @errorName(e) });
             return TranspileError.MemoryAllocationFailed;
         };
-        errdefer allocator.free(input_file_path);
+        errdefer a.free(input_file_path);
+
+        imported_files.put(input_file_path, true) catch |e| {
+            std.debug.print("Error adding file '{s}' to imported files: {s}\\n", .{ input_file_path, @errorName(e) });
+            return TranspileError.MemoryAllocationFailed;
+        }; // Mark current file as imported
+
+        import_chain.append(input_file_path) catch |e| {
+            std.debug.print("Error adding initial path '{s}' to import chain: {s}\\n", .{ input_file_path, @errorName(e) });
+            return TranspileError.MemoryAllocationFailed;
+        };
 
         return Self{
             .flags = flags,
-            .pos = .{ .col = 1, .line = 1, .start_col = 1, .end_col = 1, .filename = ifilepath },
+            .pos = .{ .col = 1, .line = 1, .start_col = 1, .end_col = 1, .filename = input_file_path },
             .ifile = ifile,
             .ofile = ofile,
             .outbuf = outbuf,
-            .tokens = utils.Vector(token.Token).init(allocator),
-            .nodes = utils.Vector(ast.Node).init(allocator),
-            .warnings = std.ArrayList(u8).init(allocator),
-            .owned_nodes = std.ArrayList(*ast.Node).init(allocator),
-            .owned_scope_entities = std.ArrayList(*scope.ScopeEntity).init(allocator),
+            .tokens = utils.Vector(token.Token).init(a),
+            .nodes = utils.Vector(ast.Node).init(a),
+            .warnings = std.ArrayList(u8).init(a),
+            .owned_nodes = std.ArrayList(*ast.Node).init(a),
+            .owned_scope_entities = std.ArrayList(*scope.ScopeEntity).init(a),
             .scope = null,
             .symbols = .{
                 .active_table = initial_table,
-                .tables = utils.Vector(*symbol.SymbolTable).init(allocator),
+                .tables = utils.Vector(*symbol.SymbolTable).init(a),
             },
-            .allocator = allocator,
+            .allocator = a,
+            .backing_allocator = allocator,
+            .arena = arena_ptr,
             .imported_files = imported_files,
             .import_chain = import_chain,
-            .global_symbols = std.StringHashMap(GlobalSymbolInfo).init(allocator),
-            .children = std.ArrayList(*TranspileProcess).init(allocator),
-            .std_imports = std.ArrayList([]const u8).init(allocator),
+            .global_symbols = std.StringHashMap(GlobalSymbolInfo).init(a),
+            .children = std.ArrayList(*TranspileProcess).init(a),
+            .std_imports = std.ArrayList([]const u8).init(a),
             .input_file_path = input_file_path,
         };
     }
@@ -905,11 +924,7 @@ pub const TranspileProcess = struct {
             if (root.type_registry == null) return false;
             const reg = &root.type_registry.?;
             const sig = reg.quirk_sig_by_name.get(expected.name.?) orelse return false;
-            const key = std.fmt.allocPrint(self.allocator, "{s}|{s}", .{ actual.name.?, sig }) catch {
-                return TranspileError.MemoryAllocationFailed;
-            };
-            defer self.allocator.free(key);
-            if (reg.impls_by_key.contains(key)) return true;
+            if (reg.impls_by_key.contains(.{ .type_name = actual.name.?, .quirk_sig = sig })) return true;
         }
 
         if (expected.is_array != actual.is_array or expected.pointer_depth != actual.pointer_depth) return false;
@@ -2276,85 +2291,34 @@ pub const TranspileProcess = struct {
 
         self.warnings.deinit();
 
-        // Free heap allocations that are not part of the `nodes` vector itself.
-        for (self.owned_scope_entities.items) |entity| {
-            self.allocator.destroy(entity);
-        }
+        // Most allocations in a `TranspileProcess` are arena-backed; deinit the
+        // containers, then release the arena at the end.
         self.owned_scope_entities.deinit();
-
-        for (self.owned_nodes.items) |node_ptr| {
-            self.allocator.destroy(node_ptr);
-        }
         self.owned_nodes.deinit();
         if (self.symbols.active_table) |table| {
             table.symbols.deinit();
-            self.allocator.destroy(table);
         }
         for (self.symbols.tables.items()) |table| {
             table.symbols.deinit();
-            self.allocator.destroy(table);
         }
         self.symbols.tables.deinit();
 
-        // Free the imported files map
-        var it = self.imported_files.keyIterator();
-        while (it.next()) |key| {
-            if (!mem.eql(u8, key.*, self.input_file_path)) {
-                self.allocator.free(key.*);
-            }
-        }
         self.imported_files.deinit();
-
-        // Free the import chain
-        for (self.import_chain.items) |path| {
-            self.allocator.free(path);
-        }
         self.import_chain.deinit();
-
-        // Properly clean up global_symbols hash map
-        var global_it = self.global_symbols.iterator();
-        while (global_it.next()) |entry| {
-            // Many entries point at memory owned by:
-            // - this process (e.g. `self.input_file_path`),
-            // - or a still-live child process (during parent deinit, children are
-            //   deinitialized after the parent's global_symbols map).
-            //
-            // Some entries (e.g. preloaded import symbols) may be backed by fresh
-            // allocations and must be freed here.
-            const fp = entry.value_ptr.file_path;
-
-            var borrowed = mem.eql(u8, fp, self.input_file_path);
-            if (!borrowed) {
-                for (self.children.items) |child| {
-                    if (mem.eql(u8, fp, child.input_file_path)) {
-                        borrowed = true;
-                        break;
-                    }
-                }
-            }
-
-            if (!borrowed) {
-                self.allocator.free(entry.value_ptr.file_path);
-                self.allocator.free(entry.key_ptr.*);
-            }
-        }
         self.global_symbols.deinit();
 
         // Deinit children TranspileProcesses
         for (self.children.items) |child| {
             child.deinit();
-            self.allocator.destroy(child);
+            self.backing_allocator.destroy(child);
         }
         self.children.deinit();
 
-        // Free std imports
-        for (self.std_imports.items) |import_path| {
-            self.allocator.free(import_path);
-        }
         self.std_imports.deinit();
 
-        // Free input file path
-        self.allocator.free(self.input_file_path);
+        // Release all arena allocations back to the backing allocator.
+        self.arena.deinit();
+        self.backing_allocator.destroy(self.arena);
     }
 
     /// Gets the output as a string. Only valid when outf is false.
@@ -3003,11 +2967,7 @@ pub const TranspileProcess = struct {
                             if (expected_sig != null) {
                                 const actual = self.expr_named_pointee_from_scope(right.*);
                                 if (actual != null) {
-                                    const key = std.fmt.allocPrint(self.allocator, "{s}|{s}", .{ actual.?, expected_sig.? }) catch {
-                                        return TranspileError.MemoryAllocationFailed;
-                                    };
-                                    defer self.allocator.free(key);
-                                    if (reg.impls_by_key.contains(key)) {
+                                    if (reg.impls_by_key.contains(.{ .type_name = actual.?, .quirk_sig = expected_sig.? })) {
                                         const type_s = try self.c_ident_sanitize(actual.?);
                                         defer self.allocator.free(type_s);
                                         var coerce_buf: [96]u8 = undefined;
@@ -3142,11 +3102,7 @@ pub const TranspileProcess = struct {
                         if (sig != null) {
                             const actual = self.expr_named_pointee_from_scope(val.*);
                             if (actual != null) {
-                                const key = std.fmt.allocPrint(self.allocator, "{s}|{s}", .{ actual.?, sig.? }) catch {
-                                    return TranspileError.MemoryAllocationFailed;
-                                };
-                                defer self.allocator.free(key);
-                                if (reg.impls_by_key.contains(key)) {
+                                if (reg.impls_by_key.contains(.{ .type_name = actual.?, .quirk_sig = sig.? })) {
                                     const type_s = try self.c_ident_sanitize(actual.?);
                                     defer self.allocator.free(type_s);
                                     var coerce_buf: [96]u8 = undefined;
@@ -3666,7 +3622,8 @@ pub const TranspileProcess = struct {
     /// - Returns an error if processing the import fails.
     fn process_local_import(self: *Self, import_path: []const u8) GeneralError!void {
         // Get full path of the file to import
-        var file_path = std.ArrayList(u8).init(self.allocator);
+        // This is a temporary helper string; keep it off the arena.
+        var file_path = std.ArrayList(u8).init(self.backing_allocator);
         defer file_path.deinit();
 
         const dir_path = std.fs.path.dirname(self.input_file_path) orelse ".";
@@ -3702,8 +3659,8 @@ pub const TranspileProcess = struct {
             std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
             return TranspileError.MemoryAllocationFailed;
         };
-        errdefer self.allocator.free(full_path);
-        defer self.allocator.free(full_path);
+        errdefer self.backing_allocator.free(full_path);
+        defer self.backing_allocator.free(full_path);
 
         // Add a comment showing the import attempt
         try self.write("\n/* Attempting to import: ");
@@ -3720,15 +3677,15 @@ pub const TranspileProcess = struct {
 
         // Robust direct circular dependency detection
         // First, check if the file being imported already has us in its import chain
-        const file_contents = fs.cwd().readFileAlloc(self.allocator, full_path, 1024 * 1024) catch |read_err| {
+        const file_contents = fs.cwd().readFileAlloc(self.backing_allocator, full_path, 1024 * 1024) catch |read_err| {
             self.err("Failed to read import file: {any}", .{read_err});
             return TranspileError.FileReadError;
         };
-        defer self.allocator.free(file_contents);
+        defer self.backing_allocator.free(file_contents);
 
         // Check if the file imports us directly (crude but effective)
         const our_name = std.fs.path.stem(self.input_file_path);
-        var import_line = std.ArrayList(u8).init(self.allocator);
+        var import_line = std.ArrayList(u8).init(self.backing_allocator);
         defer import_line.deinit();
         import_line.appendSlice("imp ") catch |e| {
             std.debug.print("Failed to allocate memory for import line: {s}\\n", .{@errorName(e)});
@@ -3764,36 +3721,38 @@ pub const TranspileProcess = struct {
             return TranspileError.MemoryAllocationFailed;
         };
 
-        // Create and initialize child transpile process
-        var import_proc = self.allocator.create(TranspileProcess) catch |e| {
+        // Create and initialize child transpile process.
+        // The child process struct itself must be backing-allocated so the parent
+        // can safely destroy it after `child.deinit()`.
+        var import_proc = self.backing_allocator.create(TranspileProcess) catch |e| {
             std.debug.print("Failed to allocate memory for import process: {s}\\n", .{@errorName(e)});
             return TranspileError.MemoryAllocationFailed;
         };
-        errdefer self.allocator.destroy(import_proc);
+        errdefer self.backing_allocator.destroy(import_proc);
 
-        import_proc.* = try TranspileProcess.init(self.allocator, full_path, "temp.c", .{ .outf = false });
+        import_proc.* = try TranspileProcess.init(self.backing_allocator, full_path, "temp.c", .{ .outf = false });
 
         import_proc.parent = self;
         import_proc.is_importing = true;
 
         // Copy the import chain and add the current import for tracking
         for (self.import_chain.items) |chain_path| {
-            const chain_path_copy = self.allocator.dupe(u8, chain_path) catch |e| {
+            const chain_path_copy = import_proc.allocator.dupe(u8, chain_path) catch |e| {
                 std.debug.print("Failed to allocate memory for import chain copy: {s}\\n", .{@errorName(e)});
                 return TranspileError.MemoryAllocationFailed;
             };
-            errdefer self.allocator.free(chain_path_copy);
+            errdefer import_proc.allocator.free(chain_path_copy);
 
             import_proc.import_chain.append(chain_path_copy) catch |e| {
                 std.debug.print("Failed to allocate memory for import chain: {s}\\n", .{@errorName(e)});
                 return TranspileError.MemoryAllocationFailed;
             };
         }
-        const import_path_copy = self.allocator.dupe(u8, full_path) catch |e| {
+        const import_path_copy = import_proc.allocator.dupe(u8, full_path) catch |e| {
             std.debug.print("Failed to allocate memory for import path copy: {s}\\n", .{@errorName(e)});
             return TranspileError.MemoryAllocationFailed;
         };
-        errdefer self.allocator.free(import_path_copy);
+        errdefer import_proc.allocator.free(import_path_copy);
 
         import_proc.import_chain.append(import_path_copy) catch |e| {
             std.debug.print("Failed to allocate memory for import chain: {s}\\n", .{@errorName(e)});
@@ -3803,11 +3762,11 @@ pub const TranspileProcess = struct {
         // Copy imported files to child
         var it = self.imported_files.iterator();
         while (it.next()) |entry| {
-            const imported_file_copy = self.allocator.dupe(u8, entry.key_ptr.*) catch |e| {
+            const imported_file_copy = import_proc.allocator.dupe(u8, entry.key_ptr.*) catch |e| {
                 std.debug.print("Failed to allocate memory for imported file copy: {s}\\n", .{@errorName(e)});
                 return TranspileError.MemoryAllocationFailed;
             };
-            errdefer self.allocator.free(imported_file_copy);
+            errdefer import_proc.allocator.free(imported_file_copy);
 
             import_proc.imported_files.put(imported_file_copy, true) catch |e| {
                 std.debug.print("Failed to allocate memory for imported file: {s}\\n", .{@errorName(e)});

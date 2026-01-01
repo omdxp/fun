@@ -1,12 +1,24 @@
 [CmdletBinding()]
 param(
-  [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..") ).Path,
+  [string]$RepoRoot = "",
   [int]$PerFileTimeoutSec = 120,
   [int]$ProgressEvery = 5
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
+  $scriptDir = if ($PSCommandPath) {
+    Split-Path -Parent $PSCommandPath
+  } elseif ($PSScriptRoot) {
+    $PSScriptRoot
+  } else {
+    (Get-Location).Path
+  }
+
+  $RepoRoot = (Resolve-Path (Join-Path $scriptDir "..")).Path
+}
 
 function Get-RelativePath([string]$base, [string]$full) {
   if (-not $full.StartsWith($base, [System.StringComparison]::OrdinalIgnoreCase)) {
