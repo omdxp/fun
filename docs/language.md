@@ -22,6 +22,13 @@
 
 See [examples/type_order.fn](../examples/type_order.fn).
 
+### C Standard Library Compatibility
+- `imp std.*;` can be used to pull in C standard headers (e.g. `std.io`→`stdio.h`, `std.time`→`time.h`).
+- ALL_CAPS identifiers (like `NULL`, `SEEK_SET`, `INT_MAX`) are allowed without prior declaration so C macro constants work naturally once the right header is imported.
+- Extra headers supported: `std.limits`→`limits.h`, `std.stdint`→`stdint.h`, `std.stddef`→`stddef.h`, `std.errno`→`errno.h`.
+
+See [examples/c_limits_and_null.fn](../examples/c_limits_and_null.fn) and [examples/c_file_io.fn](../examples/c_file_io.fn).
+
 ## Example
 ```fun
 fun add(num a, num b) num {

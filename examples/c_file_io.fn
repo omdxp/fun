@@ -1,0 +1,28 @@
+// Use C stdio via Fun std imports.
+// Demonstrates FILE*, fwrite/fread, fseek, SEEK_SET.
+
+imp std.io;
+imp std.string;
+
+fun main() {
+  str path = "./_fun_c_file_io_demo.txt";
+
+  FILE* f = fopen(path, "wb+");
+  if (f == NULL) {
+    perror("fopen");
+    ret;
+  }
+
+  str msg = "hello from C stdio\n";
+  num n = strlen(msg);
+  fwrite(msg, 1, n, f);
+
+  fseek(f, 0, SEEK_SET);
+
+  chr[64] buf;
+  // fgets writes a terminating '\0'
+  fgets(buf, 64, f);
+  printf("read: %s", buf);
+
+  fclose(f);
+}

@@ -12,6 +12,9 @@ This directory contains example programs for the fun language.
 
 - `advanced/fit_exhaustive_warning.fn` — Triggers a warning for non-exhaustive `fit` on `bin`
 - `advanced/fit_exhaustive_ok.fn` — Exhaustive `fit` on `bin` (no warning)
+- `c_limits_and_null.fn` — Uses C macros like `INT_MAX` and `NULL`
+- `c_file_io.fn` — Uses C `stdio.h` file I/O via `imp std.io;`
+- `c_size_t.fn` — Uses C typedef `size_t` via `imp std.stddef;`
 
 Try running these with the fun CLI to see the language in action!
 

@@ -641,7 +641,15 @@ pub const ParseProcess = struct {
                 return ParseError.InvalidDataType;
             }
         } else {
-            dt.*.type = .Unknown;
+            // Identifier-based types (e.g. C typedefs like `size_t`) are allowed.
+            // For a small set of common C typedef names, tag them with a numeric
+            // semantic type so arithmetic/comparisons typecheck, while still
+            // emitting the original identifier in C via `type_str`.
+            if (dt_token.?.type == .Identifier) {
+                dt.*.type = utils.get_c_typedef_alias_datatype_type(dt_token.?.data.sval.items) orelse .Unknown;
+            } else {
+                dt.*.type = .Unknown;
+            }
         }
         dt.*.type_str = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, dt_token.?.data.sval.items.len) catch |e| {
             std.debug.print("Error creating type string: {s}", .{@errorName(e)});
@@ -707,14 +715,31 @@ pub const ParseProcess = struct {
                 const prev = self.token_peek_prev();
                 const is_member_access = prev != null and prev.?.type == .Operator and mem.eql(u8, prev.?.data.sval.items, ".");
 
+                const is_c_macro_ident = struct {
+                    fn ok(name: []const u8) bool {
+                        if (name.len == 0) return false;
+                        const first = name[0];
+                        if (!((first >= 'A' and first <= 'Z') or first == '_')) return false;
+                        for (name) |c| {
+                            const is_upper = (c >= 'A' and c <= 'Z');
+                            const is_digit = (c >= '0' and c <= '9');
+                            if (!(is_upper or is_digit or c == '_')) return false;
+                        }
+                        return true;
+                    }
+                }.ok(t.?.data.sval.items);
+
                 // `_` is a wildcard identifier (used by `fit` default branches).
                 // It should be accepted even if it's not declared.
                 if (!mem.eql(u8, t.?.data.sval.items, "_")) {
                     if (!is_member_access) {
                         if (self.transpile_proc.get_scope_entity(t.?.data.sval.items) == null) {
                             if (self.transpile_proc.get_symbol(t.?.data.sval.items) == null and self.transpile_proc.global_symbols.get(t.?.data.sval.items) == null) {
-                                self.transpile_proc.err("unknown identifier '{s}'", .{t.?.data.sval.items});
-                                return ParseError.InvalidIdentifier;
+                                // Treat ALL_CAPS identifiers as C macro-style constants.
+                                if (!is_c_macro_ident) {
+                                    self.transpile_proc.err("unknown identifier '{s}'", .{t.?.data.sval.items});
+                                    return ParseError.InvalidIdentifier;
+                                }
                             }
                         }
                     }
@@ -1550,33 +1575,69 @@ pub const ParseProcess = struct {
                 // Support user-defined types at statement level: `Point p;`.
                 // If the next token is a known type name and the following token looks like a declaration,
                 // parse it as a variable declaration instead of an identifier expression.
-                const name = t.?.data.sval.items;
-                if (self.transpile_proc.get_symbol(name)) |sym| {
-                    if (sym.type == .Node and sym.data != null) {
-                        const n = sym.data.?.node;
-                        if (n.type == .Compound or n.type == .Quirk) {
-                            const t1 = self.token_peek_n(1);
-                            if (t1 != null and (t1.?.type == .Identifier or (t1.?.type == .Operator and (mem.eql(u8, t1.?.data.sval.items, "*") or mem.eql(u8, t1.?.data.sval.items, "["))))) {
-                                // Parse datatype + variable.
-                                const dt = self.transpile_proc.allocator.create(dtype.DataType) catch |e| {
-                                    std.debug.print("Error creating DataType: {}\n", .{e});
-                                    return ParseError.MemoryAllocationFailed;
-                                };
-                                errdefer self.transpile_proc.allocator.destroy(dt);
-                                dt.* = dtype.DataType{
-                                    .array = null,
-                                    .pointer_depth = 0,
-                                    .type = .Unknown,
-                                    .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
-                                    .flags = .{},
-                                };
-                                try self.parse_datatype(dt);
-                                try self.parse_variable(dt, hist);
-                                try self.expect_sym(';');
-                                break :blk true;
+                const looks_like_decl = struct {
+                    fn check(p: *Self) bool {
+                        var off: usize = 1;
+
+                        // Optional pointer stars after the type name.
+                        while (true) {
+                            const tok = p.token_peek_n(off) orelse break;
+                            if (tok.type == .Operator and mem.eql(u8, tok.data.sval.items, "*")) {
+                                off += 1;
+                                continue;
+                            }
+                            break;
+                        }
+
+                        // Optional array brackets after the type name: `T[] name;` or `T[64] name;`.
+                        while (true) {
+                            const tok = p.token_peek_n(off) orelse break;
+                            if (!(tok.type == .Operator and mem.eql(u8, tok.data.sval.items, "["))) break;
+
+                            off += 1; // skip '['
+                            // Skip until matching ']'. We don't need to fully parse the inner expression here.
+                            while (true) {
+                                const inner = p.token_peek_n(off) orelse return false;
+                                if (inner.type == .Symbol and inner.data.cval == ']') {
+                                    off += 1; // skip ']'
+                                    break;
+                                }
+                                // If we hit a statement terminator before closing, it's not a declaration.
+                                if (inner.type == .Symbol and inner.data.cval == ';') return false;
+                                off += 1;
                             }
                         }
+
+                        // A declaration must have an identifier name after the type.
+                        const name_tok = p.token_peek_n(off) orelse return false;
+                        if (name_tok.type != .Identifier) return false;
+
+                        // And should be followed by `;` or `=`.
+                        const next_tok = p.token_peek_n(off + 1) orelse return false;
+                        if (next_tok.type == .Operator and mem.eql(u8, next_tok.data.sval.items, "=")) return true;
+                        if (next_tok.type == .Symbol and next_tok.data.cval == ';') return true;
+                        return false;
                     }
+                }.check;
+
+                if (looks_like_decl(self)) {
+                    // Parse datatype + variable.
+                    const dt = self.transpile_proc.allocator.create(dtype.DataType) catch |e| {
+                        std.debug.print("Error creating DataType: {}\n", .{e});
+                        return ParseError.MemoryAllocationFailed;
+                    };
+                    errdefer self.transpile_proc.allocator.destroy(dt);
+                    dt.* = dtype.DataType{
+                        .array = null,
+                        .pointer_depth = 0,
+                        .type = .Unknown,
+                        .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
+                        .flags = .{},
+                    };
+                    try self.parse_datatype(dt);
+                    try self.parse_variable(dt, hist);
+                    try self.expect_sym(';');
+                    break :blk true;
                 }
                 break :blk try self.parse_identifier();
             },

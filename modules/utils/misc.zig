@@ -204,6 +204,35 @@ pub fn get_datatype_type(dt: []const u8) dtype.DataTypeType {
     return .Unknown;
 }
 
+/// Best-effort semantic typing for common C typedef names.
+///
+/// These identifiers are emitted verbatim in C (`type_str`), but we tag them with a
+/// Fun base type so the typechecker can treat them as numeric where appropriate.
+///
+/// Returns null when the name is not recognized.
+pub fn get_c_typedef_alias_datatype_type(dt: []const u8) ?dtype.DataTypeType {
+    // `stddef.h`
+    if (mem.eql(u8, "size_t", dt)) return .Num;
+    if (mem.eql(u8, "ptrdiff_t", dt)) return .Num;
+    // Common POSIX/C extensions
+    if (mem.eql(u8, "ssize_t", dt)) return .Num;
+    // `stdint.h`
+    if (mem.eql(u8, "intptr_t", dt)) return .Num;
+    if (mem.eql(u8, "uintptr_t", dt)) return .Num;
+    if (mem.eql(u8, "int8_t", dt)) return .Num;
+    if (mem.eql(u8, "uint8_t", dt)) return .Num;
+    if (mem.eql(u8, "int16_t", dt)) return .Num;
+    if (mem.eql(u8, "uint16_t", dt)) return .Num;
+    if (mem.eql(u8, "int32_t", dt)) return .Num;
+    if (mem.eql(u8, "uint32_t", dt)) return .Num;
+    if (mem.eql(u8, "int64_t", dt)) return .Num;
+    if (mem.eql(u8, "uint64_t", dt)) return .Num;
+    // `time.h`
+    if (mem.eql(u8, "time_t", dt)) return .Num;
+    if (mem.eql(u8, "clock_t", dt)) return .Num;
+    return null;
+}
+
 /// Checks if the given operator is an access operator.
 ///
 /// This function compares the given operator (`op`) to the access operator `"."`.

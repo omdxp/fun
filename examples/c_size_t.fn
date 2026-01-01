@@ -1,0 +1,12 @@
+// C stdlib compatibility demo:
+// - Using a C typedef type (`size_t`) in Fun code
+// - Doing arithmetic and printing with `%zu`
+
+imp std.io;
+imp std.stddef;
+
+fun main() {
+  size_t n = 0;
+  n = n + 5;
+  printf("size_t n=%zu\n", n);
+}

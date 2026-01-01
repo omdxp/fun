@@ -1396,6 +1396,27 @@ pub const TranspileProcess = struct {
                     self.report_type_error(node, "function '{s}' is not a value", .{name});
                     return TranspileError.NotCallable;
                 }
+
+                // Best-effort typing for common C macro constants.
+                // - `NULL` behaves like a C null pointer constant.
+                // - Common numeric macros (limits/stdio/stdlib/time) behave like integers.
+                if (mem.eql(u8, name, "NULL")) {
+                    return .{ .base = .Num, .is_null_literal = true };
+                }
+                if (mem.eql(u8, name, "EOF") or
+                    mem.eql(u8, name, "EXIT_SUCCESS") or mem.eql(u8, name, "EXIT_FAILURE") or
+                    mem.eql(u8, name, "SEEK_SET") or mem.eql(u8, name, "SEEK_CUR") or mem.eql(u8, name, "SEEK_END") or
+                    mem.eql(u8, name, "INT_MAX") or mem.eql(u8, name, "INT_MIN") or
+                    mem.eql(u8, name, "UINT_MAX") or
+                    mem.eql(u8, name, "LONG_MAX") or mem.eql(u8, name, "LONG_MIN") or
+                    mem.eql(u8, name, "ULONG_MAX") or
+                    mem.eql(u8, name, "LLONG_MAX") or mem.eql(u8, name, "LLONG_MIN") or
+                    mem.eql(u8, name, "ULLONG_MAX") or
+                    mem.eql(u8, name, "CLOCKS_PER_SEC"))
+                {
+                    return .{ .base = .Num };
+                }
+
                 return .{ .base = .Unknown };
             },
             .ExpressionParenthesis => {
@@ -4519,6 +4540,26 @@ pub const TranspileProcess = struct {
             };
         } else if (mem.eql(u8, import_path, "std.time")) {
             header_name = self.allocator.dupe(u8, "time.h") catch |e| {
+                self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
+                return TranspileError.MemoryAllocationFailed;
+            };
+        } else if (mem.eql(u8, import_path, "std.limits")) {
+            header_name = self.allocator.dupe(u8, "limits.h") catch |e| {
+                self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
+                return TranspileError.MemoryAllocationFailed;
+            };
+        } else if (mem.eql(u8, import_path, "std.stdint")) {
+            header_name = self.allocator.dupe(u8, "stdint.h") catch |e| {
+                self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
+                return TranspileError.MemoryAllocationFailed;
+            };
+        } else if (mem.eql(u8, import_path, "std.stddef")) {
+            header_name = self.allocator.dupe(u8, "stddef.h") catch |e| {
+                self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
+                return TranspileError.MemoryAllocationFailed;
+            };
+        } else if (mem.eql(u8, import_path, "std.errno")) {
+            header_name = self.allocator.dupe(u8, "errno.h") catch |e| {
                 self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
                 return TranspileError.MemoryAllocationFailed;
             };

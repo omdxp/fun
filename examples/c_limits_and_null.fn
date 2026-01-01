@@ -1,0 +1,23 @@
+// C stdlib compatibility demo:
+// - Using C macro constants (INT_MAX, NULL, SEEK_SET)
+// - Using C stdlib functions via Fun std imports
+
+imp std.io;
+imp std.limits;
+
+fun main() {
+  printf("INT_MAX=%d\n", INT_MAX);
+
+  // The typechecker treats common numeric macros as `num` so they can be used
+  // in expressions (while still emitting the macro identifier in C).
+  num max = INT_MAX;
+  if (max > 0) {
+    printf("max is positive\n");
+  }
+
+  // NULL is a C macro constant; Fun now accepts ALL_CAPS identifiers like this.
+  raw* p = NULL;
+  if (p == NULL) {
+    printf("p is NULL\n");
+  }
+}
