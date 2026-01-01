@@ -1,0 +1,30 @@
+// Memory management (stdlib.h)
+fun malloc(num size) raw*;
+fun calloc(num count, num size) raw*;
+fun realloc(raw* ptr, num size) raw*;
+fun free(raw* ptr);
+
+// Process control
+fun exit(num code);
+fun abort();
+fun atexit(raw* func) num;
+fun system(str command) num;
+
+// Environment
+fun getenv(str name) str;
+
+// Conversions
+fun atoi(str s) num;
+fun atol(str s) num;
+fun atof(str s) dec;
+fun strtol(str nptr, str endptr, num base) num;
+fun strtoul(str nptr, str endptr, num base) num;
+fun strtod(str nptr, str endptr) dec;
+
+// Random
+fun rand() num;
+fun srand(num seed);
+
+// Search/sort (function pointers not modeled yet; pass as raw*)
+fun bsearch(raw* key, raw* base, num nmemb, num size, raw* compar) raw*;
+fun qsort(raw* base, num nmemb, num size, raw* compar);

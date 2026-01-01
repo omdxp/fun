@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const fs = std.fs;
 const mem = std.mem;
 const assert = std.debug.assert;
@@ -244,6 +245,10 @@ pub const TranspileProcess = struct {
     /// The input file path (used for relative path resolution)
     input_file_path: []const u8,
 
+    /// Standard library root directory (expected to contain `std/`), if discovered.
+    /// Typical installed layout is: `<prefix>/share/fun/std/*.fn`.
+    stdlib_dir: ?[]const u8 = null,
+
     /// Whether the current file is importing other files
     is_importing: bool = false,
 
@@ -251,6 +256,96 @@ pub const TranspileProcess = struct {
     current_token: ?token.Token = null,
 
     const Self = @This();
+
+    fn is_abs_path(path: []const u8) bool {
+        return std.fs.path.isAbsolute(path);
+    }
+
+    fn dir_exists(path: []const u8) bool {
+        if (is_abs_path(path)) {
+            var d = std.fs.openDirAbsolute(path, .{}) catch return false;
+            d.close();
+            return true;
+        }
+        var d = std.fs.cwd().openDir(path, .{}) catch return false;
+        d.close();
+        return true;
+    }
+
+    fn dupe_arena(a: mem.Allocator, s: []const u8) TranspileError![]const u8 {
+        return a.dupe(u8, s) catch TranspileError.MemoryAllocationFailed;
+    }
+
+    fn join_alloc(allocator: mem.Allocator, parts: []const []const u8) TranspileError![]const u8 {
+        return std.fs.path.join(allocator, parts) catch TranspileError.MemoryAllocationFailed;
+    }
+
+    fn discover_stdlib_dir(backing: mem.Allocator, a: mem.Allocator) TranspileError!?[]const u8 {
+        // 1) Explicit override (best for installers and CI)
+        const env = std.process.getEnvVarOwned(backing, "FUN_STDLIB_DIR") catch |e| switch (e) {
+            error.EnvironmentVariableNotFound => null,
+            else => return TranspileError.MemoryAllocationFailed,
+        };
+        if (env) |p| {
+            defer backing.free(p);
+            // Even if it doesn't exist, keep the value for downstream tooling.
+            return try dupe_arena(a, p);
+        }
+
+        // 2) Relative to executable: `<exe_dir>/../share/fun`
+        const exe_path = std.fs.selfExePathAlloc(backing) catch null;
+        if (exe_path) |exe| {
+            defer backing.free(exe);
+            const exe_dir = std.fs.path.dirname(exe) orelse null;
+            if (exe_dir) |d| {
+                const prefix_dir = std.fs.path.dirname(d) orelse d;
+                const cand = try join_alloc(backing, &[_][]const u8{ prefix_dir, "share", "fun" });
+                defer backing.free(cand);
+                if (dir_exists(cand)) return try dupe_arena(a, cand);
+            }
+        }
+
+        // 3) Dev-tree fallbacks (when running from repo root)
+        {
+            const cand1 = "zig-out/share/fun";
+            if (dir_exists(cand1)) return try dupe_arena(a, cand1);
+            const cand2 = "stdlib";
+            if (dir_exists(cand2)) return try dupe_arena(a, cand2);
+        }
+
+        // 4) Common system locations
+        if (builtin.target.os.tag == .windows) {
+            const local_app = std.process.getEnvVarOwned(backing, "LOCALAPPDATA") catch null;
+            if (local_app) |base| {
+                defer backing.free(base);
+                const cand = try join_alloc(backing, &[_][]const u8{ base, "fun", "share", "fun" });
+                defer backing.free(cand);
+                if (dir_exists(cand)) return try dupe_arena(a, cand);
+            }
+            const program_files = std.process.getEnvVarOwned(backing, "ProgramFiles") catch null;
+            if (program_files) |base| {
+                defer backing.free(base);
+                const cand = try join_alloc(backing, &[_][]const u8{ base, "fun", "share", "fun" });
+                defer backing.free(cand);
+                if (dir_exists(cand)) return try dupe_arena(a, cand);
+            }
+        } else {
+            const cand1 = "/usr/local/share/fun";
+            if (dir_exists(cand1)) return try dupe_arena(a, cand1);
+            const cand2 = "/usr/share/fun";
+            if (dir_exists(cand2)) return try dupe_arena(a, cand2);
+
+            const home = std.process.getEnvVarOwned(backing, "HOME") catch null;
+            if (home) |h| {
+                defer backing.free(h);
+                const cand = try join_alloc(backing, &[_][]const u8{ h, ".local", "share", "fun" });
+                defer backing.free(cand);
+                if (dir_exists(cand)) return try dupe_arena(a, cand);
+            }
+        }
+
+        return null;
+    }
 
     fn get_root(self: *Self) *Self {
         var cur: *Self = self;
@@ -609,6 +704,16 @@ pub const TranspileProcess = struct {
     /// Errors:
     /// - Returns an error if opening the input file or creating the output file fails.
     pub fn init(allocator: mem.Allocator, ifilepath: []const u8, ofilepath: []const u8, flags: TranspileProcessFlags) TranspileError!Self {
+        return init_with_stdlib_dir(allocator, ifilepath, ofilepath, flags, null);
+    }
+
+    pub fn init_with_stdlib_dir(
+        allocator: mem.Allocator,
+        ifilepath: []const u8,
+        ofilepath: []const u8,
+        flags: TranspileProcessFlags,
+        stdlib_dir_override: ?[]const u8,
+    ) TranspileError!Self {
         const ifile = fs.cwd().openFile(ifilepath, .{ .mode = .read_write }) catch |e| {
             std.debug.print("Error opening input file '{s}': {s}\\n", .{ ifilepath, @errorName(e) });
             return TranspileError.FileOpenError;
@@ -671,6 +776,11 @@ pub const TranspileProcess = struct {
             return TranspileError.MemoryAllocationFailed;
         };
 
+        const discovered_stdlib_dir: ?[]const u8 = if (stdlib_dir_override) |p|
+            (try dupe_arena(a, p))
+        else
+            (try discover_stdlib_dir(allocator, a));
+
         return Self{
             .flags = flags,
             .pos = .{ .col = 1, .line = 1, .start_col = 1, .end_col = 1, .filename = input_file_path },
@@ -696,7 +806,96 @@ pub const TranspileProcess = struct {
             .children = std.ArrayList(*TranspileProcess).init(a),
             .std_imports = std.ArrayList([]const u8).init(a),
             .input_file_path = input_file_path,
+            .stdlib_dir = discovered_stdlib_dir,
         };
+    }
+
+    fn build_stdlib_module_path(self: *Self, import_path: []const u8) TranspileError!?[]const u8 {
+        if (!std.mem.startsWith(u8, import_path, "std.")) return null;
+        if (self.stdlib_dir == null) return null;
+
+        const rel = import_path["std.".len..];
+        var tmp = std.ArrayList(u8).init(self.backing_allocator);
+        defer tmp.deinit();
+
+        tmp.appendSlice(self.stdlib_dir.?) catch return TranspileError.MemoryAllocationFailed;
+        tmp.append('/') catch return TranspileError.MemoryAllocationFailed;
+        tmp.appendSlice("std") catch return TranspileError.MemoryAllocationFailed;
+        tmp.append('/') catch return TranspileError.MemoryAllocationFailed;
+        for (rel) |ch| {
+            if (ch == '.') {
+                tmp.append('/') catch return TranspileError.MemoryAllocationFailed;
+            } else {
+                tmp.append(ch) catch return TranspileError.MemoryAllocationFailed;
+            }
+        }
+        tmp.appendSlice(".fn") catch return TranspileError.MemoryAllocationFailed;
+
+        return tmp.toOwnedSlice() catch TranspileError.MemoryAllocationFailed;
+    }
+
+    /// Best-effort preload of stdlib signature modules (non-fatal).
+    ///
+    /// This is for tooling/identifier validation: it allows `imp std.*;` to have a real module
+    /// source of truth when installed, without changing codegen behavior.
+    pub fn preload_std_import_global_symbols(self: *Self, import_node: ast.Node, import_path: []const u8) void {
+        const full_path_opt = self.build_stdlib_module_path(import_path) catch return;
+        if (full_path_opt == null) return;
+        const full_path = full_path_opt.?;
+        defer self.backing_allocator.free(full_path);
+
+        std.fs.cwd().access(full_path, .{}) catch return;
+
+        var import_proc = TranspileProcess.init_with_stdlib_dir(
+            self.backing_allocator,
+            full_path,
+            "temp.c",
+            .{ .exec = false, .outf = false, .ast = false },
+            self.stdlib_dir,
+        ) catch return;
+        defer import_proc.deinit();
+
+        var lex_proc = lexer.LexProcess.init(&import_proc);
+        defer lex_proc.deinit();
+        lex_proc.lex() catch return;
+
+        const tokens = import_proc.tokens.items();
+        var i: usize = 0;
+        while (i < tokens.len) : (i += 1) {
+            const t = tokens[i];
+            if (t.type != .Keyword) continue;
+            if (!mem.eql(u8, t.data.sval.items, "fun")) continue;
+
+            var j: usize = i + 1;
+            while (j < tokens.len and token.is_nl_or_comment_or_newline_separator(tokens[j])) : (j += 1) {}
+            if (j >= tokens.len) continue;
+
+            const name_tok = tokens[j];
+            if (name_tok.type != .Identifier) continue;
+
+            const name = name_tok.data.sval.items;
+            if (mem.eql(u8, name, "main")) continue;
+
+            if (self.global_symbols.get(name)) |existing| {
+                if (!mem.eql(u8, existing.file_path, full_path) and !mem.eql(u8, existing.file_path, self.input_file_path)) {
+                    // Keep behavior consistent with local preloading.
+                    self.report_error(import_node, "Symbol '{s}' already defined in module '{s}'", .{ name, existing.file_path });
+                    return;
+                }
+            }
+
+            const name_copy = self.allocator.dupe(u8, name) catch return;
+            errdefer self.allocator.free(name_copy);
+
+            const path_copy = self.allocator.dupe(u8, full_path) catch return;
+            errdefer self.allocator.free(path_copy);
+
+            self.global_symbols.put(name_copy, .{
+                .symbol_name = name_copy,
+                .file_path = path_copy,
+                .is_function = true,
+            }) catch return;
+        }
     }
 
     pub fn get_warnings(self: *Self) ?[]const u8 {
@@ -791,6 +990,8 @@ pub const TranspileProcess = struct {
         base: dtype.DataTypeType,
         is_array: bool = false,
         pointer_depth: usize = 0,
+        /// True when this value is the integer literal 0 (C null pointer constant).
+        is_null_literal: bool = false,
         /// For user-defined types, `base` is `.Unknown` and `name` holds the identifier.
         name: ?[]const u8 = null,
 
@@ -807,6 +1008,7 @@ pub const TranspileProcess = struct {
     const FnSig = struct {
         rtype: CheckedType,
         args: []CheckedType,
+        is_variadic: bool = false,
     };
 
     const TypeEnv = struct {
@@ -997,7 +1199,17 @@ pub const TranspileProcess = struct {
             if (reg.impls_by_key.contains(.{ .type_name = actual.name.?, .quirk_sig = sig })) return true;
         }
 
+        // C-style null pointer constant: allow `0` to convert to any pointer type.
+        if (!expected.is_array and expected.pointer_depth > 0 and !actual.is_array and actual.pointer_depth == 0 and actual.is_null_literal) {
+            return true;
+        }
+
         if (expected.is_array != actual.is_array or expected.pointer_depth != actual.pointer_depth) return false;
+
+        // `raw*` behaves like C `void*`: allow implicit conversion to/from any object pointer.
+        if (!expected.is_array and expected.pointer_depth > 0 and actual.pointer_depth > 0) {
+            if (expected.base == .Raw or actual.base == .Raw) return true;
+        }
 
         // Allow widening conversions.
         if (expected.base == .Dec and actual.base == .Num and !expected.is_array and expected.pointer_depth == 0) return true;
@@ -1065,6 +1277,7 @@ pub const TranspileProcess = struct {
                 if (node.data) |d| {
                     return switch (d) {
                         .dnum => .{ .base = .Dec },
+                        .llnum => |n| .{ .base = .Num, .is_null_literal = (n == 0) },
                         else => .{ .base = .Num },
                     };
                 }
@@ -1214,12 +1427,18 @@ pub const TranspileProcess = struct {
 
                     if (maybe_sig) |sig| {
                         // Function call.
-                        if (args_nodes.items.len != sig.args.len) {
+                        if (!sig.is_variadic and args_nodes.items.len != sig.args.len) {
                             const fname = callee.data.?.sval.items;
                             self.report_type_error(node, "function '{s}' expects {d} args, got {d}", .{ fname, sig.args.len, args_nodes.items.len });
                             return TranspileError.WrongArgCount;
                         }
+                        if (sig.is_variadic and args_nodes.items.len < sig.args.len) {
+                            const fname = callee.data.?.sval.items;
+                            self.report_type_error(node, "function '{s}' expects at least {d} args, got {d}", .{ fname, sig.args.len, args_nodes.items.len });
+                            return TranspileError.WrongArgCount;
+                        }
                         for (args_nodes.items, 0..) |arg_node, idx| {
+                            if (idx >= sig.args.len) break; // variadic extras are not typechecked
                             const actual = try self.infer_expr_type(arg_node, env, fns);
                             const expected = sig.args[idx];
                             if (is_known_type(expected) and is_known_type(actual) and !(try self.can_implicit_coerce(expected, actual))) {
@@ -1545,6 +1764,7 @@ pub const TranspileProcess = struct {
             fns.put(name, .{
                 .rtype = if (fnv.rtype) |rt| type_from_dtype(&rt) else .{ .base = .Void },
                 .args = args_slice,
+                .is_variadic = fnv.is_variadic,
             }) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
@@ -2436,6 +2656,7 @@ pub const TranspileProcess = struct {
         if (mem.eql(u8, type_str, "str")) return "char*";
         if (mem.eql(u8, type_str, "bin")) return "bool";
         if (mem.eql(u8, type_str, "chr")) return "char";
+        if (mem.eql(u8, type_str, "raw")) return "void";
         return type_str;
     }
 
@@ -3283,6 +3504,7 @@ pub const TranspileProcess = struct {
                     }
                     try self.write("(");
                     self.in_function_params = true;
+                    var wrote_any_param = false;
                     if (function.args) |args| {
                         for (args.items(), 0..) |arg, i| {
                             if (i > 0) try self.write(", ");
@@ -3291,7 +3513,12 @@ pub const TranspileProcess = struct {
                                 try self.register_scope_variable(arg);
                             }
                             try self.transpile_node(arg.*);
+                            wrote_any_param = true;
                         }
+                    }
+                    if (function.is_variadic) {
+                        if (wrote_any_param) try self.write(", ");
+                        try self.write("...");
                     }
                     self.in_function_params = false;
                     try self.write(") ");
@@ -3704,6 +3931,16 @@ pub const TranspileProcess = struct {
             };
         } else if (mem.eql(u8, import_path, "std.math")) {
             header_name = self.allocator.dupe(u8, "math.h") catch |e| {
+                self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
+                return TranspileError.MemoryAllocationFailed;
+            };
+        } else if (mem.eql(u8, import_path, "std.ctype")) {
+            header_name = self.allocator.dupe(u8, "ctype.h") catch |e| {
+                self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
+                return TranspileError.MemoryAllocationFailed;
+            };
+        } else if (mem.eql(u8, import_path, "std.time")) {
+            header_name = self.allocator.dupe(u8, "time.h") catch |e| {
                 self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
                 return TranspileError.MemoryAllocationFailed;
             };

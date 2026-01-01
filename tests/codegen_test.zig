@@ -92,6 +92,38 @@ test "compound assignment transpiles" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "raw pointer maps to void*" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_raw_ptr.fn";
+
+    const input =
+        "fun id(raw* p) raw* { ret p; }\n" ++
+        "fun main() { raw* x = id(0); }\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "void* id(void* p)") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
+test "std.time import adds time.h include" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_time.fn";
+
+    const input =
+        "imp std.time;\n" ++
+        "fun main() { ret; }\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <time.h>") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
 test "compounds + quirks + impl vtables transpile" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_quirk_vtable.fn";

@@ -1,0 +1,45 @@
+// Opaque stdio types
+compound FILE {
+	num _opaque;
+}
+
+fun printf(str fmt, ...) num;
+fun fprintf(num stream, str fmt, ...) num;
+
+fun sprintf(str dst, str fmt, ...) num;
+fun snprintf(str dst, num n, str fmt, ...) num;
+
+fun scanf(str fmt, ...) num;
+fun sscanf(str src, str fmt, ...) num;
+
+fun puts(str s) num;
+fun putchar(chr c) num;
+fun getchar() num;
+
+// File IO
+fun fopen(str path, str mode) FILE*;
+fun freopen(str path, str mode, FILE* stream) FILE*;
+fun fclose(FILE* stream) num;
+fun fflush(FILE* stream) num;
+
+fun fgetc(FILE* stream) num;
+fun fputc(num c, FILE* stream) num;
+fun fgets(str s, num n, FILE* stream) str;
+fun fputs(str s, FILE* stream) num;
+
+fun fread(raw* ptr, num size, num nmemb, FILE* stream) num;
+fun fwrite(raw* ptr, num size, num nmemb, FILE* stream) num;
+
+fun fseek(FILE* stream, num offset, num whence) num;
+fun ftell(FILE* stream) num;
+fun rewind(FILE* stream);
+
+fun feof(FILE* stream) num;
+fun ferror(FILE* stream) num;
+fun perror(str s);
+
+fun remove(str path) num;
+fun rename(str oldpath, str newpath) num;
+
+fun tmpfile() FILE*;
+fun tmpnam(str s) str;

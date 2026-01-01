@@ -1,0 +1,15 @@
+fun sin(dec x) dec;
+fun cos(dec x) dec;
+fun tan(dec x) dec;
+
+fun asin(dec x) dec;
+fun acos(dec x) dec;
+fun atan(dec x) dec;
+fun atan2(dec y, dec x) dec;
+
+fun sqrt(dec x) dec;
+fun pow(dec x, dec y) dec;
+
+fun floor(dec x) dec;
+fun ceil(dec x) dec;
+fun fabs(dec x) dec;

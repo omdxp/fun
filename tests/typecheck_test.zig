@@ -90,6 +90,26 @@ test "typecheck call with two args ok" {
     try runTranspileExpectOk(std.testing.allocator, "typecheck_arg_ok.fn", input);
 }
 
+test "typecheck variadic call allows extra args" {
+    const input =
+        "fun v(num a, ...) num { ret a; }\n" ++
+        "fun main() {\n" ++
+        "  num x = v(1, 2, 3);\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_variadic_ok.fn", input);
+}
+
+test "typecheck variadic call requires fixed args" {
+    const input =
+        "fun v(num a, ...) num { ret a; }\n" ++
+        "fun main() {\n" ++
+        "  num x = v();\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_variadic_too_few.fn", input);
+}
+
 test "typecheck zero-arg call ok" {
     const input =
         "fun foo() num { ret 1; }\n" ++

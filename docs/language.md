@@ -8,6 +8,7 @@
 
 ## Types
 - `num` (integer number), `dec` (decimal number), `str` (string), `bin` (boolean), `chr` (character)
+- `raw` (opaque/"void" type; use `raw*` for C-style `void*`)
 
 ## Example
 ```fun

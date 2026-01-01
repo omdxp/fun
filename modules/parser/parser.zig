@@ -625,9 +625,12 @@ pub const ParseProcess = struct {
             self.transpile_proc.err("expected datatype, got '{?}'", .{if (dt_token) |t| t.type else null});
             return ParseError.InvalidDataType;
         }
+
         const ptr_depth = self.parse_get_pointer_depth();
         if (ptr_depth > 0) {
-            dt.*.flags.?.is_pointer = true;
+            var flags = dt.*.flags orelse dtype.DataTypeFlags{};
+            flags.is_pointer = true;
+            dt.*.flags = flags;
             dt.*.pointer_depth = ptr_depth;
         }
         // Builtins use `dt.type`, user-defined types keep `.Unknown` and rely on `type_str`.
@@ -2297,26 +2300,30 @@ pub const ParseProcess = struct {
     /// Parses function arguments.
     ///
     /// This function processes tokens representing function arguments,
-    /// including handling of variadic arguments, and returns a vector of argument nodes.
+    /// including handling of variadic arguments.
     ///
     /// Parameters:
     /// - `self`: A pointer to the current parser instance.
     /// - `hist`: A pointer to the history of parsing operations.
     ///
+    const ParsedFunctionArgs = struct {
+        args: utils.Vector(*ast.Node),
+        is_variadic: bool,
+    };
+
     /// Returns:
-    /// - `misc.Vector(*ast.Node)`: A vector of argument nodes.
+    /// - `ParsedFunctionArgs`: Parsed argument nodes and a variadic flag.
     ///
     /// Errors:
     /// - Returns an error if any parsing operation fails.
-    fn parse_function_args(self: *Self, hist: *utils.History) ParseError!utils.Vector(*ast.Node) {
+    fn parse_function_args(self: *Self, hist: *utils.History) ParseError!ParsedFunctionArgs {
         var args = utils.Vector(*ast.Node).init(self.transpile_proc.allocator);
+        var is_variadic = false;
         while (!self.next_token_is_symbol(')')) {
-            if (self.next_token_is_operator(".")) { // variadic
-                for (0..3) |_| {
-                    try self.expect_op(".");
-                }
-                self.transpile_proc.finish_scope();
-                return args;
+            if (self.next_token_is_operator("...")) { // variadic
+                _ = self.token_next();
+                is_variadic = true;
+                break;
             }
             try self.parse_full_variable(hist);
             const arg_node = self.node_pop();
@@ -2335,7 +2342,7 @@ pub const ParseProcess = struct {
             }
             _ = self.token_next(); // skip ,
         }
-        return args;
+        return .{ .args = args, .is_variadic = is_variadic };
     }
 
     /// Parses a function declaration.
@@ -2382,9 +2389,10 @@ pub const ParseProcess = struct {
         try self.expect_op("(");
         var hist_args = utils.History.init(self.transpile_proc.allocator, .{});
         defer hist_args.deinit();
-        const args = try self.parse_function_args(&hist_args);
+        const parsed_args = try self.parse_function_args(&hist_args);
         try self.expect_sym(')');
-        function_node.node_variant.?.function.args = args;
+        function_node.node_variant.?.function.args = parsed_args.args;
+        function_node.node_variant.?.function.is_variadic = parsed_args.is_variadic;
         const rtype_token = self.token_peek_next();
         if (rtype_token != null and rtype_token.?.type == .Keyword and utils.keyword_is_datatype(rtype_token.?.data.sval.items)) {
             try self.parse_datatype(&dt);
@@ -2809,7 +2817,9 @@ pub const ParseProcess = struct {
 
         // Preload imported function names so identifier validation during parsing works.
         // Standard library imports are handled specially.
-        if (!std.mem.startsWith(u8, path, "std.")) {
+        if (std.mem.startsWith(u8, path, "std.")) {
+            self.transpile_proc.preload_std_import_global_symbols(import_node, path);
+        } else {
             try self.transpile_proc.preload_import_global_symbols(import_node, path);
         }
 
@@ -2822,13 +2832,185 @@ pub const ParseProcess = struct {
         // usable in the current module, but must not participate in cross-module
         // duplicate detection.
         if (mem.eql(u8, path, "std.io")) {
-            if (self.transpile_proc.get_symbol("printf") == null) {
-                try self.transpile_proc.push_symbol(.{
-                    .type = symbol.SymbolType.NativeFunction,
-                    .name = "printf",
-                    .data = null,
-                    .symbol_table = null,
-                });
+            const names = [_][]const u8{
+                "printf",
+                "fprintf",
+                "sprintf",
+                "snprintf",
+                "scanf",
+                "sscanf",
+                "puts",
+                "putchar",
+                "getchar",
+                "fopen",
+                "freopen",
+                "fclose",
+                "fflush",
+                "fgetc",
+                "fputc",
+                "fgets",
+                "fputs",
+                "fread",
+                "fwrite",
+                "fseek",
+                "ftell",
+                "rewind",
+                "feof",
+                "ferror",
+                "perror",
+                "remove",
+                "rename",
+                "tmpfile",
+                "tmpnam",
+            };
+            for (names) |name| {
+                if (self.transpile_proc.get_symbol(name) == null) {
+                    try self.transpile_proc.push_symbol(.{
+                        .type = symbol.SymbolType.NativeFunction,
+                        .name = name,
+                        .data = null,
+                        .symbol_table = null,
+                    });
+                }
+            }
+        } else if (mem.eql(u8, path, "std.mem")) {
+            const names = [_][]const u8{
+                "malloc",
+                "calloc",
+                "realloc",
+                "free",
+                "exit",
+                "abort",
+                "atexit",
+                "system",
+                "getenv",
+                "atoi",
+                "atol",
+                "atof",
+                "strtol",
+                "strtoul",
+                "strtod",
+                "rand",
+                "srand",
+                "bsearch",
+                "qsort",
+            };
+            for (names) |name| {
+                if (self.transpile_proc.get_symbol(name) == null) {
+                    try self.transpile_proc.push_symbol(.{
+                        .type = symbol.SymbolType.NativeFunction,
+                        .name = name,
+                        .data = null,
+                        .symbol_table = null,
+                    });
+                }
+            }
+        } else if (mem.eql(u8, path, "std.string")) {
+            const names = [_][]const u8{
+                "strlen",
+                "strcmp",
+                "strncmp",
+                "strchr",
+                "strrchr",
+                "strcspn",
+                "strspn",
+                "strpbrk",
+                "strtok",
+                "strerror",
+                "strcpy",
+                "strncpy",
+                "strcat",
+                "strncat",
+                "strstr",
+                "memcpy",
+                "memset",
+                "memmove",
+                "memcmp",
+                "memchr",
+            };
+            for (names) |name| {
+                if (self.transpile_proc.get_symbol(name) == null) {
+                    try self.transpile_proc.push_symbol(.{
+                        .type = symbol.SymbolType.NativeFunction,
+                        .name = name,
+                        .data = null,
+                        .symbol_table = null,
+                    });
+                }
+            }
+        } else if (mem.eql(u8, path, "std.ctype")) {
+            const names = [_][]const u8{
+                "isalnum",
+                "isalpha",
+                "isblank",
+                "iscntrl",
+                "isdigit",
+                "isgraph",
+                "islower",
+                "isprint",
+                "ispunct",
+                "isspace",
+                "isupper",
+                "isxdigit",
+                "tolower",
+                "toupper",
+            };
+            for (names) |name| {
+                if (self.transpile_proc.get_symbol(name) == null) {
+                    try self.transpile_proc.push_symbol(.{
+                        .type = symbol.SymbolType.NativeFunction,
+                        .name = name,
+                        .data = null,
+                        .symbol_table = null,
+                    });
+                }
+            }
+        } else if (mem.eql(u8, path, "std.time")) {
+            const names = [_][]const u8{
+                "time",
+                "clock",
+                "difftime",
+                "mktime",
+                "asctime",
+                "ctime",
+                "gmtime",
+                "localtime",
+                "strftime",
+            };
+            for (names) |name| {
+                if (self.transpile_proc.get_symbol(name) == null) {
+                    try self.transpile_proc.push_symbol(.{
+                        .type = symbol.SymbolType.NativeFunction,
+                        .name = name,
+                        .data = null,
+                        .symbol_table = null,
+                    });
+                }
+            }
+        } else if (mem.eql(u8, path, "std.math")) {
+            const names = [_][]const u8{
+                "sin",
+                "cos",
+                "tan",
+                "asin",
+                "acos",
+                "atan",
+                "atan2",
+                "sqrt",
+                "pow",
+                "floor",
+                "ceil",
+                "fabs",
+            };
+            for (names) |name| {
+                if (self.transpile_proc.get_symbol(name) == null) {
+                    try self.transpile_proc.push_symbol(.{
+                        .type = symbol.SymbolType.NativeFunction,
+                        .name = name,
+                        .data = null,
+                        .symbol_table = null,
+                    });
+                }
             }
         }
     }
@@ -2909,7 +3091,7 @@ pub const ParseProcess = struct {
         } else if (mem.eql(u8, "true", sval)) {
             self.transpile_proc.nodes.push(ast.Node{
                 .type = .Boolean,
-                .pos = self.*.transpile_proc.*.pos,
+                .pos = t.?.pos,
                 .node_variant = .{ .boolean = .{ .val = true } },
             }) catch |e| {
                 std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});
@@ -2919,7 +3101,7 @@ pub const ParseProcess = struct {
         } else if (mem.eql(u8, "false", sval)) {
             self.transpile_proc.nodes.push(ast.Node{
                 .type = .Boolean,
-                .pos = self.*.transpile_proc.*.pos,
+                .pos = t.?.pos,
                 .node_variant = .{ .boolean = .{ .val = false } },
             }) catch |e| {
                 std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});

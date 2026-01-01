@@ -1,0 +1,23 @@
+fun strlen(str s) num;
+fun strcmp(str a, str b) num;
+fun strncmp(str a, str b, num n) num;
+
+fun strchr(str s, chr c) str;
+fun strrchr(str s, chr c) str;
+fun strcspn(str s, str reject) num;
+fun strspn(str s, str accept) num;
+fun strpbrk(str s, str accept) str;
+fun strtok(str s, str delim) str;
+fun strerror(num errnum) str;
+
+fun strcpy(str dst, str src) str;
+fun strncpy(str dst, str src, num n) str;
+fun strcat(str dst, str src) str;
+fun strncat(str dst, str src, num n) str;
+fun strstr(str haystack, str needle) str;
+
+fun memcpy(raw* dst, raw* src, num n) raw*;
+fun memmove(raw* dst, raw* src, num n) raw*;
+fun memset(raw* dst, num val, num n) raw*;
+fun memcmp(raw* a, raw* b, num n) num;
+fun memchr(raw* s, num c, num n) raw*;

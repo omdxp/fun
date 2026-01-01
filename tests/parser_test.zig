@@ -38,6 +38,39 @@ test "ParseProcess parse_function" {
     try fs.cwd().deleteFile(ofilepath);
 }
 
+test "ParseProcess parses variadic function declaration" {
+    const ifilepath = "ParseProcess_parse_variadic_function.fn";
+    const ofilepath = "ParseProcess_parse_variadic_function.c";
+    // Mock input file
+    {
+        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
+        defer file.close();
+        const input = "fun v(num a, ...) num;";
+        try file.writeAll(input);
+    }
+
+    const allocator = std.testing.allocator;
+    var transpile_proc = try codegen.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
+    var lex_proc = lexer.LexProcess.init(&transpile_proc);
+    var parse_proc = ParseProcess.init(&transpile_proc);
+
+    defer {
+        lex_proc.deinit();
+        transpile_proc.deinit();
+    }
+
+    try lex_proc.lex();
+    try parse_proc.parse();
+    const nodes = transpile_proc.nodes.items();
+    try std.testing.expectEqual(@as(usize, 1), nodes.len);
+    try std.testing.expectEqual(ast.NodeType.Function, nodes[0].type);
+    try std.testing.expect(nodes[0].node_variant.?.function.is_variadic);
+
+    // Delete test files
+    try fs.cwd().deleteFile(ifilepath);
+    try fs.cwd().deleteFile(ofilepath);
+}
+
 test "ParseProcess parse_return" {
     const ifilepath = "ParseProcess_parse_return.fn";
     const ofilepath = "ParseProcess_parse_return.c";

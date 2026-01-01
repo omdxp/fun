@@ -109,6 +109,15 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(exe);
     }
 
+    // --- Install Fun standard library signature files ---
+    // These are tooling-oriented Fun modules (signatures only) shipped alongside the compiler.
+    const install_stdlib = b.addInstallDirectory(.{
+        .source_dir = b.path("stdlib"),
+        .install_dir = .prefix,
+        .install_subdir = "share/fun",
+    });
+    b.getInstallStep().dependOn(&install_stdlib.step);
+
     const run_cmd = b.addRunArtifact(exe);
     // Make `zig build run -- -in .\relative\path.fn` resolve relative paths
     // from the project root (instead of Zig's cache directory).

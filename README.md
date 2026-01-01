@@ -12,6 +12,7 @@ A statically-typed programming language that transpiles to C, designed for safet
   - [Table of Contents](#table-of-contents)
   - [Features](#features)
   - [Installation](#installation)
+  - [Release installers (bundles)](#release-installers-bundles)
   - [CLI Usage](#cli-usage)
   - [Quickstart](#quickstart)
   - [Examples](#examples)
@@ -43,6 +44,27 @@ zig build
 ```
 
 This will build the `fun` compiler in `zig-out/bin/fun`.
+
+To install the compiler plus the Fun standard library signature files:
+
+```bash
+zig build install
+```
+
+This installs:
+- `zig-out/bin/fun`
+- `zig-out/share/fun/std/*.fn` (signature-only standard library modules for tooling)
+
+## Release installers (bundles)
+
+Release assets are packaged as install bundles (binary + `share/fun/` + an installer script).
+
+On Windows, release assets are provided as `.msi` installers.
+
+The compiler discovers the standard library at runtime using, in order:
+- `FUN_STDLIB_DIR` (explicit override)
+- `<exe>/../share/fun` (installed layout)
+- common system locations (platform-dependent)
 
 ## CLI Usage
 

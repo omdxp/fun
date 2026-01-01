@@ -22,6 +22,78 @@
 			"isBackground": false,
 			"problemMatcher": [],
 			"group": "test"
+		},
+		{
+			"label": "zig test main_test.zig",
+			"type": "shell",
+			"command": "zig",
+			"args": [
+				"test",
+				"tests/main_test.zig"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "test summary all",
+			"type": "shell",
+			"command": "zig",
+			"args": [
+				"build",
+				"test",
+				"--summary",
+				"all"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "test verbose",
+			"type": "shell",
+			"command": "zig",
+			"args": [
+				"build",
+				"test",
+				"--verbose"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "test capture log",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Set-Location \"C:\\Users\\omarb\\Projects\\Zig\\fun\"; zig build test *>&1 | Tee-Object -FilePath .\\_zig_test_log.txt; exit $LASTEXITCODE"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "test capture log (refresh)",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Set-Location \"C:\\Users\\omarb\\Projects\\Zig\\fun\"; zig build test *>&1 | Tee-Object -FilePath .\\_zig_test_log.txt; exit $LASTEXITCODE"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "test capture log (refresh 2)",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Set-Location \"C:\\Users\\omarb\\Projects\\Zig\\fun\"; zig build test *>&1 | Tee-Object -FilePath .\\_zig_test_log.txt; exit $LASTEXITCODE"
+			],
+			"isBackground": false,
+			"group": "test"
 		}
 	]
 }

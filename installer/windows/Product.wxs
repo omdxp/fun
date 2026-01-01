@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- WiX v3 Product definition for Fun compiler + stdlib signatures -->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <!-- UpgradeCode MUST stay stable across releases once you ship MSI. -->
+  <Product
+    Id="*"
+    Name="fun"
+    Manufacturer="fun"
+    Language="1033"
+    Version="$(var.ProductVersion)"
+    UpgradeCode="c5465632-a4b9-479c-abf9-c422b2eb91de">
+
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of fun is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Default install: C:\Program Files\fun -->
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFilesFolder">
+        <Directory Id="INSTALLFOLDER" Name="fun" />
+      </Directory>
+    </Directory>
+
+    <!-- Files harvested from the staging prefix (bin/ + share/fun/...) -->
+    <Feature Id="MainFeature" Title="fun" Level="1">
+      <ComponentGroupRef Id="FunFiles" />
+      <ComponentRef Id="PathEnv" />
+    </Feature>
+
+    <!-- Add INSTALLFOLDER\bin to PATH (per-machine) -->
+    <DirectoryRef Id="INSTALLFOLDER">
+      <!-- Component GUID MUST stay stable across releases once you ship MSI. -->
+      <Component Id="PathEnv" Guid="ecd44697-c139-4b96-9998-7d09ceefd9b2">
+        <Environment
+          Id="AddToPath"
+          Name="PATH"
+          Action="set"
+          Part="last"
+          Permanent="no"
+          System="yes"
+          Value="[INSTALLFOLDER]bin" />
+      </Component>
+    </DirectoryRef>
+
+    <UIRef Id="WixUI_Minimal" />
+    <UIRef Id="WixUI_ErrorProgressText" />
+
+  </Product>
+</Wix>

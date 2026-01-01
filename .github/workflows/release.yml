@@ -25,48 +25,102 @@ on:
 
 
 jobs:
-  build-matrix:
-    name: Build fun for all targets
+  build-unix-bundles:
+    name: Build bundles (Linux/macOS)
     runs-on: ubuntu-latest
-    # Only run this job for manual or release events
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'release'
     strategy:
       matrix:
         zig_version: [0.14.0]
         target:
-          # Supported build targets (add/remove as needed)
           - x86_64-linux-gnu
-          - x86_64-windows-gnu
           - x86_64-macos
           - aarch64-linux-gnu
           - aarch64-macos
-          - aarch64-windows-gnu
     steps:
-      # Step 1: Checkout the repository code
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Step 2: Install the required Zig toolchain
       - name: Set up Zig ${{ matrix.zig_version }}
         uses: goto-bus-stop/setup-zig@v2
         with:
           version: ${{ matrix.zig_version }}
 
-      # Step 3: Build the 'fun' binary for the current matrix target
-      - name: Build fun for ${{ matrix.target }}
+      - name: Build install bundle for ${{ matrix.target }}
         run: |
-          zig build -Dtarget=${{ matrix.target }} -Drelease=true
-          if [ -f zig-out/bin/fun ]; then mv zig-out/bin/fun zig-out/bin/fun-${{ matrix.target }}; fi
-          if [ -f zig-out/bin/fun.exe ]; then mv zig-out/bin/fun.exe zig-out/bin/fun-${{ matrix.target }}.exe; fi
+          set -euo pipefail
+          rm -rf dist artifacts
+          zig build install -Dtarget=${{ matrix.target }} --prefix dist/fun-${{ matrix.target }}
+          cp scripts/installer/install.sh dist/fun-${{ matrix.target }}/install.sh
+          cp scripts/installer/uninstall.sh dist/fun-${{ matrix.target }}/uninstall.sh
+          chmod +x dist/fun-${{ matrix.target }}/install.sh dist/fun-${{ matrix.target }}/uninstall.sh || true
+          mkdir -p artifacts
+          (cd dist && tar -czf ../artifacts/fun-${{ matrix.target }}.tar.gz fun-${{ matrix.target }})
 
-      # Step 4: Upload the built binary as a workflow artifact
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: fun-${{ matrix.target }}
-          path: |
-            zig-out/bin/fun-${{ matrix.target }}
-            zig-out/bin/fun-${{ matrix.target }}.exe
+          path: artifacts/fun-${{ matrix.target }}.tar.gz
+
+  build-windows-msi:
+    name: Build MSI (Windows)
+    runs-on: windows-latest
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'release'
+    strategy:
+      matrix:
+        zig_version: [0.14.0]
+        target:
+          - x86_64-windows-gnu
+          - aarch64-windows-gnu
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Zig ${{ matrix.zig_version }}
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ matrix.zig_version }}
+
+      - name: Install WiX Toolset (v3)
+        run: choco install wixtoolset -y
+
+      - name: Build MSI for ${{ matrix.target }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Remove-Item -Recurse -Force dist, artifacts -ErrorAction SilentlyContinue
+          zig build install -Dtarget=${{ matrix.target }} --prefix dist\fun-${{ matrix.target }}
+
+          $tag = "${{ github.event.inputs.tag }}"
+          if (-not $tag) { $tag = "${{ github.ref_name }}" }
+          if ($tag -and $tag.StartsWith('v')) { $tag = $tag.Substring(1) }
+          if (-not $tag) { $tag = '0.0.0' }
+
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+
+          $src = "dist\fun-${{ matrix.target }}"
+          $harvest = "dist\Harvest.wxs"
+          heat dir $src -cg FunFiles -dr INSTALLFOLDER -srd -sreg -sfrag -var var.SourceDir -out $harvest
+
+          $product = "installer\windows\Product.wxs"
+          $objDir = "dist\wixobj"
+          New-Item -ItemType Directory -Force $objDir | Out-Null
+
+          candle -nologo -ext WixUtilExtension -ext WixUIExtension `
+            -dSourceDir=$src `
+            -dProductVersion=$tag `
+            -out "$objDir\\" $product $harvest
+
+          $msi = "artifacts\fun-${{ matrix.target }}-$tag.msi"
+          light -nologo -ext WixUtilExtension -ext WixUIExtension -out $msi `
+            "$objDir\\Product.wixobj" "$objDir\\Harvest.wixobj"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fun-${{ matrix.target }}
+          path: artifacts/*.msi
 
 
 # =============================================================
@@ -77,7 +131,7 @@ jobs:
 
   upload-release-assets:
     name: Upload release assets
-    needs: [build-matrix]
+    needs: [build-unix-bundles, build-windows-msi]
     runs-on: ubuntu-latest
     if: github.event_name == 'release'
     steps:

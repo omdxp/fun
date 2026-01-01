@@ -18,6 +18,8 @@ pub const DataTypeFlags = packed struct {
 pub const DataTypeType = enum {
     /// Represents a void type.
     Void,
+    /// Represents a raw/opaque type (C `void`).
+    Raw,
     /// Represents a character type.
     Chr,
     /// Represents a string type.

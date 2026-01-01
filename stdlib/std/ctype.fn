@@ -1,0 +1,18 @@
+// Character classification and conversion (ctype.h)
+// Note: C functions take int (often unsigned char promoted); we model as num.
+
+fun isalnum(num c) num;
+fun isalpha(num c) num;
+fun isblank(num c) num;
+fun iscntrl(num c) num;
+fun isdigit(num c) num;
+fun isgraph(num c) num;
+fun islower(num c) num;
+fun isprint(num c) num;
+fun ispunct(num c) num;
+fun isspace(num c) num;
+fun isupper(num c) num;
+fun isxdigit(num c) num;
+
+fun tolower(num c) num;
+fun toupper(num c) num;
