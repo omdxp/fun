@@ -107,6 +107,9 @@ pub const TypeRegistry = struct {
     /// Maps canonical signature key to the (first-seen) quirk definition node.
     quirks_by_sig: std.StringHashMap(*ast.Node),
 
+    /// Caches hash(sig) for canonical quirk signature keys.
+    quirk_hash_by_sig: std.StringHashMap(u64),
+
     /// Maps `<Type> + <QuirkSig>` to the impl definition node.
     impls_by_key: std.HashMap(ImplKey, *ast.Node, ImplKeyContext, 80),
 
@@ -119,6 +122,7 @@ pub const TypeRegistry = struct {
             .compounds_by_name = std.StringHashMap(*ast.Node).init(allocator),
             .quirk_sig_by_name = std.StringHashMap([]const u8).init(allocator),
             .quirks_by_sig = std.StringHashMap(*ast.Node).init(allocator),
+            .quirk_hash_by_sig = std.StringHashMap(u64).init(allocator),
             .impls_by_key = std.HashMap(ImplKey, *ast.Node, ImplKeyContext, 80).init(allocator),
             .owned_keys = std.ArrayList([]const u8).init(allocator),
         };
@@ -129,6 +133,7 @@ pub const TypeRegistry = struct {
         self.compounds_by_name.deinit();
         self.quirk_sig_by_name.deinit();
         self.quirks_by_sig.deinit();
+        self.quirk_hash_by_sig.deinit();
         self.impls_by_key.deinit();
 
         for (self.owned_keys.items) |k| {
@@ -357,20 +362,36 @@ pub const TranspileProcess = struct {
                     if (n.node_variant == null) continue;
                     const name = n.node_variant.?.quirk.name.items;
 
-                    const sig_key = try self.quirk_signature_key(n);
-                    reg.owned_keys.append(sig_key) catch {
-                        self.allocator.free(sig_key);
+                    // Compute signature, but only keep one allocated key per unique signature.
+                    const sig_key_tmp = try self.quirk_signature_key(n);
+                    const sig_hash = std.hash.Wyhash.hash(0, sig_key_tmp);
+
+                    const gop = reg.quirks_by_sig.getOrPut(sig_key_tmp) catch {
+                        reg.allocator.free(sig_key_tmp);
                         return TranspileError.MemoryAllocationFailed;
                     };
 
-                    // Register canonical quirk by signature (first one wins).
-                    if (!reg.quirks_by_sig.contains(sig_key)) {
-                        reg.quirks_by_sig.put(sig_key, n) catch {
+                    const sig_key = gop.key_ptr.*;
+                    if (gop.found_existing) {
+                        // Not inserted; free the temporary signature string.
+                        reg.allocator.free(sig_key_tmp);
+                    } else {
+                        // Inserted; keep and free at registry teardown.
+                        reg.owned_keys.append(sig_key) catch {
+                            reg.allocator.free(sig_key);
+                            return TranspileError.MemoryAllocationFailed;
+                        };
+                        gop.value_ptr.* = n;
+                    }
+
+                    // Cache hash(sig) for fast codegen naming.
+                    if (!reg.quirk_hash_by_sig.contains(sig_key)) {
+                        reg.quirk_hash_by_sig.put(sig_key, sig_hash) catch {
                             return TranspileError.MemoryAllocationFailed;
                         };
                     }
 
-                    // Map name -> signature.
+                    // Map name -> canonical signature.
                     if (reg.quirk_sig_by_name.contains(name)) {
                         return TranspileError.DuplicateSymbol;
                     }
@@ -2437,6 +2458,11 @@ pub const TranspileProcess = struct {
         return std.hash.Wyhash.hash(0, sig);
     }
 
+    fn quirk_sig_hash_cached(self: *Self, sig: []const u8) u64 {
+        const reg = self.root_registry() orelse return quirk_sig_hash(sig);
+        return reg.quirk_hash_by_sig.get(sig) orelse quirk_sig_hash(sig);
+    }
+
     const QuirkCNames = struct {
         quirk: [64]u8,
         quirk_len: usize,
@@ -2444,12 +2470,15 @@ pub const TranspileProcess = struct {
         vtable_len: usize,
     };
 
-    fn write_quirk_c_names(sig: []const u8) TranspileError!QuirkCNames {
-        const h = quirk_sig_hash(sig);
+    fn write_quirk_c_names_hash(h: u64) TranspileError!QuirkCNames {
         var out: QuirkCNames = undefined;
         out.quirk_len = (std.fmt.bufPrint(&out.quirk, "__fun_quirk_{x}", .{h}) catch unreachable).len;
         out.vtable_len = (std.fmt.bufPrint(&out.vtable, "__fun_quirk_{x}_vtable", .{h}) catch unreachable).len;
         return out;
+    }
+
+    fn write_quirk_c_names(sig: []const u8) TranspileError!QuirkCNames {
+        return write_quirk_c_names_hash(quirk_sig_hash(sig));
     }
 
     fn root_registry(self: *Self) ?*TypeRegistry {
@@ -2592,7 +2621,8 @@ pub const TranspileProcess = struct {
             if (qnode.node_variant == null) continue;
             const q = qnode.node_variant.?.quirk;
 
-            const names = try write_quirk_c_names(sig);
+            const h = self.quirk_sig_hash_cached(sig);
+            const names = try write_quirk_c_names_hash(h);
             const quirk_c = names.quirk[0..names.quirk_len];
             const vtable_c = names.vtable[0..names.vtable_len];
 
@@ -2635,7 +2665,8 @@ pub const TranspileProcess = struct {
         while (qn_it.next()) |entry| {
             const qname = entry.key_ptr.*;
             const sig = entry.value_ptr.*;
-            const names = try write_quirk_c_names(sig);
+            const h = self.quirk_sig_hash_cached(sig);
+            const names = try write_quirk_c_names_hash(h);
             const quirk_c = names.quirk[0..names.quirk_len];
             try self.write("typedef ");
             try self.write(quirk_c);
@@ -2655,11 +2686,12 @@ pub const TranspileProcess = struct {
             const type_name = im.type_name.items;
             const quirk_name = im.quirk_name.items;
             const sig = reg.quirk_sig_by_name.get(quirk_name) orelse continue;
+            const sig_h = self.quirk_sig_hash_cached(sig);
             const qnode = reg.quirks_by_sig.get(sig) orelse continue;
             if (qnode.node_variant == null) continue;
             const q = qnode.node_variant.?.quirk;
 
-            const names = try write_quirk_c_names(sig);
+            const names = try write_quirk_c_names_hash(sig_h);
             const quirk_c = names.quirk[0..names.quirk_len];
             const vtable_c = names.vtable[0..names.vtable_len];
 
@@ -2668,10 +2700,10 @@ pub const TranspileProcess = struct {
             defer if (type_s.owned) self.backing_allocator.free(type_s.slice);
 
             var vtbl_buf: [96]u8 = undefined;
-            const vtbl_name = (std.fmt.bufPrint(&vtbl_buf, "__fun_impl_{s}_{x}_vtable", .{ type_s.slice, quirk_sig_hash(sig) }) catch unreachable);
+            const vtbl_name = (std.fmt.bufPrint(&vtbl_buf, "__fun_impl_{s}_{x}_vtable", .{ type_s.slice, sig_h }) catch unreachable);
 
             var coerce_buf: [96]u8 = undefined;
-            const coerce_name = (std.fmt.bufPrint(&coerce_buf, "__fun_coerce_{s}_{x}", .{ type_s.slice, quirk_sig_hash(sig) }) catch unreachable);
+            const coerce_name = (std.fmt.bufPrint(&coerce_buf, "__fun_coerce_{s}_{x}", .{ type_s.slice, sig_h }) catch unreachable);
 
             // Forward declare generated impl methods so wrappers can call them.
             for (im.methods.items()) |m| {
@@ -2729,7 +2761,7 @@ pub const TranspileProcess = struct {
                 const m_s = try self.c_ident_sanitize_temp(m.name.items, &m_stack);
                 defer if (m_s.owned) self.backing_allocator.free(m_s.slice);
                 var wrap_buf: [128]u8 = undefined;
-                const wrap_name = (std.fmt.bufPrint(&wrap_buf, "__fun_wrap_{s}_{x}_{s}", .{ type_s.slice, quirk_sig_hash(sig), m_s.slice }) catch unreachable);
+                const wrap_name = (std.fmt.bufPrint(&wrap_buf, "__fun_wrap_{s}_{x}_{s}", .{ type_s.slice, sig_h, m_s.slice }) catch unreachable);
 
                 try self.write("static ");
                 try self.write_type(m.rtype);
@@ -2773,7 +2805,7 @@ pub const TranspileProcess = struct {
                 const m_s = try self.c_ident_sanitize_temp(m.name.items, &m_stack2);
                 defer if (m_s.owned) self.backing_allocator.free(m_s.slice);
                 var wrap_buf2: [128]u8 = undefined;
-                const wrap_name2 = (std.fmt.bufPrint(&wrap_buf2, "__fun_wrap_{s}_{x}_{s}", .{ type_s.slice, quirk_sig_hash(sig), m_s.slice }) catch unreachable);
+                const wrap_name2 = (std.fmt.bufPrint(&wrap_buf2, "__fun_wrap_{s}_{x}_{s}", .{ type_s.slice, sig_h, m_s.slice }) catch unreachable);
                 try self.write("  .");
                 try self.write(m.name.items);
                 try self.write(" = ");
@@ -3001,7 +3033,7 @@ pub const TranspileProcess = struct {
                                         const type_s = try self.c_ident_sanitize_temp(actual.?, &type_stack2);
                                         defer if (type_s.owned) self.backing_allocator.free(type_s.slice);
                                         var coerce_buf: [96]u8 = undefined;
-                                        const coerce_name = (std.fmt.bufPrint(&coerce_buf, "__fun_coerce_{s}_{x}", .{ type_s.slice, quirk_sig_hash(expected_sig.?) }) catch unreachable);
+                                        const coerce_name = (std.fmt.bufPrint(&coerce_buf, "__fun_coerce_{s}_{x}", .{ type_s.slice, self.quirk_sig_hash_cached(expected_sig.?) }) catch unreachable);
                                         try self.transpile_node(left.*);
                                         try self.write(" = ");
                                         try self.write(coerce_name);
@@ -3137,7 +3169,7 @@ pub const TranspileProcess = struct {
                                     const type_s = try self.c_ident_sanitize_temp(actual.?, &type_stack3);
                                     defer if (type_s.owned) self.backing_allocator.free(type_s.slice);
                                     var coerce_buf: [96]u8 = undefined;
-                                    const coerce_name = (std.fmt.bufPrint(&coerce_buf, "__fun_coerce_{s}_{x}", .{ type_s.slice, quirk_sig_hash(sig.?) }) catch unreachable);
+                                    const coerce_name = (std.fmt.bufPrint(&coerce_buf, "__fun_coerce_{s}_{x}", .{ type_s.slice, self.quirk_sig_hash_cached(sig.?) }) catch unreachable);
                                     try self.write(coerce_name);
                                     try self.write("(");
                                     try self.transpile_node(val.*);
