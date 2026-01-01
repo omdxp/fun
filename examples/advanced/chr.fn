@@ -1,0 +1,7 @@
+imp std.io;
+
+fun main() {
+    chr a = 'A';
+    chr nl = '\n';
+    printf("%c%c", a, nl);
+}

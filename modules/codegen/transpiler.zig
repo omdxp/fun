@@ -481,8 +481,15 @@ pub const TranspileProcess = struct {
     fn infer_simple_dtype(self: *Self, node: ast.Node) ?dtype.DataTypeType {
         return switch (node.type) {
             .Boolean => .Bin,
-            .Number => .Num,
+            .Number => blk: {
+                if (node.data == null) break :blk .Num;
+                break :blk switch (node.data.?) {
+                    .dnum => .Dec,
+                    else => .Num,
+                };
+            },
             .String => .Str,
+            .Character => .Chr,
             .Identifier => blk: {
                 if (node.data == null) break :blk null;
                 const name = node.data.?.sval.items;
@@ -586,6 +593,30 @@ pub const TranspileProcess = struct {
         };
     }
 
+    fn is_numeric_type(t: CheckedType) bool {
+        return !t.is_array and t.pointer_depth == 0 and (t.base == .Num or t.base == .Dec);
+    }
+
+    fn promote_numeric_type(a: CheckedType, b: CheckedType) dtype.DataTypeType {
+        // Assumes `is_numeric_type(a)` and `is_numeric_type(b)`.
+        if (a.base == .Dec or b.base == .Dec) return .Dec;
+        return .Num;
+    }
+
+    fn can_implicit_coerce(expected: CheckedType, actual: CheckedType) bool {
+        if (CheckedType.eql(expected, actual)) return true;
+        if (expected.is_array != actual.is_array or expected.pointer_depth != actual.pointer_depth) return false;
+
+        // Allow widening conversions.
+        if (expected.base == .Dec and actual.base == .Num and !expected.is_array and expected.pointer_depth == 0) return true;
+        return false;
+    }
+
+    fn can_compare_or_match(a: CheckedType, b: CheckedType) bool {
+        if (CheckedType.eql(a, b)) return true;
+        return is_numeric_type(a) and is_numeric_type(b);
+    }
+
     fn flatten_call_args(self: *Self, node: ast.Node, out: *std.ArrayList(ast.Node)) TranspileError!void {
         // Function call arguments are parsed as a parenthesis node that wraps an expression.
         // For zero-arg calls this inner expression is `.Blank`.
@@ -638,9 +669,18 @@ pub const TranspileProcess = struct {
                     .pointer_depth = 0,
                 };
             },
-            .Number => return .{ .base = .Num },
+            .Number => {
+                if (node.data) |d| {
+                    return switch (d) {
+                        .dnum => .{ .base = .Dec },
+                        else => .{ .base = .Num },
+                    };
+                }
+                return .{ .base = .Num };
+            },
             .String => return .{ .base = .Str },
             .Boolean => return .{ .base = .Bin },
+            .Character => return .{ .base = .Chr },
             .Identifier => {
                 if (node.data == null) return .{ .base = .Unknown };
                 const name = node.data.?.sval.items;
@@ -666,18 +706,18 @@ pub const TranspileProcess = struct {
                     return .{ .base = .Bin };
                 }
                 if (mem.eql(u8, u.op, "-") or mem.eql(u8, u.op, "+")) {
-                    if (operand_t.base != .Num) {
-                        self.report_type_error(node, "unary '{s}' expects num operand", .{u.op});
+                    if (operand_t.base != .Num and operand_t.base != .Dec) {
+                        self.report_type_error(node, "unary '{s}' expects num/dec operand", .{u.op});
                         return TranspileError.TypeMismatch;
                     }
-                    return .{ .base = .Num };
+                    return .{ .base = operand_t.base };
                 }
                 if (mem.eql(u8, u.op, "++") or mem.eql(u8, u.op, "--")) {
-                    if (operand_t.base != .Num) {
-                        self.report_type_error(node, "unary '{s}' expects num operand", .{u.op});
+                    if (operand_t.base != .Num and operand_t.base != .Dec) {
+                        self.report_type_error(node, "unary '{s}' expects num/dec operand", .{u.op});
                         return TranspileError.TypeMismatch;
                     }
-                    return .{ .base = .Num };
+                    return .{ .base = operand_t.base };
                 }
                 return operand_t;
             },
@@ -690,11 +730,12 @@ pub const TranspileProcess = struct {
                 }
                 const a = try self.infer_expr_type(t.true.*, env, fns);
                 const b = try self.infer_expr_type(t.false.*, env, fns);
-                if (!CheckedType.eql(a, b)) {
-                    self.report_type_error(node, "tenary branches must have the same type", .{});
-                    return TranspileError.TypeMismatch;
+                if (CheckedType.eql(a, b)) return a;
+                if (is_numeric_type(a) and is_numeric_type(b)) {
+                    return .{ .base = promote_numeric_type(a, b) };
                 }
-                return a;
+                self.report_type_error(node, "tenary branches must have the same type", .{});
+                return TranspileError.TypeMismatch;
             },
             .Expression => {
                 const exp = node.node_variant.?.exp;
@@ -731,7 +772,7 @@ pub const TranspileProcess = struct {
                     for (args_nodes.items, 0..) |arg_node, idx| {
                         const actual = try self.infer_expr_type(arg_node, env, fns);
                         const expected = sig.args[idx];
-                        if (expected.base != .Unknown and actual.base != .Unknown and !CheckedType.eql(actual, expected)) {
+                        if (expected.base != .Unknown and actual.base != .Unknown and !can_implicit_coerce(expected, actual)) {
                             self.report_type_error(node, "type mismatch in call to '{s}' argument {d}", .{ fname, idx + 1 });
                             return TranspileError.TypeMismatch;
                         }
@@ -775,14 +816,27 @@ pub const TranspileProcess = struct {
 
                     // For compound assignments, require numeric types.
                     if (!mem.eql(u8, op, "=")) {
-                        if (lt.base != .Num or rt.base != .Num) {
-                            self.report_type_error(node, "compound assignment '{s}' expects num", .{op});
+                        if (mem.eql(u8, op, "<<=") or mem.eql(u8, op, ">>=")) {
+                            if (lt.base != .Num or rt.base != .Num) {
+                                self.report_type_error(node, "compound assignment '{s}' expects num", .{op});
+                                return TranspileError.TypeMismatch;
+                            }
+                            return .{ .base = .Num };
+                        }
+
+                        if (!is_numeric_type(lt) or !is_numeric_type(rt)) {
+                            self.report_type_error(node, "compound assignment '{s}' expects num/dec", .{op});
                             return TranspileError.TypeMismatch;
                         }
-                        return .{ .base = .Num };
+                        const res_base = promote_numeric_type(lt, rt);
+                        if (res_base != lt.base) {
+                            self.report_type_error(node, "compound assignment '{s}' would change the variable type", .{op});
+                            return TranspileError.TypeMismatch;
+                        }
+                        return lt;
                     }
 
-                    if (lt.base != .Unknown and rt.base != .Unknown and !CheckedType.eql(lt, rt)) {
+                    if (lt.base != .Unknown and rt.base != .Unknown and !can_implicit_coerce(lt, rt)) {
                         self.report_type_error(node, "type mismatch in assignment", .{});
                         return TranspileError.TypeMismatch;
                     }
@@ -793,23 +847,31 @@ pub const TranspileProcess = struct {
                 const r: CheckedType = if (exp.right) |right| try self.infer_expr_type(right.*, env, fns) else CheckedType{ .base = .Unknown };
 
                 if (mem.eql(u8, op, "+") or mem.eql(u8, op, "-") or mem.eql(u8, op, "*") or mem.eql(u8, op, "/") or mem.eql(u8, op, "%")) {
-                    if (l.base != .Num or r.base != .Num) {
-                        self.report_type_error(node, "operator '{s}' expects num operands", .{op});
+                    if (mem.eql(u8, op, "%")) {
+                        if (l.base != .Num or r.base != .Num) {
+                            self.report_type_error(node, "operator '{s}' expects num operands", .{op});
+                            return TranspileError.TypeMismatch;
+                        }
+                        return .{ .base = .Num };
+                    }
+
+                    if (!is_numeric_type(l) or !is_numeric_type(r)) {
+                        self.report_type_error(node, "operator '{s}' expects num/dec operands", .{op});
                         return TranspileError.TypeMismatch;
                     }
-                    return .{ .base = .Num };
+                    return .{ .base = promote_numeric_type(l, r) };
                 }
 
                 if (mem.eql(u8, op, "<") or mem.eql(u8, op, "<=") or mem.eql(u8, op, ">") or mem.eql(u8, op, ">=")) {
-                    if (l.base != .Num or r.base != .Num) {
-                        self.report_type_error(node, "comparison '{s}' expects num operands", .{op});
+                    if (!is_numeric_type(l) or !is_numeric_type(r)) {
+                        self.report_type_error(node, "comparison '{s}' expects num/dec operands", .{op});
                         return TranspileError.TypeMismatch;
                     }
                     return .{ .base = .Bin };
                 }
 
                 if (mem.eql(u8, op, "==") or mem.eql(u8, op, "!=")) {
-                    if (l.base != .Unknown and r.base != .Unknown and !CheckedType.eql(l, r)) {
+                    if (l.base != .Unknown and r.base != .Unknown and !can_compare_or_match(l, r)) {
                         self.report_type_error(node, "equality '{s}' expects both sides to have the same type", .{op});
                         return TranspileError.TypeMismatch;
                     }
@@ -855,7 +917,7 @@ pub const TranspileProcess = struct {
                     try env.put_current(name, vtype);
                     if (v.val) |val| {
                         const init_t = try self.infer_expr_type(val.*, env, fns);
-                        if (vtype.base != .Unknown and init_t.base != .Unknown and !CheckedType.eql(vtype, init_t)) {
+                        if (vtype.base != .Unknown and init_t.base != .Unknown and !can_implicit_coerce(vtype, init_t)) {
                             self.report_type_error(stmt, "type mismatch in initialization of '{s}'", .{name});
                             return TranspileError.TypeMismatch;
                         }
@@ -875,7 +937,7 @@ pub const TranspileProcess = struct {
                         }
                         const rv = stmt.node_variant.?.statement.return_stmt;
                         const rt = try self.infer_expr_type(rv.*, env, fns);
-                        if (rt.base != .Unknown and !CheckedType.eql(fn_rtype, rt)) {
+                        if (rt.base != .Unknown and !can_implicit_coerce(fn_rtype, rt)) {
                             self.report_type_error(stmt, "return type mismatch", .{});
                             return TranspileError.ReturnTypeMismatch;
                         }
@@ -909,7 +971,7 @@ pub const TranspileProcess = struct {
                     for (fit.branches.items()) |branch| {
                         if (branch.condition) |cond| {
                             const ct = try self.infer_expr_type(cond.*, env, fns);
-                            if (target_t.base != .Unknown and ct.base != .Unknown and !CheckedType.eql(target_t, ct)) {
+                            if (target_t.base != .Unknown and ct.base != .Unknown and !can_compare_or_match(target_t, ct)) {
                                 self.report_type_error(stmt, "fit branch condition type must match fit expression type", .{});
                                 return TranspileError.TypeMismatch;
                             }
@@ -1872,8 +1934,10 @@ pub const TranspileProcess = struct {
     /// Maps fun language types to C types
     fn map_type_to_c(type_str: []const u8) []const u8 {
         if (mem.eql(u8, type_str, "num")) return "int";
+        if (mem.eql(u8, type_str, "dec")) return "double";
         if (mem.eql(u8, type_str, "str")) return "char*";
         if (mem.eql(u8, type_str, "bin")) return "bool";
+        if (mem.eql(u8, type_str, "chr")) return "char";
         return type_str;
     }
 
@@ -2033,8 +2097,46 @@ pub const TranspileProcess = struct {
                 try self.transpile_node(exp.*);
             },
             .Number => {
-                const num = node.data.?.llnum;
-                try self.print("{d}", .{num});
+                const d = node.data orelse {
+                    try self.write("0");
+                    return;
+                };
+                switch (d) {
+                    .llnum => |v| try self.print("{d}", .{v}),
+                    .lnum => |v| try self.print("{d}", .{v}),
+                    .inum => |v| try self.print("{d}", .{v}),
+                    .dnum => |v| try self.print("{}", .{v}),
+                    .cval => |v| try self.print("{d}", .{v}),
+                    else => try self.write("0"),
+                }
+            },
+            .Character => {
+                const d = node.data orelse {
+                    try self.write("'\\0'");
+                    return;
+                };
+                const c: u8 = switch (d) {
+                    .cval => |v| v,
+                    else => 0,
+                };
+                try self.write("'");
+                switch (c) {
+                    '\\' => try self.write("\\\\"),
+                    '\'' => try self.write("\\\'"),
+                    '\n' => try self.write("\\n"),
+                    '\r' => try self.write("\\r"),
+                    '\t' => try self.write("\\t"),
+                    0 => try self.write("\\0"),
+                    else => {
+                        if (c < 0x20 or c >= 0x7f) {
+                            try self.print("\\x{x:0>2}", .{c});
+                        } else {
+                            var buf: [1]u8 = .{c};
+                            try self.write(buf[0..]);
+                        }
+                    },
+                }
+                try self.write("'");
             },
             .String => {
                 const str = node.data.?.sval.items;

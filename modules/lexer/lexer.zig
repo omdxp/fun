@@ -402,6 +402,50 @@ pub const LexProcess = struct {
         };
     }
 
+    fn token_make_number_from_string(self: *Self, number_str: []const u8) LexError!?token.Token {
+        // If it looks like a decimal literal, parse it as f64.
+        if (std.mem.indexOfScalar(u8, number_str, '.')) |_| {
+            const v: f64 = std.fmt.parseFloat(f64, number_str) catch {
+                self.transpile_proc.err("failed to parse number '{s}'", .{number_str});
+                return LexError.InvalidNumber;
+            };
+            return token.Token{
+                .type = .Number,
+                .data = .{ .dnum = v },
+                .num = .{ .type = .Double },
+                .pos = self.transpile_proc.pos,
+            };
+        }
+
+        const v: c_longlong = std.fmt.parseInt(c_longlong, number_str, 10) catch {
+            self.transpile_proc.err("failed to parse number '{s}'", .{number_str});
+            return LexError.InvalidNumber;
+        };
+
+        // Support suffixes like 10L and 10f.
+        const pc = try self.peek_char();
+        const num_type = if (pc != null) self.number_type(pc.?) else .Normal;
+        if (num_type != .Normal) {
+            _ = try self.next_char();
+        }
+
+        if (num_type == .Float) {
+            return token.Token{
+                .type = .Number,
+                .data = .{ .dnum = @floatFromInt(v) },
+                .num = .{ .type = .Float },
+                .pos = self.transpile_proc.pos,
+            };
+        }
+
+        return token.Token{
+            .type = .Number,
+            .data = .{ .llnum = v },
+            .num = .{ .type = num_type },
+            .pos = self.transpile_proc.pos,
+        };
+    }
+
     /// Creates a number token for a given value.
     ///
     /// This function creates a number token based on the given numeric value and its type.
@@ -439,7 +483,34 @@ pub const LexProcess = struct {
     /// Errors:
     /// - Returns an error if reading the number or next character fails.
     fn token_make_number(self: *Self) LexError!?token.Token {
-        return self.token_make_number_for_value(try self.read_number());
+        // Read the integer part.
+        var buffer = try self.read_number_str();
+        defer buffer.deinit();
+
+        // Decimal literals: <digits>.<digits>
+        const pc = try self.peek_char();
+        if (pc != null and pc.? == '.') {
+            _ = try self.next_char();
+            const after_dot = try self.peek_char();
+            if (after_dot != null and utils.is_number(after_dot.?)) {
+                buffer.append('.') catch |e| {
+                    std.debug.print("Error appending to buffer: {s}\n", .{@errorName(e)});
+                    return LexError.MemoryAllocationFailed;
+                };
+
+                const frac = try self.read_number_str();
+                defer frac.deinit();
+                buffer.appendSlice(frac.items) catch |e| {
+                    std.debug.print("Error appending to buffer: {s}\n", .{@errorName(e)});
+                    return LexError.MemoryAllocationFailed;
+                };
+            } else {
+                // Not a decimal; unread the '.' so it can be tokenized as an operator.
+                try self.push_char('.');
+            }
+        }
+
+        return try self.token_make_number_from_string(buffer.items);
     }
 
     /// Starts a new expression context.

@@ -374,8 +374,44 @@ fn token_text(allocator: mem.Allocator, t: token.Token) ![]const u8 {
             break :blk allocator.dupe(u8, buf[0..]);
         },
         .Number => {
-            const base = try std.fmt.allocPrint(allocator, "{d}", .{t.data.llnum});
+            // Note: char literals are currently tokenized as Number with `cval`.
+            if (t.data == .cval) {
+                const c = t.data.cval;
+                var out = std.ArrayList(u8).init(allocator);
+                errdefer out.deinit();
+
+                try out.append('\'');
+                switch (c) {
+                    '\\' => try out.appendSlice("\\\\"),
+                    '\'' => try out.appendSlice("\\\'"),
+                    '\n' => try out.appendSlice("\\n"),
+                    '\r' => try out.appendSlice("\\r"),
+                    '\t' => try out.appendSlice("\\t"),
+                    0 => try out.appendSlice("\\0"),
+                    else => {
+                        if (c < 0x20 or c >= 0x7f) {
+                            const esc = try std.fmt.allocPrint(allocator, "\\x{x:0>2}", .{c});
+                            defer allocator.free(esc);
+                            try out.appendSlice(esc);
+                        } else {
+                            try out.append(c);
+                        }
+                    },
+                }
+                try out.append('\'');
+                return out.toOwnedSlice();
+            }
+
+            const base = switch (t.data) {
+                .dnum => try std.fmt.allocPrint(allocator, "{}", .{t.data.dnum}),
+                .llnum => try std.fmt.allocPrint(allocator, "{d}", .{t.data.llnum}),
+                .lnum => try std.fmt.allocPrint(allocator, "{d}", .{t.data.lnum}),
+                .inum => try std.fmt.allocPrint(allocator, "{d}", .{t.data.inum}),
+                else => try allocator.dupe(u8, "0"),
+            };
             errdefer allocator.free(base);
+
+            if (t.num == null) return base;
             return switch (t.num.?.type) {
                 .Normal => base,
                 .Long => std.mem.concat(allocator, u8, &.{ base, "L" }) catch |e| {
@@ -423,6 +459,7 @@ fn operator_needs_spaces(op: []const u8) bool {
 
 fn is_builtin_type_keyword(kw: []const u8) bool {
     return std.mem.eql(u8, kw, "num") or
+        std.mem.eql(u8, kw, "dec") or
         std.mem.eql(u8, kw, "str") or
         std.mem.eql(u8, kw, "bin") or
         std.mem.eql(u8, kw, "chr");

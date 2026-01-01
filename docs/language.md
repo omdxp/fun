@@ -7,7 +7,7 @@
 - Pattern matching: `fit x { ... }`
 
 ## Types
-- `num` (number), `str` (string), `bin` (boolean), `chr` (character)
+- `num` (integer number), `dec` (decimal number), `str` (string), `bin` (boolean), `chr` (character)
 
 ## Example
 ```fun

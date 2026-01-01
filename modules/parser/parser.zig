@@ -590,12 +590,36 @@ pub const ParseProcess = struct {
         const t = self.token_next();
         switch (t.?.type) {
             .Number => {
-                var number_node = ast.Node{
-                    .type = .Number,
-                    .pos = self.*.transpile_proc.*.pos,
-                    .data = .{ .llnum = t.?.data.llnum },
-                };
-                try self.create_node(&number_node);
+                switch (t.?.data) {
+                    .llnum => |n| {
+                        var number_node = ast.Node{
+                            .type = .Number,
+                            .pos = self.*.transpile_proc.*.pos,
+                            .data = .{ .llnum = n },
+                        };
+                        try self.create_node(&number_node);
+                    },
+                    .dnum => |n| {
+                        var number_node = ast.Node{
+                            .type = .Number,
+                            .pos = self.*.transpile_proc.*.pos,
+                            .data = .{ .dnum = n },
+                        };
+                        try self.create_node(&number_node);
+                    },
+                    .cval => |c| {
+                        var char_node = ast.Node{
+                            .type = .Character,
+                            .pos = self.*.transpile_proc.*.pos,
+                            .data = .{ .cval = c },
+                        };
+                        try self.create_node(&char_node);
+                    },
+                    else => {
+                        self.transpile_proc.err("invalid number token", .{});
+                        return ParseError.InvalidToken;
+                    },
+                }
             },
             .Identifier => {
                 // `_` is a wildcard identifier (used by `fit` default branches).

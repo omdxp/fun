@@ -43,7 +43,7 @@ pub fn is_number(c: u8) bool {
 /// - `bool`: `true` if the string is a datatype keyword, otherwise `false`.
 pub fn keyword_is_datatype(str: []const u8) bool {
     // TODO: more to add later
-    return mem.eql(u8, "num", str) or mem.eql(u8, "str", str) or
+    return mem.eql(u8, "num", str) or mem.eql(u8, "dec", str) or mem.eql(u8, "str", str) or
         mem.eql(u8, "bin", str) or mem.eql(u8, "chr", str);
 }
 
@@ -60,7 +60,7 @@ pub fn keyword_is_datatype(str: []const u8) bool {
 pub fn is_keyword(str: []const u8) bool {
     // TODO: more to add later
     return mem.eql(u8, "imp", str) or mem.eql(u8, "fun", str) or
-        mem.eql(u8, "num", str) or mem.eql(u8, "str", str) or
+        mem.eql(u8, "num", str) or mem.eql(u8, "dec", str) or mem.eql(u8, "str", str) or
         mem.eql(u8, "if", str) or mem.eql(u8, "elif", str) or
         mem.eql(u8, "else", str) or mem.eql(u8, "bin", str) or
         mem.eql(u8, "true", str) or mem.eql(u8, "false", str) or
@@ -191,6 +191,7 @@ pub fn get_escape_char(c: u8) u8 {
 pub fn get_datatype_type(dt: []const u8) dtype.DataTypeType {
     if (mem.eql(u8, "chr", dt)) return .Chr;
     if (mem.eql(u8, "str", dt)) return .Str;
+    if (mem.eql(u8, "dec", dt)) return .Dec;
     if (mem.eql(u8, "num", dt)) return .Num;
     if (mem.eql(u8, "bin", dt)) return .Bin;
     return .Unknown;

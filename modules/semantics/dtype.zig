@@ -22,6 +22,8 @@ pub const DataTypeType = enum {
     Chr,
     /// Represents a string type.
     Str,
+    /// Represents a decimal (floating-point) number type.
+    Dec,
     /// Represents a number type.
     Num,
     /// Represents a boolean type.

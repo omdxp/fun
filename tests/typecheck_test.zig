@@ -152,3 +152,41 @@ test "typecheck heterogeneous array literal errors" {
 
     try runTranspileExpectError(std.testing.allocator, "typecheck_array_hetero.fn", input);
 }
+
+test "typecheck dec widening and promotion" {
+    const input_ok =
+        "fun add(dec a, dec b) dec { ret a + b; }\n" ++
+        "fun main() {\n" ++
+        "  dec x = 1;\n" ++
+        "  dec y = 2.5;\n" ++
+        "  dec z = x + y;\n" ++
+        "  dec w = add(1, 2.0);\n" ++
+        "  if 1.5 < 2 { ret; }\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_dec_ok.fn", input_ok);
+
+    const input_err_narrow =
+        "fun main() {\n" ++
+        "  num x = 1.5;\n" ++
+        "}\n";
+    try runTranspileExpectError(std.testing.allocator, "typecheck_dec_narrow_err.fn", input_err_narrow);
+}
+
+test "typecheck dec modulo disallowed" {
+    const input =
+        "fun main() {\n" ++
+        "  dec x = 5.0 % 2.0;\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_dec_mod_err.fn", input);
+}
+
+test "typecheck chr literal and variable" {
+    const input =
+        "fun main() {\n" ++
+        "  chr c = 'A';\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_chr_ok.fn", input);
+}

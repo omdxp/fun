@@ -26,6 +26,8 @@ pub const NodeType = enum {
     Identifier,
     /// Represents a string node.
     String,
+    /// Represents a character node.
+    Character,
     /// Represents a variable node.
     Variable,
     /// Represents a variable list node.

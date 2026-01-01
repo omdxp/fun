@@ -49,6 +49,8 @@ pub const TokenData = union(enum) {
     lnum: c_long,
     /// A long long integer value.
     llnum: c_longlong,
+    /// A double-precision floating-point value.
+    dnum: f64,
     /// A boolean value.
     bval: bool,
 };
