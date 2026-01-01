@@ -121,6 +121,8 @@ jobs:
             if ($p[$i] -gt 65534) { $p[$i] = 65534 }
           }
           $wixVersion = "$($p[0]).$($p[1]).$($p[2]).$($p[3])"
+          Write-Host "Tag: $tag"
+          Write-Host "WiX Version: $wixVersion"
 
           New-Item -ItemType Directory -Force artifacts | Out-Null
 
@@ -133,14 +135,28 @@ jobs:
           $objDir = "dist\wixobj"
           New-Item -ItemType Directory -Force $objDir | Out-Null
 
-          candle -nologo -ext WixUtilExtension -ext WixUIExtension `
-            -dSourceDir=$src `
-            -dProductVersion=$wixVersion `
-            -out "$objDir\\" $product $harvest
+          $candleArgs = @(
+            '-nologo',
+            '-ext', 'WixUtilExtension',
+            '-ext', 'WixUIExtension',
+            ("-dSourceDir=$src"),
+            ("-dProductVersion=$wixVersion"),
+            '-out', ("$objDir\\"),
+            $product,
+            $harvest
+          )
+          & candle @candleArgs
 
           $msi = "artifacts\fun-${{ matrix.target }}-$tag.msi"
-          light -nologo -ext WixUtilExtension -ext WixUIExtension -out $msi `
-            "$objDir\\Product.wixobj" "$objDir\\Harvest.wixobj"
+          $lightArgs = @(
+            '-nologo',
+            '-ext', 'WixUtilExtension',
+            '-ext', 'WixUIExtension',
+            '-out', $msi,
+            ("$objDir\\Product.wixobj"),
+            ("$objDir\\Harvest.wixobj")
+          )
+          & light @lightArgs
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
