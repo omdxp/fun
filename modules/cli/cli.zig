@@ -778,14 +778,11 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
         exe_file_name = input_path[0..index];
     }
 
-    // In tests, multiple runs can collide on the same output exe/pdb name, and on Windows
+    // Multiple runs can collide on the same output exe/pdb name, and on Windows
     // that can lead to file-lock stalls. Make the output name unique.
-    const exe_file_name_owned: ?[]const u8 = if (builtin.is_test)
-        try std.fmt.allocPrint(allocator, "{s}_{d}", .{ exe_file_name, std.time.nanoTimestamp() })
-    else
-        null;
-    defer if (exe_file_name_owned) |n| allocator.free(n);
-    if (exe_file_name_owned) |n| exe_file_name = n;
+    const exe_file_name_owned = try std.fmt.allocPrint(allocator, "{s}_{d}", .{ exe_file_name, std.time.nanoTimestamp() });
+    defer allocator.free(exe_file_name_owned);
+    exe_file_name = exe_file_name_owned;
     const exe_file = blk: {
         if (builtin.target.os.tag == .windows) {
             break :blk try std.fmt.allocPrint(allocator, "{s}.exe", .{exe_file_name});

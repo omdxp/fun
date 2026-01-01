@@ -80,6 +80,26 @@ test "typecheck call wrong arg count" {
     try runTranspileExpectError(std.testing.allocator, "typecheck_arg_count.fn", input);
 }
 
+test "typecheck call with two args ok" {
+    const input =
+        "fun add(num a, num b) num { ret a + b; }\n" ++
+        "fun main() {\n" ++
+        "  num x = add(1, 2);\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_arg_ok.fn", input);
+}
+
+test "typecheck zero-arg call ok" {
+    const input =
+        "fun foo() num { ret 1; }\n" ++
+        "fun main() {\n" ++
+        "  num x = foo();\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_zero_arg_call_ok.fn", input);
+}
+
 test "typecheck call arg type mismatch" {
     const input =
         "fun add(num a, num b) num { ret a + b; }\n" ++

@@ -587,6 +587,17 @@ pub const TranspileProcess = struct {
     }
 
     fn flatten_call_args(self: *Self, node: ast.Node, out: *std.ArrayList(ast.Node)) TranspileError!void {
+        // Function call arguments are parsed as a parenthesis node that wraps an expression.
+        // For zero-arg calls this inner expression is `.Blank`.
+        if (node.type == .ExpressionParenthesis and node.node_variant != null) {
+            const inner = node.node_variant.?.paren.exp.*;
+            if (inner.type == .Blank) return;
+            return try self.flatten_call_args(inner, out);
+        }
+
+        // A `.Blank` node represents an empty argument list.
+        if (node.type == .Blank) return;
+
         if (node.type == .Expression and node.node_variant != null and mem.eql(u8, node.node_variant.?.exp.op, ",")) {
             const exp = node.node_variant.?.exp;
             if (exp.left) |left| try self.flatten_call_args(left.*, out);
