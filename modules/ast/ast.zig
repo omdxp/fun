@@ -66,6 +66,12 @@ pub const NodeType = enum {
     Bracket,
     /// Represents an import node.
     Import,
+    /// Represents a user-defined compound type declaration.
+    Compound,
+    /// Represents a quirk (structural interface) declaration.
+    Quirk,
+    /// Represents an implementation block binding a compound type to a quirk.
+    Impl,
     /// Represents a blank node.
     Blank,
 };
@@ -169,6 +175,22 @@ pub const Node = struct {
             /// The body of the function.
             body: ?*Node = null,
         },
+
+        compound: struct {
+            name: std.ArrayList(u8),
+            fields: utils.Vector(CompoundField),
+        },
+
+        quirk: struct {
+            name: std.ArrayList(u8),
+            methods: utils.Vector(QuirkMethodSig),
+        },
+
+        impl: struct {
+            type_name: std.ArrayList(u8),
+            quirk_name: std.ArrayList(u8),
+            methods: utils.Vector(*Node),
+        },
         /// The statement node.
         statement: union(enum) {
             /// The return statement node.
@@ -219,6 +241,22 @@ pub const Node = struct {
             },
         },
     } = null,
+};
+
+pub const CompoundField = struct {
+    name: std.ArrayList(u8),
+    dtype: *dtype.DataType,
+};
+
+pub const QuirkMethodSig = struct {
+    name: std.ArrayList(u8),
+    rtype: dtype.DataType,
+    args: utils.Vector(QuirkArg),
+};
+
+pub const QuirkArg = struct {
+    name: std.ArrayList(u8),
+    dtype: *dtype.DataType,
 };
 
 /// Represents the branches in a fit statement.
