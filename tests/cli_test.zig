@@ -69,7 +69,7 @@ test "compile_and_run succeeds with valid C (file)" {
     }
 
     // Should compile and execute without error.
-    try cli.compile_and_run(allocator, c_path, true, "cli_compile_and_run_ok.fn");
+    try cli.compile_and_run(allocator, c_path, true, "cli_compile_and_run_ok.fn", &.{});
 }
 
 test "compile_and_run reports compilation failure for invalid C (file)" {
@@ -83,5 +83,5 @@ test "compile_and_run reports compilation failure for invalid C (file)" {
         allocator.free(c_path);
     }
 
-    try std.testing.expectError(cli.CliError.CompilationFailed, cli.compile_and_run(allocator, c_path, true, "cli_compile_and_run_bad.fn"));
+    try std.testing.expectError(cli.CliError.CompilationFailed, cli.compile_and_run(allocator, c_path, true, "cli_compile_and_run_bad.fn", &.{}));
 }

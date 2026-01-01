@@ -23,3 +23,7 @@ Try running these with the fun CLI to see the language in action!
 - `stdlib/math_distance.fn` — Uses `std.math` (`sqrt`)
 - `stdlib/ctype_validate_identifier.fn` — Uses `std.ctype` (`isalpha`, `tolower`, etc.)
 - `stdlib/time_format_now.fn` — Uses `std.time` (`time`, `ctime`)
+
+## CLI examples
+
+- `cli_args.fn` — Read program args via `main(argc, argv)`

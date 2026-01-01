@@ -51,6 +51,9 @@ pub const CliOptions = struct {
 
     /// Flag to format the input file and all locally imported modules (skips `std.*`).
     fmt_all: bool,
+
+    /// Arguments passed to the compiled program (everything after `--`).
+    program_args: [][]const u8,
 };
 
 /// Prints the usage information for the transpiler command-line interface.
@@ -65,7 +68,7 @@ pub const CliOptions = struct {
 /// - Might return an error if writing to the output fails.
 fn print_usage(writer: anytype) !void {
     try writer.writeAll(
-        \\Usage: fun -in <input_file> [-fmt | -fmt-all] [-out <output_file>] [-no-exec] [-outf] [-ast] [-help]
+        \\Usage: fun -in <input_file> [-fmt | -fmt-all] [-out <output_file>] [-no-exec] [-outf] [-ast] [-help] [-- <program args...>]
         \\
         \\Arguments:
         \\  -in      <file>  Input file to compile (required)
@@ -76,6 +79,7 @@ fn print_usage(writer: anytype) !void {
         \\  -outf            Generate .c output file (optional, disabled by default)
         \\  -ast             Print AST nodes (optional, disabled by default)
         \\  -help            Show this help message
+        \\  --              All following args are passed to the compiled program
         \\
     );
 }
@@ -126,8 +130,19 @@ pub fn parse_args(allocator: mem.Allocator) !CliOptions {
     var print_ast = false;
     var fmt = false;
     var fmt_all = false;
+    var program_args = std.ArrayList([]const u8).init(allocator);
+    errdefer {
+        for (program_args.items) |p| allocator.free(p);
+        program_args.deinit();
+    }
 
     while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--")) {
+            while (args.next()) |p| {
+                try program_args.append(try allocator.dupe(u8, p));
+            }
+            break;
+        }
         if (std.mem.eql(u8, arg, "-help")) {
             const stderr = std.io.getStdErr().writer();
             try print_usage(stderr);
@@ -180,6 +195,7 @@ pub fn parse_args(allocator: mem.Allocator) !CliOptions {
         .print_ast = print_ast,
         .fmt = fmt,
         .fmt_all = fmt_all,
+        .program_args = try program_args.toOwnedSlice(),
     };
 }
 
@@ -807,7 +823,7 @@ pub fn format_file_in_place(allocator: mem.Allocator, input_file: []const u8) !v
 /// Returns:
 /// - Might return error.CompilationFailed if GCC compilation fails.
 /// - Might return other errors from file operations or process execution.
-pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, is_file: bool, input_file: []const u8) !void {
+pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, is_file: bool, input_file: []const u8, program_args: []const []const u8) !void {
     const input_path = std.fs.path.basename(input_file);
     const extension_index = std.mem.lastIndexOf(u8, input_path, ".");
     var exe_file_name: []const u8 = input_path;
@@ -934,10 +950,16 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
         }
         defer allocator.free(exe_file_for_os);
 
+        // Build argv: exe + forwarded args.
+        var argv_all = try allocator.alloc([]const u8, 1 + program_args.len);
+        defer allocator.free(argv_all);
+        argv_all[0] = exe_file_for_os;
+        for (program_args, 0..) |a, i| argv_all[i + 1] = a;
+
         if (builtin.is_test) {
             const result = try process.Child.run(.{
                 .allocator = allocator,
-                .argv = &[_][]const u8{exe_file_for_os},
+                .argv = argv_all,
             });
             defer {
                 allocator.free(result.stdout);
@@ -952,7 +974,7 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
         } else {
             // In normal CLI usage we want the compiled program to behave like a normal
             // executable: inherit stdin/stdout/stderr so interactive programs work.
-            var child = process.Child.init(&[_][]const u8{exe_file_for_os}, allocator);
+            var child = process.Child.init(argv_all, allocator);
             child.stdin_behavior = .Inherit;
             child.stdout_behavior = .Inherit;
             child.stderr_behavior = .Inherit;

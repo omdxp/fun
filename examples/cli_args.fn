@@ -1,0 +1,15 @@
+// Demonstrates reading CLI arguments.
+//
+// Run:
+//   fun -in examples/cli_args.fn -- one two three
+
+imp std.io;
+
+fun main(str[] args) {
+  // Print argv entries until the null terminator.
+  num i = 0;
+  for args[i] != 0 {
+    printf("args[%d]=%s\n", i, args[i]);
+    i = i + 1;
+  }
+}

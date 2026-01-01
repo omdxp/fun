@@ -3535,7 +3535,54 @@ pub const TranspileProcess = struct {
                     try self.write("int");
                     try self.write(" ");
                     try self.write("main");
-                    try self.write("(int argc, char** argv) ");
+
+                    // Main parameter rules:
+                    // - No params: emit standard `(int argc, char** argv)`.
+                    // - Exactly one param of type `str[] name`: emit `(int argc, char** name)`.
+                    //   This keeps the Fun surface as `main(str[] args)` (README style) while
+                    //   still receiving OS argv.
+                    // - Otherwise: emit user-declared params verbatim.
+                    try self.write("(");
+
+                    const args_vec_opt = function.args;
+                    const argcnt: usize = if (args_vec_opt) |a| a.count else 0;
+
+                    const is_single_str_array = blk: {
+                        if (argcnt != 1) break :blk false;
+                        const arg0 = args_vec_opt.?.items()[0];
+                        if (arg0.type != .Variable or arg0.node_variant == null) break :blk false;
+                        const dt = arg0.node_variant.?.variable.type.*;
+                        if (!mem.eql(u8, dt.type_str.items, "str")) break :blk false;
+                        if (dt.flags == null or !dt.flags.?.is_array) break :blk false;
+                        break :blk true;
+                    };
+
+                    if (argcnt == 0) {
+                        try self.write("int argc, char** argv");
+                    } else if (is_single_str_array) {
+                        // Register the Fun-visible param for later type queries.
+                        const arg0 = args_vec_opt.?.items()[0];
+                        try self.register_scope_variable(arg0);
+                        self.in_function_params = true;
+                        try self.write("int argc, ");
+                        // `str[] args` prints as `char* args[]`, which is OK for argv.
+                        try self.transpile_node(arg0.*);
+                        self.in_function_params = false;
+                    } else {
+                        self.in_function_params = true;
+                        if (function.args) |args| {
+                            for (args.items(), 0..) |arg, i| {
+                                if (i > 0) try self.write(", ");
+                                if (arg.type == .Variable) {
+                                    try self.register_scope_variable(arg);
+                                }
+                                try self.transpile_node(arg.*);
+                            }
+                        }
+                        self.in_function_params = false;
+                    }
+
+                    try self.write(") ");
                     if (function.body) |body| {
                         const prev_in_main = self.in_main;
                         self.in_main = true;
