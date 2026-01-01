@@ -459,7 +459,10 @@ pub const ParseProcess = struct {
             body_node.?.binded.?.owner = null;
         }
         self.parser_current_body = body_node.?;
+
+        const lbrace_token = self.token_peek_next();
         try self.expect_sym('{');
+        body_node.?.pos = if (lbrace_token) |t| t.pos else body_node.?.pos;
         var last_stmt_type: ?ast.NodeType = null;
         while (true) {
             const next_non_skippable = self.token_peek_n(0);
@@ -670,7 +673,7 @@ pub const ParseProcess = struct {
                     .llnum => |n| {
                         var number_node = ast.Node{
                             .type = .Number,
-                            .pos = self.*.transpile_proc.*.pos,
+                            .pos = t.?.pos,
                             .data = .{ .llnum = n },
                         };
                         try self.create_node(&number_node);
@@ -678,7 +681,7 @@ pub const ParseProcess = struct {
                     .dnum => |n| {
                         var number_node = ast.Node{
                             .type = .Number,
-                            .pos = self.*.transpile_proc.*.pos,
+                            .pos = t.?.pos,
                             .data = .{ .dnum = n },
                         };
                         try self.create_node(&number_node);
@@ -686,7 +689,7 @@ pub const ParseProcess = struct {
                     .cval => |c| {
                         var char_node = ast.Node{
                             .type = .Character,
-                            .pos = self.*.transpile_proc.*.pos,
+                            .pos = t.?.pos,
                             .data = .{ .cval = c },
                         };
                         try self.create_node(&char_node);
@@ -715,7 +718,7 @@ pub const ParseProcess = struct {
                 }
                 var ident_node = ast.Node{
                     .type = .Identifier,
-                    .pos = self.*.transpile_proc.*.pos,
+                    .pos = t.?.pos,
                     .data = .{ .sval = t.?.data.sval },
                 };
                 try self.create_node(&ident_node);
@@ -723,6 +726,7 @@ pub const ParseProcess = struct {
             .String => {
                 var str_node = ast.Node{
                     .type = .String,
+                    .pos = t.?.pos,
                     .data = .{ .sval = t.?.data.sval },
                 };
                 try self.create_node(&str_node);
@@ -730,7 +734,7 @@ pub const ParseProcess = struct {
             .Boolean => {
                 var bool_node = ast.Node{
                     .type = .Boolean,
-                    .pos = self.*.transpile_proc.*.pos,
+                    .pos = t.?.pos,
                     .data = .{ .bval = t.?.data.bval },
                 };
                 try self.create_node(&bool_node);
@@ -777,6 +781,7 @@ pub const ParseProcess = struct {
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
     fn parse_for_parenthesis(self: *Self, hist: *utils.History) ParseError!void {
+        const lparen_token = self.token_peek_next();
         try self.expect_op("(");
         var left_node: ?ast.Node = null;
         const tmp_node = self.transpile_proc.nodes.back();
@@ -798,7 +803,7 @@ pub const ParseProcess = struct {
         exp.* = exp_node;
         self.transpile_proc.nodes.push(ast.Node{
             .type = .ExpressionParenthesis,
-            .pos = self.*.transpile_proc.*.pos,
+            .pos = if (lparen_token) |t| t.pos else null,
             .node_variant = .{ .paren = .{ .exp = exp } },
         }) catch |e| {
             std.debug.print("Error adding node to list: {s}", .{@errorName(e)});
@@ -820,7 +825,7 @@ pub const ParseProcess = struct {
             right.* = parenthesis_node.?;
             self.transpile_proc.nodes.push(ast.Node{
                 .type = .Expression,
-                .pos = self.*.transpile_proc.*.pos,
+                .pos = if (lparen_token) |t| t.pos else left.*.pos,
                 .node_variant = .{
                     .exp = .{
                         .left = left,
@@ -848,6 +853,7 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     fn parse_for_comma(self: *Self, hist: *utils.History) ParseError!void {
+        const comma_token = self.token_peek_next();
         _ = self.token_next(); // skip ,
         const left_node = self.node_pop();
         try self.parse_expressionable_root(hist);
@@ -866,7 +872,7 @@ pub const ParseProcess = struct {
         right.* = right_node.?;
         self.transpile_proc.nodes.push(ast.Node{
             .type = .Expression,
-            .pos = self.*.transpile_proc.*.pos,
+            .pos = if (comma_token) |t| t.pos else left.*.pos,
             .node_variant = .{
                 .exp = .{
                     .left = left,
@@ -900,6 +906,8 @@ pub const ParseProcess = struct {
         if (left_node != null) {
             _ = self.node_pop();
         }
+
+        const lbracket_token = self.token_peek_next();
         try self.expect_op("[");
         try self.parse_expressionable_root(hist);
         try self.expect_sym(']');
@@ -912,7 +920,7 @@ pub const ParseProcess = struct {
         inner.* = exp_node.?;
         self.transpile_proc.nodes.push(ast.Node{
             .type = .Bracket,
-            .pos = self.*.transpile_proc.*.pos,
+            .pos = if (lbracket_token) |t| t.pos else null,
             .node_variant = .{ .bracket = .{ .inner = inner } },
         }) catch |e| {
             std.debug.print("Error adding node to list: {s}", .{@errorName(e)});
@@ -934,7 +942,7 @@ pub const ParseProcess = struct {
             right.* = bracket_node.?;
             self.transpile_proc.nodes.push(ast.Node{
                 .type = .Expression,
-                .pos = self.*.transpile_proc.*.pos,
+                .pos = if (lbracket_token) |t| t.pos else left.*.pos,
                 .node_variant = .{
                     .exp = .{
                         .left = left,
@@ -977,6 +985,7 @@ pub const ParseProcess = struct {
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
     fn parse_for_indirection_unary(self: *Self) ParseError!void {
+        const star_token = self.token_peek_next();
         const depth = self.parse_get_pointer_depth();
         var hist = utils.History.init(self.transpile_proc.allocator, .{ .expression_is_unary = true });
         defer hist.deinit();
@@ -990,7 +999,7 @@ pub const ParseProcess = struct {
         operand.* = unary_operand_node.?;
         self.transpile_proc.nodes.push(ast.Node{
             .type = .Unary,
-            .pos = self.*.transpile_proc.*.pos,
+            .pos = if (star_token) |t| t.pos else operand.*.pos,
             .node_variant = .{
                 .unary = .{
                     .op = "*",
@@ -1021,7 +1030,8 @@ pub const ParseProcess = struct {
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
     fn parse_for_normal_unary(self: *Self) ParseError!void {
-        const unary_op = self.token_next().?.data.sval.items;
+        const unary_tok = self.token_next();
+        const unary_op = unary_tok.?.data.sval.items;
         var hist = utils.History.init(self.transpile_proc.allocator, .{ .expression_is_unary = true });
         defer hist.deinit();
         try self.parse_expressionable(&hist);
@@ -1034,7 +1044,7 @@ pub const ParseProcess = struct {
         operand.* = unary_operand_node.?;
         self.transpile_proc.nodes.push(ast.Node{
             .type = .Unary,
-            .pos = self.*.transpile_proc.*.pos,
+            .pos = unary_tok.?.pos,
             .node_variant = .{
                 .unary = .{
                     .op = unary_op,
@@ -1083,10 +1093,10 @@ pub const ParseProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if any parsing operation fails.
-    fn parse_for_left_operanded_unary(self: *Self, node_left: *ast.Node, unary_op: []const u8) ParseError!void {
+    fn parse_for_left_operanded_unary(self: *Self, node_left: *ast.Node, unary_op: []const u8, op_pos: ?token.Pos) ParseError!void {
         self.transpile_proc.nodes.push(ast.Node{
             .type = .Unary,
-            .pos = self.*.transpile_proc.*.pos,
+            .pos = op_pos orelse node_left.*.pos,
             .node_variant = .{
                 .unary = .{
                     .op = unary_op,
@@ -1114,7 +1124,7 @@ pub const ParseProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if creating the node fails.
-    fn make_expression_node(self: *Self, left_node: *ast.Node, right_node: *ast.Node, op: []const u8) ParseError!void {
+    fn make_expression_node(self: *Self, left_node: *ast.Node, right_node: *ast.Node, op: []const u8, op_pos: ?token.Pos) ParseError!void {
         const exp_node = self.transpile_proc.allocator.create(ast.Node) catch |e| {
             std.debug.print("Error creating node: {s}", .{@errorName(e)});
             return ParseError.MemoryAllocationFailed;
@@ -1134,7 +1144,7 @@ pub const ParseProcess = struct {
         right.* = right_node.*;
         exp_node.* = ast.Node{
             .type = .Expression,
-            .pos = self.*.transpile_proc.*.pos,
+            .pos = op_pos orelse left.*.pos orelse right.*.pos,
             .node_variant = .{
                 .exp = .{
                     .left = left,
@@ -1165,7 +1175,7 @@ pub const ParseProcess = struct {
         defer self.transpile_proc.allocator.destroy(body_node);
         body_node.* = ast.Node{
             .type = .Body,
-            .pos = self.*.transpile_proc.*.pos,
+            .pos = null,
         };
         try self.create_node(body_node);
     }
@@ -1382,6 +1392,7 @@ pub const ParseProcess = struct {
     fn parse_normal_expression(self: *Self, hist: *utils.History) ParseError!void {
         var t = self.token_peek_next();
         const op = t.?.data.sval.items;
+        const op_pos = t.?.pos;
         var node_left = self.node_peek_expressionable_or_null();
         if (node_left == null) {
             if (!utils.is_unary_operator(op)) {
@@ -1393,7 +1404,7 @@ pub const ParseProcess = struct {
         _ = self.token_next(); // skip operator
         _ = self.node_pop();
         if (utils.is_left_operanded_unary_operator(op)) {
-            return try self.parse_for_left_operanded_unary(&node_left.?, op);
+            return try self.parse_for_left_operanded_unary(&node_left.?, op, op_pos);
         }
         node_left.?.flags = .{ .inside_expression = true };
         t = self.token_peek_next();
@@ -1416,7 +1427,7 @@ pub const ParseProcess = struct {
         }
         var node_right = self.node_pop();
         node_right.?.flags = .{ .inside_expression = true };
-        try self.make_expression_node(&node_left.?, &node_right.?, op);
+        try self.make_expression_node(&node_left.?, &node_right.?, op, op_pos);
         var exp_node = self.node_pop();
         try self.parse_reorder_expression(&exp_node.?);
         self.transpile_proc.nodes.push(exp_node.?) catch |e| {
@@ -1694,7 +1705,7 @@ pub const ParseProcess = struct {
         }
         node.* = ast.Node{
             .type = .Compound,
-            .pos = self.*.transpile_proc.*.pos,
+            .pos = name_tok.?.pos,
             .node_variant = .{ .compound = .{ .name = name, .fields = fields } },
         };
 
@@ -1831,7 +1842,7 @@ pub const ParseProcess = struct {
         }
         node.* = ast.Node{
             .type = .Quirk,
-            .pos = self.*.transpile_proc.*.pos,
+            .pos = name_tok.?.pos,
             .node_variant = .{ .quirk = .{ .name = name, .methods = methods } },
         };
 
@@ -1897,7 +1908,7 @@ pub const ParseProcess = struct {
             // Build a regular function node with a generated name: `<Type>__<Quirk>__<method>`
             var fn_node = ast.Node{
                 .type = .Function,
-                .pos = self.*.transpile_proc.*.pos,
+                .pos = name_tok.?.pos,
                 .node_variant = .{ .function = .{} },
             };
 
@@ -1945,7 +1956,7 @@ pub const ParseProcess = struct {
             errdefer self.transpile_proc.allocator.destroy(self_var_ptr);
             self_var_ptr.* = ast.Node{
                 .type = .Variable,
-                .pos = self.*.transpile_proc.*.pos,
+                .pos = name_tok.?.pos,
                 .node_variant = .{ .variable = .{ .name = self_name, .type = self_dt, .val = null } },
             };
             // Register `self` in scope for parsing identifier uses.
@@ -2030,7 +2041,7 @@ pub const ParseProcess = struct {
         }
         node.* = ast.Node{
             .type = .Impl,
-            .pos = self.*.transpile_proc.*.pos,
+            .pos = type_tok.?.pos,
             .node_variant = .{ .impl = .{ .type_name = type_name, .quirk_name = quirk_name, .methods = methods } },
         };
 
@@ -2093,6 +2104,7 @@ pub const ParseProcess = struct {
     fn parse_array_brackets(self: *Self, dt: *dtype.DataType, hist: *utils.History) ParseError!void {
         var brackets = utils.Vector(ast.Node).init(self.transpile_proc.allocator);
         while (self.next_token_is_operator("[")) {
+            const lbracket_token = self.token_peek_next();
             try self.expect_op("[");
             dt.*.flags.?.is_array = true;
             if (self.next_token_is_symbol(']')) {
@@ -2110,7 +2122,7 @@ pub const ParseProcess = struct {
             exp.* = exp_node.?;
             self.transpile_proc.nodes.push(ast.Node{
                 .type = .Bracket,
-                .pos = self.transpile_proc.*.pos,
+                .pos = if (lbracket_token) |t| t.pos else null,
                 .node_variant = .{ .bracket = .{ .inner = exp } },
             }) catch |e| {
                 std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});
@@ -2183,7 +2195,7 @@ pub const ParseProcess = struct {
             }
             node.* = ast.Node{
                 .type = .Variable,
-                .pos = self.*.transpile_proc.*.pos,
+                .pos = ident_token.?.pos,
                 .node_variant = .{
                     .variable = .{
                         .name = name,
@@ -2225,7 +2237,7 @@ pub const ParseProcess = struct {
             }
             node.* = ast.Node{
                 .type = .Variable,
-                .pos = self.*.transpile_proc.*.pos,
+                .pos = ident_token.?.pos,
                 .node_variant = .{
                     .variable = .{
                         .name = name,
@@ -2425,12 +2437,13 @@ pub const ParseProcess = struct {
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
     fn parse_return(self: *Self, hist: *utils.History) ParseError!void {
+        const ret_token = self.token_peek_next();
         _ = self.token_next(); // skip ret
         if (self.next_token_is_symbol(';')) {
             try self.expect_sym(';');
             self.transpile_proc.nodes.push(ast.Node{
                 .type = .StatementReturn,
-                .pos = self.*.transpile_proc.*.pos,
+                .pos = if (ret_token) |t| t.pos else null,
             }) catch |e| {
                 std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});
                 return ParseError.MemoryAllocationFailed;
@@ -2447,7 +2460,7 @@ pub const ParseProcess = struct {
         exp.* = exp_node.?;
         self.transpile_proc.nodes.push(ast.Node{
             .type = .StatementReturn,
-            .pos = self.*.transpile_proc.*.pos,
+            .pos = if (ret_token) |t| t.pos else null,
             .node_variant = .{ .statement = .{ .return_stmt = exp } },
         }) catch |e| {
             std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});
@@ -2470,6 +2483,7 @@ pub const ParseProcess = struct {
     /// - Logs an error message if any expected token is not found.
     fn parse_elif_statement(self: *Self, hist: *utils.History) ParseError!void {
         if (self.next_token_is_keyword("elif")) {
+            const elif_token = self.token_peek_next();
             if (self.parser_current_function == null) {
                 self.transpile_proc.err("elif statement outside of function", .{});
                 return ParseError.InvalidStatement;
@@ -2497,7 +2511,7 @@ pub const ParseProcess = struct {
             body.* = body_node.?;
             var elif_node = ast.Node{
                 .type = .StatementElseIf,
-                .pos = self.*.transpile_proc.*.pos,
+                .pos = if (elif_token) |t| t.pos else null,
                 .node_variant = .{ .statement = .{ .elif_stmt = .{ .condition = condition, .body = body } } },
             };
             try self.create_node(&elif_node);
@@ -2518,6 +2532,7 @@ pub const ParseProcess = struct {
     /// - Logs an error message if any expected token is not found.
     fn parse_else_statement(self: *Self, hist: *utils.History) ParseError!void {
         if (self.next_token_is_keyword("else")) {
+            const else_token = self.token_peek_next();
             if (self.parser_current_function == null) {
                 self.transpile_proc.err("else statement outside of function", .{});
                 return ParseError.InvalidStatement;
@@ -2533,7 +2548,7 @@ pub const ParseProcess = struct {
             body.* = body_node.?;
             var else_node = ast.Node{
                 .type = .StatementElse,
-                .pos = self.*.transpile_proc.*.pos,
+                .pos = if (else_token) |t| t.pos else null,
                 .node_variant = .{ .statement = .{ .else_stmt = .{ .body = body } } },
             };
             try self.create_node(&else_node);
@@ -2554,6 +2569,7 @@ pub const ParseProcess = struct {
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
     fn parse_if_statement(self: *Self, hist: *utils.History) ParseError!void {
+        const if_token = self.token_peek_next();
         try self.expect_keyword("if");
         if (self.parser_current_function == null) {
             self.transpile_proc.err("if statement outside of function", .{});
@@ -2587,7 +2603,7 @@ pub const ParseProcess = struct {
         defer self.transpile_proc.allocator.destroy(if_node);
         if_node.* = ast.Node{
             .type = .StatementIf,
-            .pos = self.transpile_proc.*.pos,
+            .pos = if (if_token) |t| t.pos else null,
             .node_variant = .{
                 .statement = .{
                     .if_stmt = .{ .condition = condition, .body = body },
@@ -2685,8 +2701,10 @@ pub const ParseProcess = struct {
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
     fn parse_fit_statement(self: *Self, hist: *utils.History) ParseError!void {
+        const fit_token = self.token_peek_next();
         var fit_node: ast.Node = .{
             .type = .StatementFit,
+            .pos = if (fit_token) |t| t.pos else null,
             .node_variant = .{
                 .statement = .{ .fit_stmt = undefined },
             },
@@ -2745,6 +2763,8 @@ pub const ParseProcess = struct {
             return ParseError.InvalidIdentifier;
         }
 
+        const import_pos = folder_token.?.pos;
+
         var import_name = std.ArrayList(u8).init(self.transpile_proc.allocator);
         defer import_name.deinit();
         import_name.appendSlice(folder_token.?.data.sval.items) catch |e| {
@@ -2781,17 +2801,19 @@ pub const ParseProcess = struct {
         };
         errdefer self.transpile_proc.allocator.free(path);
 
+        const import_node = ast.Node{
+            .type = .Import,
+            .pos = import_pos,
+            .node_variant = .{ .import = .{ .path = path } },
+        };
+
         // Preload imported function names so identifier validation during parsing works.
         // Standard library imports are handled specially.
         if (!std.mem.startsWith(u8, path, "std.")) {
-            try self.transpile_proc.preload_import_global_symbols(path);
+            try self.transpile_proc.preload_import_global_symbols(import_node, path);
         }
 
-        self.transpile_proc.nodes.push(ast.Node{
-            .type = .Import,
-            .pos = self.*.transpile_proc.*.pos,
-            .node_variant = .{ .import = .{ .path = path } },
-        }) catch |e| {
+        self.transpile_proc.nodes.push(import_node) catch |e| {
             std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});
             return ParseError.MemoryAllocationFailed;
         };
@@ -2870,7 +2892,7 @@ pub const ParseProcess = struct {
             return try self.parse_return(hist);
         } else if (mem.eql(u8, "break", sval)) {
             _ = self.token_next(); // skip break
-            self.transpile_proc.nodes.push(ast.Node{ .type = .StatementBreak, .pos = self.*.transpile_proc.*.pos }) catch |e| {
+            self.transpile_proc.nodes.push(ast.Node{ .type = .StatementBreak, .pos = t.?.pos }) catch |e| {
                 std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});
                 return ParseError.MemoryAllocationFailed;
             };
@@ -2878,7 +2900,7 @@ pub const ParseProcess = struct {
             return;
         } else if (mem.eql(u8, "continue", sval)) {
             _ = self.token_next(); // skip continue
-            self.transpile_proc.nodes.push(ast.Node{ .type = .StatementContinue, .pos = self.*.transpile_proc.*.pos }) catch |e| {
+            self.transpile_proc.nodes.push(ast.Node{ .type = .StatementContinue, .pos = t.?.pos }) catch |e| {
                 std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});
                 return ParseError.MemoryAllocationFailed;
             };
@@ -2950,6 +2972,7 @@ pub const ParseProcess = struct {
     }
 
     fn parse_for_statement(self: *Self, hist: *utils.History) ParseError!void {
+        const for_token = self.token_peek_next();
         try self.expect_keyword("for");
         if (self.parser_current_function == null) {
             self.transpile_proc.err("for statement outside of function", .{});
@@ -3023,7 +3046,7 @@ pub const ParseProcess = struct {
         errdefer self.transpile_proc.allocator.destroy(body_ptr);
         body_ptr.* = body_node;
 
-        var for_node = ast.Node{ .type = .StatementFor, .pos = self.*.transpile_proc.*.pos };
+        var for_node = ast.Node{ .type = .StatementFor, .pos = if (for_token) |t| t.pos else null };
         if (iterable_node.type == .Expression and std.mem.eql(u8, iterable_node.node_variant.?.exp.op, "..")) {
             const range_ptr = self.transpile_proc.allocator.create(ast.Node) catch |e| {
                 std.debug.print("Error creating node: {s}\n", .{@errorName(e)});

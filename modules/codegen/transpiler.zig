@@ -18,6 +18,8 @@ const dtype = semantics.dtype;
 pub const TranspileError = error{
     /// Error indicating that a file is not found.
     FileNotFound,
+    /// Error indicating an imported module file is not found.
+    ImportFileNotFound,
     /// Error indicating that a file cannot be opened.
     FileOpenError,
     /// Error indicating that a file cannot be read.
@@ -492,21 +494,22 @@ pub const TranspileProcess = struct {
     ///
     /// This enables identifier validation in the parser to recognize functions defined in
     /// locally imported modules.
-    pub fn preload_import_global_symbols(self: *Self, import_path: []const u8) GeneralError!void {
+    pub fn preload_import_global_symbols(self: *Self, import_node: ast.Node, import_path: []const u8) GeneralError!void {
         if (std.mem.indexOf(u8, import_path, "std.") != null) return;
 
         const full_path = try self.build_full_import_path(import_path);
         defer self.backing_allocator.free(full_path);
 
         std.fs.cwd().access(full_path, .{}) catch {
-            return TranspileError.FileNotFound;
+            self.report_error(import_node, "Import file not found: {s}", .{full_path});
+            return TranspileError.ImportFileNotFound;
         };
 
         // Early direct circular import detection (A imports B, and B imports A).
         // This is intentionally lightweight and mirrors the check in process_local_import.
         {
             const file_contents = fs.cwd().readFileAlloc(self.backing_allocator, full_path, 1024 * 1024) catch |read_err| {
-                self.err("Failed to read import file: {any}", .{read_err});
+                self.report_error(import_node, "Failed to read import file '{s}': {any}", .{ full_path, read_err });
                 return TranspileError.FileReadError;
             };
             defer self.backing_allocator.free(file_contents);
@@ -530,7 +533,7 @@ pub const TranspileProcess = struct {
             if (std.mem.indexOf(u8, file_contents, import_line.items)) |_| {
                 const basename1 = std.fs.path.basename(self.input_file_path);
                 const basename2 = std.fs.path.basename(full_path);
-                self.err("CIRCULAR IMPORT DETECTED: '{s}' imports '{s}', but '{s}' also imports '{s}', creating a circular dependency", .{ basename1, basename2, basename2, basename1 });
+                self.report_error(import_node, "CIRCULAR IMPORT DETECTED: '{s}' imports '{s}', but '{s}' also imports '{s}', creating a circular dependency", .{ basename1, basename2, basename2, basename1 });
                 return TranspileError.CircularImport;
             }
         }
@@ -870,6 +873,52 @@ pub const TranspileProcess = struct {
                 return;
             }
         }
+        stderr.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch unreachable;
+    }
+
+    fn report_warning(self: *Self, node: ?ast.Node, comptime fmt: []const u8, args: anytype) void {
+        const stderr = std.io.getStdErr().writer();
+        stderr.print("\n[Warning]\n", .{}) catch unreachable;
+        stderr.print(fmt, args) catch unreachable;
+
+        self.warnings.writer().print("\n[Warning]\n", .{}) catch unreachable;
+        self.warnings.writer().print(fmt, args) catch unreachable;
+
+        if (node) |n| {
+            if (n.pos) |p| {
+                const end_line = if (p.end_line == 0) p.line else p.end_line;
+                if (end_line == p.line) {
+                    stderr.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col }) catch unreachable;
+                    self.warnings.writer().print("\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col }) catch unreachable;
+                } else {
+                    stderr.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col }) catch unreachable;
+                    self.warnings.writer().print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col }) catch unreachable;
+                }
+                return;
+            }
+        }
+
+        stderr.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch unreachable;
+        self.warnings.writer().print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch unreachable;
+    }
+
+    fn report_error(self: *Self, node: ?ast.Node, comptime fmt: []const u8, args: anytype) void {
+        const stderr = std.io.getStdErr().writer();
+        stderr.print("\n[Error]\n", .{}) catch unreachable;
+        stderr.print(fmt, args) catch unreachable;
+
+        if (node) |n| {
+            if (n.pos) |p| {
+                const end_line = if (p.end_line == 0) p.line else p.end_line;
+                if (end_line == p.line) {
+                    stderr.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col }) catch unreachable;
+                } else {
+                    stderr.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col }) catch unreachable;
+                }
+                return;
+            }
+        }
+
         stderr.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch unreachable;
     }
 
@@ -1558,7 +1607,7 @@ pub const TranspileProcess = struct {
         }
     }
 
-    fn warn_if_fit_not_exhausted(self: *Self, condition: *ast.Node, branches: []const ast.FitBranch) void {
+    fn warn_if_fit_not_exhausted(self: *Self, fit_stmt: ast.Node, condition: *ast.Node, branches: []const ast.FitBranch) void {
         // If there is any default branch, treat it as exhausted.
         for (branches) |branch| {
             if (branch.condition == null) return;
@@ -1582,11 +1631,11 @@ pub const TranspileProcess = struct {
 
         if (!(has_true and has_false)) {
             if (!has_true and !has_false) {
-                self.warn("fit statement is not exhausted for bin condition (missing true and false branches)", .{});
+                self.report_warning(fit_stmt, "fit statement is not exhausted for bin condition (missing true and false branches)", .{});
             } else if (!has_true) {
-                self.warn("fit statement is not exhausted for bin condition (missing true branch)", .{});
+                self.report_warning(fit_stmt, "fit statement is not exhausted for bin condition (missing true branch)", .{});
             } else {
-                self.warn("fit statement is not exhausted for bin condition (missing false branch)", .{});
+                self.report_warning(fit_stmt, "fit statement is not exhausted for bin condition (missing false branch)", .{});
             }
         }
     }
@@ -3471,7 +3520,7 @@ pub const TranspileProcess = struct {
                         }
                     },
                     .fit_stmt => |fit| {
-                        self.warn_if_fit_not_exhausted(fit.exp, fit.branches.items());
+                        self.warn_if_fit_not_exhausted(node, fit.exp, fit.branches.items());
                         try self.write("switch (");
                         try self.transpile_node(fit.exp.*);
                         try self.write(") {");
@@ -3621,9 +3670,9 @@ pub const TranspileProcess = struct {
     fn process_import(self: *Self, node: ast.Node) GeneralError!void {
         const import_path = node.node_variant.?.import.path;
         if (std.mem.indexOf(u8, import_path, "std.") != null) {
-            try self.process_std_import(import_path);
+            try self.process_std_import(node, import_path);
         } else {
-            try self.process_local_import(import_path);
+            try self.process_local_import(node, import_path);
         }
     }
 
@@ -3635,7 +3684,7 @@ pub const TranspileProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if processing the import fails.
-    fn process_std_import(self: *Self, import_path: []const u8) TranspileError!void {
+    fn process_std_import(self: *Self, import_node: ast.Node, import_path: []const u8) TranspileError!void {
         var header_name: []const u8 = undefined;
 
         if (mem.eql(u8, import_path, "std.io")) {
@@ -3659,7 +3708,7 @@ pub const TranspileProcess = struct {
                 return TranspileError.MemoryAllocationFailed;
             };
         } else {
-            self.err("Unsupported standard library import: {s}", .{import_path});
+            self.report_error(import_node, "Unsupported standard library import: {s}", .{import_path});
             return TranspileError.UnsupportedImport;
         }
 
@@ -3683,7 +3732,7 @@ pub const TranspileProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if processing the import fails.
-    fn process_local_import(self: *Self, import_path: []const u8) GeneralError!void {
+    fn process_local_import(self: *Self, import_node: ast.Node, import_path: []const u8) GeneralError!void {
         // Get full path of the file to import
         // This is a temporary helper string; keep it off the arena.
         var file_path = std.ArrayList(u8).init(self.backing_allocator);
@@ -3732,16 +3781,20 @@ pub const TranspileProcess = struct {
 
         // Check if the file exists
         std.fs.cwd().access(full_path, .{}) catch {
+            // Keep the output comment (useful when dumping partial output), but also
+            // emit a real diagnostic tied to the import statement.
             try self.write("\n/* ERROR: Import file not found: ");
             try self.write(full_path);
             try self.write(" */\n");
-            return TranspileError.FileNotFound;
+
+            self.report_error(import_node, "Import file not found: {s}", .{full_path});
+            return TranspileError.ImportFileNotFound;
         };
 
         // Robust direct circular dependency detection
         // First, check if the file being imported already has us in its import chain
         const file_contents = fs.cwd().readFileAlloc(self.backing_allocator, full_path, 1024 * 1024) catch |read_err| {
-            self.err("Failed to read import file: {any}", .{read_err});
+            self.report_error(import_node, "Failed to read import file '{s}': {any}", .{ full_path, read_err });
             return TranspileError.FileReadError;
         };
         defer self.backing_allocator.free(file_contents);
@@ -3768,7 +3821,7 @@ pub const TranspileProcess = struct {
             const basename1 = std.fs.path.basename(self.input_file_path);
             const basename2 = std.fs.path.basename(full_path);
 
-            self.err("CIRCULAR IMPORT DETECTED: '{s}' imports '{s}', but '{s}' also imports '{s}', creating a circular dependency", .{ basename1, basename2, basename2, basename1 });
+            self.report_error(import_node, "CIRCULAR IMPORT DETECTED: '{s}' imports '{s}', but '{s}' also imports '{s}', creating a circular dependency", .{ basename1, basename2, basename2, basename1 });
             return TranspileError.CircularImport;
         }
 

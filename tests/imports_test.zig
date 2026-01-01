@@ -1,4 +1,5 @@
 const std = @import("std");
+const ast = @import("ast");
 const codegen = @import("codegen");
 
 test "preload_import_global_symbols finds imported functions" {
@@ -10,7 +11,10 @@ test "preload_import_global_symbols finds imported functions" {
     );
     defer tp.deinit();
 
-    try tp.preload_import_global_symbols("relative.parent");
+    try tp.preload_import_global_symbols(
+        ast.Node{ .type = .Import, .pos = null, .node_variant = null },
+        "relative.parent",
+    );
 
     try std.testing.expect(tp.global_symbols.get("parent") != null);
 }
