@@ -2407,6 +2407,32 @@ pub const TranspileProcess = struct {
         return out.toOwnedSlice() catch return TranspileError.MemoryAllocationFailed;
     }
 
+    const SanitizedIdent = struct {
+        slice: []const u8,
+        owned: bool,
+    };
+
+    fn c_ident_sanitize_temp(self: *Self, raw: []const u8, stack_buf: []u8) TranspileError!SanitizedIdent {
+        if (raw.len <= stack_buf.len) {
+            var i: usize = 0;
+            while (i < raw.len) : (i += 1) {
+                const c = raw[i];
+                stack_buf[i] = if ((c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_') c else '_';
+            }
+            return .{ .slice = stack_buf[0..raw.len], .owned = false };
+        }
+
+        // Fallback for unusually long identifiers: allocate from the backing allocator
+        // so the memory is promptly freed and doesn't bloat the arena.
+        const heap_buf = self.backing_allocator.alloc(u8, raw.len) catch return TranspileError.MemoryAllocationFailed;
+        var i: usize = 0;
+        while (i < raw.len) : (i += 1) {
+            const c = raw[i];
+            heap_buf[i] = if ((c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_') c else '_';
+        }
+        return .{ .slice = heap_buf, .owned = true };
+    }
+
     fn quirk_sig_hash(sig: []const u8) u64 {
         return std.hash.Wyhash.hash(0, sig);
     }
@@ -2637,14 +2663,15 @@ pub const TranspileProcess = struct {
             const quirk_c = names.quirk[0..names.quirk_len];
             const vtable_c = names.vtable[0..names.vtable_len];
 
-            const type_s = try self.c_ident_sanitize(type_name);
-            defer self.allocator.free(type_s);
+            var type_stack: [128]u8 = undefined;
+            const type_s = try self.c_ident_sanitize_temp(type_name, &type_stack);
+            defer if (type_s.owned) self.backing_allocator.free(type_s.slice);
 
             var vtbl_buf: [96]u8 = undefined;
-            const vtbl_name = (std.fmt.bufPrint(&vtbl_buf, "__fun_impl_{s}_{x}_vtable", .{ type_s, quirk_sig_hash(sig) }) catch unreachable);
+            const vtbl_name = (std.fmt.bufPrint(&vtbl_buf, "__fun_impl_{s}_{x}_vtable", .{ type_s.slice, quirk_sig_hash(sig) }) catch unreachable);
 
             var coerce_buf: [96]u8 = undefined;
-            const coerce_name = (std.fmt.bufPrint(&coerce_buf, "__fun_coerce_{s}_{x}", .{ type_s, quirk_sig_hash(sig) }) catch unreachable);
+            const coerce_name = (std.fmt.bufPrint(&coerce_buf, "__fun_coerce_{s}_{x}", .{ type_s.slice, quirk_sig_hash(sig) }) catch unreachable);
 
             // Forward declare generated impl methods so wrappers can call them.
             for (im.methods.items()) |m| {
@@ -2698,10 +2725,11 @@ pub const TranspileProcess = struct {
                 }
                 if (impl_fn_name == null) continue;
 
-                const m_s = try self.c_ident_sanitize(m.name.items);
-                defer self.allocator.free(m_s);
+                var m_stack: [128]u8 = undefined;
+                const m_s = try self.c_ident_sanitize_temp(m.name.items, &m_stack);
+                defer if (m_s.owned) self.backing_allocator.free(m_s.slice);
                 var wrap_buf: [128]u8 = undefined;
-                const wrap_name = (std.fmt.bufPrint(&wrap_buf, "__fun_wrap_{s}_{x}_{s}", .{ type_s, quirk_sig_hash(sig), m_s }) catch unreachable);
+                const wrap_name = (std.fmt.bufPrint(&wrap_buf, "__fun_wrap_{s}_{x}_{s}", .{ type_s.slice, quirk_sig_hash(sig), m_s.slice }) catch unreachable);
 
                 try self.write("static ");
                 try self.write_type(m.rtype);
@@ -2741,10 +2769,11 @@ pub const TranspileProcess = struct {
             try self.write(vtbl_name);
             try self.write(" = {\n");
             for (q.methods.items()) |m| {
-                const m_s = try self.c_ident_sanitize(m.name.items);
-                defer self.allocator.free(m_s);
+                var m_stack2: [128]u8 = undefined;
+                const m_s = try self.c_ident_sanitize_temp(m.name.items, &m_stack2);
+                defer if (m_s.owned) self.backing_allocator.free(m_s.slice);
                 var wrap_buf2: [128]u8 = undefined;
-                const wrap_name2 = (std.fmt.bufPrint(&wrap_buf2, "__fun_wrap_{s}_{x}_{s}", .{ type_s, quirk_sig_hash(sig), m_s }) catch unreachable);
+                const wrap_name2 = (std.fmt.bufPrint(&wrap_buf2, "__fun_wrap_{s}_{x}_{s}", .{ type_s.slice, quirk_sig_hash(sig), m_s.slice }) catch unreachable);
                 try self.write("  .");
                 try self.write(m.name.items);
                 try self.write(" = ");
@@ -2968,10 +2997,11 @@ pub const TranspileProcess = struct {
                                 const actual = self.expr_named_pointee_from_scope(right.*);
                                 if (actual != null) {
                                     if (reg.impls_by_key.contains(.{ .type_name = actual.?, .quirk_sig = expected_sig.? })) {
-                                        const type_s = try self.c_ident_sanitize(actual.?);
-                                        defer self.allocator.free(type_s);
+                                        var type_stack2: [128]u8 = undefined;
+                                        const type_s = try self.c_ident_sanitize_temp(actual.?, &type_stack2);
+                                        defer if (type_s.owned) self.backing_allocator.free(type_s.slice);
                                         var coerce_buf: [96]u8 = undefined;
-                                        const coerce_name = (std.fmt.bufPrint(&coerce_buf, "__fun_coerce_{s}_{x}", .{ type_s, quirk_sig_hash(expected_sig.?) }) catch unreachable);
+                                        const coerce_name = (std.fmt.bufPrint(&coerce_buf, "__fun_coerce_{s}_{x}", .{ type_s.slice, quirk_sig_hash(expected_sig.?) }) catch unreachable);
                                         try self.transpile_node(left.*);
                                         try self.write(" = ");
                                         try self.write(coerce_name);
@@ -3103,10 +3133,11 @@ pub const TranspileProcess = struct {
                             const actual = self.expr_named_pointee_from_scope(val.*);
                             if (actual != null) {
                                 if (reg.impls_by_key.contains(.{ .type_name = actual.?, .quirk_sig = sig.? })) {
-                                    const type_s = try self.c_ident_sanitize(actual.?);
-                                    defer self.allocator.free(type_s);
+                                    var type_stack3: [128]u8 = undefined;
+                                    const type_s = try self.c_ident_sanitize_temp(actual.?, &type_stack3);
+                                    defer if (type_s.owned) self.backing_allocator.free(type_s.slice);
                                     var coerce_buf: [96]u8 = undefined;
-                                    const coerce_name = (std.fmt.bufPrint(&coerce_buf, "__fun_coerce_{s}_{x}", .{ type_s, quirk_sig_hash(sig.?) }) catch unreachable);
+                                    const coerce_name = (std.fmt.bufPrint(&coerce_buf, "__fun_coerce_{s}_{x}", .{ type_s.slice, quirk_sig_hash(sig.?) }) catch unreachable);
                                     try self.write(coerce_name);
                                     try self.write("(");
                                     try self.transpile_node(val.*);
