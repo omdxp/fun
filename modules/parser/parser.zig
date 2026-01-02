@@ -371,36 +371,36 @@ pub const ParseProcess = struct {
             // treat `ident * ident` as a pointer declaration. This avoids mis-parsing
             // expression statements like `w * h;` as `w* h;`.
             if (self.transpile_proc.get_scope_entity(t.?.data.sval.items) == null) {
-            var off: usize = 1;
-            while (true) {
-                const tn = self.token_peek_n(off);
-                if (tn == null) break;
-                if (tn.?.type == .Operator and mem.eql(u8, tn.?.data.sval.items, "*")) {
-                    off += 1;
-                    continue;
+                var off: usize = 1;
+                while (true) {
+                    const tn = self.token_peek_n(off);
+                    if (tn == null) break;
+                    if (tn.?.type == .Operator and mem.eql(u8, tn.?.data.sval.items, "*")) {
+                        off += 1;
+                        continue;
+                    }
+                    break;
                 }
-                break;
-            }
 
-            const t1 = self.token_peek_n(off);
-            if (t1 != null and t1.?.type == .Identifier) {
-                const dt = self.transpile_proc.allocator.create(dtype.DataType) catch |e| {
-                    std.debug.print("Error creating DataType: {}\n", .{e});
-                    return ParseError.MemoryAllocationFailed;
-                };
-                errdefer self.transpile_proc.allocator.destroy(dt);
-                dt.* = dtype.DataType{
-                    .array = null,
-                    .pointer_depth = 0,
-                    .type = .Unknown,
-                    .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
-                    .flags = .{},
-                };
-                try self.parse_datatype(dt);
-                try self.parse_variable(dt, hist);
-                try self.expect_sym(';');
-                return;
-            }
+                const t1 = self.token_peek_n(off);
+                if (t1 != null and t1.?.type == .Identifier) {
+                    const dt = self.transpile_proc.allocator.create(dtype.DataType) catch |e| {
+                        std.debug.print("Error creating DataType: {}\n", .{e});
+                        return ParseError.MemoryAllocationFailed;
+                    };
+                    // `dt` is arena-allocated and may be stored in the AST; do not destroy it on unwind.
+                    dt.* = dtype.DataType{
+                        .array = null,
+                        .pointer_depth = 0,
+                        .type = .Unknown,
+                        .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
+                        .flags = .{},
+                    };
+                    try self.parse_datatype(dt);
+                    try self.parse_variable(dt, hist);
+                    try self.expect_sym(';');
+                    return;
+                }
             }
         }
 
@@ -442,7 +442,7 @@ pub const ParseProcess = struct {
                     std.debug.print("Error creating node: {s}", .{@errorName(e)});
                     return ParseError.MemoryAllocationFailed;
                 };
-                errdefer self.transpile_proc.allocator.destroy(owner);
+                // Arena allocation; no per-allocation destroy on unwind.
                 owner.* = body;
                 // Binded nodes are only used for context; avoid copying ownership-bearing fields.
                 owner.*.binded = null;
@@ -455,7 +455,7 @@ pub const ParseProcess = struct {
                         std.debug.print("Error creating node: {s}", .{@errorName(e)});
                         return ParseError.MemoryAllocationFailed;
                     };
-                    errdefer self.transpile_proc.allocator.destroy(body_node.?.binded.?);
+                    // Arena allocation; no per-allocation destroy on unwind.
                     body_node.?.binded.?.owner = owner;
                     body_node.?.binded.?.function = null;
                 }
@@ -489,7 +489,7 @@ pub const ParseProcess = struct {
                 std.debug.print("Error creating node: {s}", .{@errorName(e)});
                 return ParseError.MemoryAllocationFailed;
             };
-            errdefer self.transpile_proc.allocator.destroy(stmt);
+            // Arena allocation; no per-allocation destroy on unwind.
             stmt.* = stmt_node.?;
             if (stmt.type == .StatementElseIf) {
                 if (last_stmt_type == null or (last_stmt_type != .StatementIf and last_stmt_type != .StatementElseIf)) {
@@ -2461,6 +2461,7 @@ pub const ParseProcess = struct {
         _ = self.token_next(); // skip fun
         var function_node = ast.Node{
             .type = .Function,
+            // Set once we read the function name token.
             .pos = self.*.transpile_proc.*.pos,
             .node_variant = .{ .function = .{} },
         };
@@ -2472,13 +2473,17 @@ pub const ParseProcess = struct {
             self.transpile_proc.err("expected indentifier, got '{}'", .{ident_token.?.type});
             return ParseError.InvalidIdentifier;
         }
+        // Prefer pointing at the identifier for diagnostics and tooling.
+        function_node.pos = ident_token.?.pos;
         // Function nodes must own their name buffer. Token sval buffers are owned by the token stream
         // and are deinitialized in `TranspileProcess.deinit()`.
         var fname = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, ident_token.?.data.sval.items.len) catch |e| {
             std.debug.print("Error creating function name: {s}\n", .{@errorName(e)});
             return ParseError.MemoryAllocationFailed;
         };
-        errdefer fname.deinit();
+        // `fname` is allocated from the transpiler arena allocator; on parse errors we rely
+        // on arena teardown for cleanup instead of deinit during unwinding (which can be
+        // fragile when parsing invalid/incomplete input).
         fname.appendSlice(ident_token.?.data.sval.items) catch |e| {
             std.debug.print("Error appending to function name: {s}\n", .{@errorName(e)});
             return ParseError.MemoryAllocationFailed;
@@ -3205,7 +3210,7 @@ pub const ParseProcess = struct {
                 std.debug.print("Error creating DataType: {}\n", .{e});
                 return ParseError.MemoryAllocationFailed;
             };
-            errdefer self.transpile_proc.allocator.destroy(dt);
+            // `dt` is arena-allocated and may be stored in the AST; do not destroy it on unwind.
             dt.* = dtype.DataType{
                 .array = null,
                 .pointer_depth = 0,
@@ -3572,7 +3577,19 @@ pub const ParseProcess = struct {
     /// - Returns an error if reading the next token fails.
     pub fn parse(self: *Self) ParseError!void {
         _ = try self.transpile_proc.init_root_scope();
-        defer self.transpile_proc.deinit_root_scope();
+        errdefer {
+            // On parse errors (common while editing and in negative test fixtures),
+            // avoid scope teardown here. The transpile process is arena-backed and will
+            // be released by `TranspileProcess.deinit()`. Trying to deinit scopes on a
+            // partially-parsed/invalid program has historically been crash-prone.
+            if (self.transpile_proc.scope) |*sc| {
+                sc.root = null;
+                sc.current = null;
+            }
+            self.transpile_proc.scope = null;
+        }
+
         while (try self.next()) {}
+        self.transpile_proc.deinit_root_scope();
     }
 };

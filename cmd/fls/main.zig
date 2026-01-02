@@ -1,6 +1,7 @@
 const std = @import("std");
 const ast = @import("ast");
 const codegen = @import("codegen");
+const parser = @import("parser");
 const lexer = @import("lexer");
 const utils = @import("utils");
 const token = lexer.token;
@@ -302,7 +303,8 @@ const LspServer = struct {
                 std.mem.eql(u8, method, "textDocument/typeDefinition") or
                 std.mem.eql(u8, method, "textDocument/implementation"))
             {
-                self.handleDefinition(id_val, obj.get("params") orelse null) catch |err| {
+                const mode: DefinitionMode = if (std.mem.eql(u8, method, "textDocument/typeDefinition")) .type_definition else .definition;
+                self.handleDefinition(mode, id_val, obj.get("params") orelse null) catch |err| {
                     std.debug.print("[fls] definition-like request failed: {s}\n", .{@errorName(err)});
                     if (is_request) self.sendResponseJson(id_val, "[]") catch {};
                 };
@@ -721,8 +723,11 @@ const LspServer = struct {
                                     }
                                 },
                                 .method => {
-                                    // We don't always have a signature here (lexer-based index), but we can show ownership.
-                                    try buf.writer().print("_method on {s}_\n", .{recv_type});
+                                    if (h.sym.detail) |det| {
+                                        try buf.writer().print("```\n{s}\n```\n", .{det});
+                                    } else {
+                                        try buf.writer().print("_method on {s}_\n", .{recv_type});
+                                    }
                                 },
                                 else => {
                                     try buf.writer().print("_{s}_\n", .{@tagName(h.sym.kind)});
@@ -754,6 +759,15 @@ const LspServer = struct {
             try buf.writer().print("**{s}**\n\n", .{tok.text});
             if (d.detail) |det| {
                 try buf.writer().print("```\n{s}\n```\n", .{det});
+            } else if (d.kind == .variable) {
+                const vt = d.value_type orelse self.guessVariableType(idx, tok.text, pos);
+                if (vt) |vts| {
+                    try buf.writer().print("```\n{s} {s}\n```\n", .{ vts, tok.text });
+                } else {
+                    try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
+                }
+            } else if ((d.kind == .struct_ or d.kind == .interface)) {
+                try buf.writer().print("```\n{s} {s}\n```\n", .{ if (d.kind == .struct_) "compound" else "quirk", tok.text });
             } else {
                 try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
             }
@@ -763,6 +777,15 @@ const LspServer = struct {
             try buf.writer().print("**{s}**\n\n", .{tok.text});
             if (d.detail) |det| {
                 try buf.writer().print("```\n{s}\n```\n", .{det});
+            } else if (d.kind == .variable) {
+                const vt = d.value_type orelse self.guessVariableType(idx, tok.text, pos);
+                if (vt) |vts| {
+                    try buf.writer().print("```\n{s} {s}\n```\n", .{ vts, tok.text });
+                } else {
+                    try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
+                }
+            } else if ((d.kind == .struct_ or d.kind == .interface)) {
+                try buf.writer().print("```\n{s} {s}\n```\n", .{ if (d.kind == .struct_) "compound" else "quirk", tok.text });
             } else {
                 try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
             }
@@ -770,7 +793,10 @@ const LspServer = struct {
                 _ = try appendDocCommentAboveLine(self.allocator, &buf, idoc.text, d.decl_range.start.line);
             }
         } else {
-            try buf.writer().print("**{s}**\n", .{tok.text});
+            try buf.writer().print("**{s}**\n\n", .{tok.text});
+            if (self.guessVariableType(idx, tok.text, pos)) |vt| {
+                try buf.writer().print("```\n{s} {s}\n```\n", .{ vt, tok.text });
+            }
         }
 
         const hover: Hover = .{
@@ -884,6 +910,7 @@ const LspServer = struct {
                         }
                     }
                     if (s.kind == .method) {
+                        if (s.detail) |d| break :blk try self.allocator.dupe(u8, d);
                         var db = std.ArrayList(u8).init(self.allocator);
                         defer db.deinit();
                         try db.writer().print("{s}.{s}", .{ container_type, s.name });
@@ -901,7 +928,12 @@ const LspServer = struct {
         }
     }
 
-    fn handleDefinition(self: *LspServer, id_val: ?std.json.Value, params_val: ?std.json.Value) !void {
+    const DefinitionMode = enum {
+        definition,
+        type_definition,
+    };
+
+    fn handleDefinition(self: *LspServer, mode: DefinitionMode, id_val: ?std.json.Value, params_val: ?std.json.Value) !void {
         const parsed = try parseTextDocPosition(params_val);
         if (parsed == null) {
             try self.sendResponseJson(id_val, "[]");
@@ -924,6 +956,44 @@ const LspServer = struct {
         };
 
         const tok = idx.tokens[tok_i];
+
+        if (mode == .type_definition) {
+            // Best-effort: resolve the declared type for an identifier, then jump to that type's definition.
+            if (tok.kind != .identifier) {
+                try self.sendResponseJson(id_val, "[]");
+                return;
+            }
+
+            // 1) If the identifier itself is a known type name, go to its declaration.
+            if (self.isKnownTypeName(tok.text)) {
+                if (self.findTypeDefinitionAnyDoc(uri, tok.text)) |hit| {
+                    const locs = [_]Location{.{ .uri = hit.uri, .range = hit.sym.selection_range }};
+                    const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
+                    defer self.allocator.free(json);
+                    try self.sendResponseJson(id_val, json);
+                    return;
+                }
+                try self.sendResponseJson(id_val, "[]");
+                return;
+            }
+
+            // 2) If it's a variable, use its value_type to locate the type definition.
+            const var_type = self.guessVariableType(idx, tok.text, pos);
+            if (var_type) |vt| {
+                if (self.isKnownTypeName(vt)) {
+                    if (self.findTypeDefinitionAnyDoc(uri, vt)) |hit| {
+                        const locs = [_]Location{.{ .uri = hit.uri, .range = hit.sym.selection_range }};
+                        const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
+                        defer self.allocator.free(json);
+                        try self.sendResponseJson(id_val, json);
+                        return;
+                    }
+                }
+            }
+
+            try self.sendResponseJson(id_val, "[]");
+            return;
+        }
 
         // Import path definition: `imp std.io;` (identifier chain)
         if (tok.kind == .identifier or isDotToken(tok)) {
@@ -1273,16 +1343,60 @@ const LspServer = struct {
         return false;
     }
 
+    fn findTypeDefinitionAnyDoc(self: *LspServer, preferred_uri: []const u8, type_name: []const u8) ?GlobalDefHit {
+        // Prefer current document first.
+        if (self.docs.get(preferred_uri)) |doc| {
+            if (doc.index) |idx| {
+                for (idx.symbols) |s| {
+                    if (s.container_fn_range != null) continue;
+                    if (!std.mem.eql(u8, s.name, type_name)) continue;
+                    if (s.kind != .struct_ and s.kind != .interface) continue;
+                    return .{ .uri = preferred_uri, .sym = s };
+                }
+            }
+        }
+
+        // Prefer direct imports of the current doc next.
+        if (self.findAnyGlobalDefinitionInDirectImports(preferred_uri, type_name)) |hit| {
+            if (hit.sym.kind == .struct_ or hit.sym.kind == .interface) return hit;
+        }
+
+        // Finally, scan all indexed docs.
+        var it = self.docs.iterator();
+        while (it.next()) |entry| {
+            const uri = entry.value_ptr.uri;
+            if (std.mem.eql(u8, uri, preferred_uri)) continue;
+            const idx = entry.value_ptr.index orelse continue;
+            for (idx.symbols) |s| {
+                if (s.container_fn_range != null) continue;
+                if (!std.mem.eql(u8, s.name, type_name)) continue;
+                if (s.kind != .struct_ and s.kind != .interface) continue;
+                return .{ .uri = uri, .sym = s };
+            }
+        }
+        return null;
+    }
+
     fn guessVariableType(self: *LspServer, idx: *const Index, var_name: []const u8, at: Position) ?[]const u8 {
+        // Prefer symbol table (locals + globals) when available.
+        if (findBestDefinition(idx.symbols, var_name, at)) |d| {
+            if (d.kind == .variable) {
+                if (d.value_type) |vt| return vt;
+            }
+        }
+
         // Scan for simple declarations like: `Type name;` or `Type name = ...;`
-        // (best-effort; ignores scope nesting)
+        // (best-effort fallback)
         var best: ?[]const u8 = null;
 
         var i: usize = 0;
         while (i + 1 < idx.tokens.len) : (i += 1) {
             const t_type = idx.tokens[i];
             if (!rangeStartLessOrEqual(t_type.range, at)) break;
-            if (t_type.kind != .identifier) continue;
+
+            const is_type_tok = (t_type.kind == .keyword and utils.keyword_is_datatype(t_type.text)) or
+                (t_type.kind == .identifier and self.isKnownTypeName(t_type.text));
+            if (!is_type_tok) continue;
 
             // Skip type identifiers that are part of declarations like `compound T`, `quirk Q`, `impl T`, `fun f`.
             if (i > 0 and idx.tokens[i - 1].kind == .keyword) {
@@ -1292,7 +1406,6 @@ const LspServer = struct {
                 }
             }
 
-            if (!self.isKnownTypeName(t_type.text)) continue;
             const t_name = idx.tokens[i + 1];
             if (t_name.kind != .identifier) continue;
             if (!std.mem.eql(u8, t_name.text, var_name)) continue;
@@ -1559,8 +1672,25 @@ const LspServer = struct {
         }
 
         // Current doc.
+        var has_locals_in_scope = false;
         for (idx.symbols) |s| {
-            if (s.kind == .field or s.kind == .property) continue;
+            if (s.container_fn_range) |cr| {
+                if (posInRange(pos, cr)) {
+                    has_locals_in_scope = true;
+                    break;
+                }
+            }
+        }
+
+        // 1) Locals first (prefer locals on name collisions).
+        for (idx.symbols) |s| {
+            if (s.container_type != null) continue;
+            if (s.container_fn_range == null) continue;
+            if (has_locals_in_scope) {
+                if (s.container_fn_range) |cr| {
+                    if (!posInRange(pos, cr)) continue;
+                }
+            }
             if (prefix.len != 0 and !std.mem.startsWith(u8, s.name, prefix)) continue;
 
             const kind: i64 = switch (s.kind) {
@@ -1575,14 +1705,56 @@ const LspServer = struct {
             const key = try self.allocator.dupe(u8, s.name);
             if (seen.contains(key)) {
                 self.allocator.free(key);
-            } else {
-                try seen.put(key, {});
-                try items.append(.{
-                    .label = try self.allocator.dupe(u8, s.name),
-                    .kind = kind,
-                    .detail = if (s.detail) |d| try self.allocator.dupe(u8, d) else null,
-                });
+                continue;
             }
+            try seen.put(key, {});
+
+            try items.append(.{
+                .label = try self.allocator.dupe(u8, s.name),
+                .kind = kind,
+                .detail = blk: {
+                    if (s.detail) |d| break :blk try self.allocator.dupe(u8, d);
+                    if (s.kind == .variable) {
+                        if (s.value_type) |vt| break :blk try self.allocator.dupe(u8, vt);
+                    }
+                    break :blk null;
+                },
+            });
+        }
+
+        // 2) Current-document globals/types/functions.
+        for (idx.symbols) |s| {
+            if (s.container_type != null) continue;
+            if (s.container_fn_range != null) continue;
+            if (prefix.len != 0 and !std.mem.startsWith(u8, s.name, prefix)) continue;
+
+            const kind: i64 = switch (s.kind) {
+                .function => 3,
+                .method => 2,
+                .struct_ => 7,
+                .interface => 8,
+                .variable => 6,
+                else => 6,
+            };
+
+            const key = try self.allocator.dupe(u8, s.name);
+            if (seen.contains(key)) {
+                self.allocator.free(key);
+                continue;
+            }
+            try seen.put(key, {});
+
+            try items.append(.{
+                .label = try self.allocator.dupe(u8, s.name),
+                .kind = kind,
+                .detail = blk: {
+                    if (s.detail) |d| break :blk try self.allocator.dupe(u8, d);
+                    if (s.kind == .variable) {
+                        if (s.value_type) |vt| break :blk try self.allocator.dupe(u8, vt);
+                    }
+                    break :blk null;
+                },
+            });
         }
 
         // Direct imports.
@@ -1600,7 +1772,8 @@ const LspServer = struct {
             for (didx.symbols) |s| {
                 // Only suggest non-member-ish items for global completion.
                 // (Fields/properties are typically completed after '.' and can be very noisy.)
-                if (s.kind == .field or s.kind == .property) continue;
+                if (s.container_type != null) continue;
+                if (s.container_fn_range != null) continue;
 
                 if (prefix.len != 0 and !std.mem.startsWith(u8, s.name, prefix)) continue;
 
@@ -1623,7 +1796,13 @@ const LspServer = struct {
                 try items.append(.{
                     .label = try self.allocator.dupe(u8, s.name),
                     .kind = kind,
-                    .detail = if (s.detail) |d| try self.allocator.dupe(u8, d) else null,
+                    .detail = blk: {
+                        if (s.detail) |d| break :blk try self.allocator.dupe(u8, d);
+                        if (s.kind == .variable) {
+                            if (s.value_type) |vt| break :blk try self.allocator.dupe(u8, vt);
+                        }
+                        break :blk null;
+                    },
                 });
             }
         }
@@ -1815,6 +1994,79 @@ const LspServer = struct {
         return true;
     }
 
+    fn guessCallSignatureAt(self: *LspServer, uri: []const u8, idx: *const Index, p: Position) ?GuessedCallSignature {
+        // Find the closest '(' before cursor, then resolve the callee.
+        var tok_index: ?usize = null;
+        for (idx.tokens, 0..) |t, ti| {
+            if (t.range.start.line > p.line) break;
+            if (t.range.start.line == p.line and t.range.start.character > p.character) break;
+            tok_index = ti;
+        }
+        if (tok_index == null) return null;
+
+        var i: isize = @intCast(tok_index.?);
+        var paren_depth: i64 = 0;
+        var active_param: i64 = 0;
+        while (i >= 0) : (i -= 1) {
+            const t = idx.tokens[@intCast(i)];
+            if (t.kind == .symbol or t.kind == .operator) {
+                if (std.mem.eql(u8, t.text, ")")) {
+                    paren_depth += 1;
+                    continue;
+                }
+                if (std.mem.eql(u8, t.text, "(")) {
+                    if (paren_depth == 0) {
+                        // previous non-comment token is the callee identifier
+                        var callee_i_opt: ?usize = null;
+                        var j: isize = i - 1;
+                        while (j >= 0) : (j -= 1) {
+                            const pt = idx.tokens[@intCast(j)];
+                            if (pt.kind == .comment) continue;
+                            callee_i_opt = @intCast(j);
+                            break;
+                        }
+                        if (callee_i_opt == null) return null;
+                        const callee_i = callee_i_opt.?;
+                        const callee = idx.tokens[callee_i];
+                        if (callee.kind != .identifier) return null;
+
+                        // Member call: `recv.method(`
+                        if (callee_i >= 2 and isDotToken(idx.tokens[callee_i - 1]) and idx.tokens[callee_i - 2].kind == .identifier) {
+                            if (self.resolveTypeOfChainUpTo(idx, uri, p, callee_i - 2)) |recv_type| {
+                                const hit = self.findMemberByContainer(uri, recv_type, callee.text, .method);
+                                if (hit) |h| {
+                                    const label = if (h.sym.detail) |d| d else callee.text;
+                                    return .{ .label = label, .active_param = active_param };
+                                }
+                            }
+                        }
+
+                        // Plain function call.
+                        const def_local = findBestDefinition(idx.symbols, callee.text, p) orelse null;
+                        const def_import = if (def_local == null) self.findAnyGlobalDefinitionInDirectImports(uri, callee.text) else null;
+                        const label = blk: {
+                            if (def_local) |d| {
+                                if (d.detail) |det| break :blk det;
+                            }
+                            if (def_import) |hit| {
+                                if (hit.sym.detail) |det| break :blk det;
+                            }
+                            break :blk callee.text;
+                        };
+                        return .{ .label = label, .active_param = active_param };
+                    }
+                    paren_depth -= 1;
+                    continue;
+                }
+                if (paren_depth == 0 and std.mem.eql(u8, t.text, ",")) {
+                    active_param += 1;
+                    continue;
+                }
+            }
+        }
+        return null;
+    }
+
     fn handleSignatureHelp(self: *LspServer, id_val: ?std.json.Value, params_val: ?std.json.Value) !void {
         const parsed = try parseTextDocPosition(params_val);
         if (parsed == null) {
@@ -1832,7 +2084,7 @@ const LspServer = struct {
             return;
         };
 
-        const sig = guessCallSignature(idx, pos) orelse {
+        const sig = self.guessCallSignatureAt(uri, idx, pos) orelse {
             try self.sendResponseJson(id_val, "null");
             return;
         };
@@ -2927,7 +3179,8 @@ fn uriToPath(allocator: Allocator, uri: []const u8) ![]u8 {
 fn posInRange(p: Position, r: Range) bool {
     if (p.line < r.start.line or p.line > r.end.line) return false;
     if (p.line == r.start.line and p.character < r.start.character) return false;
-    if (p.line == r.end.line and p.character > r.end.character) return false;
+    // LSP ranges are end-exclusive.
+    if (p.line == r.end.line and p.character >= r.end.character) return false;
     return true;
 }
 
@@ -2973,9 +3226,15 @@ fn findLastTokenIndexBeforeOrAt(tokens: []const TokenLite, p: Position) ?usize {
 
 fn rangeFromTokenPos(p: token.Pos) Range {
     const end_line_1b: u32 = if (p.end_line != 0) p.end_line else p.line;
+    const end_char_excl: i64 = blk: {
+        // Lexer columns are 1-based; `end_col` points just after the token.
+        // Convert to 0-based, end-exclusive character index.
+        if (p.end_col == 0) break :blk 0;
+        break :blk @as(i64, @intCast(p.end_col)) - 1;
+    };
     return .{
         .start = .{ .line = @as(i64, @intCast(p.line)) - 1, .character = @as(i64, @intCast(p.start_col)) - 1 },
-        .end = .{ .line = @as(i64, @intCast(end_line_1b)) - 1, .character = @as(i64, @intCast(p.end_col)) },
+        .end = .{ .line = @as(i64, @intCast(end_line_1b)) - 1, .character = end_char_excl },
     };
 }
 
@@ -3211,8 +3470,45 @@ fn buildIndexFromText(allocator: Allocator, text: []const u8) !*Index {
         try tokens_out.append(.{ .kind = kind, .text = text_copy, .range = rangeFromTokenPos(t.pos) });
     }
 
+    // Best-effort parse. On success, we can use AST-backed types/ranges for globals/locals.
+    var parse_ok: bool = true;
+    {
+        var pp = parser.ParseProcess.init(&tp);
+        pp.parse() catch {
+            parse_ok = false;
+        };
+    }
+
     var symbols_out = std.ArrayList(SymbolLite).init(tmp_alloc);
-    try collectSymbolsFromTokens(tmp_alloc, &symbols_out, tp.tokens.items());
+
+    // Always do lexer-driven indexing first (robust while typing), then optionally
+    // overlay/replace globals+locals with AST-backed symbols.
+    var symbols_token = std.ArrayList(SymbolLite).init(tmp_alloc);
+    try collectSymbolsFromTokens(tmp_alloc, &symbols_token, tp.tokens.items());
+
+    if (parse_ok) {
+        // Keep member/field symbols from the lexer scan (AST lacks positions for some of these).
+        for (symbols_token.items) |s| {
+            switch (s.kind) {
+                .field, .property, .method => try symbols_out.append(s),
+                else => {},
+            }
+        }
+
+        // Add AST-backed globals/locals/types.
+        for (tp.nodes.items()) |n| {
+            try collectSymbolsFromTopLevel(tmp_alloc, &symbols_out, n);
+        }
+    } else {
+        // Fallback: token-only symbol index.
+        symbols_out = symbols_token;
+    }
+
+    // If we successfully parsed in-process, enrich token-derived member symbols with
+    // AST types/signatures (best-effort; ignore failures).
+    if (parse_ok) {
+        enrichSymbolsFromAst(tmp_alloc, &symbols_out, &tp) catch {};
+    }
 
     const idx = try allocator.create(Index);
     idx.* = .{
@@ -3222,6 +3518,230 @@ fn buildIndexFromText(allocator: Allocator, text: []const u8) !*Index {
         .symbols = try symbols_out.toOwnedSlice(),
     };
     return idx;
+}
+
+const AstEnrichment = struct {
+    fn_sig_by_name: std.StringHashMap([]const u8),
+    fn_rtype_by_name: std.StringHashMap([]const u8),
+    member_sig_by_key: std.StringHashMap([]const u8),
+    member_rtype_by_key: std.StringHashMap([]const u8),
+    field_type_by_key: std.StringHashMap([]const u8),
+
+    fn init(allocator: Allocator) AstEnrichment {
+        return .{
+            .fn_sig_by_name = std.StringHashMap([]const u8).init(allocator),
+            .fn_rtype_by_name = std.StringHashMap([]const u8).init(allocator),
+            .member_sig_by_key = std.StringHashMap([]const u8).init(allocator),
+            .member_rtype_by_key = std.StringHashMap([]const u8).init(allocator),
+            .field_type_by_key = std.StringHashMap([]const u8).init(allocator),
+        };
+    }
+};
+
+fn enrichSymbolsFromAst(allocator: Allocator, symbols: *std.ArrayList(SymbolLite), tp: *codegen.TranspileProcess) !void {
+    var enrich = AstEnrichment.init(allocator);
+
+    // Build lookup tables from the parsed AST.
+    for (tp.nodes.items()) |*n| {
+        if (n.node_variant == null) continue;
+        switch (n.type) {
+            .Function => {
+                const fnv = n.node_variant.?.function;
+                const name_al = fnv.name orelse continue;
+                const fn_name = name_al.items;
+
+                if (!enrich.fn_sig_by_name.contains(fn_name)) {
+                    const sig = try buildSignatureFromAst(allocator, fn_name, fnv, true);
+                    try enrich.fn_sig_by_name.put(fn_name, sig);
+                }
+
+                if (fnv.rtype) |rt| {
+                    if (!enrich.fn_rtype_by_name.contains(fn_name)) {
+                        try enrich.fn_rtype_by_name.put(fn_name, rt.type_str.items);
+                    }
+                }
+            },
+            .Compound => {
+                const cv = n.node_variant.?.compound;
+                const type_name = cv.name.items;
+
+                for (cv.fields.items()) |f| {
+                    const field_name = f.name.items;
+                    const key = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ type_name, field_name });
+                    if (!enrich.field_type_by_key.contains(key)) {
+                        try enrich.field_type_by_key.put(key, f.dtype.type_str.items);
+                    }
+                }
+            },
+            .Quirk => {
+                const qv = n.node_variant.?.quirk;
+                const quirk_name = qv.name.items;
+
+                for (qv.methods.items()) |m| {
+                    const mname = m.name.items;
+                    const key = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ quirk_name, mname });
+                    if (!enrich.member_sig_by_key.contains(key)) {
+                        const sig = try buildQuirkMethodSignatureFromAst(allocator, m);
+                        try enrich.member_sig_by_key.put(key, sig);
+                    }
+                    if (!enrich.member_rtype_by_key.contains(key)) {
+                        try enrich.member_rtype_by_key.put(key, m.rtype.type_str.items);
+                    }
+                }
+            },
+            .Impl => {
+                const iv = n.node_variant.?.impl;
+                const type_name = iv.type_name.items;
+
+                for (iv.methods.items()) |mnode| {
+                    if (mnode.type != .Function or mnode.node_variant == null) continue;
+                    const mf = mnode.node_variant.?.function;
+                    const name_al = mf.name orelse continue;
+                    // Impl method names are stored as generated names:
+                    // - Plain: `<Type>__<method>`
+                    // - Quirk: `<Type>__<Quirk>__<method>`
+                    // For LSP UX we key by `<Type>.<method>`.
+                    const gen = name_al.items;
+                    const mname = if (std.mem.lastIndexOf(u8, gen, "__")) |cut| gen[cut + 2 ..] else gen;
+
+                    const key = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ type_name, mname });
+                    if (!enrich.member_sig_by_key.contains(key)) {
+                        const sig = try buildSignatureFromAst(allocator, mname, mf, false);
+                        try enrich.member_sig_by_key.put(key, sig);
+                    }
+                    if (mf.rtype) |rt| {
+                        if (!enrich.member_rtype_by_key.contains(key)) {
+                            try enrich.member_rtype_by_key.put(key, rt.type_str.items);
+                        }
+                    }
+                }
+            },
+            else => {},
+        }
+    }
+
+    // Apply enrichment to the token-derived symbols.
+    for (symbols.items) |*s| {
+        if (s.kind == .function) {
+            if (s.detail == null) {
+                if (enrich.fn_sig_by_name.get(s.name)) |sig| s.detail = sig;
+            }
+            if (s.value_type == null) {
+                if (enrich.fn_rtype_by_name.get(s.name)) |rt| s.value_type = rt;
+            }
+            continue;
+        }
+
+        if (s.container_type) |ct| {
+            // Field/property type.
+            if (s.value_type == null and (s.kind == .field or s.kind == .property)) {
+                var buf: [256]u8 = undefined;
+                const key = std.fmt.bufPrint(&buf, "{s}.{s}", .{ ct, s.name }) catch null;
+                if (key) |k| {
+                    if (enrich.field_type_by_key.get(k)) |ft| s.value_type = ft;
+                }
+            }
+
+            // Method signature/return type.
+            if (s.detail == null and (s.kind == .method or s.kind == .function)) {
+                var buf: [256]u8 = undefined;
+                const key = std.fmt.bufPrint(&buf, "{s}.{s}", .{ ct, s.name }) catch null;
+                if (key) |k| {
+                    if (enrich.member_sig_by_key.get(k)) |ms| s.detail = ms;
+                    if (s.value_type == null) {
+                        if (enrich.member_rtype_by_key.get(k)) |rt| s.value_type = rt;
+                    }
+                }
+            }
+        }
+
+        if (s.container_fn_range) |fr| {
+            _ = fr;
+        }
+    }
+}
+
+fn buildSignatureFromAst(
+    allocator: Allocator,
+    name: []const u8,
+    fnv: anytype,
+    include_fun_prefix: bool,
+) ![]const u8 {
+    var buf = std.ArrayList(u8).init(allocator);
+    errdefer buf.deinit();
+
+    if (include_fun_prefix) {
+        try buf.writer().print("fun {s}(", .{name});
+    } else {
+        try buf.writer().print("{s}(", .{name});
+    }
+
+    if (fnv.args) |args| {
+        var first: bool = true;
+        for (args.items()) |a| {
+            if (a.type != .Variable or a.node_variant == null) continue;
+            const av = a.node_variant.?.variable;
+            if (!first) try buf.appendSlice(", ");
+            first = false;
+            try buf.writer().print("{s} {s}", .{ av.type.type_str.items, av.name.items });
+        }
+    }
+
+    try buf.append(')');
+    if (fnv.rtype) |rt| {
+        try buf.writer().print(" {s}", .{rt.type_str.items});
+    }
+    return try buf.toOwnedSlice();
+}
+
+fn buildQuirkMethodSignatureFromAst(allocator: Allocator, m: ast.QuirkMethodSig) ![]const u8 {
+    var buf = std.ArrayList(u8).init(allocator);
+    errdefer buf.deinit();
+
+    try buf.writer().print("{s}(", .{m.name.items});
+    var first: bool = true;
+    for (m.args.items()) |a| {
+        if (!first) try buf.appendSlice(", ");
+        first = false;
+        try buf.writer().print("{s} {s}", .{ a.dtype.type_str.items, a.name.items });
+    }
+    try buf.append(')');
+    try buf.writer().print(" {s}", .{m.rtype.type_str.items});
+    return try buf.toOwnedSlice();
+}
+
+test "fls index: locals are indexed inside fun bodies" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const text =
+        "compound Point {\n" ++
+        "  num x;\n" ++
+        "  num y;\n" ++
+        "}\n\n" ++
+        "impl Point {\n" ++
+        "  translate(num dx, num dy) {\n" ++
+        "    self.x += dx;\n" ++
+        "    self.y += dy;\n" ++
+        "  }\n" ++
+        "}\n\n" ++
+        "fun main() {\n" ++
+        "  Point p;\n" ++
+        "  p.x = 1;\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found_p = false;
+    for (idx.symbols) |s| {
+        if (s.kind == .variable and std.mem.eql(u8, s.name, "p")) {
+            found_p = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_p);
 }
 
 fn trimLeftSpace(s: []const u8) []const u8 {
@@ -3302,6 +3822,20 @@ fn isSymbolChar(t: token.Token, c: u8) bool {
     return t.type == .Symbol and t.data == .cval and t.data.cval == c;
 }
 
+fn isPunctChar(t: token.Token, c: u8) bool {
+    switch (t.type) {
+        .Symbol => return switch (t.data) {
+            .cval => |v| v == c,
+            else => false,
+        },
+        .Operator => return switch (t.data) {
+            .sval => |sv| sv.items.len == 1 and sv.items[0] == c,
+            else => false,
+        },
+        else => return false,
+    }
+}
+
 fn isPrimitiveTypeKeywordName(s: []const u8) bool {
     // Fun primitive datatypes.
     return std.mem.eql(u8, s, "void") or std.mem.eql(u8, s, "raw") or std.mem.eql(u8, s, "num") or std.mem.eql(u8, s, "dec") or
@@ -3324,23 +3858,146 @@ fn nextNonTrivialToken(tokens: []const token.Token, start_index: usize) ?usize {
     return null;
 }
 
+fn rangeFromTokenSpan(start_t: token.Token, end_t: token.Token) Range {
+    const sr = rangeFromTokenPos(start_t.pos);
+    const er = rangeFromTokenPos(end_t.pos);
+    return .{ .start = sr.start, .end = er.end };
+}
+
+fn buildSignatureFromTokens(
+    allocator: Allocator,
+    tokens: []const token.Token,
+    name_i: usize,
+    include_fun_prefix: bool,
+) !struct { detail: ?[]u8, return_type: ?[]u8 } {
+    if (name_i >= tokens.len) return .{ .detail = null, .return_type = null };
+    if (!isIdent(tokens[name_i])) return .{ .detail = null, .return_type = null };
+
+    const after_name_i = nextNonTrivialToken(tokens, name_i + 1) orelse return .{ .detail = null, .return_type = null };
+    if (!isPunctChar(tokens[after_name_i], '(')) return .{ .detail = null, .return_type = null };
+
+    // Find matching ')'
+    var depth: i64 = 0;
+    var rparen_i: ?usize = null;
+    var k: usize = after_name_i;
+    while (k < tokens.len) : (k += 1) {
+        const tk = tokens[k];
+        if (isPunctChar(tk, '(')) depth += 1;
+        if (isPunctChar(tk, ')')) {
+            depth -= 1;
+            if (depth == 0) {
+                rparen_i = k;
+                break;
+            }
+        }
+    }
+    if (rparen_i == null) return .{ .detail = null, .return_type = null };
+
+    const name = tokenString(tokens[name_i]);
+    var buf = std.ArrayList(u8).init(allocator);
+    errdefer buf.deinit();
+
+    if (include_fun_prefix) {
+        try buf.writer().print("fun {s}(", .{name});
+    } else {
+        try buf.writer().print("{s}(", .{name});
+    }
+
+    // Parse params as `Type name` pairs.
+    var first: bool = true;
+    var pi: usize = after_name_i + 1;
+    while (pi < rparen_i.?) {
+        const pt = tokens[pi];
+        if (pt.type == .NewLine or pt.type == .Comment) {
+            pi += 1;
+            continue;
+        }
+        if (isPunctChar(pt, ',')) {
+            pi += 1;
+            continue;
+        }
+
+        if (!isTypeToken(pt)) {
+            pi += 1;
+            continue;
+        }
+        const ptype = tokenString(pt);
+        const pname_i = nextNonTrivialToken(tokens, pi + 1) orelse break;
+        if (!isIdent(tokens[pname_i])) {
+            pi += 1;
+            continue;
+        }
+        const pname = tokenString(tokens[pname_i]);
+        if (!first) try buf.appendSlice(", ");
+        first = false;
+        try buf.writer().print("{s} {s}", .{ ptype, pname });
+        pi = pname_i + 1;
+    }
+
+    try buf.append(')');
+
+    // Optional return type: `<type>` before `{` or `;`.
+    var rtype_owned: ?[]u8 = null;
+    const after_rparen_i = nextNonTrivialToken(tokens, rparen_i.? + 1);
+    if (after_rparen_i) |ri| {
+        const rt = tokens[ri];
+        if (isTypeToken(rt)) {
+            const rts = tokenString(rt);
+            rtype_owned = try allocator.dupe(u8, rts);
+            try buf.writer().print(" {s}", .{rts});
+        }
+    }
+
+    return .{ .detail = try buf.toOwnedSlice(), .return_type = rtype_owned };
+}
+
 fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite), tokens: []const token.Token) !void {
     var brace_depth: i64 = 0;
     var paren_depth: i64 = 0;
+
+    // Track when we're inside a `fun ... { ... }` body so we can index locals.
+    var pending_fun_body: bool = false;
+    var in_fun_body: bool = false;
+    var fun_body_brace_depth: i64 = 0;
+    var fun_body_range: ?Range = null;
+
     var i: usize = 0;
     while (i < tokens.len) : (i += 1) {
         const t = tokens[i];
 
         if (isSymbolChar(t, '{')) brace_depth += 1;
         if (isSymbolChar(t, '}')) brace_depth -= 1;
-        if (isSymbolChar(t, '(')) paren_depth += 1;
-        if (isSymbolChar(t, ')')) paren_depth -= 1;
+        if (isPunctChar(t, '(')) paren_depth += 1;
+        if (isPunctChar(t, ')')) paren_depth -= 1;
+
+        // Enter/exit fun bodies.
+        if (pending_fun_body and isSymbolChar(t, '{')) {
+            pending_fun_body = false;
+            in_fun_body = true;
+            fun_body_brace_depth = brace_depth;
+            const br = rangeFromTokenPos(t.pos);
+            fun_body_range = .{
+                .start = br.start,
+                .end = .{ .line = std.math.maxInt(i64), .character = std.math.maxInt(i64) },
+            };
+        }
+        if (pending_fun_body and isSymbolChar(t, ';')) {
+            // Prototype/no-body.
+            pending_fun_body = false;
+        }
+        if (in_fun_body and isSymbolChar(t, '}') and brace_depth < fun_body_brace_depth) {
+            in_fun_body = false;
+            fun_body_range = null;
+        }
 
         if (isKeyword(t, "fun")) {
+            pending_fun_body = true;
             const name_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
             if (!isIdent(tokens[name_i])) continue;
             const name = tokenString(tokens[name_i]);
             const r = rangeFromTokenPos(tokens[name_i].pos);
+
+            const sig = try buildSignatureFromTokens(allocator, tokens, name_i, true);
             try out.append(.{
                 .name = try allocator.dupe(u8, name),
                 .kind = .function,
@@ -3348,7 +4005,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 .selection_range = r,
                 .container_type = null,
                 .value_type = null,
-                .detail = null,
+                .detail = sig.detail,
             });
             continue;
         }
@@ -3443,7 +4100,9 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
 
                         if (!isIdent(tk)) continue;
                         const after_name_i = nextNonTrivialToken(tokens, k + 1) orelse continue;
-                        if (!isSymbolChar(tokens[after_name_i], '(')) continue;
+                        if (!isPunctChar(tokens[after_name_i], '(')) continue;
+
+                        const sig = try buildSignatureFromTokens(allocator, tokens, k, false);
 
                         const mname = tokenString(tk);
                         const mr = rangeFromTokenPos(tk.pos);
@@ -3453,7 +4112,8 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                             .decl_range = mr,
                             .selection_range = mr,
                             .container_type = try allocator.dupe(u8, owner_name),
-                            .detail = null,
+                            .value_type = sig.return_type,
+                            .detail = sig.detail,
                         });
                     }
                     break;
@@ -3484,7 +4144,9 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                         if (!isIdent(tk)) continue;
 
                         const after_name_i = nextNonTrivialToken(tokens, k + 1) orelse continue;
-                        if (!isSymbolChar(tokens[after_name_i], '(')) continue;
+                        if (!isPunctChar(tokens[after_name_i], '(')) continue;
+
+                        const sig = try buildSignatureFromTokens(allocator, tokens, k, false);
 
                         const mname = tokenString(tk);
                         const r = rangeFromTokenPos(tk.pos);
@@ -3494,12 +4156,72 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                             .decl_range = r,
                             .selection_range = r,
                             .container_type = try allocator.dupe(u8, owner_name),
-                            .detail = null,
+                            .value_type = sig.return_type,
+                            .detail = sig.detail,
                         });
                     }
                     break;
                 }
                 j_opt = nextNonTrivialToken(tokens, j + 1);
+            }
+            continue;
+        }
+
+        // Best-effort local variable indexing (token-based): `Type name;` or `Type name = ...;`.
+        // Attach locals to the enclosing `fun { ... }` body.
+        if (in_fun_body and isTypeToken(t)) {
+            // Avoid `compound X`, `quirk X`, `impl X`, `fun name`.
+            if (i > 0 and tokens[i - 1].type == .Keyword) {
+                const kw = tokenString(tokens[i - 1]);
+                if (std.mem.eql(u8, kw, "compound") or std.mem.eql(u8, kw, "quirk") or std.mem.eql(u8, kw, "impl") or std.mem.eql(u8, kw, "fun")) {
+                    continue;
+                }
+            }
+
+            const name_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
+            if (!isIdent(tokens[name_i])) continue;
+
+            // Avoid pairing across lines (e.g. `p` then next-line `p.x...`) which would
+            // create bogus locals like `p p`.
+            if (tokens[i].pos.line != tokens[name_i].pos.line) continue;
+
+            // Require declaration terminator after the name.
+            const first_after_i = nextNonTrivialToken(tokens, name_i + 1) orelse continue;
+            if (!(isPunctChar(tokens[first_after_i], ';') or isPunctChar(tokens[first_after_i], '=') or isPunctChar(tokens[first_after_i], ','))) continue;
+
+            const vtype = tokenString(t);
+
+            // Support `Type a, b, c;` by walking commas until a terminator.
+            var cur_name_i: usize = name_i;
+            while (true) {
+                const vname = tokenString(tokens[cur_name_i]);
+                const r = rangeFromTokenPos(tokens[cur_name_i].pos);
+
+                var det_buf = std.ArrayList(u8).init(allocator);
+                defer det_buf.deinit();
+                try det_buf.writer().print("{s} {s}", .{ vtype, vname });
+
+                try out.append(.{
+                    .name = try allocator.dupe(u8, vname),
+                    .kind = .variable,
+                    .decl_range = r,
+                    .selection_range = r,
+                    .container_fn_range = fun_body_range.?,
+                    .container_type = null,
+                    .value_type = try allocator.dupe(u8, vtype),
+                    .detail = try allocator.dupe(u8, det_buf.items),
+                });
+
+                const after_i = nextNonTrivialToken(tokens, cur_name_i + 1) orelse break;
+                if (isPunctChar(tokens[after_i], ',')) {
+                    const next_name_i = nextNonTrivialToken(tokens, after_i + 1) orelse break;
+                    if (!isIdent(tokens[next_name_i])) break;
+                    if (tokens[cur_name_i].pos.line != tokens[next_name_i].pos.line) break;
+                    cur_name_i = next_name_i;
+                    continue;
+                }
+                // End of declaration.
+                break;
             }
             continue;
         }
@@ -3519,7 +4241,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
             if (!isIdent(tokens[name_i])) continue;
             const after_i = nextNonTrivialToken(tokens, name_i + 1) orelse continue;
             const after = tokens[after_i];
-            if (!(isSymbolChar(after, ';') or isSymbolChar(after, '=') or isSymbolChar(after, ','))) continue;
+            if (!(isPunctChar(after, ';') or isPunctChar(after, '=') or isPunctChar(after, ','))) continue;
 
             const vtype = tokenString(t);
             const vname = tokenString(tokens[name_i]);
@@ -3546,6 +4268,25 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
 fn collectSymbolsFromTopLevel(allocator: Allocator, out: *std.ArrayList(SymbolLite), n: ast.Node) !void {
     if (n.node_variant == null) return;
     switch (n.type) {
+        .Variable => {
+            const v = n.node_variant.?.variable;
+            const name = v.name.items;
+            const r = if (n.pos) |p| rangeFromTokenPos(p) else return;
+
+            var detail_buf = std.ArrayList(u8).init(allocator);
+            errdefer detail_buf.deinit();
+            try detail_buf.writer().print("{s} {s}", .{ v.type.type_str.items, name });
+
+            try out.append(.{
+                .name = try allocator.dupe(u8, name),
+                .kind = .variable,
+                .decl_range = r,
+                .selection_range = r,
+                .container_type = null,
+                .value_type = try allocator.dupe(u8, v.type.type_str.items),
+                .detail = try detail_buf.toOwnedSlice(),
+            });
+        },
         .Function => {
             const fnv = n.node_variant.?.function;
             if (fnv.name == null) return;
@@ -3597,24 +4338,9 @@ fn collectSymbolsFromTopLevel(allocator: Allocator, out: *std.ArrayList(SymbolLi
             });
         },
         .Impl => {
-            const im = n.node_variant.?.impl;
-            for (im.methods.items()) |m| {
-                if (m.type != .Function or m.node_variant == null) continue;
-                const fnv = m.node_variant.?.function;
-                if (fnv.name == null) continue;
-                const mname = fnv.name.?.items;
-                const r = if (m.pos) |p| rangeFromTokenPos(p) else Range{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 0 } };
-                const detail = try formatFunctionSignature(allocator, mname, fnv);
-                try out.append(.{
-                    .name = try allocator.dupe(u8, mname),
-                    .kind = .method,
-                    .decl_range = r,
-                    .selection_range = r,
-                    .container_type = null,
-                    .value_type = null,
-                    .detail = detail,
-                });
-            }
+            // Skip impl methods here: the AST stores generated method names
+            // (`Type__method` / `Type__Quirk__method`), while the lexer scan has
+            // the user-facing method name and better positioning.
         },
         else => {},
     }
@@ -3668,7 +4394,7 @@ fn collectLocalVars(allocator: Allocator, out: *std.ArrayList(SymbolLite), n: *a
                 .selection_range = r,
                 .container_fn_range = container_fn_range,
                 .container_type = null,
-                .value_type = null,
+                .value_type = try allocator.dupe(u8, v.type.type_str.items),
                 .detail = det,
             });
         },
@@ -3804,6 +4530,7 @@ fn classifyIdentifierTokenType(idx: *const Index, name: []const u8) u32 {
             .function, .method => 5,
             .struct_, .interface => 7,
             .variable => 6,
+            .field, .property, .constant => 6,
             else => 6,
         };
     }
@@ -3836,12 +4563,45 @@ fn buildSemanticTokens(allocator: Allocator, idx: *const Index) ![]u32 {
             .boolean => 0,
             .operator, .symbol => 4,
             .identifier => blk: {
+                // Member access: `.name` => variable/function depending on call usage.
+                if (ti > 0 and isDotToken(idx.tokens[ti - 1])) {
+                    var j1: usize = ti + 1;
+                    while (j1 < idx.tokens.len and idx.tokens[j1].kind == .comment) : (j1 += 1) {}
+                    if (j1 < idx.tokens.len) {
+                        const nt1 = idx.tokens[j1];
+                        if ((nt1.kind == .symbol or nt1.kind == .operator) and std.mem.eql(u8, nt1.text, "(")) {
+                            break :blk 5; // function
+                        }
+                    }
+                    break :blk 6; // variable
+                }
+
+                // Heuristic: treat `Type name;` / `Type name =` / `Type name,` as a type position,
+                // even if the type name isn't in this document's symbol table.
+                var j0: usize = ti + 1;
+                while (j0 < idx.tokens.len and idx.tokens[j0].kind == .comment) : (j0 += 1) {}
+                if (j0 < idx.tokens.len and idx.tokens[j0].kind == .identifier) {
+                    var k0: usize = j0 + 1;
+                    while (k0 < idx.tokens.len and idx.tokens[k0].kind == .comment) : (k0 += 1) {}
+                    if (k0 < idx.tokens.len) {
+                        const nt0 = idx.tokens[k0];
+                        if ((nt0.kind == .symbol or nt0.kind == .operator) and
+                            (std.mem.eql(u8, nt0.text, ";") or std.mem.eql(u8, nt0.text, "=") or std.mem.eql(u8, nt0.text, ",")))
+                        {
+                            // Check if the type is a known struct/compound/interface in the symbol table.
+                            const type_by_symbol = classifyIdentifierTokenType(idx, t.text);
+                            if (type_by_symbol == 7) {
+                                break :blk 7; // type
+                            }
+                        }
+                    }
+                }
+
                 // Prefer symbol-table classification.
                 const by_symbol = classifyIdentifierTokenType(idx, t.text);
-                if (by_symbol == 5) break :blk by_symbol;
+                if (by_symbol == 5 or by_symbol == 7) break :blk by_symbol;
 
                 // Heuristic for call-sites: identifier followed by '(' => function.
-                // This improves highlighting for builtins/stdlib/external functions.
                 var j: usize = ti + 1;
                 while (j < idx.tokens.len and idx.tokens[j].kind == .comment) : (j += 1) {}
                 if (j < idx.tokens.len) {

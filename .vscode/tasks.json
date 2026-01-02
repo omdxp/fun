@@ -66,7 +66,7 @@
 			"args": [
 				"-NoProfile",
 				"-Command",
-				"Set-Location \"C:\\Users\\omarb\\Projects\\Zig\\fun\"; zig build test *>&1 | Tee-Object -FilePath .\\_zig_test_log.txt; exit $LASTEXITCODE"
+				"Set-Location \"C:\\Users\\omarb\\Projects\\Zig\\fun\"; cmd /c \"zig build test --summary all 2>&1\" | Tee-Object -FilePath .\\_zig_test_log.txt; exit $LASTEXITCODE"
 			],
 			"isBackground": false,
 			"group": "test"
@@ -78,7 +78,7 @@
 			"args": [
 				"-NoProfile",
 				"-Command",
-				"Set-Location \"C:\\Users\\omarb\\Projects\\Zig\\fun\"; zig build test *>&1 | Tee-Object -FilePath .\\_zig_test_log.txt; exit $LASTEXITCODE"
+				"Set-Location \"C:\\Users\\omarb\\Projects\\Zig\\fun\"; cmd /c \"zig build test --summary all 2>&1\" | Tee-Object -FilePath .\\_zig_test_log.txt; exit $LASTEXITCODE"
 			],
 			"isBackground": false,
 			"group": "test"
@@ -90,7 +90,7 @@
 			"args": [
 				"-NoProfile",
 				"-Command",
-				"Set-Location \"C:\\Users\\omarb\\Projects\\Zig\\fun\"; zig build test *>&1 | Tee-Object -FilePath .\\_zig_test_log.txt; exit $LASTEXITCODE"
+				"Set-Location \"C:\\Users\\omarb\\Projects\\Zig\\fun\"; cmd /c \"zig build test --summary all 2>&1\" | Tee-Object -FilePath .\\_zig_test_log.txt; exit $LASTEXITCODE"
 			],
 			"isBackground": false,
 			"group": "test"
@@ -115,7 +115,7 @@
 			"args": [
 				"-NoProfile",
 				"-Command",
-				"Set-Location \"C:\\Users\\omarb\\Projects\\Zig\\fun\"; zig test tests\\fls_e2e_test.zig -ODebug *>&1 | Tee-Object -FilePath .\\_fls_e2e_only_log.txt; exit $LASTEXITCODE"
+				"Set-Location \"C:\\Users\\omarb\\Projects\\Zig\\fun\"; cmd /c \"zig test tests\\fls_e2e_test.zig -ODebug 2>&1\" | Tee-Object -FilePath .\\_fls_e2e_only_log.txt; exit $LASTEXITCODE"
 			],
 			"isBackground": false,
 			"problemMatcher": [],
@@ -128,7 +128,7 @@
 			"args": [
 				"-NoProfile",
 				"-Command",
-				"Set-Location \"C:\\Users\\omarb\\Projects\\Zig\\fun\"; zig build test --summary all *>&1 | Tee-Object -FilePath .\\_zig_test_log3.txt; exit $LASTEXITCODE"
+				"Set-Location \"C:\\Users\\omarb\\Projects\\Zig\\fun\"; cmd /c \"zig build test --summary all 2>&1\" | Tee-Object -FilePath .\\_zig_test_log3.txt; exit $LASTEXITCODE"
 			],
 			"isBackground": false,
 			"problemMatcher": [],
@@ -153,7 +153,7 @@
 			"args": [
 				"-NoProfile",
 				"-Command",
-				"Set-Location \"C:\\Users\\omarb\\Projects\\Zig\\fun\"; Get-Process fls -ErrorAction SilentlyContinue | Stop-Process -Force; zig build test *>&1 | Tee-Object -FilePath .\\_zig_test_log_fmtfix.txt; exit $LASTEXITCODE"
+				"Set-Location \"C:\\Users\\omarb\\Projects\\Zig\\fun\"; Get-Process fls -ErrorAction SilentlyContinue | Stop-Process -Force; cmd /c \"zig build test --summary all 2>&1\" | Tee-Object -FilePath .\\_zig_test_log_fmtfix.txt; exit $LASTEXITCODE"
 			],
 			"isBackground": false,
 			"group": "test"

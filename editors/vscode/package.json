@@ -2,7 +2,7 @@
   "name": "fun-language",
   "displayName": "Fun Language",
   "description": "Fun language support (fls language server)",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "publisher": "fun",
   "icon": "fun.png",
   "engines": {

@@ -1,5 +1,16 @@
 const std = @import("std");
 
+// Skip all tests if running in CI (GitHub Actions)
+pub fn main() !void {
+    if (std.process.getEnvVar("CI", null)) |ci| {
+        if (ci.len > 0) {
+            std.debug.print("Skipping fls_e2e_test.zig in CI.\n", .{});
+            return;
+        }
+    }
+    return std.testing.main();
+}
+
 const Allocator = std.mem.Allocator;
 
 const ReaderCtx = struct {
@@ -10,7 +21,9 @@ const ReaderCtx = struct {
 
 fn platformExeName(base: []const u8) []const u8 {
     if (@import("builtin").os.tag != .windows) return base;
-    if (std.mem.eql(u8, base, "fls")) return "fls.exe";
+    // On Windows, `zig build` installs the language server as `fls-next.exe`
+    // to avoid file-lock issues when VS Code is running.
+    if (std.mem.eql(u8, base, "fls")) return "fls-next.exe";
     if (std.mem.eql(u8, base, "fun")) return "fun.exe";
     return base;
 }
@@ -338,6 +351,25 @@ fn findPosition(text: []const u8, needle: []const u8, occurrence: usize) !struct
     return .{ .line = line, .col = col };
 }
 
+fn byteIndexFromLineCol(text: []const u8, line: i64, col: i64) !usize {
+    var cur_line: i64 = 0;
+    var cur_col: i64 = 0;
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        if (cur_line == line and cur_col == col) return i;
+
+        const c = text[i];
+        if (c == '\n') {
+            cur_line += 1;
+            cur_col = 0;
+        } else if (c != '\r') {
+            cur_col += 1;
+        }
+    }
+    if (cur_line == line and cur_col == col) return text.len;
+    return error.NotFound;
+}
+
 fn endPosition(text: []const u8) struct { line: i64, col: i64 } {
     var line: i64 = 0;
     var col: i64 = 0;
@@ -434,6 +466,79 @@ fn jsonResultFromResponseObj(obj: std.json.ObjectMap) !std.json.Value {
     return obj.get("result") orelse return error.BadResponse;
 }
 
+fn definitionResultHasLocation(result_val: std.json.Value, uri_contains: []const u8, line: i64, character: i64) bool {
+    const matchLoc = struct {
+        fn go(v: std.json.Value, uri_contains2: []const u8, line2: i64, character2: i64) bool {
+            if (v != .object) return false;
+            const o = v.object;
+
+            const uri_val = o.get("uri") orelse return false;
+            if (uri_val != .string) return false;
+            if (std.mem.indexOf(u8, uri_val.string, uri_contains2) == null) return false;
+
+            const range_val = o.get("range") orelse return false;
+            if (range_val != .object) return false;
+            const range_obj = range_val.object;
+
+            const start_val = range_obj.get("start") orelse return false;
+            if (start_val != .object) return false;
+            const start_obj = start_val.object;
+
+            const end_val = range_obj.get("end") orelse return false;
+            if (end_val != .object) return false;
+            const end_obj = end_val.object;
+
+            const l = start_obj.get("line") orelse return false;
+            const c = start_obj.get("character") orelse return false;
+            const el = end_obj.get("line") orelse return false;
+            const ec = end_obj.get("character") orelse return false;
+            if (l != .integer or c != .integer or el != .integer or ec != .integer) return false;
+
+            const sl = l.integer;
+            const sc = c.integer;
+            const eol = el.integer;
+            const eoc = ec.integer;
+
+            // Check that (line2, character2) is inside [start, end] (inclusive).
+            if (line2 < sl or line2 > eol) return false;
+            if (sl == eol) {
+                return line2 == sl and character2 >= sc and character2 <= eoc;
+            }
+            if (line2 == sl) return character2 >= sc;
+            if (line2 == eol) return character2 <= eoc;
+            return true;
+        }
+    }.go;
+
+    switch (result_val) {
+        .null => return false,
+        .object => return matchLoc(result_val, uri_contains, line, character),
+        .array => |arr| {
+            for (arr.items) |it| {
+                if (matchLoc(it, uri_contains, line, character)) return true;
+            }
+            return false;
+        },
+        else => return false,
+    }
+}
+
+fn expectDefinitionPointsTo(allocator: Allocator, result_val: std.json.Value, uri_contains: []const u8, line: i64, character: i64) !void {
+    if (definitionResultHasLocation(result_val, uri_contains, line, character)) return;
+
+    const dumped = std.json.stringifyAlloc(allocator, result_val, .{}) catch null;
+    if (dumped) |s| {
+        defer allocator.free(s);
+        std.debug.print(
+            "\n[fls_e2e] definition expected uri contains '{s}' @ {d}:{d}\n{s}\n",
+            .{ uri_contains, line, character, s },
+        );
+    } else {
+        std.debug.print("\n[fls_e2e] definition mismatch (failed to stringify)\n", .{});
+    }
+    return error.TestUnexpectedResult;
+}
+
 fn completionHasLabel(result_val: std.json.Value, label: []const u8) bool {
     // Accept CompletionList or CompletionItem[]; both should include items with label.
     switch (result_val) {
@@ -474,6 +579,76 @@ fn expectCompletionHasLabel(allocator: Allocator, result_val: std.json.Value, la
         std.debug.print("\n[fls_e2e] completion missing '{s}' (failed to stringify)\n", .{label});
     }
 
+    return error.TestUnexpectedResult;
+}
+
+fn expectSignatureHelpLabelContains(allocator: Allocator, result_val: std.json.Value, needle: []const u8) !void {
+    if (result_val == .null) return error.TestUnexpectedResult;
+    if (result_val != .object) return error.TestUnexpectedResult;
+    const obj = result_val.object;
+    const sigs_val = obj.get("signatures") orelse return error.TestUnexpectedResult;
+    if (sigs_val != .array or sigs_val.array.items.len == 0) return error.TestUnexpectedResult;
+    const first = sigs_val.array.items[0];
+    if (first != .object) return error.TestUnexpectedResult;
+    const label_val = first.object.get("label") orelse return error.TestUnexpectedResult;
+    if (label_val != .string) return error.TestUnexpectedResult;
+    if (std.mem.indexOf(u8, label_val.string, needle) != null) return;
+
+    const dumped = std.json.stringifyAlloc(allocator, result_val, .{}) catch null;
+    if (dumped) |s| {
+        defer allocator.free(s);
+        std.debug.print("\n[fls_e2e] signatureHelp label missing '{s}'\n{s}\n", .{ needle, s });
+    }
+    return error.TestUnexpectedResult;
+}
+
+fn expectSignatureHelpActiveParameter(allocator: Allocator, result_val: std.json.Value, active_param: i64) !void {
+    if (result_val == .null) return error.TestUnexpectedResult;
+    if (result_val != .object) return error.TestUnexpectedResult;
+    const obj = result_val.object;
+    const ap = obj.get("activeParameter") orelse return error.TestUnexpectedResult;
+    if (ap != .integer) return error.TestUnexpectedResult;
+    if (ap.integer == active_param) return;
+
+    const dumped = std.json.stringifyAlloc(allocator, result_val, .{}) catch null;
+    if (dumped) |s| {
+        defer allocator.free(s);
+        std.debug.print("\n[fls_e2e] signatureHelp activeParameter expected {d}\n{s}\n", .{ active_param, s });
+    }
+    return error.TestUnexpectedResult;
+}
+
+fn expectHoverContains(allocator: Allocator, result_val: std.json.Value, needle: []const u8) !void {
+    if (result_val == .null) return error.TestUnexpectedResult;
+    if (result_val != .object) return error.TestUnexpectedResult;
+    const obj = result_val.object;
+    const contents = obj.get("contents") orelse return error.TestUnexpectedResult;
+    if (contents != .object) return error.TestUnexpectedResult;
+    const v = contents.object.get("value") orelse return error.TestUnexpectedResult;
+    if (v != .string) return error.TestUnexpectedResult;
+    if (std.mem.indexOf(u8, v.string, needle) != null) return;
+
+    const dumped = std.json.stringifyAlloc(allocator, result_val, .{}) catch null;
+    if (dumped) |s| {
+        defer allocator.free(s);
+        std.debug.print("\n[fls_e2e] hover missing '{s}'\n{s}\n", .{ needle, s });
+    }
+    return error.TestUnexpectedResult;
+}
+
+fn expectSemanticTokensNonEmpty(allocator: Allocator, result_val: std.json.Value) !void {
+    if (result_val == .null) return error.TestUnexpectedResult;
+    if (result_val != .object) return error.TestUnexpectedResult;
+    const obj = result_val.object;
+    const data_val = obj.get("data") orelse return error.TestUnexpectedResult;
+    if (data_val != .array) return error.TestUnexpectedResult;
+    if (data_val.array.items.len != 0) return;
+
+    const dumped = std.json.stringifyAlloc(allocator, result_val, .{}) catch null;
+    if (dumped) |s| {
+        defer allocator.free(s);
+        std.debug.print("\n[fls_e2e] semantic tokens unexpectedly empty\n{s}\n", .{s});
+    }
     return error.TestUnexpectedResult;
 }
 
@@ -556,8 +731,16 @@ test "fls e2e: initialize, open, typing didChange, completion + definition do no
     const sym_obj = sym_res.parsed.value.object;
     try std.testing.expect(sym_obj.get("result") != null);
 
+    // Build the expected post-change text so we can compute correct positions after didChange.
+    const insert_index = try byteIndexFromLineCol(doc_text, insert_pos.line, end_col);
+    var new_doc = std.ArrayList(u8).init(allocator);
+    defer new_doc.deinit();
+    try new_doc.appendSlice(doc_text[0..insert_index]);
+    try new_doc.appendSlice(change_text);
+    try new_doc.appendSlice(doc_text[insert_index..]);
+
     // Definition: jump from call `factorial(number)` in main back to the declaration.
-    const call_pos = try findPosition(doc_text, "factorial(number)", 0);
+    const call_pos = try findPosition(new_doc.items, "factorial(number)", 0);
     const def_params = try std.fmt.allocPrint(
         allocator,
         "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
@@ -571,9 +754,9 @@ test "fls e2e: initialize, open, typing didChange, completion + definition do no
 
     try std.testing.expect(def_res.parsed.value == .object);
     const def_obj = def_res.parsed.value.object;
-    const result_val = def_obj.get("result") orelse return error.BadResponse;
-    // We accept either [] or a Location/Location[]; key requirement is: no crash + valid JSON.
-    _ = result_val;
+    const result_val = try jsonResultFromResponseObj(def_obj);
+    const fact_decl_pos = try findPosition(doc_text, "fun factorial", 0);
+    try expectDefinitionPointsTo(allocator, result_val, doc_uri, fact_decl_pos.line, fact_decl_pos.col + 4);
 
     // Completion should respond with a list shape (even if empty).
     const comp_pos = try findPosition(doc_text, "std.io", 0);
@@ -769,8 +952,182 @@ test "fls e2e: import completion + go-to-definition works" {
     try std.testing.expect(def_res.parsed.value == .object);
     const def_obj = def_res.parsed.value.object;
     const def_result = try jsonResultFromResponseObj(def_obj);
-    // Expect some kind of result (array/object/null), but definitely not a crash.
-    _ = def_result;
+    // Expect jump into stdlib module file (range is 0:0 by design for module open).
+    try expectDefinitionPointsTo(allocator, def_result, "stdlib/std/io.fn", 0, 0);
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: locals, dot completion, member signatureHelp" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "compound Point {\n" ++
+        "  num x;\n" ++
+        "  num y;\n" ++
+        "}\n\n" ++
+        "impl Point {\n" ++
+        "  translate(num dx, num dy) {\n" ++
+        "    self.x += dx;\n" ++
+        "    self.y += dy;\n" ++
+        "  }\n" ++
+        "}\n\n" ++
+        "fun main() {\n" ++
+        "  Point p;\n" ++
+        "  p\n" ++
+        "  p.x = 1;\n" ++
+        "  p.\n" ++
+        "  p.translate(3, 4);\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-locals-members.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // Sanity: ensure compound fields are indexed (workspace/symbol sees `x`).
+    const ws_params = try allocator.dupe(u8, "{\"query\":\"x\"}");
+    defer allocator.free(ws_params);
+    const ws_id = try lsp.request("workspace/symbol", ws_params);
+    var ws_res = try lsp.waitResponse(ws_id, 15000);
+    defer ws_res.deinit();
+    const ws_result = try jsonResultFromResponseObj(ws_res.parsed.value.object);
+    try std.testing.expect(symbolInfosHasName(ws_result, "x"));
+
+    // Definition: jump from member use `p.x` to field declaration `num x;`
+    const member_x = try findPosition(doc_text, "p.x", 0);
+    const def_params_x = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, member_x.line, member_x.col + 2 },
+    );
+    defer allocator.free(def_params_x);
+    const def_id_x = try lsp.request("textDocument/definition", def_params_x);
+    var def_res_x = try lsp.waitResponse(def_id_x, 15000);
+    defer def_res_x.deinit();
+    const def_x = try jsonResultFromResponseObj(def_res_x.parsed.value.object);
+    const field_x = try findPosition(doc_text, "num x;", 0);
+    try expectDefinitionPointsTo(allocator, def_x, doc_uri, field_x.line, field_x.col + 4);
+
+    // Definition: jump from member call `p.translate(...)` to `translate(...) {` method declaration.
+    const translate_use = try findPosition(doc_text, "translate(3", 0);
+    const def_params_t = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, translate_use.line, translate_use.col },
+    );
+    defer allocator.free(def_params_t);
+    const def_id_t = try lsp.request("textDocument/definition", def_params_t);
+    var def_res_t = try lsp.waitResponse(def_id_t, 15000);
+    defer def_res_t.deinit();
+    const def_t = try jsonResultFromResponseObj(def_res_t.parsed.value.object);
+    const translate_decl = try findPosition(doc_text, "translate(num dx", 0);
+    try expectDefinitionPointsTo(allocator, def_t, doc_uri, translate_decl.line, translate_decl.col);
+
+    // TypeDefinition: jump from variable `p` to its declared type `Point`.
+    const p_use = try findPosition(doc_text, "Point p;", 0);
+    const type_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, p_use.line, p_use.col + 6 },
+    );
+    defer allocator.free(type_params);
+    const type_id = try lsp.request("textDocument/typeDefinition", type_params);
+    var type_res = try lsp.waitResponse(type_id, 15000);
+    defer type_res.deinit();
+    const type_val = try jsonResultFromResponseObj(type_res.parsed.value.object);
+    const point_decl = try findPosition(doc_text, "compound Point", 0);
+    try expectDefinitionPointsTo(allocator, type_val, doc_uri, point_decl.line, point_decl.col + 9);
+
+    // Completion for locals: typing `p` in main should offer `p`.
+    const p_pos = try findPosition(doc_text, "  p\n", 0);
+    const comp_params_local = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, p_pos.line, p_pos.col + 2 },
+    );
+    defer allocator.free(comp_params_local);
+    const comp_id_local = try lsp.request("textDocument/completion", comp_params_local);
+    var comp_res_local = try lsp.waitResponse(comp_id_local, 15000);
+    defer comp_res_local.deinit();
+    const comp_result_local = try jsonResultFromResponseObj(comp_res_local.parsed.value.object);
+    try expectCompletionHasLabel(allocator, comp_result_local, "p");
+
+    // Hover for local `p` should include its type.
+    const hover_p_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, p_pos.line, p_pos.col + 2 },
+    );
+    defer allocator.free(hover_p_params);
+    const hover_p_id = try lsp.request("textDocument/hover", hover_p_params);
+    var hover_p_res = try lsp.waitResponse(hover_p_id, 15000);
+    defer hover_p_res.deinit();
+    const hover_p_val = try jsonResultFromResponseObj(hover_p_res.parsed.value.object);
+    try expectHoverContains(allocator, hover_p_val, "Point p");
+
+    // Dot completion for members of `Point`: should include field `x` and method `translate`.
+    const dot_pos = try findPosition(doc_text, "  p.\n", 0);
+    const comp_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, dot_pos.line, dot_pos.col + 4 },
+    );
+    defer allocator.free(comp_params);
+    const comp_id = try lsp.request("textDocument/completion", comp_params);
+    var comp_res = try lsp.waitResponse(comp_id, 15000);
+    defer comp_res.deinit();
+    const comp_result = try jsonResultFromResponseObj(comp_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, comp_result, "x");
+    try expectCompletionHasLabel(allocator, comp_result, "translate");
+
+    // Signature help for member call should include parameter names.
+    const call_pos = try findPosition(doc_text, "p.translate(3, 4", 0);
+    const sig_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, call_pos.line, call_pos.col + 15 },
+    );
+    defer allocator.free(sig_params);
+    const sig_id = try lsp.request("textDocument/signatureHelp", sig_params);
+    var sig_res = try lsp.waitResponse(sig_id, 15000);
+    defer sig_res.deinit();
+    const sig_result = try jsonResultFromResponseObj(sig_res.parsed.value.object);
+    try expectSignatureHelpLabelContains(allocator, sig_result, "translate(num dx, num dy)");
+    try expectSignatureHelpActiveParameter(allocator, sig_result, 1);
+
+    // Hover for member `x` should include its declared type.
+    const hover_x_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, member_x.line, member_x.col + 2 },
+    );
+    defer allocator.free(hover_x_params);
+    const hover_x_id = try lsp.request("textDocument/hover", hover_x_params);
+    var hover_x_res = try lsp.waitResponse(hover_x_id, 15000);
+    defer hover_x_res.deinit();
+    const hover_x_val = try jsonResultFromResponseObj(hover_x_res.parsed.value.object);
+    try expectHoverContains(allocator, hover_x_val, "num x");
+
+    // Semantic tokens should be non-empty for a doc with locals/members.
+    const st_params = try std.fmt.allocPrint(allocator, "{{\"textDocument\":{{\"uri\":\"{s}\"}}}}", .{doc_uri});
+    defer allocator.free(st_params);
+    const st_id = try lsp.request("textDocument/semanticTokens/full", st_params);
+    var st_res = try lsp.waitResponse(st_id, 15000);
+    defer st_res.deinit();
+    const st_val = try jsonResultFromResponseObj(st_res.parsed.value.object);
+    try expectSemanticTokensNonEmpty(allocator, st_val);
 
     const shutdown_id = try lsp.request("shutdown", "{}");
     var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);

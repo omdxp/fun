@@ -1,0 +1,45 @@
+# Publish VS Code extension with language release
+# This workflow publishes the VS Code extension to the Marketplace with the same version as the language release.
+
+name: Publish VS Code Extension
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish-vscode-extension:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: |
+          cd editors/vscode
+          npm ci
+
+      - name: Set extension version to match release
+        run: |
+          VERSION=$(echo "${{ github.ref_name }}" | sed 's/^v//')
+          cd editors/vscode
+          npm version --no-git-tag-version "$VERSION"
+
+      - name: Publish VS Code extension
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          cd editors/vscode
+          npx vsce package --allow-missing-repository --skip-license --allow-star-activation
+          npx vsce publish --no-git-tag-version --pat "$VSCE_PAT"
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fun-language-vsix
+          path: editors/vscode/*.vsix

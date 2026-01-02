@@ -231,3 +231,77 @@ test "ParseProcess parses if condition with == operator" {
     try fs.cwd().deleteFile(ifilepath);
     try fs.cwd().deleteFile(ofilepath);
 }
+
+test "ParseProcess parse returns error on malformed input (no crash)" {
+    const ifilepath = "ParseProcess_parse_malformed_missing_semicolon.fn";
+    const ofilepath = "ParseProcess_parse_malformed_missing_semicolon.c";
+
+    {
+        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
+        defer file.close();
+        // Missing ';' after variable declaration.
+        const input =
+            "fun main() {\n" ++
+            "  num x = 1\n" ++
+            "  ret;\n" ++
+            "}\n";
+        try file.writeAll(input);
+    }
+
+    const allocator = std.testing.allocator;
+    var transpile_proc = try codegen.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
+    var lex_proc = lexer.LexProcess.init(&transpile_proc);
+    var parse_proc = ParseProcess.init(&transpile_proc);
+
+    defer {
+        lex_proc.deinit();
+        transpile_proc.deinit();
+    }
+
+    try lex_proc.lex();
+    if (parse_proc.parse()) |_| {
+        try std.testing.expect(false);
+    } else |_| {
+        // Any parse error is acceptable; the key requirement is that we do not crash.
+    }
+
+    try fs.cwd().deleteFile(ifilepath);
+    try fs.cwd().deleteFile(ofilepath);
+}
+
+test "ParseProcess parse returns error on malformed dot (no crash)" {
+    const ifilepath = "ParseProcess_parse_malformed_dot.fn";
+    const ofilepath = "ParseProcess_parse_malformed_dot.c";
+
+    {
+        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
+        defer file.close();
+        // Missing identifier after '.'
+        const input =
+            "imp std.;\n" ++
+            "fun main() {\n" ++
+            "  ret;\n" ++
+            "}\n";
+        try file.writeAll(input);
+    }
+
+    const allocator = std.testing.allocator;
+    var transpile_proc = try codegen.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
+    var lex_proc = lexer.LexProcess.init(&transpile_proc);
+    var parse_proc = ParseProcess.init(&transpile_proc);
+
+    defer {
+        lex_proc.deinit();
+        transpile_proc.deinit();
+    }
+
+    try lex_proc.lex();
+    if (parse_proc.parse()) |_| {
+        try std.testing.expect(false);
+    } else |_| {
+        // Any parse error is acceptable; the key requirement is that we do not crash.
+    }
+
+    try fs.cwd().deleteFile(ifilepath);
+    try fs.cwd().deleteFile(ofilepath);
+}

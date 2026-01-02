@@ -1,3 +1,12 @@
+# Prerequisites
+
+**Before using this extension, you must have the `fun` compiler and `fls` language server installed and accessible in your system PATH.**
+
+- Install the Fun language and ensure both `fun` and `fls` are available globally (e.g., by running `fun --version` and `fls --version` in your terminal).
+- The extension will use the default values (`fun`, `fls`) unless you override them in the settings.
+
+If you install the language using the official installer or release, these binaries should be available globally. If not, please follow the installation instructions in the main Fun language repository.
+
 # Fun VS Code Extension (WIP)
 
 This extension wires VS Code up to the `fls` language server.

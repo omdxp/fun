@@ -637,7 +637,7 @@ pub const TranspileProcess = struct {
 
         if (impl_user_args.len != quirk_args.len) {
             self.report_type_error(
-                impl_node.*, 
+                impl_node.*,
                 "impl method '{s}' arg count mismatch for quirk method '{s}'",
                 .{ method_name, method_name },
             );
@@ -665,7 +665,7 @@ pub const TranspileProcess = struct {
             try self.append_dtype_sig(&want, &quirk_sig.rtype);
             try self.append_dtype_sig(&got, &impl_rtype);
             self.report_type_error(
-                impl_node.*, 
+                impl_node.*,
                 "impl method '{s}' return type mismatch: expected {s}, got {s}",
                 .{ method_name, want.items, got.items },
             );
@@ -1139,7 +1139,7 @@ pub const TranspileProcess = struct {
     /// Logs an error message with the current position in the token stream.
     ///
     /// This function logs an error message along with the line number, column span.,
-    /// and filename where the error occurred, then panics.
+    /// and filename where the error occurred.
     ///
     /// Parameters:
     /// - `self`: The instance of the transpiler.
@@ -1160,7 +1160,8 @@ pub const TranspileProcess = struct {
         } else {
             stderr.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch unreachable;
         }
-        self.deinit();
+        // Do not deinit here. Callers typically `defer tp.deinit()`; implicitly
+        // deinitializing inside `err()` causes double-close crashes (especially on Windows).
     }
 
     /// Logs a warning message with the current position in the token stream.
@@ -4107,11 +4108,20 @@ pub const TranspileProcess = struct {
                     if (exp.left) |left| {
                         try self.transpile_node(left.*);
                     }
-                    try self.write(" ");
-                    try self.write(exp.op);
-                    try self.write(" ");
-                    if (exp.right) |right| {
-                        try self.transpile_node(right.*);
+                    // Special case: no space after reference operator '&' or '^' (address-of/reference)
+                    if (mem.eql(u8, exp.op, "&") or mem.eql(u8, exp.op, "^")) {
+                        try self.write(exp.op);
+                        if (exp.right) |right| {
+                            try self.transpile_node(right.*);
+                        }
+                    } else {
+                        // Default: space before and after all other operators
+                        try self.write(" ");
+                        try self.write(exp.op);
+                        try self.write(" ");
+                        if (exp.right) |right| {
+                            try self.transpile_node(right.*);
+                        }
                     }
                 } else if (exp.left) |left| {
                     try self.transpile_node(left.*);

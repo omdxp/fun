@@ -127,16 +127,8 @@ pub fn build(b: *std.Build) void {
         b.getInstallStep().dependOn(&fls_exe.step);
     } else {
         b.installArtifact(exe);
-        // On Windows, fls.exe is often running (VS Code) and the file gets locked.
-        // A locked destination makes `zig build` fail with AccessDenied.
-        // Install fls to a "next" binary so builds succeed; the user can restart VS Code
-        // (or stop fls.exe) to replace fls.exe when convenient.
-        if (target.result.os.tag == .windows) {
-            const install_fls_next = b.addInstallArtifact(fls_exe, .{ .dest_sub_path = "fls-next.exe" });
-            b.getInstallStep().dependOn(&install_fls_next.step);
-        } else {
-            b.installArtifact(fls_exe);
-        }
+        // Always install fls.exe as the language server, even on Windows.
+        b.installArtifact(fls_exe);
     }
 
     // --- Install Fun standard library signature files ---
