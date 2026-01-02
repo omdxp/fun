@@ -1,14 +1,12 @@
-# fun Documentation
 
-Welcome to the documentation for the fun programming language!
+# Fun Language Documentation
 
-## Overview
+This directory contains documentation for the Fun language.
 
-fun is a statically-typed language that transpiles to C, designed for safety, performance, and simplicity. Written in Zig, it aims to be approachable for both beginners and systems programmers.
+## Files
 
-## Contents
-- [Language Reference](./language.md)
-- [Architecture](./architecture.md)
-- [FAQ](./faq.md)
+- **architecture.md**: Language architecture overview
+- **faq.md**: Frequently asked questions
+- **language.md**: Language specification
 
-For more, see the [README](../README.md).
+See individual files for details.

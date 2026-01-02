@@ -1,44 +1,96 @@
-# fun Language Reference
 
-## Syntax
-- Statically-typed, C-inspired
-- Functions: `fun name(args) type { ... }`
-- Imports: `imp std.io;`
-- Compounds: `compound Point { num x; num y; }`
-- Quirks (interfaces): `quirk Shape { area() num; }`
-- Implementations:
-    - Quirk impl: `impl Rectangle Shape { ... }`
-    - Plain compound methods: `impl Point { translate(num dx, num dy) { ... } }`
-- Pattern matching: `fit x { ... }`
+# Fun Language Reference
 
-## Types
-- `num` (integer number), `dec` (decimal number), `str` (string), `bin` (boolean), `chr` (character)
-- `raw` (opaque/"void" type; use `raw*` for C-style `void*`)
+## Language Features
 
-### Declaration Order
-- `compound` types can reference other `compound` types even if those types are declared later in the file.
-- This includes pointer fields like `Node* next;` (self-referential pointers are supported).
-- By-value cycles (A contains B contains A by value) cannot be represented as C structs; use pointers to break cycles.
+### Syntax & Structure
+- **Statically-typed, C-inspired**: All variables and functions have explicit types.
+- **Functions**: Defined with `fun name(args) type { ... }`.
+- **Imports**: Use `imp module;` to import standard or user modules.
+- **Compounds**: Custom types (like structs): `compound Point { num x; num y; }`.
+- **Quirks (Interfaces)**: Define required methods: `quirk Shape { area() num; }`.
+- **Implementations**:
+    - Quirk implementation: `impl Rectangle Shape { ... }`
+    - Plain compound methods: `impl Point { ... }`
+- **Pattern Matching**: `fit x { ... }` for value-based branching.
+- **Comments**: Use `//` for single-line comments.
 
-See [examples/type_order.fn](../examples/type_order.fn).
+### Types
+- **Primitive Types**:
+    - `num`: Integer number
+    - `dec`: Decimal (floating-point) number
+    - `str`: String
+    - `bin`: Boolean
+    - `chr`: Character
+    - `raw`: Opaque/"void" type (use `raw*` for C-style `void*`)
+- **Arrays**: `num[] arr = [1, 2, 3];`
+- **Pointers**: `Node* next;` (self-referential and forward-declared types supported)
+- **Type Inference**: Not supported; all types must be explicit.
 
-### C Standard Library Compatibility
-- `imp std.*;` can be used to pull in C standard headers (e.g. `std.io`→`stdio.h`, `std.time`→`time.h`).
-- ALL_CAPS identifiers (like `NULL`, `SEEK_SET`, `INT_MAX`) are allowed without prior declaration so C macro constants work naturally once the right header is imported.
-- Extra headers supported: `std.limits`→`limits.h`, `std.stdint`→`stdint.h`, `std.stddef`→`stddef.h`, `std.errno`→`errno.h`.
+### Control Flow
+- **If/Else**: Standard conditional branching.
+- **Elif**: Else-if chaining.
+- **Pattern Matching**: `fit` statement for exhaustive and non-exhaustive matches.
+- **For Loops**:
+    - Range: `for i : 0..10 { ... }`
+    - Array: `for item : arr { ... }`
+    - Indexed: `for i, item :: arr { ... }`
 
-See [examples/c_limits_and_null.fn](../examples/c_limits_and_null.fn) and [examples/c_file_io.fn](../examples/c_file_io.fn).
+### Functions
+- **Definition**: `fun name(type arg, ...) return_type { ... }`
+- **Return**: Use `ret value;` to return from a function.
+- **No Nested Functions**: Functions cannot be declared inside other functions.
 
-## Example
+### Compounds & Quirks
+- **Compounds**: Like C structs, can have methods via `impl`.
+- **Quirks**: Like interfaces/traits, define required methods.
+- **Impl**: Attach methods to compounds or implement quirks for compounds.
+- **Method Dispatch**: Quirk values can be used for dynamic dispatch (like trait objects).
+
+### Imports & Modularity
+- **Standard Library**: `imp std.io;` maps to C standard headers.
+- **Relative Imports**: `imp relative.parent;` for user modules.
+- **Circular Dependency Detection**: Compiler detects and errors on circular imports.
+
+### C Interop
+- **C Macros**: ALL_CAPS identifiers (e.g., `NULL`, `INT_MAX`) are allowed if the right header is imported.
+- **Direct Mapping**: `imp std.*;` maps to C headers (`stdio.h`, `limits.h`, etc.).
+- **Signature-only stdlib**: Fun stdlib modules only declare signatures; C provides implementations.
+
+### Error Handling
+- **Type Checking**: Errors for type mismatches, e.g., assigning `str` to `num`.
+- **Undeclared Symbols**: Errors for using undeclared variables or functions.
+- **Duplicate Declarations**: Errors for redeclaring variables in the same scope.
+- **Missing Imports**: Errors for importing non-existent modules.
+- **Incomplete Quirk Implementations**: Errors if not all quirk methods are implemented.
+
+### Example
 ```fun
-fun add(num a, num b) num {
-    ret a + b;
+imp std.io;
+
+compound Point { num x; num y; }
+
+impl Point {
+    translate(num dx, num dy) {
+        self.x += dx;
+        self.y += dy;
+    }
+}
+
+fun main() {
+    Point p;
+    p.x = 1; p.y = 2;
+    p.translate(3, 4);
+    printf("p=(%d,%d)\n", p.x, p.y);
 }
 ```
 
-## Control Flow
-- `if`, `elif`, `else`
-- `fit` (pattern matching)
+### Additional Features
+- **Forward Declarations**: Compounds can reference each other regardless of order.
+- **Self-referential Types**: Supported via pointers.
+- **Pattern Matching**: Exhaustive and non-exhaustive with `_` default branch.
+- **CLI Tool**: Compile, transpile, and run Fun code from the command line.
 
-## More
-See [examples](../examples/) for real code.
+---
+
+See the [examples directory](../examples/) for real code and advanced usage.

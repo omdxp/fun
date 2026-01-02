@@ -13,12 +13,9 @@ This extension wires VS Code up to the `fls` language server.
 
 ## What you get
 
-- Diagnostics (via `fun -no-exec`)
-- Formatting (via `fun -fmt -no-exec`)
 
 ## Requirements
 
-- Build the tools:
   - `zig build`
   - Ensure `zig-out/bin` is on your `PATH`, or set explicit paths in settings.
 
@@ -31,5 +28,34 @@ This extension wires VS Code up to the `fls` language server.
 
 ## Settings
 
-- `fun.fls.path`: path to `fls` (default: `fls`)
-- `fun.fls.funPath`: optional path to `fun` (sets `FLS_FUN_PATH`)
+# Fun VS Code Extension
+
+This directory contains the official VS Code extension for the Fun language.
+
+## Features
+
+- Syntax highlighting
+- Semantic tokens
+- Operator highlighting
+- Formatter integration
+- Language server integration (planned)
+
+## Installation
+
+- Install from the VS Code Marketplace (recommended)
+- Or build and install from source:
+  ```sh
+  npm install
+  npm run package
+  code --install-extension fun-x.x.x.vsix
+  ```
+
+## Usage
+
+- Open Fun files (`.fn`) in VS Code
+- Syntax and semantic highlighting enabled by default
+- Formatter runs on save
+
+## Development
+
+- See [CONTRIBUTING.md](../../CONTRIBUTING.md) for extension development guidelines

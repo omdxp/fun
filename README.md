@@ -1,9 +1,10 @@
-# fun
+
+# Fun Programming Language
 
 [![CI](https://img.shields.io/github/actions/workflow/status/omdxp/fun/ci-dev.yml?branch=main)](https://github.com/omdxp/fun/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A statically-typed programming language that transpiles to C, designed for safety, performance, and leveraging the power of C. Written in Zig.
+**Fun** is a statically-typed programming language that transpiles to C, designed for safety, performance, and simplicity. Written in Zig.
 
 ---
 
@@ -24,11 +25,12 @@ A statically-typed programming language that transpiles to C, designed for safet
 ---
 
 ## Features
-- Statically-typed language with C-like performance
+
+- Statically-typed, C-like performance
 - Transpiles to readable C code
 - Simple, expressive syntax
-- Imports and modularity
-- Pattern matching with `fit` statement
+- Modular imports
+- Pattern matching (`fit` statement)
 - Type-safe variables and functions
 - CLI with multiple output and debug options
 - AST printing and analysis
@@ -142,3 +144,32 @@ There is a minimal VS Code extension scaffold in [editors/vscode](editors/vscode
 
 - Build `fun` + `fls` first (`zig build`)
 - Then open `editors/vscode` in VS Code and follow its README.
+---
+
+## Installation
+
+### Prerequisites
+
+- [Zig](https://ziglang.org/download/) (latest stable recommended)
+- Windows, Linux, or macOS
+
+### Build from Source
+
+Clone the repository and build using Zig:
+
+```sh
+git clone https://github.com/omdxp/fun.git
+cd fun
+zig build
+```
+
+### Install from Release
+
+Pre-built installers and binaries are available for each release. See [Release installers (bundles)](#release-installers-bundles).
+
+
+
+
+
+
+

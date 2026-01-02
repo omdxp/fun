@@ -1,12 +1,15 @@
-# fun Standard Library (Signatures)
 
-This directory contains the Fun standard library modules written in Fun.
+# Fun Standard Library
 
-Important: these files intentionally contain **function signatures only** (no implementations).
-The Fun compiler maps `imp std.*;` imports to C standard headers during code generation, and the
-C compiler/linker provides the actual implementations.
+This directory contains standard library modules for the Fun language.
 
-These signature-only modules exist primarily to support tooling (e.g. IDE completion, future LSP).
+## Structure
+
+- **std/**: Core standard library modules (function signatures only)
+
+Fun maps `imp std.*;` imports to C standard headers during code generation. Actual implementations are provided by the C compiler/linker.
+
+Signature-only modules support tooling (IDE completion, future LSP).
 
 Installed location (via `zig build install`):
 - `share/fun/std/*.fn`
