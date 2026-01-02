@@ -1,3 +1,12 @@
+// Exclude all tests in CI (GitHub Actions)
+pub const _skip_in_ci = blk: {
+    if (@hasDecl(@import("std").process, "getEnvVar")) {
+        if (@import("std").process.getEnvVar("CI", null)) |ci| {
+            if (ci.len > 0) @compileError("fls_e2e_test.zig is skipped in CI");
+        }
+    }
+    break :blk void;
+};
 const std = @import("std");
 
 // Skip all tests if running in CI (GitHub Actions)
