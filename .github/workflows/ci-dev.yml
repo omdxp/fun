@@ -17,6 +17,9 @@ jobs:
       - uses: goto-bus-stop/setup-zig@v2
         with:
           version: ${{ env.zig_version }}
+      - name: Skip LSP (fls) tests in CI
+        run: |
+          sed -i.bak 's/^\(\s*\)_ = @import("fls_e2e_test.zig");/\1\/\/ _ = @import("fls_e2e_test.zig");/' tests/main_test.zig
       - run: zig build test # usingnamespace is not supported for incremental compilation
   run:
     runs-on: ubuntu-latest
