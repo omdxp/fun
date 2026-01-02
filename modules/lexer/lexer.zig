@@ -611,6 +611,12 @@ pub const LexProcess = struct {
             _ = try self.push_char(buffer.items[i]);
             i -= 1;
         }
+
+        // IMPORTANT: We only want to keep the first operator character.
+        // The rest were pushed back into the input stream and must not remain
+        // in the returned operator token, otherwise we'd emit an invalid operator
+        // and then re-lex the pushed-back chars (duplicating tokens).
+        buffer.items.len = 1;
     }
 
     /// Reads an operator from the input file.
@@ -643,6 +649,10 @@ pub const LexProcess = struct {
         } else if (!utils.op_treated_as_one(op.?)) {
             for (0..2) |_| {
                 op = try self.peek_char();
+                // Don't consume delimiters as part of a multi-char operator.
+                // Otherwise sequences like `||(` become `||(` (invalid), triggering flush-back
+                // logic and incorrectly splitting a valid operator into two tokens.
+                if (op.? == '(' or op.? == '[' or op.? == ',') break;
                 if (utils.is_single_operator(op.?)) {
                     buffer.append(op.?) catch |e| {
                         std.debug.print("Error appending to buffer: {s}\n", .{@errorName(e)});

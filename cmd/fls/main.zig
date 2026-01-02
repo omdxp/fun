@@ -729,6 +729,10 @@ const LspServer = struct {
                                 },
                             }
 
+                            if (self.docs.get(h.uri)) |hdoc| {
+                                _ = try appendDocCommentAboveLine(self.allocator, &buf, hdoc.text, h.sym.decl_range.start.line);
+                            }
+
                             const hover: Hover = .{ .contents = .{ .value = buf.items }, .range = tok.range };
                             const json = try std.json.stringifyAlloc(self.allocator, hover, .{});
                             defer self.allocator.free(json);
@@ -742,16 +746,28 @@ const LspServer = struct {
 
         // Prefer definition in current doc; else search direct imports.
         const def_local = findBestDefinition(idx.symbols, tok.text, pos) orelse null;
-        const def = def_local orelse (self.findBestDefinitionInDirectImports(uri, tok.text) orelse null);
+        const def_import = if (def_local == null) self.findAnyGlobalDefinitionInDirectImports(uri, tok.text) else null;
         var buf = std.ArrayList(u8).init(self.allocator);
         defer buf.deinit();
 
-        if (def) |d| {
+        if (def_local) |d| {
             try buf.writer().print("**{s}**\n\n", .{tok.text});
             if (d.detail) |det| {
                 try buf.writer().print("```\n{s}\n```\n", .{det});
             } else {
                 try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
+            }
+            _ = try appendDocCommentAboveLine(self.allocator, &buf, doc.text, d.decl_range.start.line);
+        } else if (def_import) |hit| {
+            const d = hit.sym;
+            try buf.writer().print("**{s}**\n\n", .{tok.text});
+            if (d.detail) |det| {
+                try buf.writer().print("```\n{s}\n```\n", .{det});
+            } else {
+                try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
+            }
+            if (self.docs.get(hit.uri)) |idoc| {
+                _ = try appendDocCommentAboveLine(self.allocator, &buf, idoc.text, d.decl_range.start.line);
             }
         } else {
             try buf.writer().print("**{s}**\n", .{tok.text});
@@ -3206,6 +3222,65 @@ fn buildIndexFromText(allocator: Allocator, text: []const u8) !*Index {
         .symbols = try symbols_out.toOwnedSlice(),
     };
     return idx;
+}
+
+fn trimLeftSpace(s: []const u8) []const u8 {
+    var i: usize = 0;
+    while (i < s.len and (s[i] == ' ' or s[i] == '\t')) : (i += 1) {}
+    return s[i..];
+}
+
+fn trimRightCR(s: []const u8) []const u8 {
+    if (s.len != 0 and s[s.len - 1] == '\r') return s[0 .. s.len - 1];
+    return s;
+}
+
+fn appendDocCommentAboveLine(allocator: Allocator, out: *std.ArrayList(u8), text: []const u8, decl_line: i64) !bool {
+    // Collect contiguous `//...` lines immediately above `decl_line`.
+    // Stop on the first blank or non-comment line.
+    if (decl_line <= 0) return false;
+
+    const decl_start = byteIndexForPosition(text, .{ .line = decl_line, .character = 0 });
+    var cur_start: usize = decl_start;
+    if (cur_start == 0) return false;
+
+    var lines = std.ArrayList([]const u8).init(allocator);
+    defer lines.deinit();
+
+    while (cur_start > 0) {
+        var prev_end: usize = cur_start - 1;
+
+        // If we're sitting right after a newline, step back over it.
+        if (text[prev_end] == '\n' and prev_end > 0) prev_end -= 1;
+
+        // Find start of previous line.
+        var prev_start: usize = prev_end;
+        while (prev_start > 0 and text[prev_start - 1] != '\n') : (prev_start -= 1) {}
+
+        var line = text[prev_start .. prev_end + 1];
+        line = trimRightCR(line);
+        const trimmed = trimLeftSpace(line);
+
+        if (trimmed.len == 0) break;
+        if (!std.mem.startsWith(u8, trimmed, "//")) break;
+
+        var content = trimmed[2..];
+        content = trimLeftSpace(content);
+        try lines.append(content);
+
+        cur_start = prev_start;
+    }
+
+    if (lines.items.len == 0) return false;
+
+    // Render top-to-bottom.
+    var i: isize = @intCast(lines.items.len);
+    while (i > 0) : (i -= 1) {
+        const l = lines.items[@intCast(i - 1)];
+        try out.writer().print("{s}\n", .{l});
+    }
+    try out.appendSlice("\n");
+    return true;
 }
 
 fn tokenString(t: token.Token) []const u8 {

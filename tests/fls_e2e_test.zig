@@ -11,7 +11,6 @@ const ReaderCtx = struct {
 fn platformExeName(base: []const u8) []const u8 {
     if (@import("builtin").os.tag != .windows) return base;
     if (std.mem.eql(u8, base, "fls")) return "fls.exe";
-    if (std.mem.eql(u8, base, "fls-next")) return "fls-next.exe";
     if (std.mem.eql(u8, base, "fun")) return "fun.exe";
     return base;
 }
@@ -362,13 +361,10 @@ const TestSetup = struct {
 
 fn resolveTestSetup(allocator: Allocator) !TestSetup {
     // We run tests with cwd=repo root (see build.zig). Spawn the installed fls.
-    const fls_next_rel = try std.fs.path.join(allocator, &[_][]const u8{ "zig-out", "bin", platformExeName("fls-next") });
-    defer allocator.free(fls_next_rel);
     const fls_cur_rel = try std.fs.path.join(allocator, &[_][]const u8{ "zig-out", "bin", platformExeName("fls") });
     defer allocator.free(fls_cur_rel);
 
-    const fls_choice = if (fileExists(fls_next_rel)) fls_next_rel else fls_cur_rel;
-    const fls_path = try allocator.dupe(u8, fls_choice);
+    const fls_path = try allocator.dupe(u8, fls_cur_rel);
     errdefer allocator.free(fls_path);
     try std.testing.expect(fileExists(fls_path));
 

@@ -84,41 +84,6 @@ function resolveExe(configured, root, defaultRel) {
 function platformExeName(base) {
     return process?.platform === 'win32' ? `${base}.exe` : base;
 }
-function maybePreferNextExe(resolvedFlsPath, root, output) {
-    if (!root)
-        return resolvedFlsPath;
-    const nextCandidate = path.join(root, 'zig-out', 'bin', platformExeName('fls-next'));
-    if (!fs.existsSync(nextCandidate))
-        return resolvedFlsPath;
-    // If the configured path is a plain command (fls/fls.exe), prefer fls-next when available.
-    const base = path.basename(resolvedFlsPath);
-    const looksLikeCommand = base === 'fls' || base === 'fls.exe';
-    if (looksLikeCommand) {
-        output.appendLine(`Detected ${path.basename(nextCandidate)}; preferring it over ${base}.`);
-        return nextCandidate;
-    }
-    // If the resolved path is the workspace-local zig-out fls, prefer fls-next if it exists and is newer.
-    try {
-        const normalized = path.normalize(resolvedFlsPath);
-        const defaultFls = path.normalize(path.join(root, 'zig-out', 'bin', platformExeName('fls')));
-        if (normalized === defaultFls) {
-            if (!fs.existsSync(resolvedFlsPath)) {
-                output.appendLine(`Detected ${path.basename(nextCandidate)}; ${path.basename(resolvedFlsPath)} is missing, using fls-next.`);
-                return nextCandidate;
-            }
-            const nextStat = fs.statSync(nextCandidate);
-            const curStat = fs.statSync(resolvedFlsPath);
-            if (nextStat.mtimeMs > curStat.mtimeMs) {
-                output.appendLine(`Detected newer ${path.basename(nextCandidate)}; preferring it over ${path.basename(resolvedFlsPath)}.`);
-                return nextCandidate;
-            }
-        }
-    }
-    catch {
-        // Best-effort only; never block startup due to stat errors.
-    }
-    return resolvedFlsPath;
-}
 function openOutput(output) {
     // `toggleOutput` can actually hide the panel if it's already visible.
     // Keep this deterministic: just reveal our channel.
@@ -137,7 +102,7 @@ function createClient(output) {
     const flsDefaultRel = path.join('zig-out', 'bin', platformExeName('fls'));
     const funDefaultRel = path.join('zig-out', 'bin', platformExeName('fun'));
     const flsResolved = resolveExe(flsCfg, root, flsDefaultRel);
-    const flsPath = maybePreferNextExe(flsResolved, root, output);
+    const flsPath = flsResolved;
     const funPath = resolveExe(funCfg, root, funDefaultRel);
     output.appendLine(`workspaceRoot = ${root ?? '(none)'}`);
     output.appendLine(`workspaceTrusted = ${vscode.workspace.isTrusted}`);

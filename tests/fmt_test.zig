@@ -1,5 +1,24 @@
 const std = @import("std");
 const cli = @import("cli");
+const codegen = @import("codegen");
+const lexer = @import("lexer");
+const parser = @import("parser");
+
+fn expectFileParses(allocator: std.mem.Allocator, path: []const u8) !void {
+    var tp = try codegen.TranspileProcess.init(
+        allocator,
+        path,
+        "__fmt_parse_unused__.c",
+        .{ .exec = false, .outf = false, .ast = false },
+    );
+    defer tp.deinit();
+    var lp = lexer.LexProcess.init(&tp);
+    defer lp.deinit();
+    var pp = parser.ParseProcess.init(&tp);
+
+    try lp.lex();
+    try pp.parse();
+}
 
 fn writeTempFnFile(allocator: std.mem.Allocator, prefix: []const u8, contents: []const u8) ![]const u8 {
     const ts = std.time.nanoTimestamp();
@@ -59,13 +78,13 @@ test "-fmt formats file in-place" {
 
     const expected =
         "fun add(num a, num b) num {\n" ++
-        "    ret a + b;\n" ++
+        "  ret a + b;\n" ++
         "}\n" ++
         "// comment\n" ++
         "if true {\n" ++
-        "    ret 1;\n" ++
+        "  ret 1;\n" ++
         "} else {\n" ++
-        "    ret 2;\n" ++
+        "  ret 2;\n" ++
         "}\n";
 
     try std.testing.expectEqualStrings(expected, got);
@@ -90,13 +109,92 @@ test "-fmt keeps a blank line between functions" {
 
     const expected =
         "fun a() num {\n" ++
-        "    ret 1;\n" ++
+        "  ret 1;\n" ++
         "}\n" ++
         "\n" ++
         "fun b() num {\n" ++
-        "    ret 2;\n" ++
+        "  ret 2;\n" ++
         "}\n";
 
+    try std.testing.expectEqualStrings(expected, got);
+}
+
+test "-fmt preserves blank lines in function bodies" {
+    const allocator = std.testing.allocator;
+
+    const ugly =
+        "fun main() num{\n" ++
+        "num x=1;\n" ++
+        "\n" ++
+        "num y=2;\n" ++
+        "\n" ++
+        "\n" ++
+        "ret x+y;\n" ++
+        "}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_body_blank", ugly);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, path);
+
+    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    defer allocator.free(got);
+
+    // Preserve blank lines between statements (normalize 2+ newlines to a blank line).
+    const expected =
+        "fun main() num {\n" ++
+        "  num x = 1;\n" ++
+        "\n" ++
+        "  num y = 2;\n" ++
+        "\n" ++
+        "  ret x + y;\n" ++
+        "}\n";
+    try std.testing.expectEqualStrings(expected, got);
+}
+
+test "-fmt preserves blank lines between top-level constructs" {
+    const allocator = std.testing.allocator;
+
+    const ugly =
+        "compound A{num x;}\n" ++
+        "\n" ++
+        "quirk Q{f() num;}\n" ++
+        "\n" ++
+        "impl A Q{f() num{ret self.x;}}\n" ++
+        "\n" ++
+        "fun main(){}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_top_blank", ugly);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, path);
+
+    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    defer allocator.free(got);
+
+    const expected =
+        "compound A {\n" ++
+        "  num x;\n" ++
+        "}\n" ++
+        "\n" ++
+        "quirk Q {\n" ++
+        "  f() num;\n" ++
+        "}\n" ++
+        "\n" ++
+        "impl A Q {\n" ++
+        "  f() num {\n" ++
+        "    ret self.x;\n" ++
+        "  }\n" ++
+        "}\n" ++
+        "\n" ++
+        "fun main() {\n" ++
+        "}\n";
     try std.testing.expectEqualStrings(expected, got);
 }
 
@@ -129,7 +227,7 @@ test "-fmt groups imports and globals at top" {
         "num y = 2;\n" ++
         "\n" ++
         "fun main() num {\n" ++
-        "    ret 0;\n" ++
+        "  ret 0;\n" ++
         "}\n";
 
     try std.testing.expectEqualStrings(expected, got);
@@ -172,9 +270,109 @@ test "-fmt-all formats local imports recursively (skips std.*)" {
     defer allocator.free(got_import);
     const expected_imported =
         "fun add(num a, num b) num {\n" ++
-        "    ret a + b;\n" ++
+        "  ret a + b;\n" ++
         "}\n";
     try std.testing.expectEqualStrings(expected_imported, got_import);
+}
+
+test "-fmt output still parses (quirks/ops)" {
+    const allocator = std.testing.allocator;
+
+    const ugly =
+        "imp std.io;\n" ++
+        "compound Point{num x;num y;}\n" ++
+        "quirk Shape{area() num;translate(num dx,num dy);}\n" ++
+        "compound Rectangle{Point a;Point b;}\n" ++
+        "impl Rectangle Shape{area() num{num w=self.b.x-self.a.x;num h=self.b.y-self.a.y;ret w*h;}translate(num dx,num dy){self.a.x+=dx;self.a.y+=dy;}}\n" ++
+        "fun main(){Rectangle r;Shape s=&r;printf(\"%d\\n\",s.area());}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_parse", ugly);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, path);
+    try expectFileParses(allocator, path);
+}
+
+test "-fmt removes if-condition parentheses" {
+    const allocator = std.testing.allocator;
+
+    const ugly =
+        "fun main() num{\n" ++
+        "num x=1;\n" ++
+        "if(x<0){ret 0;}\n" ++
+        "if((x<0)||(x>10)){ret 1;}\n" ++
+        "ret 2;\n" ++
+        "}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_if_paren", ugly);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, path);
+
+    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    defer allocator.free(got);
+
+    // Outer parens are removed; ensure a space after `if`.
+    // Inner parens may remain for grouping in complex conditions.
+    try std.testing.expect(std.mem.indexOf(u8, got, "if(") == null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "if x") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "||") != null);
+}
+
+test "-fmt keeps parentheses for single-statement if" {
+    const allocator = std.testing.allocator;
+
+    const ugly =
+        "fun main() num{\n" ++
+        "num w=1;\n" ++
+        "if w < 0 w = -w;\n" ++
+        "ret 0;\n" ++
+        "}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_if_single_stmt", ugly);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, path);
+    try expectFileParses(allocator, path);
+
+    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    defer allocator.free(got);
+
+    try std.testing.expect(std.mem.indexOf(u8, got, "if (") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, ") w") != null);
+}
+
+test "-fmt never introduces scientific notation" {
+    const allocator = std.testing.allocator;
+
+    const ugly =
+        "fun main() num{\n" ++
+        "ret 3.14159;\n" ++
+        "}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_float", ugly);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, path);
+
+    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    defer allocator.free(got);
+
+    try std.testing.expect(std.mem.indexOf(u8, got, "3.14159") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "3.14159e") == null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "3.14159E") == null);
 }
 
 test "-fmt-all has cycle protection" {

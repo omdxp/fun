@@ -419,7 +419,14 @@ fn token_text(allocator: mem.Allocator, t: token.Token) ![]const u8 {
             }
 
             const base = switch (t.data) {
-                .dnum => try std.fmt.allocPrint(allocator, "{}", .{t.data.dnum}),
+                .dnum => blk: {
+                    // Fun doesn't support scientific notation (e.g. `3.14159e0`).
+                    // Use a decimal formatter that never emits exponent notation.
+                    var buf = std.ArrayList(u8).init(allocator);
+                    errdefer buf.deinit();
+                    try std.fmt.format(buf.writer(), "{d}", .{t.data.dnum});
+                    break :blk try buf.toOwnedSlice();
+                },
                 .llnum => try std.fmt.allocPrint(allocator, "{d}", .{t.data.llnum}),
                 .lnum => try std.fmt.allocPrint(allocator, "{d}", .{t.data.lnum}),
                 .inum => try std.fmt.allocPrint(allocator, "{d}", .{t.data.inum}),
@@ -495,11 +502,99 @@ const EmitState = struct {
     allocator: mem.Allocator,
 };
 
+const fmt_indent_width: usize = 2;
+
+fn ensureBlankLine(out: *std.ArrayList(u8)) !void {
+    // Ensure output ends with at least two '\n' characters.
+    const n = out.items.len;
+    if (n >= 2 and out.items[n - 1] == '\n' and out.items[n - 2] == '\n') return;
+    if (n >= 1 and out.items[n - 1] == '\n') {
+        try out.append('\n');
+        return;
+    }
+    try out.append('\n');
+    try out.append('\n');
+}
+
+fn is_top_level_construct_keyword(kw: []const u8) bool {
+    return std.mem.eql(u8, kw, "fun") or
+        std.mem.eql(u8, kw, "compound") or
+        std.mem.eql(u8, kw, "quirk") or
+        std.mem.eql(u8, kw, "impl");
+}
+
 fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
     var idx: usize = 0;
+    var pending_newlines: usize = 0;
+    var cond_paren_depth: usize = 0;
+    var skipping_cond_outer_parens: bool = false;
+    var wrap_cond_open_at: ?usize = null;
+    var wrap_cond_close_before: ?usize = null;
+    var prev_unary_prefix: bool = false;
     while (idx < toks.len) : (idx += 1) {
         const t2 = toks[idx];
-        if (t2.type == .NewLine) continue;
+        if (t2.type == .NewLine) {
+            pending_newlines += 1;
+            continue;
+        }
+
+        // Preserve blank lines (2+ newlines) between statements/constructs.
+        if (pending_newlines >= 2) {
+            if (!state.at_line_start.*) {
+                try state.out.append('\n');
+                state.at_line_start.* = true;
+            }
+            try ensureBlankLine(state.out);
+            state.at_line_start.* = true;
+            state.prev_token.* = null;
+        }
+        pending_newlines = 0;
+
+        // Strip outer parentheses in conditions: `if (cond)` -> `if cond`.
+        // Preserve inner parentheses to keep grouping.
+        // Implementation note: only skip the outermost pair; emit all inner tokens via the
+        // normal formatting path so spacing rules still apply (notably `if (`).
+        if (skipping_cond_outer_parens) {
+            if (t2.type == .Operator and std.mem.eql(u8, t2.data.sval.items, "(")) {
+                if (cond_paren_depth == 0) {
+                    cond_paren_depth = 1;
+                    continue; // skip outer `(`
+                }
+                cond_paren_depth += 1; // inner `(`
+            }
+            if (t2.type == .Symbol and t2.data.cval == ')') {
+                if (cond_paren_depth == 1) {
+                    cond_paren_depth = 0;
+                    skipping_cond_outer_parens = false;
+                    continue; // skip outer `)`
+                }
+                if (cond_paren_depth > 1) {
+                    cond_paren_depth -= 1; // inner `)`
+                }
+            }
+        }
+
+        // For single-statement `if/elif` (no `{}`), keep/add parentheses around the condition
+        // to disambiguate where the condition ends.
+        // Example: `if w < 0 w = -w;` must become `if (w < 0) w = -w;`.
+        if (wrap_cond_open_at) |open_at| {
+            if (idx == open_at) {
+                const last2 = if (state.out.items.len > 0) state.out.items[state.out.items.len - 1] else 0;
+                if (last2 != ' ' and last2 != '\n' and last2 != '\t') try state.out.append(' ');
+                try state.out.append('(');
+                // Prevent the normal spacing rules from inserting a space after `(`.
+                state.prev_token.* = null;
+                wrap_cond_open_at = null;
+            }
+        }
+        if (wrap_cond_close_before) |close_before| {
+            if (idx == close_before) {
+                try state.out.append(')');
+                try state.out.append(' ');
+                state.prev_token.* = null;
+                wrap_cond_close_before = null;
+            }
+        }
 
         if (t2.type == .Comment) {
             if (!state.at_line_start.*) {
@@ -507,7 +602,7 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
                 state.at_line_start.* = true;
             }
             if (state.at_line_start.*) {
-                try state.out.appendNTimes(' ', state.indent.* * 4);
+                try state.out.appendNTimes(' ', state.indent.* * fmt_indent_width);
             }
             const s2 = try token_text(state.allocator, t2);
             defer state.allocator.free(s2);
@@ -518,6 +613,111 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
             continue;
         }
 
+        if (t2.type == .Keyword) {
+            const kw2 = t2.data.sval.items;
+            if (std.mem.eql(u8, kw2, "if") or std.mem.eql(u8, kw2, "elif")) {
+                // Decide whether this `if/elif` is a block (`{}`) or a single-statement form.
+                // If it's a block and the condition is parenthesized, we strip the outer parens.
+                // If it's single-statement and the condition is NOT parenthesized, we add parens.
+                var jcond: usize = idx + 1;
+                while (jcond < toks.len and (toks[jcond].type == .NewLine or toks[jcond].type == .Comment)) : (jcond += 1) {}
+                if (jcond < toks.len) {
+                    const cond_has_parens = toks[jcond].type == .Operator and std.mem.eql(u8, toks[jcond].data.sval.items, "(");
+
+                    // Scan forward to determine if this `if` uses a `{` block before the next `;`.
+                    var depth_paren: isize = 0;
+                    var depth_bracket: isize = 0;
+                    var is_block: bool = false;
+                    var is_single_stmt: bool = false;
+                    var jscan: usize = jcond;
+                    while (jscan < toks.len) : (jscan += 1) {
+                        const tj = toks[jscan];
+                        if (tj.type == .NewLine or tj.type == .Comment) continue;
+                        if (tj.type == .Operator and std.mem.eql(u8, tj.data.sval.items, "(")) depth_paren += 1;
+                        if (tj.type == .Symbol and tj.data.cval == ')') {
+                            if (depth_paren > 0) depth_paren -= 1;
+                        }
+                        if (tj.type == .Operator and std.mem.eql(u8, tj.data.sval.items, "[")) depth_bracket += 1;
+                        if (tj.type == .Symbol and tj.data.cval == ']') {
+                            if (depth_bracket > 0) depth_bracket -= 1;
+                        }
+
+                        if (depth_paren == 0 and depth_bracket == 0 and tj.type == .Symbol) {
+                            if (tj.data.cval == '{') {
+                                is_block = true;
+                                break;
+                            }
+                            if (tj.data.cval == ';') {
+                                is_single_stmt = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (is_block and cond_has_parens) {
+                        skipping_cond_outer_parens = true;
+                        cond_paren_depth = 0;
+                    } else if (is_single_stmt and !cond_has_parens) {
+                        // Find a reasonable statement start boundary so we can wrap only the condition.
+                        const stmt_keywords = [_][]const u8{ "ret", "break", "continue", "fit", "for", "if" };
+                        const assign_ops = [_][]const u8{ "=", "+=", "-=", "*=", "/=", "++", "--" };
+
+                        var stmt_start: ?usize = null;
+                        var depthp: isize = 0;
+                        var depthb: isize = 0;
+                        var prev_sig_at_depth0: ?usize = null;
+                        var jfind: usize = jcond;
+                        while (jfind < toks.len) : (jfind += 1) {
+                            const tj = toks[jfind];
+                            if (tj.type == .NewLine or tj.type == .Comment) continue;
+
+                            if (tj.type == .Operator and std.mem.eql(u8, tj.data.sval.items, "(")) depthp += 1;
+                            if (tj.type == .Symbol and tj.data.cval == ')') {
+                                if (depthp > 0) depthp -= 1;
+                            }
+                            if (tj.type == .Operator and std.mem.eql(u8, tj.data.sval.items, "[")) depthb += 1;
+                            if (tj.type == .Symbol and tj.data.cval == ']') {
+                                if (depthb > 0) depthb -= 1;
+                            }
+
+                            if (depthp == 0 and depthb == 0) {
+                                if (tj.type == .Symbol and tj.data.cval == ';') break;
+
+                                if (tj.type == .Keyword) {
+                                    const w = tj.data.sval.items;
+                                    for (stmt_keywords) |skw| {
+                                        if (std.mem.eql(u8, w, skw)) {
+                                            stmt_start = jfind;
+                                            break;
+                                        }
+                                    }
+                                    if (stmt_start != null) break;
+                                }
+
+                                if (tj.type == .Operator) {
+                                    const op = tj.data.sval.items;
+                                    for (assign_ops) |aop| {
+                                        if (std.mem.eql(u8, op, aop)) {
+                                            stmt_start = prev_sig_at_depth0;
+                                            break;
+                                        }
+                                    }
+                                    if (stmt_start != null) break;
+                                }
+
+                                prev_sig_at_depth0 = jfind;
+                            }
+                        }
+
+                        if (stmt_start) |ss| {
+                            wrap_cond_open_at = jcond;
+                            wrap_cond_close_before = ss;
+                        }
+                    }
+                }
+            }
+        }
+
         // Handle closing brace with optional same-line `elif`/`else`.
         if (t2.type == .Symbol and t2.data.cval == '}') {
             if (!state.at_line_start.*) {
@@ -525,7 +725,7 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
                 state.at_line_start.* = true;
             }
             if (state.indent.* > 0) state.indent.* -= 1;
-            try state.out.appendNTimes(' ', state.indent.* * 4);
+            try state.out.appendNTimes(' ', state.indent.* * fmt_indent_width);
             try state.out.append('}');
 
             // Look ahead for `elif`/`else`.
@@ -548,8 +748,8 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
             if (state.indent.* == 0) {
                 var k2 = idx + 1;
                 while (k2 < toks.len and (toks[k2].type == .NewLine or toks[k2].type == .Comment)) : (k2 += 1) {}
-                if (k2 < toks.len and toks[k2].type == .Keyword and std.mem.eql(u8, toks[k2].data.sval.items, "fun")) {
-                    try state.out.append('\n');
+                if (k2 < toks.len and toks[k2].type == .Keyword and is_top_level_construct_keyword(toks[k2].data.sval.items)) {
+                    try ensureBlankLine(state.out);
                     state.at_line_start.* = true;
                 }
             }
@@ -560,13 +760,26 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
 
         // Indent at start of line.
         if (state.at_line_start.*) {
-            try state.out.appendNTimes(' ', state.indent.* * 4);
+            try state.out.appendNTimes(' ', state.indent.* * fmt_indent_width);
             state.at_line_start.* = false;
         }
 
         // Decide whether to add a space before this token.
         if (state.prev_token.*) |pt2| {
             const needs_space = blk: {
+                if (prev_unary_prefix) {
+                    // Keep unary prefix operators glued to their operand: `-w`, `-1`, `+(x)`.
+                    prev_unary_prefix = false;
+                    break :blk false;
+                }
+                if (pt2.type == .Keyword) {
+                    const pkw2 = pt2.data.sval.items;
+                    if (std.mem.eql(u8, pkw2, "if") or std.mem.eql(u8, pkw2, "elif")) {
+                        // Always separate the keyword from the start of its condition, even if
+                        // the condition starts with an inner grouping `(`.
+                        break :blk true;
+                    }
+                }
                 if (t2.type == .Symbol) {
                     const c2 = t2.data.cval;
                     if (c2 == ',' or c2 == ';' or c2 == ')' or c2 == ']' or c2 == '}' or c2 == ':') break :blk false;
@@ -579,6 +792,11 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
                 if (pt2.type == .Symbol) {
                     const pc2 = pt2.data.cval;
                     if (pc2 == '(' or pc2 == '[' or pc2 == '{') break :blk false;
+                }
+                if (t2.type == .Operator and (std.mem.eql(u8, t2.data.sval.items, "(") or std.mem.eql(u8, t2.data.sval.items, "["))) {
+                    // Distinguish grouping after spaced operators (e.g. `|| (`) from calls/indexing (e.g. `foo(`).
+                    if (pt2.type == .Operator and operator_needs_spaces(pt2.data.sval.items)) break :blk true;
+                    break :blk false;
                 }
                 if (t2.type == .Operator) {
                     break :blk operator_needs_spaces(t2.data.sval.items);
@@ -649,6 +867,22 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
         const s2 = try token_text(state.allocator, t2);
         defer state.allocator.free(s2);
         try state.out.appendSlice(s2);
+
+        // Track unary prefix ops so we don't insert a space after them.
+        if (t2.type == .Operator) {
+            const op2 = t2.data.sval.items;
+            if ((std.mem.eql(u8, op2, "-") or std.mem.eql(u8, op2, "+"))) {
+                const unary_ctx = blk: {
+                    const prev = state.prev_token.*;
+                    if (prev == null) break :blk true;
+                    const pt = prev.?;
+                    if (is_word_like(pt)) break :blk false;
+                    if (pt.type == .Symbol and is_closing_symbol(pt.data.cval)) break :blk false;
+                    break :blk true;
+                };
+                if (unary_ctx) prev_unary_prefix = true;
+            }
+        }
         state.prev_token.* = t2;
     }
 }
@@ -692,7 +926,16 @@ pub fn format_file_in_place(allocator: mem.Allocator, input_file: []const u8) !v
     var i: usize = 0;
     while (i < tokens.len) : (i += 1) {
         const t = tokens[i];
-        if (t.type == .NewLine) continue;
+        if (t.type == .NewLine) {
+            // Keep newlines so the emitter can preserve blank lines (2+ newlines).
+            // A single newline is treated as normal whitespace by the emitter.
+            if (brace_depth == 0 and pending_comments.items.len > 0) {
+                try pending_comments.append(t);
+            } else {
+                try rest.append(t);
+            }
+            continue;
+        }
 
         const is_top = brace_depth == 0;
         const is_stmt_start = is_top and paren_depth == 0 and bracket_depth == 0 and can_start_stmt;

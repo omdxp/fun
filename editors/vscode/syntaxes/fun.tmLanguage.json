@@ -6,12 +6,33 @@
     { "include": "#comments" },
     { "include": "#strings" },
     { "include": "#numbers" },
+    { "include": "#typeDeclarations" },
     { "include": "#types" },
     { "include": "#functions" },
     { "include": "#booleans" },
     { "include": "#keywords" }
   ],
   "repository": {
+    "typeDeclarations": {
+      "patterns": [
+        {
+          "name": "meta.type.declaration.struct.fun",
+          "match": "\\b(compound)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": { "name": "storage.type.struct.fun" },
+            "2": { "name": "entity.name.type.struct.fun" }
+          }
+        },
+        {
+          "name": "meta.type.declaration.interface.fun",
+          "match": "\\b(quirk)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": { "name": "storage.type.interface.fun" },
+            "2": { "name": "entity.name.type.interface.fun" }
+          }
+        }
+      ]
+    },
     "comments": {
       "patterns": [
         {

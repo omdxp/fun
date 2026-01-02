@@ -133,6 +133,41 @@
 			"isBackground": false,
 			"problemMatcher": [],
 			"group": "test"
+		},
+		{
+			"label": "test (kill fls first)",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Set-Location \"C:\\Users\\omarb\\Projects\\Zig\\fun\"; Get-Process fls -ErrorAction SilentlyContinue | Stop-Process -Force; zig build test; exit $LASTEXITCODE"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "test (kill fls first, capture log)",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Set-Location \"C:\\Users\\omarb\\Projects\\Zig\\fun\"; Get-Process fls -ErrorAction SilentlyContinue | Stop-Process -Force; zig build test *>&1 | Tee-Object -FilePath .\\_zig_test_log_fmtfix.txt; exit $LASTEXITCODE"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "check fls processes",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Get-Process fls -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,Path | Format-Table -AutoSize | Out-String -Width 200; exit 0"
+			],
+			"isBackground": false
 		}
 	]
 }

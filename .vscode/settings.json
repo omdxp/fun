@@ -1,6 +1,4 @@
 {
-  "fun.fls.path": "path/to/fls.exe",
-  "fun.fls.funPath": "path/to/fun.exe",
   "files.associations": {
     "*.fn": "fun"
   }
