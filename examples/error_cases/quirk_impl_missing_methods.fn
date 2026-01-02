@@ -1,0 +1,20 @@
+// Expect: compiler error about missing quirk methods
+compound Point {
+    num x;
+}
+quirk Q {
+    a() num;
+    b(num x) num;
+}
+// Missing method `b(num x) num`
+impl Point Q {
+    a() num {
+        ret 1;
+    }
+}
+
+fun main() {
+    Point p;
+    Q q = & p;
+    // Using q would require a complete impl.
+}

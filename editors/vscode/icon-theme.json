@@ -1,0 +1,10 @@
+{
+  "iconDefinitions": {
+    "fun-file": {
+      "iconPath": "./fun.png"
+    }
+  },
+  "fileExtensions": {
+    "fn": "fun-file"
+  }
+}

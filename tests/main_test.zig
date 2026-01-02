@@ -13,6 +13,7 @@ comptime {
     _ = @import("for_test.zig");
     _ = @import("fit_exhaustive_test.zig");
     _ = @import("typecheck_test.zig");
+    _ = @import("fls_e2e_test.zig");
 }
 
 test {

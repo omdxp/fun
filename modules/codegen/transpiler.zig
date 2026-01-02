@@ -522,6 +522,10 @@ pub const TranspileProcess = struct {
 
             const sig = reg.quirk_sig_by_name.get(quirk_name) orelse quirk_name;
 
+            // Validate: quirk impl must implement all quirk methods.
+            // This is a compiler-time error so users get a clear missing-method list.
+            try proc.validate_quirk_impl_complete(n, type_name, quirk_name, sig, reg);
+
             const key: ImplKey = .{ .type_name = type_name, .quirk_sig = sig };
             if (reg.impls_by_key.contains(key)) {
                 return TranspileError.DuplicateSymbol;
@@ -530,6 +534,209 @@ pub const TranspileProcess = struct {
             reg.impls_by_key.put(key, n) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
+        }
+    }
+
+    fn validate_quirk_impl_complete(
+        self: *Self,
+        impl_node: *ast.Node,
+        type_name: []const u8,
+        quirk_name: []const u8,
+        quirk_sig: []const u8,
+        reg: *TypeRegistry,
+    ) TranspileError!void {
+        const qnode = reg.quirks_by_sig.get(quirk_sig) orelse {
+            self.report_type_error(impl_node.*, "unknown quirk '{s}'", .{quirk_name});
+            return TranspileError.SymbolNotDefined;
+        };
+        if (qnode.node_variant == null) return TranspileError.UnsupportedNodeType;
+        const q = qnode.node_variant.?.quirk;
+
+        if (impl_node.node_variant == null) return TranspileError.UnsupportedNodeType;
+        const im = impl_node.node_variant.?.impl;
+
+        // Build a lookup from base method name -> function node.
+        // Impl methods are parsed as Function nodes with generated names:
+        // `<Type>__<Quirk>__<method>`.
+        var methods_by_name = std.StringHashMap(*ast.Node).init(self.backing_allocator);
+        defer methods_by_name.deinit();
+
+        for (im.methods.items()) |m_ptr| {
+            const m = m_ptr.*;
+            if (m.type != .Function or m.node_variant == null) continue;
+            const fnv = m.node_variant.?.function;
+            const gen = if (fnv.name) |nm| nm.items else continue;
+            const base = base_method_name_from_generated(gen);
+            if (base.len == 0) continue;
+            // Keep the first occurrence; duplicates are already handled elsewhere.
+            if (!methods_by_name.contains(base)) {
+                methods_by_name.put(base, m_ptr) catch return TranspileError.MemoryAllocationFailed;
+            }
+        }
+
+        // Collect missing methods.
+        var missing = std.ArrayList(ast.QuirkMethodSig).init(self.backing_allocator);
+        defer missing.deinit();
+
+        for (q.methods.items()) |qm| {
+            const name = qm.name.items;
+            const m_ptr = methods_by_name.get(name) orelse {
+                missing.append(qm) catch return TranspileError.MemoryAllocationFailed;
+                continue;
+            };
+            const m = m_ptr.*;
+            const fnv = m.node_variant.?.function;
+
+            // Must have a body to count as implemented.
+            if (fnv.body == null) {
+                missing.append(qm) catch return TranspileError.MemoryAllocationFailed;
+                continue;
+            }
+
+            // Signature must match the quirk declaration.
+            try self.validate_quirk_method_signature(impl_node, name, m, qm);
+        }
+
+        if (missing.items.len != 0) {
+            var buf = std.ArrayList(u8).init(self.backing_allocator);
+            defer buf.deinit();
+
+            buf.writer().print(
+                "impl '{s}' for quirk '{s}' is missing {d} method(s):\n",
+                .{ type_name, quirk_name, missing.items.len },
+            ) catch return TranspileError.MemoryAllocationFailed;
+
+            for (missing.items) |qm| {
+                buf.appendSlice("- ") catch return TranspileError.MemoryAllocationFailed;
+                try self.append_quirk_method_stub_sig(&buf, qm);
+                buf.append('\n') catch return TranspileError.MemoryAllocationFailed;
+            }
+
+            self.report_type_error(impl_node.*, "{s}", .{buf.items});
+            return TranspileError.TypeMismatch;
+        }
+    }
+
+    fn validate_quirk_method_signature(
+        self: *Self,
+        impl_node: *ast.Node,
+        method_name: []const u8,
+        impl_method_node: ast.Node,
+        quirk_sig: ast.QuirkMethodSig,
+    ) TranspileError!void {
+        if (impl_method_node.node_variant == null or impl_method_node.type != .Function) {
+            self.report_type_error(impl_node.*, "invalid impl method '{s}'", .{method_name});
+            return TranspileError.UnsupportedNodeType;
+        }
+        const impl_fn = impl_method_node.node_variant.?.function;
+
+        // Impl args include implicit `self` as arg0; quirk sig args do not.
+        const impl_args = if (impl_fn.args) |a| a.items() else &[_]*ast.Node{};
+        const quirk_args = quirk_sig.args.items();
+        const impl_user_args = if (impl_args.len > 0) impl_args[1..] else impl_args;
+
+        if (impl_user_args.len != quirk_args.len) {
+            self.report_type_error(
+                impl_node.*, 
+                "impl method '{s}' arg count mismatch for quirk method '{s}'",
+                .{ method_name, method_name },
+            );
+            return TranspileError.WrongArgCount;
+        }
+
+        // Return type: missing means void.
+        var impl_rtype: dtype.DataType = .{ .type_str = std.ArrayList(u8).init(self.backing_allocator) };
+        defer impl_rtype.type_str.deinit();
+        if (impl_fn.rtype) |rt| {
+            impl_rtype.type_str.appendSlice(rt.type_str.items) catch return TranspileError.MemoryAllocationFailed;
+            impl_rtype.pointer_depth = rt.pointer_depth;
+            impl_rtype.array = rt.array;
+            impl_rtype.type = rt.type;
+        } else {
+            impl_rtype.type = .Void;
+            impl_rtype.type_str.appendSlice("void") catch return TranspileError.MemoryAllocationFailed;
+        }
+
+        if (!dtype_sig_equal(&impl_rtype, &quirk_sig.rtype)) {
+            var want = std.ArrayList(u8).init(self.backing_allocator);
+            defer want.deinit();
+            var got = std.ArrayList(u8).init(self.backing_allocator);
+            defer got.deinit();
+            try self.append_dtype_sig(&want, &quirk_sig.rtype);
+            try self.append_dtype_sig(&got, &impl_rtype);
+            self.report_type_error(
+                impl_node.*, 
+                "impl method '{s}' return type mismatch: expected {s}, got {s}",
+                .{ method_name, want.items, got.items },
+            );
+            return TranspileError.ReturnTypeMismatch;
+        }
+
+        for (quirk_args, 0..) |qa, i| {
+            const impl_arg_node = impl_user_args[i];
+            if (impl_arg_node.node_variant == null or impl_arg_node.type != .Variable) {
+                self.report_type_error(impl_node.*, "invalid impl method '{s}' arg", .{method_name});
+                return TranspileError.UnsupportedNodeType;
+            }
+            const impl_dt = impl_arg_node.node_variant.?.variable.type;
+            if (!dtype_sig_equal(impl_dt, qa.dtype)) {
+                var want = std.ArrayList(u8).init(self.backing_allocator);
+                defer want.deinit();
+                var got = std.ArrayList(u8).init(self.backing_allocator);
+                defer got.deinit();
+                try self.append_dtype_sig(&want, qa.dtype);
+                try self.append_dtype_sig(&got, impl_dt);
+                self.report_type_error(
+                    impl_node.*,
+                    "impl method '{s}' arg {d} type mismatch: expected {s}, got {s}",
+                    .{ method_name, i + 1, want.items, got.items },
+                );
+                return TranspileError.TypeMismatch;
+            }
+        }
+    }
+
+    fn dtype_sig_equal(a: *const dtype.DataType, b: *const dtype.DataType) bool {
+        if (!mem.eql(u8, a.type_str.items, b.type_str.items)) return false;
+        if (a.pointer_depth != b.pointer_depth) return false;
+        const a_arr = a.array;
+        const b_arr = b.array;
+        if ((a_arr == null) != (b_arr == null)) return false;
+        if (a_arr) |aa| {
+            if (b_arr) |bb| {
+                if (aa.brackets.count != bb.brackets.count) return false;
+            } else return false;
+        }
+        return true;
+    }
+
+    fn base_method_name_from_generated(gen: []const u8) []const u8 {
+        // Split on "__" and return the last segment.
+        var i: usize = gen.len;
+        while (i >= 2) : (i -= 1) {
+            if (gen[i - 1] == '_' and gen[i - 2] == '_') {
+                return gen[i..];
+            }
+        }
+        return "";
+    }
+
+    fn append_quirk_method_stub_sig(self: *Self, buf: *std.ArrayList(u8), m: ast.QuirkMethodSig) TranspileError!void {
+        buf.appendSlice(m.name.items) catch return TranspileError.MemoryAllocationFailed;
+        buf.append('(') catch return TranspileError.MemoryAllocationFailed;
+
+        const args = m.args.items();
+        for (args, 0..) |a, i| {
+            if (i != 0) buf.appendSlice(", ") catch return TranspileError.MemoryAllocationFailed;
+            try self.append_dtype_sig(buf, a.dtype);
+            buf.append(' ') catch return TranspileError.MemoryAllocationFailed;
+            buf.appendSlice(a.name.items) catch return TranspileError.MemoryAllocationFailed;
+        }
+        buf.append(')') catch return TranspileError.MemoryAllocationFailed;
+
+        if (m.rtype.type != .Void) {
+            buf.append(' ') catch return TranspileError.MemoryAllocationFailed;
+            try self.append_dtype_sig(buf, &m.rtype);
         }
     }
 

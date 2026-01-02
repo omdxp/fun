@@ -126,3 +126,19 @@ See [CHANGELOG.md](CHANGELOG.md) for release notes and development history.
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
+## IDE / Language Server (fls)
+
+This repo includes a work-in-progress language server called `fls`.
+
+- Build: `zig build` (installs `fls` alongside `fun`)
+- The server speaks LSP over stdio and currently supports:
+  - Diagnostics (via `fun -no-exec`)
+  - Formatting (via `fun -fmt -no-exec`)
+
+### VS Code
+
+There is a minimal VS Code extension scaffold in [editors/vscode](editors/vscode).
+
+- Build `fun` + `fls` first (`zig build`)
+- Then open `editors/vscode` in VS Code and follow its README.

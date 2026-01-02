@@ -1,0 +1,97 @@
+{
+  "name": "fun-language",
+  "displayName": "Fun Language",
+  "description": "Fun language support (fls language server)",
+  "version": "0.1.2",
+  "publisher": "fun",
+  "icon": "fun.png",
+  "engines": {
+    "vscode": ">=1.74.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true
+    }
+  },
+  "activationEvents": [
+    "onLanguage:fun",
+    "onCommand:fun.restartLanguageServer",
+    "onCommand:fun.showLanguageServerOutput"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "fun.restartLanguageServer",
+        "title": "Fun: Restart Language Server"
+      },
+      {
+        "command": "fun.showLanguageServerOutput",
+        "title": "Fun: Show Language Server Output"
+      }
+    ],
+    "languages": [
+      {
+        "id": "fun",
+        "aliases": ["Fun", "fun"],
+        "extensions": [".fn"],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "fun.png",
+          "dark": "fun.png"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "fun",
+        "scopeName": "source.fun",
+        "path": "./syntaxes/fun.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Fun",
+      "properties": {
+        "fun.fls.path": {
+          "type": "string",
+          "default": "fls",
+          "description": "Path to the fls language server executable."
+        },
+        "fun.fls.funPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path to the fun executable; passed to fls via FLS_FUN_PATH."
+        }
+      }
+    },
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "fun.restartLanguageServer",
+          "when": "editorLangId == fun || resourceLangId == fun"
+        },
+        {
+          "command": "fun.showLanguageServerOutput",
+          "when": "editorLangId == fun || resourceLangId == fun"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "npm run compile && vsce package --allow-missing-repository --skip-license --allow-star-activation"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.74.0",
+    "typescript": "^5.3.3",
+    "@vscode/vsce": "^3.7.1"
+  }
+}

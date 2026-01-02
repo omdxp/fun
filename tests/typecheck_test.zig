@@ -285,3 +285,16 @@ test "typecheck quirk method arg type mismatch errors" {
 
     try runTranspileExpectError(std.testing.allocator, "typecheck_quirk_method_arg_mismatch.fn", input);
 }
+
+test "typecheck quirk impl missing methods errors" {
+    const input =
+        "compound Point { num x; }\n" ++
+        "quirk Q {\n" ++
+        "  a() num;\n" ++
+        "  b(num x) num;\n" ++
+        "}\n" ++
+        "impl Point Q {\n" ++
+        "  a() num { ret 1; }\n" ++
+        "}\n";
+    try runTranspileExpectError(std.testing.allocator, "typecheck_quirk_impl_missing_methods.fn", input);
+}

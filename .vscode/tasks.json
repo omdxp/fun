@@ -94,6 +94,45 @@
 			],
 			"isBackground": false,
 			"group": "test"
+		},
+		{
+			"label": "zig test fls_e2e_test.zig",
+			"type": "shell",
+			"command": "zig",
+			"args": [
+				"test",
+				"tests/fls_e2e_test.zig",
+				"-ODebug"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "zig test fls_e2e capture",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Set-Location \"C:\\Users\\omarb\\Projects\\Zig\\fun\"; zig test tests\\fls_e2e_test.zig -ODebug *>&1 | Tee-Object -FilePath .\\_fls_e2e_only_log.txt; exit $LASTEXITCODE"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "test capture log summary",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Set-Location \"C:\\Users\\omarb\\Projects\\Zig\\fun\"; zig build test --summary all *>&1 | Tee-Object -FilePath .\\_zig_test_log3.txt; exit $LASTEXITCODE"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
 		}
 	]
 }

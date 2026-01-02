@@ -367,6 +367,10 @@ pub const ParseProcess = struct {
         // `Point p;`, `Point p = ...;`, `Point* p;`, `Point** p = ...;`
         // Detect `<Identifier> [* ...] <Identifier>` and parse it as a variable declaration.
         if (t.?.type == .Identifier) {
+            // If the identifier is already a value in scope (e.g. local variable), do NOT
+            // treat `ident * ident` as a pointer declaration. This avoids mis-parsing
+            // expression statements like `w * h;` as `w* h;`.
+            if (self.transpile_proc.get_scope_entity(t.?.data.sval.items) == null) {
             var off: usize = 1;
             while (true) {
                 const tn = self.token_peek_n(off);
@@ -396,6 +400,7 @@ pub const ParseProcess = struct {
                 try self.parse_variable(dt, hist);
                 try self.expect_sym(';');
                 return;
+            }
             }
         }
 
@@ -1625,7 +1630,10 @@ pub const ParseProcess = struct {
                     }
                 }.check;
 
-                if (looks_like_decl(self)) {
+                // Avoid mis-parsing expressions like `w * h` as a pointer declaration `w* h`.
+                // Only consider this declaration fast-path when the leading identifier is not
+                // a known value in the current scope.
+                if (self.transpile_proc.get_scope_entity(t.?.data.sval.items) == null and looks_like_decl(self)) {
                     // Parse datatype + variable.
                     const dt = self.transpile_proc.allocator.create(dtype.DataType) catch |e| {
                         std.debug.print("Error creating DataType: {}\n", .{e});

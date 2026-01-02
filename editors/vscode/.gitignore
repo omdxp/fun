@@ -1,0 +1,8 @@
+**/.vscode/**
+**/.git/**
+**/*.ts
+**/*.map
+node_modules/**
+out/**
+!out/extension.js
+*.vsix

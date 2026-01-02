@@ -102,11 +102,41 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_module,
     });
 
+    // --- Define Language Server Executable (fls) ---
+    const fls_module = b.createModule(.{
+        .root_source_file = b.path("cmd/fls/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    fls_module.addImport("utils", utils_module);
+    fls_module.addImport("ast", ast_module);
+    fls_module.addImport("lexer", lexer_module);
+    fls_module.addImport("parser", parser_module);
+    fls_module.addImport("semantics", semantics_module);
+    fls_module.addImport("codegen", codegen_module);
+
+    const fls_exe = b.addExecutable(.{
+        .name = "fls",
+        .root_module = fls_module,
+    });
+
     const no_bin = b.option(bool, "no-bin", "skip emitting binary") orelse false;
     if (no_bin) {
         b.getInstallStep().dependOn(&exe.step);
+        b.getInstallStep().dependOn(&fls_exe.step);
     } else {
         b.installArtifact(exe);
+        // On Windows, fls.exe is often running (VS Code) and the file gets locked.
+        // A locked destination makes `zig build` fail with AccessDenied.
+        // Install fls to a "next" binary so builds succeed; the user can restart VS Code
+        // (or stop fls.exe) to replace fls.exe when convenient.
+        if (target.result.os.tag == .windows) {
+            const install_fls_next = b.addInstallArtifact(fls_exe, .{ .dest_sub_path = "fls-next.exe" });
+            b.getInstallStep().dependOn(&install_fls_next.step);
+        } else {
+            b.installArtifact(fls_exe);
+        }
     }
 
     // --- Install Fun standard library signature files ---
@@ -150,7 +180,30 @@ pub fn build(b: *std.Build) void {
     });
 
     const run_main_tests = b.addRunArtifact(main_tests);
+    // Some tests (e.g. LSP e2e) expect paths like zig-out/bin/* relative to the repo root.
+    run_main_tests.cwd = b.path(".");
+
+    // --- Define fls (language server) Unit Tests ---
+    // We keep fls tests close to the implementation (cmd/fls/main.zig) and wire them into `zig build test`.
+    const fls_test_module = b.createModule(.{
+        .root_source_file = b.path("cmd/fls/main.zig"),
+        .target = target,
+        .optimize = .Debug,
+    });
+    fls_test_module.addImport("utils", utils_module);
+    fls_test_module.addImport("ast", ast_module);
+    fls_test_module.addImport("lexer", lexer_module);
+    fls_test_module.addImport("parser", parser_module);
+    fls_test_module.addImport("semantics", semantics_module);
+    fls_test_module.addImport("codegen", codegen_module);
+
+    const fls_tests = b.addTest(.{ .root_module = fls_test_module });
+    const run_fls_tests = b.addRunArtifact(fls_tests);
+    run_fls_tests.cwd = b.path(".");
 
     const test_step = b.step("test", "Run unit tests");
+    // Ensure compiler + language server binaries (and stdlib layout) exist for tests that spawn them.
+    test_step.dependOn(b.getInstallStep());
     test_step.dependOn(&run_main_tests.step);
+    test_step.dependOn(&run_fls_tests.step);
 }
