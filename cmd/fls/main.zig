@@ -849,6 +849,10 @@ const LspServer = struct {
         if (findTokenIndexAt(idx.tokens, pos)) |tok_i| {
             if (tok_i > 0 and isDotToken(idx.tokens[tok_i - 1])) {
                 if (tok_i >= 2 and idx.tokens[tok_i - 2].kind == .identifier) {
+                    // Special-case stdlib namespace: `std.<module>.<symbol>`.
+                    if (try self.trySendStdNamespaceHover(id_val, uri, idx, tok_i)) {
+                        return;
+                    }
                     if (self.resolveTypeOfChainUpTo(idx, uri, pos, tok_i - 2)) |recv_type| {
                         const name = tok.text;
                         const hit = self.findMemberByContainer(uri, recv_type, name, .field) orelse
@@ -1148,6 +1152,11 @@ const LspServer = struct {
 
         if (tok.kind != .identifier) {
             try self.sendResponseJson(id_val, "[]");
+            return;
+        }
+
+        // stdlib namespace definition: `std.<module>.<symbol>`.
+        if (try self.trySendStdNamespaceDefinition(id_val, uri, idx, tok_i)) {
             return;
         }
 
@@ -1807,6 +1816,10 @@ const LspServer = struct {
             }
 
             if (receiver_last_ident_i) |ri| {
+                // Special-case: `std.<...>` behaves like a module namespace.
+                // This does not go through value-type inference.
+                if (try self.trySendStdNamespaceCompletions(id_val, uri, idx, pos, ri, prefix)) return;
+
                 if (self.resolveTypeOfChainUpTo(idx, uri, pos, ri)) |recv_type| {
                     var seen = std.StringHashMap(void).init(self.allocator);
                     defer {
@@ -1984,6 +1997,511 @@ const LspServer = struct {
         const json = try std.json.stringifyAlloc(self.allocator, list, .{});
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
+    }
+
+    fn trySendStdNamespaceCompletions(
+        self: *LspServer,
+        id_val: ?std.json.Value,
+        current_uri: []const u8,
+        idx: *const Index,
+        pos: Position,
+        receiver_last_ident_i: usize,
+        prefix: []const u8,
+    ) !bool {
+        _ = pos;
+
+        // Reconstruct the identifier chain for the receiver (e.g. `std.io` in `std.io.<cursor>`).
+        var ids = std.ArrayList(usize).init(self.allocator);
+        defer ids.deinit();
+
+        var start_i: usize = receiver_last_ident_i;
+        while (start_i >= 2) {
+            const dot = idx.tokens[start_i - 1];
+            const left = idx.tokens[start_i - 2];
+            if (isDotToken(dot) and left.kind == .identifier) {
+                start_i -= 2;
+                continue;
+            }
+            break;
+        }
+
+        var j: usize = start_i;
+        while (j <= receiver_last_ident_i) {
+            if (idx.tokens[j].kind != .identifier) return false;
+            try ids.append(j);
+            if (j == receiver_last_ident_i) break;
+            if (j + 2 > receiver_last_ident_i) return false;
+            if (!isDotToken(idx.tokens[j + 1])) return false;
+            j += 2;
+        }
+        if (ids.items.len == 0) return false;
+
+        const base = idx.tokens[ids.items[0]].text;
+        if (!std.mem.eql(u8, base, "std")) return false;
+
+        // We need a stdlib root to serve std namespace completions.
+        var stdlib_root = self.getStdlibRootPath() orelse null;
+        if (stdlib_root == null) {
+            self.tryStdlibRootFromCurrentDoc(current_uri);
+            stdlib_root = self.getStdlibRootPath() orelse null;
+        }
+        const root = stdlib_root orelse return false;
+
+        var items = std.ArrayList(CompletionItem).init(self.allocator);
+        defer {
+            for (items.items) |ci| {
+                self.allocator.free(ci.label);
+                if (ci.detail) |d| self.allocator.free(d);
+            }
+            items.deinit();
+        }
+
+        // Build the path under stdlib.
+        // We treat `std.<x>` as `std.c.<x>` unless the user explicitly wrote `.c.`.
+        var segs = std.ArrayList([]const u8).init(self.allocator);
+        defer segs.deinit();
+        try segs.append(root);
+        try segs.append("std");
+
+        var after_std: usize = 1;
+        const has_explicit_c = ids.items.len >= 2 and std.mem.eql(u8, idx.tokens[ids.items[1]].text, "c");
+        if (!has_explicit_c) {
+            try segs.append("c");
+        } else {
+            after_std = 2;
+        }
+
+        // Receiver chain beyond `std` (and possibly `c`).
+        var k: usize = after_std;
+        while (k < ids.items.len) : (k += 1) {
+            try segs.append(idx.tokens[ids.items[k]].text);
+        }
+
+        // Candidate module file: <root>/std/c/<chain...>.fn
+        const receiver_path_no_ext = try std.fs.path.join(self.allocator, segs.items);
+        defer self.allocator.free(receiver_path_no_ext);
+
+        const receiver_file = try std.mem.concat(self.allocator, u8, &[_][]const u8{ receiver_path_no_ext, ".fn" });
+        defer self.allocator.free(receiver_file);
+
+        // 1) If receiver resolves to a module file, complete its exported globals.
+        // Use openFile rather than access(): it differentiates files from directories.
+        var is_file: bool = false;
+        if (std.fs.path.isAbsolute(receiver_file)) {
+            if (std.fs.openFileAbsolute(receiver_file, .{}) catch null) |f| {
+                f.close();
+                is_file = true;
+            }
+        } else {
+            if (std.fs.cwd().openFile(receiver_file, .{}) catch null) |f| {
+                f.close();
+                is_file = true;
+            }
+        }
+
+        if (is_file) {
+            const receiver_uri = try pathToUri(self.allocator, receiver_file);
+            defer self.allocator.free(receiver_uri);
+            self.ensureDocIndexedFromDisk(receiver_uri) catch {};
+            const doc = self.docs.get(receiver_uri) orelse return false;
+            const didx = doc.index orelse return false;
+
+            for (didx.symbols) |s| {
+                if (s.container_type != null) continue;
+                if (s.container_fn_range != null) continue;
+                if (prefix.len != 0 and !std.mem.startsWith(u8, s.name, prefix)) continue;
+
+                const kind: i64 = switch (s.kind) {
+                    .function => 3,
+                    .variable => 6,
+                    .struct_ => 7,
+                    .interface => 8,
+                    else => 6,
+                };
+
+                try items.append(.{
+                    .label = try self.allocator.dupe(u8, s.name),
+                    .kind = kind,
+                    .detail = if (s.detail) |d| try self.allocator.dupe(u8, d) else null,
+                });
+            }
+
+            const list: CompletionList = .{ .items = items.items };
+            const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+            defer self.allocator.free(json);
+            try self.sendResponseJson(id_val, json);
+            return true;
+        }
+
+        // 2) Otherwise treat receiver as a directory and list modules/subfolders.
+        if (std.fs.path.isAbsolute(receiver_path_no_ext)) {
+            if (std.fs.openDirAbsolute(receiver_path_no_ext, .{ .iterate = true }) catch null) |dir| {
+                var dir_mut = dir;
+                defer dir_mut.close();
+                var it = dir_mut.iterate();
+                while (it.next() catch null) |entry| {
+                    if (entry.kind == .directory) {
+                        if (prefix.len != 0 and !std.mem.startsWith(u8, entry.name, prefix)) continue;
+                        try items.append(.{ .label = try self.allocator.dupe(u8, entry.name), .kind = 19 });
+                    } else if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".fn")) {
+                        const base_name = entry.name[0 .. entry.name.len - 3];
+                        if (prefix.len != 0 and !std.mem.startsWith(u8, base_name, prefix)) continue;
+                        try items.append(.{ .label = try self.allocator.dupe(u8, base_name), .kind = 17 });
+                    }
+                }
+            }
+        }
+
+        // At `std.` we also want `c` to be visible, even though we default to it.
+        if (ids.items.len == 1) {
+            if (prefix.len == 0 or std.mem.startsWith(u8, "c", prefix)) {
+                try items.append(.{ .label = try self.allocator.dupe(u8, "c"), .kind = 19 });
+            }
+        }
+
+        const list: CompletionList = .{ .items = items.items };
+        const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+        defer self.allocator.free(json);
+        try self.sendResponseJson(id_val, json);
+        return true;
+    }
+
+    fn getStdlibRootForNamespace(self: *LspServer, current_uri: []const u8) ?[]const u8 {
+        var stdlib_root = self.getStdlibRootPath() orelse null;
+        if (stdlib_root == null) {
+            self.tryStdlibRootFromCurrentDoc(current_uri);
+            stdlib_root = self.getStdlibRootPath() orelse null;
+        }
+        return stdlib_root;
+    }
+
+    fn collectDotChainIdentifiersAround(
+        self: *LspServer,
+        idx: *const Index,
+        ident_i: usize,
+        ids: *std.ArrayList(usize),
+    ) !bool {
+        _ = self;
+        if (idx.tokens[ident_i].kind != .identifier) return false;
+
+        // Scan left over `. <ident>`.
+        var start_i: usize = ident_i;
+        while (start_i >= 2) {
+            const dot = idx.tokens[start_i - 1];
+            const left = idx.tokens[start_i - 2];
+            if (isDotToken(dot) and left.kind == .identifier) {
+                start_i -= 2;
+                continue;
+            }
+            break;
+        }
+
+        // Scan right over `. <ident>`.
+        var end_i: usize = ident_i;
+        while (end_i + 2 < idx.tokens.len) {
+            const dot = idx.tokens[end_i + 1];
+            const right = idx.tokens[end_i + 2];
+            if (isDotToken(dot) and right.kind == .identifier) {
+                end_i += 2;
+                continue;
+            }
+            break;
+        }
+
+        var j: usize = start_i;
+        while (j <= end_i) {
+            if (idx.tokens[j].kind != .identifier) return false;
+            try ids.append(j);
+            if (j == end_i) break;
+            if (j + 2 > end_i) return false;
+            if (!isDotToken(idx.tokens[j + 1])) return false;
+            j += 2;
+        }
+        return ids.items.len != 0;
+    }
+
+    fn buildStdModuleFilePathFromIds(
+        self: *LspServer,
+        current_uri: []const u8,
+        idx: *const Index,
+        ids: []const usize,
+        module_last_inclusive: usize,
+    ) !?[]u8 {
+        if (ids.len == 0) return null;
+        if (!std.mem.eql(u8, idx.tokens[ids[0]].text, "std")) return null;
+
+        const root = self.getStdlibRootForNamespace(current_uri) orelse return null;
+
+        var segs = std.ArrayList([]const u8).init(self.allocator);
+        defer segs.deinit();
+        try segs.append(root);
+        try segs.append("std");
+
+        const has_explicit_c = ids.len >= 2 and std.mem.eql(u8, idx.tokens[ids[1]].text, "c");
+        var after_std: usize = 1;
+        if (!has_explicit_c) {
+            try segs.append("c");
+        } else {
+            after_std = 2;
+        }
+
+        if (module_last_inclusive < after_std) return null;
+
+        var k: usize = after_std;
+        while (k <= module_last_inclusive) : (k += 1) {
+            try segs.append(idx.tokens[ids[k]].text);
+        }
+
+        const no_ext = try std.fs.path.join(self.allocator, segs.items);
+        errdefer self.allocator.free(no_ext);
+        const file_path = try std.mem.concat(self.allocator, u8, &[_][]const u8{ no_ext, ".fn" });
+        self.allocator.free(no_ext);
+        return file_path;
+    }
+
+    fn tryOpenExistingFile(self: *LspServer, abs_or_rel_path: []const u8) bool {
+        _ = self;
+        if (std.fs.path.isAbsolute(abs_or_rel_path)) {
+            if (std.fs.openFileAbsolute(abs_or_rel_path, .{}) catch null) |f| {
+                f.close();
+                return true;
+            }
+            return false;
+        }
+
+        if (std.fs.cwd().openFile(abs_or_rel_path, .{}) catch null) |f| {
+            f.close();
+            return true;
+        }
+        return false;
+    }
+
+    fn findTopLevelSymbol(idx: *const Index, name: []const u8) ?SymbolLite {
+        for (idx.symbols) |s| {
+            if (s.container_type != null) continue;
+            if (s.container_fn_range != null) continue;
+            if (std.mem.eql(u8, s.name, name)) return s;
+        }
+        return null;
+    }
+
+    fn trySendStdNamespaceDefinition(
+        self: *LspServer,
+        id_val: ?std.json.Value,
+        current_uri: []const u8,
+        idx: *const Index,
+        tok_i: usize,
+    ) !bool {
+        if (idx.tokens[tok_i].kind != .identifier) return false;
+
+        var ids = std.ArrayList(usize).init(self.allocator);
+        defer ids.deinit();
+        if (!try self.collectDotChainIdentifiersAround(idx, tok_i, &ids)) return false;
+        if (ids.items.len == 0) return false;
+
+        if (!std.mem.eql(u8, idx.tokens[ids.items[0]].text, "std")) return false;
+
+        var selected_idx_opt: ?usize = null;
+        for (ids.items, 0..) |ti, si| {
+            if (ti == tok_i) {
+                selected_idx_opt = si;
+                break;
+            }
+        }
+        const selected_idx = selected_idx_opt orelse return false;
+
+        // Clicked `std` itself -> jump to stdlib README.
+        if (selected_idx == 0) {
+            const root = self.getStdlibRootForNamespace(current_uri) orelse return false;
+            const readme_path = try std.fs.path.join(self.allocator, &.{ root, "README.md" });
+            defer self.allocator.free(readme_path);
+            if (!self.tryOpenExistingFile(readme_path)) return false;
+            const target_uri = try pathToUri(self.allocator, readme_path);
+            defer self.allocator.free(target_uri);
+            const locs = [_]Location{.{
+                .uri = target_uri,
+                .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 0 } },
+            }};
+            const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
+            defer self.allocator.free(json);
+            try self.sendResponseJson(id_val, json);
+            return true;
+        }
+
+        const has_explicit_c = ids.items.len >= 2 and std.mem.eql(u8, idx.tokens[ids.items[1]].text, "c");
+        const min_len: usize = if (has_explicit_c) @as(usize, 4) else @as(usize, 3);
+        const is_symbol = selected_idx == ids.items.len - 1 and ids.items.len >= min_len;
+
+        if (is_symbol) {
+            const symbol_name = idx.tokens[ids.items[ids.items.len - 1]].text;
+            const module_last_inclusive: usize = ids.items.len - 2;
+            const module_file = (try self.buildStdModuleFilePathFromIds(current_uri, idx, ids.items, module_last_inclusive)) orelse return false;
+            defer self.allocator.free(module_file);
+            if (!self.tryOpenExistingFile(module_file)) return false;
+
+            const module_uri = try pathToUri(self.allocator, module_file);
+            defer self.allocator.free(module_uri);
+            self.ensureDocIndexedFromDisk(module_uri) catch {};
+            const doc = self.docs.get(module_uri) orelse return false;
+            const didx = doc.index orelse return false;
+
+            if (findTopLevelSymbol(didx, symbol_name)) |sym| {
+                const locs = [_]Location{.{ .uri = module_uri, .range = sym.selection_range }};
+                const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
+                defer self.allocator.free(json);
+                try self.sendResponseJson(id_val, json);
+                return true;
+            }
+
+            const locs = [_]Location{.{
+                .uri = module_uri,
+                .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 0 } },
+            }};
+            const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
+            defer self.allocator.free(json);
+            try self.sendResponseJson(id_val, json);
+            return true;
+        }
+
+        // Otherwise treat the selected identifier as a module segment and jump to its module file.
+        const module_file = (try self.buildStdModuleFilePathFromIds(current_uri, idx, ids.items, selected_idx)) orelse return false;
+        defer self.allocator.free(module_file);
+        if (!self.tryOpenExistingFile(module_file)) return false;
+        const module_uri = try pathToUri(self.allocator, module_file);
+        defer self.allocator.free(module_uri);
+        self.ensureDocIndexedFromDisk(module_uri) catch {};
+        const locs = [_]Location{.{
+            .uri = module_uri,
+            .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 0 } },
+        }};
+        const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
+        defer self.allocator.free(json);
+        try self.sendResponseJson(id_val, json);
+        return true;
+    }
+
+    fn trySendStdNamespaceHover(
+        self: *LspServer,
+        id_val: ?std.json.Value,
+        current_uri: []const u8,
+        idx: *const Index,
+        tok_i: usize,
+    ) !bool {
+        if (idx.tokens[tok_i].kind != .identifier) return false;
+
+        var ids = std.ArrayList(usize).init(self.allocator);
+        defer ids.deinit();
+        if (!try self.collectDotChainIdentifiersAround(idx, tok_i, &ids)) return false;
+        if (ids.items.len == 0) return false;
+        if (!std.mem.eql(u8, idx.tokens[ids.items[0]].text, "std")) return false;
+
+        var selected_idx_opt: ?usize = null;
+        for (ids.items, 0..) |ti, si| {
+            if (ti == tok_i) {
+                selected_idx_opt = si;
+                break;
+            }
+        }
+        const selected_idx = selected_idx_opt orelse return false;
+
+        const has_explicit_c = ids.items.len >= 2 and std.mem.eql(u8, idx.tokens[ids.items[1]].text, "c");
+        const min_len: usize = if (has_explicit_c) @as(usize, 4) else @as(usize, 3);
+        const is_symbol = selected_idx == ids.items.len - 1 and ids.items.len >= min_len;
+
+        var buf = std.ArrayList(u8).init(self.allocator);
+        defer buf.deinit();
+
+        if (is_symbol) {
+            const symbol_name = idx.tokens[ids.items[ids.items.len - 1]].text;
+            const module_last_inclusive: usize = ids.items.len - 2;
+            const module_file = (try self.buildStdModuleFilePathFromIds(current_uri, idx, ids.items, module_last_inclusive)) orelse return false;
+            defer self.allocator.free(module_file);
+            if (!self.tryOpenExistingFile(module_file)) return false;
+
+            const module_uri = try pathToUri(self.allocator, module_file);
+            defer self.allocator.free(module_uri);
+            self.ensureDocIndexedFromDisk(module_uri) catch {};
+            const doc = self.docs.get(module_uri) orelse return false;
+            const didx = doc.index orelse return false;
+
+            const sym = findTopLevelSymbol(didx, symbol_name) orelse return false;
+
+            try buf.writer().print("**{s}**\n\n", .{symbol_name});
+            if (sym.detail) |det| {
+                try buf.writer().print("```\n{s}\n```\n", .{det});
+            } else if (sym.kind == .variable) {
+                if (sym.value_type) |vt| {
+                    try buf.writer().print("```\n{s} {s}\n```\n", .{ vt, symbol_name });
+                } else {
+                    try buf.writer().print("_{s}_\n", .{@tagName(sym.kind)});
+                }
+            } else if (sym.kind == .struct_ or sym.kind == .interface) {
+                try buf.writer().print("```\n{s} {s}\n```\n", .{ if (sym.kind == .struct_) "compound" else "quirk", symbol_name });
+            } else {
+                try buf.writer().print("_{s}_\n", .{@tagName(sym.kind)});
+            }
+
+            _ = try appendDocCommentAboveLine(self.allocator, &buf, doc.text, sym.decl_range.start.line);
+
+            const hover: Hover = .{ .contents = .{ .value = buf.items }, .range = idx.tokens[tok_i].range };
+            const json = try std.json.stringifyAlloc(self.allocator, hover, .{});
+            defer self.allocator.free(json);
+            try self.sendResponseJson(id_val, json);
+            return true;
+        }
+
+        // Hover over a module segment: show a minimal module hint if the module file exists.
+        const module_file = (try self.buildStdModuleFilePathFromIds(current_uri, idx, ids.items, selected_idx)) orelse return false;
+        defer self.allocator.free(module_file);
+        if (!self.tryOpenExistingFile(module_file)) return false;
+
+        const name = idx.tokens[tok_i].text;
+        try buf.writer().print("**{s}**\n\n_module_\n", .{name});
+
+        const hover: Hover = .{ .contents = .{ .value = buf.items }, .range = idx.tokens[tok_i].range };
+        const json = try std.json.stringifyAlloc(self.allocator, hover, .{});
+        defer self.allocator.free(json);
+        try self.sendResponseJson(id_val, json);
+        return true;
+    }
+
+    fn tryGuessStdNamespaceCallSignature(
+        self: *LspServer,
+        current_uri: []const u8,
+        idx: *const Index,
+        callee_i: usize,
+        active_param: i64,
+    ) ?GuessedCallSignature {
+        if (idx.tokens[callee_i].kind != .identifier) return null;
+
+        var ids = std.ArrayList(usize).init(self.allocator);
+        defer ids.deinit();
+        if (!(self.collectDotChainIdentifiersAround(idx, callee_i, &ids) catch false)) return null;
+        if (ids.items.len == 0) return null;
+        if (!std.mem.eql(u8, idx.tokens[ids.items[0]].text, "std")) return null;
+
+        const has_explicit_c = ids.items.len >= 2 and std.mem.eql(u8, idx.tokens[ids.items[1]].text, "c");
+        const min_len: usize = if (has_explicit_c) @as(usize, 4) else @as(usize, 3);
+        if (ids.items.len < min_len) return null;
+
+        // We only handle `std.<module>.<fn>(...)` style calls here.
+        const symbol_name = idx.tokens[ids.items[ids.items.len - 1]].text;
+        if (!std.mem.eql(u8, symbol_name, idx.tokens[callee_i].text)) return null;
+
+        const module_last_inclusive: usize = ids.items.len - 2;
+        const module_file = (self.buildStdModuleFilePathFromIds(current_uri, idx, ids.items, module_last_inclusive) catch null) orelse return null;
+        defer self.allocator.free(module_file);
+        if (!self.tryOpenExistingFile(module_file)) return null;
+
+        const module_uri = pathToUri(self.allocator, module_file) catch return null;
+        defer self.allocator.free(module_uri);
+        self.ensureDocIndexedFromDisk(module_uri) catch {};
+        const doc = self.docs.get(module_uri) orelse return null;
+        const didx = doc.index orelse return null;
+
+        const sym = findTopLevelSymbol(didx, symbol_name) orelse return null;
+        const label = if (sym.detail) |d| d else symbol_name;
+        return .{ .label = label, .active_param = active_param };
     }
 
     fn parseImportSpecFromTokens(self: *LspServer, idx: *const Index, imp_i: usize) !?[]u8 {
@@ -2237,6 +2755,10 @@ const LspServer = struct {
 
                         // Member call: `recv.method(`
                         if (callee_i >= 2 and isDotToken(idx.tokens[callee_i - 1]) and idx.tokens[callee_i - 2].kind == .identifier) {
+                            // stdlib namespace call: `std.<module>.<fn>(...)`
+                            if (self.tryGuessStdNamespaceCallSignature(uri, idx, callee_i, active_param)) |sig| {
+                                return sig;
+                            }
                             if (self.resolveTypeOfChainUpTo(idx, uri, p, callee_i - 2)) |recv_type| {
                                 const hit = self.findMemberByContainer(uri, recv_type, callee.text, .method);
                                 if (hit) |h| {
