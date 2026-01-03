@@ -178,9 +178,11 @@ const LspServer = struct {
     stdin: std.fs.File,
     stdout: std.fs.File,
     fun_exe_path: []const u8,
+    fls_exe_path: ?[]u8 = null,
     published_diag_uris: std.StringHashMap(void),
     root_uri: ?[]u8 = null,
     root_path: ?[]u8 = null,
+    stdlib_root_path: ?[]u8 = null,
 
     fn init(allocator: Allocator) !LspServer {
         return .{
@@ -189,9 +191,11 @@ const LspServer = struct {
             .stdin = std.io.getStdIn(),
             .stdout = std.io.getStdOut(),
             .fun_exe_path = try findSiblingOrPathExe(allocator, "fun"),
+            .fls_exe_path = std.fs.selfExePathAlloc(allocator) catch null,
             .published_diag_uris = std.StringHashMap(void).init(allocator),
             .root_uri = null,
             .root_path = null,
+            .stdlib_root_path = null,
         };
     }
 
@@ -209,8 +213,71 @@ const LspServer = struct {
         }
         self.published_diag_uris.deinit();
         self.allocator.free(self.fun_exe_path);
+        if (self.fls_exe_path) |p| self.allocator.free(p);
         if (self.root_uri) |u| self.allocator.free(u);
         if (self.root_path) |p| self.allocator.free(p);
+        if (self.stdlib_root_path) |p| self.allocator.free(p);
+    }
+
+    fn getStdlibRootPath(self: *LspServer) ?[]const u8 {
+        if (self.stdlib_root_path) |p| return p;
+
+        const candidates = struct {
+            fn isStdlibRoot(path: []const u8) bool {
+                // Expect: <path>/std/<module>.fn
+                const std_dir = std.fs.path.join(std.heap.page_allocator, &.{ path, "std" }) catch return false;
+                defer std.heap.page_allocator.free(std_dir);
+                var d = std.fs.openDirAbsolute(std_dir, .{}) catch return false;
+                d.close();
+                return true;
+            }
+
+            fn trySet(self_ptr: *LspServer, path: []const u8) bool {
+                // Only accept if it looks like an actual stdlib root.
+                if (!isStdlibRoot(path)) return false;
+                self_ptr.stdlib_root_path = self_ptr.allocator.dupe(u8, path) catch return false;
+                return true;
+            }
+
+            fn tryFromEnv(self_ptr: *LspServer, name: []const u8) bool {
+                const v = std.process.getEnvVarOwned(self_ptr.allocator, name) catch return false;
+                defer self_ptr.allocator.free(v);
+                return trySet(self_ptr, v);
+            }
+
+            fn tryFromWorkspace(self_ptr: *LspServer) bool {
+                const root = self_ptr.root_path orelse return false;
+                const p = std.fs.path.join(self_ptr.allocator, &.{ root, "stdlib" }) catch return false;
+                defer self_ptr.allocator.free(p);
+                return trySet(self_ptr, p);
+            }
+
+            fn tryFromExe(self_ptr: *LspServer, exe_path: []const u8) bool {
+                const bin_dir = std.fs.path.dirname(exe_path) orelse return false;
+                const prefix = std.fs.path.dirname(bin_dir) orelse return false;
+
+                // Typical install layout:
+                // <prefix>/bin/fun(.exe)
+                // <prefix>/share/fun/stdlib/std/...
+                const p = std.fs.path.join(self_ptr.allocator, &.{ prefix, "share", "fun", "stdlib" }) catch return false;
+                defer self_ptr.allocator.free(p);
+                return trySet(self_ptr, p);
+            }
+        };
+
+        // Optional override for custom installs.
+        if (candidates.tryFromEnv(self, "FUN_STDLIB_DIR")) return self.stdlib_root_path.?;
+
+        // Repo/workspace checkout layout.
+        if (candidates.tryFromWorkspace(self)) return self.stdlib_root_path.?;
+
+        // Installed layout next to bundled binaries.
+        if (self.fls_exe_path) |p| {
+            if (candidates.tryFromExe(self, p)) return self.stdlib_root_path.?;
+        }
+        if (candidates.tryFromExe(self, self.fun_exe_path)) return self.stdlib_root_path.?;
+
+        return null;
     }
 
     fn run(self: *LspServer) !void {
@@ -1931,41 +1998,6 @@ const LspServer = struct {
         const ends_with_dot = after_imp.len != 0 and after_imp[after_imp.len - 1] == '.';
         const partial: []const u8 = if (ends_with_dot) "" else parts.items[parts.items.len - 1];
         const parent_count: usize = if (ends_with_dot) parts.items.len else (if (parts.items.len >= 1) parts.items.len - 1 else 0);
-
-        // Determine base dir.
-        var base_dir_path: []u8 = undefined;
-        if (parts.items.len != 0 and std.mem.eql(u8, parts.items[0], "std")) {
-            const root = self.root_path orelse return false;
-            var segs = std.ArrayList([]const u8).init(self.allocator);
-            defer segs.deinit();
-            try segs.append(root);
-            try segs.append("stdlib");
-            try segs.append("std");
-            // parent segments after `std`
-            var si: usize = 1;
-            while (si < parent_count) : (si += 1) {
-                if (parts.items[si].len != 0) try segs.append(parts.items[si]);
-            }
-            base_dir_path = try std.fs.path.join(self.allocator, segs.items);
-        } else {
-            const current_path = uriToPath(self.allocator, current_uri) catch return false;
-            defer self.allocator.free(current_path);
-            const current_dir = std.fs.path.dirname(current_path) orelse return false;
-
-            var segs = std.ArrayList([]const u8).init(self.allocator);
-            defer segs.deinit();
-            try segs.append(current_dir);
-            var si: usize = 0;
-            while (si < parent_count) : (si += 1) {
-                if (parts.items[si].len != 0) try segs.append(parts.items[si]);
-            }
-            base_dir_path = try std.fs.path.join(self.allocator, segs.items);
-        }
-        defer self.allocator.free(base_dir_path);
-
-        var dir = std.fs.openDirAbsolute(base_dir_path, .{ .iterate = true }) catch return false;
-        defer dir.close();
-
         var items = std.ArrayList(CompletionItem).init(self.allocator);
         defer {
             for (items.items) |ci| {
@@ -1975,15 +2007,61 @@ const LspServer = struct {
             items.deinit();
         }
 
-        var iter = dir.iterate();
-        while (try iter.next()) |entry| {
-            if (entry.kind == .directory) {
-                if (partial.len != 0 and !std.mem.startsWith(u8, entry.name, partial)) continue;
-                try items.append(.{ .label = try self.allocator.dupe(u8, entry.name), .kind = 19 }); // Folder
-            } else if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".fn")) {
-                const base = entry.name[0 .. entry.name.len - 3];
-                if (partial.len != 0 and !std.mem.startsWith(u8, base, partial)) continue;
-                try items.append(.{ .label = try self.allocator.dupe(u8, base), .kind = 17 }); // File
+        // Always suggest `std` at top-level after `imp`.
+        if (parent_count == 0 and std.mem.startsWith(u8, "std", partial)) {
+            try items.append(.{ .label = try self.allocator.dupe(u8, "std"), .kind = 19 }); // Folder
+        }
+
+        // Determine base dir for filesystem-backed completion.
+        var base_dir_path_opt: ?[]u8 = null;
+        if (parts.items.len != 0 and std.mem.eql(u8, parts.items[0], "std")) {
+            const stdlib_root = self.getStdlibRootPath() orelse null;
+            if (stdlib_root) |root| {
+                var segs = std.ArrayList([]const u8).init(self.allocator);
+                defer segs.deinit();
+                try segs.append(root);
+                try segs.append("std");
+                var si: usize = 1;
+                while (si < parent_count) : (si += 1) {
+                    if (parts.items[si].len != 0) try segs.append(parts.items[si]);
+                }
+                base_dir_path_opt = try std.fs.path.join(self.allocator, segs.items);
+            }
+        } else {
+            const current_path = uriToPath(self.allocator, current_uri) catch null;
+            if (current_path) |cp| {
+                defer self.allocator.free(cp);
+                const current_dir = std.fs.path.dirname(cp) orelse null;
+                if (current_dir) |cd| {
+                    var segs = std.ArrayList([]const u8).init(self.allocator);
+                    defer segs.deinit();
+                    try segs.append(cd);
+                    var si: usize = 0;
+                    while (si < parent_count) : (si += 1) {
+                        if (parts.items[si].len != 0) try segs.append(parts.items[si]);
+                    }
+                    base_dir_path_opt = try std.fs.path.join(self.allocator, segs.items);
+                }
+            }
+        }
+        defer if (base_dir_path_opt) |p| self.allocator.free(p);
+
+        if (base_dir_path_opt) |base_dir_path| {
+            if (std.fs.openDirAbsolute(base_dir_path, .{ .iterate = true }) catch null) |dir| {
+                var dir_mut = dir;
+                defer dir_mut.close();
+
+                var iter = dir_mut.iterate();
+                while (iter.next() catch null) |entry| {
+                    if (entry.kind == .directory) {
+                        if (partial.len != 0 and !std.mem.startsWith(u8, entry.name, partial)) continue;
+                        try items.append(.{ .label = try self.allocator.dupe(u8, entry.name), .kind = 19 });
+                    } else if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".fn")) {
+                        const base = entry.name[0 .. entry.name.len - 3];
+                        if (partial.len != 0 and !std.mem.startsWith(u8, base, partial)) continue;
+                        try items.append(.{ .label = try self.allocator.dupe(u8, base), .kind = 17 });
+                    }
+                }
             }
         }
 
@@ -2287,9 +2365,8 @@ const LspServer = struct {
         defer segs.deinit();
 
         if (std.mem.eql(u8, parts.items[0], "std")) {
-            const root = self.root_path orelse return null;
-            try segs.append(root);
-            try segs.append("stdlib");
+            const stdlib_root = self.getStdlibRootPath() orelse return null;
+            try segs.append(stdlib_root);
             try segs.append("std");
             if (parts.items.len == 1) return null;
             for (parts.items[1..]) |p| try segs.append(p);
