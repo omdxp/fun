@@ -2507,7 +2507,7 @@ pub const ParseProcess = struct {
         function_node.node_variant.?.function.args = parsed_args.args;
         function_node.node_variant.?.function.is_variadic = parsed_args.is_variadic;
         const rtype_token = self.token_peek_next();
-        if (rtype_token != null and rtype_token.?.type == .Keyword and utils.keyword_is_datatype(rtype_token.?.data.sval.items)) {
+        if (rtype_token != null and ((rtype_token.?.type == .Keyword and utils.keyword_is_datatype(rtype_token.?.data.sval.items)) or rtype_token.?.type == .Identifier)) {
             try self.parse_datatype(&dt);
         } else {
             var type_str = std.ArrayList(u8).init(self.transpile_proc.allocator);

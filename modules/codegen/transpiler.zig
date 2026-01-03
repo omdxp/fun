@@ -76,6 +76,18 @@ pub const TranspileProcessFlags = packed struct {
     outf: bool = false,
     /// Flag to print AST nodes. When true, prints the Abstract Syntax Tree nodes.
     ast: bool = false,
+
+    /// Flag to preload imported module symbols during parsing.
+    ///
+    /// This is primarily for parser identifier validation. Tooling (like `fls`) may disable
+    /// it when indexing from in-memory text to avoid filesystem churn and noisy diagnostics
+    /// when relative imports are resolved from a temp path.
+    preload_imports: bool = true,
+
+    /// Flag to preload stdlib signature modules during parsing.
+    ///
+    /// This is best-effort and non-fatal, but still touches the filesystem.
+    preload_std_imports: bool = true,
 };
 
 /// GlobalSymbolInfo tracks information about symbols across modules
@@ -807,6 +819,7 @@ pub const TranspileProcess = struct {
     /// This enables identifier validation in the parser to recognize functions defined in
     /// locally imported modules.
     pub fn preload_import_global_symbols(self: *Self, import_node: ast.Node, import_path: []const u8) GeneralError!void {
+        if (!self.flags.preload_imports) return;
         if (std.mem.indexOf(u8, import_path, "std.") != null) return;
 
         const full_path = try self.build_full_import_path(import_path);
@@ -1106,6 +1119,7 @@ pub const TranspileProcess = struct {
     /// This is for tooling/identifier validation: it allows `imp std.c.*;` (and the `std.*` alias)
     /// source of truth when installed, without changing codegen behavior.
     pub fn preload_std_import_global_symbols(self: *Self, import_node: ast.Node, import_path: []const u8) void {
+        if (!self.flags.preload_std_imports) return;
         const full_path_opt = self.build_stdlib_module_path(import_path) catch return;
         if (full_path_opt == null) return;
         const full_path = full_path_opt.?;
@@ -1502,6 +1516,115 @@ pub const TranspileProcess = struct {
         return self.lookup_plain_impl_method_fn_proc(root, type_name, method_name);
     }
 
+    fn lookup_quirk_impl_method_fn_for_self(self: *Self, type_name: []const u8, method_name: []const u8) ?[]const u8 {
+        const root = self.get_root();
+        if (root.type_registry == null) return null;
+        const reg = &root.type_registry.?;
+
+        var it = reg.impls_by_key.iterator();
+        while (it.next()) |entry| {
+            const key = entry.key_ptr.*;
+            if (!mem.eql(u8, key.type_name, type_name)) continue;
+
+            // Only consider quirk impls.
+            const impl_node = entry.value_ptr.*;
+            if (impl_node.node_variant == null) continue;
+            const im = impl_node.node_variant.?.impl;
+            if (im.quirk_name == null) continue;
+
+            // Ensure the quirk signature actually contains this method name.
+            const qnode = reg.quirks_by_sig.get(key.quirk_sig) orelse continue;
+            if (qnode.node_variant == null) continue;
+            const q = qnode.node_variant.?.quirk;
+            var has_method = false;
+            for (q.methods.items()) |qm| {
+                if (mem.eql(u8, qm.name.items, method_name)) {
+                    has_method = true;
+                    break;
+                }
+            }
+            if (!has_method) continue;
+
+            // Find the generated method function name by suffix match.
+            var suf_buf: [128]u8 = undefined;
+            const suf = (std.fmt.bufPrint(&suf_buf, "__{s}", .{method_name}) catch unreachable);
+            for (im.methods.items()) |m| {
+                if (m.type != .Function or m.node_variant == null) continue;
+                const fnv = m.node_variant.?.function;
+                if (fnv.name == null) continue;
+                const full = fnv.name.?.items;
+                if (mem.endsWith(u8, full, suf)) return full;
+            }
+        }
+        return null;
+    }
+
+    const QuirkImplMethodResolution = struct {
+        fn_name: ?[]const u8 = null,
+        quirk_name: ?[]const u8 = null,
+        ambiguous: bool = false,
+        other_quirk_name: ?[]const u8 = null,
+    };
+
+    fn resolve_quirk_impl_method_for_concrete(self: *Self, type_name: []const u8, method_name: []const u8) QuirkImplMethodResolution {
+        const root = self.get_root();
+        if (root.type_registry == null) return .{};
+        const reg = &root.type_registry.?;
+
+        var res: QuirkImplMethodResolution = .{};
+        var it = reg.impls_by_key.iterator();
+        while (it.next()) |entry| {
+            const key = entry.key_ptr.*;
+            if (!mem.eql(u8, key.type_name, type_name)) continue;
+
+            const impl_node = entry.value_ptr.*;
+            if (impl_node.node_variant == null) continue;
+            const im = impl_node.node_variant.?.impl;
+            if (im.quirk_name == null) continue;
+
+            const qnode = reg.quirks_by_sig.get(key.quirk_sig) orelse continue;
+            if (qnode.node_variant == null) continue;
+            const q = qnode.node_variant.?.quirk;
+            const qname = q.name.items;
+
+            var has_method = false;
+            for (q.methods.items()) |qm| {
+                if (mem.eql(u8, qm.name.items, method_name)) {
+                    has_method = true;
+                    break;
+                }
+            }
+            if (!has_method) continue;
+
+            var suf_buf: [128]u8 = undefined;
+            const suf = (std.fmt.bufPrint(&suf_buf, "__{s}", .{method_name}) catch unreachable);
+
+            var fn_name: ?[]const u8 = null;
+            for (im.methods.items()) |m| {
+                if (m.type != .Function or m.node_variant == null) continue;
+                const fnv = m.node_variant.?.function;
+                if (fnv.name == null) continue;
+                const full = fnv.name.?.items;
+                if (mem.endsWith(u8, full, suf)) {
+                    fn_name = full;
+                    break;
+                }
+            }
+            if (fn_name == null) continue;
+
+            if (res.fn_name == null) {
+                res.fn_name = fn_name;
+                res.quirk_name = qname;
+            } else {
+                // Multiple quirks implemented by this type share the same method name.
+                res.ambiguous = true;
+                res.other_quirk_name = qname;
+                return res;
+            }
+        }
+        return res;
+    }
+
     fn is_numeric_type(t: CheckedType) bool {
         return !t.is_array and t.pointer_depth == 0 and (t.base == .Num or t.base == .Dec);
     }
@@ -1807,12 +1930,32 @@ pub const TranspileProcess = struct {
 
                             var buf: [256]u8 = undefined;
                             const gen_name = std.fmt.bufPrint(&buf, "{s}__{s}", .{ recv_t.name.?, mname }) catch unreachable;
-                            plain_method_sig = fns.get(gen_name) orelse {
-                                self.report_type_error(node, "type '{s}' has no method '{s}'", .{ recv_t.name.?, mname });
-                                return TranspileError.NotCallable;
-                            };
-                            plain_method_name = mname;
-                            call_rtype = plain_method_sig.?.rtype;
+
+                            if (fns.get(gen_name)) |sig| {
+                                plain_method_sig = sig;
+                                plain_method_name = mname;
+                                call_rtype = sig.rtype;
+                            } else {
+                                // Also allow calling quirk-impl methods directly on concrete types.
+                                // If the type implements exactly one quirk that defines this method name,
+                                // lower/typecheck as a direct call to the generated impl function.
+                                const qres = self.resolve_quirk_impl_method_for_concrete(recv_t.name.?, mname);
+                                if (qres.ambiguous) {
+                                    self.report_type_error(node, "type '{s}' method '{s}' is ambiguous (quirks: '{s}', '{s}')", .{ recv_t.name.?, mname, qres.quirk_name orelse "<unknown>", qres.other_quirk_name orelse "<unknown>" });
+                                    return TranspileError.NotCallable;
+                                }
+                                if (qres.fn_name) |qfn| {
+                                    plain_method_sig = fns.get(qfn) orelse {
+                                        self.report_type_error(node, "type '{s}' has no method '{s}'", .{ recv_t.name.?, mname });
+                                        return TranspileError.NotCallable;
+                                    };
+                                    plain_method_name = mname;
+                                    call_rtype = plain_method_sig.?.rtype;
+                                } else {
+                                    self.report_type_error(node, "type '{s}' has no method '{s}'", .{ recv_t.name.?, mname });
+                                    return TranspileError.NotCallable;
+                                }
+                            }
                         }
                     } else {
                         self.report_type_error(node, "only calling named functions or quirk methods is supported", .{});
@@ -3630,6 +3773,16 @@ pub const TranspileProcess = struct {
 
         const reg = self.root_registry() orelse return;
 
+        // Plain impl methods (`impl Type { ... }`) can be called from within quirk impl
+        // method bodies. Emit their forward declarations up-front so C compilation
+        // never relies on implicit declarations.
+        // NOTE: Prototypes will also be emitted again in the "Plain impl methods" block;
+        // duplicate identical prototypes are OK in C.
+        var plain_emitted = std.StringHashMap(bool).init(self.backing_allocator);
+        defer plain_emitted.deinit();
+        try self.emit_plain_impl_method_prototypes_module(self, &plain_emitted);
+        try self.write("\n");
+
         // Impl wrappers/vtables/coercions
         try self.write("// --- Quirk impl vtables ---\n\n");
         var impl_it = reg.impls_by_key.iterator();
@@ -3789,6 +3942,45 @@ pub const TranspileProcess = struct {
         var emitted = std.StringHashMap(bool).init(self.backing_allocator);
         defer emitted.deinit();
         try self.emit_plain_impl_methods_module(self, &emitted);
+    }
+
+    fn emit_plain_impl_method_prototypes_module(self: *Self, proc: *Self, emitted: *std.StringHashMap(bool)) TranspileError!void {
+        for (proc.owned_nodes.items) |n| {
+            if (n.type != .Impl or n.node_variant == null) continue;
+            const im = n.node_variant.?.impl;
+            if (im.quirk_name != null) continue;
+
+            for (im.methods.items()) |m| {
+                if (m.type != .Function or m.node_variant == null) continue;
+                const fnv = m.node_variant.?.function;
+                if (fnv.name == null) continue;
+                const fname = fnv.name.?.items;
+                if (emitted.contains(fname)) continue;
+                emitted.put(fname, true) catch return TranspileError.MemoryAllocationFailed;
+
+                if (fnv.rtype) |rt| {
+                    try proc.write_type(rt);
+                } else {
+                    try proc.write("void");
+                }
+                try proc.write(" ");
+                try proc.write(fname);
+                try proc.write("(");
+                proc.in_function_params = true;
+                if (fnv.args) |args| {
+                    for (args.items(), 0..) |arg, i| {
+                        if (i > 0) try proc.write(", ");
+                        try proc.transpile_node(arg.*);
+                    }
+                }
+                proc.in_function_params = false;
+                try proc.write(");\n");
+            }
+        }
+
+        for (proc.children.items) |child| {
+            try self.emit_plain_impl_method_prototypes_module(child, emitted);
+        }
     }
 
     fn emit_plain_impl_methods_module(self: *Self, proc: *Self, emitted: *std.StringHashMap(bool)) TranspileError!void {
@@ -4085,6 +4277,71 @@ pub const TranspileProcess = struct {
                                             try self.write(")");
                                             try self.write(")");
                                             return;
+                                        }
+
+                                        // Also allow calling quirk-impl methods directly on concrete types.
+                                        const qres = self.resolve_quirk_impl_method_for_concrete(type_name, mname);
+                                        if (!qres.ambiguous) {
+                                            if (qres.fn_name) |qfn_name| {
+                                                try self.write("(");
+                                                try self.write(qfn_name);
+                                                try self.write("(");
+
+                                                if (dt.?.pointer_depth == 0) {
+                                                    try self.write("&");
+                                                    try self.transpile_node(recv.?.*);
+                                                } else {
+                                                    try self.transpile_node(recv.?.*);
+                                                }
+
+                                                if (exp.right) |right| {
+                                                    const inner = if (right.type == .ExpressionParenthesis and right.node_variant != null)
+                                                        right.node_variant.?.paren.exp.*
+                                                    else
+                                                        right.*;
+                                                    if (inner.type != .Blank) {
+                                                        try self.write(", ");
+                                                        try self.transpile_node(inner);
+                                                    }
+                                                }
+
+                                                try self.write(")");
+                                                try self.write(")");
+                                                return;
+                                            }
+                                        }
+
+                                        // Quirk impl method call on `self` inside `impl Type Quirk { ... }`.
+                                        // `self.method()` is not a struct member call in C; emit a direct call to
+                                        // the generated impl function when we can resolve it.
+                                        if (mem.eql(u8, rname, "self")) {
+                                            if (self.lookup_quirk_impl_method_fn_for_self(type_name, mname)) |qfn_name| {
+                                                try self.write("(");
+                                                try self.write(qfn_name);
+                                                try self.write("(");
+
+                                                if (dt.?.pointer_depth == 0) {
+                                                    try self.write("&");
+                                                    try self.transpile_node(recv.?.*);
+                                                } else {
+                                                    try self.transpile_node(recv.?.*);
+                                                }
+
+                                                if (exp.right) |right| {
+                                                    const inner = if (right.type == .ExpressionParenthesis and right.node_variant != null)
+                                                        right.node_variant.?.paren.exp.*
+                                                    else
+                                                        right.*;
+                                                    if (inner.type != .Blank) {
+                                                        try self.write(", ");
+                                                        try self.transpile_node(inner);
+                                                    }
+                                                }
+
+                                                try self.write(")");
+                                                try self.write(")");
+                                                return;
+                                            }
                                         }
                                     }
                                 }
@@ -5185,3 +5442,9 @@ pub const TranspileProcess = struct {
         }
     }
 };
+
+fn typeRegistryRoot(proc: *TranspileProcess) ?*TypeRegistry {
+    const root = proc.get_root() orelse proc;
+    if (root.type_registry) |*reg| return reg;
+    return null;
+}

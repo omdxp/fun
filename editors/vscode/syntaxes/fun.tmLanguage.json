@@ -6,6 +6,7 @@
     { "include": "#comments" },
     { "include": "#strings" },
     { "include": "#numbers" },
+    { "include": "#operators" },
     { "include": "#typeDeclarations" },
     { "include": "#types" },
     { "include": "#functions" },
@@ -13,6 +14,18 @@
     { "include": "#keywords" }
   ],
   "repository": {
+    "operators": {
+      "patterns": [
+        {
+          "name": "punctuation.accessor.fun",
+          "match": "\\."
+        },
+        {
+          "name": "keyword.operator.fun",
+          "match": "(\\+\\=|\\-\\=|\\*\\=|\\/\\=|\\%\\=|\\=\\=|\\!\\=|\\<\\=|\\>\\=|\\&\\&|\\|\\||\\<\\<|\\>\\>|\\+\\+|\\-\\-|\\+|\\-|\\*|\\/|\\%|\\=|\\<|\\>|\\!|\\&|\\||\\^|\\~)"
+        }
+      ]
+    },
     "typeDeclarations": {
       "patterns": [
         {

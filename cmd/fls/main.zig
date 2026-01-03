@@ -234,6 +234,12 @@ const LspServer = struct {
         // Repo/workspace checkout layout (fallback).
         if (self.tryStdlibRootFromWorkspace()) return self.stdlib_root_path.?;
 
+        // Final fallback: try resolving relative to the server's current working directory.
+        // VS Code launches `fls` with `cwd` set to the workspace root, but some clients/flows
+        // don't provide a usable `rootUri` or the document may be `untitled:`.
+        if (self.trySetStdlibRoot("stdlib")) return self.stdlib_root_path.?;
+        if (self.trySetStdlibRoot("zig-out/share/fun/stdlib")) return self.stdlib_root_path.?;
+
         return null;
     }
 
@@ -2385,7 +2391,7 @@ const LspServer = struct {
         const doc_ptr = self.docs.getPtr(uri) orelse return;
 
         // Build the new index first; if it fails, keep the old one so completion doesn't "die" mid-edit.
-        const new_idx = buildIndexFromText(self.allocator, doc_ptr.text) catch |err| {
+        const new_idx = buildIndexFromTextAt(self.allocator, doc_ptr.text, null) catch |err| {
             std.debug.print("[fls] rebuildIndex failed (keeping old index): {s}\n", .{@errorName(err)});
             return;
         };
@@ -3245,10 +3251,29 @@ test "fls: resolveImportUri relative imports" {
     try std.testing.expect(std.mem.eql(u8, norm_resolved, norm_expected));
 }
 
-test "fls: resolveImportUri std requires root_path" {
+test "fls: resolveImportUri std fails without stdlib" {
     const allocator = std.testing.allocator;
-    const current_uri = try allocator.dupe(u8, "file:///C:/x/main.fn");
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Create a dummy current document.
+    try tmp.dir.makePath("src");
+    {
+        var f = try tmp.dir.createFile("src/main.fn", .{ .read = true, .truncate = true });
+        defer f.close();
+        try f.writeAll("imp std.c.io;\n");
+    }
+    const current_abs = try tmp.dir.realpathAlloc(allocator, "src/main.fn");
+    defer allocator.free(current_abs);
+    const current_uri = try pathToUri(allocator, current_abs);
     defer allocator.free(current_uri);
+
+    // Seed an invalid stdlib root so resolution can't succeed via env/workspace/cwd.
+    const tmp_root_abs = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_root_abs);
+    const bogus_stdlib = try std.fs.path.join(allocator, &.{ tmp_root_abs, "__not_a_stdlib__" });
+    defer allocator.free(bogus_stdlib);
 
     var server: LspServer = .{
         .allocator = allocator,
@@ -3259,10 +3284,12 @@ test "fls: resolveImportUri std requires root_path" {
         .published_diag_uris = std.StringHashMap(void).init(allocator),
         .root_uri = null,
         .root_path = null,
+        .stdlib_root_path = try allocator.dupe(u8, bogus_stdlib),
     };
     defer server.deinit();
 
     const resolved = try server.resolveImportUri(current_uri, "std.c.io");
+    defer if (resolved) |r| allocator.free(r);
     try std.testing.expect(resolved == null);
 }
 
@@ -3822,6 +3849,10 @@ fn maybeCleanupFlsTempDir(dir: *std.fs.Dir) void {
 }
 
 fn buildIndexFromText(allocator: Allocator, text: []const u8) !*Index {
+    return buildIndexFromTextAt(allocator, text, null);
+}
+
+fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path_opt: ?[]const u8) !*Index {
     // Parsing while typing regularly hits syntax errors.
     // Use an arena for the full compiler pipeline and for all index allocations.
     // This avoids per-token frees (which are brittle if anything is corrupted) and
@@ -3831,13 +3862,18 @@ fn buildIndexFromText(allocator: Allocator, text: []const u8) !*Index {
     const tmp_alloc = arena.allocator();
 
     // NOTE: This function may run very frequently while typing.
-    // Avoid creating temporary files in the process CWD (which can be the workspace or even
-    // the currently-edited file's directory, depending on how `fls` is launched).
-    // We instead best-effort redirect to the OS temp directory.
+    // If a directory path is provided, create the temp file in that directory so
+    // relative imports resolve correctly. Otherwise, best-effort use OS temp.
     var tmp_dir = std.fs.cwd();
     var tmp_dir_path: ?[]const u8 = null;
 
-    if (getOrInitFlsTempDirCached()) |res| {
+    if (tmp_dir_path_opt) |p| {
+        if (std.fs.path.isAbsolute(p)) {
+            tmp_dir = try std.fs.openDirAbsolute(p, .{});
+            defer tmp_dir.close();
+            tmp_dir_path = p;
+        }
+    } else if (getOrInitFlsTempDirCached()) |res| {
         tmp_dir = res.dir;
         tmp_dir_path = res.abs_path;
     }
@@ -3866,11 +3902,14 @@ fn buildIndexFromText(allocator: Allocator, text: []const u8) !*Index {
     defer tmp_dir.deleteFile(tmp_name) catch {};
     defer tmp_dir.deleteFile(out_name) catch {};
 
+    // For LSP indexing, avoid preloading imports during parsing.
+    // This prevents noisy "Import file not found" errors when indexing from a temp file path,
+    // and also avoids touching the user's project directory.
     var tp = try codegen.TranspileProcess.init(
         tmp_alloc,
         tmp_path_for_codegen,
         out_path_for_codegen,
-        .{ .exec = false, .outf = false, .ast = false },
+        .{ .exec = false, .outf = false, .ast = false, .preload_imports = false, .preload_std_imports = false },
     );
     defer tp.deinit();
 

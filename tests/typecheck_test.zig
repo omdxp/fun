@@ -273,6 +273,28 @@ test "typecheck quirk coercion from impl ok" {
     try runTranspileExpectOk(std.testing.allocator, "typecheck_quirk_coerce_ok.fn", input);
 }
 
+test "typecheck concrete can call quirk impl method" {
+    const input =
+        "compound Point {\n" ++
+        "  num x;\n" ++
+        "}\n" ++
+        "quirk HasX {\n" ++
+        "  getX() num;\n" ++
+        "}\n" ++
+        "impl Point HasX {\n" ++
+        "  getX() num {\n" ++
+        "    ret self.x;\n" ++
+        "  }\n" ++
+        "}\n" ++
+        "fun main() {\n" ++
+        "  Point p;\n" ++
+        "  p.x = 7;\n" ++
+        "  num a = p.getX();\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_concrete_quirk_method_ok.fn", input);
+}
+
 test "typecheck quirk method arg type mismatch errors" {
     const input =
         "quirk Q {\n" ++
