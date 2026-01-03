@@ -17,7 +17,7 @@
     "operators": {
       "patterns": [
         {
-          "name": "punctuation.accessor.fun",
+          "name": "keyword.operator.fun",
           "match": "\\."
         },
         {

@@ -1884,8 +1884,15 @@ pub const TranspileProcess = struct {
                             maybe_sig = sig;
                             call_rtype = sig.rtype;
                         } else {
-                            // External/stdlib function (e.g. printf). Skip type checking.
-                            return .{ .base = .Unknown };
+                            // If the name is known from preloaded imports/stdlib signatures, treat it
+                            // as an external function and skip type checking.
+                            // Otherwise, this is a real semantic error (we don't want to defer to C).
+                            if (self.global_symbols.get(fname) != null or is_known_extern_function_name(fname)) {
+                                return .{ .base = .Unknown };
+                            }
+
+                            self.report_type_error(node, "unknown function '{s}'", .{fname});
+                            return TranspileError.SymbolNotDefined;
                         }
                     } else if (callee.type == .Expression and callee.node_variant != null and mem.eql(u8, callee.node_variant.?.exp.op, ".")) {
                         // Method call: `x.method(...)`.
@@ -5442,6 +5449,38 @@ pub const TranspileProcess = struct {
         }
     }
 };
+
+fn is_known_extern_function_name(name: []const u8) bool {
+    return mem.eql(u8, name, "printf") or
+        mem.eql(u8, name, "fprintf") or
+        mem.eql(u8, name, "sprintf") or
+        mem.eql(u8, name, "snprintf") or
+        mem.eql(u8, name, "scanf") or
+        mem.eql(u8, name, "sscanf") or
+        mem.eql(u8, name, "puts") or
+        mem.eql(u8, name, "putchar") or
+        mem.eql(u8, name, "getchar") or
+        mem.eql(u8, name, "fopen") or
+        mem.eql(u8, name, "freopen") or
+        mem.eql(u8, name, "fclose") or
+        mem.eql(u8, name, "fflush") or
+        mem.eql(u8, name, "fgetc") or
+        mem.eql(u8, name, "fputc") or
+        mem.eql(u8, name, "fgets") or
+        mem.eql(u8, name, "fputs") or
+        mem.eql(u8, name, "fread") or
+        mem.eql(u8, name, "fwrite") or
+        mem.eql(u8, name, "fseek") or
+        mem.eql(u8, name, "ftell") or
+        mem.eql(u8, name, "rewind") or
+        mem.eql(u8, name, "feof") or
+        mem.eql(u8, name, "ferror") or
+        mem.eql(u8, name, "perror") or
+        mem.eql(u8, name, "remove") or
+        mem.eql(u8, name, "rename") or
+        mem.eql(u8, name, "tmpfile") or
+        mem.eql(u8, name, "tmpnam");
+}
 
 fn typeRegistryRoot(proc: *TranspileProcess) ?*TypeRegistry {
     const root = proc.get_root() orelse proc;

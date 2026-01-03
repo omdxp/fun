@@ -228,8 +228,10 @@ const LspServer = struct {
         // Prefer installed layout next to the running binaries (matches transpiler behavior).
         if (self.fls_exe_path) |p| {
             if (self.tryStdlibRootFromExe(p)) return self.stdlib_root_path.?;
+            if (self.tryStdlibRootFromExeDirWalk(p)) return self.stdlib_root_path.?;
         }
         if (self.tryStdlibRootFromExe(self.fun_exe_path)) return self.stdlib_root_path.?;
+        if (self.tryStdlibRootFromExeDirWalk(self.fun_exe_path)) return self.stdlib_root_path.?;
 
         // Repo/workspace checkout layout (fallback).
         if (self.tryStdlibRootFromWorkspace()) return self.stdlib_root_path.?;
@@ -241,6 +243,26 @@ const LspServer = struct {
         if (self.trySetStdlibRoot("zig-out/share/fun/stdlib")) return self.stdlib_root_path.?;
 
         return null;
+    }
+
+    fn tryStdlibRootFromExeDirWalk(self: *LspServer, exe_path: []const u8) bool {
+        // Repo/worktree layout when running from zig-out/bin:
+        // <repo>/zig-out/bin/fls(.exe)
+        // <repo>/stdlib/std/...
+        // Walk up a few levels looking for a sibling `stdlib/`.
+        var dir_opt: ?[]const u8 = std.fs.path.dirname(exe_path);
+        var depth: usize = 0;
+        while (dir_opt) |dir| : (depth += 1) {
+            if (depth > 10) break;
+
+            const cand = std.fs.path.join(self.allocator, &.{ dir, "stdlib" }) catch break;
+            const ok = self.trySetStdlibRoot(cand);
+            self.allocator.free(cand);
+            if (ok) return true;
+
+            dir_opt = std.fs.path.dirname(dir);
+        }
+        return false;
     }
 
     fn isStdlibRootAbsolute(path_abs: []const u8) bool {

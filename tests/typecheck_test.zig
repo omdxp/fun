@@ -120,6 +120,15 @@ test "typecheck zero-arg call ok" {
     try runTranspileExpectOk(std.testing.allocator, "typecheck_zero_arg_call_ok.fn", input);
 }
 
+test "typecheck unknown function call errors" {
+    const input =
+        "fun main() {\n" ++
+        "  missing();\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_unknown_fn_call.fn", input);
+}
+
 test "typecheck call arg type mismatch" {
     const input =
         "fun add(num a, num b) num { ret a + b; }\n" ++
