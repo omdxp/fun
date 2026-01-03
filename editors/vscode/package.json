@@ -4,6 +4,10 @@
   "description": "Fun language support (fls language server)",
   "version": "0.1.4",
   "publisher": "fun",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/omdxp/fun.git"
+  },
   "icon": "fun.png",
   "engines": {
     "vscode": ">=1.74.0"

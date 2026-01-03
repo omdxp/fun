@@ -39,7 +39,8 @@ jobs:
           BASE_CONTENT_URL="https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}"
           BASE_IMAGES_URL="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}"
           npx vsce package --allow-missing-repository --skip-license --allow-star-activation --baseContentUrl "$BASE_CONTENT_URL" --baseImagesUrl "$BASE_IMAGES_URL"
-          npx vsce publish --no-git-tag-version --pat "$VSCE_PAT"
+          VSIX_PATH=$(ls -1 *.vsix | head -n 1)
+          npx vsce publish --no-git-tag-version --pat "$VSCE_PAT" --packagePath "$VSIX_PATH" --baseContentUrl "$BASE_CONTENT_URL" --baseImagesUrl "$BASE_IMAGES_URL"
 
       - name: Upload VSIX artifact
         uses: actions/upload-artifact@v4
