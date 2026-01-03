@@ -9,7 +9,7 @@
 ---
 
 ## Table of Contents
-- [fun](#fun)
+- [Fun Programming Language](#fun-programming-language)
   - [Table of Contents](#table-of-contents)
   - [Features](#features)
   - [Installation](#installation)
@@ -21,6 +21,12 @@
   - [Contributing](#contributing)
   - [Changelog](#changelog)
   - [License](#license)
+  - [IDE / Language Server (fls)](#ide--language-server-fls)
+    - [VS Code](#vs-code)
+  - [Installation](#installation-1)
+    - [Prerequisites](#prerequisites)
+    - [Build from Source](#build-from-source)
+    - [Install from Release](#install-from-release)
 
 ---
 
@@ -47,7 +53,7 @@ zig build
 
 This will build the `fun` compiler in `zig-out/bin/fun`.
 
-To install the compiler plus the Fun standard library signature files:
+To install the compiler plus the Fun standard library files:
 
 ```bash
 zig build install
@@ -55,7 +61,11 @@ zig build install
 
 This installs:
 - `zig-out/bin/fun`
-- `zig-out/share/fun/std/*.fn` (signature-only standard library modules for tooling)
+- `zig-out/share/fun/stdlib/std/c/*.fn` (signature-only C-interop modules used for tooling)
+
+Notes:
+- `std.c.*` is the C-interop layer (signatures only). These modules describe external C APIs (e.g. `printf`) so the compiler and language server can typecheck and provide tooling.
+- `std.*` (without `.c`) is intended for Fun-native standard library modules written in Fun.
 
 ## Release installers (bundles)
 

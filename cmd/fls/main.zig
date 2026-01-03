@@ -222,62 +222,81 @@ const LspServer = struct {
     fn getStdlibRootPath(self: *LspServer) ?[]const u8 {
         if (self.stdlib_root_path) |p| return p;
 
-        const candidates = struct {
-            fn isStdlibRoot(path: []const u8) bool {
-                // Expect: <path>/std/<module>.fn
-                const std_dir = std.fs.path.join(std.heap.page_allocator, &.{ path, "std" }) catch return false;
-                defer std.heap.page_allocator.free(std_dir);
-                var d = std.fs.openDirAbsolute(std_dir, .{}) catch return false;
-                d.close();
-                return true;
-            }
-
-            fn trySet(self_ptr: *LspServer, path: []const u8) bool {
-                // Only accept if it looks like an actual stdlib root.
-                if (!isStdlibRoot(path)) return false;
-                self_ptr.stdlib_root_path = self_ptr.allocator.dupe(u8, path) catch return false;
-                return true;
-            }
-
-            fn tryFromEnv(self_ptr: *LspServer, name: []const u8) bool {
-                const v = std.process.getEnvVarOwned(self_ptr.allocator, name) catch return false;
-                defer self_ptr.allocator.free(v);
-                return trySet(self_ptr, v);
-            }
-
-            fn tryFromWorkspace(self_ptr: *LspServer) bool {
-                const root = self_ptr.root_path orelse return false;
-                const p = std.fs.path.join(self_ptr.allocator, &.{ root, "stdlib" }) catch return false;
-                defer self_ptr.allocator.free(p);
-                return trySet(self_ptr, p);
-            }
-
-            fn tryFromExe(self_ptr: *LspServer, exe_path: []const u8) bool {
-                const bin_dir = std.fs.path.dirname(exe_path) orelse return false;
-                const prefix = std.fs.path.dirname(bin_dir) orelse return false;
-
-                // Typical install layout:
-                // <prefix>/bin/fun(.exe)
-                // <prefix>/share/fun/stdlib/std/c/...
-                const p = std.fs.path.join(self_ptr.allocator, &.{ prefix, "share", "fun", "stdlib" }) catch return false;
-                defer self_ptr.allocator.free(p);
-                return trySet(self_ptr, p);
-            }
-        };
-
         // Optional override for custom installs.
-        if (candidates.tryFromEnv(self, "FUN_STDLIB_DIR")) return self.stdlib_root_path.?;
+        if (self.tryStdlibRootFromEnv("FUN_STDLIB_DIR")) return self.stdlib_root_path.?;
 
-        // Repo/workspace checkout layout.
-        if (candidates.tryFromWorkspace(self)) return self.stdlib_root_path.?;
-
-        // Installed layout next to bundled binaries.
+        // Prefer installed layout next to the running binaries (matches transpiler behavior).
         if (self.fls_exe_path) |p| {
-            if (candidates.tryFromExe(self, p)) return self.stdlib_root_path.?;
+            if (self.tryStdlibRootFromExe(p)) return self.stdlib_root_path.?;
         }
-        if (candidates.tryFromExe(self, self.fun_exe_path)) return self.stdlib_root_path.?;
+        if (self.tryStdlibRootFromExe(self.fun_exe_path)) return self.stdlib_root_path.?;
+
+        // Repo/workspace checkout layout (fallback).
+        if (self.tryStdlibRootFromWorkspace()) return self.stdlib_root_path.?;
 
         return null;
+    }
+
+    fn isStdlibRoot(path: []const u8) bool {
+        // Expect: <path>/std/...
+        const std_dir = std.fs.path.join(std.heap.page_allocator, &.{ path, "std" }) catch return false;
+        defer std.heap.page_allocator.free(std_dir);
+        var d = std.fs.openDirAbsolute(std_dir, .{}) catch return false;
+        d.close();
+        return true;
+    }
+
+    fn trySetStdlibRoot(self: *LspServer, path: []const u8) bool {
+        if (!isStdlibRoot(path)) return false;
+        if (self.stdlib_root_path) |p| self.allocator.free(p);
+        self.stdlib_root_path = self.allocator.dupe(u8, path) catch return false;
+        return true;
+    }
+
+    fn tryStdlibRootFromEnv(self: *LspServer, name: []const u8) bool {
+        const v = std.process.getEnvVarOwned(self.allocator, name) catch return false;
+        defer self.allocator.free(v);
+        return self.trySetStdlibRoot(v);
+    }
+
+    fn tryStdlibRootFromWorkspace(self: *LspServer) bool {
+        const root = self.root_path orelse return false;
+        const p = std.fs.path.join(self.allocator, &.{ root, "stdlib" }) catch return false;
+        defer self.allocator.free(p);
+        return self.trySetStdlibRoot(p);
+    }
+
+    fn tryStdlibRootFromExe(self: *LspServer, exe_path: []const u8) bool {
+        const bin_dir = std.fs.path.dirname(exe_path) orelse return false;
+        const prefix = std.fs.path.dirname(bin_dir) orelse return false;
+
+        // Typical install layout:
+        // <prefix>/bin/fun(.exe)
+        // <prefix>/share/fun/stdlib/std/c/...
+        const p = std.fs.path.join(self.allocator, &.{ prefix, "share", "fun", "stdlib" }) catch return false;
+        defer self.allocator.free(p);
+        return self.trySetStdlibRoot(p);
+    }
+
+    fn tryStdlibRootFromCurrentDoc(self: *LspServer, current_uri: []const u8) void {
+        // If initialize didn't provide a usable workspace root (or the client is in single-file mode),
+        // fall back to discovering the repo root by walking up from the current file.
+        if (self.stdlib_root_path != null) return;
+        const current_path = uriToPath(self.allocator, current_uri) catch return;
+        defer self.allocator.free(current_path);
+
+        var dir_opt: ?[]const u8 = std.fs.path.dirname(current_path);
+        var depth: usize = 0;
+        while (dir_opt) |dir| : (depth += 1) {
+            if (depth > 32) break;
+
+            const cand = std.fs.path.join(self.allocator, &.{ dir, "stdlib" }) catch break;
+            const ok = self.trySetStdlibRoot(cand);
+            self.allocator.free(cand);
+            if (ok) return;
+
+            dir_opt = std.fs.path.dirname(dir);
+        }
     }
 
     fn run(self: *LspServer) !void {
@@ -1189,10 +1208,39 @@ const LspServer = struct {
 
         var rel_from: usize = 0;
         if (std.mem.eql(u8, segs.items[0].name, "std")) {
-            const root = self.root_path orelse return false;
+            var stdlib_root = self.getStdlibRootPath() orelse null;
+            if (stdlib_root == null) {
+                self.tryStdlibRootFromCurrentDoc(current_uri);
+                stdlib_root = self.getStdlibRootPath() orelse null;
+            }
+            const root = stdlib_root orelse return false;
+
+            // If the user clicked `std` itself, jump to stdlib README (nice, read-only-ish entrypoint).
+            if (selected_seg_index == 0) {
+                const readme_path = try std.fs.path.join(self.allocator, &.{ root, "README.md" });
+                defer self.allocator.free(readme_path);
+                std.fs.cwd().access(readme_path, .{}) catch return false;
+                const target_uri = try pathToUri(self.allocator, readme_path);
+                defer self.allocator.free(target_uri);
+                const locs = [_]Location{.{
+                    .uri = target_uri,
+                    .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 0 } },
+                }};
+                const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
+                defer self.allocator.free(json);
+                try self.sendResponseJson(id_val, json);
+                return true;
+            }
+
             try base_segs.append(root);
-            try base_segs.append("stdlib");
             try base_segs.append("std");
+
+            // Treat `std.<module>` as an alias for `std.c.<module>`.
+            const has_explicit_c = segs.items.len >= 2 and std.mem.eql(u8, segs.items[1].name, "c");
+            if (!has_explicit_c) {
+                try base_segs.append("c");
+            }
+
             rel_from = 1;
         } else {
             try base_segs.append(current_dir);
@@ -2012,15 +2060,36 @@ const LspServer = struct {
             try items.append(.{ .label = try self.allocator.dupe(u8, "std"), .kind = 19 }); // Folder
         }
 
+        const completing_under_std_alias = parts.items.len >= 1 and std.mem.eql(u8, parts.items[0], "std") and
+            // `imp std.<partial>`
+            ((!ends_with_dot and parent_count == 1) or
+            // `imp std.` (split yields ["std", ""]) 
+            (ends_with_dot and parts.items.len == 2 and parts.items[1].len == 0));
+
         // Determine base dir for filesystem-backed completion.
         var base_dir_path_opt: ?[]u8 = null;
         if (parts.items.len != 0 and std.mem.eql(u8, parts.items[0], "std")) {
-            const stdlib_root = self.getStdlibRootPath() orelse null;
+            var stdlib_root = self.getStdlibRootPath() orelse null;
+            if (stdlib_root == null) {
+                self.tryStdlibRootFromCurrentDoc(current_uri);
+                stdlib_root = self.getStdlibRootPath() orelse null;
+            }
             if (stdlib_root) |root| {
                 var segs = std.ArrayList([]const u8).init(self.allocator);
                 defer segs.deinit();
                 try segs.append(root);
                 try segs.append("std");
+
+                // Treat `std.<module>` as an alias for `std.c.<module>` for completion,
+                // so users can keep typing `std.io` and still get suggestions.
+                if (completing_under_std_alias) {
+                    try segs.append("c");
+                    // Also explicitly include `c` as a completion option at `std.`.
+                    if (partial.len == 0 or std.mem.startsWith(u8, "c", partial)) {
+                        try items.append(.{ .label = try self.allocator.dupe(u8, "c"), .kind = 19 });
+                    }
+                }
+
                 var si: usize = 1;
                 while (si < parent_count) : (si += 1) {
                     if (parts.items[si].len != 0) try segs.append(parts.items[si]);
@@ -2366,8 +2435,13 @@ const LspServer = struct {
         defer segs.deinit();
 
         if (std.mem.eql(u8, parts.items[0], "std")) {
-            const stdlib_root = self.getStdlibRootPath() orelse return null;
-            try segs.append(stdlib_root);
+            var stdlib_root = self.getStdlibRootPath() orelse null;
+            if (stdlib_root == null) {
+                self.tryStdlibRootFromCurrentDoc(current_uri);
+                stdlib_root = self.getStdlibRootPath() orelse null;
+            }
+            const root = stdlib_root orelse return null;
+            try segs.append(root);
             try segs.append("std");
             try segs.append("c");
 

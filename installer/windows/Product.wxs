@@ -43,6 +43,13 @@
           Permanent="no"
           System="yes"
           Value="[INSTALLFOLDER]bin" />
+        <Environment
+          Id="SetFunStdlibDir"
+          Name="FUN_STDLIB_DIR"
+          Action="set"
+          Permanent="no"
+          System="yes"
+          Value="[INSTALLFOLDER]share\fun\stdlib" />
       </Component>
     </DirectoryRef>
 

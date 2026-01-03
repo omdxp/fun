@@ -32,6 +32,7 @@ if ($Prefix -ne '') {
 
 $destBin = Join-Path $destPrefix 'bin'
 $destShare = Join-Path $destPrefix 'share\fun'
+${destStdlibRoot} = Join-Path $destShare 'stdlib'
 
 New-Item -ItemType Directory -Force -Path $destBin | Out-Null
 New-Item -ItemType Directory -Force -Path $destShare | Out-Null
@@ -50,6 +51,10 @@ if ($currentPath -notlike "*$binPath*") {
   [Environment]::SetEnvironmentVariable('Path', $newPath, $pathScope)
 }
 
+# Point tooling at the installed stdlib.
+[Environment]::SetEnvironmentVariable('FUN_STDLIB_DIR', $destStdlibRoot, $pathScope)
+
 Write-Host "Installed fun to: $destPrefix"
 Write-Host "Stdlib installed to: $destShare"
+Write-Host "FUN_STDLIB_DIR set to: $destStdlibRoot"
 Write-Host "You may need to restart your terminal for PATH changes to take effect."

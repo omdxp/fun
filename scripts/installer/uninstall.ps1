@@ -24,6 +24,7 @@ if ($Prefix -ne '') {
 }
 
 $destBin = Join-Path $destPrefix 'bin'
+${destStdlibRoot} = Join-Path (Join-Path $destPrefix 'share\fun') 'stdlib'
 
 if (Test-Path $destPrefix) {
   Remove-Item -Recurse -Force $destPrefix
@@ -35,6 +36,11 @@ if ($null -ne $currentPath) {
   $parts = $currentPath -split ';' | Where-Object { $_ -and ($_ -ne $destBin) }
   $newPath = ($parts -join ';')
   [Environment]::SetEnvironmentVariable('Path', $newPath, $pathScope)
+}
+
+$curStdlib = [Environment]::GetEnvironmentVariable('FUN_STDLIB_DIR', $pathScope)
+if ($null -ne $curStdlib -and $curStdlib -eq $destStdlibRoot) {
+  [Environment]::SetEnvironmentVariable('FUN_STDLIB_DIR', $null, $pathScope)
 }
 
 Write-Host "Uninstalled fun from: $destPrefix"
