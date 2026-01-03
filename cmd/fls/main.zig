@@ -313,8 +313,20 @@ const LspServer = struct {
     }
 
     fn tryStdlibRootFromExe(self: *LspServer, exe_path: []const u8) bool {
-        const bin_dir = std.fs.path.dirname(exe_path) orelse return false;
-        const prefix = std.fs.path.dirname(bin_dir) orelse return false;
+        const exe_dir = std.fs.path.dirname(exe_path) orelse return false;
+
+        // Support both layouts:
+        // 1) Typical install layout:
+        //    <prefix>/bin/fls(.exe)
+        //    <prefix>/share/fun/stdlib/std/...
+        // 2) Portable/zip layout where binaries live directly under <prefix>:
+        //    <prefix>/fls(.exe)
+        //    <prefix>/share/fun/stdlib/std/...
+        const exe_dir_base = std.fs.path.basename(exe_dir);
+        const prefix = if (std.ascii.eqlIgnoreCase(exe_dir_base, "bin"))
+            (std.fs.path.dirname(exe_dir) orelse return false)
+        else
+            exe_dir;
 
         // Typical install layout:
         // <prefix>/bin/fun(.exe)
