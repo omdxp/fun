@@ -237,19 +237,37 @@ const LspServer = struct {
         return null;
     }
 
-    fn isStdlibRoot(path: []const u8) bool {
+    fn isStdlibRootAbsolute(path_abs: []const u8) bool {
+        if (!std.fs.path.isAbsolute(path_abs)) return false;
+
         // Expect: <path>/std/...
-        const std_dir = std.fs.path.join(std.heap.page_allocator, &.{ path, "std" }) catch return false;
+        const std_dir = std.fs.path.join(std.heap.page_allocator, &.{ path_abs, "std" }) catch return false;
         defer std.heap.page_allocator.free(std_dir);
+
+        // Defensive: `openDirAbsolute` asserts that its input is absolute on this OS.
+        if (!std.fs.path.isAbsolute(std_dir)) return false;
+
         var d = std.fs.openDirAbsolute(std_dir, .{}) catch return false;
         d.close();
         return true;
     }
 
     fn trySetStdlibRoot(self: *LspServer, path: []const u8) bool {
-        if (!isStdlibRoot(path)) return false;
+        // Ensure we store an absolute path and never pass a non-absolute string to
+        // `openDirAbsolute` (which asserts in Zig stdlib).
+        const abs = if (std.fs.path.isAbsolute(path))
+            (self.allocator.dupe(u8, path) catch return false)
+        else
+            (std.fs.cwd().realpathAlloc(self.allocator, path) catch return false);
+
+        var keep: bool = false;
+        defer if (!keep) self.allocator.free(abs);
+
+        if (!isStdlibRootAbsolute(abs)) return false;
+
         if (self.stdlib_root_path) |p| self.allocator.free(p);
-        self.stdlib_root_path = self.allocator.dupe(u8, path) catch return false;
+        self.stdlib_root_path = abs;
+        keep = true;
         return true;
     }
 
@@ -2063,8 +2081,8 @@ const LspServer = struct {
         const completing_under_std_alias = parts.items.len >= 1 and std.mem.eql(u8, parts.items[0], "std") and
             // `imp std.<partial>`
             ((!ends_with_dot and parent_count == 1) or
-            // `imp std.` (split yields ["std", ""]) 
-            (ends_with_dot and parts.items.len == 2 and parts.items[1].len == 0));
+                // `imp std.` (split yields ["std", ""])
+                (ends_with_dot and parts.items.len == 2 and parts.items[1].len == 0));
 
         // Determine base dir for filesystem-backed completion.
         var base_dir_path_opt: ?[]u8 = null;
