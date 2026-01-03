@@ -3185,24 +3185,46 @@ fn isUriUnreserved(ch: u8) bool {
 }
 
 fn pathToUri(allocator: Allocator, path_raw: []const u8) ![]u8 {
-    // Minimal file:// URI builder for Windows paths.
-    // We percent-encode non-unreserved bytes (spaces, etc.) to keep VS Code happy.
+    // Cross-platform file:// URI builder.
+    // We percent-encode non-unreserved bytes (spaces, etc.) to keep editors happy.
+    //
+    // Windows absolute paths:  C:\Users\me\x  -> file:///C:/Users/me/x
+    // POSIX absolute paths:    /home/me/x      -> file:///home/me/x
+    const builtin = @import("builtin");
+
     const tmp = try allocator.dupe(u8, path_raw);
     defer allocator.free(tmp);
     for (tmp) |*c| {
         if (c.* == '\\') c.* = '/';
     }
 
+    const is_windows_drive = tmp.len >= 3 and
+        ((tmp[0] >= 'A' and tmp[0] <= 'Z') or (tmp[0] >= 'a' and tmp[0] <= 'z')) and
+        tmp[1] == ':' and tmp[2] == '/';
+
     var out = std.ArrayList(u8).init(allocator);
     errdefer out.deinit();
     try out.appendSlice("file:///");
-    for (tmp) |ch| {
+
+    const path_part: []const u8 = if (is_windows_drive)
+        tmp
+    else if (builtin.os.tag == .windows)
+        // On Windows, treat non-drive absolute paths as-is.
+        tmp
+    else if (tmp.len != 0 and tmp[0] == '/')
+        // Avoid emitting file:////... on POSIX.
+        tmp[1..]
+    else
+        tmp;
+
+    for (path_part) |ch| {
         if (isUriUnreserved(ch)) {
             try out.append(ch);
         } else {
             try out.writer().print("%{X:0>2}", .{ch});
         }
     }
+
     return out.toOwnedSlice();
 }
 
@@ -3216,25 +3238,54 @@ fn hexValue(ch: u8) ?u8 {
 }
 
 fn uriToPath(allocator: Allocator, uri: []const u8) ![]u8 {
-    if (!std.mem.startsWith(u8, uri, "file:///")) return error.UnsupportedUri;
-    const rest = uri["file:///".len..];
+    // Cross-platform file:// URI parser.
+    // Accepts file:///... (no authority) and file://localhost/... .
+    const builtin = @import("builtin");
+
+    if (!std.mem.startsWith(u8, uri, "file://")) return error.UnsupportedUri;
+
+    var rest = uri["file://".len..];
+    if (std.mem.startsWith(u8, rest, "localhost/")) {
+        rest = rest["localhost/".len..];
+    }
+    // We expect an absolute-path form with a leading '/'. If it's missing, treat as unsupported.
+    if (rest.len == 0 or rest[0] != '/') return error.UnsupportedUri;
+
+    // Strip the leading '/' from the URI path component for decoding.
+    const path_no_leading = rest[1..];
+
+    // Detect Windows drive in the URI path: /C:/...
+    const is_windows_drive = path_no_leading.len >= 3 and
+        ((path_no_leading[0] >= 'A' and path_no_leading[0] <= 'Z') or (path_no_leading[0] >= 'a' and path_no_leading[0] <= 'z')) and
+        path_no_leading[1] == ':' and path_no_leading[2] == '/';
 
     var out = std.ArrayList(u8).init(allocator);
     errdefer out.deinit();
 
+    if (!is_windows_drive and builtin.os.tag != .windows) {
+        // POSIX absolute path.
+        try out.append('/');
+    }
+
     var i: usize = 0;
-    while (i < rest.len) : (i += 1) {
-        const ch = rest[i];
-        if (ch == '%' and i + 2 < rest.len) {
-            const hi = hexValue(rest[i + 1]);
-            const lo = hexValue(rest[i + 2]);
+    while (i < path_no_leading.len) : (i += 1) {
+        const ch = path_no_leading[i];
+        if (ch == '%' and i + 2 < path_no_leading.len) {
+            const hi = hexValue(path_no_leading[i + 1]);
+            const lo = hexValue(path_no_leading[i + 2]);
             if (hi != null and lo != null) {
-                try out.append((hi.? << 4) | lo.?);
+                const decoded = (hi.? << 4) | lo.?;
+                try out.append(if (builtin.os.tag == .windows and decoded == '/') '\\' else decoded);
                 i += 2;
                 continue;
             }
         }
-        try out.append(if (ch == '/') '\\' else ch);
+
+        if (builtin.os.tag == .windows and ch == '/') {
+            try out.append('\\');
+        } else {
+            try out.append(ch);
+        }
     }
 
     return out.toOwnedSlice();
