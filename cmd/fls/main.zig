@@ -2964,7 +2964,34 @@ test "fls: parseFunDiagnosticsByUri supports multiline messages and Location spl
     }
 
     try std.testing.expectEqual(@as(usize, 1), diags.len);
-    try std.testing.expect(std.mem.endsWith(u8, diags[0].uri, "src/other.fn") or std.mem.endsWith(u8, diags[0].uri, "src\\other.fn"));
+    // Normalize both paths to forward slashes for cross-platform comparison
+    const norm_uri = blk: {
+        const buf = try allocator.dupe(u8, diags[0].uri);
+        defer allocator.free(buf);
+        for (buf) |*c| {
+            if (c.* == '\\') {
+                c.* = '/';
+            }
+        }
+        break :blk buf;
+    };
+    // Normalize all slashes to '/'
+    const slash_buf = try allocator.dupe(u8, norm_uri);
+    defer allocator.free(slash_buf);
+    for (slash_buf) |*c| {
+        if (c.* == '\\') {
+            c.* = '/';
+        }
+    }
+    // removed unused last_slash
+    // Removed unused 'last2' variable
+    const filename = std.fs.path.basename(slash_buf);
+    const parent = std.fs.path.dirname(slash_buf) orelse "";
+    const parent_name = std.fs.path.basename(parent);
+    const last2_joined = try std.fmt.allocPrint(allocator, "{s}/{s}", .{parent_name, filename});
+    defer allocator.free(last2_joined);
+    std.debug.print("last2_joined: '{s}'\n", .{last2_joined});
+    try std.testing.expect(std.mem.eql(u8, last2_joined, "src/other.fn"));
     try std.testing.expect(std.mem.eql(u8, diags[0].diag.message, "first line\nsecond line"));
 }
 
@@ -2974,23 +3001,29 @@ test "fls: resolveImportUri relative imports" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("examples/utils");
+    const sep = std.fs.path.sep;
+    const examples_dir = try std.fmt.allocPrint(allocator, "examples{c}utils", .{sep});
+    defer allocator.free(examples_dir);
+    try tmp.dir.makePath(examples_dir);
+    const main_fn = try std.fmt.allocPrint(allocator, "examples{c}main.fn", .{sep});
+    defer allocator.free(main_fn);
+    const math_fn = try std.fmt.allocPrint(allocator, "examples{c}utils{c}math.fn", .{sep, sep});
+    defer allocator.free(math_fn);
     {
-        var f = try tmp.dir.createFile("examples/main.fn", .{ .read = true, .truncate = true });
+        var f = try tmp.dir.createFile(main_fn, .{ .read = true, .truncate = true });
         defer f.close();
         try f.writeAll("imp utils.math;\n");
     }
     {
-        var f2 = try tmp.dir.createFile("examples/utils/math.fn", .{ .read = true, .truncate = true });
+        var f2 = try tmp.dir.createFile(math_fn, .{ .read = true, .truncate = true });
         defer f2.close();
         try f2.writeAll("// math\n");
     }
-
     const root_abs = try tmp.dir.realpathAlloc(allocator, ".");
     defer allocator.free(root_abs);
-    const current_abs = try tmp.dir.realpathAlloc(allocator, "examples/main.fn");
+    const current_abs = try tmp.dir.realpathAlloc(allocator, main_fn);
     defer allocator.free(current_abs);
-    const expected_abs = try tmp.dir.realpathAlloc(allocator, "examples/utils/math.fn");
+    const expected_abs = try tmp.dir.realpathAlloc(allocator, math_fn);
     defer allocator.free(expected_abs);
 
     const current_uri = try pathToUri(allocator, current_abs);
@@ -3012,7 +3045,28 @@ test "fls: resolveImportUri relative imports" {
 
     const resolved = (try server.resolveImportUri(current_uri, "utils.math")) orelse return error.TestUnexpectedResult;
     defer allocator.free(resolved);
-    try std.testing.expect(std.mem.eql(u8, resolved, expected_uri));
+    // Normalize both URIs to forward slashes for cross-platform comparison
+    const norm_resolved = blk: {
+        const buf = try allocator.dupe(u8, resolved);
+        defer allocator.free(buf);
+        for (buf) |*c| {
+            if (c.* == '\\') {
+                c.* = '/';
+            }
+        }
+        break :blk buf;
+    };
+    const norm_expected = blk: {
+        const buf = try allocator.dupe(u8, expected_uri);
+        defer allocator.free(buf);
+        for (buf) |*c| {
+            if (c.* == '\\') {
+                c.* = '/';
+            }
+        }
+        break :blk buf;
+    };
+    try std.testing.expect(std.mem.eql(u8, norm_resolved, norm_expected));
 }
 
 test "fls: resolveImportUri std requires root_path" {
