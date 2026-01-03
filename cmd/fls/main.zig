@@ -2988,7 +2988,7 @@ test "fls: parseFunDiagnosticsByUri supports multiline messages and Location spl
     const filename = std.fs.path.basename(slash_buf);
     const parent = std.fs.path.dirname(slash_buf) orelse "";
     const parent_name = std.fs.path.basename(parent);
-    const last2_joined = try std.fmt.allocPrint(allocator, "{s}/{s}", .{parent_name, filename});
+    const last2_joined = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ parent_name, filename });
     defer allocator.free(last2_joined);
     std.debug.print("last2_joined: '{s}'\n", .{last2_joined});
     // Print hex dump for debugging platform issues
@@ -3010,7 +3010,7 @@ test "fls: resolveImportUri relative imports" {
     try tmp.dir.makePath(examples_dir);
     const main_fn = try std.fmt.allocPrint(allocator, "examples{c}main.fn", .{sep});
     defer allocator.free(main_fn);
-    const math_fn = try std.fmt.allocPrint(allocator, "examples{c}utils{c}math.fn", .{sep, sep});
+    const math_fn = try std.fmt.allocPrint(allocator, "examples{c}utils{c}math.fn", .{ sep, sep });
     defer allocator.free(math_fn);
     {
         var f = try tmp.dir.createFile(main_fn, .{ .read = true, .truncate = true });
