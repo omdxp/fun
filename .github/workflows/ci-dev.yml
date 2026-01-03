@@ -17,31 +17,8 @@ jobs:
       - uses: goto-bus-stop/setup-zig@v2
         with:
           version: ${{ env.zig_version }}
-      - name: Skip LSP (fls) tests in CI
-        run: |
-          sed -i.bak 's/^\(\s*\)_ = @import("fls_e2e_test.zig");/\1\/\/ _ = @import("fls_e2e_test.zig");/' tests/main_test.zig
-      - name: Run tests and allow known fls failures
-        run: |
-          set -e
-          zig build test 2> test-stderr.log || true
-          # If only known fls test failures are present, ignore for CI green
-          if grep -q -E "test.fls: resolve std import to stdlib|test.fls: parseFunDiagnosticsByUri supports multiline messages and Location split line|test.fls: resolveImportUri relative imports" test-stderr.log; then
-            # If there are other errors, fail, else pass
-            if grep -v -E "test.fls: resolve std import to stdlib|test.fls: parseFunDiagnosticsByUri supports multiline messages and Location split line|test.fls: resolveImportUri relative imports|error: while executing test 'main.test.fls index: locals are indexed inside fun bodies'" test-stderr.log | grep -q 'error:'; then
-              echo "Unexpected errors found in stderr:" >&2
-              cat test-stderr.log >&2
-              exit 1
-            else
-              echo "Only known fls test failures found, ignoring for CI green."
-              exit 0
-            fi
-          fi
-          if [ -s test-stderr.log ]; then
-            echo "Unexpected stderr output:" >&2
-            cat test-stderr.log >&2
-            exit 1
-          fi
-          echo "No unexpected stderr output."
+      - name: Run all tests (including fls LSP)
+        run: zig build test --summary all
   run:
     runs-on: ubuntu-latest
     steps:

@@ -2991,6 +2991,9 @@ test "fls: parseFunDiagnosticsByUri supports multiline messages and Location spl
     const last2_joined = try std.fmt.allocPrint(allocator, "{s}/{s}", .{parent_name, filename});
     defer allocator.free(last2_joined);
     std.debug.print("last2_joined: '{s}'\n", .{last2_joined});
+    // Print hex dump for debugging platform issues
+    for (last2_joined) |c| std.debug.print("{02x} ", .{c});
+    std.debug.print("\n", .{});
     try std.testing.expect(std.mem.eql(u8, last2_joined, "src/other.fn"));
     try std.testing.expect(std.mem.eql(u8, diags[0].diag.message, "first line\nsecond line"));
 }
