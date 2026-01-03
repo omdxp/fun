@@ -1148,7 +1148,12 @@ pub const TranspileProcess = struct {
     pub fn err(self: *Self, comptime fmt: []const u8, args: anytype) void {
         const stderr = std.io.getStdErr().writer();
         stderr.print("\n[Error]\n", .{}) catch unreachable;
-        stderr.print(fmt, args) catch unreachable;
+        // Defensive: if format string expects args but none provided, print fallback
+        if (args.len == 0 and std.mem.indexOf(u8, fmt, "{") != null) {
+            stderr.print("[INTERNAL ERROR: format string '{s}' called with no arguments]", .{fmt}) catch unreachable;
+        } else {
+            stderr.print(fmt, args) catch unreachable;
+        }
 
         if (self.current_token) |ct| {
             const end_line = if (ct.pos.end_line == 0) ct.pos.line else ct.pos.end_line;
@@ -1296,7 +1301,11 @@ pub const TranspileProcess = struct {
     fn report_type_error(self: *Self, node: ?ast.Node, comptime fmt: []const u8, args: anytype) void {
         const stderr = std.io.getStdErr().writer();
         stderr.print("\n[TypeError]\n", .{}) catch unreachable;
-        stderr.print(fmt, args) catch unreachable;
+        if (args.len == 0 and std.mem.indexOf(u8, fmt, "{") != null) {
+            stderr.print("[INTERNAL ERROR: format string '{s}' called with no arguments]", .{fmt}) catch unreachable;
+        } else {
+            stderr.print(fmt, args) catch unreachable;
+        }
 
         if (node) |n| {
             if (n.pos) |p| {
@@ -1341,7 +1350,11 @@ pub const TranspileProcess = struct {
     fn report_error(self: *Self, node: ?ast.Node, comptime fmt: []const u8, args: anytype) void {
         const stderr = std.io.getStdErr().writer();
         stderr.print("\n[Error]\n", .{}) catch unreachable;
-        stderr.print(fmt, args) catch unreachable;
+        if (args.len == 0 and std.mem.indexOf(u8, fmt, "{") != null) {
+            stderr.print("[INTERNAL ERROR: format string '{s}' called with no arguments]", .{fmt}) catch unreachable;
+        } else {
+            stderr.print(fmt, args) catch unreachable;
+        }
 
         if (node) |n| {
             if (n.pos) |p| {
@@ -4140,7 +4153,7 @@ pub const TranspileProcess = struct {
                     .llnum => |v| try self.print("{d}", .{v}),
                     .lnum => |v| try self.print("{d}", .{v}),
                     .inum => |v| try self.print("{d}", .{v}),
-                    .dnum => |v| try self.print("{}", .{v}),
+                    .dnum => |v| try self.print("{e}", .{v}),
                     .cval => |v| try self.print("{d}", .{v}),
                     else => try self.write("0"),
                 }

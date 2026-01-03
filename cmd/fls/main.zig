@@ -2964,19 +2964,12 @@ test "fls: parseFunDiagnosticsByUri supports multiline messages and Location spl
     }
 
     try std.testing.expectEqual(@as(usize, 1), diags.len);
-    // Normalize both paths to forward slashes for cross-platform comparison
-    const norm_uri = blk: {
-        const buf = try allocator.dupe(u8, diags[0].uri);
-        defer allocator.free(buf);
-        for (buf) |*c| {
-            if (c.* == '\\') {
-                c.* = '/';
-            }
-        }
-        break :blk buf;
-    };
+    // Work with a real filesystem path (URIs include a scheme and aren't suitable for std.fs.path helpers).
+    const diag_path = try uriToPath(allocator, diags[0].uri);
+    defer allocator.free(diag_path);
+
     // Normalize all slashes to '/'
-    const slash_buf = try allocator.dupe(u8, norm_uri);
+    const slash_buf = try allocator.dupe(u8, diag_path);
     defer allocator.free(slash_buf);
     for (slash_buf) |*c| {
         if (c.* == '\\') {
@@ -2990,10 +2983,6 @@ test "fls: parseFunDiagnosticsByUri supports multiline messages and Location spl
     const parent_name = std.fs.path.basename(parent);
     const last2_joined = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ parent_name, filename });
     defer allocator.free(last2_joined);
-    std.debug.print("last2_joined: '{s}'\n", .{last2_joined});
-    // Print hex dump for debugging platform issues
-    for (last2_joined) |c| std.debug.print("{02x} ", .{c});
-    std.debug.print("\n", .{});
     try std.testing.expect(std.mem.eql(u8, last2_joined, "src/other.fn"));
     try std.testing.expect(std.mem.eql(u8, diags[0].diag.message, "first line\nsecond line"));
 }

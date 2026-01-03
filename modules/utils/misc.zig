@@ -473,7 +473,7 @@ pub fn print_node(node: ast.Node, writer: anytype, depth: usize) !void {
         .Boolean => {
             if (node.node_variant != null) {
                 try print_indent(writer, depth + 1);
-                try writer.print("Value: {}\n", .{node.node_variant.?.boolean.val});
+                try writer.print("Value: {s}\n", .{if (node.node_variant.?.boolean.val) "true" else "false"});
             }
         },
         .StatementIf => {
