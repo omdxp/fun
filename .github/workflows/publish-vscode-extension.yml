@@ -35,7 +35,10 @@ jobs:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: |
           cd editors/vscode
-          npx vsce package --allow-missing-repository --skip-license --allow-star-activation
+          # README contains relative links like ../../CONTRIBUTING.md; vsce needs base URLs to rewrite them.
+          BASE_CONTENT_URL="https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}"
+          BASE_IMAGES_URL="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}"
+          npx vsce package --allow-missing-repository --skip-license --allow-star-activation --baseContentUrl "$BASE_CONTENT_URL" --baseImagesUrl "$BASE_IMAGES_URL"
           npx vsce publish --no-git-tag-version --pat "$VSCE_PAT"
 
       - name: Upload VSIX artifact
