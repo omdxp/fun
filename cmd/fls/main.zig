@@ -3498,6 +3498,49 @@ fn parseWorkspaceSymbolQuery(allocator: Allocator, params_val: ?std.json.Value) 
     return try allocator.dupe(u8, qv.string);
 }
 
+var fls_temp_cleanup_done: bool = false;
+
+fn maybeCleanupFlsTempDir(dir: *std.fs.Dir) void {
+    if (fls_temp_cleanup_done) return;
+    fls_temp_cleanup_done = true;
+
+    const now_ns: i128 = std.time.nanoTimestamp();
+    // Delete only sufficiently old leftovers to avoid interfering with another running instance.
+    // Files are normally deleted immediately; these are only meant to catch crash/kill residue.
+    const max_age_ns: i128 = 30 * std.time.ns_per_min;
+
+    var it = dir.iterate();
+    while (it.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        const name = entry.name;
+
+        const prefix_idx = "_fls_idx_";
+        const prefix_out = "__fls_unused__";
+
+        var stamp_str: ?[]const u8 = null;
+        if (std.mem.startsWith(u8, name, prefix_idx)) {
+            const rest = name[prefix_idx.len..];
+            if (std.mem.indexOfScalar(u8, rest, '_')) |pos| {
+                stamp_str = rest[0..pos];
+            }
+        } else if (std.mem.startsWith(u8, name, prefix_out)) {
+            const rest = name[prefix_out.len..];
+            if (std.mem.indexOfScalar(u8, rest, '_')) |pos| {
+                stamp_str = rest[0..pos];
+            }
+        } else {
+            continue;
+        }
+
+        const s = stamp_str orelse continue;
+        const stamp_ns = std.fmt.parseInt(i128, s, 10) catch continue;
+        const age = now_ns - stamp_ns;
+        if (age > max_age_ns) {
+            dir.deleteFile(name) catch {};
+        }
+    }
+}
+
 fn buildIndexFromText(allocator: Allocator, text: []const u8) !*Index {
     // Parsing while typing regularly hits syntax errors.
     // Use an arena for the full compiler pipeline and for all index allocations.
@@ -3531,13 +3574,16 @@ fn buildIndexFromText(allocator: Allocator, text: []const u8) !*Index {
                 else => return e,
             };
 
-            const fls_dir_opt = bd_mut.openDir("fun-fls", .{}) catch null;
+            const fls_dir_opt = bd_mut.openDir("fun-fls", .{ .iterate = true }) catch null;
             if (fls_dir_opt) |d| {
                 const joined_path = std.fs.path.join(tmp_alloc, &.{ root_path, "fun-fls" }) catch null;
                 if (joined_path) |jp| {
                     tmp_dir = d;
                     tmp_dir_needs_close = true;
                     tmp_dir_path = jp;
+
+                    // One-time best-effort cleanup of stale leftovers in the temp dir.
+                    maybeCleanupFlsTempDir(&tmp_dir);
                 } else {
                     var d_mut = d;
                     d_mut.close();
