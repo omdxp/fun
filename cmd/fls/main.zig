@@ -2459,7 +2459,17 @@ const LspServer = struct {
         const path = try uriToPath(self.allocator, uri);
         defer self.allocator.free(path);
 
-        const text = try std.fs.cwd().readFileAlloc(self.allocator, path, 25 * 1024 * 1024);
+        // `uriToPath()` yields an absolute path for `file:` URIs.
+        // On Windows, using `std.fs.cwd().readFileAlloc()` with an absolute path can fail,
+        // which breaks stdlib indexing when the stdlib lives outside the workspace.
+        const text = blk: {
+            if (std.fs.path.isAbsolute(path)) {
+                var f = try std.fs.openFileAbsolute(path, .{});
+                defer f.close();
+                break :blk try f.readToEndAlloc(self.allocator, 25 * 1024 * 1024);
+            }
+            break :blk try std.fs.cwd().readFileAlloc(self.allocator, path, 25 * 1024 * 1024);
+        };
         defer self.allocator.free(text);
 
         try self.upsertDoc(uri, 0, text);
@@ -2524,7 +2534,14 @@ const LspServer = struct {
         const full = try std.mem.concat(self.allocator, u8, &[_][]const u8{ joined, ".fn" });
         defer self.allocator.free(full);
 
-        std.fs.cwd().access(full, .{}) catch return null;
+        // `full` is typically absolute (current file dir is absolute or stdlib root is absolute).
+        // Use absolute file APIs so installed stdlib works on Windows.
+        if (std.fs.path.isAbsolute(full)) {
+            var f = std.fs.openFileAbsolute(full, .{}) catch return null;
+            f.close();
+        } else {
+            std.fs.cwd().access(full, .{}) catch return null;
+        }
         return try pathToUri(self.allocator, full);
     }
 
@@ -3943,7 +3960,7 @@ fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path_opt
         tmp_alloc,
         tmp_path_for_codegen,
         out_path_for_codegen,
-        .{ .exec = false, .outf = false, .ast = false, .preload_imports = false, .preload_std_imports = false },
+        .{ .exec = false, .outf = false, .ast = false, .preload_imports = false, .preload_std_imports = false, .emit_stderr = false },
     );
     defer tp.deinit();
 

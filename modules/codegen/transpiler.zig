@@ -88,6 +88,12 @@ pub const TranspileProcessFlags = packed struct {
     ///
     /// This is best-effort and non-fatal, but still touches the filesystem.
     preload_std_imports: bool = true,
+
+    /// When false, suppress writing diagnostics to stderr.
+    ///
+    /// Tooling (like `fls`) may parse/lex temporary/incomplete snapshots while typing.
+    /// Emitting those transient errors to stderr creates noisy logs without improving UX.
+    emit_stderr: bool = true,
 };
 
 /// GlobalSymbolInfo tracks information about symbols across modules
@@ -1194,6 +1200,7 @@ pub const TranspileProcess = struct {
     /// - `fmt`: The format string for the error message.
     /// - `args`: The arguments for the format string.
     pub fn err(self: *Self, comptime fmt: []const u8, args: anytype) void {
+        if (!self.flags.emit_stderr) return;
         const stderr = std.io.getStdErr().writer();
         stderr.print("\n[Error]\n", .{}) catch unreachable;
         // Defensive: if format string expects args but none provided, print fallback
@@ -1371,8 +1378,10 @@ pub const TranspileProcess = struct {
 
     fn report_warning(self: *Self, node: ?ast.Node, comptime fmt: []const u8, args: anytype) void {
         const stderr = std.io.getStdErr().writer();
-        stderr.print("\n[Warning]\n", .{}) catch unreachable;
-        stderr.print(fmt, args) catch unreachable;
+        if (self.flags.emit_stderr) {
+            stderr.print("\n[Warning]\n", .{}) catch unreachable;
+            stderr.print(fmt, args) catch unreachable;
+        }
 
         self.warnings.writer().print("\n[Warning]\n", .{}) catch unreachable;
         self.warnings.writer().print(fmt, args) catch unreachable;
@@ -1381,21 +1390,22 @@ pub const TranspileProcess = struct {
             if (n.pos) |p| {
                 const end_line = if (p.end_line == 0) p.line else p.end_line;
                 if (end_line == p.line) {
-                    stderr.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col }) catch unreachable;
+                    if (self.flags.emit_stderr) stderr.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col }) catch unreachable;
                     self.warnings.writer().print("\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col }) catch unreachable;
                 } else {
-                    stderr.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col }) catch unreachable;
+                    if (self.flags.emit_stderr) stderr.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col }) catch unreachable;
                     self.warnings.writer().print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col }) catch unreachable;
                 }
                 return;
             }
         }
 
-        stderr.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch unreachable;
+        if (self.flags.emit_stderr) stderr.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch unreachable;
         self.warnings.writer().print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch unreachable;
     }
 
     fn report_error(self: *Self, node: ?ast.Node, comptime fmt: []const u8, args: anytype) void {
+        if (!self.flags.emit_stderr) return;
         const stderr = std.io.getStdErr().writer();
         stderr.print("\n[Error]\n", .{}) catch unreachable;
         if (args.len == 0 and std.mem.indexOf(u8, fmt, "{") != null) {
