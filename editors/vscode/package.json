@@ -1,6 +1,6 @@
 {
   "name": "fun-language",
-  "displayName": "Fun Language Support",
+  "displayName": "Fun (FLS) for VS Code",
   "description": "Fun language support (fls language server)",
   "version": "0.1.4",
   "publisher": "fun",
