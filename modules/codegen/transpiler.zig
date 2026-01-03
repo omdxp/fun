@@ -179,6 +179,8 @@ pub const TranspileProcess = struct {
 
     /// Guard to avoid emitting type/vtable prelude more than once.
     did_emit_user_types: bool = false,
+    /// Guard to avoid emitting impl bodies/vtables more than once.
+    did_emit_impls: bool = false,
     /// Track if we're currently transpiling function parameters
     in_function_params: bool = false,
 
@@ -3413,7 +3415,7 @@ pub const TranspileProcess = struct {
         }
     }
 
-    fn emit_user_types_and_vtables(self: *Self) TranspileError!void {
+    fn emit_user_types(self: *Self) TranspileError!void {
         if (self.did_emit_user_types) return;
         self.did_emit_user_types = true;
 
@@ -3620,6 +3622,13 @@ pub const TranspileProcess = struct {
             try self.write(";\n");
         }
         try self.write("\n");
+    }
+
+    fn emit_impls_and_vtables(self: *Self) TranspileError!void {
+        if (self.did_emit_impls) return;
+        self.did_emit_impls = true;
+
+        const reg = self.root_registry() orelse return;
 
         // Impl wrappers/vtables/coercions
         try self.write("// --- Quirk impl vtables ---\n\n");
@@ -3876,15 +3885,23 @@ pub const TranspileProcess = struct {
         // Write standard library includes and prelude
         try self.transpile_prelude();
 
-        // Emit user-defined types (compounds/quirks) and all impl vtables once at the root.
+        // Emit user-defined types (compounds/quirks) once at the root.
+        // NOTE: Impl method bodies/vtables are emitted later so the global function
+        // prototype block can appear before any function bodies that might call
+        // imported functions.
         if (!self.is_importing) {
-            try self.emit_user_types_and_vtables();
+            try self.emit_user_types();
         }
 
         // Emit forward declarations for all functions so calls work even when
         // function bodies are declared later in the file.
         if (!self.is_importing) {
             try self.emit_function_prototypes_all();
+        }
+
+        // Emit impl method bodies/vtables/coercions after the prototype block.
+        if (!self.is_importing) {
+            try self.emit_impls_and_vtables();
         }
 
         // Output content from child imports recursively
