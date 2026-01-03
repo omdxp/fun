@@ -3507,7 +3507,44 @@ fn buildIndexFromText(allocator: Allocator, text: []const u8) !*Index {
     errdefer arena.deinit();
     const tmp_alloc = arena.allocator();
 
+    // NOTE: This function may run very frequently while typing.
+    // Avoid creating temporary files in the process CWD (which can be the workspace or even
+    // the currently-edited file's directory, depending on how `fls` is launched).
+    // We instead best-effort redirect to the OS temp directory.
     var tmp_dir = std.fs.cwd();
+    var tmp_dir_needs_close = false;
+    var tmp_dir_path: ?[]const u8 = null;
+    defer if (tmp_dir_needs_close) tmp_dir.close();
+
+    const is_windows = @import("builtin").target.os.tag == .windows;
+    const temp_root = std.process.getEnvVarOwned(tmp_alloc, if (is_windows) "TEMP" else "TMPDIR") catch null;
+    const temp_root_fallback = std.process.getEnvVarOwned(tmp_alloc, "TMP") catch null;
+    if (temp_root orelse temp_root_fallback) |root_path| {
+        const base_dir_opt = std.fs.openDirAbsolute(root_path, .{}) catch null;
+        if (base_dir_opt) |bd| {
+            var bd_mut = bd;
+            defer bd_mut.close();
+
+            // Keep our files in a stable subdir so we don't clutter the global temp root.
+            bd_mut.makeDir("fun-fls") catch |e| switch (e) {
+                error.PathAlreadyExists => {},
+                else => return e,
+            };
+
+            const fls_dir_opt = bd_mut.openDir("fun-fls", .{}) catch null;
+            if (fls_dir_opt) |d| {
+                const joined_path = std.fs.path.join(tmp_alloc, &.{ root_path, "fun-fls" }) catch null;
+                if (joined_path) |jp| {
+                    tmp_dir = d;
+                    tmp_dir_needs_close = true;
+                    tmp_dir_path = jp;
+                } else {
+                    var d_mut = d;
+                    d_mut.close();
+                }
+            }
+        }
+    }
     var tmp_name_buf: [96]u8 = undefined;
     const stamp = std.time.nanoTimestamp();
     const nonce: u64 = std.crypto.random.int(u64);
@@ -3515,6 +3552,15 @@ fn buildIndexFromText(allocator: Allocator, text: []const u8) !*Index {
 
     var out_name_buf: [96]u8 = undefined;
     const out_name = try std.fmt.bufPrint(&out_name_buf, "__fls_unused__{d}_{x}.c", .{ stamp, nonce });
+
+    const tmp_path_for_codegen = if (tmp_dir_path) |p|
+        (try std.fs.path.join(tmp_alloc, &.{ p, tmp_name }))
+    else
+        tmp_name;
+    const out_path_for_codegen = if (tmp_dir_path) |p|
+        (try std.fs.path.join(tmp_alloc, &.{ p, out_name }))
+    else
+        out_name;
 
     {
         const f = try tmp_dir.createFile(tmp_name, .{ .read = true, .truncate = true });
@@ -3526,8 +3572,8 @@ fn buildIndexFromText(allocator: Allocator, text: []const u8) !*Index {
 
     var tp = try codegen.TranspileProcess.init(
         tmp_alloc,
-        tmp_name,
-        out_name,
+        tmp_path_for_codegen,
+        out_path_for_codegen,
         .{ .exec = false, .outf = false, .ast = false },
     );
     defer tp.deinit();
