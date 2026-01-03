@@ -2940,6 +2940,10 @@ pub const ParseProcess = struct {
     fn parse_import(self: *Self) ParseError!void {
         _ = self.token_next(); // skip imp
         const folder_token = self.token_next();
+        if (folder_token == null) {
+            self.transpile_proc.err("expected folder identifier after import", .{});
+            return ParseError.InvalidIdentifier;
+        }
         if (folder_token.?.type != .Identifier) {
             self.transpile_proc.err("expected folder identifier, got '{?}'", .{folder_token.?.type});
             return ParseError.InvalidIdentifier;
@@ -2962,6 +2966,10 @@ pub const ParseProcess = struct {
 
             _ = self.token_next(); // skip dot
             const part_token = self.token_next();
+            if (part_token == null) {
+                self.transpile_proc.err("expected identifier after '.'", .{});
+                return ParseError.InvalidIdentifier;
+            }
             if (part_token.?.type != .Identifier) {
                 self.transpile_proc.err("expected identifier after '.', got '{?}'", .{part_token.?.type});
                 return ParseError.InvalidIdentifier;

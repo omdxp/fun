@@ -583,6 +583,7 @@ pub const LexProcess = struct {
     /// - Returns an error if reading the next character fails.
     fn token_make_symbol(self: *Self) LexError!?token.Token {
         const c = try self.peek_char();
+        if (c == null) return null;
         if (c.? == ')') {
             try self.finish_expression();
         }
@@ -632,23 +633,26 @@ pub const LexProcess = struct {
     fn read_op(self: *Self) LexError!std.ArrayList(u8) {
         var buffer = std.ArrayList(u8).init(self.transpile_proc.allocator);
         var single_operator = true;
-        var op = try self.next_char();
-        buffer.append(op.?) catch |e| {
+        const op0 = (try self.next_char()) orelse {
+            self.transpile_proc.err("unexpected end of file while reading operator", .{});
+            return LexError.InvalidOperator;
+        };
+        buffer.append(op0) catch |e| {
             std.debug.print("Error appending to buffer: {s}\n", .{@errorName(e)});
             return LexError.MemoryAllocationFailed;
         };
-        var pc = try self.peek_char();
-        if (op.? == '*' and pc.? == '=') {
-            pc = try self.peek_char();
+        const pc = try self.peek_char();
+        if (op0 == '*' and pc != null and pc.? == '=') {
             buffer.append(pc.?) catch |e| {
                 std.debug.print("Error appending to buffer: {s}\n", .{@errorName(e)});
                 return LexError.MemoryAllocationFailed;
             };
             _ = try self.next_char();
             single_operator = false;
-        } else if (!utils.op_treated_as_one(op.?)) {
+        } else if (!utils.op_treated_as_one(op0)) {
             for (0..2) |_| {
-                op = try self.peek_char();
+                const op = try self.peek_char();
+                if (op == null) break;
                 // Don't consume delimiters as part of a multi-char operator.
                 // Otherwise sequences like `||(` become `||(` (invalid), triggering flush-back
                 // logic and incorrectly splitting a valid operator into two tokens.
@@ -669,7 +673,7 @@ pub const LexProcess = struct {
                 try self.read_op_flush_back_keep_first(&buffer);
             }
         } else if (!utils.op_valid(buffer.items)) {
-            self.transpile_proc.err("operator '{?}' not valid", .{op});
+            self.transpile_proc.err("operator '{s}' not valid", .{buffer.items});
             return LexError.InvalidOperator;
         }
 
@@ -694,7 +698,7 @@ pub const LexProcess = struct {
             .pos = self.transpile_proc.pos,
         };
 
-        if (op.? == '(') {
+        if (op != null and op.? == '(') {
             self.start_expression();
         }
 
@@ -803,6 +807,14 @@ pub const LexProcess = struct {
 
         _ = self.transpile_proc.tokens.pop(); // popping the first 0 (.eg [0]b0001)
         const c = try self.peek_char();
+        if (c == null) {
+            self.transpile_proc.tokens.push(last_token.?) catch |e| {
+                std.debug.print("Error pushing token: {s}\n", .{@errorName(e)});
+                return LexError.MemoryAllocationFailed;
+            };
+            self.transpile_proc.err("unexpected end of file while reading special number", .{});
+            return LexError.FileReadError;
+        }
         switch (c.?) {
             'b' => t = try self.token_make_special_number_binary(),
             'x' => t = try self.token_make_number_hexadecimal(),
@@ -851,6 +863,10 @@ pub const LexProcess = struct {
     /// - Returns an error if reading the next character or appending to the buffer fails.
     fn handle_escape(self: *Self, buf: *std.ArrayList(u8)) LexError!void {
         const c = try self.peek_char();
+        if (c == null) {
+            self.transpile_proc.err("unexpected end of file while reading escape", .{});
+            return LexError.FileReadError;
+        }
         if (utils.is_number(c.?)) {
             try self.handle_escape_number(buf);
             return;
@@ -923,12 +939,24 @@ pub const LexProcess = struct {
     fn token_make_character(self: *Self) LexError!?token.Token {
         _ = try self.next_char(); // skip "'"
         var c = try self.next_char();
+        if (c == null) {
+            self.transpile_proc.err("unexpected end of file while reading character", .{});
+            return LexError.InvalidCharacter;
+        }
         if (c.? == '\\') {
             c = try self.next_char();
+            if (c == null) {
+                self.transpile_proc.err("unexpected end of file while reading character escape", .{});
+                return LexError.InvalidCharacter;
+            }
             c = utils.get_escape_char(c.?);
         }
 
         const nc = try self.next_char();
+        if (nc == null) {
+            self.transpile_proc.err("unexpected end of file while reading character", .{});
+            return LexError.InvalidCharacter;
+        }
         if (nc.? != '\'') {
             self.transpile_proc.err("expected ' got '{c}'", .{nc.?});
             return LexError.InvalidCharacter;

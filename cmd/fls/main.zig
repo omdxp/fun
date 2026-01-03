@@ -3499,6 +3499,99 @@ fn parseWorkspaceSymbolQuery(allocator: Allocator, params_val: ?std.json.Value) 
 }
 
 var fls_temp_cleanup_done: bool = false;
+var fls_temp_dir_warned: bool = false;
+var fls_temp_dir_announced: bool = false;
+var fls_temp_dir_cache_init_done: bool = false;
+var fls_temp_dir_cache: ?FlsTempDir = null;
+
+const FlsTempDir = struct {
+    dir: std.fs.Dir,
+    abs_path: []const u8,
+};
+
+fn tryOpenFlsTempDir(alloc: Allocator) !?FlsTempDir {
+    const is_windows = @import("builtin").target.os.tag == .windows;
+
+    const Try = struct {
+        fn openSub(alloc_inner: Allocator, root_path: []const u8) !?FlsTempDir {
+            const base_dir_opt = std.fs.openDirAbsolute(root_path, .{}) catch null;
+            if (base_dir_opt) |bd| {
+                var bd_mut = bd;
+                defer bd_mut.close();
+
+                bd_mut.makeDir("fun-fls") catch |e| switch (e) {
+                    error.PathAlreadyExists => {},
+                    else => return null,
+                };
+
+                const abs_path = try std.fs.path.join(alloc_inner, &.{ root_path, "fun-fls" });
+                const d = std.fs.openDirAbsolute(abs_path, .{ .iterate = true }) catch return null;
+                return .{ .dir = d, .abs_path = abs_path };
+            }
+            return null;
+        }
+    };
+
+    const env_try = struct {
+        fn get(alloc_inner: Allocator, name: []const u8) ?[]const u8 {
+            return std.process.getEnvVarOwned(alloc_inner, name) catch null;
+        }
+    };
+
+    if (is_windows) {
+        if (env_try.get(alloc, "TEMP")) |p| if (try Try.openSub(alloc, p)) |r| return r;
+        if (env_try.get(alloc, "TMP")) |p| if (try Try.openSub(alloc, p)) |r| return r;
+        if (env_try.get(alloc, "LOCALAPPDATA")) |lap| {
+            const p = try std.fs.path.join(alloc, &.{ lap, "Temp" });
+            if (try Try.openSub(alloc, p)) |r| return r;
+        }
+        if (env_try.get(alloc, "USERPROFILE")) |up| {
+            const p = try std.fs.path.join(alloc, &.{ up, "AppData", "Local", "Temp" });
+            if (try Try.openSub(alloc, p)) |r| return r;
+        }
+        if (env_try.get(alloc, "SystemRoot")) |sr| {
+            const p = try std.fs.path.join(alloc, &.{ sr, "Temp" });
+            if (try Try.openSub(alloc, p)) |r| return r;
+        }
+
+        // Last-resort Windows conventional temp path.
+        if (try Try.openSub(alloc, "C:\\Windows\\Temp")) |r| return r;
+    } else {
+        if (env_try.get(alloc, "TMPDIR")) |p| if (try Try.openSub(alloc, p)) |r| return r;
+        if (env_try.get(alloc, "TMP")) |p| if (try Try.openSub(alloc, p)) |r| return r;
+        if (env_try.get(alloc, "TEMP")) |p| if (try Try.openSub(alloc, p)) |r| return r;
+
+        // Last-resort POSIX conventional temp path.
+        if (try Try.openSub(alloc, "/tmp")) |r| return r;
+    }
+
+    return null;
+}
+
+fn getOrInitFlsTempDirCached() ?FlsTempDir {
+    if (fls_temp_dir_cache_init_done) return fls_temp_dir_cache;
+    fls_temp_dir_cache_init_done = true;
+
+    // Cache allocations live for the lifetime of the process.
+    // This avoids reallocating/joining paths and reopening the directory on every keystroke.
+    const cache_alloc = std.heap.page_allocator;
+    fls_temp_dir_cache = tryOpenFlsTempDir(cache_alloc) catch null;
+
+    if (fls_temp_dir_cache) |res| {
+        if (!fls_temp_dir_announced) {
+            fls_temp_dir_announced = true;
+            std.debug.print("[fls] temp dir: {s}\n", .{res.abs_path});
+        }
+        // One-time best-effort cleanup of stale leftovers.
+        var d = res.dir;
+        maybeCleanupFlsTempDir(&d);
+    } else if (!fls_temp_dir_warned) {
+        fls_temp_dir_warned = true;
+        std.debug.print("[fls] warning: could not open OS temp dir; using process CWD for temp files\n", .{});
+    }
+
+    return fls_temp_dir_cache;
+}
 
 fn maybeCleanupFlsTempDir(dir: *std.fs.Dir) void {
     if (fls_temp_cleanup_done) return;
@@ -3555,41 +3648,11 @@ fn buildIndexFromText(allocator: Allocator, text: []const u8) !*Index {
     // the currently-edited file's directory, depending on how `fls` is launched).
     // We instead best-effort redirect to the OS temp directory.
     var tmp_dir = std.fs.cwd();
-    var tmp_dir_needs_close = false;
     var tmp_dir_path: ?[]const u8 = null;
-    defer if (tmp_dir_needs_close) tmp_dir.close();
 
-    const is_windows = @import("builtin").target.os.tag == .windows;
-    const temp_root = std.process.getEnvVarOwned(tmp_alloc, if (is_windows) "TEMP" else "TMPDIR") catch null;
-    const temp_root_fallback = std.process.getEnvVarOwned(tmp_alloc, "TMP") catch null;
-    if (temp_root orelse temp_root_fallback) |root_path| {
-        const base_dir_opt = std.fs.openDirAbsolute(root_path, .{}) catch null;
-        if (base_dir_opt) |bd| {
-            var bd_mut = bd;
-            defer bd_mut.close();
-
-            // Keep our files in a stable subdir so we don't clutter the global temp root.
-            bd_mut.makeDir("fun-fls") catch |e| switch (e) {
-                error.PathAlreadyExists => {},
-                else => return e,
-            };
-
-            const fls_dir_opt = bd_mut.openDir("fun-fls", .{ .iterate = true }) catch null;
-            if (fls_dir_opt) |d| {
-                const joined_path = std.fs.path.join(tmp_alloc, &.{ root_path, "fun-fls" }) catch null;
-                if (joined_path) |jp| {
-                    tmp_dir = d;
-                    tmp_dir_needs_close = true;
-                    tmp_dir_path = jp;
-
-                    // One-time best-effort cleanup of stale leftovers in the temp dir.
-                    maybeCleanupFlsTempDir(&tmp_dir);
-                } else {
-                    var d_mut = d;
-                    d_mut.close();
-                }
-            }
-        }
+    if (getOrInitFlsTempDirCached()) |res| {
+        tmp_dir = res.dir;
+        tmp_dir_path = res.abs_path;
     }
     var tmp_name_buf: [96]u8 = undefined;
     const stamp = std.time.nanoTimestamp();
