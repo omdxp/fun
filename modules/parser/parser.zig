@@ -2426,6 +2426,10 @@ pub const ParseProcess = struct {
             }
             try self.parse_full_variable(hist);
             const arg_node = self.node_pop();
+            if (arg_node == null) {
+                self.transpile_proc.err("expected argument", .{});
+                return ParseError.InvalidIdentifier;
+            }
             const arg = self.transpile_proc.allocator.create(ast.Node) catch |e| {
                 std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
                 return ParseError.MemoryAllocationFailed;
@@ -2458,6 +2462,7 @@ pub const ParseProcess = struct {
     /// - Logs an error message if any expected token is not found.
     fn parse_function(self: *Self) ParseError!void {
         _ = try self.transpile_proc.new_scope();
+        errdefer self.transpile_proc.finish_scope();
         _ = self.token_next(); // skip fun
         var function_node = ast.Node{
             .type = .Function,
@@ -2469,6 +2474,10 @@ pub const ParseProcess = struct {
         // `parse_datatype()` will set `type`/`flags` and overwrite `type_str`.
         var dt: dtype.DataType = .{ .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator) };
         const ident_token = self.token_next();
+        if (ident_token == null) {
+            self.transpile_proc.err("expected identifier after 'fun'", .{});
+            return ParseError.InvalidIdentifier;
+        }
         if (ident_token.?.type != .Identifier) {
             self.transpile_proc.err("expected indentifier, got '{}'", .{ident_token.?.type});
             return ParseError.InvalidIdentifier;
@@ -2518,6 +2527,10 @@ pub const ParseProcess = struct {
             defer hist_body.deinit();
             try self.parse_body(&hist_body);
             const body_node = self.node_pop();
+            if (body_node == null) {
+                self.transpile_proc.err("expected function body", .{});
+                return ParseError.InvalidStatement;
+            }
             const body = self.transpile_proc.allocator.create(ast.Node) catch |e| {
                 std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
                 return ParseError.MemoryAllocationFailed;

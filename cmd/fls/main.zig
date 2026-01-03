@@ -3577,15 +3577,18 @@ fn getOrInitFlsTempDirCached() ?FlsTempDir {
     const cache_alloc = std.heap.page_allocator;
     fls_temp_dir_cache = tryOpenFlsTempDir(cache_alloc) catch null;
 
+    const debug_env = std.process.getEnvVarOwned(cache_alloc, "FUN_FLS_DEBUG") catch null;
+    const debug_on = if (debug_env) |v| std.mem.eql(u8, v, "1") else false;
+
     if (fls_temp_dir_cache) |res| {
-        if (!fls_temp_dir_announced) {
+        if (debug_on and !fls_temp_dir_announced) {
             fls_temp_dir_announced = true;
             std.debug.print("[fls] temp dir: {s}\n", .{res.abs_path});
         }
         // One-time best-effort cleanup of stale leftovers.
         var d = res.dir;
         maybeCleanupFlsTempDir(&d);
-    } else if (!fls_temp_dir_warned) {
+    } else if (debug_on and !fls_temp_dir_warned) {
         fls_temp_dir_warned = true;
         std.debug.print("[fls] warning: could not open OS temp dir; using process CWD for temp files\n", .{});
     }
