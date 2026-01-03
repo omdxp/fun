@@ -48,13 +48,13 @@
 - **Method Dispatch**: Quirk values can be used for dynamic dispatch (like trait objects).
 
 ### Imports & Modularity
-- **Standard Library**: `imp std.io;` maps to C standard headers.
+- **Standard Library**: `imp std.c.io;` maps to C standard headers.
 - **Relative Imports**: `imp relative.parent;` for user modules.
 - **Circular Dependency Detection**: Compiler detects and errors on circular imports.
 
 ### C Interop
 - **C Macros**: ALL_CAPS identifiers (e.g., `NULL`, `INT_MAX`) are allowed if the right header is imported.
-- **Direct Mapping**: `imp std.*;` maps to C headers (`stdio.h`, `limits.h`, etc.).
+- **Direct Mapping**: `imp std.c.*;` maps to C headers (`stdio.h`, `limits.h`, etc.).
 - **Signature-only stdlib**: Fun stdlib modules only declare signatures; C provides implementations.
 
 ### Error Handling
@@ -66,7 +66,7 @@
 
 ### Example
 ```fun
-imp std.io;
+imp std.c.io;
 
 compound Point { num x; num y; }
 

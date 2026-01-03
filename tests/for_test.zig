@@ -34,7 +34,7 @@ test "for range transpiles" {
     const ifilepath = "for_range.fn";
 
     const input =
-        "imp std.io;\n" ++
+        "imp std.c.io;\n" ++
         "fun main() {\n" ++
         "  for i : 0..3 {\n" ++
         "    printf(\"%d\\n\", i);\n" ++
@@ -54,7 +54,7 @@ test "for array item transpiles" {
     const ifilepath = "for_array_item.fn";
 
     const input =
-        "imp std.io;\n" ++
+        "imp std.c.io;\n" ++
         "fun main() {\n" ++
         "  num[] arr = [1, 2, 3];\n" ++
         "  for item : arr {\n" ++
@@ -77,7 +77,7 @@ test "for array index and item transpiles" {
     const ifilepath = "for_array_index_item.fn";
 
     const input =
-        "imp std.io;\n" ++
+        "imp std.c.io;\n" ++
         "fun main() {\n" ++
         "  num[] arr = [1, 2, 3];\n" ++
         "  for i, item :: arr {\n" ++
@@ -99,7 +99,7 @@ test "for condition transpiles to while" {
     const ifilepath = "for_condition.fn";
 
     const input =
-        "imp std.io;\n" ++
+        "imp std.c.io;\n" ++
         "fun main() {\n" ++
         "  num i = 0;\n" ++
         "  for i < 3 {\n" ++
@@ -121,7 +121,7 @@ test "for infinite transpiles to while(1)" {
     const ifilepath = "for_infinite.fn";
 
     const input =
-        "imp std.io;\n" ++
+        "imp std.c.io;\n" ++
         "fun main() {\n" ++
         "  num i = 0;\n" ++
         "  for {\n" ++

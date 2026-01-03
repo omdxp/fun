@@ -258,7 +258,7 @@ const LspServer = struct {
 
                 // Typical install layout:
                 // <prefix>/bin/fun(.exe)
-                // <prefix>/share/fun/stdlib/std/...
+                // <prefix>/share/fun/stdlib/std/c/...
                 const p = std.fs.path.join(self_ptr.allocator, &.{ prefix, "share", "fun", "stdlib" }) catch return false;
                 defer self_ptr.allocator.free(p);
                 return trySet(self_ptr, p);
@@ -1062,7 +1062,7 @@ const LspServer = struct {
             return;
         }
 
-        // Import path definition: `imp std.io;` (identifier chain)
+        // Import path definition: `imp std.c.io;` (identifier chain)
         if (tok.kind == .identifier or isDotToken(tok)) {
             if (try self.trySendImportDefinition(id_val, uri, idx, tok_i)) {
                 return;
@@ -1648,7 +1648,7 @@ const LspServer = struct {
             return;
         };
 
-        // Import path completion: `imp std.io;` (no quotes)
+        // Import path completion: `imp std.c.io;` (no quotes)
         // This does not require a successful full index build, so try it first.
         if (try self.trySendImportCompletions(id_val, uri, doc.text, pos)) return;
 
@@ -2341,7 +2341,8 @@ const LspServer = struct {
 
     fn resolveImportUri(self: *LspServer, current_uri: []const u8, raw_import: []const u8) !?[]u8 {
         // Supports:
-        // - `imp std.io;` => <workspace>/stdlib/std/io.fn
+        // - `imp std.c.io;` => <workspace>/stdlib/std/c/io.fn
+        // - `imp std.io;`   => <workspace>/stdlib/std/c/io.fn (compat alias)
         // - `imp relative.parent;` => <current_dir>/relative/parent.fn
         // - `imp child;` => <current_dir>/child.fn
         const spec = std.mem.trim(u8, raw_import, " \t\r\n\"");
@@ -2368,8 +2369,17 @@ const LspServer = struct {
             const stdlib_root = self.getStdlibRootPath() orelse return null;
             try segs.append(stdlib_root);
             try segs.append("std");
+            try segs.append("c");
+
             if (parts.items.len == 1) return null;
-            for (parts.items[1..]) |p| try segs.append(p);
+            if (parts.items.len >= 2 and std.mem.eql(u8, parts.items[1], "c")) {
+                // `std.c.<module>`
+                if (parts.items.len == 2) return null;
+                for (parts.items[2..]) |p| try segs.append(p);
+            } else {
+                // `std.<module>` (compat alias)
+                for (parts.items[1..]) |p| try segs.append(p);
+            }
         } else {
             try segs.append(current_dir);
             for (parts.items) |p| try segs.append(p);
@@ -2833,7 +2843,7 @@ test "fls: apply ranged edit (multi-line)" {
 
 test "fls: parse import spec from tokens" {
     const allocator = std.testing.allocator;
-    const src = "imp std.io;\n";
+    const src = "imp std.c.io;\n";
     const idx = try buildIndexFromText(allocator, src);
     defer idx.deinit();
 
@@ -2859,7 +2869,7 @@ test "fls: parse import spec from tokens" {
     try std.testing.expect(imp_i != null);
     const spec = (try server.parseImportSpecFromTokens(idx, imp_i.?)) orelse return error.TestUnexpectedResult;
     defer allocator.free(spec);
-    try std.testing.expect(std.mem.eql(u8, spec, "std.io"));
+    try std.testing.expect(std.mem.eql(u8, spec, "std.c.io"));
 }
 
 // Exclude LSP-related tests in CI (GitHub Actions)
@@ -2878,10 +2888,10 @@ test "fls: resolve std import to stdlib" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    // Create: <root>/stdlib/std/io.fn
-    try tmp.dir.makePath("stdlib/std");
+    // Create: <root>/stdlib/std/c/io.fn
+    try tmp.dir.makePath("stdlib/std/c");
     {
-        var f = try tmp.dir.createFile("stdlib/std/io.fn", .{ .read = true, .truncate = true });
+        var f = try tmp.dir.createFile("stdlib/std/c/io.fn", .{ .read = true, .truncate = true });
         defer f.close();
         try f.writeAll("// std io\n");
     }
@@ -2891,14 +2901,14 @@ test "fls: resolve std import to stdlib" {
     {
         var f2 = try tmp.dir.createFile("examples/main.fn", .{ .read = true, .truncate = true });
         defer f2.close();
-        try f2.writeAll("imp std.io;\n");
+        try f2.writeAll("imp std.c.io;\n");
     }
 
     const root_abs = try tmp.dir.realpathAlloc(allocator, ".");
     defer allocator.free(root_abs);
     const current_abs = try tmp.dir.realpathAlloc(allocator, "examples/main.fn");
     defer allocator.free(current_abs);
-    const std_abs = try tmp.dir.realpathAlloc(allocator, "stdlib/std/io.fn");
+    const std_abs = try tmp.dir.realpathAlloc(allocator, "stdlib/std/c/io.fn");
     defer allocator.free(std_abs);
 
     const current_uri = try pathToUri(allocator, current_abs);
@@ -2918,9 +2928,14 @@ test "fls: resolve std import to stdlib" {
     };
     defer server.deinit();
 
-    const resolved = (try server.resolveImportUri(current_uri, "std.io")) orelse return error.TestUnexpectedResult;
+    const resolved = (try server.resolveImportUri(current_uri, "std.c.io")) orelse return error.TestUnexpectedResult;
     defer allocator.free(resolved);
     try std.testing.expect(std.mem.eql(u8, resolved, expected_uri));
+
+    // Compat alias: `std.io` still resolves to the same file.
+    const resolved2 = (try server.resolveImportUri(current_uri, "std.io")) orelse return error.TestUnexpectedResult;
+    defer allocator.free(resolved2);
+    try std.testing.expect(std.mem.eql(u8, resolved2, expected_uri));
 }
 
 test "fls: parseFunDiagnosticsByUri maps tmp file to current uri" {
@@ -3155,7 +3170,7 @@ test "fls: resolveImportUri std requires root_path" {
     };
     defer server.deinit();
 
-    const resolved = try server.resolveImportUri(current_uri, "std.io");
+    const resolved = try server.resolveImportUri(current_uri, "std.c.io");
     try std.testing.expect(resolved == null);
 }
 

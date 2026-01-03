@@ -1,4 +1,4 @@
-imp std.io;
+imp std.c.io;
 
 compound Point {
   num x;

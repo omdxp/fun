@@ -34,7 +34,7 @@ test "if/elif/else transpiles" {
     const ifilepath = "codegen_if_elif_else.fn";
 
     const input =
-        "imp std.io;\n" ++
+        "imp std.c.io;\n" ++
         "fun main() {\n" ++
         "  num x = 1;\n" ++
         "  if x == 1 { printf(\"a\\n\"); }\n" ++
@@ -58,7 +58,7 @@ test "array indexing expression transpiles" {
     const ifilepath = "codegen_index.fn";
 
     const input =
-        "imp std.io;\n" ++
+        "imp std.c.io;\n" ++
         "fun main() {\n" ++
         "  num[] arr = [1, 2, 3];\n" ++
         "  num x = arr[1];\n" ++
@@ -113,7 +113,7 @@ test "function definitions can be out of order (prototypes emitted)" {
     const ifilepath = "codegen_fn_prototype_order.fn";
 
     const input =
-        "imp std.io;\n" ++
+        "imp std.c.io;\n" ++
         "fun main() {\n" ++
         "  foo();\n" ++
         "}\n" ++
@@ -136,7 +136,7 @@ test "std.time import adds time.h include" {
     const ifilepath = "codegen_std_time.fn";
 
     const input =
-        "imp std.time;\n" ++
+        "imp std.c.time;\n" ++
         "fun main() { ret; }\n";
 
     const out_owned = try runTranspile(allocator, ifilepath, input);

@@ -1,4 +1,4 @@
-imp std.io;
+imp std.c.io;
 
 // Demonstrates that compounds can be declared in any order.
 // The compiler will handle forward references automatically.

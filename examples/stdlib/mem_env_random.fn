@@ -1,8 +1,8 @@
 // Real-world-ish: read an env var, parse an int, allocate a buffer, fill it with pseudo-random data.
 
-imp std.io;
-imp std.mem;
-imp std.string;
+imp std.c.io;
+imp std.c.mem;
+imp std.c.string;
 
 fun main() {
   str seed_s = getenv("FUN_SEED");

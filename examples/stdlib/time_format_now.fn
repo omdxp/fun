@@ -1,7 +1,7 @@
 // Real-world-ish: print the current time (epoch seconds).
 
-imp std.io;
-imp std.time;
+imp std.c.io;
+imp std.c.time;
 fun main() {
   // `time()` returns a `time_t` and `ctime()` expects a `time_t*`.
   time_t now = time(NULL);

@@ -3026,7 +3026,7 @@ pub const ParseProcess = struct {
         // Standard library imports may provide names (e.g. printf) that should be
         // usable in the current module, but must not participate in cross-module
         // duplicate detection.
-        if (mem.eql(u8, path, "std.io")) {
+        if (mem.eql(u8, path, "std.io") or mem.eql(u8, path, "std.c.io")) {
             const names = [_][]const u8{
                 "printf",
                 "fprintf",
@@ -3068,7 +3068,7 @@ pub const ParseProcess = struct {
                     });
                 }
             }
-        } else if (mem.eql(u8, path, "std.mem")) {
+        } else if (mem.eql(u8, path, "std.mem") or mem.eql(u8, path, "std.c.mem")) {
             const names = [_][]const u8{
                 "malloc",
                 "calloc",
@@ -3100,7 +3100,7 @@ pub const ParseProcess = struct {
                     });
                 }
             }
-        } else if (mem.eql(u8, path, "std.string")) {
+        } else if (mem.eql(u8, path, "std.string") or mem.eql(u8, path, "std.c.string")) {
             const names = [_][]const u8{
                 "strlen",
                 "strcmp",
@@ -3133,7 +3133,7 @@ pub const ParseProcess = struct {
                     });
                 }
             }
-        } else if (mem.eql(u8, path, "std.ctype")) {
+        } else if (mem.eql(u8, path, "std.ctype") or mem.eql(u8, path, "std.c.ctype")) {
             const names = [_][]const u8{
                 "isalnum",
                 "isalpha",
@@ -3160,7 +3160,7 @@ pub const ParseProcess = struct {
                     });
                 }
             }
-        } else if (mem.eql(u8, path, "std.time")) {
+        } else if (mem.eql(u8, path, "std.time") or mem.eql(u8, path, "std.c.time")) {
             const names = [_][]const u8{
                 "time",
                 "clock",
@@ -3182,7 +3182,7 @@ pub const ParseProcess = struct {
                     });
                 }
             }
-        } else if (mem.eql(u8, path, "std.math")) {
+        } else if (mem.eql(u8, path, "std.math") or mem.eql(u8, path, "std.c.math")) {
             const names = [_][]const u8{
                 "sin",
                 "cos",

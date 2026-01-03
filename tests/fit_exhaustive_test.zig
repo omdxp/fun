@@ -41,7 +41,7 @@ test "fit bin missing false warns" {
     const ifilepath = "fit_bin_missing_false.fn";
 
     const input =
-        "imp std.io;\n" ++
+        "imp std.c.io;\n" ++
         "fun main() {\n" ++
         "  bin x = true;\n" ++
         "  fit x {\n" ++
@@ -66,7 +66,7 @@ test "fit bin exhausted via default no warning" {
     const ifilepath = "fit_bin_default.fn";
 
     const input =
-        "imp std.io;\n" ++
+        "imp std.c.io;\n" ++
         "fun main() {\n" ++
         "  bin x = true;\n" ++
         "  fit x {\n" ++
@@ -91,7 +91,7 @@ test "fit num no exhaustiveness warning" {
     const ifilepath = "fit_num_no_warn.fn";
 
     const input =
-        "imp std.io;\n" ++
+        "imp std.c.io;\n" ++
         "fun main() {\n" ++
         "  num x = 1;\n" ++
         "  fit x {\n" ++

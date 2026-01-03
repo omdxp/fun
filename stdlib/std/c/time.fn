@@ -12,14 +12,14 @@ compound tm {
   num tm_isdst;
 }
 
-fun time(num* tloc) num;
+fun time(num * tloc) num;
 fun clock() num;
 fun difftime(num time1, num time0) dec;
-fun mktime(tm* t) num;
+fun mktime(tm * t) num;
 
-fun asctime(tm* t) str;
-fun ctime(num* timep) str;
-fun gmtime(num* timep) tm*;
-fun localtime(num* timep) tm*;
+fun asctime(tm * t) str;
+fun ctime(num * timep) str;
+fun gmtime(num * timep) tm *;
+fun localtime(num * timep) tm *;
 
-fun strftime(str s, num max, str format, tm* t) num;
+fun strftime(str s, num max, str format, tm * t) num;

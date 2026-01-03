@@ -1,0 +1,4 @@
+// C limits header (limits.h)
+// 
+// This module is intentionally light: most limits are macros (e.g. INT_MAX) and
+// are consumed directly by the transpiler/typechecker.

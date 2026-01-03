@@ -30,9 +30,7 @@ const ReaderCtx = struct {
 
 fn platformExeName(base: []const u8) []const u8 {
     if (@import("builtin").os.tag != .windows) return base;
-    // On Windows, `zig build` installs the language server as `fls-next.exe`
-    // to avoid file-lock issues when VS Code is running.
-    if (std.mem.eql(u8, base, "fls")) return "fls-next.exe";
+    if (std.mem.eql(u8, base, "fls")) return "fls.exe";
     if (std.mem.eql(u8, base, "fun")) return "fun.exe";
     return base;
 }
@@ -686,7 +684,7 @@ test "fls e2e: initialize, open, typing didChange, completion + definition do no
     try lspInitialize(allocator, &lsp, setup.root_uri);
 
     const doc_text =
-        "imp std.io;\n\n" ++
+        "imp std.c.io;\n\n" ++
         "// this calculates the factorial of a number\n" ++
         "fun factorial(num n) num {\n" ++
         "    if n == 0 {\n" ++
@@ -768,7 +766,7 @@ test "fls e2e: initialize, open, typing didChange, completion + definition do no
     try expectDefinitionPointsTo(allocator, result_val, doc_uri, fact_decl_pos.line, fact_decl_pos.col + 4);
 
     // Completion should respond with a list shape (even if empty).
-    const comp_pos = try findPosition(doc_text, "std.io", 0);
+    const comp_pos = try findPosition(doc_text, "std.c.io", 0);
     const comp_params = try std.fmt.allocPrint(
         allocator,
         "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
@@ -804,7 +802,7 @@ test "fls e2e: formatting never returns empty output" {
     try lspInitialize(allocator, &lsp, setup.root_uri);
 
     const doc_text =
-        "imp std.io;\n\n" ++
+        "imp std.c.io;\n\n" ++
         "fun main() {\n" ++
         "    printf(\"hi\\n\");\n" ++
         "}\n";
@@ -859,7 +857,7 @@ test "fls e2e: typing with CRLF positions stays consistent" {
     try lspInitialize(allocator, &lsp, setup.root_uri);
 
     const doc_text =
-        "imp std.io;\r\n\r\n" ++
+        "imp std.c.io;\r\n\r\n" ++
         "fun main() {\r\n" ++
         "    num a = 1;\r\n" ++
         "    printf(\"%d\\n\", a);\r\n" ++
@@ -885,7 +883,7 @@ test "fls e2e: typing with CRLF positions stays consistent" {
     try lsp.notify("textDocument/didChange", did_change_params);
 
     // Completion request should still succeed (shape only).
-    const comp_pos = try findPosition(doc_text, "std.io", 0);
+    const comp_pos = try findPosition(doc_text, "std.c.io", 0);
     const comp_params = try std.fmt.allocPrint(
         allocator,
         "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
@@ -926,7 +924,7 @@ test "fls e2e: import completion + go-to-definition works" {
     defer allocator.free(doc_uri);
     try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
 
-    // Completion after `std.` should include `io`.
+    // Completion after `std.` should include `c`.
     const pos = try findPosition(doc_text, "std.", 0);
     const comp_params = try std.fmt.allocPrint(
         allocator,
@@ -940,10 +938,10 @@ test "fls e2e: import completion + go-to-definition works" {
     try std.testing.expect(comp_res.parsed.value == .object);
     const comp_obj = comp_res.parsed.value.object;
     const comp_result = try jsonResultFromResponseObj(comp_obj);
-    try expectCompletionHasLabel(allocator, comp_result, "io");
+    try expectCompletionHasLabel(allocator, comp_result, "c");
 
-    // Now open a doc with `imp std.io;` and request definition on `io`.
-    const doc_text2 = "imp std.io;\n";
+    // Now open a doc with `imp std.c.io;` and request definition on `io`.
+    const doc_text2 = "imp std.c.io;\n";
     const doc_uri2 = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-import2.fn");
     defer allocator.free(doc_uri2);
     try lspOpenDoc(allocator, &lsp, doc_uri2, 1, doc_text2);
@@ -962,7 +960,7 @@ test "fls e2e: import completion + go-to-definition works" {
     const def_obj = def_res.parsed.value.object;
     const def_result = try jsonResultFromResponseObj(def_obj);
     // Expect jump into stdlib module file (range is 0:0 by design for module open).
-    try expectDefinitionPointsTo(allocator, def_result, "stdlib/std/io.fn", 0, 0);
+    try expectDefinitionPointsTo(allocator, def_result, "stdlib/std/c/io.fn", 0, 0);
 
     const shutdown_id = try lsp.request("shutdown", "{}");
     var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
@@ -1340,7 +1338,7 @@ test "fls e2e: didClose clears doc; requests remain safe" {
     try lspInitialize(allocator, &lsp, setup.root_uri);
 
     const doc_text =
-        "imp std.io;\n\n" ++
+        "imp std.c.io;\n\n" ++
         "fun alpha() {\n" ++
         "    printf(\"hi\\n\");\n" ++
         "}\n";
@@ -1441,7 +1439,7 @@ test "fls e2e: torture - extreme positions + most handlers" {
     try lspInitialize(allocator, &lsp, setup.root_uri);
 
     const doc_text =
-        "imp std.io;\n\n" ++
+        "imp std.c.io;\n\n" ++
         "fun alpha() {\n" ++
         "    printf(\"hi\\n\");\n" ++
         "}\n";

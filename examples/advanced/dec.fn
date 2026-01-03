@@ -1,4 +1,4 @@
-imp std.io;
+imp std.c.io;
 
 fun main() {
     dec x = 1;

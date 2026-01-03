@@ -1,7 +1,7 @@
 // Real-world-ish: normalize/sanitize user input characters.
 
-imp std.io;
-imp std.ctype;
+imp std.c.io;
+imp std.c.ctype;
 
 fun main() {
   // Example: accept a single character (pretend it's user input)

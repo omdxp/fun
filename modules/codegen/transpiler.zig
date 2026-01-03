@@ -1047,29 +1047,61 @@ pub const TranspileProcess = struct {
         if (!std.mem.startsWith(u8, import_path, "std.")) return null;
         if (self.stdlib_dir == null) return null;
 
-        const rel = import_path["std.".len..];
-        var tmp = std.ArrayList(u8).init(self.backing_allocator);
-        defer tmp.deinit();
+        // Canonical layout:
+        // - `std.c.io` => <stdlib>/std/c/io.fn
+        // Compatibility alias:
+        // - `std.io`   => <stdlib>/std/c/io.fn (fallback to <stdlib>/std/io.fn if present)
+        const rel_after_std = import_path["std.".len..];
+        const has_c_prefix = std.mem.startsWith(u8, rel_after_std, "c.");
+        const rel = if (has_c_prefix) rel_after_std["c.".len..] else rel_after_std;
 
-        tmp.appendSlice(self.stdlib_dir.?) catch return TranspileError.MemoryAllocationFailed;
-        tmp.append('/') catch return TranspileError.MemoryAllocationFailed;
-        tmp.appendSlice("std") catch return TranspileError.MemoryAllocationFailed;
-        tmp.append('/') catch return TranspileError.MemoryAllocationFailed;
-        for (rel) |ch| {
-            if (ch == '.') {
+        const StdPathLayout = enum { canonical, legacy };
+
+        const Builder = struct {
+            fn build(self2: *Self, rel2: []const u8, layout: StdPathLayout) TranspileError![]const u8 {
+                var tmp = std.ArrayList(u8).init(self2.backing_allocator);
+                defer tmp.deinit();
+
+                tmp.appendSlice(self2.stdlib_dir.?) catch return TranspileError.MemoryAllocationFailed;
                 tmp.append('/') catch return TranspileError.MemoryAllocationFailed;
-            } else {
-                tmp.append(ch) catch return TranspileError.MemoryAllocationFailed;
+                tmp.appendSlice("std") catch return TranspileError.MemoryAllocationFailed;
+                tmp.append('/') catch return TranspileError.MemoryAllocationFailed;
+                if (layout == .canonical) {
+                    tmp.appendSlice("c") catch return TranspileError.MemoryAllocationFailed;
+                    tmp.append('/') catch return TranspileError.MemoryAllocationFailed;
+                }
+                for (rel2) |ch| {
+                    if (ch == '.') {
+                        tmp.append('/') catch return TranspileError.MemoryAllocationFailed;
+                    } else {
+                        tmp.append(ch) catch return TranspileError.MemoryAllocationFailed;
+                    }
+                }
+                tmp.appendSlice(".fn") catch return TranspileError.MemoryAllocationFailed;
+                return tmp.toOwnedSlice() catch TranspileError.MemoryAllocationFailed;
             }
-        }
-        tmp.appendSlice(".fn") catch return TranspileError.MemoryAllocationFailed;
+        };
 
-        return tmp.toOwnedSlice() catch TranspileError.MemoryAllocationFailed;
+        // Try canonical path first.
+        const canonical = try Builder.build(self, rel, .canonical);
+        std.fs.cwd().access(canonical, .{}) catch {
+            self.backing_allocator.free(canonical);
+            if (has_c_prefix) return null;
+
+            // Fallback for older installs that still ship <stdlib>/std/<mod>.fn
+            const legacy = try Builder.build(self, rel, .legacy);
+            std.fs.cwd().access(legacy, .{}) catch {
+                self.backing_allocator.free(legacy);
+                return null;
+            };
+            return legacy;
+        };
+        return canonical;
     }
 
     /// Best-effort preload of stdlib signature modules (non-fatal).
     ///
-    /// This is for tooling/identifier validation: it allows `imp std.*;` to have a real module
+    /// This is for tooling/identifier validation: it allows `imp std.c.*;` (and the `std.*` alias)
     /// source of truth when installed, without changing codegen behavior.
     pub fn preload_std_import_global_symbols(self: *Self, import_node: ast.Node, import_path: []const u8) void {
         const full_path_opt = self.build_stdlib_module_path(import_path) catch return;
@@ -4788,7 +4820,7 @@ pub const TranspileProcess = struct {
     /// - Returns an error if processing the import fails.
     fn process_import(self: *Self, node: ast.Node) GeneralError!void {
         const import_path = node.node_variant.?.import.path;
-        if (std.mem.indexOf(u8, import_path, "std.") != null) {
+        if (std.mem.startsWith(u8, import_path, "std.")) {
             try self.process_std_import(node, import_path);
         } else {
             try self.process_local_import(node, import_path);
@@ -4806,52 +4838,52 @@ pub const TranspileProcess = struct {
     fn process_std_import(self: *Self, import_node: ast.Node, import_path: []const u8) TranspileError!void {
         var header_name: []const u8 = undefined;
 
-        if (mem.eql(u8, import_path, "std.io")) {
+        if (mem.eql(u8, import_path, "std.io") or mem.eql(u8, import_path, "std.c.io")) {
             header_name = self.allocator.dupe(u8, "stdio.h") catch |e| {
                 self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
                 return TranspileError.MemoryAllocationFailed;
             };
-        } else if (mem.eql(u8, import_path, "std.mem")) {
+        } else if (mem.eql(u8, import_path, "std.mem") or mem.eql(u8, import_path, "std.c.mem")) {
             header_name = self.allocator.dupe(u8, "stdlib.h") catch |e| {
                 self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
                 return TranspileError.MemoryAllocationFailed;
             };
-        } else if (mem.eql(u8, import_path, "std.string")) {
+        } else if (mem.eql(u8, import_path, "std.string") or mem.eql(u8, import_path, "std.c.string")) {
             header_name = self.allocator.dupe(u8, "string.h") catch |e| {
                 self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
                 return TranspileError.MemoryAllocationFailed;
             };
-        } else if (mem.eql(u8, import_path, "std.math")) {
+        } else if (mem.eql(u8, import_path, "std.math") or mem.eql(u8, import_path, "std.c.math")) {
             header_name = self.allocator.dupe(u8, "math.h") catch |e| {
                 self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
                 return TranspileError.MemoryAllocationFailed;
             };
-        } else if (mem.eql(u8, import_path, "std.ctype")) {
+        } else if (mem.eql(u8, import_path, "std.ctype") or mem.eql(u8, import_path, "std.c.ctype")) {
             header_name = self.allocator.dupe(u8, "ctype.h") catch |e| {
                 self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
                 return TranspileError.MemoryAllocationFailed;
             };
-        } else if (mem.eql(u8, import_path, "std.time")) {
+        } else if (mem.eql(u8, import_path, "std.time") or mem.eql(u8, import_path, "std.c.time")) {
             header_name = self.allocator.dupe(u8, "time.h") catch |e| {
                 self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
                 return TranspileError.MemoryAllocationFailed;
             };
-        } else if (mem.eql(u8, import_path, "std.limits")) {
+        } else if (mem.eql(u8, import_path, "std.limits") or mem.eql(u8, import_path, "std.c.limits")) {
             header_name = self.allocator.dupe(u8, "limits.h") catch |e| {
                 self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
                 return TranspileError.MemoryAllocationFailed;
             };
-        } else if (mem.eql(u8, import_path, "std.stdint")) {
+        } else if (mem.eql(u8, import_path, "std.stdint") or mem.eql(u8, import_path, "std.c.stdint")) {
             header_name = self.allocator.dupe(u8, "stdint.h") catch |e| {
                 self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
                 return TranspileError.MemoryAllocationFailed;
             };
-        } else if (mem.eql(u8, import_path, "std.stddef")) {
+        } else if (mem.eql(u8, import_path, "std.stddef") or mem.eql(u8, import_path, "std.c.stddef")) {
             header_name = self.allocator.dupe(u8, "stddef.h") catch |e| {
                 self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
                 return TranspileError.MemoryAllocationFailed;
             };
-        } else if (mem.eql(u8, import_path, "std.errno")) {
+        } else if (mem.eql(u8, import_path, "std.errno") or mem.eql(u8, import_path, "std.c.errno")) {
             header_name = self.allocator.dupe(u8, "errno.h") catch |e| {
                 self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
                 return TranspileError.MemoryAllocationFailed;

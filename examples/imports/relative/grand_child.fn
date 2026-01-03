@@ -1,4 +1,4 @@
-imp std.io;
+imp std.c.io;
 
 fun grand_child() {
 	printf("grand_child\n");

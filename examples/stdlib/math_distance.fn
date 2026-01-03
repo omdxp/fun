@@ -1,7 +1,7 @@
 // Real-world-ish: compute Euclidean distance between two points.
 
-imp std.io;
-imp std.math;
+imp std.c.io;
+imp std.c.math;
 
 fun main() {
   dec x1 = 1.0;

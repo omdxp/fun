@@ -1,7 +1,7 @@
 // Real-world-ish: copy up to 1024 bytes from stdin to a file, then report bytes.
 // When you run the produced C program, type input then EOF (Ctrl+Z+Enter on Windows).
 
-imp std.io;
+imp std.c.io;
 
 fun main() {
   FILE* out = fopen("out.txt", "w");

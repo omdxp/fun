@@ -3,7 +3,7 @@
 // Run:
 //   fun -in examples/cli_args.fn -- one two three
 
-imp std.io;
+imp std.c.io;
 
 fun main(str[] args) {
   // Print argv entries until the null terminator.

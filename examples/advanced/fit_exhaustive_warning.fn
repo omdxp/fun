@@ -8,7 +8,7 @@
 //   "fit statement is not exhausted for bin condition (missing false branch)"
 // - Program still runs normally.
 
-imp std.io;
+imp std.c.io;
 
 fun main() {
   bin x = true;

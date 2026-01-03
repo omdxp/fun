@@ -1,0 +1,4 @@
+// C stddef header (stddef.h)
+// 
+// This module is intentionally light: typedefs like `size_t` are recognized by
+// the typechecker as numeric-compatible identifier types.

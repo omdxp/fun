@@ -1,4 +1,4 @@
-imp std.io;
+imp std.c.io;
 
 fun sub(num x, num y) num {
 	ret x - y;

@@ -87,7 +87,7 @@ Arguments:
 Write your first program in `hello.fn`:
 
 ```fun
-imp std.io;
+imp std.c.io;
 
 fun main(str[] args) {
     printf("Hello, World!\n");

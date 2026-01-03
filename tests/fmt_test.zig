@@ -203,7 +203,7 @@ test "-fmt groups imports and globals at top" {
 
     const ugly =
         "fun main() num{ret 0;}\n" ++
-        "imp std.io;\n" ++
+        "imp std.c.io;\n" ++
         "num x=1;\n" ++
         "imp foo.bar;\n" ++
         "num y=2;\n";
@@ -220,7 +220,7 @@ test "-fmt groups imports and globals at top" {
     defer allocator.free(got);
 
     const expected =
-        "imp std.io;\n" ++
+        "imp std.c.io;\n" ++
         "imp foo.bar;\n" ++
         "\n" ++
         "num x = 1;\n" ++
@@ -247,7 +247,7 @@ test "-fmt-all formats local imports recursively (skips std.*)" {
         allocator,
         dir,
         "main.fn",
-        "imp foo.bar; imp std.io; fun  main() num{ret 0;}\n",
+        "imp foo.bar; imp std.c.io; fun  main() num{ret 0;}\n",
     );
     defer allocator.free(main_path);
 
@@ -264,7 +264,7 @@ test "-fmt-all formats local imports recursively (skips std.*)" {
     const got_main = try std.fs.cwd().readFileAlloc(allocator, main_path, 1024 * 1024);
     defer allocator.free(got_main);
     try std.testing.expect(std.mem.indexOf(u8, got_main, "imp foo.bar;\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, got_main, "imp std.io;\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got_main, "imp std.c.io;\n") != null);
 
     const got_import = try std.fs.cwd().readFileAlloc(allocator, imported_path, 1024 * 1024);
     defer allocator.free(got_import);
@@ -279,7 +279,7 @@ test "-fmt output still parses (quirks/ops)" {
     const allocator = std.testing.allocator;
 
     const ugly =
-        "imp std.io;\n" ++
+        "imp std.c.io;\n" ++
         "compound Point{num x;num y;}\n" ++
         "quirk Shape{area() num;translate(num dx,num dy);}\n" ++
         "compound Rectangle{Point a;Point b;}\n" ++

@@ -3,7 +3,7 @@
 // Run:
 //   fun -in .\examples\advanced\fit_exhaustive_ok.fn
 
-imp std.io;
+imp std.c.io;
 
 fun main() {
   bin x = true;
