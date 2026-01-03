@@ -7,6 +7,7 @@ if [ "${1:-}" = "--prefix" ] && [ -n "${2:-}" ]; then
 fi
 
 rm -f "$prefix/bin/fun" || true
+rm -f "$prefix/bin/fls" || true
 rm -rf "$prefix/share/fun" || true
 
 echo "Uninstalled fun from: $prefix"

@@ -29,14 +29,16 @@ dest_share="$prefix/share/fun"
 
 mkdir -p "$dest_bin" "$dest_share"
 
-# Copy binary
+# Copy binaries
 cp -f "$src_bin/fun" "$dest_bin/fun" 2>/dev/null || cp -f "$src_bin/fun.exe" "$dest_bin/fun"
-chmod 755 "$dest_bin/fun" || true
+cp -f "$src_bin/fls" "$dest_bin/fls" 2>/dev/null || cp -f "$src_bin/fls.exe" "$dest_bin/fls"
+chmod 755 "$dest_bin/fun" "$dest_bin/fls" || true
 
 # Copy stdlib signatures
 mkdir -p "$prefix/share"
 cp -R "$src_share" "$prefix/share/"
 
 echo "Installed fun to: $prefix"
+echo "Installed fls to: $prefix"
 echo "Stdlib installed to: $dest_share"
 echo "Ensure $dest_bin is on your PATH."
