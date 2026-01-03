@@ -3927,9 +3927,14 @@ fn buildIndexFromText(allocator: Allocator, text: []const u8) !*Index {
 
     if (parse_ok) {
         // Keep member/field symbols from the lexer scan (AST lacks positions for some of these).
+        // Also keep token-derived locals (including implicit `self` and params inside `impl` methods),
+        // because the current AST-backed collection does not cover all method-body locals.
         for (symbols_token.items) |s| {
             switch (s.kind) {
                 .field, .property, .method => try symbols_out.append(s),
+                .variable => {
+                    if (s.container_fn_range != null) try symbols_out.append(s);
+                },
                 else => {},
             }
         }
@@ -4183,6 +4188,45 @@ test "fls index: locals are indexed inside fun bodies" {
     try std.testing.expect(found_p);
 }
 
+test "fls index: impl methods include self, params, locals" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const text =
+        "compound Point {\n" ++
+        "  num x;\n" ++
+        "}\n\n" ++
+        "impl Point {\n" ++
+        "  translate(num dx, num dy) {\n" ++
+        "    num tmp = 1;\n" ++
+        "    self.x += dx;\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found_self = false;
+    var found_dx = false;
+    var found_dy = false;
+    var found_tmp = false;
+
+    for (idx.symbols) |s| {
+        if (s.kind != .variable) continue;
+        if (s.container_fn_range == null) continue;
+        if (std.mem.eql(u8, s.name, "self")) found_self = true;
+        if (std.mem.eql(u8, s.name, "dx")) found_dx = true;
+        if (std.mem.eql(u8, s.name, "dy")) found_dy = true;
+        if (std.mem.eql(u8, s.name, "tmp")) found_tmp = true;
+    }
+
+    try std.testing.expect(found_self);
+    try std.testing.expect(found_dx);
+    try std.testing.expect(found_dy);
+    try std.testing.expect(found_tmp);
+}
+
 fn trimLeftSpace(s: []const u8) []const u8 {
     var i: usize = 0;
     while (i < s.len and (s[i] == ' ' or s[i] == '\t')) : (i += 1) {}
@@ -4394,11 +4438,83 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
     var brace_depth: i64 = 0;
     var paren_depth: i64 = 0;
 
-    // Track when we're inside a `fun ... { ... }` body so we can index locals.
-    var pending_fun_body: bool = false;
-    var in_fun_body: bool = false;
-    var fun_body_brace_depth: i64 = 0;
-    var fun_body_range: ?Range = null;
+    const ParamLite = struct { name: []const u8, dtype: []const u8 };
+
+    // Track when we're inside any function-ish body so we can index locals.
+    // This includes:
+    // - `fun name(...) { ... }`
+    // - `impl Type { method(...) { ... } }`
+    const PendingBodyKind = enum { none, fun_decl, impl_method };
+
+    var pending_body: PendingBodyKind = .none;
+    var pending_params = std.ArrayList(ParamLite).init(allocator);
+    defer pending_params.deinit();
+    var pending_impl_owner: ?[]const u8 = null;
+
+    var in_body: bool = false;
+    var body_brace_depth: i64 = 0;
+    var body_range: ?Range = null;
+
+    // Track `impl Type { ... }` so we can recognize method declarations.
+    var pending_impl_block: bool = false;
+    var in_impl_block: bool = false;
+    var impl_brace_depth: i64 = 0;
+    var impl_owner_name: ?[]const u8 = null;
+
+    const resetPendingBody = struct {
+        fn call(kind: *PendingBodyKind, params: *std.ArrayList(ParamLite), owner: *?[]const u8) void {
+            kind.* = .none;
+            params.clearRetainingCapacity();
+            owner.* = null;
+        }
+    }.call;
+
+    const parseParamsAfterLParen = struct {
+        fn call(tokens_: []const token.Token, lparen_i: usize, params: *std.ArrayList(ParamLite)) void {
+            // Parse `Type name` pairs until the matching ')'. Best-effort; ignore failures.
+            var depth: i64 = 0;
+            var rparen_i: ?usize = null;
+            var k: usize = lparen_i;
+            while (k < tokens_.len) : (k += 1) {
+                const tk = tokens_[k];
+                if (isPunctChar(tk, '(')) depth += 1;
+                if (isPunctChar(tk, ')')) {
+                    depth -= 1;
+                    if (depth == 0) {
+                        rparen_i = k;
+                        break;
+                    }
+                }
+            }
+            if (rparen_i == null) return;
+
+            var pi: usize = lparen_i + 1;
+            while (pi < rparen_i.?) {
+                const pt = tokens_[pi];
+                if (pt.type == .NewLine or pt.type == .Comment) {
+                    pi += 1;
+                    continue;
+                }
+                if (isPunctChar(pt, ',')) {
+                    pi += 1;
+                    continue;
+                }
+                if (!isTypeToken(pt)) {
+                    pi += 1;
+                    continue;
+                }
+                const ptype = tokenString(pt);
+                const pname_i = nextNonTrivialToken(tokens_, pi + 1) orelse break;
+                if (!isIdent(tokens_[pname_i])) {
+                    pi += 1;
+                    continue;
+                }
+                const pname = tokenString(tokens_[pname_i]);
+                params.append(.{ .name = pname, .dtype = ptype }) catch {};
+                pi = pname_i + 1;
+            }
+        }
+    }.call;
 
     var i: usize = 0;
     while (i < tokens.len) : (i += 1) {
@@ -4409,32 +4525,103 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
         if (isPunctChar(t, '(')) paren_depth += 1;
         if (isPunctChar(t, ')')) paren_depth -= 1;
 
-        // Enter/exit fun bodies.
-        if (pending_fun_body and isSymbolChar(t, '{')) {
-            pending_fun_body = false;
-            in_fun_body = true;
-            fun_body_brace_depth = brace_depth;
+        // Enter/exit impl blocks.
+        if (pending_impl_block and isSymbolChar(t, '{')) {
+            pending_impl_block = false;
+            in_impl_block = true;
+            impl_brace_depth = brace_depth;
+        }
+        if (pending_impl_block and isSymbolChar(t, ';')) {
+            pending_impl_block = false;
+            impl_owner_name = null;
+        }
+        if (in_impl_block and isSymbolChar(t, '}') and brace_depth < impl_brace_depth) {
+            in_impl_block = false;
+            impl_owner_name = null;
+        }
+
+        // Enter/exit function-ish bodies.
+        if (pending_body != .none and isSymbolChar(t, '{')) {
+            in_body = true;
+            body_brace_depth = brace_depth;
             const br = rangeFromTokenPos(t.pos);
-            fun_body_range = .{
+            body_range = .{
                 .start = br.start,
                 .end = .{ .line = std.math.maxInt(i64), .character = std.math.maxInt(i64) },
             };
+
+            // Add implicit `self` inside impl method bodies.
+            if (pending_body == .impl_method) {
+                if (pending_impl_owner) |owner| {
+                    try out.append(.{
+                        .name = try allocator.dupe(u8, "self"),
+                        .kind = .variable,
+                        .decl_range = br,
+                        .selection_range = br,
+                        .container_fn_range = body_range.?,
+                        .container_type = null,
+                        .value_type = try allocator.dupe(u8, owner),
+                        .detail = try allocator.dupe(u8, owner),
+                    });
+                }
+            }
+
+            // Add params as locals within the body.
+            for (pending_params.items) |pinfo| {
+                try out.append(.{
+                    .name = try allocator.dupe(u8, pinfo.name),
+                    .kind = .variable,
+                    .decl_range = br,
+                    .selection_range = br,
+                    .container_fn_range = body_range.?,
+                    .container_type = null,
+                    .value_type = try allocator.dupe(u8, pinfo.dtype),
+                    .detail = blk: {
+                        var det_buf = std.ArrayList(u8).init(allocator);
+                        defer det_buf.deinit();
+                        try det_buf.writer().print("{s} {s}", .{ pinfo.dtype, pinfo.name });
+                        break :blk try allocator.dupe(u8, det_buf.items);
+                    },
+                });
+            }
+
+            resetPendingBody(&pending_body, &pending_params, &pending_impl_owner);
         }
-        if (pending_fun_body and isSymbolChar(t, ';')) {
+        if (pending_body != .none and isSymbolChar(t, ';')) {
             // Prototype/no-body.
-            pending_fun_body = false;
+            resetPendingBody(&pending_body, &pending_params, &pending_impl_owner);
         }
-        if (in_fun_body and isSymbolChar(t, '}') and brace_depth < fun_body_brace_depth) {
-            in_fun_body = false;
-            fun_body_range = null;
+        if (in_body and isSymbolChar(t, '}') and brace_depth < body_brace_depth) {
+            in_body = false;
+            body_range = null;
         }
 
         if (isKeyword(t, "fun")) {
-            pending_fun_body = true;
+            resetPendingBody(&pending_body, &pending_params, &pending_impl_owner);
+            pending_body = .fun_decl;
             const name_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
             if (!isIdent(tokens[name_i])) continue;
             const name = tokenString(tokens[name_i]);
             const r = rangeFromTokenPos(tokens[name_i].pos);
+
+            // Capture params so we can offer them as locals inside the body.
+            const after_name_i = nextNonTrivialToken(tokens, name_i + 1) orelse {
+                // Still index the function symbol; params are just best-effort.
+                const sig = try buildSignatureFromTokens(allocator, tokens, name_i, true);
+                try out.append(.{
+                    .name = try allocator.dupe(u8, name),
+                    .kind = .function,
+                    .decl_range = r,
+                    .selection_range = r,
+                    .container_type = null,
+                    .value_type = null,
+                    .detail = sig.detail,
+                });
+                continue;
+            };
+            if (isPunctChar(tokens[after_name_i], '(')) {
+                parseParamsAfterLParen(tokens, after_name_i, &pending_params);
+            }
 
             const sig = try buildSignatureFromTokens(allocator, tokens, name_i, true);
             try out.append(.{
@@ -4563,6 +4750,17 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
         }
 
         if (isKeyword(t, "impl")) {
+            // Enter impl block tracking so we can index locals/self inside methods.
+            pending_impl_block = true;
+            const type_i2 = nextNonTrivialToken(tokens, i + 1) orelse {
+                impl_owner_name = null;
+                continue;
+            };
+            if (isIdent(tokens[type_i2])) {
+                impl_owner_name = tokenString(tokens[type_i2]);
+            } else {
+                impl_owner_name = null;
+            }
             // impl <Type> [<Quirk>] { ... }
             const type_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
             if (!isIdent(tokens[type_i])) continue;
@@ -4606,9 +4804,22 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
             continue;
         }
 
+        // Recognize impl method declarations at the top-level of an impl block so we can index
+        // `self`, params, and locals within the method body.
+        if (in_impl_block and brace_depth == impl_brace_depth and t.type == .Identifier) {
+            const after_name_i = nextNonTrivialToken(tokens, i + 1) orelse null;
+            if (after_name_i != null and isPunctChar(tokens[after_name_i.?], '(')) {
+                // Avoid clobbering a pending `fun` body if the user is mid-edit.
+                resetPendingBody(&pending_body, &pending_params, &pending_impl_owner);
+                pending_body = .impl_method;
+                pending_impl_owner = impl_owner_name;
+                parseParamsAfterLParen(tokens, after_name_i.?, &pending_params);
+            }
+        }
+
         // Best-effort local variable indexing (token-based): `Type name;` or `Type name = ...;`.
         // Attach locals to the enclosing `fun { ... }` body.
-        if (in_fun_body and isTypeToken(t)) {
+        if (in_body and isTypeToken(t)) {
             // Avoid `compound X`, `quirk X`, `impl X`, `fun name`.
             if (i > 0 and tokens[i - 1].type == .Keyword) {
                 const kw = tokenString(tokens[i - 1]);
@@ -4645,7 +4856,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                     .kind = .variable,
                     .decl_range = r,
                     .selection_range = r,
-                    .container_fn_range = fun_body_range.?,
+                    .container_fn_range = body_range.?,
                     .container_type = null,
                     .value_type = try allocator.dupe(u8, vtype),
                     .detail = try allocator.dupe(u8, det_buf.items),
