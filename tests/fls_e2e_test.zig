@@ -139,6 +139,28 @@ const MsgQueue = struct {
 
         return null;
     }
+
+    fn popMatchingNotification(self: *MsgQueue, allocator: Allocator, method: []const u8) ?ParsedMsg {
+        self.mu.lock();
+        defer self.mu.unlock();
+
+        var i: usize = 0;
+        while (i < self.items.items.len) : (i += 1) {
+            const raw = self.items.items[i];
+            const parsed = std.json.parseFromSlice(std.json.Value, allocator, raw, .{}) catch continue;
+            if (parsed.value == .object) {
+                const obj = parsed.value.object;
+                if (obj.get("method")) |mv| {
+                    if (mv == .string and std.mem.eql(u8, mv.string, method)) {
+                        _ = self.items.orderedRemove(i);
+                        return .{ .allocator = allocator, .raw = raw, .parsed = parsed };
+                    }
+                }
+            }
+            parsed.deinit();
+        }
+        return null;
+    }
 };
 
 fn readerThread(ctx: *ReaderCtx) void {
@@ -283,6 +305,21 @@ const LspProc = struct {
             self.q.cv.timedWait(&self.q.mu, 50 * std.time.ns_per_ms) catch {};
         }
     }
+
+    fn waitNotification(self: *LspProc, method: []const u8, timeout_ms: i64) !MsgQueue.ParsedMsg {
+        const start_ms = std.time.milliTimestamp();
+        while (true) {
+            if (self.q.popMatchingNotification(self.allocator, method)) |msg| return msg;
+
+            const elapsed = std.time.milliTimestamp() - start_ms;
+            if (elapsed > timeout_ms) return error.Timeout;
+
+            self.q.mu.lock();
+            defer self.q.mu.unlock();
+            if (self.q.closed) return error.EndOfStream;
+            self.q.cv.timedWait(&self.q.mu, 50 * std.time.ns_per_ms) catch {};
+        }
+    }
 };
 
 fn escapeJsonAlloc(allocator: Allocator, s: []const u8) ![]u8 {
@@ -399,18 +436,43 @@ const TestSetup = struct {
 };
 
 fn resolveTestSetup(allocator: Allocator) !TestSetup {
-    // We run tests with cwd=repo root (see build.zig). Spawn the installed fls.
-    const fls_cur_rel = try std.fs.path.join(allocator, &[_][]const u8{ "zig-out", "bin", platformExeName("fls") });
-    defer allocator.free(fls_cur_rel);
+    // We run tests with cwd=repo root (see build.zig).
+    // By default, spawn the installed binaries from `zig-out/bin/`.
+    // On Windows, `zig-out/bin/fls.exe` may be locked by a running VS Code instance.
+    // Allow overriding the exe directory for local development.
+    const exe_dir_opt: ?[]u8 = blk: {
+        if (@hasDecl(std.process, "getEnvVarOwned")) {
+            // Zig 0.14+
+            break :blk std.process.getEnvVarOwned(allocator, "FLS_E2E_EXE_DIR") catch null;
+        }
+        if (@hasDecl(@import("std").process, "getEnvVar")) {
+            // Older Zig; best-effort.
+            break :blk @import("std").process.getEnvVar("FLS_E2E_EXE_DIR", allocator) catch null;
+        }
+        break :blk null;
+    };
+    defer if (exe_dir_opt) |d| allocator.free(d);
 
-    const fls_path = try allocator.dupe(u8, fls_cur_rel);
+    const fls_path = blk: {
+        if (exe_dir_opt) |dir| {
+            const p = try std.fs.path.join(allocator, &[_][]const u8{ dir, platformExeName("fls") });
+            break :blk p;
+        }
+        break :blk try std.fs.path.join(allocator, &[_][]const u8{ "zig-out", "bin", platformExeName("fls") });
+    };
     errdefer allocator.free(fls_path);
     try std.testing.expect(fileExists(fls_path));
 
-    const fun_rel = try std.fs.path.join(allocator, &[_][]const u8{ "zig-out", "bin", platformExeName("fun") });
-    defer allocator.free(fun_rel);
-    try std.testing.expect(fileExists(fun_rel));
-    const fun_abs = try std.fs.cwd().realpathAlloc(allocator, fun_rel);
+    const fun_path_rel_or_abs = blk: {
+        if (exe_dir_opt) |dir| {
+            const p = try std.fs.path.join(allocator, &[_][]const u8{ dir, platformExeName("fun") });
+            break :blk p;
+        }
+        break :blk try std.fs.path.join(allocator, &[_][]const u8{ "zig-out", "bin", platformExeName("fun") });
+    };
+    defer allocator.free(fun_path_rel_or_abs);
+    try std.testing.expect(fileExists(fun_path_rel_or_abs));
+    const fun_abs = try std.fs.cwd().realpathAlloc(allocator, fun_path_rel_or_abs);
     errdefer allocator.free(fun_abs);
 
     const root_abs = try std.fs.cwd().realpathAlloc(allocator, ".");
@@ -1140,6 +1202,263 @@ test "fls e2e: locals, dot completion, member signatureHelp" {
     var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
     shutdown_res.deinit();
     try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: dot completion finds impl methods across imported files" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    // Create a tiny multi-file project under `.zig-cache/` so import resolution matches
+    // what fls does for in-editor unsaved buffers.
+    std.fs.cwd().makePath(".zig-cache") catch {};
+
+    const user_path = ".zig-cache/__fls_implsep_user.fn";
+    const impl_path = ".zig-cache/__fls_implsep_user_impl.fn";
+    defer std.fs.cwd().deleteFile(user_path) catch {};
+    defer std.fs.cwd().deleteFile(impl_path) catch {};
+
+    {
+        const f = try std.fs.cwd().createFile(user_path, .{ .truncate = true });
+        defer f.close();
+        try f.writeAll(
+            "compound User {\n" ++
+                "  str name;\n" ++
+                "}\n",
+        );
+    }
+    {
+        const f = try std.fs.cwd().createFile(impl_path, .{ .truncate = true });
+        defer f.close();
+        try f.writeAll(
+            "imp std.c.io;\n" ++
+                "imp __fls_implsep_user;\n\n" ++
+                "impl User {\n" ++
+                "  greet() {\n" ++
+                "    printf(\"hi %s\\n\", self.name);\n" ++
+                "  }\n" ++
+                "}\n",
+        );
+    }
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "imp __fls_implsep_user;\n" ++
+        "imp __fls_implsep_user_impl;\n\n" ++
+        "fun main() void {\n" ++
+        "  User user;\n" ++
+        "  user.name = \"Alice\";\n" ++
+        "  User* u = &user;\n" ++
+        "  u.\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-implsep.fn");
+    defer allocator.free(doc_uri);
+
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const dot_pos = try findPosition(doc_text, "u.", 0);
+    const comp_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, dot_pos.line, dot_pos.col + 2 },
+    );
+    defer allocator.free(comp_params);
+
+    const comp_id = try lsp.request("textDocument/completion", comp_params);
+    var comp_res = try lsp.waitResponse(comp_id, 5000);
+    defer comp_res.deinit();
+    try std.testing.expect(comp_res.parsed.value == .object);
+    const comp_obj = comp_res.parsed.value.object;
+    const result_val = try jsonResultFromResponseObj(comp_obj);
+
+    // Expect method completion from `impl User` living in a different imported file.
+    try expectCompletionHasLabel(allocator, result_val, "greet");
+}
+
+test "fls e2e: quirks across folders complete + missing methods diagnose" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    std.fs.cwd().makePath(".zig-cache") catch {};
+    std.fs.cwd().makePath(".zig-cache/qaf/defs") catch {};
+    std.fs.cwd().makePath(".zig-cache/qaf/impls") catch {};
+
+    const user_path = ".zig-cache/qaf/defs/user.fn";
+    const greeter_path = ".zig-cache/qaf/defs/greeter.fn";
+    const impl_ok_path = ".zig-cache/qaf/impls/user_greeter_ok.fn";
+    const impl_bad_path = ".zig-cache/qaf/impls/user_greeter_bad.fn";
+
+    defer std.fs.cwd().deleteFile(user_path) catch {};
+    defer std.fs.cwd().deleteFile(greeter_path) catch {};
+    defer std.fs.cwd().deleteFile(impl_ok_path) catch {};
+    defer std.fs.cwd().deleteFile(impl_bad_path) catch {};
+
+    {
+        const f = try std.fs.cwd().createFile(user_path, .{ .truncate = true });
+        defer f.close();
+        try f.writeAll(
+            "compound User {\n" ++
+                "  str name;\n" ++
+                "}\n",
+        );
+    }
+    {
+        const f = try std.fs.cwd().createFile(greeter_path, .{ .truncate = true });
+        defer f.close();
+        try f.writeAll(
+            "quirk Greeter {\n" ++
+                "  greet(str prefix) void;\n" ++
+                "  bye() void;\n" ++
+                "}\n",
+        );
+    }
+    {
+        const f = try std.fs.cwd().createFile(impl_ok_path, .{ .truncate = true });
+        defer f.close();
+        try f.writeAll(
+            "imp std.c.io;\n" ++
+                "imp ..defs.user;\n" ++
+                "imp ..defs.greeter;\n\n" ++
+                "impl User Greeter {\n" ++
+                "  greet(str prefix) void {\n" ++
+                "    printf(\"%s %s\\n\", prefix, self.name);\n" ++
+                "  }\n\n" ++
+                "  bye() void {\n" ++
+                "    printf(\"bye %s\\n\", self.name);\n" ++
+                "  }\n" ++
+                "}\n",
+        );
+    }
+    {
+        const f = try std.fs.cwd().createFile(impl_bad_path, .{ .truncate = true });
+        defer f.close();
+        // Intentionally missing `bye()`.
+        try f.writeAll(
+            "imp std.c.io;\n" ++
+                "imp ..defs.user;\n" ++
+                "imp ..defs.greeter;\n\n" ++
+                "impl User Greeter {\n" ++
+                "  greet(str prefix) void {\n" ++
+                "    printf(\"%s %s\\n\", prefix, self.name);\n" ++
+                "  }\n" ++
+                "}\n",
+        );
+    }
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    // --- 1) Completion for quirk/type names in an impl header.
+    const doc_text_impl_header =
+        "imp qaf.defs.user;\n" ++
+        "imp qaf.defs.greeter;\n\n" ++
+        "impl User \n";
+
+    const doc_uri_impl_header = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-qaf-impl-header.fn");
+    defer allocator.free(doc_uri_impl_header);
+    try lspOpenDoc(allocator, &lsp, doc_uri_impl_header, 1, doc_text_impl_header);
+
+    const impl_pos = try findPosition(doc_text_impl_header, "impl User ", 0);
+    const comp_params_impl = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri_impl_header, impl_pos.line, impl_pos.col + @as(i64, @intCast("impl User ".len)) },
+    );
+    defer allocator.free(comp_params_impl);
+
+    const comp_id_impl = try lsp.request("textDocument/completion", comp_params_impl);
+    var comp_res_impl = try lsp.waitResponse(comp_id_impl, 5000);
+    defer comp_res_impl.deinit();
+    const comp_obj_impl = comp_res_impl.parsed.value.object;
+    const comp_val_impl = try jsonResultFromResponseObj(comp_obj_impl);
+    try expectCompletionHasLabel(allocator, comp_val_impl, "Greeter");
+    try expectCompletionHasLabel(allocator, comp_val_impl, "User");
+
+    // --- 2) Member completion for impl methods across imported files.
+    const doc_text_members =
+        "imp qaf.defs.user;\n" ++
+        "imp qaf.impls.user_greeter_ok;\n\n" ++
+        "fun main() void {\n" ++
+        "  User user;\n" ++
+        "  user.name = \"Alice\";\n" ++
+        "  User* u = &user;\n" ++
+        "  u.\n" ++
+        "}\n";
+
+    const doc_uri_members = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-qaf-members.fn");
+    defer allocator.free(doc_uri_members);
+    try lspOpenDoc(allocator, &lsp, doc_uri_members, 1, doc_text_members);
+
+    const dot_pos = try findPosition(doc_text_members, "u.", 0);
+    const comp_params_dot = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri_members, dot_pos.line, dot_pos.col + 2 },
+    );
+    defer allocator.free(comp_params_dot);
+
+    const comp_id_dot = try lsp.request("textDocument/completion", comp_params_dot);
+    var comp_res_dot = try lsp.waitResponse(comp_id_dot, 5000);
+    defer comp_res_dot.deinit();
+    const comp_obj_dot = comp_res_dot.parsed.value.object;
+    const comp_val_dot = try jsonResultFromResponseObj(comp_obj_dot);
+    try expectCompletionHasLabel(allocator, comp_val_dot, "greet");
+    try expectCompletionHasLabel(allocator, comp_val_dot, "bye");
+
+    // --- 3) Diagnostics should report missing quirk methods in an imported impl.
+    const doc_text_bad =
+        "imp qaf.defs.user;\n" ++
+        "imp qaf.impls.user_greeter_bad;\n\n" ++
+        "fun main() void {\n" ++
+        "  User user;\n" ++
+        "  user.name = \"Alice\";\n" ++
+        "  User* u = &user;\n" ++
+        "  u.greet(\"hi\");\n" ++
+        "}\n";
+
+    const doc_uri_bad = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-qaf-bad.fn");
+    defer allocator.free(doc_uri_bad);
+    try lspOpenDoc(allocator, &lsp, doc_uri_bad, 1, doc_text_bad);
+
+    const expectDiagnosticsForUriContains = struct {
+        fn call(lsp_: *LspProc, needle: []const u8) !void {
+            var tries: usize = 0;
+            while (tries < 40) : (tries += 1) {
+                var msg = try lsp_.waitNotification("textDocument/publishDiagnostics", 15000);
+                defer msg.deinit();
+
+                if (msg.parsed.value != .object) continue;
+                const obj = msg.parsed.value.object;
+                const params_v = obj.get("params") orelse continue;
+                if (params_v != .object) continue;
+                const params = params_v.object;
+                const uri_v = params.get("uri") orelse continue;
+                const diags_v = params.get("diagnostics") orelse continue;
+                if (uri_v != .string or diags_v != .array) continue;
+
+                if (std.mem.indexOf(u8, uri_v.string, needle) != null) {
+                    try std.testing.expect(diags_v.array.items.len > 0);
+                    return;
+                }
+            }
+            return error.TestUnexpectedResult;
+        }
+    }.call;
+
+    // Wait for at least one diagnostic for the bad impl file.
+    try expectDiagnosticsForUriContains(&lsp, "user_greeter_bad.fn");
 }
 
 test "fls e2e: didChange before didOpen is ignored unless full replace" {

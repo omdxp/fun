@@ -1,0 +1,8 @@
+imp std.c.io;
+imp user;
+
+impl User {
+  greet() {
+    printf("hi %s\n", self.name);
+  }
+}

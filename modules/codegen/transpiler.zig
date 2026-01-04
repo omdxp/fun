@@ -795,18 +795,46 @@ pub const TranspileProcess = struct {
             return TranspileError.MemoryAllocationFailed;
         };
 
-        for (import_path) |ch| {
-            if (ch == '.') {
+        // Convert dotted imports to a path. Additionally, support parent traversal via dot runs:
+        // - `.`  => path separator
+        // - `..` => `../` (one parent)
+        // - `....` => `../../` (two parents)
+        var i: usize = 0;
+        while (i < import_path.len) {
+            if (import_path[i] != '.') {
+                file_path.append(import_path[i]) catch |e| {
+                    std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+                    return TranspileError.MemoryAllocationFailed;
+                };
+                i += 1;
+                continue;
+            }
+
+            var j = i;
+            while (j < import_path.len and import_path[j] == '.') : (j += 1) {}
+            const run_len = j - i;
+            const parents = run_len / 2;
+            const sep = (run_len % 2) == 1;
+
+            var p: usize = 0;
+            while (p < parents) : (p += 1) {
+                file_path.appendSlice("..") catch |e| {
+                    std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+                    return TranspileError.MemoryAllocationFailed;
+                };
                 file_path.append('/') catch |e| {
                     std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
                     return TranspileError.MemoryAllocationFailed;
                 };
-            } else {
-                file_path.append(ch) catch |e| {
+            }
+            if (sep) {
+                file_path.append('/') catch |e| {
                     std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
                     return TranspileError.MemoryAllocationFailed;
                 };
             }
+
+            i = j;
         }
 
         file_path.appendSlice(".fn") catch |e| {
@@ -5220,19 +5248,46 @@ pub const TranspileProcess = struct {
             return TranspileError.MemoryAllocationFailed;
         };
 
+        // Convert dotted imports to a path. Additionally, support parent traversal via dot runs:
+        // - `.`  => path separator
+        // - `..` => `../` (one parent)
+        // - `....` => `../../` (two parents)
         var i: usize = 0;
-        while (i < import_path.len) : (i += 1) {
-            if (import_path[i] == '.') {
-                file_path.append('/') catch |e| {
-                    std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
-                    return TranspileError.MemoryAllocationFailed;
-                };
-            } else {
+        while (i < import_path.len) {
+            if (import_path[i] != '.') {
                 file_path.append(import_path[i]) catch |e| {
                     std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
                     return TranspileError.MemoryAllocationFailed;
                 };
+                i += 1;
+                continue;
             }
+
+            var j = i;
+            while (j < import_path.len and import_path[j] == '.') : (j += 1) {}
+            const run_len = j - i;
+            const parents = run_len / 2;
+            const sep = (run_len % 2) == 1;
+
+            var p: usize = 0;
+            while (p < parents) : (p += 1) {
+                file_path.appendSlice("..") catch |e| {
+                    std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+                    return TranspileError.MemoryAllocationFailed;
+                };
+                file_path.append('/') catch |e| {
+                    std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+                    return TranspileError.MemoryAllocationFailed;
+                };
+            }
+            if (sep) {
+                file_path.append('/') catch |e| {
+                    std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+                    return TranspileError.MemoryAllocationFailed;
+                };
+            }
+
+            i = j;
         }
 
         file_path.appendSlice(".fn") catch |e| {

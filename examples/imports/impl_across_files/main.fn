@@ -1,0 +1,12 @@
+imp std.c.io;
+imp user;
+imp user_impl;
+
+fun main() void {
+  User user;
+  user.name = "Alice";
+
+  User* u = &user;
+  // Completion should suggest `greet` after typing `u.`.
+  u.greet();
+}

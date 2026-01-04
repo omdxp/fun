@@ -1,0 +1,11 @@
+imp user;
+imp user_greeter;
+
+fun main() void {
+  User user;
+  user.name = "Alice";
+
+  User* u = &user;
+  u.greet("hi");
+  u.bye();
+}

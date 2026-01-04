@@ -16,8 +16,8 @@ fun strcat(str dst, str src) str;
 fun strncat(str dst, str src, num n) str;
 fun strstr(str haystack, str needle) str;
 
-fun memcpy(raw * dst, raw * src, num n) raw *;
-fun memmove(raw * dst, raw * src, num n) raw *;
-fun memset(raw * dst, num val, num n) raw *;
-fun memcmp(raw * a, raw * b, num n) num;
-fun memchr(raw * s, num c, num n) raw *;
+fun memcpy(raw* dst, raw* src, num n) raw*;
+fun memmove(raw* dst, raw* src, num n) raw*;
+fun memset(raw* dst, num val, num n) raw*;
+fun memcmp(raw* a, raw* b, num n) num;
+fun memchr(raw* s, num c, num n) raw*;

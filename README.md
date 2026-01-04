@@ -117,6 +117,7 @@ Explore the [`examples/`](examples/) directory for more:
 - Basic: [`test.fn`](examples/test.fn)
 - Advanced: [`advanced/custom_functions.fn`](examples/advanced/custom_functions.fn)
 - Imports: [`imports/main.fn`](examples/imports/main.fn)
+- Imports (parent traversal `....`): [`imports/parent_traversal_2up/nested/level1/main.fn`](examples/imports/parent_traversal_2up/nested/level1/main.fn)
 - Error cases: [`error_cases/`](examples/error_cases/)
 
 ## Project Structure

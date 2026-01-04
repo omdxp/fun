@@ -210,12 +210,34 @@ fn build_full_import_path_for_formatter(allocator: mem.Allocator, input_file_pat
     try file_path.appendSlice(dir_path);
     try file_path.append('/');
 
-    for (import_path) |ch| {
-        if (ch == '.') {
-            try file_path.append('/');
-        } else {
-            try file_path.append(ch);
+    // Convert dotted imports to a path. Additionally, support parent traversal via dot runs:
+    // - `.`  => path separator
+    // - `..` => `../` (one parent)
+    // - `....` => `../../` (two parents)
+    var i: usize = 0;
+    while (i < import_path.len) {
+        if (import_path[i] != '.') {
+            try file_path.append(import_path[i]);
+            i += 1;
+            continue;
         }
+
+        var j = i;
+        while (j < import_path.len and import_path[j] == '.') : (j += 1) {}
+        const run_len = j - i;
+        const parents = run_len / 2;
+        const sep = (run_len % 2) == 1;
+
+        var p: usize = 0;
+        while (p < parents) : (p += 1) {
+            try file_path.appendSlice("..");
+            try file_path.append('/');
+        }
+        if (sep) {
+            try file_path.append('/');
+        }
+
+        i = j;
     }
     try file_path.appendSlice(".fn");
 
@@ -267,6 +289,31 @@ fn parse_local_import_paths(allocator: mem.Allocator, input_file: []const u8) !s
             // Parse `imp foo.bar;`
             var j: usize = i + 1;
             while (j < tokens.len and (tokens[j].type == .NewLine or tokens[j].type == .Comment)) : (j += 1) {}
+
+            const isDotRunOperator = struct {
+                fn call(tt: token.Token) bool {
+                    if (tt.type != .Operator) return false;
+                    const s = tt.data.sval.items;
+                    if (s.len == 0) return false;
+                    for (s) |ch| if (ch != '.') return false;
+                    return true;
+                }
+            }.call;
+
+            var leading_dots: usize = 0;
+            while (j < tokens.len) {
+                const tj = tokens[j];
+                if (!isDotRunOperator(tj)) break;
+                leading_dots += tj.data.sval.items.len;
+                j += 1;
+                while (j < tokens.len and (tokens[j].type == .NewLine or tokens[j].type == .Comment)) : (j += 1) {}
+            }
+
+            if (leading_dots % 2 != 0) {
+                // Malformed parent traversal (odd dot count). Ignore; compiler will report.
+                continue;
+            }
+
             if (j >= tokens.len or tokens[j].type != .Identifier) {
                 // Let the normal compiler path handle detailed errors; formatter just ignores malformed imports.
                 continue;
@@ -274,18 +321,20 @@ fn parse_local_import_paths(allocator: mem.Allocator, input_file: []const u8) !s
 
             var import_name = std.ArrayList(u8).init(allocator);
             defer import_name.deinit();
+            if (leading_dots > 0) try import_name.appendNTimes('.', leading_dots);
             try import_name.appendSlice(tokens[j].data.sval.items);
             j += 1;
 
             while (true) {
                 while (j < tokens.len and (tokens[j].type == .NewLine or tokens[j].type == .Comment)) : (j += 1) {}
                 if (j >= tokens.len) break;
-                if (tokens[j].type != .Operator or !utils.is_access_operator(tokens[j].data.sval.items)) break;
+                if (!isDotRunOperator(tokens[j])) break;
+                const dot_op = tokens[j].data.sval.items;
                 j += 1;
 
                 while (j < tokens.len and (tokens[j].type == .NewLine or tokens[j].type == .Comment)) : (j += 1) {}
                 if (j >= tokens.len or tokens[j].type != .Identifier) break;
-                try import_name.append('.');
+                try import_name.appendSlice(dot_op);
                 try import_name.appendSlice(tokens[j].data.sval.items);
                 j += 1;
             }
@@ -477,8 +526,13 @@ fn is_word_like(t: token.Token) bool {
 fn operator_needs_spaces(op: []const u8) bool {
     // Operators that should not be surrounded by spaces are handled separately by symbols.
     // Keep this conservative.
+    // Dot runs are treated like access operators and should be glued: `.`, `..`, `...`, etc.
+    for (op) |ch| {
+        if (ch != '.') break;
+    } else {
+        return false;
+    }
     return !std.mem.eql(u8, op, ",") and
-        !std.mem.eql(u8, op, ".") and
         !std.mem.eql(u8, op, "(") and
         !std.mem.eql(u8, op, "[");
 }
@@ -820,6 +874,10 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
                     if (std.mem.eql(u8, pkw2, "if") or std.mem.eql(u8, pkw2, "elif")) {
                         // Always separate the keyword from the start of its condition, even if
                         // the condition starts with an inner grouping `(`.
+                        break :blk true;
+                    }
+                    if (std.mem.eql(u8, pkw2, "imp")) {
+                        // Always separate `imp` from the import path, even if it starts with dot-runs.
                         break :blk true;
                     }
                 }

@@ -1567,17 +1567,39 @@ const LspServer = struct {
             }
         }
 
-        // Scan for simple declarations like: `Type name;` or `Type name = ...;`
+        // Scan for simple declarations like:
+        // - `Type name;` / `Type name = ...;`
+        // - `Type* name;` / `Type * name = ...;`
+        // - `Type& name;` / `Type & name = ...;`
         // (best-effort fallback)
         var best: ?[]const u8 = null;
+
+        const baseTypeName = struct {
+            fn go(s: []const u8) []const u8 {
+                var end = s.len;
+                while (end > 0) {
+                    const ch = s[end - 1];
+                    if (ch == '*' or ch == '&') {
+                        end -= 1;
+                        continue;
+                    }
+                    break;
+                }
+                return s[0..end];
+            }
+        }.go;
 
         var i: usize = 0;
         while (i + 1 < idx.tokens.len) : (i += 1) {
             const t_type = idx.tokens[i];
             if (!rangeStartLessOrEqual(t_type.range, at)) break;
 
-            const is_type_tok = (t_type.kind == .keyword and utils.keyword_is_datatype(t_type.text)) or
-                (t_type.kind == .identifier and self.isKnownTypeName(t_type.text));
+            const is_type_tok = (t_type.kind == .keyword and utils.keyword_is_datatype(t_type.text)) or blk: {
+                if (t_type.kind != .identifier) break :blk false;
+                const base = baseTypeName(t_type.text);
+                if (base.len == 0) break :blk false;
+                break :blk self.isKnownTypeName(base);
+            };
             if (!is_type_tok) continue;
 
             // Skip type identifiers that are part of declarations like `compound T`, `quirk Q`, `impl T`, `fun f`.
@@ -1588,13 +1610,26 @@ const LspServer = struct {
                 }
             }
 
-            const t_name = idx.tokens[i + 1];
+            // Allow pointer/reference markers between the base type token and the name.
+            // We still return the base type so member completion can match `impl Type { ... }`.
+            var name_i: usize = i + 1;
+            while (name_i < idx.tokens.len) : (name_i += 1) {
+                const tt = idx.tokens[name_i];
+                if (tt.kind == .comment) continue;
+                if ((tt.kind == .operator or tt.kind == .symbol) and (std.mem.eql(u8, tt.text, "*") or std.mem.eql(u8, tt.text, "&"))) {
+                    continue;
+                }
+                break;
+            }
+            if (name_i >= idx.tokens.len) continue;
+
+            const t_name = idx.tokens[name_i];
             if (t_name.kind != .identifier) continue;
             if (!std.mem.eql(u8, t_name.text, var_name)) continue;
 
             // Ensure the name token is also before position.
             if (!rangeStartLessOrEqual(t_name.range, at)) continue;
-            best = t_type.text;
+            best = if (t_type.kind == .identifier) baseTypeName(t_type.text) else t_type.text;
         }
         return best;
     }
@@ -1803,6 +1838,68 @@ const LspServer = struct {
             items.deinit();
         }
 
+        // Text-based dot completion fallback.
+        // Some lexer states can treat `u.` as a single token, which breaks the
+        // token-based dot detection below. Prefer the user's cursor context: if the
+        // character immediately before the cursor is '.', offer members for the
+        // resolved receiver identifier.
+        {
+            const cursor_b = byteIndexForPosition(doc.text, pos);
+            const dot_i_opt: ?usize = blk: {
+                if (cursor_b > 0 and doc.text[cursor_b - 1] == '.') break :blk cursor_b - 1;
+                if (cursor_b < doc.text.len and doc.text[cursor_b] == '.') break :blk cursor_b;
+                break :blk null;
+            };
+
+            if (dot_i_opt) |dot_i| {
+                // Find the identifier directly before the dot.
+                var j: usize = dot_i;
+                while (j > 0) {
+                    const ch = doc.text[j - 1];
+                    if (ch == ' ' or ch == '\t' or ch == '\r' or ch == '\n') {
+                        j -= 1;
+                        continue;
+                    }
+                    break;
+                }
+                var start: usize = j;
+                while (start > 0) {
+                    const ch = doc.text[start - 1];
+                    const ok = (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_';
+                    if (!ok) break;
+                    start -= 1;
+                }
+                const recv_name = if (start < j) doc.text[start..j] else "";
+
+                if (recv_name.len != 0) {
+                    var recv_type: ?[]const u8 = null;
+                    if (std.mem.eql(u8, recv_name, "self")) {
+                        recv_type = self.guessEnclosingImplType(idx, pos);
+                    } else if (self.isKnownTypeName(recv_name)) {
+                        recv_type = recv_name;
+                    } else {
+                        recv_type = self.guessVariableType(idx, recv_name, pos);
+                    }
+
+                    if (recv_type) |rt| {
+                        var seen = std.StringHashMap(void).init(self.allocator);
+                        defer {
+                            var it = seen.iterator();
+                            while (it.next()) |e| self.allocator.free(e.key_ptr.*);
+                            seen.deinit();
+                        }
+
+                        try self.appendMemberCompletionsForType(&items, &seen, rt, prefix);
+                        const list: CompletionList = .{ .items = items.items };
+                        const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+                        defer self.allocator.free(json);
+                        try self.sendResponseJson(id_val, json);
+                        return;
+                    }
+                }
+            }
+        }
+
         // If we're completing after a '.', offer members of the resolved receiver type.
         const tok_i_opt = findTokenIndexAt(idx.tokens, pos) orelse findLastTokenIndexBeforeOrAt(idx.tokens, pos);
         if (tok_i_opt) |tok_i| {
@@ -1834,6 +1931,38 @@ const LspServer = struct {
                     defer self.allocator.free(json);
                     try self.sendResponseJson(id_val, json);
                     return;
+                }
+            }
+
+            // Fallback: some lexer states may emit `u.` as a single identifier token (`"u."`).
+            // When that happens, the dot-token path above can't trigger.
+            if (t.kind == .identifier and t.text.len > 1 and std.mem.endsWith(u8, t.text, ".")) {
+                const recv_name = t.text[0 .. t.text.len - 1];
+                if (recv_name.len != 0) {
+                    var recv_type: ?[]const u8 = null;
+                    if (std.mem.eql(u8, recv_name, "self")) {
+                        recv_type = self.guessEnclosingImplType(idx, pos);
+                    } else if (self.isKnownTypeName(recv_name)) {
+                        recv_type = recv_name;
+                    } else {
+                        recv_type = self.guessVariableType(idx, recv_name, pos);
+                    }
+
+                    if (recv_type) |rt| {
+                        var seen = std.StringHashMap(void).init(self.allocator);
+                        defer {
+                            var it = seen.iterator();
+                            while (it.next()) |e| self.allocator.free(e.key_ptr.*);
+                            seen.deinit();
+                        }
+                        try self.appendMemberCompletionsForType(&items, &seen, rt, prefix);
+
+                        const list: CompletionList = .{ .items = items.items };
+                        const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+                        defer self.allocator.free(json);
+                        try self.sendResponseJson(id_val, json);
+                        return;
+                    }
                 }
             }
         }
@@ -3004,6 +3133,7 @@ const LspServer = struct {
         // - `imp std.io;`   => <workspace>/stdlib/std/c/io.fn (compat alias)
         // - `imp relative.parent;` => <current_dir>/relative/parent.fn
         // - `imp child;` => <current_dir>/child.fn
+        // - `imp ..defs.user;` => <current_dir>/../defs/user.fn
         const spec = std.mem.trim(u8, raw_import, " \t\r\n\"");
         if (spec.len == 0) return null;
 
@@ -3011,14 +3141,47 @@ const LspServer = struct {
         defer self.allocator.free(current_path);
         const current_dir = std.fs.path.dirname(current_path) orelse return null;
 
-        // Split on '.'
+        const parsed = struct {
+            fn addSegments(out: *std.ArrayList([]const u8), s: []const u8) !void {
+                var start: usize = 0;
+                var i: usize = 0;
+                while (i < s.len) {
+                    if (s[i] != '.') {
+                        i += 1;
+                        continue;
+                    }
+
+                    // Flush preceding identifier segment.
+                    if (i > start) {
+                        const seg = std.mem.trim(u8, s[start..i], " \t\r\n\"");
+                        if (seg.len != 0) try out.append(seg);
+                    }
+
+                    // Consume dot run.
+                    var j = i;
+                    while (j < s.len and s[j] == '.') : (j += 1) {}
+                    const run_len = j - i;
+                    const parents = run_len / 2;
+                    // If there's an odd dot, it's just a separator.
+                    var p: usize = 0;
+                    while (p < parents) : (p += 1) {
+                        try out.append("..");
+                    }
+
+                    i = j;
+                    start = i;
+                }
+
+                if (s.len > start) {
+                    const seg = std.mem.trim(u8, s[start..], " \t\r\n\"");
+                    if (seg.len != 0) try out.append(seg);
+                }
+            }
+        };
+
         var parts = std.ArrayList([]const u8).init(self.allocator);
         defer parts.deinit();
-        var it = std.mem.splitScalar(u8, spec, '.');
-        while (it.next()) |p| {
-            const trimmed = std.mem.trim(u8, p, " \t\r");
-            if (trimmed.len != 0) try parts.append(trimmed);
-        }
+        try parsed.addSegments(&parts, spec);
         if (parts.items.len == 0) return null;
 
         var segs = std.ArrayList([]const u8).init(self.allocator);

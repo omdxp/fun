@@ -1,0 +1,5 @@
+imp ....defs.greeter;
+
+fun main() void {
+  greet();
+}

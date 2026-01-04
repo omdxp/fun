@@ -268,6 +268,39 @@ test "-fmt groups imports and globals at top" {
     try std.testing.expectEqualStrings(expected, got);
 }
 
+test "-fmt formats parent traversal imports" {
+    const allocator = std.testing.allocator;
+
+    const ugly =
+        "imp std.c.io;\n" ++
+        "imp .. defs.user;\n" ++
+        "imp ..  defs.greeter;\n" ++
+        "imp .... defs.greeter;\n" ++
+        "fun main() void{ }\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_imp_parent", ugly);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, path);
+
+    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    defer allocator.free(got);
+
+    const expected =
+        "imp std.c.io;\n" ++
+        "imp ..defs.user;\n" ++
+        "imp ..defs.greeter;\n" ++
+        "imp ....defs.greeter;\n" ++
+        "\n" ++
+        "fun main() void {\n" ++
+        "}\n";
+
+    try std.testing.expectEqualStrings(expected, got);
+}
+
 test "-fmt-all formats local imports recursively (skips std.*)" {
     const allocator = std.testing.allocator;
 

@@ -2952,6 +2952,30 @@ pub const ParseProcess = struct {
     /// - Logs an error message if any expected token is not found.
     fn parse_import(self: *Self) ParseError!void {
         _ = self.token_next(); // skip imp
+        // Support parent traversal via leading dots, e.g. `imp ..defs.user;`.
+        // Each pair of leading dots (`..`) means "go up one directory".
+        const isDotRunOperator = struct {
+            fn call(t: token.Token) bool {
+                if (t.type != .Operator) return false;
+                const s = t.data.sval.items;
+                if (s.len == 0) return false;
+                for (s) |ch| if (ch != '.') return false;
+                return true;
+            }
+        }.call;
+
+        var leading_dots: usize = 0;
+        while (true) {
+            const t = self.token_peek_next() orelse break;
+            if (!isDotRunOperator(t)) break;
+            _ = self.token_next();
+            leading_dots += t.data.sval.items.len;
+        }
+        if (leading_dots % 2 != 0) {
+            self.transpile_proc.err("invalid import path: expected '.' after '.'", .{});
+            return ParseError.InvalidIdentifier;
+        }
+
         const folder_token = self.token_next();
         if (folder_token == null) {
             self.transpile_proc.err("expected folder identifier after import", .{});
@@ -2966,6 +2990,12 @@ pub const ParseProcess = struct {
 
         var import_name = std.ArrayList(u8).init(self.transpile_proc.allocator);
         defer import_name.deinit();
+        if (leading_dots > 0) {
+            import_name.appendNTimes('.', leading_dots) catch |e| {
+                std.debug.print("Error appending to import_name: {s}\n", .{@errorName(e)});
+                return ParseError.MemoryAllocationFailed;
+            };
+        }
         import_name.appendSlice(folder_token.?.data.sval.items) catch |e| {
             std.debug.print("Error appending to import_name: {s}\n", .{@errorName(e)});
             return ParseError.MemoryAllocationFailed;
@@ -2973,11 +3003,11 @@ pub const ParseProcess = struct {
 
         while (true) {
             const next_token = self.token_peek_next();
-            if (next_token == null or next_token.?.type != .Operator or !utils.is_access_operator(next_token.?.data.sval.items)) {
-                break; // Stop if there's no dot operator
+            if (next_token == null or !isDotRunOperator(next_token.?)) {
+                break; // Stop if there's no dot-run operator
             }
 
-            _ = self.token_next(); // skip dot
+            const dot_op = self.token_next().?; // consume dot-run operator
             const part_token = self.token_next();
             if (part_token == null) {
                 self.transpile_proc.err("expected identifier after '.'", .{});
@@ -2987,7 +3017,7 @@ pub const ParseProcess = struct {
                 self.transpile_proc.err("expected identifier after '.', got '{?}'", .{part_token.?.type});
                 return ParseError.InvalidIdentifier;
             }
-            import_name.append('.') catch |e| {
+            import_name.appendSlice(dot_op.data.sval.items) catch |e| {
                 std.debug.print("Error appending to import_name: {s}\n", .{@errorName(e)});
                 return ParseError.MemoryAllocationFailed;
             };
