@@ -161,7 +161,7 @@ There is a minimal VS Code extension scaffold in [editors/vscode](editors/vscode
 
 ### Prerequisites
 
-- [Zig](https://ziglang.org/download/) (latest stable recommended)
+- [Zig](https://ziglang.org/download/) (the one defined in [build.zig.zon](build.zig.zon))
 - Windows, Linux, or macOS
 
 ### Build from Source
