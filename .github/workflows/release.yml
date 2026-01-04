@@ -118,13 +118,28 @@ jobs:
           if ($tag -and $tag.StartsWith('v')) { $tag = $tag.Substring(1) }
           if (-not $tag) { $tag = '0.0.0' }
 
-          zig build install -Dtarget=${{ matrix.target }} -Dversion=$tag --prefix dist\fun-${{ matrix.target }}
+          # IMPORTANT: always pass -Dversion as a single argument.
+          # PowerShell can mis-tokenize version-like strings (e.g. 0.12.10) if they appear unquoted.
+          zig build install -Dtarget=${{ matrix.target }} "-Dversion=$tag" --prefix dist\fun-${{ matrix.target }}
 
           # Verify version embedding. We can execute x86_64 builds; for aarch64 just scan bytes.
           $exePath = "dist\fun-${{ matrix.target }}\bin\fun.exe"
           if (-not (Test-Path $exePath)) {
             throw "Expected executable not found: $exePath"
           }
+          function Test-ContainsBytes([byte[]]$haystack, [byte[]]$needle) {
+            if ($needle.Length -eq 0) { return $true }
+            if ($haystack.Length -lt $needle.Length) { return $false }
+            for ($i = 0; $i -le $haystack.Length - $needle.Length; $i++) {
+              $ok = $true
+              for ($j = 0; $j -lt $needle.Length; $j++) {
+                if ($haystack[$i + $j] -ne $needle[$j]) { $ok = $false; break }
+              }
+              if ($ok) { return $true }
+            }
+            return $false
+          }
+
           if ("${{ matrix.target }}" -eq "x86_64-windows-gnu") {
             $out = & $exePath -version
             if ($LASTEXITCODE -ne 0) { throw "Version check failed running $exePath" }
@@ -134,8 +149,9 @@ jobs:
             }
           } else {
             $bytes = [System.IO.File]::ReadAllBytes($exePath)
-            $ascii = [System.Text.Encoding]::ASCII.GetString($bytes)
-            if ($ascii.IndexOf($tag, [System.StringComparison]::Ordinal) -lt 0) {
+            $needleUtf8 = [System.Text.Encoding]::UTF8.GetBytes($tag)
+            $needleUtf16 = [System.Text.Encoding]::Unicode.GetBytes($tag) # UTF-16LE
+            if (-not (Test-ContainsBytes $bytes $needleUtf8) -and -not (Test-ContainsBytes $bytes $needleUtf16)) {
               throw "Expected version '$tag' not found in $exePath"
             }
           }

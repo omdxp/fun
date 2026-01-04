@@ -26,7 +26,12 @@ jobs:
 
       - name: Set extension version to match release
         run: |
-          VERSION=$(echo "${{ github.ref_name }}" | sed 's/^v//')
+          RAW_TAG="${{ github.event.release.tag_name || github.ref_name }}"
+          VERSION=$(echo "$RAW_TAG" | sed 's/^v//')
+          if [ -z "$VERSION" ]; then
+            echo "Could not determine VERSION (release tag/ref was empty)" >&2
+            exit 1
+          fi
           cd editors/vscode
           npm version --no-git-tag-version "$VERSION"
 
@@ -36,8 +41,9 @@ jobs:
         run: |
           cd editors/vscode
           # README contains relative links like ../../CONTRIBUTING.md; vsce needs base URLs to rewrite them.
-          BASE_CONTENT_URL="https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}"
-          BASE_IMAGES_URL="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}"
+          RAW_TAG="${{ github.event.release.tag_name || github.ref_name }}"
+          BASE_CONTENT_URL="https://github.com/${{ github.repository }}/blob/${RAW_TAG}"
+          BASE_IMAGES_URL="https://raw.githubusercontent.com/${{ github.repository }}/${RAW_TAG}"
           npx vsce package --allow-missing-repository --skip-license --allow-star-activation --baseContentUrl "$BASE_CONTENT_URL" --baseImagesUrl "$BASE_IMAGES_URL"
           VSIX_PATH=$(ls -1 *.vsix | head -n 1)
           npx vsce publish --no-git-tag-version --pat "$VSCE_PAT" --packagePath "$VSIX_PATH" --baseContentUrl "$BASE_CONTENT_URL" --baseImagesUrl "$BASE_IMAGES_URL"
