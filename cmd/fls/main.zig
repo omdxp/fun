@@ -85,8 +85,13 @@ const DocumentSymbol = struct {
     children: ?[]const DocumentSymbol = null,
 };
 
+const ParameterInformation = struct {
+    label: []const u8,
+};
+
 const SignatureInformation = struct {
     label: []const u8,
+    parameters: ?[]const ParameterInformation = null,
 };
 
 const SignatureHelp = struct {
@@ -3443,11 +3448,65 @@ const LspServer = struct {
             return;
         };
 
-        const infos = [_]SignatureInformation{.{ .label = sig.label }};
-        const help: SignatureHelp = .{ .signatures = &infos, .activeParameter = sig.active_param };
+        const parsed_params = try self.parseParamsFromSignatureLabel(sig.label);
+        defer {
+            for (parsed_params.items) |p| self.allocator.free(p.label);
+            parsed_params.deinit();
+        }
+
+        const variadic = self.signatureLabelHasVariadic(sig.label);
+        var active_param = sig.active_param;
+        if (parsed_params.items.len != 0) {
+            const max_param: i64 = @intCast(parsed_params.items.len - 1);
+            if (!variadic and active_param > max_param) active_param = max_param;
+        } else {
+            active_param = 0;
+        }
+
+        const infos = [_]SignatureInformation{.{ .label = sig.label, .parameters = parsed_params.items }};
+        const help: SignatureHelp = .{ .signatures = &infos, .activeParameter = active_param };
         const json = try std.json.stringifyAlloc(self.allocator, help, .{});
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
+    }
+
+    fn signatureLabelHasVariadic(self: *LspServer, label: []const u8) bool {
+        _ = self;
+        return std.mem.indexOf(u8, label, "...") != null;
+    }
+
+    fn parseParamsFromSignatureLabel(self: *LspServer, label: []const u8) !std.ArrayList(ParameterInformation) {
+        var out = std.ArrayList(ParameterInformation).init(self.allocator);
+
+        const open_i = std.mem.indexOfScalar(u8, label, '(') orelse return out;
+        const close_i = std.mem.lastIndexOfScalar(u8, label, ')') orelse return out;
+        if (close_i <= open_i + 1) return out;
+
+        const inner = std.mem.trim(u8, label[open_i + 1 .. close_i], " \t\r\n");
+        if (inner.len == 0) return out;
+
+        // Split by top-level commas (no nested types exist today, but keep it safe).
+        var depth: usize = 0;
+        var start: usize = 0;
+        var i: usize = 0;
+        while (i <= inner.len) : (i += 1) {
+            const at_end = i == inner.len;
+            const c = if (!at_end) inner[i] else 0;
+            if (!at_end) {
+                if (c == '(') depth += 1;
+                if (c == ')') depth -|= 1;
+            }
+            if (at_end or (c == ',' and depth == 0)) {
+                var seg = inner[start..i];
+                seg = std.mem.trim(u8, seg, " \t\r\n");
+                if (seg.len != 0) {
+                    try out.append(.{ .label = try self.allocator.dupe(u8, seg) });
+                }
+                start = i + 1;
+            }
+        }
+
+        return out;
     }
 
     fn handleDocumentSymbols(self: *LspServer, id_val: ?std.json.Value, params_val: ?std.json.Value) !void {

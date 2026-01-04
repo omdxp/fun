@@ -687,6 +687,31 @@ fn expectSignatureHelpActiveParameter(allocator: Allocator, result_val: std.json
     return error.TestUnexpectedResult;
 }
 
+fn expectSignatureHelpHasParameter(allocator: Allocator, result_val: std.json.Value, needle: []const u8) !void {
+    if (result_val == .null) return error.TestUnexpectedResult;
+    if (result_val != .object) return error.TestUnexpectedResult;
+    const obj = result_val.object;
+    const sigs_val = obj.get("signatures") orelse return error.TestUnexpectedResult;
+    if (sigs_val != .array or sigs_val.array.items.len == 0) return error.TestUnexpectedResult;
+    const first = sigs_val.array.items[0];
+    if (first != .object) return error.TestUnexpectedResult;
+    const params_val = first.object.get("parameters") orelse return error.TestUnexpectedResult;
+    if (params_val != .array) return error.TestUnexpectedResult;
+
+    for (params_val.array.items) |pv| {
+        if (pv != .object) continue;
+        const lbl = pv.object.get("label") orelse continue;
+        if (lbl == .string and std.mem.indexOf(u8, lbl.string, needle) != null) return;
+    }
+
+    const dumped = std.json.stringifyAlloc(allocator, result_val, .{}) catch null;
+    if (dumped) |s| {
+        defer allocator.free(s);
+        std.debug.print("\n[fls_e2e] signatureHelp parameters missing '{s}'\n{s}\n", .{ needle, s });
+    }
+    return error.TestUnexpectedResult;
+}
+
 fn expectHoverContains(allocator: Allocator, result_val: std.json.Value, needle: []const u8) !void {
     if (result_val == .null) return error.TestUnexpectedResult;
     if (result_val != .object) return error.TestUnexpectedResult;
@@ -1292,6 +1317,8 @@ test "fls e2e: locals, dot completion, member signatureHelp" {
     const sig_result = try jsonResultFromResponseObj(sig_res.parsed.value.object);
     try expectSignatureHelpLabelContains(allocator, sig_result, "translate(num dx, num dy)");
     try expectSignatureHelpActiveParameter(allocator, sig_result, 1);
+    try expectSignatureHelpHasParameter(allocator, sig_result, "num dx");
+    try expectSignatureHelpHasParameter(allocator, sig_result, "num dy");
 
     // Hover for member `x` should include its declared type.
     const hover_x_params = try std.fmt.allocPrint(
@@ -1314,6 +1341,53 @@ test "fls e2e: locals, dot completion, member signatureHelp" {
     defer st_res.deinit();
     const st_val = try jsonResultFromResponseObj(st_res.parsed.value.object);
     try expectSemanticTokensNonEmpty(allocator, st_val);
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: signatureHelp for plain function call" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "fun add(num a, num b) num {\n" ++
+        "  return a + b;\n" ++
+        "}\n\n" ++
+        "fun main() {\n" ++
+        "  add(1, 2\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-sighelp-plain.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const call_pos = try findPosition(doc_text, "add(1, 2", 0);
+    const sig_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, call_pos.line, call_pos.col + @as(i64, @intCast("add(1, ".len)) },
+    );
+    defer allocator.free(sig_params);
+
+    const sig_id = try lsp.request("textDocument/signatureHelp", sig_params);
+    var sig_res = try lsp.waitResponse(sig_id, 15000);
+    defer sig_res.deinit();
+    const sig_result = try jsonResultFromResponseObj(sig_res.parsed.value.object);
+    try expectSignatureHelpLabelContains(allocator, sig_result, "add(num a, num b)");
+    try expectSignatureHelpActiveParameter(allocator, sig_result, 1);
+    try expectSignatureHelpHasParameter(allocator, sig_result, "num a");
+    try expectSignatureHelpHasParameter(allocator, sig_result, "num b");
 
     const shutdown_id = try lsp.request("shutdown", "{}");
     var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
