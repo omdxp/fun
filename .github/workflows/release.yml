@@ -50,12 +50,19 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf dist artifacts
-          zig build install -Dtarget=${{ matrix.target }} --prefix dist/fun-${{ matrix.target }}
+
+          tag="${RELEASE_TAG:-}"
+          if [ -z "$tag" ]; then tag="0.0.0"; fi
+          tag="${tag#v}"
+
+          zig build install -Dtarget=${{ matrix.target }} -Dversion="$tag" --prefix dist/fun-${{ matrix.target }}
           cp scripts/installer/install.sh dist/fun-${{ matrix.target }}/install.sh
           cp scripts/installer/uninstall.sh dist/fun-${{ matrix.target }}/uninstall.sh
           chmod +x dist/fun-${{ matrix.target }}/install.sh dist/fun-${{ matrix.target }}/uninstall.sh || true
           mkdir -p artifacts
           (cd dist && tar -czf ../artifacts/fun-${{ matrix.target }}.tar.gz fun-${{ matrix.target }})
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -90,12 +97,13 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           Remove-Item -Recurse -Force dist, artifacts -ErrorAction SilentlyContinue
-          zig build install -Dtarget=${{ matrix.target }} --prefix dist\fun-${{ matrix.target }}
 
           $tag = "${{ github.event.inputs.tag }}"
           if (-not $tag) { $tag = "${{ github.ref_name }}" }
           if ($tag -and $tag.StartsWith('v')) { $tag = $tag.Substring(1) }
           if (-not $tag) { $tag = '0.0.0' }
+
+          zig build install -Dtarget=${{ matrix.target }} -Dversion=$tag --prefix dist\fun-${{ matrix.target }}
 
           # WiX Product/@Version requires x.x.x.x with each x in [0, 65534].
           # Accept tags like 1.2.3 or 1.2.3-beta and normalize.
