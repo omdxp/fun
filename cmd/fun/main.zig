@@ -43,7 +43,9 @@ fn print_error_and_exit(err: anyerror) noreturn {
         error.FileNotFound => {
             _ = stderr.writeAll("Error: Input file not found\n") catch {};
         },
-        else => {},
+        else => {
+            stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+        },
     }
 
     std.process.exit(1);

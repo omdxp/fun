@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -189,6 +190,18 @@ pub fn build(b: *std.Build) void {
     // Some tests (e.g. LSP e2e) expect paths like zig-out/bin/* relative to the repo root.
     run_main_tests.cwd = b.path(".");
 
+    // Stage test binaries into a separate directory so Windows file locks on
+    // `zig-out/bin/fls.exe` don't break `zig build test`.
+    const test_exe_dir = "zig-out/test-bin";
+    const exe_suffix: []const u8 = if (builtin.os.tag == .windows) ".exe" else "";
+    const install_test_fun = b.addInstallFile(exe.getEmittedBin(), b.fmt("{s}/fun{s}", .{ test_exe_dir, exe_suffix }));
+    const install_test_fls = b.addInstallFile(fls_exe.getEmittedBin(), b.fmt("{s}/fls{s}", .{ test_exe_dir, exe_suffix }));
+    const stage_test_bins = b.step("stage-test-bins", "Stage fun/fls into zig-out/test-bin for e2e tests");
+    stage_test_bins.dependOn(&install_test_fun.step);
+    stage_test_bins.dependOn(&install_test_fls.step);
+    run_main_tests.*.step.dependOn(stage_test_bins);
+    run_main_tests.setEnvironmentVariable("FLS_E2E_EXE_DIR", test_exe_dir);
+
     // --- Define fls (language server) Unit Tests ---
     // We keep fls tests close to the implementation (cmd/fls/main.zig) and wire them into `zig build test`.
     const fls_test_module = b.createModule(.{
@@ -208,8 +221,7 @@ pub fn build(b: *std.Build) void {
     run_fls_tests.cwd = b.path(".");
 
     const test_step = b.step("test", "Run unit tests");
-    // Ensure compiler + language server binaries (and stdlib layout) exist for tests that spawn them.
-    test_step.dependOn(b.getInstallStep());
+    // Ensure compiler + language server binaries exist for tests that spawn them.
     test_step.dependOn(&run_main_tests.step);
     test_step.dependOn(&run_fls_tests.step);
 }

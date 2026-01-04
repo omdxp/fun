@@ -204,6 +204,9 @@ pub const TranspileProcess = struct {
 
     /// True while generating the C `main` body.
     in_main: bool = false,
+
+    /// Currently transpiled function return type (for return-statement codegen).
+    current_fn_return: ?CheckedType = null,
     /// Current indentation level for code formatting
     indent_level: u32 = 0,
     /// Represents a scope structure used in the transpiler.
@@ -530,6 +533,13 @@ pub const TranspileProcess = struct {
         }
     }
 
+    fn collect_type_registry_recursive(self: *Self, proc: *Self, reg: *TypeRegistry) TranspileError!void {
+        try self.collect_type_registry_module(proc, reg);
+        for (proc.children.items) |child| {
+            try self.collect_type_registry_recursive(child, reg);
+        }
+    }
+
     fn collect_impls_module(self: *Self, proc: *Self, reg: *TypeRegistry) TranspileError!void {
         _ = self;
         for (proc.owned_nodes.items) |n| {
@@ -554,6 +564,13 @@ pub const TranspileProcess = struct {
             reg.impls_by_key.put(key, n) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
+        }
+    }
+
+    fn collect_impls_recursive(self: *Self, proc: *Self, reg: *TypeRegistry) TranspileError!void {
+        try self.collect_impls_module(proc, reg);
+        for (proc.children.items) |child| {
+            try self.collect_impls_recursive(child, reg);
         }
     }
 
@@ -768,15 +785,282 @@ pub const TranspileProcess = struct {
         self.get_root().type_registry = TypeRegistry.init(self.get_root().allocator);
         const new_reg = &self.get_root().type_registry.?;
 
-        try self.collect_type_registry_module(self, new_reg);
-        for (self.children.items) |child| {
-            try self.collect_type_registry_module(child, new_reg);
-        }
+        try self.collect_type_registry_recursive(self, new_reg);
 
         // Second pass: impls need quirk name->signature resolution.
-        try self.collect_impls_module(self, new_reg);
-        for (self.children.items) |child| {
-            try self.collect_impls_module(child, new_reg);
+        try self.collect_impls_recursive(self, new_reg);
+    }
+
+    fn has_compound_named(proc: *Self, name: []const u8) bool {
+        for (proc.owned_nodes.items) |n| {
+            if (n.type != .Compound or n.node_variant == null) continue;
+            if (mem.eql(u8, n.node_variant.?.compound.name.items, name)) return true;
+        }
+        for (proc.children.items) |child| {
+            if (has_compound_named(child, name)) return true;
+        }
+        return false;
+    }
+
+    fn has_quirk_named(proc: *Self, name: []const u8) bool {
+        for (proc.owned_nodes.items) |n| {
+            if (n.type != .Quirk or n.node_variant == null) continue;
+            if (mem.eql(u8, n.node_variant.?.quirk.name.items, name)) return true;
+        }
+        for (proc.children.items) |child| {
+            if (has_quirk_named(child, name)) return true;
+        }
+        return false;
+    }
+
+    fn find_fn_defining_decl(self: *Self, kind_kw: []const u8, name: []const u8) !?[]u8 {
+        // Best-effort: scan workspace files for a `compound <Name>` or `quirk <Name>` declaration.
+        // Returns a backing-allocator owned relative path like `parent/child/some.fn`.
+        var matches = std.ArrayList([]u8).init(self.backing_allocator);
+        defer {
+            for (matches.items) |m| self.backing_allocator.free(m);
+            matches.deinit();
+        }
+
+        var root_dir = try std.fs.cwd().openDir(".", .{ .iterate = true });
+        defer root_dir.close();
+        var walker = try root_dir.walk(self.backing_allocator);
+        defer walker.deinit();
+
+        var pat_buf: [256]u8 = undefined;
+        const pat = try std.fmt.bufPrint(&pat_buf, "{s} {s}", .{ kind_kw, name });
+
+        while (try walker.next()) |entry| {
+            // Skip generated/vendor trees.
+            if (mem.startsWith(u8, entry.path, ".zig-cache") or mem.startsWith(u8, entry.path, "zig-out") or mem.startsWith(u8, entry.path, ".git") or mem.startsWith(u8, entry.path, "stdlib")) {
+                continue;
+            }
+            if (entry.kind != .file) continue;
+            if (!mem.endsWith(u8, entry.path, ".fn")) continue;
+
+            var f = try root_dir.openFile(entry.path, .{});
+            defer f.close();
+            const contents = f.readToEndAlloc(self.backing_allocator, 512 * 1024) catch continue;
+            defer self.backing_allocator.free(contents);
+
+            if (mem.indexOf(u8, contents, pat) == null) continue;
+            try matches.append(try self.backing_allocator.dupe(u8, entry.path));
+            if (matches.items.len > 1) break;
+        }
+
+        if (matches.items.len != 1) return null;
+        return try self.backing_allocator.dupe(u8, matches.items[0]);
+    }
+
+    fn process_local_import_full_path(self: *Self, full_path: []const u8) GeneralError!void {
+        // Minimal variant of `process_local_import()` that takes a resolved `.fn` path.
+        // Used for auto-importing type definitions so entrypoint scripts can run unchanged.
+
+        const canon_path = std.fs.cwd().realpathAlloc(self.allocator, full_path) catch null;
+        const canon = canon_path orelse (self.allocator.dupe(u8, full_path) catch return TranspileError.MemoryAllocationFailed);
+        errdefer self.allocator.free(canon);
+
+        // Avoid duplicate imports.
+        if (self.imported_files.contains(canon)) {
+            self.allocator.free(canon);
+            return;
+        }
+
+        std.fs.cwd().access(canon, .{}) catch {
+            self.report_error(null, "Import file not found: {s}", .{full_path});
+            return TranspileError.ImportFileNotFound;
+        };
+
+        self.imported_files.put(canon, true) catch |e| {
+            std.debug.print("Failed to allocate memory for imported file: {s}\n", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
+
+        var import_proc = self.backing_allocator.create(TranspileProcess) catch |e| {
+            std.debug.print("Failed to allocate memory for import process: {s}\n", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
+        errdefer self.backing_allocator.destroy(import_proc);
+
+        import_proc.* = try TranspileProcess.init(self.backing_allocator, canon, "temp.c", .{ .outf = false });
+        import_proc.parent = self;
+        import_proc.is_importing = true;
+
+        for (self.import_chain.items) |chain_path| {
+            const chain_path_copy = import_proc.allocator.dupe(u8, chain_path) catch |e| {
+                std.debug.print("Failed to allocate memory for import chain copy: {s}\n", .{@errorName(e)});
+                return TranspileError.MemoryAllocationFailed;
+            };
+            errdefer import_proc.allocator.free(chain_path_copy);
+            import_proc.import_chain.append(chain_path_copy) catch |e| {
+                std.debug.print("Failed to allocate memory for import chain: {s}\n", .{@errorName(e)});
+                return TranspileError.MemoryAllocationFailed;
+            };
+        }
+
+        const import_path_copy = import_proc.allocator.dupe(u8, canon) catch |e| {
+            std.debug.print("Failed to allocate memory for import path copy: {s}\n", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
+        errdefer import_proc.allocator.free(import_path_copy);
+        import_proc.import_chain.append(import_path_copy) catch |e| {
+            std.debug.print("Failed to allocate memory for import chain: {s}\n", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
+
+        var it = self.imported_files.iterator();
+        while (it.next()) |entry| {
+            const imported_file_copy = import_proc.allocator.dupe(u8, entry.key_ptr.*) catch |e| {
+                std.debug.print("Failed to allocate memory for imported file copy: {s}\n", .{@errorName(e)});
+                return TranspileError.MemoryAllocationFailed;
+            };
+            errdefer import_proc.allocator.free(imported_file_copy);
+            import_proc.imported_files.put(imported_file_copy, true) catch |e| {
+                std.debug.print("Failed to allocate memory for imported file: {s}\n", .{@errorName(e)});
+                return TranspileError.MemoryAllocationFailed;
+            };
+        }
+
+        var lex_proc = lexer.LexProcess.init(import_proc);
+        var parse_proc = parser.ParseProcess.init(import_proc);
+        try lex_proc.lex();
+        try parse_proc.parse();
+
+        for (import_proc.nodes.items()) |node| {
+            if (node.type == .Import) {
+                try import_proc.process_import(node);
+            }
+        }
+
+        try import_proc.sync_global_symbols_to_parent();
+
+        self.children.append(import_proc) catch |e| {
+            std.debug.print("Failed to allocate memory for child process: {s}\n", .{@errorName(e)});
+            return TranspileError.MemoryAllocationFailed;
+        };
+    }
+
+    fn collect_user_type_refs_in_body(self: *Self, body: *ast.Node, out: *std.StringHashMap(bool)) TranspileError!void {
+        if (body.type != .Body or body.node_variant == null) return;
+        const stmts = body.node_variant.?.body.statements;
+        for (stmts.items()) |stmt_ptr| {
+            const stmt = stmt_ptr.*;
+            switch (stmt.type) {
+                .Variable => {
+                    const v = stmt.node_variant.?.variable;
+                    const dt = v.type;
+                    if (dt.type == .Unknown and dt.type_str.items.len != 0) {
+                        out.put(dt.type_str.items, true) catch return TranspileError.MemoryAllocationFailed;
+                    }
+                },
+                .StatementIf => {
+                    const ifs = stmt.node_variant.?.statement.if_stmt;
+                    try self.collect_user_type_refs_in_body(ifs.body, out);
+                },
+                .StatementElseIf => {
+                    const elif = stmt.node_variant.?.statement.elif_stmt;
+                    try self.collect_user_type_refs_in_body(elif.body, out);
+                },
+                .StatementElse => {
+                    const els = stmt.node_variant.?.statement.else_stmt;
+                    try self.collect_user_type_refs_in_body(els.body, out);
+                },
+                .StatementFit => {
+                    const fit = stmt.node_variant.?.statement.fit_stmt;
+                    for (fit.branches.items()) |br| {
+                        try self.collect_user_type_refs_in_body(br.body, out);
+                    }
+                },
+                .StatementFor => {
+                    const f = stmt.node_variant.?.statement.for_stmt;
+                    switch (f) {
+                        .cond => |fc| try self.collect_user_type_refs_in_body(fc.body, out),
+                        .iter => |fi| try self.collect_user_type_refs_in_body(fi.body, out),
+                        .range => |fr| try self.collect_user_type_refs_in_body(fr.body, out),
+                    }
+                },
+                else => {},
+            }
+        }
+    }
+
+    fn auto_import_missing_user_types(self: *Self) GeneralError!void {
+        // Scan root file for referenced user-defined types (e.g. `Data data;`, `impl Data Display`).
+        // If a referenced type isn't currently defined in the import graph, try to find a unique
+        // declaration in the workspace and import that file automatically.
+
+        var refs = std.StringHashMap(bool).init(self.backing_allocator);
+        defer refs.deinit();
+
+        // Root nodes
+        for (self.nodes.items()) |n| {
+            switch (n.type) {
+                .Variable => {
+                    if (n.node_variant == null) continue;
+                    const v = n.node_variant.?.variable;
+                    const dt = v.type;
+                    if (dt.type == .Unknown and dt.type_str.items.len != 0) {
+                        refs.put(dt.type_str.items, true) catch return TranspileError.MemoryAllocationFailed;
+                    }
+                },
+                .Function => {
+                    if (n.node_variant == null) continue;
+                    const f = n.node_variant.?.function;
+                    if (f.args) |args| {
+                        for (args.items()) |arg| {
+                            if (arg.type != .Variable or arg.node_variant == null) continue;
+                            const dt = arg.node_variant.?.variable.type;
+                            if (dt.type == .Unknown and dt.type_str.items.len != 0) {
+                                refs.put(dt.type_str.items, true) catch return TranspileError.MemoryAllocationFailed;
+                            }
+                        }
+                    }
+                    if (f.rtype) |rt| {
+                        if (rt.type == .Unknown and rt.type_str.items.len != 0) {
+                            refs.put(rt.type_str.items, true) catch return TranspileError.MemoryAllocationFailed;
+                        }
+                    }
+                    if (f.body) |b| {
+                        try self.collect_user_type_refs_in_body(b, &refs);
+                    }
+                },
+                .Impl => {
+                    if (n.node_variant == null) continue;
+                    const im = n.node_variant.?.impl;
+                    if (im.type_name.items.len != 0) {
+                        refs.put(im.type_name.items, true) catch return TranspileError.MemoryAllocationFailed;
+                    }
+                    if (im.quirk_name) |qn| {
+                        if (qn.items.len != 0) refs.put(qn.items, true) catch return TranspileError.MemoryAllocationFailed;
+                    }
+                },
+                else => {},
+            }
+        }
+
+        var it = refs.iterator();
+        while (it.next()) |entry| {
+            const name = entry.key_ptr.*;
+
+            // Skip builtins.
+            if (mem.eql(u8, name, "num") or mem.eql(u8, name, "dec") or mem.eql(u8, name, "str") or mem.eql(u8, name, "chr") or mem.eql(u8, name, "bin") or mem.eql(u8, name, "raw") or mem.eql(u8, name, "void")) {
+                continue;
+            }
+
+            // If the type already exists in the current import graph, nothing to do.
+            if (has_compound_named(self, name) or has_quirk_named(self, name)) continue;
+
+            // Prefer compounds; if not found, try quirks.
+            if (self.find_fn_defining_decl("compound", name) catch null) |path| {
+                defer self.backing_allocator.free(path);
+                try self.process_local_import_full_path(path);
+                continue;
+            }
+            if (self.find_fn_defining_decl("quirk", name) catch null) |path| {
+                defer self.backing_allocator.free(path);
+                try self.process_local_import_full_path(path);
+                continue;
+            }
         }
     }
 
@@ -3615,26 +3899,25 @@ pub const TranspileProcess = struct {
         // NOTE: `std.StringHashMap` iteration order is not stable and can place
         // dependent compounds before their dependencies (e.g. Rectangle before Point).
         // Emit compounds in a stable order that respects by-value dependencies.
-        const root = self.get_root();
 
         var compound_nodes = std.ArrayList(*ast.Node).init(self.allocator);
         defer compound_nodes.deinit();
 
-        var seen_compounds = std.StringHashMap(bool).init(self.allocator);
-        defer seen_compounds.deinit();
-
-        for (root.nodes.items()) |n| {
-            if (n.type != .Compound or n.node_variant == null) continue;
-            const cname = n.node_variant.?.compound.name.items;
-            if (!reg.compounds_by_name.contains(cname)) continue;
-            if (seen_compounds.contains(cname)) continue;
-            seen_compounds.put(cname, true) catch {
-                return TranspileError.MemoryAllocationFailed;
-            };
-            compound_nodes.append(reg.compounds_by_name.get(cname).?) catch {
+        var c_it = reg.compounds_by_name.iterator();
+        while (c_it.next()) |entry| {
+            const cnode = entry.value_ptr.*;
+            if (cnode.node_variant == null) continue;
+            compound_nodes.append(cnode) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
         }
+
+        std.sort.pdq(*ast.Node, compound_nodes.items, {}, struct {
+            fn lessThan(_: void, a: *ast.Node, b: *ast.Node) bool {
+                if (a.node_variant == null or b.node_variant == null) return false;
+                return mem.lessThan(u8, a.node_variant.?.compound.name.items, b.node_variant.?.compound.name.items);
+            }
+        }.lessThan);
 
         var emitted_compounds = std.StringHashMap(bool).init(self.allocator);
         defer emitted_compounds.deinit();
@@ -4112,6 +4395,26 @@ pub const TranspileProcess = struct {
         for (import_nodes.items) |i| {
             try self.process_import(self.nodes.items()[i]);
         }
+
+        // Allow running entrypoint scripts that reference workspace-defined types
+        // without explicitly importing their defining modules.
+        // This is intentionally conservative: only auto-imports when a single
+        // matching declaration is found.
+        try self.auto_import_missing_user_types();
+
+        // Imported modules share the same active scope pointers during codegen.
+        // This avoids crashes when we transpile function nodes owned by child modules
+        // (e.g. when emitting impl method bodies) without calling `child.transpile()`.
+        const ScopeOpt = @TypeOf(self.scope);
+        const binder = struct {
+            fn bind(proc: *Self, shared: ScopeOpt) void {
+                proc.scope = shared;
+                for (proc.children.items) |child| {
+                    bind(child, shared);
+                }
+            }
+        };
+        binder.bind(self, self.scope);
 
         // Collect user-defined type declarations across imports before typechecking.
         try self.collect_type_registry_all();
@@ -4632,6 +4935,10 @@ pub const TranspileProcess = struct {
             .Function => {
                 const function = node.node_variant.?.function;
 
+                const prev_fn_return = self.current_fn_return;
+                defer self.current_fn_return = prev_fn_return;
+                self.current_fn_return = if (function.rtype) |rt| type_from_dtype(&rt) else CheckedType{ .base = .Void };
+
                 // Function scope (arguments live here; body gets its own nested scope).
                 _ = try self.new_scope();
                 defer self.finish_scope();
@@ -5036,6 +5343,28 @@ pub const TranspileProcess = struct {
                         try self.write("}");
                     },
                     .return_stmt => |ret| {
+                        // If the user returns a pointer to a local (e.g. `ret &x;` from `fun f() T*`),
+                        // make it safe by heap-allocating and copying.
+                        const fnr = self.current_fn_return;
+                        if (fnr != null and fnr.?.pointer_depth == 1 and fnr.?.name != null and ret.type == .Unary and ret.node_variant != null) {
+                            const u = ret.node_variant.?.unary;
+                            if (mem.eql(u8, u.op, "&") and u.operand.type == .Identifier and u.operand.data != null) {
+                                const type_name = fnr.?.name.?;
+                                const local_name = u.operand.data.?.sval.items;
+                                try self.write("{ ");
+                                try self.write(type_name);
+                                try self.write("* __fun_ret = (");
+                                try self.write(type_name);
+                                try self.write("*)malloc(sizeof(");
+                                try self.write(type_name);
+                                try self.write(")); ");
+                                try self.write("*__fun_ret = ");
+                                try self.write(local_name);
+                                try self.write("; return __fun_ret; }");
+                                return;
+                            }
+                        }
+
                         try self.write("return ");
                         try self.transpile_node(ret.*);
                         try self.write(";");
@@ -5301,27 +5630,31 @@ pub const TranspileProcess = struct {
         errdefer self.backing_allocator.free(full_path);
         defer self.backing_allocator.free(full_path);
 
+        const canon_path = std.fs.cwd().realpathAlloc(self.allocator, full_path) catch null;
+        const canon = canon_path orelse (self.allocator.dupe(u8, full_path) catch return TranspileError.MemoryAllocationFailed);
+        errdefer self.allocator.free(canon);
+
         // Add a comment showing the import attempt
         try self.write("\n/* Attempting to import: ");
         try self.write(full_path);
         try self.write(" */\n");
 
         // Check if the file exists
-        std.fs.cwd().access(full_path, .{}) catch {
+        std.fs.cwd().access(canon, .{}) catch {
             // Keep the output comment (useful when dumping partial output), but also
             // emit a real diagnostic tied to the import statement.
             try self.write("\n/* ERROR: Import file not found: ");
             try self.write(full_path);
             try self.write(" */\n");
 
-            self.report_error(import_node, "Import file not found: {s}", .{full_path});
+            self.report_error(import_node, "Import file not found: {s}", .{canon});
             return TranspileError.ImportFileNotFound;
         };
 
         // Robust direct circular dependency detection
         // First, check if the file being imported already has us in its import chain
-        const file_contents = fs.cwd().readFileAlloc(self.backing_allocator, full_path, 1024 * 1024) catch |read_err| {
-            self.report_error(import_node, "Failed to read import file '{s}': {any}", .{ full_path, read_err });
+        const file_contents = fs.cwd().readFileAlloc(self.backing_allocator, canon, 1024 * 1024) catch |read_err| {
+            self.report_error(import_node, "Failed to read import file '{s}': {any}", .{ canon, read_err });
             return TranspileError.FileReadError;
         };
         defer self.backing_allocator.free(file_contents);
@@ -5353,13 +5686,12 @@ pub const TranspileProcess = struct {
         }
 
         // Mark this file as imported
-        const full_path_copy = self.allocator.dupe(u8, full_path) catch |e| {
-            std.debug.print("Failed to allocate memory for full path copy: {s}\\n", .{@errorName(e)});
-            return TranspileError.MemoryAllocationFailed;
-        };
-        errdefer self.allocator.free(full_path_copy);
-
-        self.imported_files.put(full_path_copy, true) catch |e| {
+        // Avoid importing the same file under different relative paths.
+        if (self.imported_files.contains(canon)) {
+            self.allocator.free(canon);
+            return;
+        }
+        self.imported_files.put(canon, true) catch |e| {
             std.debug.print("Failed to allocate memory for imported file: {s}\\n", .{@errorName(e)});
             return TranspileError.MemoryAllocationFailed;
         };
@@ -5373,7 +5705,7 @@ pub const TranspileProcess = struct {
         };
         errdefer self.backing_allocator.destroy(import_proc);
 
-        import_proc.* = try TranspileProcess.init(self.backing_allocator, full_path, "temp.c", .{ .outf = false });
+        import_proc.* = try TranspileProcess.init(self.backing_allocator, canon, "temp.c", .{ .outf = false });
 
         import_proc.parent = self;
         import_proc.is_importing = true;
@@ -5391,7 +5723,7 @@ pub const TranspileProcess = struct {
                 return TranspileError.MemoryAllocationFailed;
             };
         }
-        const import_path_copy = import_proc.allocator.dupe(u8, full_path) catch |e| {
+        const import_path_copy = import_proc.allocator.dupe(u8, canon) catch |e| {
             std.debug.print("Failed to allocate memory for import path copy: {s}\\n", .{@errorName(e)});
             return TranspileError.MemoryAllocationFailed;
         };

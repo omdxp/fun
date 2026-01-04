@@ -2634,15 +2634,25 @@ const LspServer = struct {
     }
 
     fn parseImportSpecFromTokens(self: *LspServer, idx: *const Index, imp_i: usize) !?[]u8 {
-        // Parses `imp a.b.c;` into "a.b.c".
+        // Parses:
+        // - `imp a.b.c;` into "a.b.c"
+        // - `imp ..defs.user;` into "..defs.user"
+        // - `imp ....parent.child;` into "....parent.child"
         if (imp_i + 1 >= idx.tokens.len) return null;
         var i = imp_i + 1;
-        if (idx.tokens[i].kind != .identifier) return null;
 
         var buf = std.ArrayList(u8).init(self.allocator);
         errdefer buf.deinit();
 
-        // ident ('.' ident)* until ';'
+        const parsed = struct {
+            fn isAllDots(s: []const u8) bool {
+                if (s.len == 0) return false;
+                for (s) |c| if (c != '.') return false;
+                return true;
+            }
+        };
+
+        // ident / dot-runs until ';'
         while (i < idx.tokens.len) : (i += 1) {
             const t = idx.tokens[i];
             if ((t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, ";")) break;
@@ -2656,6 +2666,11 @@ const LspServer = struct {
             }
             if (isDotToken(t)) {
                 try buf.append('.');
+                continue;
+            }
+            if ((t.kind == .symbol or t.kind == .operator) and parsed.isAllDots(t.text)) {
+                // Supports dot-run tokens like ".." / "....".
+                try buf.appendSlice(t.text);
                 continue;
             }
             // Stop if we hit something unexpected.
@@ -2738,14 +2753,47 @@ const LspServer = struct {
         // Cut at ';' if present
         if (std.mem.indexOfScalar(u8, after_imp, ';')) |semi| after_imp = after_imp[0..semi];
 
-        // Split on '.'
+        // Parse segments; treat dot-runs as parent traversal steps.
+        const parsed = struct {
+            fn addSegments(out: *std.ArrayList([]const u8), s: []const u8) !void {
+                var start: usize = 0;
+                var i: usize = 0;
+                while (i < s.len) {
+                    if (s[i] != '.') {
+                        i += 1;
+                        continue;
+                    }
+
+                    // Flush preceding identifier segment.
+                    if (i > start) {
+                        const seg = std.mem.trim(u8, s[start..i], " \t\r\n\"");
+                        if (seg.len != 0) try out.append(seg);
+                    }
+
+                    // Consume dot run.
+                    var j = i;
+                    while (j < s.len and s[j] == '.') : (j += 1) {}
+                    const run_len = j - i;
+                    const parents = run_len / 2;
+                    var p: usize = 0;
+                    while (p < parents) : (p += 1) {
+                        try out.append("..");
+                    }
+
+                    i = j;
+                    start = i;
+                }
+
+                if (s.len > start) {
+                    const seg = std.mem.trim(u8, s[start..], " \t\r\n\"");
+                    if (seg.len != 0) try out.append(seg);
+                }
+            }
+        };
+
         var parts = std.ArrayList([]const u8).init(self.allocator);
         defer parts.deinit();
-        var it = std.mem.splitScalar(u8, after_imp, '.');
-        while (it.next()) |p| {
-            const trimmed = std.mem.trim(u8, p, " \t\r");
-            try parts.append(trimmed);
-        }
+        try parsed.addSegments(&parts, after_imp);
         if (parts.items.len == 0) return false;
 
         const ends_with_dot = after_imp.len != 0 and after_imp[after_imp.len - 1] == '.';
