@@ -6,6 +6,8 @@ pub fn build(b: *std.Build) void {
         .preferred_optimize_mode = .ReleaseSafe,
     });
 
+    const fun_version = b.option([]const u8, "version", "version string for `fun --version` (set by release workflow)") orelse "0.0.0";
+
     // --- Define Core Library Modules ---
 
     const utils_module = b.createModule(.{
@@ -101,6 +103,10 @@ pub fn build(b: *std.Build) void {
         .name = "fun",
         .root_module = exe_module,
     });
+
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "version", fun_version);
+    exe.root_module.addOptions("build_options", build_options);
 
     // --- Define Language Server Executable (fls) ---
     const fls_module = b.createModule(.{

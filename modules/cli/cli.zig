@@ -68,9 +68,10 @@ pub const CliOptions = struct {
 /// - Might return an error if writing to the output fails.
 fn print_usage(writer: anytype) !void {
     try writer.writeAll(
-        \\Usage: fun -in <input_file> [-fmt | -fmt-all] [-out <output_file>] [-no-exec] [-outf] [-ast] [-help] [-- <program args...>]
+        \\Usage: fun --version | fun -in <input_file> [-fmt | -fmt-all] [-out <output_file>] [-no-exec] [-outf] [-ast] [-help] [-- <program args...>]
         \\
         \\Arguments:
+        \\  --version        Print version and exit
         \\  -in      <file>  Input file to compile (required)
         \\  -fmt            Format the input file in-place (optional)
         \\  -fmt-all        Format the input file and all locally imported modules (optional)

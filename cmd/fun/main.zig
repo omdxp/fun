@@ -1,6 +1,7 @@
 const std = @import("std");
 const heap = std.heap;
 const builtin = @import("builtin");
+const build_options = @import("build_options");
 const token = @import("lexer").token;
 const codegen = @import("codegen");
 const lexer = @import("lexer");
@@ -62,6 +63,20 @@ pub fn main() void {
     var arena = heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const global_allocator = arena.allocator();
+
+    // Handle `--version` without requiring other flags.
+    {
+        var args = std.process.argsWithAllocator(global_allocator) catch |err| print_error_and_exit(err);
+        defer args.deinit();
+        _ = args.skip();
+        while (args.next()) |arg| {
+            if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-version")) {
+                const stdout = std.io.getStdOut().writer();
+                stdout.print("{s}\n", .{build_options.version}) catch |err| print_error_and_exit(err);
+                return;
+            }
+        }
+    }
 
     const options = cli.parse_args(global_allocator) catch |err| print_error_and_exit(err);
 
