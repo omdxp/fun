@@ -43,4 +43,14 @@ if ($null -ne $curStdlib -and $curStdlib -eq $destStdlibRoot) {
   [Environment]::SetEnvironmentVariable('FUN_STDLIB_DIR', $null, $pathScope)
 }
 
+# Also clean up stale User-scoped values that may override Machine scope.
+$userStdlib = [Environment]::GetEnvironmentVariable('FUN_STDLIB_DIR', 'User')
+if ($null -ne $userStdlib) {
+  $u = $userStdlib.Trim('"')
+  $legacy = Join-Path $destStdlibRoot 'stdlib'
+  if ($u -eq $destStdlibRoot -or $u -eq $legacy) {
+    [Environment]::SetEnvironmentVariable('FUN_STDLIB_DIR', $null, 'User')
+  }
+}
+
 Write-Host "Uninstalled fun from: $destPrefix"

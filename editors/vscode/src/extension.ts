@@ -67,6 +67,50 @@ function platformExeName(base: string): string {
   return process?.platform === 'win32' ? `${base}.exe` : base;
 }
 
+function isWindows(): boolean {
+  return process?.platform === 'win32';
+}
+
+function splitPathList(p: string | undefined): string[] {
+  if (!p) return [];
+  return String(p)
+    .split(isWindows() ? ';' : ':')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function resolveCommandOnPath(command: string): string {
+  const cmd = (command ?? '').trim();
+  if (!cmd) return '';
+  if (cmd.includes('/') || cmd.includes('\\') || path.isAbsolute(cmd)) return '';
+
+  const pathDirs = splitPathList(process?.env?.PATH);
+  const hasExt = path.extname(cmd).length > 0;
+
+  const pathext = isWindows()
+    ? splitPathList(process?.env?.PATHEXT).map((e) => e.toLowerCase())
+    : [];
+
+  const candidates = isWindows()
+    ? hasExt
+      ? [cmd]
+      : [cmd, ...pathext.map((ext) => `${cmd}${ext}`), `${cmd}.exe`]
+    : [cmd];
+
+  for (const dir of pathDirs) {
+    for (const c of candidates) {
+      const full = path.join(dir, c);
+      try {
+        if (fs.existsSync(full)) return full;
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  return '';
+}
+
 function looksLikeBinDir(dirPath: string): boolean {
   const base = path.basename(dirPath).toLowerCase();
   return base === 'bin';
@@ -160,8 +204,15 @@ function createClient(output: vscode.OutputChannel): LanguageClient {
     output.appendLine('Fix: set Fun settings `fun.fls.path` to a valid fls executable path.');
   }
 
+  // If configured as a bare command (e.g. "fls"), resolve it via PATH so we can derive
+  // the install prefix and stdlib root even when VS Code doesn't inherit FUN_STDLIB_DIR.
+  const flsResolvedOnPath = !flsLooksLikePath ? resolveCommandOnPath(flsPath) : '';
+  if (flsResolvedOnPath) output.appendLine(`fun.fls.path (resolved on PATH) = ${flsResolvedOnPath}`);
+
   // Only set FLS_FUN_PATH if we have a real executable.
   const resolvedFunExe = funPath && funPath.trim().length > 0 && fs.existsSync(funPath) ? funPath : '';
+  const resolvedFunExeOnPath = !resolvedFunExe ? resolveCommandOnPath(funPath) : '';
+  if (resolvedFunExeOnPath) output.appendLine(`fun.fls.funPath (resolved on PATH) = ${resolvedFunExeOnPath}`);
 
   // Ensure FUN_STDLIB_DIR is available even when VS Code doesn't inherit installer env vars.
   // We only set it if the environment doesn't already define it.
@@ -171,7 +222,9 @@ function createClient(output: vscode.OutputChannel): LanguageClient {
   const derivedStdlib =
     existingStdlib ||
     (flsLooksLikePath && fs.existsSync(flsPath) ? deriveStdlibDirFromExe(flsPath) : '') ||
-    (resolvedFunExe ? deriveStdlibDirFromExe(resolvedFunExe) : '');
+    (flsResolvedOnPath ? deriveStdlibDirFromExe(flsResolvedOnPath) : '') ||
+    (resolvedFunExe ? deriveStdlibDirFromExe(resolvedFunExe) : '') ||
+    (resolvedFunExeOnPath ? deriveStdlibDirFromExe(resolvedFunExeOnPath) : '');
 
   output.appendLine(`FUN_STDLIB_DIR (env) = ${existingStdlibRaw || '(unset)'}`);
   if (existingStdlib && existingStdlib !== existingStdlibRaw) {

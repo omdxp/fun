@@ -54,6 +54,19 @@ if ($currentPath -notlike "*$binPath*") {
 # Point tooling at the installed stdlib.
 [Environment]::SetEnvironmentVariable('FUN_STDLIB_DIR', $destStdlibRoot, $pathScope)
 
+# If we're doing a Machine install, remove any stale User-scoped FUN_STDLIB_DIR
+# that overrides the Machine value (common from older installs that used ...\stdlib).
+if ($Scope -eq 'Machine') {
+  $userStd = [Environment]::GetEnvironmentVariable('FUN_STDLIB_DIR', 'User')
+  if ($null -ne $userStd -and $userStd.Trim().Length -gt 0) {
+    $userStdTrim = $userStd.Trim('"')
+    $userStdHasStd = Test-Path (Join-Path $userStdTrim 'std')
+    if (-not $userStdHasStd) {
+      [Environment]::SetEnvironmentVariable('FUN_STDLIB_DIR', $null, 'User')
+    }
+  }
+}
+
 Write-Host "Installed fun to: $destPrefix"
 Write-Host "Stdlib installed to: $destShare"
 Write-Host "FUN_STDLIB_DIR set to: $destStdlibRoot"
