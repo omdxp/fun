@@ -62,7 +62,7 @@ jobs:
           mkdir -p artifacts
           (cd dist && tar -czf ../artifacts/fun-${{ matrix.target }}.tar.gz fun-${{ matrix.target }})
         env:
-          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || github.event.inputs.tag || github.ref_name }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -98,8 +98,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           Remove-Item -Recurse -Force dist, artifacts -ErrorAction SilentlyContinue
 
-          $tag = "${{ github.event.inputs.tag }}"
-          if (-not $tag) { $tag = "${{ github.ref_name }}" }
+          $tag = "${{ github.event_name == 'release' && github.event.release.tag_name || github.event.inputs.tag || github.ref_name }}"
           if ($tag -and $tag.StartsWith('v')) { $tag = $tag.Substring(1) }
           if (-not $tag) { $tag = '0.0.0' }
 
