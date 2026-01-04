@@ -11,6 +11,9 @@
 
 name: Release
 
+permissions:
+  contents: write
+
 # Workflow triggers:
 # - Manually via GitHub UI (workflow_dispatch)
 # - Automatically when a new GitHub Release is published
@@ -59,6 +62,19 @@ jobs:
           cp scripts/installer/install.sh dist/fun-${{ matrix.target }}/install.sh
           cp scripts/installer/uninstall.sh dist/fun-${{ matrix.target }}/uninstall.sh
           chmod +x dist/fun-${{ matrix.target }}/install.sh dist/fun-${{ matrix.target }}/uninstall.sh || true
+
+          # Cross-target builds cannot execute the produced binary here.
+          # As a cheap sanity check, ensure the expected version string is embedded.
+          exe_path="dist/fun-${{ matrix.target }}/bin/fun"
+          if [ ! -f "$exe_path" ]; then
+            echo "Expected executable not found: $exe_path" >&2
+            exit 1
+          fi
+          if ! strings "$exe_path" | grep -Fq -- "$tag"; then
+            echo "Expected version '$tag' not found in $exe_path" >&2
+            exit 1
+          fi
+
           mkdir -p artifacts
           (cd dist && tar -czf ../artifacts/fun-${{ matrix.target }}.tar.gz fun-${{ matrix.target }})
         env:
@@ -103,6 +119,26 @@ jobs:
           if (-not $tag) { $tag = '0.0.0' }
 
           zig build install -Dtarget=${{ matrix.target }} -Dversion=$tag --prefix dist\fun-${{ matrix.target }}
+
+          # Verify version embedding. We can execute x86_64 builds; for aarch64 just scan bytes.
+          $exePath = "dist\fun-${{ matrix.target }}\bin\fun.exe"
+          if (-not (Test-Path $exePath)) {
+            throw "Expected executable not found: $exePath"
+          }
+          if ("${{ matrix.target }}" -eq "x86_64-windows-gnu") {
+            $out = & $exePath -version
+            if ($LASTEXITCODE -ne 0) { throw "Version check failed running $exePath" }
+            $out = ($out | Out-String).Trim()
+            if ($out -ne $tag) {
+              throw "Expected version '$tag' but got '$out'"
+            }
+          } else {
+            $bytes = [System.IO.File]::ReadAllBytes($exePath)
+            $ascii = [System.Text.Encoding]::ASCII.GetString($bytes)
+            if ($ascii.IndexOf($tag, [System.StringComparison]::Ordinal) -lt 0) {
+              throw "Expected version '$tag' not found in $exePath"
+            }
+          }
 
           # WiX Product/@Version requires x.x.x.x with each x in [0, 65534].
           # Accept tags like 1.2.3 or 1.2.3-beta and normalize.
@@ -182,16 +218,30 @@ jobs:
     name: Upload release assets
     needs: [build-unix-bundles, build-windows-msi]
     runs-on: ubuntu-latest
-    if: github.event_name == 'release'
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
     steps:
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
 
+      - name: Resolve release tag
+        id: resolve_tag
+        run: |
+          set -euo pipefail
+          tag="${RELEASE_TAG:-}"
+          if [ -z "$tag" ]; then
+            echo "No release tag available" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || github.event.inputs.tag || github.ref_name }}
+
       - name: Upload all artifacts to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.resolve_tag.outputs.tag }}
           files: |
             artifacts/**/fun-*
         env:
