@@ -1512,12 +1512,6 @@ const LspServer = struct {
             try base_segs.append(root);
             try base_segs.append("std");
 
-            // Treat `std.<module>` as an alias for `std.c.<module>`.
-            const has_explicit_c = segs.items.len >= 2 and std.mem.eql(u8, segs.items[1].name, "c");
-            if (!has_explicit_c) {
-                try base_segs.append("c");
-            }
-
             rel_from = 1;
         } else {
             try base_segs.append(current_dir);
@@ -1541,18 +1535,31 @@ const LspServer = struct {
         const is_last = selected_seg_index == segs.items.len - 1;
 
         if (is_last) {
-            // Final segment: open the module file.
+            // Final segment: prefer module file, but if it doesn't exist treat it as a directory.
             const file_path = try std.mem.concat(self.allocator, u8, &[_][]const u8{ sel_joined, ".fn" });
             defer self.allocator.free(file_path);
-            if (std.fs.path.isAbsolute(file_path)) {
-                var f = std.fs.openFileAbsolute(file_path, .{}) catch return false;
-                f.close();
-            } else {
-                std.fs.cwd().access(file_path, .{}) catch return false;
+            if (self.tryOpenExistingFile(file_path)) {
+                const target_uri = try pathToUri(self.allocator, file_path);
+                defer self.allocator.free(target_uri);
+                self.ensureDocIndexedFromDisk(target_uri) catch {};
+                const locs = [_]Location{.{
+                    .uri = target_uri,
+                    .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 0 } },
+                }};
+                const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
+                defer self.allocator.free(json);
+                try self.sendResponseJson(id_val, json);
+                return true;
             }
-            const target_uri = try pathToUri(self.allocator, file_path);
+            // Else fall through to directory handling.
+        }
+
+        // Directory segment: if README exists, prefer it.
+        const dir_readme_path = try std.fs.path.join(self.allocator, &[_][]const u8{ sel_joined, "README.md" });
+        defer self.allocator.free(dir_readme_path);
+        if (self.tryOpenExistingFile(dir_readme_path)) {
+            const target_uri = try pathToUri(self.allocator, dir_readme_path);
             defer self.allocator.free(target_uri);
-            self.ensureDocIndexedFromDisk(target_uri) catch {};
             const locs = [_]Location{.{
                 .uri = target_uri,
                 .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 0 } },
@@ -2404,22 +2411,13 @@ const LspServer = struct {
         }
 
         // Build the path under stdlib.
-        // We treat `std.<x>` as `std.c.<x>` unless the user explicitly wrote `.c.`.
         var segs = std.ArrayList([]const u8).init(self.allocator);
         defer segs.deinit();
         try segs.append(root);
         try segs.append("std");
 
-        var after_std: usize = 1;
-        const has_explicit_c = ids.items.len >= 2 and std.mem.eql(u8, idx.tokens[ids.items[1]].text, "c");
-        if (!has_explicit_c) {
-            try segs.append("c");
-        } else {
-            after_std = 2;
-        }
-
-        // Receiver chain beyond `std` (and possibly `c`).
-        var k: usize = after_std;
+        // Receiver chain beyond `std`.
+        var k: usize = 1;
         while (k < ids.items.len) : (k += 1) {
             try segs.append(idx.tokens[ids.items[k]].text);
         }
@@ -2496,13 +2494,6 @@ const LspServer = struct {
                         try items.append(.{ .label = try self.allocator.dupe(u8, base_name), .kind = 17 });
                     }
                 }
-            }
-        }
-
-        // At `std.` we also want `c` to be visible, even though we default to it.
-        if (ids.items.len == 1) {
-            if (prefix.len == 0 or std.mem.startsWith(u8, "c", prefix)) {
-                try items.append(.{ .label = try self.allocator.dupe(u8, "c"), .kind = 19 });
             }
         }
 
@@ -2584,17 +2575,9 @@ const LspServer = struct {
         try segs.append(root);
         try segs.append("std");
 
-        const has_explicit_c = ids.len >= 2 and std.mem.eql(u8, idx.tokens[ids[1]].text, "c");
-        var after_std: usize = 1;
-        if (!has_explicit_c) {
-            try segs.append("c");
-        } else {
-            after_std = 2;
-        }
+        if (module_last_inclusive < 1) return null;
 
-        if (module_last_inclusive < after_std) return null;
-
-        var k: usize = after_std;
+        var k: usize = 1;
         while (k <= module_last_inclusive) : (k += 1) {
             try segs.append(idx.tokens[ids[k]].text);
         }
@@ -2675,9 +2658,7 @@ const LspServer = struct {
             return true;
         }
 
-        const has_explicit_c = ids.items.len >= 2 and std.mem.eql(u8, idx.tokens[ids.items[1]].text, "c");
-        const min_len: usize = if (has_explicit_c) @as(usize, 4) else @as(usize, 3);
-        const is_symbol = selected_idx == ids.items.len - 1 and ids.items.len >= min_len;
+        const is_symbol = selected_idx == ids.items.len - 1 and ids.items.len >= 3;
 
         if (is_symbol) {
             const symbol_name = idx.tokens[ids.items[ids.items.len - 1]].text;
@@ -2710,18 +2691,78 @@ const LspServer = struct {
             return true;
         }
 
-        // Otherwise treat the selected identifier as a module segment and jump to its module file.
-        const module_file = (try self.buildStdModuleFilePathFromIds(current_uri, idx, ids.items, selected_idx)) orelse return false;
+        // Otherwise treat the selected identifier as a module/directory segment.
+        const root = self.getStdlibRootForNamespace(current_uri) orelse return false;
+
+        var segs = std.ArrayList([]const u8).init(self.allocator);
+        defer segs.deinit();
+        try segs.append(root);
+        try segs.append("std");
+        var k: usize = 1;
+        while (k <= selected_idx) : (k += 1) {
+            try segs.append(idx.tokens[ids.items[k]].text);
+        }
+        const selected_path_no_ext = try std.fs.path.join(self.allocator, segs.items);
+        defer self.allocator.free(selected_path_no_ext);
+
+        // Prefer README.md if this is a directory segment.
+        const readme_path = try std.fs.path.join(self.allocator, &[_][]const u8{ selected_path_no_ext, "README.md" });
+        defer self.allocator.free(readme_path);
+        if (self.tryOpenExistingFile(readme_path)) {
+            const target_uri = try pathToUri(self.allocator, readme_path);
+            defer self.allocator.free(target_uri);
+            const locs = [_]Location{.{
+                .uri = target_uri,
+                .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 0 } },
+            }};
+            const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
+            defer self.allocator.free(json);
+            try self.sendResponseJson(id_val, json);
+            return true;
+        }
+
+        // Then try module file.
+        const module_file = try std.mem.concat(self.allocator, u8, &[_][]const u8{ selected_path_no_ext, ".fn" });
         defer self.allocator.free(module_file);
-        if (!self.tryOpenExistingFile(module_file)) return false;
-        const module_uri = try pathToUri(self.allocator, module_file);
-        defer self.allocator.free(module_uri);
-        self.ensureDocIndexedFromDisk(module_uri) catch {};
-        const locs = [_]Location{.{
-            .uri = module_uri,
-            .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 0 } },
-        }};
-        const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
+        if (self.tryOpenExistingFile(module_file)) {
+            const module_uri = try pathToUri(self.allocator, module_file);
+            defer self.allocator.free(module_uri);
+            self.ensureDocIndexedFromDisk(module_uri) catch {};
+            const locs = [_]Location{.{
+                .uri = module_uri,
+                .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 0 } },
+            }};
+            const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
+            defer self.allocator.free(json);
+            try self.sendResponseJson(id_val, json);
+            return true;
+        }
+
+        // If it's a directory, return definitions for contained modules.
+        var dir = if (std.fs.path.isAbsolute(selected_path_no_ext))
+            (std.fs.openDirAbsolute(selected_path_no_ext, .{ .iterate = true }) catch return false)
+        else
+            (std.fs.cwd().openDir(selected_path_no_ext, .{ .iterate = true }) catch return false);
+        defer dir.close();
+
+        var locs_list = std.ArrayList(Location).init(self.allocator);
+        defer {
+            for (locs_list.items) |l| self.allocator.free(l.uri);
+            locs_list.deinit();
+        }
+
+        var it = dir.iterate();
+        while (try it.next()) |entry| {
+            if (entry.kind != .file) continue;
+            if (!std.mem.endsWith(u8, entry.name, ".fn")) continue;
+            const full_path = try std.fs.path.join(self.allocator, &[_][]const u8{ selected_path_no_ext, entry.name });
+            defer self.allocator.free(full_path);
+            const u = try pathToUri(self.allocator, full_path);
+            try locs_list.append(.{ .uri = u, .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 0 } } });
+        }
+
+        if (locs_list.items.len == 0) return false;
+        const json = try std.json.stringifyAlloc(self.allocator, locs_list.items, .{});
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
         return true;
@@ -2751,9 +2792,7 @@ const LspServer = struct {
         }
         const selected_idx = selected_idx_opt orelse return false;
 
-        const has_explicit_c = ids.items.len >= 2 and std.mem.eql(u8, idx.tokens[ids.items[1]].text, "c");
-        const min_len: usize = if (has_explicit_c) @as(usize, 4) else @as(usize, 3);
-        const is_symbol = selected_idx == ids.items.len - 1 and ids.items.len >= min_len;
+        const is_symbol = selected_idx == ids.items.len - 1 and ids.items.len >= 3;
 
         var buf = std.ArrayList(u8).init(self.allocator);
         defer buf.deinit();
@@ -2798,7 +2837,42 @@ const LspServer = struct {
         }
 
         // Hover over a module segment: show a minimal module hint if the module file exists.
-        const module_file = (try self.buildStdModuleFilePathFromIds(current_uri, idx, ids.items, selected_idx)) orelse return false;
+        const root = self.getStdlibRootForNamespace(current_uri) orelse return false;
+
+        var segs = std.ArrayList([]const u8).init(self.allocator);
+        defer segs.deinit();
+        try segs.append(root);
+        try segs.append("std");
+        var k: usize = 1;
+        while (k <= selected_idx) : (k += 1) {
+            try segs.append(idx.tokens[ids.items[k]].text);
+        }
+        const selected_path_no_ext = try std.fs.path.join(self.allocator, segs.items);
+        defer self.allocator.free(selected_path_no_ext);
+
+        // Prefer README hover for directory segments.
+        const readme_path = try std.fs.path.join(self.allocator, &[_][]const u8{ selected_path_no_ext, "README.md" });
+        defer self.allocator.free(readme_path);
+        if (self.tryOpenExistingFile(readme_path)) {
+            const readme_text = blk: {
+                if (std.fs.path.isAbsolute(readme_path)) {
+                    var f = std.fs.openFileAbsolute(readme_path, .{}) catch return false;
+                    defer f.close();
+                    break :blk f.readToEndAlloc(self.allocator, 128 * 1024) catch return false;
+                }
+                break :blk std.fs.cwd().readFileAlloc(self.allocator, readme_path, 128 * 1024) catch return false;
+            };
+            defer self.allocator.free(readme_text);
+
+            const hover: Hover = .{ .contents = .{ .value = readme_text }, .range = idx.tokens[tok_i].range };
+            const json = try std.json.stringifyAlloc(self.allocator, hover, .{});
+            defer self.allocator.free(json);
+            try self.sendResponseJson(id_val, json);
+            return true;
+        }
+
+        // Otherwise, show a minimal module hint if the module file exists.
+        const module_file = try std.mem.concat(self.allocator, u8, &[_][]const u8{ selected_path_no_ext, ".fn" });
         defer self.allocator.free(module_file);
         if (!self.tryOpenExistingFile(module_file)) return false;
 
@@ -2827,9 +2901,7 @@ const LspServer = struct {
         if (ids.items.len == 0) return null;
         if (!std.mem.eql(u8, idx.tokens[ids.items[0]].text, "std")) return null;
 
-        const has_explicit_c = ids.items.len >= 2 and std.mem.eql(u8, idx.tokens[ids.items[1]].text, "c");
-        const min_len: usize = if (has_explicit_c) @as(usize, 4) else @as(usize, 3);
-        if (ids.items.len < min_len) return null;
+        if (ids.items.len < 3) return null;
 
         // We only handle `std.<module>.<fn>(...)` style calls here.
         const symbol_name = idx.tokens[ids.items[ids.items.len - 1]].text;
@@ -3031,12 +3103,6 @@ const LspServer = struct {
             try items.append(.{ .label = try self.allocator.dupe(u8, "std"), .kind = 19 }); // Folder
         }
 
-        const completing_under_std_alias = parts.items.len >= 1 and std.mem.eql(u8, parts.items[0], "std") and
-            // `imp std.<partial>`
-            ((!ends_with_dot and parent_count == 1) or
-                // `imp std.` (split yields ["std", ""])
-                (ends_with_dot and parts.items.len == 2 and parts.items[1].len == 0));
-
         // Determine base dir for filesystem-backed completion.
         var base_dir_path_opt: ?[]u8 = null;
         if (parts.items.len != 0 and std.mem.eql(u8, parts.items[0], "std")) {
@@ -3050,16 +3116,6 @@ const LspServer = struct {
                 defer segs.deinit();
                 try segs.append(root);
                 try segs.append("std");
-
-                // Treat `std.<module>` as an alias for `std.c.<module>` for completion,
-                // so users can keep typing `std.io` and still get suggestions.
-                if (completing_under_std_alias) {
-                    try segs.append("c");
-                    // Also explicitly include `c` as a completion option at `std.`.
-                    if (partial.len == 0 or std.mem.startsWith(u8, "c", partial)) {
-                        try items.append(.{ .label = try self.allocator.dupe(u8, "c"), .kind = 19 });
-                    }
-                }
 
                 var si: usize = 1;
                 while (si < parent_count) : (si += 1) {
@@ -3400,7 +3456,6 @@ const LspServer = struct {
     fn resolveImportUri(self: *LspServer, current_uri: []const u8, raw_import: []const u8) !?[]u8 {
         // Supports:
         // - `imp std.c.io;` => <workspace>/stdlib/std/c/io.fn
-        // - `imp std.io;`   => <workspace>/stdlib/std/c/io.fn (compat alias)
         // - `imp relative.parent;` => <current_dir>/relative/parent.fn
         // - `imp child;` => <current_dir>/child.fn
         // - `imp ..defs.user;` => <current_dir>/../defs/user.fn
@@ -3469,17 +3524,9 @@ const LspServer = struct {
             if (self.debug_imports) dbg(true, "imports", "stdlib root used={s}", .{root});
             try segs.append(root);
             try segs.append("std");
-            try segs.append("c");
 
             if (parts.items.len == 1) return null;
-            if (parts.items.len >= 2 and std.mem.eql(u8, parts.items[1], "c")) {
-                // `std.c.<module>`
-                if (parts.items.len == 2) return null;
-                for (parts.items[2..]) |p| try segs.append(p);
-            } else {
-                // `std.<module>` (compat alias)
-                for (parts.items[1..]) |p| try segs.append(p);
-            }
+            for (parts.items[1..]) |p| try segs.append(p);
         } else {
             try segs.append(current_dir);
             for (parts.items) |p| try segs.append(p);
@@ -4040,11 +4087,6 @@ test "fls: resolve std import to stdlib" {
     const resolved = (try server.resolveImportUri(current_uri, "std.c.io")) orelse return error.TestUnexpectedResult;
     defer allocator.free(resolved);
     try std.testing.expect(std.mem.eql(u8, resolved, expected_uri));
-
-    // Compat alias: `std.io` still resolves to the same file.
-    const resolved2 = (try server.resolveImportUri(current_uri, "std.io")) orelse return error.TestUnexpectedResult;
-    defer allocator.free(resolved2);
-    try std.testing.expect(std.mem.eql(u8, resolved2, expected_uri));
 }
 
 test "fls: parseFunDiagnosticsByUri maps tmp file to current uri" {
