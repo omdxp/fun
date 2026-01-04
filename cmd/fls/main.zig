@@ -5231,7 +5231,11 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
     var brace_depth: i64 = 0;
     var paren_depth: i64 = 0;
 
-    const ParamLite = struct { name: []const u8, dtype: []const u8 };
+    const ParamLite = struct {
+        name: []const u8,
+        dtype_base: []const u8,
+        dtype_display: []const u8,
+    };
 
     // Track when we're inside any function-ish body so we can index locals.
     // This includes:
@@ -5296,15 +5300,31 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                     pi += 1;
                     continue;
                 }
-                const ptype = tokenString(pt);
-                const pname_i = nextNonTrivialToken(tokens_, pi + 1) orelse break;
-                if (!isIdent(tokens_[pname_i])) {
+                const ptype_base = tokenString(pt);
+
+                // Allow pointer/reference markers between type and name: `Type* name` / `Type & name`.
+                var name_i = nextNonTrivialToken(tokens_, pi + 1) orelse break;
+                var markers = std.ArrayList(u8).init(std.heap.page_allocator);
+                defer markers.deinit();
+                while (name_i < tokens_.len and (isPunctChar(tokens_[name_i], '*') or isPunctChar(tokens_[name_i], '&'))) {
+                    if (isPunctChar(tokens_[name_i], '*')) markers.append('*') catch {};
+                    if (isPunctChar(tokens_[name_i], '&')) markers.append('&') catch {};
+                    name_i = nextNonTrivialToken(tokens_, name_i + 1) orelse break;
+                }
+                if (name_i >= tokens_.len or !isIdent(tokens_[name_i])) {
                     pi += 1;
                     continue;
                 }
-                const pname = tokenString(tokens_[pname_i]);
-                params.append(.{ .name = pname, .dtype = ptype }) catch {};
-                pi = pname_i + 1;
+
+                const pname = tokenString(tokens_[name_i]);
+                const dtype_display = if (markers.items.len == 0)
+                    ptype_base
+                else
+                    (std.mem.concat(std.heap.page_allocator, u8, &[_][]const u8{ ptype_base, markers.items }) catch ptype_base);
+                defer if (dtype_display.ptr != ptype_base.ptr) std.heap.page_allocator.free(dtype_display);
+
+                params.append(.{ .name = pname, .dtype_base = ptype_base, .dtype_display = dtype_display }) catch {};
+                pi = name_i + 1;
             }
         }
     }.call;
@@ -5368,11 +5388,11 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                     .selection_range = br,
                     .container_fn_range = body_range.?,
                     .container_type = null,
-                    .value_type = try allocator.dupe(u8, pinfo.dtype),
+                    .value_type = try allocator.dupe(u8, pinfo.dtype_base),
                     .detail = blk: {
                         var det_buf = std.ArrayList(u8).init(allocator);
                         defer det_buf.deinit();
-                        try det_buf.writer().print("{s} {s}", .{ pinfo.dtype, pinfo.name });
+                        try det_buf.writer().print("{s} {s}", .{ pinfo.dtype_display, pinfo.name });
                         break :blk try allocator.dupe(u8, det_buf.items);
                     },
                 });
@@ -5610,7 +5630,10 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
             }
         }
 
-        // Best-effort local variable indexing (token-based): `Type name;` or `Type name = ...;`.
+        // Best-effort local variable indexing (token-based):
+        // - `Type name;` / `Type name = ...;`
+        // - `Type* name;` / `Type * name = ...;`
+        // - `Type& name;` / `Type & name = ...;`
         // Attach locals to the enclosing `fun { ... }` body.
         if (in_body and isTypeToken(t)) {
             // Avoid `compound X`, `quirk X`, `impl X`, `fun name`.
@@ -5621,8 +5644,17 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 }
             }
 
-            const name_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
-            if (!isIdent(tokens[name_i])) continue;
+            const vtype_base = tokenString(t);
+
+            var name_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
+            var markers = std.ArrayList(u8).init(std.heap.page_allocator);
+            defer markers.deinit();
+            while (name_i < tokens.len and (isPunctChar(tokens[name_i], '*') or isPunctChar(tokens[name_i], '&'))) {
+                if (isPunctChar(tokens[name_i], '*')) try markers.append('*');
+                if (isPunctChar(tokens[name_i], '&')) try markers.append('&');
+                name_i = nextNonTrivialToken(tokens, name_i + 1) orelse break;
+            }
+            if (name_i >= tokens.len or !isIdent(tokens[name_i])) continue;
 
             // Avoid pairing across lines (e.g. `p` then next-line `p.x...`) which would
             // create bogus locals like `p p`.
@@ -5632,7 +5664,11 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
             const first_after_i = nextNonTrivialToken(tokens, name_i + 1) orelse continue;
             if (!(isPunctChar(tokens[first_after_i], ';') or isPunctChar(tokens[first_after_i], '=') or isPunctChar(tokens[first_after_i], ','))) continue;
 
-            const vtype = tokenString(t);
+            const vtype_display = if (markers.items.len == 0)
+                vtype_base
+            else
+                (try std.mem.concat(allocator, u8, &[_][]const u8{ vtype_base, markers.items }));
+            defer if (vtype_display.ptr != vtype_base.ptr) allocator.free(vtype_display);
 
             // Support `Type a, b, c;` by walking commas until a terminator.
             var cur_name_i: usize = name_i;
@@ -5642,7 +5678,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
 
                 var det_buf = std.ArrayList(u8).init(allocator);
                 defer det_buf.deinit();
-                try det_buf.writer().print("{s} {s}", .{ vtype, vname });
+                try det_buf.writer().print("{s} {s}", .{ vtype_display, vname });
 
                 try out.append(.{
                     .name = try allocator.dupe(u8, vname),
@@ -5651,7 +5687,8 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                     .selection_range = r,
                     .container_fn_range = body_range.?,
                     .container_type = null,
-                    .value_type = try allocator.dupe(u8, vtype),
+                    // Store the base type so member completion can match `impl Type { ... }`.
+                    .value_type = try allocator.dupe(u8, vtype_base),
                     .detail = try allocator.dupe(u8, det_buf.items),
                 });
 
