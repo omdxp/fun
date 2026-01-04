@@ -26,7 +26,7 @@ fi
 
 dest_bin="$prefix/bin"
 dest_share="$prefix/share/fun"
-dest_stdlib="$dest_share/stdlib"
+dest_stdlib="$dest_share"
 
 mkdir -p "$dest_bin" "$dest_share"
 

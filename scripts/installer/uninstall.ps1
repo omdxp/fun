@@ -24,7 +24,7 @@ if ($Prefix -ne '') {
 }
 
 $destBin = Join-Path $destPrefix 'bin'
-${destStdlibRoot} = Join-Path (Join-Path $destPrefix 'share\fun') 'stdlib'
+${destStdlibRoot} = Join-Path $destPrefix 'share\fun'
 
 if (Test-Path $destPrefix) {
   Remove-Item -Recurse -Force $destPrefix

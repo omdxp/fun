@@ -35,6 +35,11 @@ jobs:
           cd editors/vscode
           npm version --no-git-tag-version "$VERSION"
 
+      - name: Build extension (TypeScript)
+        run: |
+          cd editors/vscode
+          npm run compile
+
       - name: Publish VS Code extension
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}

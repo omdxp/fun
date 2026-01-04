@@ -32,7 +32,7 @@ if ($Prefix -ne '') {
 
 $destBin = Join-Path $destPrefix 'bin'
 $destShare = Join-Path $destPrefix 'share\fun'
-${destStdlibRoot} = Join-Path $destShare 'stdlib'
+${destStdlibRoot} = $destShare
 
 New-Item -ItemType Directory -Force -Path $destBin | Out-Null
 New-Item -ItemType Directory -Force -Path $destShare | Out-Null

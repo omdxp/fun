@@ -183,8 +183,34 @@ const LspServer = struct {
     root_uri: ?[]u8 = null,
     root_path: ?[]u8 = null,
     stdlib_root_path: ?[]u8 = null,
+    debug_enabled: bool = false,
+    debug_imports: bool = false,
+    debug_definitions: bool = false,
+    did_log_stdlib_root_resolution: bool = false,
+
+    fn envFlag(allocator: Allocator, name: []const u8) bool {
+        const v = std.process.getEnvVarOwned(allocator, name) catch return false;
+        defer allocator.free(v);
+        const s = std.mem.trim(u8, v, " \t\r\n");
+        if (s.len == 0) return false;
+        if (std.ascii.eqlIgnoreCase(s, "0")) return false;
+        if (std.ascii.eqlIgnoreCase(s, "false")) return false;
+        if (std.ascii.eqlIgnoreCase(s, "no")) return false;
+        if (std.ascii.eqlIgnoreCase(s, "off")) return false;
+        return true;
+    }
+
+    fn dbg(enabled: bool, comptime category: []const u8, comptime fmt: []const u8, args: anytype) void {
+        if (!enabled) return;
+        std.debug.print("[fls:{s}] ", .{category});
+        std.debug.print(fmt, args);
+        std.debug.print("\n", .{});
+    }
 
     fn init(allocator: Allocator) !LspServer {
+        const dbg_all = envFlag(allocator, "FLS_DEBUG");
+        const dbg_imports = dbg_all or envFlag(allocator, "FLS_DEBUG_IMPORTS");
+        const dbg_defs = dbg_all or envFlag(allocator, "FLS_DEBUG_DEFINITIONS");
         return .{
             .allocator = allocator,
             .docs = std.StringHashMap(Doc).init(allocator),
@@ -196,6 +222,10 @@ const LspServer = struct {
             .root_uri = null,
             .root_path = null,
             .stdlib_root_path = null,
+            .debug_enabled = dbg_all or dbg_imports or dbg_defs,
+            .debug_imports = dbg_imports,
+            .debug_definitions = dbg_defs,
+            .did_log_stdlib_root_resolution = false,
         };
     }
 
@@ -222,8 +252,19 @@ const LspServer = struct {
     fn getStdlibRootPath(self: *LspServer) ?[]const u8 {
         if (self.stdlib_root_path) |p| return p;
 
+        if (self.debug_imports and !self.did_log_stdlib_root_resolution) {
+            self.did_log_stdlib_root_resolution = true;
+            dbg(true, "imports", "resolving stdlib root (env/exe/workspace/cwd)", .{});
+            if (self.root_path) |rp| dbg(true, "imports", "root_path={s}", .{rp});
+            dbg(true, "imports", "fun_exe_path={s}", .{self.fun_exe_path});
+            if (self.fls_exe_path) |fp| dbg(true, "imports", "fls_exe_path={s}", .{fp});
+        }
+
         // Optional override for custom installs.
-        if (self.tryStdlibRootFromEnv("FUN_STDLIB_DIR")) return self.stdlib_root_path.?;
+        if (self.tryStdlibRootFromEnv("FUN_STDLIB_DIR")) {
+            if (self.debug_imports) dbg(true, "imports", "stdlib root from FUN_STDLIB_DIR => {s}", .{self.stdlib_root_path.?});
+            return self.stdlib_root_path.?;
+        }
 
         // Prefer installed layout next to the running binaries (matches transpiler behavior).
         if (self.fls_exe_path) |p| {
@@ -234,13 +275,22 @@ const LspServer = struct {
         if (self.tryStdlibRootFromExeDirWalk(self.fun_exe_path)) return self.stdlib_root_path.?;
 
         // Repo/workspace checkout layout (fallback).
-        if (self.tryStdlibRootFromWorkspace()) return self.stdlib_root_path.?;
+        if (self.tryStdlibRootFromWorkspace()) {
+            if (self.debug_imports) dbg(true, "imports", "stdlib root from workspace => {s}", .{self.stdlib_root_path.?});
+            return self.stdlib_root_path.?;
+        }
 
         // Final fallback: try resolving relative to the server's current working directory.
         // VS Code launches `fls` with `cwd` set to the workspace root, but some clients/flows
         // don't provide a usable `rootUri` or the document may be `untitled:`.
-        if (self.trySetStdlibRoot("stdlib")) return self.stdlib_root_path.?;
-        if (self.trySetStdlibRoot("zig-out/share/fun/stdlib")) return self.stdlib_root_path.?;
+        if (self.trySetStdlibRoot("stdlib")) {
+            if (self.debug_imports) dbg(true, "imports", "stdlib root from cwd relative 'stdlib' => {s}", .{self.stdlib_root_path.?});
+            return self.stdlib_root_path.?;
+        }
+        if (self.trySetStdlibRoot("zig-out/share/fun/stdlib")) {
+            if (self.debug_imports) dbg(true, "imports", "stdlib root from cwd relative 'zig-out/share/fun/stdlib' => {s}", .{self.stdlib_root_path.?});
+            return self.stdlib_root_path.?;
+        }
 
         return null;
     }
@@ -280,29 +330,145 @@ const LspServer = struct {
         return true;
     }
 
+    fn checkStdlibRootAbsolute(self: *LspServer, root_abs: []const u8) bool {
+        if (!std.fs.path.isAbsolute(root_abs)) return false;
+
+        const std_dir = std.fs.path.join(std.heap.page_allocator, &.{ root_abs, "std" }) catch return false;
+        defer std.heap.page_allocator.free(std_dir);
+
+        if (!std.fs.path.isAbsolute(std_dir)) return false;
+        var d = std.fs.openDirAbsolute(std_dir, .{}) catch |err| {
+            if (self.debug_imports) dbg(true, "imports", "stdlib root check failed: root={s} std_dir={s} err={s}", .{ root_abs, std_dir, @errorName(err) });
+            return false;
+        };
+        d.close();
+        return true;
+    }
+
     fn trySetStdlibRoot(self: *LspServer, path: []const u8) bool {
+        if (self.debug_imports) dbg(true, "imports", "trySetStdlibRoot candidate={s}", .{path});
         // Ensure we store an absolute path and never pass a non-absolute string to
         // `openDirAbsolute` (which asserts in Zig stdlib).
-        const abs = if (std.fs.path.isAbsolute(path))
+        var abs = if (std.fs.path.isAbsolute(path))
             (self.allocator.dupe(u8, path) catch return false)
         else
             (std.fs.cwd().realpathAlloc(self.allocator, path) catch return false);
 
+        // Normalize/derive: accept a variety of installed layouts.
+        // We ultimately store `<root>` such that `<root>/std/...` exists.
+        if (!self.checkStdlibRootAbsolute(abs)) {
+            const base = std.fs.path.basename(abs);
+
+            // Common: caller points at `<root>/std`.
+            if (std.ascii.eqlIgnoreCase(base, "std")) {
+                const parent = std.fs.path.dirname(abs) orelse null;
+                if (parent) |p| {
+                    if (self.checkStdlibRootAbsolute(p)) {
+                        if (self.debug_imports) dbg(true, "imports", "normalized stdlib root from .../std => {s}", .{p});
+                        self.allocator.free(abs);
+                        abs = self.allocator.dupe(u8, p) catch return false;
+                    }
+                }
+            }
+
+            // Back-compat / common confusion: env points at `<root>/stdlib` but install layout
+            // actually places `std/` directly under `<root>` (e.g. `<prefix>/share/fun/std`).
+            if (!self.checkStdlibRootAbsolute(abs) and std.ascii.eqlIgnoreCase(base, "stdlib")) {
+                const parent = std.fs.path.dirname(abs) orelse null;
+                if (parent) |p| {
+                    if (self.checkStdlibRootAbsolute(p)) {
+                        if (self.debug_imports) dbg(true, "imports", "normalized stdlib root from .../stdlib => {s}", .{p});
+                        self.allocator.free(abs);
+                        abs = self.allocator.dupe(u8, p) catch return false;
+                    }
+                }
+            }
+
+            // If still not valid, try common prefixes where the env var might point to the install prefix
+            // or to `.../share`/`.../share/fun`.
+            if (!self.checkStdlibRootAbsolute(abs)) {
+                const derived1 = std.fs.path.join(self.allocator, &.{ abs, "stdlib" }) catch null;
+                if (derived1) |p| {
+                    defer self.allocator.free(p);
+                    if (self.debug_imports) dbg(true, "imports", "trySetStdlibRoot derived(suffix stdlib)={s}", .{p});
+                    if (self.checkStdlibRootAbsolute(p)) {
+                        if (self.debug_imports) dbg(true, "imports", "accepted derived stdlib root => {s}", .{p});
+                        self.allocator.free(abs);
+                        abs = self.allocator.dupe(u8, p) catch return false;
+                    }
+                }
+
+                // Current installer layout: `<prefix>/share/fun/std/...` (no `stdlib/` directory).
+                if (!self.checkStdlibRootAbsolute(abs)) {
+                    const derived_share_fun = std.fs.path.join(self.allocator, &.{ abs, "share", "fun" }) catch null;
+                    if (derived_share_fun) |p| {
+                        defer self.allocator.free(p);
+                        if (self.debug_imports) dbg(true, "imports", "trySetStdlibRoot derived(suffix share/fun)={s}", .{p});
+                        if (self.checkStdlibRootAbsolute(p)) {
+                            if (self.debug_imports) dbg(true, "imports", "accepted derived stdlib root => {s}", .{p});
+                            self.allocator.free(abs);
+                            abs = self.allocator.dupe(u8, p) catch return false;
+                        }
+                    }
+                }
+
+                if (!self.checkStdlibRootAbsolute(abs)) {
+                    const derived2 = std.fs.path.join(self.allocator, &.{ abs, "share", "fun", "stdlib" }) catch null;
+                    if (derived2) |p| {
+                        defer self.allocator.free(p);
+                        if (self.debug_imports) dbg(true, "imports", "trySetStdlibRoot derived(suffix share/fun/stdlib)={s}", .{p});
+                        if (self.checkStdlibRootAbsolute(p)) {
+                            if (self.debug_imports) dbg(true, "imports", "accepted derived stdlib root => {s}", .{p});
+                            self.allocator.free(abs);
+                            abs = self.allocator.dupe(u8, p) catch return false;
+                        }
+                    }
+                }
+
+                if (!self.checkStdlibRootAbsolute(abs)) {
+                    const derived3 = std.fs.path.join(self.allocator, &.{ abs, "fun", "stdlib" }) catch null;
+                    if (derived3) |p| {
+                        defer self.allocator.free(p);
+                        if (self.debug_imports) dbg(true, "imports", "trySetStdlibRoot derived(suffix fun/stdlib)={s}", .{p});
+                        if (self.checkStdlibRootAbsolute(p)) {
+                            if (self.debug_imports) dbg(true, "imports", "accepted derived stdlib root => {s}", .{p});
+                            self.allocator.free(abs);
+                            abs = self.allocator.dupe(u8, p) catch return false;
+                        }
+                    }
+                }
+            }
+        }
+
         var keep: bool = false;
         defer if (!keep) self.allocator.free(abs);
 
-        if (!isStdlibRootAbsolute(abs)) return false;
+        if (!self.checkStdlibRootAbsolute(abs)) {
+            if (self.debug_imports) dbg(true, "imports", "reject stdlib root (unable to open 'std/'?) abs={s}", .{abs});
+            return false;
+        }
 
         if (self.stdlib_root_path) |p| self.allocator.free(p);
         self.stdlib_root_path = abs;
         keep = true;
+        if (self.debug_imports) dbg(true, "imports", "accepted stdlib root abs={s}", .{abs});
         return true;
     }
 
     fn tryStdlibRootFromEnv(self: *LspServer, name: []const u8) bool {
         const v = std.process.getEnvVarOwned(self.allocator, name) catch return false;
         defer self.allocator.free(v);
-        return self.trySetStdlibRoot(v);
+        const trimmed = std.mem.trim(u8, v, " \t\r\n");
+        if (trimmed.len == 0) return false;
+        const unquoted = blk: {
+            if ((trimmed[0] == '"' and trimmed[trimmed.len - 1] == '"') or (trimmed[0] == '\'' and trimmed[trimmed.len - 1] == '\'')) {
+                if (trimmed.len <= 2) break :blk "";
+                break :blk trimmed[1 .. trimmed.len - 1];
+            }
+            break :blk trimmed;
+        };
+        if (unquoted.len == 0) return false;
+        return self.trySetStdlibRoot(unquoted);
     }
 
     fn tryStdlibRootFromWorkspace(self: *LspServer) bool {
@@ -628,6 +794,11 @@ const LspServer = struct {
         const path = uriToPath(self.allocator, chosen_uri.?) catch return;
         if (self.root_path) |p| self.allocator.free(p);
         self.root_path = path;
+
+        if (self.debug_imports) {
+            dbg(true, "imports", "initialize captured root_uri={s}", .{self.root_uri.?});
+            dbg(true, "imports", "initialize captured root_path={s}", .{self.root_path.?});
+        }
     }
 
     fn indexWorkspace(self: *LspServer) !void {
@@ -1123,6 +1294,10 @@ const LspServer = struct {
 
         const tok = idx.tokens[tok_i];
 
+        if (self.debug_definitions) {
+            dbg(true, "defs", "definition request uri={s} pos=({d},{d}) tok='{s}' kind={s}", .{ uri, pos.line, pos.character, tok.text, @tagName(tok.kind) });
+        }
+
         if (mode == .type_definition) {
             // Best-effort: resolve the declared type for an identifier, then jump to that type's definition.
             if (tok.kind != .identifier) {
@@ -1203,6 +1378,18 @@ const LspServer = struct {
             defer self.allocator.free(json);
             try self.sendResponseJson(id_val, json);
             return;
+        }
+
+        // Final fallback for types: if the identifier is a known type name anywhere in the workspace,
+        // jump to its declaration even if the current file forgot to import it.
+        if (self.isKnownTypeName(tok.text)) {
+            if (self.findTypeDefinitionAnyDoc(uri, tok.text)) |hit| {
+                const locs = [_]Location{.{ .uri = hit.uri, .range = hit.sym.selection_range }};
+                const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
+                defer self.allocator.free(json);
+                try self.sendResponseJson(id_val, json);
+                return;
+            }
         }
 
         try self.sendResponseJson(id_val, "[]");
@@ -1304,7 +1491,12 @@ const LspServer = struct {
             if (selected_seg_index == 0) {
                 const readme_path = try std.fs.path.join(self.allocator, &.{ root, "README.md" });
                 defer self.allocator.free(readme_path);
-                std.fs.cwd().access(readme_path, .{}) catch return false;
+                if (std.fs.path.isAbsolute(readme_path)) {
+                    var f = std.fs.openFileAbsolute(readme_path, .{}) catch return false;
+                    f.close();
+                } else {
+                    std.fs.cwd().access(readme_path, .{}) catch return false;
+                }
                 const target_uri = try pathToUri(self.allocator, readme_path);
                 defer self.allocator.free(target_uri);
                 const locs = [_]Location{.{
@@ -1352,7 +1544,12 @@ const LspServer = struct {
             // Final segment: open the module file.
             const file_path = try std.mem.concat(self.allocator, u8, &[_][]const u8{ sel_joined, ".fn" });
             defer self.allocator.free(file_path);
-            std.fs.cwd().access(file_path, .{}) catch return false;
+            if (std.fs.path.isAbsolute(file_path)) {
+                var f = std.fs.openFileAbsolute(file_path, .{}) catch return false;
+                f.close();
+            } else {
+                std.fs.cwd().access(file_path, .{}) catch return false;
+            }
             const target_uri = try pathToUri(self.allocator, file_path);
             defer self.allocator.free(target_uri);
             self.ensureDocIndexedFromDisk(target_uri) catch {};
@@ -1367,7 +1564,10 @@ const LspServer = struct {
         }
 
         // Directory segment: return a list of modules in this directory.
-        var dir = std.fs.cwd().openDir(sel_joined, .{ .iterate = true }) catch return false;
+        var dir = if (std.fs.path.isAbsolute(sel_joined))
+            (std.fs.openDirAbsolute(sel_joined, .{ .iterate = true }) catch return false)
+        else
+            (std.fs.cwd().openDir(sel_joined, .{ .iterate = true }) catch return false);
         defer dir.close();
 
         var locs_list = std.ArrayList(Location).init(self.allocator);
@@ -3162,10 +3362,14 @@ const LspServer = struct {
             const spec = self.parseImportSpecFromTokens(idx, i) catch null;
             if (spec) |s| {
                 defer self.allocator.free(s);
+                if (self.debug_imports) dbg(true, "imports", "found import in {s}: '{s}'", .{ uri, s });
                 const maybe_target_uri = self.resolveImportUri(uri, s) catch null;
                 if (maybe_target_uri) |target_uri| {
                     defer self.allocator.free(target_uri);
+                    if (self.debug_imports) dbg(true, "imports", "resolved import '{s}' => {s}", .{ s, target_uri });
                     self.ensureDocIndexedFromDisk(target_uri) catch {};
+                } else {
+                    if (self.debug_imports) dbg(true, "imports", "failed to resolve import '{s}'", .{s});
                 }
             }
         }
@@ -3202,6 +3406,8 @@ const LspServer = struct {
         // - `imp ..defs.user;` => <current_dir>/../defs/user.fn
         const spec = std.mem.trim(u8, raw_import, " \t\r\n\"");
         if (spec.len == 0) return null;
+
+        if (self.debug_imports) dbg(true, "imports", "resolveImportUri current_uri={s} raw='{s}' spec='{s}'", .{ current_uri, raw_import, spec });
 
         const current_path = uriToPath(self.allocator, current_uri) catch return null;
         defer self.allocator.free(current_path);
@@ -3260,6 +3466,7 @@ const LspServer = struct {
                 stdlib_root = self.getStdlibRootPath() orelse null;
             }
             const root = stdlib_root orelse return null;
+            if (self.debug_imports) dbg(true, "imports", "stdlib root used={s}", .{root});
             try segs.append(root);
             try segs.append("std");
             try segs.append("c");
@@ -3284,6 +3491,8 @@ const LspServer = struct {
 
         const full = try std.mem.concat(self.allocator, u8, &[_][]const u8{ joined, ".fn" });
         defer self.allocator.free(full);
+
+        if (self.debug_imports) dbg(true, "imports", "candidate path={s}", .{full});
 
         // `full` is typically absolute (current file dir is absolute or stdlib root is absolute).
         // Use absolute file APIs so installed stdlib works on Windows.

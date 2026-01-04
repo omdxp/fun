@@ -68,6 +68,21 @@
           "type": "string",
           "default": "",
           "description": "Optional path to the fun executable; passed to fls via FLS_FUN_PATH."
+        },
+        "fun.fls.debug": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable verbose debug logging from fls (sets FLS_DEBUG=1)."
+        },
+        "fun.fls.debugImports": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable import/stdlib debug logging from fls (sets FLS_DEBUG_IMPORTS=1)."
+        },
+        "fun.fls.debugDefinitions": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable go-to-definition debug logging from fls (sets FLS_DEBUG_DEFINITIONS=1)."
         }
       }
     },

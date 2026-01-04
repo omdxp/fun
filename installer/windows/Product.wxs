@@ -49,7 +49,7 @@
           Action="set"
           Permanent="no"
           System="yes"
-          Value="[INSTALLFOLDER]share\fun\stdlib" />
+          Value="[INSTALLFOLDER]share\fun" />
       </Component>
     </DirectoryRef>
 
