@@ -906,7 +906,16 @@ const LspServer = struct {
         if (def_local) |d| {
             try buf.writer().print("**{s}**\n\n", .{tok.text});
             if (d.detail) |det| {
-                try buf.writer().print("```\n{s}\n```\n", .{det});
+                if (d.kind == .function and d.value_type != null) {
+                    const det_trim = std.mem.trimRight(u8, det, " \t\r\n");
+                    if (det_trim.len != 0 and det_trim[det_trim.len - 1] == ')') {
+                        try buf.writer().print("```\n{s} {s}\n```\n", .{ det_trim, d.value_type.? });
+                    } else {
+                        try buf.writer().print("```\n{s}\n```\n", .{det});
+                    }
+                } else {
+                    try buf.writer().print("```\n{s}\n```\n", .{det});
+                }
             } else if (d.kind == .variable) {
                 const vt = d.value_type orelse self.guessVariableType(idx, tok.text, pos);
                 if (vt) |vts| {
@@ -924,7 +933,16 @@ const LspServer = struct {
             const d = hit.sym;
             try buf.writer().print("**{s}**\n\n", .{tok.text});
             if (d.detail) |det| {
-                try buf.writer().print("```\n{s}\n```\n", .{det});
+                if (d.kind == .function and d.value_type != null) {
+                    const det_trim = std.mem.trimRight(u8, det, " \t\r\n");
+                    if (det_trim.len != 0 and det_trim[det_trim.len - 1] == ')') {
+                        try buf.writer().print("```\n{s} {s}\n```\n", .{ det_trim, d.value_type.? });
+                    } else {
+                        try buf.writer().print("```\n{s}\n```\n", .{det});
+                    }
+                } else {
+                    try buf.writer().print("```\n{s}\n```\n", .{det});
+                }
             } else if (d.kind == .variable) {
                 const vt = d.value_type orelse self.guessVariableType(idx, tok.text, pos);
                 if (vt) |vts| {
@@ -4826,6 +4844,19 @@ const AstEnrichment = struct {
 fn enrichSymbolsFromAst(allocator: Allocator, symbols: *std.ArrayList(SymbolLite), tp: *codegen.TranspileProcess) !void {
     var enrich = AstEnrichment.init(allocator);
 
+    const dtypeStringOwned = struct {
+        fn build(a: Allocator, dt: anytype) ![]u8 {
+            var buf = std.ArrayList(u8).init(a);
+            errdefer buf.deinit();
+            try buf.appendSlice(dt.type_str.items);
+            var i: usize = 0;
+            while (i < dt.pointer_depth) : (i += 1) {
+                try buf.append('*');
+            }
+            return try buf.toOwnedSlice();
+        }
+    };
+
     // Build lookup tables from the parsed AST.
     for (tp.nodes.items()) |*n| {
         if (n.node_variant == null) continue;
@@ -4842,7 +4873,8 @@ fn enrichSymbolsFromAst(allocator: Allocator, symbols: *std.ArrayList(SymbolLite
 
                 if (fnv.rtype) |rt| {
                     if (!enrich.fn_rtype_by_name.contains(fn_name)) {
-                        try enrich.fn_rtype_by_name.put(fn_name, rt.type_str.items);
+                        const rts = try dtypeStringOwned.build(allocator, rt);
+                        try enrich.fn_rtype_by_name.put(fn_name, rts);
                     }
                 }
             },
@@ -4870,7 +4902,8 @@ fn enrichSymbolsFromAst(allocator: Allocator, symbols: *std.ArrayList(SymbolLite
                         try enrich.member_sig_by_key.put(key, sig);
                     }
                     if (!enrich.member_rtype_by_key.contains(key)) {
-                        try enrich.member_rtype_by_key.put(key, m.rtype.type_str.items);
+                        const rts = try dtypeStringOwned.build(allocator, m.rtype);
+                        try enrich.member_rtype_by_key.put(key, rts);
                     }
                 }
             },
@@ -4896,7 +4929,8 @@ fn enrichSymbolsFromAst(allocator: Allocator, symbols: *std.ArrayList(SymbolLite
                     }
                     if (mf.rtype) |rt| {
                         if (!enrich.member_rtype_by_key.contains(key)) {
-                            try enrich.member_rtype_by_key.put(key, rt.type_str.items);
+                            const rts = try dtypeStringOwned.build(allocator, rt);
+                            try enrich.member_rtype_by_key.put(key, rts);
                         }
                     }
                 }
@@ -4952,6 +4986,16 @@ fn buildSignatureFromAst(
     fnv: anytype,
     include_fun_prefix: bool,
 ) ![]const u8 {
+    const appendDType = struct {
+        fn call(buf: *std.ArrayList(u8), dt: anytype) !void {
+            try buf.appendSlice(dt.type_str.items);
+            var i: usize = 0;
+            while (i < dt.pointer_depth) : (i += 1) {
+                try buf.append('*');
+            }
+        }
+    }.call;
+
     var buf = std.ArrayList(u8).init(allocator);
     errdefer buf.deinit();
 
@@ -4968,18 +5012,30 @@ fn buildSignatureFromAst(
             const av = a.node_variant.?.variable;
             if (!first) try buf.appendSlice(", ");
             first = false;
-            try buf.writer().print("{s} {s}", .{ av.type.type_str.items, av.name.items });
+            try appendDType(&buf, av.type);
+            try buf.writer().print(" {s}", .{av.name.items});
         }
     }
 
     try buf.append(')');
     if (fnv.rtype) |rt| {
-        try buf.writer().print(" {s}", .{rt.type_str.items});
+        try buf.append(' ');
+        try appendDType(&buf, rt);
     }
     return try buf.toOwnedSlice();
 }
 
 fn buildQuirkMethodSignatureFromAst(allocator: Allocator, m: ast.QuirkMethodSig) ![]const u8 {
+    const appendDType = struct {
+        fn call(buf: *std.ArrayList(u8), dt: anytype) !void {
+            try buf.appendSlice(dt.type_str.items);
+            var i: usize = 0;
+            while (i < dt.pointer_depth) : (i += 1) {
+                try buf.append('*');
+            }
+        }
+    }.call;
+
     var buf = std.ArrayList(u8).init(allocator);
     errdefer buf.deinit();
 
@@ -4988,11 +5044,43 @@ fn buildQuirkMethodSignatureFromAst(allocator: Allocator, m: ast.QuirkMethodSig)
     for (m.args.items()) |a| {
         if (!first) try buf.appendSlice(", ");
         first = false;
-        try buf.writer().print("{s} {s}", .{ a.dtype.type_str.items, a.name.items });
+        try appendDType(&buf, a.dtype);
+        try buf.writer().print(" {s}", .{a.name.items});
     }
     try buf.append(')');
-    try buf.writer().print(" {s}", .{m.rtype.type_str.items});
+    try buf.append(' ');
+    try appendDType(&buf, m.rtype);
     return try buf.toOwnedSlice();
+}
+
+test "fls hover: signatures include custom return types" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const text =
+        "compound User {\n" ++
+        "  num age;\n" ++
+        "}\n\n" ++
+        "fun make_user() User* {\n" ++
+        "  User u;\n" ++
+        "  ret &u;\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found: bool = false;
+    for (idx.symbols) |s| {
+        if (s.kind != .function) continue;
+        if (!std.mem.eql(u8, s.name, "make_user")) continue;
+        try std.testing.expect(s.detail != null);
+        const det = s.detail.?;
+        const rparen = std.mem.lastIndexOfScalar(u8, det, ')') orelse 0;
+        try std.testing.expect(std.mem.indexOf(u8, det[rparen..], "User") != null);
+        found = true;
+    }
+    try std.testing.expect(found);
 }
 
 test "fls index: locals are indexed inside fun bodies" {
@@ -5227,7 +5315,29 @@ fn buildSignatureFromTokens(
         try buf.writer().print("{s}(", .{name});
     }
 
-    // Parse params as `Type name` pairs.
+    const parsed = struct {
+        fn isStarToken(t: token.Token) bool {
+            if (t.type == .Operator and t.data == .sval and std.mem.eql(u8, t.data.sval.items, "*")) return true;
+            if (t.type == .Symbol and t.data == .cval and t.data.cval == '*') return true;
+            return false;
+        }
+
+        fn appendPointerSuffix(out_buf: *std.ArrayList(u8), all_tokens: []const token.Token, start_i: usize) !usize {
+            var i = start_i;
+            while (i < all_tokens.len and isStarToken(all_tokens[i])) : (i += 1) {
+                try out_buf.append('*');
+            }
+            return i;
+        }
+
+        fn pointerSuffixLen(all_tokens: []const token.Token, start_i: usize) usize {
+            var i = start_i;
+            while (i < all_tokens.len and isStarToken(all_tokens[i])) : (i += 1) {}
+            return i - start_i;
+        }
+    };
+
+    // Parse params as `Type[*...] name` pairs.
     var first: bool = true;
     var pi: usize = after_name_i + 1;
     while (pi < rparen_i.?) {
@@ -5246,7 +5356,12 @@ fn buildSignatureFromTokens(
             continue;
         }
         const ptype = tokenString(pt);
-        const pname_i = nextNonTrivialToken(tokens, pi + 1) orelse break;
+        var ptype_buf = std.ArrayList(u8).init(allocator);
+        defer ptype_buf.deinit();
+        try ptype_buf.appendSlice(ptype);
+        const after_ptr_i = try parsed.appendPointerSuffix(&ptype_buf, tokens, pi + 1);
+
+        const pname_i = nextNonTrivialToken(tokens, after_ptr_i) orelse break;
         if (!isIdent(tokens[pname_i])) {
             pi += 1;
             continue;
@@ -5254,21 +5369,30 @@ fn buildSignatureFromTokens(
         const pname = tokenString(tokens[pname_i]);
         if (!first) try buf.appendSlice(", ");
         first = false;
-        try buf.writer().print("{s} {s}", .{ ptype, pname });
+        try buf.writer().print("{s} {s}", .{ ptype_buf.items, pname });
         pi = pname_i + 1;
     }
 
     try buf.append(')');
 
-    // Optional return type: `<type>` before `{` or `;`.
+    // Optional return type: `<type>[*...]` before `{` or `;`.
     var rtype_owned: ?[]u8 = null;
     const after_rparen_i = nextNonTrivialToken(tokens, rparen_i.? + 1);
     if (after_rparen_i) |ri| {
         const rt = tokens[ri];
         if (isTypeToken(rt)) {
             const rts = tokenString(rt);
-            rtype_owned = try allocator.dupe(u8, rts);
-            try buf.writer().print(" {s}", .{rts});
+            const suffix_len = parsed.pointerSuffixLen(tokens, ri + 1);
+
+            var rt_buf = std.ArrayList(u8).init(allocator);
+            errdefer rt_buf.deinit();
+            try rt_buf.appendSlice(rts);
+            var si: usize = 0;
+            while (si < suffix_len) : (si += 1) {
+                try rt_buf.append('*');
+            }
+            rtype_owned = try rt_buf.toOwnedSlice();
+            try buf.writer().print(" {s}", .{rtype_owned.?});
         }
     }
 
@@ -5475,7 +5599,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                     .decl_range = r,
                     .selection_range = r,
                     .container_type = null,
-                    .value_type = null,
+                    .value_type = sig.return_type,
                     .detail = sig.detail,
                 });
                 continue;
@@ -5491,7 +5615,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 .decl_range = r,
                 .selection_range = r,
                 .container_type = null,
-                .value_type = null,
+                .value_type = sig.return_type,
                 .detail = sig.detail,
             });
             continue;
@@ -5878,6 +6002,17 @@ fn formatFunctionSignature(allocator: Allocator, name: []const u8, fnv: anytype)
     var buf = std.ArrayList(u8).init(allocator);
     errdefer buf.deinit();
     try buf.writer().print("fun {s}(", .{name});
+
+    const appendDType = struct {
+        fn call(out_buf: *std.ArrayList(u8), dt: anytype) !void {
+            try out_buf.appendSlice(dt.type_str.items);
+            var i: usize = 0;
+            while (i < dt.pointer_depth) : (i += 1) {
+                try out_buf.append('*');
+            }
+        }
+    }.call;
+
     if (fnv.args) |args| {
         var first = true;
         for (args.items()) |a| {
@@ -5885,21 +6020,20 @@ fn formatFunctionSignature(allocator: Allocator, name: []const u8, fnv: anytype)
             const vv = a.node_variant.?.variable;
             const arg_name = vv.name.items;
             const dt = vv.type.*;
-            const dt_str = dt.type_str.items;
             if (!first) try buf.appendSlice(", ");
             first = false;
-            try buf.writer().print("{s} {s}", .{ dt_str, arg_name });
+            try appendDType(&buf, dt);
+            try buf.writer().print(" {s}", .{arg_name});
         }
     }
     if (fnv.is_variadic) {
         if (fnv.args != null and fnv.args.?.items().len != 0) try buf.appendSlice(", ");
         try buf.appendSlice("...");
     }
-    try buf.appendSlice(")");
+    try buf.append(')');
     if (fnv.rtype) |rt| {
-        if (rt.type != .Unknown) {
-            try buf.writer().print(" -> {s}", .{rt.type_str.items});
-        }
+        try buf.append(' ');
+        try appendDType(&buf, rt);
     }
     return buf.toOwnedSlice();
 }
