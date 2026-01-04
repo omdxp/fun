@@ -1,61 +1,81 @@
-# Prerequisites
+# Fun (FLS) for VS Code
 
-**Before using this extension, you must have the `fun` compiler and `fls` language server installed and accessible in your system PATH.**
-
-- Install the Fun language and ensure both `fun` and `fls` are available globally (e.g., by running `fun --version` and `fls --version` in your terminal).
-- The extension will use the default values (`fun`, `fls`) unless you override them in the settings.
-
-If you install the language using the official installer or release, these binaries should be available globally. If not, please follow the installation instructions in the main Fun language repository.
-
-# Fun VS Code Extension (WIP)
-
-This extension wires VS Code up to the `fls` language server.
-
-## What you get
-
-
-## Requirements
-
-  - `zig build`
-  - Ensure `zig-out/bin` is on your `PATH`, or set explicit paths in settings.
-
-## Setup (dev)
-
-1) In VS Code, open the `editors/vscode` folder.
-2) Run `npm install`.
-3) Run `npm run compile`.
-4) Press `F5` to launch the Extension Development Host.
-
-## Settings
-
-# Fun VS Code Extension
-
-This directory contains the official VS Code extension for the Fun language.
+Official VS Code support for the Fun language. This extension provides syntax highlighting and connects VS Code to the `fls` language server.
 
 ## Features
 
-- Syntax highlighting
-- Semantic tokens
-- Operator highlighting
-- Formatter integration
-- Language server integration (planned)
+- Syntax highlighting for `.fn` files
+- Language Server support via `fls` (hover, completion, diagnostics, go-to-definition, formatting, etc. as provided by `fls`)
+- Output channel: **Fun Language Server** (useful for debugging startup issues)
 
-## Installation
+## Requirements
 
-- Install from the VS Code Marketplace (recommended)
-- Or build and install from source:
-  ```sh
-  npm install
-  npm run package
-  code --install-extension fun-x.x.x.vsix
-  ```
+You need the Fun tooling installed:
 
-## Usage
+- `fls` language server
+- `fun` compiler (optional but recommended; used by `fls` for deeper analysis)
 
-- Open Fun files (`.fn`) in VS Code
-- Syntax and semantic highlighting enabled by default
-- Formatter runs on save
+By default the extension will try, in order:
 
-## Development
+1. Workspace-local binaries: `zig-out/bin/fls(.exe)` and `zig-out/bin/fun(.exe)`
+2. Your system `PATH` (e.g. `fls`, `fun`)
 
-- See [CONTRIBUTING.md](../../CONTRIBUTING.md) for extension development guidelines
+## Getting Started
+
+1. Install the extension.
+2. Open a `.fn` file.
+3. If the server doesn’t start, open **View → Output** and select **Fun Language Server**.
+
+## Settings
+
+These settings live under **Settings → Extensions → Fun**:
+
+- `fun.fls.path`
+  - Path to the `fls` executable.
+  - Default: `fls` (falls back to `zig-out/bin/fls` when available)
+- `fun.fls.funPath`
+  - Optional path to the `fun` executable.
+  - When set to a valid executable, it is passed to `fls` via the `FLS_FUN_PATH` environment variable.
+
+Notes:
+
+- Settings support `${workspaceFolder}` / `${workspaceRoot}`.
+- On Windows, `%VAR%` environment variables inside paths are expanded (best-effort).
+
+## Commands
+
+Open the Command Palette and run:
+
+- **Fun: Restart Language Server**
+- **Fun: Show Language Server Output**
+
+## Troubleshooting
+
+**No hover / completions / diagnostics**
+
+- Verify `fls` is found:
+  - Either ensure it’s on `PATH`, or set `fun.fls.path` to the full path.
+- If you’re building Fun from source, ensure `zig-out/bin` exists (or point settings at the built executables).
+
+**Standard library isn’t found**
+
+- The extension attempts to derive `FUN_STDLIB_DIR` from the directory containing `fls` / `fun`.
+- Check the **Fun Language Server** output for the resolved paths.
+
+## Developing This Extension
+
+From this folder (`editors/vscode`):
+
+1. `npm install`
+2. `npm run compile`
+3. Press `F5` in VS Code (Extension Development Host)
+
+Packaging a `.vsix`:
+
+```sh
+npm install
+npm run package
+code --install-extension fun-language-*.vsix
+```
+
+See [CONTRIBUTING.md](../../CONTRIBUTING.md) for repo-wide contribution guidelines.
