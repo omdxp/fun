@@ -219,6 +219,9 @@ pub fn build(b: *std.Build) void {
     const fls_tests = b.addTest(.{ .root_module = fls_test_module });
     const run_fls_tests = b.addRunArtifact(fls_tests);
     run_fls_tests.cwd = b.path(".");
+    // Ensure fls unit tests don't depend on the developer machine's stdlib install.
+    // Some tests create a temporary `stdlib/` and expect resolution to fall back to workspace/cwd.
+    run_fls_tests.setEnvironmentVariable("FUN_STDLIB_DIR", "");
 
     const test_step = b.step("test", "Run unit tests");
     // Ensure compiler + language server binaries exist for tests that spawn them.

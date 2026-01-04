@@ -1,0 +1,10 @@
+fun bad() num* {
+  num x = 123;
+  ret &x;
+}
+
+fun main() {
+  // Intentionally do not call `bad()`.
+  // This example exists to demonstrate the diagnostic.
+  ret;
+}

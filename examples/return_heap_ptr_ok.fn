@@ -1,0 +1,23 @@
+// Demonstrates returning a heap-allocated pointer.
+// This should NOT trigger the "returning address of local variable" warning,
+// because we return the heap pointer itself (not `&local`).
+
+imp std.c.mem;
+imp std.c.io;
+
+fun make_buf(num n) raw* {
+  raw* p = malloc(n);
+  if p == 0 {
+    printf("malloc failed\n");
+    ret 0;
+  }
+  ret p;
+}
+
+fun main() {
+  raw* p = make_buf(16);
+  if p != 0 {
+    free(p);
+  }
+  ret;
+}

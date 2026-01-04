@@ -1592,6 +1592,25 @@ pub const TranspileProcess = struct {
         };
     }
 
+    fn warn_if_returning_address_of_local(self: *Self, ret_expr: ast.Node) void {
+        const fn_ret = self.current_fn_return orelse return;
+        if (fn_ret.pointer_depth == 0) return;
+
+        if (ret_expr.type != .Unary or ret_expr.node_variant == null) return;
+        const unary = ret_expr.node_variant.?.unary;
+        if (!mem.eql(u8, unary.op, "&")) return;
+
+        const operand = unary.operand.*;
+        if (operand.type != .Identifier or operand.data == null) return;
+        const name = operand.data.?.sval.items;
+
+        // Only warn for locals: `get_scope_entity` searches the active scope chain,
+        // excluding the global/root scope.
+        _ = self.get_scope_entity(name) orelse return;
+
+        self.report_warning(operand, "returning address of local variable '{s}' from a pointer-returning function; this pointer will dangle after return", .{name});
+    }
+
     const CheckedType = struct {
         base: dtype.DataTypeType,
         is_array: bool = false,
@@ -5343,28 +5362,7 @@ pub const TranspileProcess = struct {
                         try self.write("}");
                     },
                     .return_stmt => |ret| {
-                        // If the user returns a pointer to a local (e.g. `ret &x;` from `fun f() T*`),
-                        // make it safe by heap-allocating and copying.
-                        const fnr = self.current_fn_return;
-                        if (fnr != null and fnr.?.pointer_depth == 1 and fnr.?.name != null and ret.type == .Unary and ret.node_variant != null) {
-                            const u = ret.node_variant.?.unary;
-                            if (mem.eql(u8, u.op, "&") and u.operand.type == .Identifier and u.operand.data != null) {
-                                const type_name = fnr.?.name.?;
-                                const local_name = u.operand.data.?.sval.items;
-                                try self.write("{ ");
-                                try self.write(type_name);
-                                try self.write("* __fun_ret = (");
-                                try self.write(type_name);
-                                try self.write("*)malloc(sizeof(");
-                                try self.write(type_name);
-                                try self.write(")); ");
-                                try self.write("*__fun_ret = ");
-                                try self.write(local_name);
-                                try self.write("; return __fun_ret; }");
-                                return;
-                            }
-                        }
-
+                        self.warn_if_returning_address_of_local(ret.*);
                         try self.write("return ");
                         try self.transpile_node(ret.*);
                         try self.write(";");
