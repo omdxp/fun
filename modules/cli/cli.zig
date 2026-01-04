@@ -484,11 +484,47 @@ fn operator_needs_spaces(op: []const u8) bool {
 }
 
 fn is_builtin_type_keyword(kw: []const u8) bool {
-    return std.mem.eql(u8, kw, "num") or
+    return std.mem.eql(u8, kw, "void") or
+        std.mem.eql(u8, kw, "raw") or
+        std.mem.eql(u8, kw, "num") or
         std.mem.eql(u8, kw, "dec") or
         std.mem.eql(u8, kw, "str") or
         std.mem.eql(u8, kw, "bin") or
         std.mem.eql(u8, kw, "chr");
+}
+
+fn isLikelyTypeToken(t: token.Token) bool {
+    return switch (t.type) {
+        .Keyword => is_builtin_type_keyword(t.data.sval.items),
+        .Identifier => t.data.sval.items.len > 0 and (t.data.sval.items[0] >= 'A' and t.data.sval.items[0] <= 'Z'),
+        else => false,
+    };
+}
+
+fn nextSignificantToken(toks: []const token.Token, start_at: usize) ?token.Token {
+    var i: usize = start_at;
+    while (i < toks.len) : (i += 1) {
+        const t = toks[i];
+        if (t.type == .NewLine or t.type == .Comment) continue;
+        return t;
+    }
+    return null;
+}
+
+fn isPointerTypeStarContext(toks: []const token.Token, idx: usize, prev: token.Token) bool {
+    if (!isLikelyTypeToken(prev)) return false;
+
+    const next = nextSignificantToken(toks, idx + 1) orelse return false;
+    // Return type pointers: `...) Type* {` or `...) Type*;`
+    if (next.type == .Symbol and (next.data.cval == '{' or next.data.cval == ';')) return true;
+
+    // Declaration/field/param pointers: `Type* name` (name then delimiter)
+    if (next.type == .Identifier) {
+        const after_name = nextSignificantToken(toks, idx + 2) orelse return false;
+        if (after_name.type == .Symbol and (after_name.data.cval == ';' or after_name.data.cval == ',' or after_name.data.cval == ')' or after_name.data.cval == ']')) return true;
+        if (after_name.type == .Operator and (std.mem.eql(u8, after_name.data.sval.items, "=") or std.mem.eql(u8, after_name.data.sval.items, ","))) return true;
+    }
+    return false;
 }
 
 fn appendAll(dst: *std.ArrayList(token.Token), src: []const token.Token) !void {
@@ -775,6 +811,10 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
                     prev_unary_prefix = false;
                     break :blk false;
                 }
+                if (t2.type == .Operator and std.mem.eql(u8, t2.data.sval.items, "*") and isPointerTypeStarContext(toks, idx, pt2)) {
+                    // Pointer types: `Type* name` / `Type* {`.
+                    break :blk false;
+                }
                 if (pt2.type == .Keyword) {
                     const pkw2 = pt2.data.sval.items;
                     if (std.mem.eql(u8, pkw2, "if") or std.mem.eql(u8, pkw2, "elif")) {
@@ -874,11 +914,16 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
         // Track unary prefix ops so we don't insert a space after them.
         if (t2.type == .Operator) {
             const op2 = t2.data.sval.items;
-            if ((std.mem.eql(u8, op2, "-") or std.mem.eql(u8, op2, "+"))) {
+            if ((std.mem.eql(u8, op2, "-") or std.mem.eql(u8, op2, "+") or std.mem.eql(u8, op2, "&") or std.mem.eql(u8, op2, "*"))) {
                 const unary_ctx = blk: {
                     const prev = state.prev_token.*;
                     if (prev == null) break :blk true;
                     const pt = prev.?;
+                    if (pt.type == .Keyword) {
+                        const kw = pt.data.sval.items;
+                        // Keywords that are followed by an expression.
+                        if (std.mem.eql(u8, kw, "ret") or std.mem.eql(u8, kw, "if") or std.mem.eql(u8, kw, "elif") or std.mem.eql(u8, kw, "for")) break :blk true;
+                    }
                     if (is_word_like(pt)) break :blk false;
                     if (pt.type == .Symbol and is_closing_symbol(pt.data.cval)) break :blk false;
                     break :blk true;

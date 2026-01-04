@@ -198,6 +198,41 @@ test "-fmt preserves blank lines between top-level constructs" {
     try std.testing.expectEqualStrings(expected, got);
 }
 
+test "-fmt formats pointer and address-of spacing" {
+    const allocator = std.testing.allocator;
+
+    const ugly =
+        "compound User{raw* p;}\n" ++
+        "fun main() void{User user;User * u2=& user;raw * buf=malloc(10);num x=1;num y=2;ret x*y;}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_ptr", ugly);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, path);
+
+    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    defer allocator.free(got);
+
+    const expected =
+        "compound User {\n" ++
+        "  raw* p;\n" ++
+        "}\n" ++
+        "\n" ++
+        "fun main() void {\n" ++
+        "  User user;\n" ++
+        "  User* u2 = &user;\n" ++
+        "  raw* buf = malloc(10);\n" ++
+        "  num x = 1;\n" ++
+        "  num y = 2;\n" ++
+        "  ret x * y;\n" ++
+        "}\n";
+
+    try std.testing.expectEqualStrings(expected, got);
+}
+
 test "-fmt groups imports and globals at top" {
     const allocator = std.testing.allocator;
 
