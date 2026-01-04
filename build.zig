@@ -6,7 +6,15 @@ pub fn build(b: *std.Build) void {
         .preferred_optimize_mode = .ReleaseSafe,
     });
 
-    const fun_version = b.option([]const u8, "version", "version string for `fun --version` (set by release workflow)") orelse "0.0.0";
+    const fun_version_opt = b.option([]const u8, "version", "version string for `fun --version` (set by release workflow)");
+    const fun_version = blk: {
+        const v = fun_version_opt orelse "0.0.0";
+        // Guard against common CI/local mistakes like passing a shell variable literally
+        // (e.g. `-Dversion=$tag` in cmd.exe).
+        if (v.len == 0) break :blk "0.0.0";
+        if (std.mem.eql(u8, v, "$tag")) break :blk "0.0.0";
+        break :blk v;
+    };
 
     // --- Define Core Library Modules ---
 

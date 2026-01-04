@@ -68,19 +68,21 @@ pub const CliOptions = struct {
 /// - Might return an error if writing to the output fails.
 fn print_usage(writer: anytype) !void {
     try writer.writeAll(
-        \\Usage: fun --version | fun -in <input_file> [-fmt | -fmt-all] [-out <output_file>] [-no-exec] [-outf] [-ast] [-help] [-- <program args...>]
+        \\Usage:
+        \\  fun -in <input_file> [-fmt | -fmt-all] [-out <output_file>] [-no-exec] [-outf] [-ast] [-help] [-- <program args...>]
+        \\  fun -version
         \\
         \\Arguments:
-        \\  --version        Print version and exit
-        \\  -in      <file>  Input file to compile (required)
-        \\  -fmt            Format the input file in-place (optional)
-        \\  -fmt-all        Format the input file and all locally imported modules (optional)
-        \\  -out     <file>  Output file (optional, defaults to input filename with .c extension)
-        \\  -no-exec         Disable automatic compilation and execution (optional, execution enabled by default)
-        \\  -outf            Generate .c output file (optional, disabled by default)
-        \\  -ast             Print AST nodes (optional, disabled by default)
-        \\  -help            Show this help message
-        \\  --              All following args are passed to the compiled program
+        \\  -help             Show this help message
+        \\  -version          Print version and exit
+        \\  -in      <file>   Input file to compile (required)
+        \\  -fmt              Format the input file in-place (optional)
+        \\  -fmt-all          Format the input file and all locally imported modules (optional)
+        \\  -out     <file>   Output file (optional, defaults to input filename with .c extension)
+        \\  -no-exec          Disable automatic compilation and execution (optional, execution enabled by default)
+        \\  -outf             Generate .c output file (optional, disabled by default)
+        \\  -ast              Print AST nodes (optional, disabled by default)
+        \\  --                All following args are passed to the compiled program
         \\
     );
 }
