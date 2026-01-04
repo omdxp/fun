@@ -1,4 +1,42 @@
-// C stddef header (stddef.h)
+// C standard definitions (stddef.h)
 // 
-// This module is intentionally light: typedefs like `size_t` are recognized by
-// the typechecker as numeric-compatible identifier types.
+// This module is signature-only.
+// 
+// In Fun, most things from `stddef.h` are provided by C as typedefs/macros, so
+// you typically *use the names directly* after importing this module.
+// 
+// Import:
+// - `imp std.c.stddef;`
+// 
+// Common typedef names
+// - `size_t`
+// - Unsigned integer type used for sizes/lengths.
+// - In Fun, this is treated as numeric-compatible.
+// 
+// - `ptrdiff_t`
+// - Signed integer type used for pointer differences.
+// - In Fun, this is treated as numeric-compatible.
+// 
+// - `wchar_t`
+// - Wide character integer type.
+// - In Fun, this is treated as numeric-compatible.
+// 
+// - `max_align_t`
+// - An alignment type (usually a struct) available on C11+.
+// - In Fun, this is treated as an opaque named type (not numeric).
+// 
+// Optional / platform-specific typedefs
+// - `rsize_t`
+// - Bounds-checked library size type (Annex K), if provided by the platform.
+// - In Fun, this is treated as numeric-compatible.
+// 
+// Common macros
+// - `NULL`
+// - Null pointer constant.
+// - In Fun, `NULL` is treated like the literal `0` for pointer assignment and
+// comparisons (best-effort).
+// 
+// Notes
+// - Function-like macros such as `offsetof(type, member)` cannot be expressed as
+// Fun signatures today because they require passing a C type name, not a
+// runtime value.

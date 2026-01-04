@@ -2125,12 +2125,26 @@ pub const TranspileProcess = struct {
                 if (mem.eql(u8, name, "EOF") or
                     mem.eql(u8, name, "EXIT_SUCCESS") or mem.eql(u8, name, "EXIT_FAILURE") or
                     mem.eql(u8, name, "SEEK_SET") or mem.eql(u8, name, "SEEK_CUR") or mem.eql(u8, name, "SEEK_END") or
+                    // `limits.h`
+                    mem.eql(u8, name, "CHAR_BIT") or
+                    mem.eql(u8, name, "MB_LEN_MAX") or
+                    mem.eql(u8, name, "SCHAR_MIN") or mem.eql(u8, name, "SCHAR_MAX") or
+                    mem.eql(u8, name, "UCHAR_MAX") or
+                    mem.eql(u8, name, "CHAR_MIN") or mem.eql(u8, name, "CHAR_MAX") or
+                    mem.eql(u8, name, "SHRT_MIN") or mem.eql(u8, name, "SHRT_MAX") or
+                    mem.eql(u8, name, "USHRT_MAX") or
                     mem.eql(u8, name, "INT_MAX") or mem.eql(u8, name, "INT_MIN") or
                     mem.eql(u8, name, "UINT_MAX") or
                     mem.eql(u8, name, "LONG_MAX") or mem.eql(u8, name, "LONG_MIN") or
                     mem.eql(u8, name, "ULONG_MAX") or
                     mem.eql(u8, name, "LLONG_MAX") or mem.eql(u8, name, "LLONG_MIN") or
                     mem.eql(u8, name, "ULLONG_MAX") or
+                    // Common extensions / related headers (often visible when importing std c headers)
+                    mem.eql(u8, name, "SIZE_MAX") or
+                    mem.eql(u8, name, "RSIZE_MAX") or
+                    mem.eql(u8, name, "PTRDIFF_MIN") or mem.eql(u8, name, "PTRDIFF_MAX") or
+                    mem.eql(u8, name, "WCHAR_MIN") or mem.eql(u8, name, "WCHAR_MAX") or
+                    mem.eql(u8, name, "WINT_MIN") or mem.eql(u8, name, "WINT_MAX") or
                     mem.eql(u8, name, "CLOCKS_PER_SEC"))
                 {
                     return .{ .base = .Num };

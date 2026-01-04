@@ -1,30 +1,175 @@
-// Memory management (stdlib.h)
+// C standard library utilities (stdlib.h)
+// 
+// Notes:
+// - These are C bindings; ownership/lifetime rules are C rules.
+// - Pointers are represented as raw*.
+
+// Memory management
+// Allocates `size` bytes.
+// 
+// Params:
+// - size: bytes to allocate
+// 
+// Returns:
+// - pointer to allocated memory, or null on failure (C semantics)
 fun malloc(num size) raw*;
+
+// Allocates an array of `count` elements of `size` bytes each, zero-initialized.
+// 
+// Params:
+// - count: number of elements
+// - size: element size in bytes
+// 
+// Returns:
+// - pointer to allocated memory, or null on failure (C semantics)
 fun calloc(num count, num size) raw*;
+
+// Resizes an existing allocation.
+// 
+// Params:
+// - ptr: existing allocation (may be null)
+// - size: new size in bytes
+// 
+// Returns:
+// - pointer to resized allocation, or null on failure (C semantics)
 fun realloc(raw* ptr, num size) raw*;
+
+// Frees an allocation created by malloc/calloc/realloc.
+// 
+// Params:
+// - ptr: allocation pointer (may be null)
 fun free(raw* ptr);
 
 // Process control
+// Exits the process with an exit code.
+// 
+// Params:
+// - code: exit status
 fun exit(num code);
+
+// Abnormal process termination.
 fun abort();
+
+// Registers a function to be called at normal process termination.
+// 
+// Params:
+// - func: function pointer (not modeled yet; pass as raw*)
+// 
+// Returns:
+// - 0 on success, nonzero on failure (C semantics)
 fun atexit(raw* func) num;
+
+// Invokes a command processor to execute a command.
+// 
+// Params:
+// - command: command string
+// 
+// Returns:
+// - implementation-defined status code (C semantics)
 fun system(str command) num;
 
 // Environment
+// Looks up an environment variable.
+// 
+// Params:
+// - name: variable name
+// 
+// Returns:
+// - pointer to value string or null if missing (C semantics)
 fun getenv(str name) str;
 
 // Conversions
+// Parses an integer in base-10.
+// 
+// Params:
+// - s: input string
+// 
+// Returns:
+// - parsed integer value (C semantics)
 fun atoi(str s) num;
+
+// Parses a long integer in base-10.
+// 
+// Params:
+// - s: input string
+// 
+// Returns:
+// - parsed integer value (C semantics)
 fun atol(str s) num;
+
+// Parses a floating point number.
+// 
+// Params:
+// - s: input string
+// 
+// Returns:
+// - parsed floating-point value (C semantics)
 fun atof(str s) dec;
+
+// Parses an integer with a specified base.
+// 
+// Params:
+// - nptr: input string
+// - endptr: output pointer to first unparsed char (C semantics)
+// - base: numeric base (0, 2..36)
+// 
+// Returns:
+// - parsed integer value (C semantics)
 fun strtol(str nptr, str endptr, num base) num;
+
+// Parses an unsigned integer with a specified base.
+// 
+// Params:
+// - nptr: input string
+// - endptr: output pointer to first unparsed char (C semantics)
+// - base: numeric base (0, 2..36)
+// 
+// Returns:
+// - parsed unsigned integer value (C semantics)
 fun strtoul(str nptr, str endptr, num base) num;
+
+// Parses a floating point number.
+// 
+// Params:
+// - nptr: input string
+// - endptr: output pointer to first unparsed char (C semantics)
+// 
+// Returns:
+// - parsed floating-point value (C semantics)
 fun strtod(str nptr, str endptr) dec;
 
 // Random
+// Returns a pseudo-random integer in the range 0..RAND_MAX.
+// 
+// Returns:
+// - pseudo-random integer (C semantics)
 fun rand() num;
+
+// Seeds the pseudo-random number generator.
+// 
+// Params:
+// - seed: seed value
 fun srand(num seed);
 
 // Search/sort (function pointers not modeled yet; pass as raw*)
+// Binary searches a sorted array.
+// 
+// Params:
+// - key: key to search for
+// - base: array base pointer
+// - nmemb: number of elements
+// - size: element size in bytes
+// - compar: comparator function pointer (raw*)
+// 
+// Returns:
+// - pointer to matching element or null (C semantics)
 fun bsearch(raw* key, raw* base, num nmemb, num size, raw* compar) raw*;
+
+// Sorts an array in-place.
+// 
+// Params:
+// - base: array base pointer
+// - nmemb: number of elements
+// - size: element size in bytes
+// - compar: comparator function pointer (raw*)
 fun qsort(raw* base, num nmemb, num size, raw* compar);

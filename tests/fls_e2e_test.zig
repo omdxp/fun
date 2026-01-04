@@ -906,6 +906,123 @@ test "fls e2e: formatting never returns empty output" {
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: C macro completion for std.c.limits and std.c.stddef" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "imp std.c.limits;\n" ++
+        "imp std.c.stddef;\n\n" ++
+        "fun main() {\n" ++
+        "    num x = INT;\n" ++
+        "    num y = NUL;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-macro-complete.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // Completion at end of `INT` should include `INT_MAX`.
+    const int_pos = try findPosition(doc_text, "INT;", 0);
+    const int_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, int_pos.line, int_pos.col + @as(i64, @intCast("INT".len)) },
+    );
+    defer allocator.free(int_params);
+    const int_id = try lsp.request("textDocument/completion", int_params);
+    var int_res = try lsp.waitResponse(int_id, 5000);
+    defer int_res.deinit();
+    try std.testing.expect(int_res.parsed.value == .object);
+    const int_obj = int_res.parsed.value.object;
+    const int_result = try jsonResultFromResponseObj(int_obj);
+    try expectCompletionHasLabel(allocator, int_result, "INT_MAX");
+
+    // Completion at end of `NUL` should include `NULL`.
+    const nul_pos = try findPosition(doc_text, "NUL;", 0);
+    const nul_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, nul_pos.line, nul_pos.col + @as(i64, @intCast("NUL".len)) },
+    );
+    defer allocator.free(nul_params);
+    const nul_id = try lsp.request("textDocument/completion", nul_params);
+    var nul_res = try lsp.waitResponse(nul_id, 5000);
+    defer nul_res.deinit();
+    try std.testing.expect(nul_res.parsed.value == .object);
+    const nul_obj = nul_res.parsed.value.object;
+    const nul_result = try jsonResultFromResponseObj(nul_obj);
+    try expectCompletionHasLabel(allocator, nul_result, "NULL");
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: std namespace hover shows README and module docs" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "imp std.c.io;\n\n" ++
+        "fun main() {\n" ++
+        "    printf(\"hi\\n\");\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-std-hover.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // Hover on `std` should show the stdlib README.
+    const std_pos = try findPosition(doc_text, "std.c.io", 0);
+    const hover_std_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, std_pos.line, std_pos.col },
+    );
+    defer allocator.free(hover_std_params);
+    const hover_std_id = try lsp.request("textDocument/hover", hover_std_params);
+    var hover_std_res = try lsp.waitResponse(hover_std_id, 15000);
+    defer hover_std_res.deinit();
+    const hover_std_val = try jsonResultFromResponseObj(hover_std_res.parsed.value.object);
+    try expectHoverContains(allocator, hover_std_val, "Fun Standard Library");
+
+    // Hover on `io` (in `std.c.io`) should show the module's leading doc block.
+    const hover_io_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, std_pos.line, std_pos.col + @as(i64, @intCast("std.c.".len)) },
+    );
+    defer allocator.free(hover_io_params);
+    const hover_io_id = try lsp.request("textDocument/hover", hover_io_params);
+    var hover_io_res = try lsp.waitResponse(hover_io_id, 15000);
+    defer hover_io_res.deinit();
+    const hover_io_val = try jsonResultFromResponseObj(hover_io_res.parsed.value.object);
+    try expectHoverContains(allocator, hover_io_val, "C standard I/O bindings");
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: typing with CRLF positions stays consistent" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();

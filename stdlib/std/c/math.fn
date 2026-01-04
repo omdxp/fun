@@ -1,15 +1,115 @@
+// C math library bindings (math.h)
+// 
+// Notes:
+// - Trigonometric functions use radians (C semantics).
+// - Domain/range errors follow the platform C library behavior.
+
+// Computes sine.
+// 
+// Params:
+// - x: angle in radians
+// 
+// Returns:
+// - sine of x (C semantics)
 fun sin(dec x) dec;
+
+// Computes cosine.
+// 
+// Params:
+// - x: angle in radians
+// 
+// Returns:
+// - cosine of x (C semantics)
 fun cos(dec x) dec;
+
+// Computes tangent.
+// 
+// Params:
+// - x: angle in radians
+// 
+// Returns:
+// - tangent of x (C semantics)
 fun tan(dec x) dec;
 
+// Computes arcsine.
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - arcsine of x (C semantics)
 fun asin(dec x) dec;
+
+// Computes arccosine.
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - arccosine of x (C semantics)
 fun acos(dec x) dec;
+
+// Computes arctangent.
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - arctangent of x (C semantics)
 fun atan(dec x) dec;
+
+// Computes arctangent of y/x handling quadrants.
+// 
+// Params:
+// - y: y coordinate
+// - x: x coordinate
+// 
+// Returns:
+// - arctangent of y/x in the correct quadrant (C semantics)
 fun atan2(dec y, dec x) dec;
 
+// Computes square root.
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - square root of x (C semantics)
 fun sqrt(dec x) dec;
+
+// Computes x raised to the power y.
+// 
+// Params:
+// - x: base
+// - y: exponent
+// 
+// Returns:
+// - x raised to the power y (C semantics)
 fun pow(dec x, dec y) dec;
 
+// Rounds down to the nearest integer value.
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - largest integer value not greater than x (C semantics)
 fun floor(dec x) dec;
+
+// Rounds up to the nearest integer value.
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - smallest integer value not less than x (C semantics)
 fun ceil(dec x) dec;
+
+// Computes absolute value.
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - absolute value of x (C semantics)
 fun fabs(dec x) dec;

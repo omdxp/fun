@@ -214,6 +214,9 @@ pub fn get_c_typedef_alias_datatype_type(dt: []const u8) ?dtype.DataTypeType {
     // `stddef.h`
     if (mem.eql(u8, "size_t", dt)) return .Num;
     if (mem.eql(u8, "ptrdiff_t", dt)) return .Num;
+    if (mem.eql(u8, "wchar_t", dt)) return .Num;
+    // Optional (C11 Annex K), if provided by the platform headers.
+    if (mem.eql(u8, "rsize_t", dt)) return .Num;
     // Common POSIX/C extensions
     if (mem.eql(u8, "ssize_t", dt)) return .Num;
     // `stdint.h`

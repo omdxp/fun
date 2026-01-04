@@ -1,25 +1,108 @@
-// Time and date (time.h)
+// Time and date bindings (time.h)
+// 
+// Notes:
+// - Values follow C `time.h` semantics and platform libc behavior.
+// - Some functions return pointers to static storage (C semantics).
 
 compound tm {
+  // Seconds after the minute (0..60).
   num tm_sec;
+  // Minutes after the hour (0..59).
   num tm_min;
+  // Hours since midnight (0..23).
   num tm_hour;
+  // Day of the month (1..31).
   num tm_mday;
+  // Months since January (0..11).
   num tm_mon;
+  // Years since 1900.
   num tm_year;
+  // Days since Sunday (0..6).
   num tm_wday;
+  // Days since January 1 (0..365).
   num tm_yday;
+  // Daylight Saving Time flag (>0 in effect, 0 not in effect, <0 unknown).
   num tm_isdst;
 }
 
+// Returns the current calendar time.
+// 
+// Params:
+// - tloc: optional output pointer (may be null)
+// 
+// Returns:
+// - time value (C semantics)
 fun time(num* tloc) num;
+
+// Returns processor time consumed by the program.
+// 
+// Returns:
+// - processor time value, or -1 if not available (C semantics)
 fun clock() num;
+
+// Computes the difference between two time values.
+// 
+// Params:
+// - time1: first time
+// - time0: second time
+// 
+// Returns:
+// - difference in seconds as dec (C semantics)
 fun difftime(num time1, num time0) dec;
-fun mktime(tm * t) num;
 
-fun asctime(tm * t) str;
+// Converts broken-down local time to calendar time.
+// 
+// Params:
+// - t: broken-down time
+// 
+// Returns:
+// - calendar time value, or -1 on failure (C semantics)
+fun mktime(tm* t) num;
+
+// Converts broken-down time to a textual representation.
+// 
+// Params:
+// - t: broken-down time
+// 
+// Returns:
+// - pointer to static string (C semantics)
+fun asctime(tm* t) str;
+
+// Converts calendar time to a textual representation.
+// 
+// Params:
+// - timep: pointer to calendar time
+// 
+// Returns:
+// - pointer to static string (C semantics)
 fun ctime(num* timep) str;
-fun gmtime(num* timep) tm *;
-fun localtime(num* timep) tm *;
 
-fun strftime(str s, num max, str format, tm * t) num;
+// Converts calendar time to UTC broken-down time.
+// 
+// Params:
+// - timep: pointer to calendar time
+// 
+// Returns:
+// - pointer to static tm (C semantics)
+fun gmtime(num* timep) tm*;
+
+// Converts calendar time to local broken-down time.
+// 
+// Params:
+// - timep: pointer to calendar time
+// 
+// Returns:
+// - pointer to static tm (C semantics)
+fun localtime(num* timep) tm*;
+
+// Formats a broken-down time according to a format string.
+// 
+// Params:
+// - s: destination buffer
+// - max: buffer capacity
+// - format: format string
+// - t: broken-down time
+// 
+// Returns:
+// - number of bytes written (C semantics)
+fun strftime(str s, num max, str format, tm* t) num;

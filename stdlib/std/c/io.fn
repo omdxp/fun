@@ -1,45 +1,291 @@
+// C standard I/O bindings (stdio.h)
+// 
+// This module declares common stdio types and functions so Fun programs can
+// call into the platform C library.
+// 
+// Notes:
+// - These are declarations only; implementations come from your system libc.
+// - Error reporting follows C conventions (return values + errno).
+
 // Opaque stdio types
 compound FILE {
+  // Opaque payload (represents the underlying FILE structure).
   num _opaque;
 }
 
+// Prints formatted output to stdout.
+// 
+// Params:
+// - fmt: printf-style format string
+// - ...: format arguments
+// 
+// Returns:
+// - number of characters written, or a negative value on error (C semantics)
 fun printf(str fmt, ...) num;
+
+// Prints formatted output to a stream (e.g. stderr).
+// 
+// Params:
+// - stream: destination stream (modeled as num; typically a FILE*)
+// - fmt: printf-style format string
+// - ...: format arguments
+// 
+// Returns:
+// - number of characters written, or a negative value on error (C semantics)
 fun fprintf(num stream, str fmt, ...) num;
 
+// Formats output into a destination buffer.
+// 
+// Params:
+// - dst: destination buffer
+// - fmt: printf-style format string
+// - ...: format arguments
+// 
+// Returns:
+// - number of characters written (excluding the trailing NUL), or a negative value on error (C semantics)
 fun sprintf(str dst, str fmt, ...) num;
+
+// Formats output into a destination buffer with a maximum size.
+// 
+// Params:
+// - dst: destination buffer
+// - n: maximum bytes to write
+// - fmt: printf-style format string
+// - ...: format arguments
+// 
+// Returns:
+// - number of characters that would have been written (excluding NUL), or a negative value on error (C semantics)
 fun snprintf(str dst, num n, str fmt, ...) num;
 
+// Scans formatted input from stdin.
+// 
+// Params:
+// - fmt: scanf-style format string
+// - ...: output argument pointers (C semantics)
+// 
+// Returns:
+// - number of items successfully read, or EOF on input failure (C semantics)
 fun scanf(str fmt, ...) num;
+
+// Scans formatted input from a string.
+// 
+// Params:
+// - src: input string
+// - fmt: scanf-style format string
+// - ...: output argument pointers (C semantics)
+// 
+// Returns:
+// - number of items successfully read, or EOF on input failure (C semantics)
 fun sscanf(str src, str fmt, ...) num;
 
+// Writes a string and a trailing newline to stdout.
+// 
+// Params:
+// - s: string to write
+// 
+// Returns:
+// - nonnegative on success, or EOF on error (C semantics)
 fun puts(str s) num;
+
+// Writes a single character to stdout.
+// 
+// Params:
+// - c: character to write
+// 
+// Returns:
+// - written character as num, or EOF on error (C semantics)
 fun putchar(chr c) num;
+
+// Reads a single character from stdin.
+// 
+// Returns:
+// - next byte as num, or EOF (C semantics)
 fun getchar() num;
 
 // File IO
+// Opens a file.
+// 
+// Params:
+// - path: file path
+// - mode: fopen mode string (e.g. "r", "wb")
+// 
+// Returns:
+// - FILE* handle or null (C semantics)
 fun fopen(str path, str mode) FILE*;
+
+// Reopens a stream with a new file and mode.
+// 
+// Params:
+// - path: file path
+// - mode: fopen mode string
+// - stream: existing stream
+// 
+// Returns:
+// - FILE* handle or null (C semantics)
 fun freopen(str path, str mode, FILE* stream) FILE*;
+
+// Closes a stream.
+// 
+// Params:
+// - stream: stream to close
+// 
+// Returns:
+// - 0 on success, EOF on failure (C semantics)
 fun fclose(FILE* stream) num;
+
+// Flushes buffered output to the underlying stream.
+// 
+// Params:
+// - stream: stream to flush
+// 
+// Returns:
+// - 0 on success, EOF on failure (C semantics)
 fun fflush(FILE* stream) num;
 
+// Reads a single byte from a stream.
+// 
+// Params:
+// - stream: source stream
+// 
+// Returns:
+// - next byte as num, or EOF (C semantics)
 fun fgetc(FILE* stream) num;
+
+// Writes a single byte to a stream.
+// 
+// Params:
+// - c: byte to write (as num)
+// - stream: destination stream
+// 
+// Returns:
+// - written byte as num, or EOF on error (C semantics)
 fun fputc(num c, FILE* stream) num;
+
+// Reads a line (or up to n-1 bytes) into a buffer.
+// 
+// Params:
+// - s: destination buffer
+// - n: max bytes to read
+// - stream: source stream
+// 
+// Returns:
+// - s on success or null (C semantics)
 fun fgets(str s, num n, FILE* stream) str;
+
+// Writes a string to a stream.
+// 
+// Params:
+// - s: string to write
+// - stream: destination stream
+// 
+// Returns:
+// - nonnegative on success, or EOF on error (C semantics)
 fun fputs(str s, FILE* stream) num;
 
+// Reads nmemb elements of size bytes from a stream into memory.
+// 
+// Params:
+// - ptr: destination memory
+// - size: element size
+// - nmemb: element count
+// - stream: source stream
+// 
+// Returns:
+// - number of elements read (C semantics)
 fun fread(raw* ptr, num size, num nmemb, FILE* stream) num;
+
+// Writes nmemb elements of size bytes from memory into a stream.
+// 
+// Params:
+// - ptr: source memory
+// - size: element size
+// - nmemb: element count
+// - stream: destination stream
+// 
+// Returns:
+// - number of elements written (C semantics)
 fun fwrite(raw* ptr, num size, num nmemb, FILE* stream) num;
 
+// Sets the file position indicator.
+// 
+// Params:
+// - stream: target stream
+// - offset: byte offset
+// - whence: seek origin (e.g. SEEK_SET)
+// 
+// Returns:
+// - 0 on success, nonzero on failure (C semantics)
 fun fseek(FILE* stream, num offset, num whence) num;
+
+// Returns the current file position indicator.
+// 
+// Params:
+// - stream: target stream
+// 
+// Returns:
+// - current position on success, or a negative value on failure (C semantics)
 fun ftell(FILE* stream) num;
+
+// Resets the file position indicator to the beginning.
+// 
+// Params:
+// - stream: target stream
 fun rewind(FILE* stream);
 
+// Tests the end-of-file indicator.
+// 
+// Params:
+// - stream: target stream
+// 
+// Returns:
+// - nonzero if EOF, otherwise 0 (C semantics)
 fun feof(FILE* stream) num;
+
+// Tests the error indicator.
+// 
+// Params:
+// - stream: target stream
+// 
+// Returns:
+// - nonzero if error, otherwise 0 (C semantics)
 fun ferror(FILE* stream) num;
+
+// Prints a human-readable error message for the current errno.
+// 
+// Params:
+// - s: optional prefix string
 fun perror(str s);
 
+// Removes a file.
+// 
+// Params:
+// - path: file path
+// 
+// Returns:
+// - 0 on success, nonzero on failure (C semantics)
 fun remove(str path) num;
+
+// Renames (moves) a file.
+// 
+// Params:
+// - oldpath: old file path
+// - newpath: new file path
+// 
+// Returns:
+// - 0 on success, nonzero on failure (C semantics)
 fun rename(str oldpath, str newpath) num;
 
+// Creates a temporary binary file.
+// 
+// Returns:
+// - FILE* handle or null (C semantics)
 fun tmpfile() FILE*;
+
+// Generates a temporary filename.
+// 
+// Params:
+// - s: optional destination buffer
+// 
+// Returns:
+// - pointer to temporary name string (C semantics)
 fun tmpnam(str s) str;

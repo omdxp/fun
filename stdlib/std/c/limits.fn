@@ -1,4 +1,39 @@
-// C limits header (limits.h)
+// C implementation limits (limits.h)
 // 
-// This module is intentionally light: most limits are macros (e.g. INT_MAX) and
-// are consumed directly by the transpiler/typechecker.
+// This module is signature-only.
+// 
+// Most limits are preprocessor macros in C (e.g. `INT_MAX`), not functions.
+// In Fun, you use these identifiers directly after importing this module.
+// 
+// Import:
+// - `imp std.c.limits;`
+// 
+// Integer limits
+// - `CHAR_BIT`:
+// - Bits in a byte.
+// - `MB_LEN_MAX`:
+// - Max bytes in a multibyte character.
+// 
+// Signed integer ranges
+// - `SCHAR_MIN`, `SCHAR_MAX`
+// - `SHRT_MIN`, `SHRT_MAX`
+// - `INT_MIN`, `INT_MAX`
+// - `LONG_MIN`, `LONG_MAX`
+// - `LLONG_MIN`, `LLONG_MAX`
+// - `CHAR_MIN`, `CHAR_MAX` (depends on whether `char` is signed)
+// 
+// Unsigned integer maxima
+// - `UCHAR_MAX`
+// - `USHRT_MAX`
+// - `UINT_MAX`
+// - `ULONG_MAX`
+// - `ULLONG_MAX`
+// 
+// Size/pointer limits (sometimes provided via other headers)
+// - `SIZE_MAX` (commonly from `stdint.h`/`stddef.h`, but often visible with limits)
+// - `PTRDIFF_MIN`, `PTRDIFF_MAX` (commonly from `stdint.h`/`stddef.h`)
+// 
+// Notes
+// - The Fun compiler performs best-effort typing for many of these macros as
+// `num` so they can participate in arithmetic and comparisons.
+// - Availability varies by platform and C library.

@@ -1016,14 +1016,16 @@ const LspServer = struct {
             return;
         }
 
+        // Stdlib namespace hover (e.g. `std`, `std.c`, `std.c.io`, `std.c.io.printf`).
+        // Do this early and for any identifier token so hovering `std` itself works.
+        if (findTokenIndexAt(idx.tokens, pos)) |tok_i| {
+            if (try self.trySendStdNamespaceHover(id_val, uri, idx, tok_i)) return;
+        }
+
         // Member hover: show info for `a.b` / `a.b.c` by resolving receiver type.
         if (findTokenIndexAt(idx.tokens, pos)) |tok_i| {
             if (tok_i > 0 and isDotToken(idx.tokens[tok_i - 1])) {
                 if (tok_i >= 2 and idx.tokens[tok_i - 2].kind == .identifier) {
-                    // Special-case stdlib namespace: `std.<module>.<symbol>`.
-                    if (try self.trySendStdNamespaceHover(id_val, uri, idx, tok_i)) {
-                        return;
-                    }
                     if (self.resolveTypeOfChainUpTo(idx, uri, pos, tok_i - 2)) |recv_type| {
                         const name = tok.text;
                         const hit = self.findMemberByContainer(uri, recv_type, name, .field) orelse
@@ -2203,6 +2205,11 @@ const LspServer = struct {
             }
         }
 
+        // C macro constants (best-effort): offer completions when the corresponding
+        // C header module is imported. We intentionally do NOT model these as Fun
+        // globals/consts because they are macros provided by the C preprocessor.
+        try self.appendCMacroCompletionsForImports(&items, idx, prefix);
+
         // Symbols (only current file + direct imports).
         var seen = std.StringHashMap(void).init(self.allocator);
         defer {
@@ -2351,6 +2358,95 @@ const LspServer = struct {
         const json = try std.json.stringifyAlloc(self.allocator, list, .{});
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
+    }
+
+    fn appendCMacroCompletionsForImports(self: *LspServer, items: *std.ArrayList(CompletionItem), idx: *const Index, prefix: []const u8) !void {
+        // Avoid noisy global completion: only suggest macros when user is typing an
+        // ALL_CAPS-ish prefix.
+        if (prefix.len == 0) return;
+        const c0 = prefix[0];
+        const is_macro_prefix = (c0 >= 'A' and c0 <= 'Z') or c0 == '_';
+        if (!is_macro_prefix) return;
+
+        var has_limits = false;
+        var has_stddef = false;
+
+        for (idx.tokens, 0..) |t, i| {
+            if (t.kind != .keyword or !std.mem.eql(u8, t.text, "imp")) continue;
+            const spec = try self.parseImportSpecFromTokens(idx, i) orelse continue;
+            defer self.allocator.free(spec);
+
+            if (std.mem.eql(u8, spec, "std.c.limits")) has_limits = true;
+            if (std.mem.eql(u8, spec, "std.c.stddef")) has_stddef = true;
+        }
+
+        if (!has_limits and !has_stddef) return;
+
+        const Macro = struct { name: []const u8, detail: []const u8 };
+
+        const stddef_macros = [_]Macro{
+            .{ .name = "NULL", .detail = "stddef.h macro" },
+        };
+
+        const limits_macros = [_]Macro{
+            .{ .name = "CHAR_BIT", .detail = "limits.h macro" },
+            .{ .name = "MB_LEN_MAX", .detail = "limits.h macro" },
+
+            .{ .name = "SCHAR_MIN", .detail = "limits.h macro" },
+            .{ .name = "SCHAR_MAX", .detail = "limits.h macro" },
+            .{ .name = "UCHAR_MAX", .detail = "limits.h macro" },
+            .{ .name = "CHAR_MIN", .detail = "limits.h macro" },
+            .{ .name = "CHAR_MAX", .detail = "limits.h macro" },
+
+            .{ .name = "SHRT_MIN", .detail = "limits.h macro" },
+            .{ .name = "SHRT_MAX", .detail = "limits.h macro" },
+            .{ .name = "USHRT_MAX", .detail = "limits.h macro" },
+
+            .{ .name = "INT_MIN", .detail = "limits.h macro" },
+            .{ .name = "INT_MAX", .detail = "limits.h macro" },
+            .{ .name = "UINT_MAX", .detail = "limits.h macro" },
+
+            .{ .name = "LONG_MIN", .detail = "limits.h macro" },
+            .{ .name = "LONG_MAX", .detail = "limits.h macro" },
+            .{ .name = "ULONG_MAX", .detail = "limits.h macro" },
+
+            .{ .name = "LLONG_MIN", .detail = "limits.h macro" },
+            .{ .name = "LLONG_MAX", .detail = "limits.h macro" },
+            .{ .name = "ULLONG_MAX", .detail = "limits.h macro" },
+
+            // Often available via related headers; still useful to offer when the user
+            // opts into `limits`.
+            .{ .name = "SIZE_MAX", .detail = "limits.h-related macro" },
+            .{ .name = "RSIZE_MAX", .detail = "limits.h-related macro" },
+            .{ .name = "PTRDIFF_MIN", .detail = "limits.h-related macro" },
+            .{ .name = "PTRDIFF_MAX", .detail = "limits.h-related macro" },
+            .{ .name = "WCHAR_MIN", .detail = "limits.h-related macro" },
+            .{ .name = "WCHAR_MAX", .detail = "limits.h-related macro" },
+            .{ .name = "WINT_MIN", .detail = "limits.h-related macro" },
+            .{ .name = "WINT_MAX", .detail = "limits.h-related macro" },
+        };
+
+        if (has_stddef) {
+            for (stddef_macros) |m| {
+                if (!std.mem.startsWith(u8, m.name, prefix)) continue;
+                try items.append(.{
+                    .label = try self.allocator.dupe(u8, m.name),
+                    .kind = 21, // CompletionItemKind.Constant
+                    .detail = try self.allocator.dupe(u8, m.detail),
+                });
+            }
+        }
+
+        if (has_limits) {
+            for (limits_macros) |m| {
+                if (!std.mem.startsWith(u8, m.name, prefix)) continue;
+                try items.append(.{
+                    .label = try self.allocator.dupe(u8, m.name),
+                    .kind = 21, // CompletionItemKind.Constant
+                    .detail = try self.allocator.dupe(u8, m.detail),
+                });
+            }
+        }
     }
 
     fn trySendStdNamespaceCompletions(
@@ -2658,7 +2754,14 @@ const LspServer = struct {
             return true;
         }
 
-        const is_symbol = selected_idx == ids.items.len - 1 and ids.items.len >= 3;
+        // Determine whether the full chain names a module file. This is critical for nested
+        // modules like `std.c.io` (module) vs `std.c.io.printf` (symbol).
+        const chain_last: usize = ids.items.len - 1;
+        const full_module_file = (try self.buildStdModuleFilePathFromIds(current_uri, idx, ids.items, chain_last)) orelse return false;
+        defer self.allocator.free(full_module_file);
+        const full_chain_is_module = self.tryOpenExistingFile(full_module_file);
+
+        const is_symbol = (selected_idx == chain_last) and !full_chain_is_module and ids.items.len >= 3;
 
         if (is_symbol) {
             const symbol_name = idx.tokens[ids.items[ids.items.len - 1]].text;
@@ -2792,7 +2895,58 @@ const LspServer = struct {
         }
         const selected_idx = selected_idx_opt orelse return false;
 
-        const is_symbol = selected_idx == ids.items.len - 1 and ids.items.len >= 3;
+        const root = self.getStdlibRootForNamespace(current_uri) orelse return false;
+
+        // Helper: build the filesystem path (no extension) for a module chain up to `last_inclusive`.
+        // `last_inclusive` is an index into `ids.items` (identifier index within the chain).
+        const PathBuild = struct {
+            fn moduleNoExt(allocator: Allocator, root_path: []const u8, idx2: *const Index, ids2: []const usize, last_inclusive: usize) ![]u8 {
+                var segs = std.ArrayList([]const u8).init(allocator);
+                defer segs.deinit();
+                try segs.append(root_path);
+                try segs.append("std");
+                var k: usize = 1;
+                while (k <= last_inclusive) : (k += 1) {
+                    try segs.append(idx2.tokens[ids2[k]].text);
+                }
+                return try std.fs.path.join(allocator, segs.items);
+            }
+        };
+
+        // `std` itself: show stdlib README in hover.
+        if (selected_idx == 0) {
+            const readme_path = try std.fs.path.join(self.allocator, &.{ root, "README.md" });
+            defer self.allocator.free(readme_path);
+            if (!self.tryOpenExistingFile(readme_path)) return false;
+
+            const readme_text = blk: {
+                if (std.fs.path.isAbsolute(readme_path)) {
+                    var f = std.fs.openFileAbsolute(readme_path, .{}) catch return false;
+                    defer f.close();
+                    break :blk f.readToEndAlloc(self.allocator, 128 * 1024) catch return false;
+                }
+                break :blk std.fs.cwd().readFileAlloc(self.allocator, readme_path, 128 * 1024) catch return false;
+            };
+            defer self.allocator.free(readme_text);
+
+            const hover: Hover = .{ .contents = .{ .value = readme_text }, .range = idx.tokens[tok_i].range };
+            const json = try std.json.stringifyAlloc(self.allocator, hover, .{});
+            defer self.allocator.free(json);
+            try self.sendResponseJson(id_val, json);
+            return true;
+        }
+
+        // Determine whether the *full* chain (up to last identifier) names a module file.
+        // This is critical for nested modules like `std.c.io`.
+        const chain_last: usize = ids.items.len - 1;
+        const full_no_ext = try PathBuild.moduleNoExt(self.allocator, root, idx, ids.items, chain_last);
+        defer self.allocator.free(full_no_ext);
+        const full_module_file = try std.mem.concat(self.allocator, u8, &[_][]const u8{ full_no_ext, ".fn" });
+        defer self.allocator.free(full_module_file);
+        const full_chain_is_module = self.tryOpenExistingFile(full_module_file);
+
+        const is_last = selected_idx == chain_last;
+        const is_symbol = is_last and !full_chain_is_module and ids.items.len >= 3;
 
         var buf = std.ArrayList(u8).init(self.allocator);
         defer buf.deinit();
@@ -2836,18 +2990,8 @@ const LspServer = struct {
             return true;
         }
 
-        // Hover over a module segment: show a minimal module hint if the module file exists.
-        const root = self.getStdlibRootForNamespace(current_uri) orelse return false;
-
-        var segs = std.ArrayList([]const u8).init(self.allocator);
-        defer segs.deinit();
-        try segs.append(root);
-        try segs.append("std");
-        var k: usize = 1;
-        while (k <= selected_idx) : (k += 1) {
-            try segs.append(idx.tokens[ids.items[k]].text);
-        }
-        const selected_path_no_ext = try std.fs.path.join(self.allocator, segs.items);
+        // Hover over a module/directory segment.
+        const selected_path_no_ext = try PathBuild.moduleNoExt(self.allocator, root, idx, ids.items, selected_idx);
         defer self.allocator.free(selected_path_no_ext);
 
         // Prefer README hover for directory segments.
@@ -2876,8 +3020,40 @@ const LspServer = struct {
         defer self.allocator.free(module_file);
         if (!self.tryOpenExistingFile(module_file)) return false;
 
+        // For module files, prefer showing the leading `//` doc block.
+        const module_text = blk: {
+            if (std.fs.path.isAbsolute(module_file)) {
+                var f = std.fs.openFileAbsolute(module_file, .{}) catch return false;
+                defer f.close();
+                break :blk f.readToEndAlloc(self.allocator, 128 * 1024) catch return false;
+            }
+            break :blk std.fs.cwd().readFileAlloc(self.allocator, module_file, 128 * 1024) catch return false;
+        };
+        defer self.allocator.free(module_text);
+
         const name = idx.tokens[tok_i].text;
-        try buf.writer().print("**{s}**\n\n_module_\n", .{name});
+        try buf.writer().print("**{s}**\n\n", .{name});
+
+        // Extract the leading line-comment block and render it as markdown.
+        var wrote_doc: bool = false;
+        var i: usize = 0;
+        while (i < module_text.len) {
+            // Find line end.
+            const line_start = i;
+            while (i < module_text.len and module_text[i] != '\n') : (i += 1) {}
+            const line = std.mem.trimRight(u8, module_text[line_start..@min(i, module_text.len)], "\r");
+            if (line.len < 2 or line[0] != '/' or line[1] != '/') break;
+            var content = line[2..];
+            if (content.len != 0 and content[0] == ' ') content = content[1..];
+            try buf.appendSlice(content);
+            try buf.append('\n');
+            wrote_doc = true;
+            if (i < module_text.len and module_text[i] == '\n') i += 1;
+        }
+
+        if (!wrote_doc) {
+            try buf.writer().print("_module_\n", .{});
+        }
 
         const hover: Hover = .{ .contents = .{ .value = buf.items }, .range = idx.tokens[tok_i].range };
         const json = try std.json.stringifyAlloc(self.allocator, hover, .{});
