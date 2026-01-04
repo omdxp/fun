@@ -565,8 +565,8 @@ fn nextSignificantToken(toks: []const token.Token, start_at: usize) ?token.Token
     return null;
 }
 
-fn isPointerTypeStarContext(toks: []const token.Token, idx: usize, prev: token.Token) bool {
-    if (!isLikelyTypeToken(prev)) return false;
+fn isPointerTypeStarContext(toks: []const token.Token, idx: usize, prev: token.Token, in_decl_only_ctx: bool) bool {
+    if (!in_decl_only_ctx and !isLikelyTypeToken(prev)) return false;
 
     const next = nextSignificantToken(toks, idx + 1) orelse return false;
     // Return type pointers: `...) Type* {` or `...) Type*;`
@@ -624,6 +624,9 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
     var wrap_cond_open_at: ?usize = null;
     var wrap_cond_close_before: ?usize = null;
     var prev_unary_prefix: bool = false;
+    var in_fun_signature: bool = false;
+    var pending_decl_block_open: bool = false;
+    var decl_block_depth: isize = 0;
     while (idx < toks.len) : (idx += 1) {
         const t2 = toks[idx];
         if (t2.type == .NewLine) {
@@ -708,6 +711,12 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
 
         if (t2.type == .Keyword) {
             const kw2 = t2.data.sval.items;
+            if (std.mem.eql(u8, kw2, "fun")) {
+                in_fun_signature = true;
+            }
+            if (std.mem.eql(u8, kw2, "compound") or std.mem.eql(u8, kw2, "quirk")) {
+                pending_decl_block_open = true;
+            }
             if (std.mem.eql(u8, kw2, "if") or std.mem.eql(u8, kw2, "elif")) {
                 // Decide whether this `if/elif` is a block (`{}`) or a single-statement form.
                 // If it's a block and the condition is parenthesized, we strip the outer parens.
@@ -813,6 +822,7 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
 
         // Handle closing brace with optional same-line `elif`/`else`.
         if (t2.type == .Symbol and t2.data.cval == '}') {
+            if (decl_block_depth > 0) decl_block_depth -= 1;
             if (!state.at_line_start.*) {
                 try state.out.append('\n');
                 state.at_line_start.* = true;
@@ -857,6 +867,8 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
             state.at_line_start.* = false;
         }
 
+        const in_decl_only_ctx = in_fun_signature or decl_block_depth > 0;
+
         // Decide whether to add a space before this token.
         if (state.prev_token.*) |pt2| {
             const needs_space = blk: {
@@ -865,7 +877,7 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
                     prev_unary_prefix = false;
                     break :blk false;
                 }
-                if (t2.type == .Operator and std.mem.eql(u8, t2.data.sval.items, "*") and isPointerTypeStarContext(toks, idx, pt2)) {
+                if (t2.type == .Operator and std.mem.eql(u8, t2.data.sval.items, "*") and isPointerTypeStarContext(toks, idx, pt2, in_decl_only_ctx)) {
                     // Pointer types: `Type* name` / `Type* {`.
                     break :blk false;
                 }
@@ -919,6 +931,11 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
         if (t2.type == .Symbol) {
             const c2 = t2.data.cval;
             if (c2 == '{') {
+                if (pending_decl_block_open) {
+                    decl_block_depth += 1;
+                    pending_decl_block_open = false;
+                }
+                if (in_fun_signature) in_fun_signature = false;
                 try state.out.append('{');
                 try state.out.append('\n');
                 state.indent.* += 1;
@@ -927,6 +944,7 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
                 continue;
             }
             if (c2 == ';') {
+                if (in_fun_signature) in_fun_signature = false;
                 try state.out.append(';');
                 try state.out.append('\n');
                 state.at_line_start.* = true;

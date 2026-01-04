@@ -301,6 +301,36 @@ test "-fmt formats parent traversal imports" {
     try std.testing.expectEqualStrings(expected, got);
 }
 
+test "-fmt formats lowercase type pointers in signatures" {
+    const allocator = std.testing.allocator;
+
+    const ugly =
+        "compound tm{num tm_sec;}\n" ++
+        "fun mktime(tm * t) num;\n" ++
+        "fun gmtime(num* timep) tm *;\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_tm_ptr", ugly);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, path);
+
+    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    defer allocator.free(got);
+
+    const expected =
+        "compound tm {\n" ++
+        "  num tm_sec;\n" ++
+        "}\n" ++
+        "\n" ++
+        "fun mktime(tm* t) num;\n" ++
+        "fun gmtime(num* timep) tm*;\n";
+
+    try std.testing.expectEqualStrings(expected, got);
+}
+
 test "-fmt-all formats local imports recursively (skips std.*)" {
     const allocator = std.testing.allocator;
 
