@@ -86,9 +86,33 @@ test "fit bin exhausted via default no warning" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
-test "fit num no exhaustiveness warning" {
+test "fit bin default only no warning" {
     const allocator = std.testing.allocator;
-    const ifilepath = "fit_num_no_warn.fn";
+    const ifilepath = "fit_bin_default_only.fn";
+
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  bin x = true;\n" ++
+        "  fit x {\n" ++
+        "    _ -> { printf(\"D\\n\"); }\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(res.warnings == null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
+test "fit num missing default warns" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "fit_num_missing_default_warns.fn";
 
     const input =
         "imp std.c.io;\n" ++
@@ -105,7 +129,36 @@ test "fit num no exhaustiveness warning" {
         if (res.warnings) |w| allocator.free(w);
     }
 
-    try std.testing.expect(res.warnings == null);
+    try std.testing.expect(res.warnings != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "fit statement is not exhausted") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "missing catch-all '_' branch") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
+test "fit pointer missing default warns" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "fit_ptr_missing_default_warns.fn";
+
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.c.mem;\n\n" ++
+        "fun main() {\n" ++
+        "  raw* p = malloc(1);\n" ++
+        "  fit p {\n" ++
+        "    NULL -> { printf(\"null\\n\"); }\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(res.warnings != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "fit statement is not exhausted") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "missing catch-all '_' branch") != null);
 
     try fs.cwd().deleteFile(ifilepath);
 }

@@ -2847,9 +2847,9 @@ pub const TranspileProcess = struct {
             if (branch.condition == null) return;
         }
 
-        const cond_type = self.infer_simple_dtype(condition.*) orelse return;
-        if (cond_type != .Bin) return;
-
+        // Boolean (`bin`) is the only type we can treat as exhaustive without a catch-all.
+        // Everything else (num/dec/chr/str/raw*/unknown pointers, etc) should warn unless
+        // there is a `_ -> ...` default branch.
         var has_true = false;
         var has_false = false;
         for (branches) |branch| {
@@ -2861,6 +2861,19 @@ pub const TranspileProcess = struct {
                     has_false = true;
                 }
             }
+        }
+
+        // Exhaustive boolean fit: true + false present.
+        if (has_true and has_false) return;
+
+        const cond_type = self.infer_simple_dtype(condition.*) orelse {
+            self.report_warning(fit_stmt, "fit statement is not exhausted for unknown condition (missing catch-all '_' branch)", .{});
+            return;
+        };
+
+        if (cond_type != .Bin) {
+            self.report_warning(fit_stmt, "fit statement is not exhausted for {s} condition (missing catch-all '_' branch)", .{@tagName(cond_type)});
+            return;
         }
 
         if (!(has_true and has_false)) {
