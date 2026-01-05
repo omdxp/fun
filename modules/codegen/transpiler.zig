@@ -50,6 +50,11 @@ pub const TranspileError = error{
 
     /// Error indicating a type mismatch.
     TypeMismatch,
+
+    /// Error indicating a field/member access is syntactically/semantically invalid.
+    InvalidFieldAccess,
+    /// Error indicating a named type does not have a requested field.
+    UnknownField,
     /// Error indicating a function call has the wrong number of arguments.
     WrongArgCount,
     /// Error indicating a return statement does not match the function return type.
@@ -1809,17 +1814,17 @@ pub const TranspileProcess = struct {
     fn infer_compound_field_access_type(self: *Self, node: ast.Node, base: CheckedType, field_name: []const u8) TranspileError!CheckedType {
         if (!is_user_named_type(base)) {
             self.report_type_error(node, "field access requires a compound-typed value", .{});
-            return TranspileError.TypeMismatch;
+            return TranspileError.InvalidFieldAccess;
         }
 
         if (base.pointer_depth > 1) {
             self.report_type_error(node, "field access supports at most one pointer indirection", .{});
-            return TranspileError.TypeMismatch;
+            return TranspileError.InvalidFieldAccess;
         }
 
         const fdt = self.lookup_compound_field(base.name.?, field_name) orelse {
             self.report_type_error(node, "type '{s}' has no field '{s}'", .{ base.name.?, field_name });
-            return TranspileError.TypeMismatch;
+            return TranspileError.UnknownField;
         };
         return type_from_dtype(fdt);
     }
@@ -2232,6 +2237,7 @@ pub const TranspileProcess = struct {
                     var method_sig: ?ast.QuirkMethodSig = null;
                     var plain_method_sig: ?FnSig = null;
                     var plain_method_name: ?[]const u8 = null;
+                    var skip_signature_typecheck: bool = false;
 
                     if (callee.type == .Identifier and callee.data != null) {
                         const fname = callee.data.?.sval.items;
@@ -2243,11 +2249,14 @@ pub const TranspileProcess = struct {
                             // as an external function and skip type checking.
                             // Otherwise, this is a real semantic error (we don't want to defer to C).
                             if (self.global_symbols.get(fname) != null or is_known_extern_function_name(fname)) {
-                                return .{ .base = .Unknown };
+                                skip_signature_typecheck = true;
+                                call_rtype = .{ .base = .Unknown };
                             }
 
-                            self.report_type_error(node, "unknown function '{s}'", .{fname});
-                            return TranspileError.SymbolNotDefined;
+                            if (!skip_signature_typecheck) {
+                                self.report_type_error(node, "unknown function '{s}'", .{fname});
+                                return TranspileError.SymbolNotDefined;
+                            }
                         }
                     } else if (callee.type == .Expression and callee.node_variant != null and mem.eql(u8, callee.node_variant.?.exp.op, ".")) {
                         // Method call: `x.method(...)`.
@@ -2330,6 +2339,16 @@ pub const TranspileProcess = struct {
                         try self.flatten_call_args(right.*, &args_nodes);
                     }
 
+                    // Even when skipping signature-based type checking (extern functions), we still
+                    // need to semantically validate each argument expression so member access, etc.
+                    // errors are not missed.
+                    if (skip_signature_typecheck) {
+                        for (args_nodes.items) |arg_node| {
+                            _ = try self.infer_expr_type(arg_node, env, fns);
+                        }
+                        return call_rtype;
+                    }
+
                     if (maybe_sig) |sig| {
                         // Function call.
                         if (!sig.is_variadic and args_nodes.items.len != sig.args.len) {
@@ -2343,13 +2362,14 @@ pub const TranspileProcess = struct {
                             return TranspileError.WrongArgCount;
                         }
                         for (args_nodes.items, 0..) |arg_node, idx| {
-                            if (idx >= sig.args.len) break; // variadic extras are not typechecked
                             const actual = try self.infer_expr_type(arg_node, env, fns);
-                            const expected = sig.args[idx];
-                            if (is_known_type(expected) and is_known_type(actual) and !(try self.can_implicit_coerce(expected, actual))) {
-                                const fname = callee.data.?.sval.items;
-                                self.report_type_error(node, "type mismatch in call to '{s}' argument {d}", .{ fname, idx + 1 });
-                                return TranspileError.TypeMismatch;
+                            if (idx < sig.args.len) {
+                                const expected = sig.args[idx];
+                                if (is_known_type(expected) and is_known_type(actual) and !(try self.can_implicit_coerce(expected, actual))) {
+                                    const fname = callee.data.?.sval.items;
+                                    self.report_type_error(node, "type mismatch in call to '{s}' argument {d}", .{ fname, idx + 1 });
+                                    return TranspileError.TypeMismatch;
+                                }
                             }
                         }
                     } else if (method_sig) |msig| {
@@ -2387,12 +2407,13 @@ pub const TranspileProcess = struct {
 
                         for (args_nodes.items, 0..) |arg_node, idx| {
                             const sig_idx = idx + 1; // skip implicit self
-                            if (sig_idx >= psig.args.len) break; // variadic extras are not typechecked
                             const actual = try self.infer_expr_type(arg_node, env, fns);
-                            const expected = psig.args[sig_idx];
-                            if (is_known_type(expected) and is_known_type(actual) and !(try self.can_implicit_coerce(expected, actual))) {
-                                self.report_type_error(node, "type mismatch in call to method '{s}' argument {d}", .{ plain_method_name orelse "<method>", idx + 1 });
-                                return TranspileError.TypeMismatch;
+                            if (sig_idx < psig.args.len) {
+                                const expected = psig.args[sig_idx];
+                                if (is_known_type(expected) and is_known_type(actual) and !(try self.can_implicit_coerce(expected, actual))) {
+                                    self.report_type_error(node, "type mismatch in call to method '{s}' argument {d}", .{ plain_method_name orelse "<method>", idx + 1 });
+                                    return TranspileError.TypeMismatch;
+                                }
                             }
                         }
                     }
@@ -2420,17 +2441,17 @@ pub const TranspileProcess = struct {
                                 const dot = cursor.node_variant.?.exp;
                                 const seg = dot.left orelse {
                                     self.report_type_error(node, "field access requires an identifier", .{});
-                                    return TranspileError.TypeMismatch;
+                                    return TranspileError.InvalidFieldAccess;
                                 };
                                 if (seg.type != .Identifier or seg.data == null) {
                                     self.report_type_error(node, "field access requires an identifier", .{});
-                                    return TranspileError.TypeMismatch;
+                                    return TranspileError.InvalidFieldAccess;
                                 }
                                 lt = try self.infer_compound_field_access_type(node, lt, seg.data.?.sval.items);
 
                                 const next = dot.right orelse {
                                     self.report_type_error(node, "field access requires an identifier", .{});
-                                    return TranspileError.TypeMismatch;
+                                    return TranspileError.InvalidFieldAccess;
                                 };
                                 cursor = next.*;
                                 continue;
@@ -2442,7 +2463,7 @@ pub const TranspileProcess = struct {
                             }
 
                             self.report_type_error(node, "field access requires an identifier", .{});
-                            return TranspileError.TypeMismatch;
+                            return TranspileError.InvalidFieldAccess;
                         }
                     }
 

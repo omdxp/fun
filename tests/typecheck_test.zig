@@ -110,6 +110,34 @@ test "typecheck variadic call requires fixed args" {
     try runTranspileExpectError(std.testing.allocator, "typecheck_variadic_too_few.fn", input);
 }
 
+test "typecheck variadic extra args still validated" {
+    const input =
+        "compound User {\n" ++
+        "  num age;\n" ++
+        "}\n" ++
+        "fun v(num a, ...) num { ret a; }\n" ++
+        "fun main() {\n" ++
+        "  User user;\n" ++
+        "  num x = v(1, user.missing);\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_variadic_extra_expr_validated.fn", input);
+}
+
+test "typecheck extern call args still validated" {
+    const input =
+        "compound User {\n" ++
+        "  num age;\n" ++
+        "}\n" ++
+        "fun main() {\n" ++
+        "  User user;\n" ++
+        // `printf` is treated as a known extern even without an import/signature.
+        "  printf(\"%d\\n\", user.missing);\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_extern_call_args_validated.fn", input);
+}
+
 test "typecheck zero-arg call ok" {
     const input =
         "fun foo() num { ret 1; }\n" ++
