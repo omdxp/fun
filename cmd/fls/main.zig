@@ -1021,6 +1021,12 @@ const LspServer = struct {
             return;
         }
 
+        // Import namespace hover (custom modules): if hovering a segment of `imp a.b.c;` and that
+        // segment resolves to a directory with a README, show it.
+        if (findTokenIndexAt(idx.tokens, pos)) |tok_i| {
+            if (try self.trySendImportNamespaceHover(id_val, uri, idx, tok_i)) return;
+        }
+
         // Stdlib namespace hover (e.g. `std`, `std.c`, `std.c.io`, `std.c.io.printf`).
         // Do this early and for any identifier token so hovering `std` itself works.
         if (findTokenIndexAt(idx.tokens, pos)) |tok_i| {
@@ -1609,6 +1615,185 @@ const LspServer = struct {
         }
 
         const json = try std.json.stringifyAlloc(self.allocator, locs_list.items, .{});
+        defer self.allocator.free(json);
+        try self.sendResponseJson(id_val, json);
+        return true;
+    }
+
+    fn trySendImportNamespaceHover(self: *LspServer, id_val: ?std.json.Value, current_uri: []const u8, idx: *const Index, tok_i: usize) !bool {
+        if (idx.tokens[tok_i].kind != .identifier) return false;
+
+        // Scan backwards to find an `imp` keyword without crossing ';'
+        var imp_i_opt: ?usize = null;
+        var k: isize = @intCast(tok_i);
+        while (k >= 0) : (k -= 1) {
+            const t = idx.tokens[@intCast(k)];
+            if ((t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, ";")) break;
+            if (t.kind == .keyword and std.mem.eql(u8, t.text, "imp")) {
+                imp_i_opt = @intCast(k);
+                break;
+            }
+        }
+        if (imp_i_opt == null) return false;
+        const imp_i = imp_i_opt.?;
+
+        // Resolve the full import spec including dot-runs like `..` / `....`.
+        const spec = try self.parseImportSpecFromTokens(idx, imp_i) orelse return false;
+        defer self.allocator.free(spec);
+
+        // If this is a stdlib import, let std namespace hover handle it.
+        if (std.mem.startsWith(u8, spec, "std") and (spec.len == 3 or spec[3] == '.')) return false;
+
+        const parsed = struct {
+            fn addSegments(out: *std.ArrayList([]const u8), s: []const u8) !void {
+                var start: usize = 0;
+                var i: usize = 0;
+                while (i < s.len) {
+                    if (s[i] != '.') {
+                        i += 1;
+                        continue;
+                    }
+
+                    // Flush preceding identifier segment.
+                    if (i > start) {
+                        const seg = std.mem.trim(u8, s[start..i], " \t\r\n\"");
+                        if (seg.len != 0) try out.append(seg);
+                    }
+
+                    // Consume dot run.
+                    var j = i;
+                    while (j < s.len and s[j] == '.') : (j += 1) {}
+                    const run_len = j - i;
+                    const parents = run_len / 2;
+                    var p: usize = 0;
+                    while (p < parents) : (p += 1) {
+                        try out.append("..");
+                    }
+
+                    i = j;
+                    start = i;
+                }
+
+                if (s.len > start) {
+                    const seg = std.mem.trim(u8, s[start..], " \t\r\n\"");
+                    if (seg.len != 0) try out.append(seg);
+                }
+            }
+        };
+
+        var parts = std.ArrayList([]const u8).init(self.allocator);
+        defer parts.deinit();
+        try parsed.addSegments(&parts, spec);
+        if (parts.items.len == 0) return false;
+
+        // Collect identifier tokens in the import statement and locate which one is hovered.
+        var ident_toks = std.ArrayList(usize).init(self.allocator);
+        defer ident_toks.deinit();
+        var i: usize = imp_i + 1;
+        while (i < idx.tokens.len) : (i += 1) {
+            const t = idx.tokens[i];
+            if ((t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, ";")) break;
+            if (t.kind == .identifier) try ident_toks.append(i);
+        }
+        if (ident_toks.items.len == 0) return false;
+
+        var selected_ident_ord_opt: ?usize = null;
+        for (ident_toks.items, 0..) |ti, ord| {
+            if (ti == tok_i) {
+                selected_ident_ord_opt = ord;
+                break;
+            }
+        }
+        const selected_ident_ord = selected_ident_ord_opt orelse return false;
+
+        // Map identifier ordinal -> part index (skip parent segments "..").
+        var non_parent_part_indices = std.ArrayList(usize).init(self.allocator);
+        defer non_parent_part_indices.deinit();
+        for (parts.items, 0..) |p, pi| {
+            if (!std.mem.eql(u8, p, "..")) try non_parent_part_indices.append(pi);
+        }
+        if (non_parent_part_indices.items.len != ident_toks.items.len) return false;
+
+        const selected_part_index = non_parent_part_indices.items[selected_ident_ord];
+
+        const current_path = uriToPath(self.allocator, current_uri) catch return false;
+        defer self.allocator.free(current_path);
+        const current_dir = std.fs.path.dirname(current_path) orelse return false;
+
+        // Build the filesystem path (no extension) for the selected segment.
+        var path_segs = std.ArrayList([]const u8).init(self.allocator);
+        defer path_segs.deinit();
+        try path_segs.append(current_dir);
+        var si: usize = 0;
+        while (si <= selected_part_index) : (si += 1) {
+            try path_segs.append(parts.items[si]);
+        }
+
+        const selected_path_no_ext = try std.fs.path.join(self.allocator, path_segs.items);
+        defer self.allocator.free(selected_path_no_ext);
+
+        // Prefer README hover for directory segments (and for last segment if it is a directory).
+        const readme_path = try std.fs.path.join(self.allocator, &[_][]const u8{ selected_path_no_ext, "README.md" });
+        defer self.allocator.free(readme_path);
+        if (self.tryOpenExistingFile(readme_path)) {
+            const readme_text = blk: {
+                if (std.fs.path.isAbsolute(readme_path)) {
+                    var f = std.fs.openFileAbsolute(readme_path, .{}) catch return false;
+                    defer f.close();
+                    break :blk f.readToEndAlloc(self.allocator, 128 * 1024) catch return false;
+                }
+                break :blk std.fs.cwd().readFileAlloc(self.allocator, readme_path, 128 * 1024) catch return false;
+            };
+            defer self.allocator.free(readme_text);
+
+            const hover: Hover = .{ .contents = .{ .value = readme_text }, .range = idx.tokens[tok_i].range };
+            const json = try std.json.stringifyAlloc(self.allocator, hover, .{});
+            defer self.allocator.free(json);
+            try self.sendResponseJson(id_val, json);
+            return true;
+        }
+
+        // Otherwise, if this segment is a module file, show its leading `//` doc block.
+        const module_file = try std.mem.concat(self.allocator, u8, &[_][]const u8{ selected_path_no_ext, ".fn" });
+        defer self.allocator.free(module_file);
+        if (!self.tryOpenExistingFile(module_file)) return false;
+
+        const module_text = blk: {
+            if (std.fs.path.isAbsolute(module_file)) {
+                var f = std.fs.openFileAbsolute(module_file, .{}) catch return false;
+                defer f.close();
+                break :blk f.readToEndAlloc(self.allocator, 128 * 1024) catch return false;
+            }
+            break :blk std.fs.cwd().readFileAlloc(self.allocator, module_file, 128 * 1024) catch return false;
+        };
+        defer self.allocator.free(module_text);
+
+        var buf = std.ArrayList(u8).init(self.allocator);
+        defer buf.deinit();
+
+        const name = idx.tokens[tok_i].text;
+        try buf.writer().print("**{s}**\n\n", .{name});
+
+        var wrote_doc: bool = false;
+        var li: usize = 0;
+        while (li < module_text.len) {
+            const line_start = li;
+            while (li < module_text.len and module_text[li] != '\n') : (li += 1) {}
+            const line = std.mem.trimRight(u8, module_text[line_start..@min(li, module_text.len)], "\r");
+            if (line.len < 2 or line[0] != '/' or line[1] != '/') break;
+            var content = line[2..];
+            if (content.len != 0 and content[0] == ' ') content = content[1..];
+            try buf.appendSlice(content);
+            try buf.append('\n');
+            wrote_doc = true;
+            if (li < module_text.len and module_text[li] == '\n') li += 1;
+        }
+        if (!wrote_doc) {
+            try buf.writer().print("_module_\n", .{});
+        }
+
+        const hover: Hover = .{ .contents = .{ .value = buf.items }, .range = idx.tokens[tok_i].range };
+        const json = try std.json.stringifyAlloc(self.allocator, hover, .{});
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
         return true;

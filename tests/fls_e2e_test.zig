@@ -1048,6 +1048,81 @@ test "fls e2e: std namespace hover shows README and module docs" {
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: custom import namespace hover shows README" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    // Create a custom module directory with a README.
+    const mod_dir_abs = try std.fs.path.join(allocator, &[_][]const u8{ setup.root_abs, "mylib" });
+    defer allocator.free(mod_dir_abs);
+    try std.fs.makeDirAbsolute(mod_dir_abs) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    defer std.fs.deleteTreeAbsolute(mod_dir_abs) catch {};
+
+    const readme_abs = try std.fs.path.join(allocator, &[_][]const u8{ mod_dir_abs, "README.md" });
+    defer allocator.free(readme_abs);
+    {
+        const f = try std.fs.createFileAbsolute(readme_abs, .{ .truncate = true });
+        defer f.close();
+        try f.writeAll("# MyLib\n\nCustom module README hover works.\n");
+    }
+
+    // Create a module file so `imp mylib.foo;` is a valid import.
+    const foo_abs = try std.fs.path.join(allocator, &[_][]const u8{ mod_dir_abs, "foo.fn" });
+    defer allocator.free(foo_abs);
+    {
+        const f = try std.fs.createFileAbsolute(foo_abs, .{ .truncate = true });
+        defer f.close();
+        try f.writeAll(
+            "// Foo module\n" ++
+                "fun add(num a, num b) num {\n" ++
+                "  ret a + b;\n" ++
+                "}\n",
+        );
+    }
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "imp mylib.foo;\n\n" ++
+        "fun main() {\n" ++
+        "  ret;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-custom-import-hover.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // Hover on `mylib` (in `imp mylib.foo;`) should show the directory README.
+    const pos = try findPosition(doc_text, "mylib.foo", 0);
+    const hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, pos.line, pos.col },
+    );
+    defer allocator.free(hover_params);
+
+    const hover_id = try lsp.request("textDocument/hover", hover_params);
+    var hover_res = try lsp.waitResponse(hover_id, 15000);
+    defer hover_res.deinit();
+    const hover_val = try jsonResultFromResponseObj(hover_res.parsed.value.object);
+    try expectHoverContains(allocator, hover_val, "MyLib");
+    try expectHoverContains(allocator, hover_val, "Custom module README hover works");
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: typing with CRLF positions stays consistent" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
