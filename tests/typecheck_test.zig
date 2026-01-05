@@ -138,6 +138,71 @@ test "typecheck extern call args still validated" {
     try runTranspileExpectError(std.testing.allocator, "typecheck_extern_call_args_validated.fn", input);
 }
 
+test "typecheck sizeof builtin ok" {
+    const input =
+        "compound User {\n" ++
+        "  num age;\n" ++
+        "}\n" ++
+        "fun main() {\n" ++
+        "  num s = sizeof(User);\n" ++
+        "  if s == 0 { ret; }\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_sizeof_ok.fn", input);
+}
+
+test "typecheck sizeof rejects non-type operand" {
+    const input =
+        "fun main() {\n" ++
+        "  num s = sizeof(1);\n" ++
+        "  ret;\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_sizeof_bad_operand.fn", input);
+}
+
+test "typecheck missing field errors in plain impl body" {
+    const input =
+        "compound User {\n" ++
+        "  num age;\n" ++
+        "}\n" ++
+        "impl User {\n" ++
+        "  greet() {\n" ++
+        "    num x = self.missing;\n" ++
+        "    ret;\n" ++
+        "  }\n" ++
+        "}\n" ++
+        "fun main() {\n" ++
+        "  User u;\n" ++
+        "  u.greet();\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_impl_missing_field.fn", input);
+}
+
+test "typecheck missing field errors in quirk impl body" {
+    const input =
+        "quirk Display {\n" ++
+        "  show();\n" ++
+        "}\n" ++
+        "compound Data {\n" ++
+        "  num id;\n" ++
+        "}\n" ++
+        "impl Data Display {\n" ++
+        "  show() {\n" ++
+        "    num x = self.missing;\n" ++
+        "    ret;\n" ++
+        "  }\n" ++
+        "}\n" ++
+        "fun main() {\n" ++
+        "  Data d;\n" ++
+        "  d.id = 1;\n" ++
+        "  d.show();\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_quirk_impl_missing_field.fn", input);
+}
+
 test "typecheck zero-arg call ok" {
     const input =
         "fun foo() num { ret 1; }\n" ++

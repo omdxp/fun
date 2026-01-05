@@ -55,6 +55,9 @@ pub const TranspileError = error{
     InvalidFieldAccess,
     /// Error indicating a named type does not have a requested field.
     UnknownField,
+
+    /// Error indicating an invalid `sizeof(...)` usage.
+    InvalidSizeof,
     /// Error indicating a function call has the wrong number of arguments.
     WrongArgCount,
     /// Error indicating a return statement does not match the function return type.
@@ -2231,6 +2234,12 @@ pub const TranspileProcess = struct {
                         return TranspileError.NotCallable;
                     };
 
+                    var args_nodes = std.ArrayList(ast.Node).init(self.allocator);
+                    defer args_nodes.deinit();
+                    if (exp.right) |right| {
+                        try self.flatten_call_args(right.*, &args_nodes);
+                    }
+
                     // Standard function call: `foo(...)`.
                     var maybe_sig: ?FnSig = null;
                     var call_rtype: CheckedType = .{ .base = .Unknown };
@@ -2241,6 +2250,45 @@ pub const TranspileProcess = struct {
 
                     if (callee.type == .Identifier and callee.data != null) {
                         const fname = callee.data.?.sval.items;
+
+                        // Builtin: `sizeof(Type)`.
+                        if (mem.eql(u8, fname, "sizeof")) {
+                            if (args_nodes.items.len != 1) {
+                                self.report_type_error(node, "sizeof expects exactly 1 argument", .{});
+                                return TranspileError.InvalidSizeof;
+                            }
+                            const arg0 = args_nodes.items[0];
+                            if (arg0.type != .Identifier or arg0.data == null) {
+                                self.report_type_error(node, "sizeof argument must be a type name", .{});
+                                return TranspileError.InvalidSizeof;
+                            }
+
+                            const type_name = arg0.data.?.sval.items;
+                            const is_builtin = mem.eql(u8, type_name, "void") or
+                                mem.eql(u8, type_name, "raw") or
+                                mem.eql(u8, type_name, "chr") or
+                                mem.eql(u8, type_name, "str") or
+                                mem.eql(u8, type_name, "dec") or
+                                mem.eql(u8, type_name, "num") or
+                                mem.eql(u8, type_name, "bin");
+
+                            const is_declared = blk: {
+                                const root = self.get_root();
+                                if (root.type_registry == null) break :blk false;
+                                const reg = &root.type_registry.?;
+                                if (reg.compounds_by_name.contains(type_name)) break :blk true;
+                                if (reg.quirk_sig_by_name.contains(type_name)) break :blk true;
+                                break :blk false;
+                            };
+
+                            if (!is_builtin and !is_declared) {
+                                self.report_type_error(node, "sizeof unknown type '{s}'", .{type_name});
+                                return TranspileError.InvalidSizeof;
+                            }
+
+                            return .{ .base = .Num };
+                        }
+
                         if (fns.get(fname)) |sig| {
                             maybe_sig = sig;
                             call_rtype = sig.rtype;
@@ -2331,12 +2379,6 @@ pub const TranspileProcess = struct {
                     } else {
                         self.report_type_error(node, "only calling named functions or quirk methods is supported", .{});
                         return TranspileError.NotCallable;
-                    }
-
-                    var args_nodes = std.ArrayList(ast.Node).init(self.allocator);
-                    defer args_nodes.deinit();
-                    if (exp.right) |right| {
-                        try self.flatten_call_args(right.*, &args_nodes);
                     }
 
                     // Even when skipping signature-based type checking (extern functions), we still
@@ -2858,6 +2900,50 @@ pub const TranspileProcess = struct {
 
             if (fnv.body) |body| {
                 try proc.check_body(body, &fn_env, fns, fn_rtype);
+            }
+        }
+
+        // Impl methods live under `.Impl` nodes in `proc.owned_nodes`.
+        // Typecheck them too, with an implicit `self` binding.
+        for (proc.owned_nodes.items) |n| {
+            if (n.type != .Impl or n.node_variant == null) continue;
+            const im = n.node_variant.?.impl;
+            const self_type: CheckedType = .{ .base = .Unknown, .name = im.type_name.items, .pointer_depth = 1 };
+
+            for (im.methods.items()) |m_ptr| {
+                const m = m_ptr.*;
+                if (m.type != .Function or m.node_variant == null) continue;
+                const fnv = m.node_variant.?.function;
+                const fn_rtype: CheckedType = if (fnv.rtype) |rt| type_from_dtype(&rt) else CheckedType{ .base = .Void };
+
+                var fn_env = TypeEnv.init(proc.allocator);
+                defer fn_env.deinit();
+                try fn_env.push();
+
+                // Add module-level globals.
+                for (proc.nodes.items()) |gn| {
+                    if (gn.type == .Variable and gn.node_variant != null and gn.binded == null) {
+                        const v = gn.node_variant.?.variable;
+                        try fn_env.put_current(v.name.items, type_from_dtype(v.type));
+                    }
+                }
+
+                // Add implicit `self`.
+                try fn_env.put_current("self", self_type);
+
+                // Add explicit args.
+                if (fnv.args) |args| {
+                    for (args.items()) |arg_ptr| {
+                        const arg = arg_ptr.*;
+                        if (arg.type != .Variable or arg.node_variant == null) continue;
+                        const v = arg.node_variant.?.variable;
+                        try fn_env.put_current(v.name.items, type_from_dtype(v.type));
+                    }
+                }
+
+                if (fnv.body) |body| {
+                    try proc.check_body(body, &fn_env, fns, fn_rtype);
+                }
             }
         }
     }
