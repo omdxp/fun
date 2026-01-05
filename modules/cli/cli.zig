@@ -639,10 +639,10 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
 
         // Preserve blank lines (2+ newlines) between statements/constructs.
         if (pending_newlines >= 2) {
-              if (!state.at_line_start.*) try state.out.append('\n');
-              try ensureBlankLine(state.out);
-              state.at_line_start.* = true;
-              state.prev_token.* = null;
+            if (!state.at_line_start.*) try state.out.append('\n');
+            try ensureBlankLine(state.out);
+            state.at_line_start.* = true;
+            state.prev_token.* = null;
         }
         pending_newlines = 0;
 
@@ -827,10 +827,10 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
         if (t2.type == .Symbol and t2.data.cval == '}') {
             if (decl_block_depth > 0) decl_block_depth -= 1;
             if (enum_block_depth > 0) enum_block_depth -= 1;
-                if (!state.at_line_start.*) try state.out.append('\n');
-                if (state.indent.* > 0) state.indent.* -= 1;
-                try state.out.appendNTimes(' ', state.indent.* * fmt_indent_width);
-                try state.out.append('}');
+            if (!state.at_line_start.*) try state.out.append('\n');
+            if (state.indent.* > 0) state.indent.* -= 1;
+            try state.out.appendNTimes(' ', state.indent.* * fmt_indent_width);
+            try state.out.append('}');
 
             // If a fit-branch separator comma immediately follows, keep it on the same line:
             // `} , Next -> {` becomes `},\nNext -> {`.
@@ -927,11 +927,17 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
                     if (pt2.type == .Operator and operator_needs_spaces(pt2.data.sval.items)) break :blk true;
                     break :blk false;
                 }
-                    // PATCH: Ensure space after equality (==) or assignment (=) before dot shorthand (enum variant)
-                    if (pt2.type == .Operator and (std.mem.eql(u8, pt2.data.sval.items, "==") or std.mem.eql(u8, pt2.data.sval.items, "="))
-                        and t2.type == .Operator and t2.data.sval.items.len > 0 and t2.data.sval.items[0] == '.') {
-                        break :blk true;
-                    }
+                // Ensure space after comparison or assignment operators before dot shorthand (enum variant)
+                if (pt2.type == .Operator and (std.mem.eql(u8, pt2.data.sval.items, "==") or
+                    std.mem.eql(u8, pt2.data.sval.items, "=") or
+                    std.mem.eql(u8, pt2.data.sval.items, "!=") or
+                    std.mem.eql(u8, pt2.data.sval.items, "<") or
+                    std.mem.eql(u8, pt2.data.sval.items, "<=") or
+                    std.mem.eql(u8, pt2.data.sval.items, ">") or
+                    std.mem.eql(u8, pt2.data.sval.items, ">=")) and t2.type == .Operator and t2.data.sval.items.len > 0 and t2.data.sval.items[0] == '.')
+                {
+                    break :blk true;
+                }
                 if (t2.type == .Operator) {
                     break :blk operator_needs_spaces(t2.data.sval.items);
                 }

@@ -2263,8 +2263,8 @@ const LspServer = struct {
             }
 
             const keywords = [_][]const u8{
-                "imp",  "fun", "compound", "quirk", "impl", "enum", "ret", "if",  "elif", "else",  "for", "fit", "break", "continue",
-                "void", "raw", "num",      "dec",   "str",  "bin", "chr", "true", "false",
+                "imp",  "fun", "compound", "quirk", "impl", "enum", "ret", "if",   "elif",  "else", "for", "fit", "break", "continue",
+                "void", "raw", "num",      "dec",   "str",  "bin",  "chr", "true", "false",
             };
             for (keywords) |kw| {
                 if (prefix.len == 0 or std.mem.startsWith(u8, kw, prefix)) {
@@ -2424,8 +2424,8 @@ const LspServer = struct {
 
         // Keywords.
         const keywords = [_][]const u8{
-            "imp",  "fun", "compound", "quirk", "impl", "enum", "ret", "if",  "elif", "else",  "for", "fit", "break", "continue",
-            "void", "raw", "num",      "dec",   "str",  "bin", "chr", "true", "false",
+            "imp",  "fun", "compound", "quirk", "impl", "enum", "ret", "if",   "elif",  "else", "for", "fit", "break", "continue",
+            "void", "raw", "num",      "dec",   "str",  "bin",  "chr", "true", "false",
         };
         for (keywords) |kw| {
             if (prefix.len == 0 or std.mem.startsWith(u8, kw, prefix)) {
