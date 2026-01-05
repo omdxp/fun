@@ -613,6 +613,7 @@ fn is_top_level_construct_keyword(kw: []const u8) bool {
     return std.mem.eql(u8, kw, "fun") or
         std.mem.eql(u8, kw, "compound") or
         std.mem.eql(u8, kw, "quirk") or
+        std.mem.eql(u8, kw, "enum") or
         std.mem.eql(u8, kw, "impl");
 }
 
@@ -627,6 +628,8 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
     var in_fun_signature: bool = false;
     var pending_decl_block_open: bool = false;
     var decl_block_depth: isize = 0;
+    var pending_enum_block_open: bool = false;
+    var enum_block_depth: isize = 0;
     while (idx < toks.len) : (idx += 1) {
         const t2 = toks[idx];
         if (t2.type == .NewLine) {
@@ -636,13 +639,10 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
 
         // Preserve blank lines (2+ newlines) between statements/constructs.
         if (pending_newlines >= 2) {
-            if (!state.at_line_start.*) {
-                try state.out.append('\n');
-                state.at_line_start.* = true;
-            }
-            try ensureBlankLine(state.out);
-            state.at_line_start.* = true;
-            state.prev_token.* = null;
+              if (!state.at_line_start.*) try state.out.append('\n');
+              try ensureBlankLine(state.out);
+              state.at_line_start.* = true;
+              state.prev_token.* = null;
         }
         pending_newlines = 0;
 
@@ -716,6 +716,9 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
             }
             if (std.mem.eql(u8, kw2, "compound") or std.mem.eql(u8, kw2, "quirk")) {
                 pending_decl_block_open = true;
+            }
+            if (std.mem.eql(u8, kw2, "enum")) {
+                pending_enum_block_open = true;
             }
             if (std.mem.eql(u8, kw2, "if") or std.mem.eql(u8, kw2, "elif")) {
                 // Decide whether this `if/elif` is a block (`{}`) or a single-statement form.
@@ -823,13 +826,26 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
         // Handle closing brace with optional same-line `elif`/`else`.
         if (t2.type == .Symbol and t2.data.cval == '}') {
             if (decl_block_depth > 0) decl_block_depth -= 1;
-            if (!state.at_line_start.*) {
-                try state.out.append('\n');
-                state.at_line_start.* = true;
+            if (enum_block_depth > 0) enum_block_depth -= 1;
+                if (!state.at_line_start.*) try state.out.append('\n');
+                if (state.indent.* > 0) state.indent.* -= 1;
+                try state.out.appendNTimes(' ', state.indent.* * fmt_indent_width);
+                try state.out.append('}');
+
+            // If a fit-branch separator comma immediately follows, keep it on the same line:
+            // `} , Next -> {` becomes `},\nNext -> {`.
+            {
+                var j2 = idx + 1;
+                var saw_comment: bool = false;
+                while (j2 < toks.len and (toks[j2].type == .NewLine or toks[j2].type == .Comment)) : (j2 += 1) {
+                    if (toks[j2].type == .Comment) saw_comment = true;
+                }
+                if (!saw_comment and j2 < toks.len and toks[j2].type == .Operator and std.mem.eql(u8, toks[j2].data.sval.items, ",")) {
+                    try state.out.append(',');
+                    // Skip the comma token; formatting continues after it.
+                    idx = j2;
+                }
             }
-            if (state.indent.* > 0) state.indent.* -= 1;
-            try state.out.appendNTimes(' ', state.indent.* * fmt_indent_width);
-            try state.out.append('}');
 
             // Look ahead for `elif`/`else`.
             var j2 = idx + 1;
@@ -911,6 +927,11 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
                     if (pt2.type == .Operator and operator_needs_spaces(pt2.data.sval.items)) break :blk true;
                     break :blk false;
                 }
+                    // PATCH: Ensure space after equality (==) or assignment (=) before dot shorthand (enum variant)
+                    if (pt2.type == .Operator and (std.mem.eql(u8, pt2.data.sval.items, "==") or std.mem.eql(u8, pt2.data.sval.items, "="))
+                        and t2.type == .Operator and t2.data.sval.items.len > 0 and t2.data.sval.items[0] == '.') {
+                        break :blk true;
+                    }
                 if (t2.type == .Operator) {
                     break :blk operator_needs_spaces(t2.data.sval.items);
                 }
@@ -935,6 +956,10 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
                     decl_block_depth += 1;
                     pending_decl_block_open = false;
                 }
+                if (pending_enum_block_open) {
+                    enum_block_depth += 1;
+                    pending_enum_block_open = false;
+                }
                 if (in_fun_signature) in_fun_signature = false;
                 try state.out.append('{');
                 try state.out.append('\n');
@@ -945,7 +970,11 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
             }
             if (c2 == ';') {
                 if (in_fun_signature) in_fun_signature = false;
-                try state.out.append(';');
+                if (enum_block_depth > 0) {
+                    try state.out.append(',');
+                } else {
+                    try state.out.append(';');
+                }
                 try state.out.append('\n');
                 state.at_line_start.* = true;
                 state.prev_token.* = null;
@@ -953,7 +982,12 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
             }
             if (c2 == ',') {
                 try state.out.append(',');
-                try state.out.append(' ');
+                if (enum_block_depth > 0) {
+                    try state.out.append('\n');
+                    state.at_line_start.* = true;
+                } else {
+                    try state.out.append(' ');
+                }
                 state.prev_token.* = null;
                 continue;
             }
@@ -970,7 +1004,12 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
 
         if (t2.type == .Operator and std.mem.eql(u8, t2.data.sval.items, ",")) {
             try state.out.append(',');
-            try state.out.append(' ');
+            if (enum_block_depth > 0) {
+                try state.out.append('\n');
+                state.at_line_start.* = true;
+            } else {
+                try state.out.append(' ');
+            }
             state.prev_token.* = null;
             continue;
         }

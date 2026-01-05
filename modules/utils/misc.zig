@@ -60,8 +60,8 @@ pub fn keyword_is_datatype(str: []const u8) bool {
 /// Returns:
 /// - `bool`: `true` if the string is a keyword, otherwise `false`.
 pub fn is_keyword(str: []const u8) bool {
-    // TODO: more to add later
     return mem.eql(u8, "imp", str) or mem.eql(u8, "fun", str) or
+        mem.eql(u8, "enum", str) or
         mem.eql(u8, "compound", str) or mem.eql(u8, "quirk", str) or mem.eql(u8, "impl", str) or
         mem.eql(u8, "void", str) or
         mem.eql(u8, "raw", str) or

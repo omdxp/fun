@@ -1061,6 +1061,7 @@ const LspServer = struct {
                         const name = tok.text;
                         const hit = self.findMemberByContainer(uri, recv_type, name, .field) orelse
                             self.findMemberByContainer(uri, recv_type, name, .property) orelse
+                            self.findMemberByContainer(uri, recv_type, name, .enumMember) orelse
                             self.findMemberByContainer(uri, recv_type, name, .method);
                         if (hit) |h| {
                             var buf = std.ArrayList(u8).init(self.allocator);
@@ -1073,6 +1074,9 @@ const LspServer = struct {
                                     } else {
                                         try buf.writer().print("_field_\n", .{});
                                     }
+                                },
+                                .enumMember => {
+                                    try buf.writer().print("```\n{s}.{s}\n```\n", .{ recv_type, name });
                                 },
                                 .method => {
                                     if (h.sym.detail) |det| {
@@ -1127,8 +1131,9 @@ const LspServer = struct {
                 } else {
                     try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
                 }
-            } else if ((d.kind == .struct_ or d.kind == .interface)) {
-                try buf.writer().print("```\n{s} {s}\n```\n", .{ if (d.kind == .struct_) "compound" else "quirk", tok.text });
+            } else if ((d.kind == .struct_ or d.kind == .interface or d.kind == .enum_)) {
+                const kw = if (d.kind == .struct_) "compound" else if (d.kind == .interface) "quirk" else "enum";
+                try buf.writer().print("```\n{s} {s}\n```\n", .{ kw, tok.text });
             } else {
                 try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
             }
@@ -1154,8 +1159,9 @@ const LspServer = struct {
                 } else {
                     try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
                 }
-            } else if ((d.kind == .struct_ or d.kind == .interface)) {
-                try buf.writer().print("```\n{s} {s}\n```\n", .{ if (d.kind == .struct_) "compound" else "quirk", tok.text });
+            } else if ((d.kind == .struct_ or d.kind == .interface or d.kind == .enum_)) {
+                const kw = if (d.kind == .struct_) "compound" else if (d.kind == .interface) "quirk" else "enum";
+                try buf.writer().print("```\n{s} {s}\n```\n", .{ kw, tok.text });
             } else {
                 try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
             }
@@ -1253,12 +1259,13 @@ const LspServer = struct {
                 if (s.container_fn_range != null) continue;
                 if (s.container_type == null) continue;
                 if (!std.mem.eql(u8, s.container_type.?, container_type)) continue;
-                if (!(s.kind == .field or s.kind == .property or s.kind == .method)) continue;
+                if (!(s.kind == .field or s.kind == .property or s.kind == .method or s.kind == .enumMember)) continue;
                 if (prefix.len != 0 and !std.mem.startsWith(u8, s.name, prefix)) continue;
 
                 const kind: i64 = switch (s.kind) {
                     .method => 2,
                     .field, .property => 5,
+                    .enumMember => 20,
                     else => 6,
                 };
 
@@ -1278,6 +1285,12 @@ const LspServer = struct {
                         if (s.value_type) |vt| {
                             break :blk try self.allocator.dupe(u8, vt);
                         }
+                    }
+                    if (s.kind == .enumMember) {
+                        var db = std.ArrayList(u8).init(self.allocator);
+                        defer db.deinit();
+                        try db.writer().print("{s}.{s}", .{ container_type, s.name });
+                        break :blk try self.allocator.dupe(u8, db.items);
                     }
                     if (s.kind == .method) {
                         if (s.detail) |d| break :blk try self.allocator.dupe(u8, d);
@@ -1954,7 +1967,7 @@ const LspServer = struct {
                 if (s.container_fn_range != null) continue;
                 if (!std.mem.eql(u8, s.name, name)) continue;
                 switch (s.kind) {
-                    .struct_, .interface => return true,
+                    .struct_, .interface, .enum_ => return true,
                     else => {},
                 }
             }
@@ -1969,7 +1982,7 @@ const LspServer = struct {
                 for (idx.symbols) |s| {
                     if (s.container_fn_range != null) continue;
                     if (!std.mem.eql(u8, s.name, type_name)) continue;
-                    if (s.kind != .struct_ and s.kind != .interface) continue;
+                    if (s.kind != .struct_ and s.kind != .interface and s.kind != .enum_) continue;
                     return .{ .uri = preferred_uri, .sym = s };
                 }
             }
@@ -1977,7 +1990,7 @@ const LspServer = struct {
 
         // Prefer direct imports of the current doc next.
         if (self.findAnyGlobalDefinitionInDirectImports(preferred_uri, type_name)) |hit| {
-            if (hit.sym.kind == .struct_ or hit.sym.kind == .interface) return hit;
+            if (hit.sym.kind == .struct_ or hit.sym.kind == .interface or hit.sym.kind == .enum_) return hit;
         }
 
         // Finally, scan all indexed docs.
@@ -1989,7 +2002,7 @@ const LspServer = struct {
             for (idx.symbols) |s| {
                 if (s.container_fn_range != null) continue;
                 if (!std.mem.eql(u8, s.name, type_name)) continue;
-                if (s.kind != .struct_ and s.kind != .interface) continue;
+                if (s.kind != .struct_ and s.kind != .interface and s.kind != .enum_) continue;
                 return .{ .uri = uri, .sym = s };
             }
         }
@@ -2042,7 +2055,7 @@ const LspServer = struct {
             // Skip type identifiers that are part of declarations like `compound T`, `quirk Q`, `impl T`, `fun f`.
             if (i > 0 and idx.tokens[i - 1].kind == .keyword) {
                 const kw = idx.tokens[i - 1].text;
-                if (std.mem.eql(u8, kw, "compound") or std.mem.eql(u8, kw, "quirk") or std.mem.eql(u8, kw, "impl") or std.mem.eql(u8, kw, "fun")) {
+                if (std.mem.eql(u8, kw, "compound") or std.mem.eql(u8, kw, "quirk") or std.mem.eql(u8, kw, "impl") or std.mem.eql(u8, kw, "enum") or std.mem.eql(u8, kw, "fun")) {
                     continue;
                 }
             }
@@ -2250,7 +2263,7 @@ const LspServer = struct {
             }
 
             const keywords = [_][]const u8{
-                "imp",  "fun", "compound", "quirk", "impl", "ret", "if",  "elif", "else",  "for", "fit", "break", "continue",
+                "imp",  "fun", "compound", "quirk", "impl", "enum", "ret", "if",  "elif", "else",  "for", "fit", "break", "continue",
                 "void", "raw", "num",      "dec",   "str",  "bin", "chr", "true", "false",
             };
             for (keywords) |kw| {
@@ -2411,7 +2424,7 @@ const LspServer = struct {
 
         // Keywords.
         const keywords = [_][]const u8{
-            "imp",  "fun", "compound", "quirk", "impl", "ret", "if",  "elif", "else",  "for", "fit", "break", "continue",
+            "imp",  "fun", "compound", "quirk", "impl", "enum", "ret", "if",  "elif", "else",  "for", "fit", "break", "continue",
             "void", "raw", "num",      "dec",   "str",  "bin", "chr", "true", "false",
         };
         for (keywords) |kw| {
@@ -6390,6 +6403,88 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
             continue;
         }
 
+        if (isKeyword(t, "enum")) {
+            const name_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
+            if (!isIdent(tokens[name_i])) continue;
+            const name = tokenString(tokens[name_i]);
+            const r = rangeFromTokenPos(tokens[name_i].pos);
+            try out.append(.{
+                .name = try allocator.dupe(u8, name),
+                .kind = .enum_,
+                .decl_range = r,
+                .selection_range = r,
+                .container_type = null,
+                .value_type = null,
+                .detail = null,
+            });
+
+            // Best-effort enum variant indexing inside `enum Name { Variant; Variant2 = 3; ... }`.
+            const owner_name = name;
+            var j_opt = nextNonTrivialToken(tokens, name_i + 1);
+            while (j_opt) |j| {
+                if (isSymbolChar(tokens[j], '{')) {
+                    var depth: i64 = 1;
+                    var k: usize = j + 1;
+                    while (k < tokens.len and depth > 0) : (k += 1) {
+                        const tk = tokens[k];
+                        if (isSymbolChar(tk, '{')) depth += 1;
+                        if (isSymbolChar(tk, '}')) depth -= 1;
+                        if (depth != 1) continue;
+
+                        if (!isIdent(tk)) continue;
+                        const after_name_i = nextNonTrivialToken(tokens, k + 1) orelse continue;
+
+                        // `Variant;`
+                        if (isSymbolChar(tokens[after_name_i], ';')) {
+                            const vname = tokenString(tk);
+                            const vr = rangeFromTokenPos(tk.pos);
+                            try out.append(.{
+                                .name = try allocator.dupe(u8, vname),
+                                .kind = .enumMember,
+                                .decl_range = vr,
+                                .selection_range = vr,
+                                .container_type = try allocator.dupe(u8, owner_name),
+                                .value_type = try allocator.dupe(u8, owner_name),
+                                .detail = null,
+                            });
+                            k = after_name_i;
+                            continue;
+                        }
+
+                        // `Variant = 3;`
+                        if (isPunctChar(tokens[after_name_i], '=')) {
+                            const semi_i = nextNonTrivialToken(tokens, after_name_i + 1) orelse continue;
+                            // Scan forward to ';'
+                            var m: usize = semi_i;
+                            while (m < tokens.len) : (m += 1) {
+                                if (isSymbolChar(tokens[m], ';')) break;
+                                if (isSymbolChar(tokens[m], '{')) break;
+                                if (isSymbolChar(tokens[m], '}')) break;
+                            }
+                            if (m < tokens.len and isSymbolChar(tokens[m], ';')) {
+                                const vname = tokenString(tk);
+                                const vr = rangeFromTokenPos(tk.pos);
+                                try out.append(.{
+                                    .name = try allocator.dupe(u8, vname),
+                                    .kind = .enumMember,
+                                    .decl_range = vr,
+                                    .selection_range = vr,
+                                    .container_type = try allocator.dupe(u8, owner_name),
+                                    .value_type = try allocator.dupe(u8, owner_name),
+                                    .detail = null,
+                                });
+                                k = m;
+                            }
+                        }
+                    }
+                    break;
+                }
+                j_opt = nextNonTrivialToken(tokens, j + 1);
+            }
+
+            continue;
+        }
+
         if (isKeyword(t, "quirk")) {
             const name_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
             if (!isIdent(tokens[name_i])) continue;
@@ -6520,7 +6615,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
             // Avoid `compound X`, `quirk X`, `impl X`, `fun name`.
             if (i > 0 and tokens[i - 1].type == .Keyword) {
                 const kw = tokenString(tokens[i - 1]);
-                if (std.mem.eql(u8, kw, "compound") or std.mem.eql(u8, kw, "quirk") or std.mem.eql(u8, kw, "impl") or std.mem.eql(u8, kw, "fun")) {
+                if (std.mem.eql(u8, kw, "compound") or std.mem.eql(u8, kw, "quirk") or std.mem.eql(u8, kw, "impl") or std.mem.eql(u8, kw, "enum") or std.mem.eql(u8, kw, "fun")) {
                     continue;
                 }
             }

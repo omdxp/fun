@@ -162,3 +162,94 @@ test "fit pointer missing default warns" {
 
     try fs.cwd().deleteFile(ifilepath);
 }
+
+test "fit enum exhausted via all variants no warning" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "fit_enum_exhausted.fn";
+
+    const input =
+        "imp std.c.io;\n" ++
+        "enum Color {\n" ++
+        "  Red;\n" ++
+        "  Green;\n" ++
+        "  Blue;\n" ++
+        "}\n" ++
+        "fun main() {\n" ++
+        "  Color c = Color.Red;\n" ++
+        "  fit c {\n" ++
+        "    Color.Red -> { printf(\"R\\n\"); },\n" ++
+        "    Color.Green -> { printf(\"G\\n\"); },\n" ++
+        "    Color.Blue -> { printf(\"B\\n\"); }\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(res.warnings == null);
+    try fs.cwd().deleteFile(ifilepath);
+}
+
+test "fit enum missing variant warns" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "fit_enum_missing_variant.fn";
+
+    const input =
+        "imp std.c.io;\n" ++
+        "enum Color {\n" ++
+        "  Red;\n" ++
+        "  Green;\n" ++
+        "  Blue;\n" ++
+        "}\n" ++
+        "fun main() {\n" ++
+        "  Color c = Color.Red;\n" ++
+        "  fit c {\n" ++
+        "    Color.Red -> { printf(\"R\\n\"); },\n" ++
+        "    Color.Green -> { printf(\"G\\n\"); }\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(res.warnings != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "fit statement is not exhausted for enum") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
+test "fit enum dot shorthand exhausted no warning" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "fit_enum_dot_shorthand_exhausted.fn";
+
+    const input =
+        "imp std.c.io;\n" ++
+        "enum Color {\n" ++
+        "  Red;\n" ++
+        "  Green;\n" ++
+        "  Blue;\n" ++
+        "}\n" ++
+        "fun main() {\n" ++
+        "  Color c = .Red;\n" ++
+        "  fit c {\n" ++
+        "    .Red -> { printf(\"R\\n\"); },\n" ++
+        "    .Green -> { printf(\"G\\n\"); },\n" ++
+        "    .Blue -> { printf(\"B\\n\"); }\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(res.warnings == null);
+    try fs.cwd().deleteFile(ifilepath);
+}

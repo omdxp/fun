@@ -1,0 +1,22 @@
+imp std.c.io;
+
+enum Color {
+  Red,
+  Green,
+  Blue,
+}
+
+fun main() {
+  // Intentionally non-exhaustive: missing `Color.Blue` and no `_` catch-all.
+  // The compiler should warn about non-exhaustive enum fit.
+  Color c = Color.Red;
+
+  fit c {
+    Color.Red -> {
+      printf("red\n");
+    },
+    Color.Green -> {
+      printf("green\n");
+    }
+  }
+}

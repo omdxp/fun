@@ -1,0 +1,24 @@
+imp std.c.io;
+
+enum Color {
+  Red,
+  Green,
+  Blue,
+}
+
+fun main() {
+  // Exhausted via catch-all: no warning expected.
+  Color c = Color.Blue;
+
+  fit c {
+    Color.Red -> {
+      printf("red\n");
+    },
+    Color.Green -> {
+      printf("green\n");
+    },
+    _ -> {
+      printf("other\n");
+    }
+  }
+}

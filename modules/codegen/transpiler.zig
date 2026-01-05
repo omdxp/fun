@@ -130,6 +130,9 @@ const ImplKeyContext = struct {
 pub const TypeRegistry = struct {
     allocator: mem.Allocator,
 
+    /// Maps `enum` names to their defining heap node.
+    enums_by_name: std.StringHashMap(*ast.Node),
+
     /// Maps `compound` names to their defining heap node.
     compounds_by_name: std.StringHashMap(*ast.Node),
 
@@ -151,6 +154,7 @@ pub const TypeRegistry = struct {
     pub fn init(allocator: mem.Allocator) TypeRegistry {
         return .{
             .allocator = allocator,
+            .enums_by_name = std.StringHashMap(*ast.Node).init(allocator),
             .compounds_by_name = std.StringHashMap(*ast.Node).init(allocator),
             .quirk_sig_by_name = std.StringHashMap([]const u8).init(allocator),
             .quirks_by_sig = std.StringHashMap(*ast.Node).init(allocator),
@@ -162,6 +166,7 @@ pub const TypeRegistry = struct {
 
     pub fn deinit(self: *TypeRegistry) void {
         // compound/quirk name keys are borrowed from AST node allocations.
+        self.enums_by_name.deinit();
         self.compounds_by_name.deinit();
         self.quirk_sig_by_name.deinit();
         self.quirks_by_sig.deinit();
@@ -482,6 +487,16 @@ pub const TranspileProcess = struct {
     fn collect_type_registry_module(self: *Self, proc: *Self, reg: *TypeRegistry) TranspileError!void {
         for (proc.owned_nodes.items) |n| {
             switch (n.type) {
+                .Enum => {
+                    if (n.node_variant == null) continue;
+                    const name = n.node_variant.?.enum_decl.name.items;
+                    if (reg.enums_by_name.contains(name) or reg.compounds_by_name.contains(name) or reg.quirk_sig_by_name.contains(name)) {
+                        return TranspileError.DuplicateSymbol;
+                    }
+                    reg.enums_by_name.put(name, n) catch {
+                        return TranspileError.MemoryAllocationFailed;
+                    };
+                },
                 .Compound => {
                     if (n.node_variant == null) continue;
                     const name = n.node_variant.?.compound.name.items;
@@ -1786,6 +1801,65 @@ pub const TranspileProcess = struct {
         return t.base == .Unknown and t.name != null;
     }
 
+    fn expected_enum_name(self: *Self, t: CheckedType) ?[]const u8 {
+        if (t.base != .Unknown) return null;
+        if (t.pointer_depth != 0 or t.is_array) return null;
+        const name = t.name orelse return null;
+        const reg = self.root_registry() orelse return null;
+        if (!reg.enums_by_name.contains(name)) return null;
+        return name;
+    }
+
+    fn dot_shorthand_variant_name(node: *ast.Node) ?[]const u8 {
+        if (node.type != .Expression or node.node_variant == null) return null;
+        const exp = node.node_variant.?.exp;
+        if (!mem.eql(u8, exp.op, ".")) return null;
+        const left = exp.left orelse return null;
+        const right = exp.right orelse return null;
+        if (left.*.type != .Blank) return null;
+        if (right.*.type != .Identifier or right.*.data == null) return null;
+        return right.*.data.?.sval.items;
+    }
+
+    fn resolve_dot_shorthand_enum_variant(self: *Self, node: *ast.Node, enum_name: []const u8) TranspileError!CheckedType {
+        const variant_name = dot_shorthand_variant_name(node) orelse return .{ .base = .Unknown };
+        const reg = self.root_registry() orelse return .{ .base = .Unknown };
+        const enode = reg.enums_by_name.get(enum_name) orelse {
+            self.report_type_error(node.*, "unknown enum '{s}'", .{enum_name});
+            return TranspileError.TypeMismatch;
+        };
+        if (enode.node_variant == null) return .{ .base = .Unknown };
+
+        var ok = false;
+        for (enode.node_variant.?.enum_decl.variants.items()) |v| {
+            if (mem.eql(u8, v.name.items, variant_name)) {
+                ok = true;
+                break;
+            }
+        }
+        if (!ok) {
+            self.report_type_error(node.*, "enum '{s}' has no variant '{s}'", .{ enum_name, variant_name });
+            return TranspileError.UnknownField;
+        }
+
+        // Rewrite `.Variant` into `Enum.Variant` by mutating the blank LHS node.
+        const left_ptr = node.node_variant.?.exp.left.?;
+        // AST nodes are arena-owned; allocate via `self.allocator` to keep ownership consistent.
+        var sval = std.ArrayList(u8).init(self.allocator);
+        sval.appendSlice(enum_name) catch {
+            return TranspileError.MemoryAllocationFailed;
+        };
+        left_ptr.* = ast.Node{
+            .type = .Identifier,
+            .pos = left_ptr.*.pos orelse node.pos,
+            .data = .{ .sval = sval },
+            .binded = null,
+            .node_variant = null,
+        };
+
+        return .{ .base = .Unknown, .name = enum_name };
+    }
+
     fn lookup_compound_field(self: *Self, compound_name: []const u8, field_name: []const u8) ?*const dtype.DataType {
         const root = self.get_root();
         if (root.type_registry == null) return null;
@@ -2049,13 +2123,13 @@ pub const TranspileProcess = struct {
         return false;
     }
 
-    fn flatten_call_args(self: *Self, node: ast.Node, out: *std.ArrayList(ast.Node)) TranspileError!void {
+    fn flatten_call_args_ptr(self: *Self, node: *ast.Node, out: *std.ArrayList(*ast.Node)) TranspileError!void {
         // Function call arguments are parsed as a parenthesis node that wraps an expression.
         // For zero-arg calls this inner expression is `.Blank`.
         if (node.type == .ExpressionParenthesis and node.node_variant != null) {
-            const inner = node.node_variant.?.paren.exp.*;
-            if (inner.type == .Blank) return;
-            return try self.flatten_call_args(inner, out);
+            const inner = node.node_variant.?.paren.exp;
+            if (inner.*.type == .Blank) return;
+            return try self.flatten_call_args_ptr(inner, out);
         }
 
         // A `.Blank` node represents an empty argument list.
@@ -2063,8 +2137,8 @@ pub const TranspileProcess = struct {
 
         if (node.type == .Expression and node.node_variant != null and mem.eql(u8, node.node_variant.?.exp.op, ",")) {
             const exp = node.node_variant.?.exp;
-            if (exp.left) |left| try self.flatten_call_args(left.*, out);
-            if (exp.right) |right| try self.flatten_call_args(right.*, out);
+            if (exp.left) |left| try self.flatten_call_args_ptr(left, out);
+            if (exp.right) |right| try self.flatten_call_args_ptr(right, out);
             return;
         }
         out.append(node) catch {
@@ -2076,15 +2150,13 @@ pub const TranspileProcess = struct {
         switch (node.type) {
             .Bracket => {
                 // Array literal: `[a, b, c]`. The parser stores elements under `bracket.inner`.
-                const inner = node.node_variant.?.bracket.inner.*;
-
-                var elems = std.ArrayList(ast.Node).init(self.allocator);
+                var elems = std.ArrayList(*ast.Node).init(self.allocator);
                 defer elems.deinit();
-                try self.flatten_call_args(inner, &elems);
+                try self.flatten_call_args_ptr(node.node_variant.?.bracket.inner, &elems);
 
                 var elem_type: ?CheckedType = null;
                 for (elems.items) |elem_node| {
-                    const t = try self.infer_expr_type(elem_node, env, fns);
+                    const t = try self.infer_expr_type(elem_node.*, env, fns);
                     if (elem_type == null) {
                         elem_type = t;
                         continue;
@@ -2234,10 +2306,10 @@ pub const TranspileProcess = struct {
                         return TranspileError.NotCallable;
                     };
 
-                    var args_nodes = std.ArrayList(ast.Node).init(self.allocator);
+                    var args_nodes = std.ArrayList(*ast.Node).init(self.allocator);
                     defer args_nodes.deinit();
                     if (exp.right) |right| {
-                        try self.flatten_call_args(right.*, &args_nodes);
+                        try self.flatten_call_args_ptr(right, &args_nodes);
                     }
 
                     // Standard function call: `foo(...)`.
@@ -2257,7 +2329,7 @@ pub const TranspileProcess = struct {
                                 self.report_type_error(node, "sizeof expects exactly 1 argument", .{});
                                 return TranspileError.InvalidSizeof;
                             }
-                            const arg0 = args_nodes.items[0];
+                            const arg0 = args_nodes.items[0].*;
                             if (arg0.type != .Identifier or arg0.data == null) {
                                 self.report_type_error(node, "sizeof argument must be a type name", .{});
                                 return TranspileError.InvalidSizeof;
@@ -2276,6 +2348,7 @@ pub const TranspileProcess = struct {
                                 const root = self.get_root();
                                 if (root.type_registry == null) break :blk false;
                                 const reg = &root.type_registry.?;
+                                if (reg.enums_by_name.contains(type_name)) break :blk true;
                                 if (reg.compounds_by_name.contains(type_name)) break :blk true;
                                 if (reg.quirk_sig_by_name.contains(type_name)) break :blk true;
                                 break :blk false;
@@ -2386,7 +2459,7 @@ pub const TranspileProcess = struct {
                     // errors are not missed.
                     if (skip_signature_typecheck) {
                         for (args_nodes.items) |arg_node| {
-                            _ = try self.infer_expr_type(arg_node, env, fns);
+                            _ = try self.infer_expr_type(arg_node.*, env, fns);
                         }
                         return call_rtype;
                     }
@@ -2404,7 +2477,17 @@ pub const TranspileProcess = struct {
                             return TranspileError.WrongArgCount;
                         }
                         for (args_nodes.items, 0..) |arg_node, idx| {
-                            const actual = try self.infer_expr_type(arg_node, env, fns);
+                            // Enum shorthand args: `foo(.Blue)` where param type is `Color`.
+                            if (idx < sig.args.len) {
+                                const expected = sig.args[idx];
+                                if (self.expected_enum_name(expected)) |enum_name| {
+                                    if (dot_shorthand_variant_name(arg_node)) |_| {
+                                        _ = try self.resolve_dot_shorthand_enum_variant(arg_node, enum_name);
+                                    }
+                                }
+                            }
+
+                            const actual = try self.infer_expr_type(arg_node.*, env, fns);
                             if (idx < sig.args.len) {
                                 const expected = sig.args[idx];
                                 if (is_known_type(expected) and is_known_type(actual) and !(try self.can_implicit_coerce(expected, actual))) {
@@ -2422,8 +2505,14 @@ pub const TranspileProcess = struct {
                             return TranspileError.WrongArgCount;
                         }
                         for (args_nodes.items, 0..) |arg_node, idx| {
-                            const actual = try self.infer_expr_type(arg_node, env, fns);
                             const expected = type_from_dtype(expected_args[idx].dtype);
+                            if (self.expected_enum_name(expected)) |enum_name| {
+                                if (dot_shorthand_variant_name(arg_node)) |_| {
+                                    _ = try self.resolve_dot_shorthand_enum_variant(arg_node, enum_name);
+                                }
+                            }
+
+                            const actual = try self.infer_expr_type(arg_node.*, env, fns);
                             if (is_known_type(expected) and is_known_type(actual) and !(try self.can_implicit_coerce(expected, actual))) {
                                 self.report_type_error(node, "type mismatch in call to method '{s}' argument {d}", .{ msig.name.items, idx + 1 });
                                 return TranspileError.TypeMismatch;
@@ -2449,7 +2538,16 @@ pub const TranspileProcess = struct {
 
                         for (args_nodes.items, 0..) |arg_node, idx| {
                             const sig_idx = idx + 1; // skip implicit self
-                            const actual = try self.infer_expr_type(arg_node, env, fns);
+                            if (sig_idx < psig.args.len) {
+                                const expected = psig.args[sig_idx];
+                                if (self.expected_enum_name(expected)) |enum_name| {
+                                    if (dot_shorthand_variant_name(arg_node)) |_| {
+                                        _ = try self.resolve_dot_shorthand_enum_variant(arg_node, enum_name);
+                                    }
+                                }
+                            }
+
+                            const actual = try self.infer_expr_type(arg_node.*, env, fns);
                             if (sig_idx < psig.args.len) {
                                 const expected = psig.args[sig_idx];
                                 if (is_known_type(expected) and is_known_type(actual) and !(try self.can_implicit_coerce(expected, actual))) {
@@ -2466,6 +2564,36 @@ pub const TranspileProcess = struct {
                 if (mem.eql(u8, op, ".")) {
                     const left = exp.left orelse return .{ .base = .Unknown };
                     const right = exp.right orelse return .{ .base = .Unknown };
+
+                    // Enum variant constant: `Enum.Variant`.
+                    // Only treat this form as enum access when `Enum` is not a value in the current env.
+                    if (left.*.type == .Identifier and left.*.data != null and right.*.type == .Identifier and right.*.data != null) {
+                        const enum_name = left.*.data.?.sval.items;
+                        const variant_name = right.*.data.?.sval.items;
+
+                        if (env.get(enum_name) == null) {
+                            const root = self.get_root();
+                            if (root.type_registry != null) {
+                                const reg = &root.type_registry.?;
+                                if (reg.enums_by_name.get(enum_name)) |enode| {
+                                    if (enode.node_variant != null) {
+                                        var ok = false;
+                                        for (enode.node_variant.?.enum_decl.variants.items()) |v| {
+                                            if (mem.eql(u8, v.name.items, variant_name)) {
+                                                ok = true;
+                                                break;
+                                            }
+                                        }
+                                        if (!ok) {
+                                            self.report_type_error(node, "enum '{s}' has no variant '{s}'", .{ enum_name, variant_name });
+                                            return TranspileError.UnknownField;
+                                        }
+                                        return .{ .base = .Unknown, .name = enum_name };
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     var lt = try self.infer_expr_type(left.*, env, fns);
 
@@ -2544,6 +2672,14 @@ pub const TranspileProcess = struct {
                     const left = exp.left orelse return .{ .base = .Unknown };
                     const right = exp.right orelse return .{ .base = .Unknown };
                     const lt = try self.infer_expr_type(left.*, env, fns);
+                    // Enum shorthand assignment: `c = .Blue`.
+                    // Resolve the shorthand before inferring RHS type.
+                    if (self.expected_enum_name(lt)) |enum_name| {
+                        if (dot_shorthand_variant_name(right)) |_| {
+                            _ = try self.resolve_dot_shorthand_enum_variant(right, enum_name);
+                        }
+                    }
+
                     const rt = try self.infer_expr_type(right.*, env, fns);
 
                     // For compound assignments, require numeric types.
@@ -2575,6 +2711,57 @@ pub const TranspileProcess = struct {
                     return lt;
                 }
 
+                // Equality needs special handling for enum dot shorthand, since `.Variant` cannot
+                // be type-inferred without an expected enum type.
+                if (mem.eql(u8, op, "==") or mem.eql(u8, op, "!=")) {
+                    const left = exp.left orelse return .{ .base = .Unknown };
+                    const right = exp.right orelse return .{ .base = .Unknown };
+
+                    const left_is_shorthand = dot_shorthand_variant_name(left) != null;
+                    const right_is_shorthand = dot_shorthand_variant_name(right) != null;
+
+                    // If both sides are shorthand, we have no context to infer the enum.
+                    if (left_is_shorthand and right_is_shorthand) {
+                        self.report_type_error(node, "cannot infer enum type for dot shorthand on both sides of '{s}'", .{op});
+                        return TranspileError.TypeMismatch;
+                    }
+
+                    var lt: CheckedType = .{ .base = .Unknown };
+                    var rt: CheckedType = .{ .base = .Unknown };
+
+                    if (!left_is_shorthand) {
+                        lt = try self.infer_expr_type(left.*, env, fns);
+                        if (self.expected_enum_name(lt)) |enum_name| {
+                            if (right_is_shorthand) {
+                                _ = try self.resolve_dot_shorthand_enum_variant(right, enum_name);
+                            }
+                        }
+                        rt = try self.infer_expr_type(right.*, env, fns);
+                        if (left_is_shorthand) {
+                            if (self.expected_enum_name(rt)) |enum_name| {
+                                _ = try self.resolve_dot_shorthand_enum_variant(left, enum_name);
+                                lt = .{ .base = .Unknown, .name = enum_name };
+                            }
+                        }
+                    } else {
+                        // Left is shorthand, right is not.
+                        rt = try self.infer_expr_type(right.*, env, fns);
+                        if (self.expected_enum_name(rt)) |enum_name| {
+                            _ = try self.resolve_dot_shorthand_enum_variant(left, enum_name);
+                            lt = .{ .base = .Unknown, .name = enum_name };
+                        } else {
+                            // Try to infer the left after resolution attempt; will error with a clearer message elsewhere.
+                            lt = try self.infer_expr_type(left.*, env, fns);
+                        }
+                    }
+
+                    if (is_known_type(lt) and is_known_type(rt) and !can_compare_or_match(lt, rt)) {
+                        self.report_type_error(node, "equality '{s}' expects both sides to have the same type", .{op});
+                        return TranspileError.TypeMismatch;
+                    }
+                    return .{ .base = .Bin };
+                }
+
                 const l: CheckedType = if (exp.left) |left| try self.infer_expr_type(left.*, env, fns) else CheckedType{ .base = .Unknown };
                 const r: CheckedType = if (exp.right) |right| try self.infer_expr_type(right.*, env, fns) else CheckedType{ .base = .Unknown };
 
@@ -2602,13 +2789,7 @@ pub const TranspileProcess = struct {
                     return .{ .base = .Bin };
                 }
 
-                if (mem.eql(u8, op, "==") or mem.eql(u8, op, "!=")) {
-                    if (is_known_type(l) and is_known_type(r) and !can_compare_or_match(l, r)) {
-                        self.report_type_error(node, "equality '{s}' expects both sides to have the same type", .{op});
-                        return TranspileError.TypeMismatch;
-                    }
-                    return .{ .base = .Bin };
-                }
+                // NOTE: equality is handled above to support enum dot shorthand.
 
                 if (mem.eql(u8, op, "&&") or mem.eql(u8, op, "||")) {
                     if (l.base != .Bin or r.base != .Bin) {
@@ -2648,6 +2829,11 @@ pub const TranspileProcess = struct {
                     const vtype = type_from_dtype(v.type);
                     try env.put_current(name, vtype);
                     if (v.val) |val| {
+                        if (self.expected_enum_name(vtype)) |enum_name| {
+                            if (dot_shorthand_variant_name(val)) |_| {
+                                _ = try self.resolve_dot_shorthand_enum_variant(val, enum_name);
+                            }
+                        }
                         const init_t = try self.infer_expr_type(val.*, env, fns);
                         if (is_known_type(vtype) and is_known_type(init_t) and !(try self.can_implicit_coerce(vtype, init_t))) {
                             self.report_type_error(stmt, "type mismatch in initialization of '{s}'", .{name});
@@ -2668,6 +2854,11 @@ pub const TranspileProcess = struct {
                             return TranspileError.ReturnTypeMismatch;
                         }
                         const rv = stmt.node_variant.?.statement.return_stmt;
+                        if (self.expected_enum_name(fn_rtype)) |enum_name| {
+                            if (dot_shorthand_variant_name(rv)) |_| {
+                                _ = try self.resolve_dot_shorthand_enum_variant(rv, enum_name);
+                            }
+                        }
                         const rt = try self.infer_expr_type(rv.*, env, fns);
                         if (is_known_type(fn_rtype) and is_known_type(rt) and !(try self.can_implicit_coerce(fn_rtype, rt))) {
                             self.report_type_error(stmt, "return type mismatch", .{});
@@ -2700,8 +2891,14 @@ pub const TranspileProcess = struct {
                 .StatementFit => {
                     const fit = stmt.node_variant.?.statement.fit_stmt;
                     const target_t = try self.infer_expr_type(fit.exp.*, env, fns);
+                    const target_enum = self.expected_enum_name(target_t);
                     for (fit.branches.items()) |branch| {
                         if (branch.condition) |cond| {
+                            if (target_enum) |enum_name| {
+                                if (dot_shorthand_variant_name(cond)) |_| {
+                                    _ = try self.resolve_dot_shorthand_enum_variant(cond, enum_name);
+                                }
+                            }
                             const ct = try self.infer_expr_type(cond.*, env, fns);
                             if (is_known_type(target_t) and is_known_type(ct) and !can_compare_or_match(target_t, ct)) {
                                 self.report_type_error(stmt, "fit branch condition type must match fit expression type", .{});
@@ -2954,7 +3151,7 @@ pub const TranspileProcess = struct {
             if (branch.condition == null) return;
         }
 
-        // Boolean (`bin`) is the only type we can treat as exhaustive without a catch-all.
+        // Boolean (`bin`) and enums are the only types we can treat as exhaustive without a catch-all.
         // Everything else (num/dec/chr/str/raw*/unknown pointers, etc) should warn unless
         // there is a `_ -> ...` default branch.
         var has_true = false;
@@ -2972,6 +3169,68 @@ pub const TranspileProcess = struct {
 
         // Exhaustive boolean fit: true + false present.
         if (has_true and has_false) return;
+
+        // Try enum exhaustiveness: only when the condition is a variable whose declared type is a named enum.
+        // (We keep this intentionally conservative for now.)
+        const root = self.get_root();
+        if (root.type_registry != null and condition.*.type == .Identifier and condition.*.data != null) {
+            const vname = condition.*.data.?.sval.items;
+            if (self.get_scope_entity(vname)) |ent| {
+                if (ent.node) |ent_node| {
+                    if (ent_node.type == .Variable and ent_node.node_variant != null) {
+                        const dt = ent_node.node_variant.?.variable.type;
+                        if (dt.type == .Unknown and dt.pointer_depth == 0 and dt.type_str.items.len > 0) {
+                            const enum_name = dt.type_str.items;
+                            const reg = &root.type_registry.?;
+                            if (reg.enums_by_name.get(enum_name)) |enode| {
+                                if (enode.node_variant != null) {
+                                    const variants = enode.node_variant.?.enum_decl.variants.items();
+
+                                    var covered = std.StringHashMap(bool).init(self.backing_allocator);
+                                    defer covered.deinit();
+
+                                    for (branches) |branch| {
+                                        const bcond = branch.condition orelse continue;
+                                        if (bcond.type != .Expression or bcond.node_variant == null) continue;
+                                        const exp = bcond.node_variant.?.exp;
+                                        if (!mem.eql(u8, exp.op, ".")) continue;
+                                        const left = exp.left orelse continue;
+                                        const right = exp.right orelse continue;
+                                        if (left.type != .Identifier or left.data == null) continue;
+                                        if (right.type != .Identifier or right.data == null) continue;
+                                        if (!mem.eql(u8, left.data.?.sval.items, enum_name)) continue;
+                                        covered.put(right.data.?.sval.items, true) catch {};
+                                    }
+
+                                    var missing = std.ArrayList(u8).init(self.backing_allocator);
+                                    defer missing.deinit();
+                                    const mw = missing.writer();
+
+                                    var missing_count: usize = 0;
+                                    for (variants) |v| {
+                                        if (covered.contains(v.name.items)) continue;
+                                        if (missing_count > 0) {
+                                            mw.writeAll(", ") catch {};
+                                        }
+                                        mw.print("{s}.{s}", .{ enum_name, v.name.items }) catch {};
+                                        missing_count += 1;
+                                    }
+
+                                    if (missing_count == 0) return;
+
+                                    self.report_warning(
+                                        fit_stmt,
+                                        "fit statement is not exhausted for enum '{s}' condition (missing: {s}; add catch-all '_' branch to silence)",
+                                        .{ enum_name, missing.items },
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         const cond_type = self.infer_simple_dtype(condition.*) orelse {
             self.report_warning(fit_stmt, "fit statement is not exhausted for unknown condition (missing catch-all '_' branch)", .{});
@@ -3610,6 +3869,13 @@ pub const TranspileProcess = struct {
                     }
                     q.methods.deinit();
                 },
+                .enum_decl => |e| {
+                    e.name.deinit();
+                    for (e.variants.items()) |v| {
+                        v.name.deinit();
+                    }
+                    e.variants.deinit();
+                },
                 .impl => |im| {
                     im.type_name.deinit();
                     if (im.quirk_name) |*qn| {
@@ -4047,6 +4313,48 @@ pub const TranspileProcess = struct {
         const reg = self.root_registry() orelse return;
 
         try self.write("// --- User types ---\n\n");
+
+        // Enums (must come before compounds that use them by-value)
+        var enum_nodes = std.ArrayList(*ast.Node).init(self.allocator);
+        defer enum_nodes.deinit();
+
+        var e_it = reg.enums_by_name.iterator();
+        while (e_it.next()) |entry| {
+            const enode = entry.value_ptr.*;
+            if (enode.node_variant == null) continue;
+            enum_nodes.append(enode) catch {
+                return TranspileError.MemoryAllocationFailed;
+            };
+        }
+
+        std.sort.pdq(*ast.Node, enum_nodes.items, {}, struct {
+            fn lessThan(_: void, a: *ast.Node, b: *ast.Node) bool {
+                if (a.node_variant == null or b.node_variant == null) return false;
+                return mem.lessThan(u8, a.node_variant.?.enum_decl.name.items, b.node_variant.?.enum_decl.name.items);
+            }
+        }.lessThan);
+
+        for (enum_nodes.items) |enode| {
+            if (enode.node_variant == null) continue;
+            const e = enode.node_variant.?.enum_decl;
+            try self.write("typedef enum ");
+            try self.write(e.name.items);
+            try self.write(" {\n");
+            for (e.variants.items()) |v| {
+                try self.write("  ");
+                try self.write(e.name.items);
+                try self.write("_");
+                try self.write(v.name.items);
+                if (v.value) |val| {
+                    try self.write(" = ");
+                    try self.print("{d}", .{val});
+                }
+                try self.write(",\n");
+            }
+            try self.write("} ");
+            try self.write(e.name.items);
+            try self.write(";\n\n");
+        }
 
         // Compounds
         // NOTE: `std.StringHashMap` iteration order is not stable and can place
@@ -4909,6 +5217,31 @@ pub const TranspileProcess = struct {
                 } else if (mem.eql(u8, exp.op, ".")) {
                     const left = exp.left orelse return;
                     const right = exp.right orelse return;
+
+                    // Enum variant constant: `Enum.Variant` -> `Enum_Variant` in C.
+                    if (left.*.type == .Identifier and left.*.data != null and right.*.type == .Identifier and right.*.data != null) {
+                        const enum_name = left.*.data.?.sval.items;
+                        const variant_name = right.*.data.?.sval.items;
+
+                        var is_shadowed_by_variable = false;
+                        if (self.get_scope_entity(enum_name)) |ent| {
+                            if (ent.node) |ent_node| {
+                                if (ent_node.type == .Variable) is_shadowed_by_variable = true;
+                            }
+                        }
+
+                        if (!is_shadowed_by_variable) {
+                            if (self.root_registry()) |reg| {
+                                if (reg.enums_by_name.contains(enum_name)) {
+                                    try self.write(enum_name);
+                                    try self.write("_");
+                                    try self.write(variant_name);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+
                     try self.transpile_node(left.*);
                     const pd = self.expr_pointer_depth_from_scope(left.*);
                     try self.write(if (pd > 0) "->" else ".");

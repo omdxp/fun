@@ -70,6 +70,8 @@ pub const NodeType = enum {
     Compound,
     /// Represents a quirk (structural interface) declaration.
     Quirk,
+    /// Represents an enum declaration.
+    Enum,
     /// Represents an implementation block binding a compound type to a quirk.
     Impl,
     /// Represents a blank node.
@@ -188,6 +190,11 @@ pub const Node = struct {
             methods: utils.Vector(QuirkMethodSig),
         },
 
+        enum_decl: struct {
+            name: std.ArrayList(u8),
+            variants: utils.Vector(EnumVariant),
+        },
+
         impl: struct {
             type_name: std.ArrayList(u8),
             /// Optional quirk name. When null, this is a plain impl block: `impl Type { ... }`.
@@ -267,6 +274,13 @@ pub const QuirkMethodSig = struct {
 pub const QuirkArg = struct {
     name: std.ArrayList(u8),
     dtype: *dtype.DataType,
+};
+
+pub const EnumVariant = struct {
+    name: std.ArrayList(u8),
+    /// Optional explicit integer value (`Variant = 3;`).
+    /// When null, values auto-increment from 0 following C enum rules.
+    value: ?i64 = null,
 };
 
 /// Represents the branches in a fit statement.

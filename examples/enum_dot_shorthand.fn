@@ -1,0 +1,29 @@
+imp std.c.io;
+
+enum Color {
+  Red,
+  Green,
+  Blue,
+}
+
+fun takes(Color c) {
+  fit c {
+    .Red -> {
+      printf("R\n");
+    },
+    .Green -> {
+      printf("G\n");
+    },
+    .Blue -> {
+      printf("B\n");
+    }
+  }
+}
+
+fun main() {
+  Color c = .Blue;
+  if c == .Blue {
+    takes(.Red);
+  }
+  takes(c);
+}

@@ -90,6 +90,42 @@ test "typecheck call with two args ok" {
     try runTranspileExpectOk(std.testing.allocator, "typecheck_arg_ok.fn", input);
 }
 
+test "typecheck enum dot shorthand in init/assign/compare" {
+    const input =
+        "enum Color {\n" ++
+        "  Red;\n" ++
+        "  Green;\n" ++
+        "  Blue;\n" ++
+        "}\n" ++
+        "fun main() {\n" ++
+        "  Color c = .Blue;\n" ++
+        "  if c == .Blue {\n" ++
+        "    c = .Green;\n" ++
+        "  }\n" ++
+        "  if c != .Red { ret; }\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_enum_dot_shorthand_ops.fn", input);
+}
+
+test "typecheck enum dot shorthand in call args" {
+    const input =
+        "enum Color {\n" ++
+        "  Red;\n" ++
+        "  Green;\n" ++
+        "  Blue;\n" ++
+        "}\n" ++
+        "fun takes(Color c) {\n" ++
+        "  ret;\n" ++
+        "}\n" ++
+        "fun main() {\n" ++
+        "  takes(.Red);\n" ++
+        "  takes(.Blue);\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_enum_dot_shorthand_call.fn", input);
+}
+
 test "typecheck variadic call allows extra args" {
     const input =
         "fun v(num a, ...) num { ret a; }\n" ++

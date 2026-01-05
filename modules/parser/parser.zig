@@ -1485,6 +1485,29 @@ pub const ParseProcess = struct {
         const op_pos = t.?.pos;
         var node_left = self.node_peek_expressionable_or_null();
         if (node_left == null) {
+            // Enum variant shorthand (Zig-style): `.Variant`.
+            // Parse as a dot-expression with a blank LHS so later passes can resolve it
+            // using the expected enum type from context.
+            if (mem.eql(u8, op, ".")) {
+                _ = self.token_next(); // skip '.'
+
+                // Expect a single identifier after '.'
+                _ = try self.parse_identifier();
+                var node_right = self.node_pop();
+                node_right.?.flags = .{ .inside_expression = true };
+
+                var blank_left: ast.Node = .{ .type = .Blank, .pos = op_pos };
+                blank_left.flags = .{ .inside_expression = true };
+                try self.make_expression_node(&blank_left, &node_right.?, op, op_pos);
+
+                var exp_node = self.node_pop();
+                try self.parse_reorder_expression(&exp_node.?);
+                self.transpile_proc.nodes.push(exp_node.?) catch |e| {
+                    std.debug.print("Error adding node to list: {s}", .{@errorName(e)});
+                    return ParseError.MemoryAllocationFailed;
+                };
+                return;
+            }
             if (!utils.is_unary_operator(op)) {
                 self.transpile_proc.err("expected left operand for '{s}' operator", .{op});
                 return ParseError.InvalidOperand;
@@ -1504,6 +1527,10 @@ pub const ParseProcess = struct {
                 defer hist_down.deinit();
                 hist_down.flags.parenthesis_not_function_call = true;
                 try self.parse_for_parenthesis(&hist_down);
+            } else if (mem.eql(u8, t.?.data.sval.items, ".")) {
+                // Allow enum variant shorthand `.Variant` as a valid RHS operand after
+                // binary operators like `==`, `!=`, `=` etc.
+                try self.parse_normal_expression(hist);
             } else if (utils.is_unary_operator(t.?.data.sval.items)) {
                 try self.parse_for_unary();
             } else {
@@ -2035,6 +2062,109 @@ pub const ParseProcess = struct {
 
         // Register as a symbol so it can be used as a datatype identifier.
         try self.transpile_proc.push_symbol(.{ .type = .Node, .name = node.*.node_variant.?.quirk.name.items, .data = .{ .node = node.* }, .symbol_table = null });
+
+        self.transpile_proc.nodes.push(node.*) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+        self.transpile_proc.owned_nodes.append(node) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+    }
+
+    fn parse_enum(self: *Self) ParseError!void {
+        try self.expect_keyword("enum");
+
+        const name_tok = self.token_next();
+        if (name_tok == null or name_tok.?.type != .Identifier) {
+            self.transpile_proc.err("expected identifier after 'enum'", .{});
+            return ParseError.InvalidIdentifier;
+        }
+
+        var name = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, name_tok.?.data.sval.items.len) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+        errdefer name.deinit();
+        name.appendSlice(name_tok.?.data.sval.items) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+
+        try self.expect_sym('{');
+
+        var variants = utils.Vector(ast.EnumVariant).init(self.transpile_proc.allocator);
+        errdefer {
+            for (variants.items()) |v| {
+                v.name.deinit();
+            }
+            variants.deinit();
+        }
+
+        while (!self.next_token_is_symbol('}')) {
+            const vtok = self.token_next();
+            if (vtok == null or vtok.?.type != .Identifier) {
+                self.transpile_proc.err("expected enum variant name", .{});
+                return ParseError.InvalidIdentifier;
+            }
+
+            var vname = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, vtok.?.data.sval.items.len) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer vname.deinit();
+            vname.appendSlice(vtok.?.data.sval.items) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+
+            var value: ?i64 = null;
+            if (self.next_token_is_operator("=")) {
+                _ = self.token_next(); // skip '='
+                const ntok = self.token_next();
+                if (ntok == null or ntok.?.type != .Number) {
+                    self.transpile_proc.err("expected integer literal after '='", .{});
+                    return ParseError.InvalidToken;
+                }
+                switch (ntok.?.data) {
+                    .inum => |n| value = @as(i64, @intCast(n)),
+                    .lnum => |n| value = @as(i64, @intCast(n)),
+                    .llnum => |n| value = @as(i64, @intCast(n)),
+                    else => {
+                        self.transpile_proc.err("enum variant value must be an integer literal", .{});
+                        return ParseError.InvalidToken;
+                    },
+                }
+            }
+
+            // Variants are separated by commas (preferred) or semicolons (legacy).
+            // Trailing separators are allowed.
+            if (self.next_token_is_operator(",")) {
+                _ = self.token_next();
+            } else if (self.next_token_is_symbol(';')) {
+                _ = self.token_next();
+            } else if (!self.next_token_is_symbol('}')) {
+                self.transpile_proc.err("expected ',' or ';' after enum variant", .{});
+                return ParseError.InvalidToken;
+            }
+            variants.push(.{ .name = vname, .value = value }) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+        }
+
+        try self.expect_sym('}');
+
+        const node = self.transpile_proc.allocator.create(ast.Node) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+        errdefer {
+            self.transpile_proc.deinit_node(node.*);
+            self.transpile_proc.allocator.destroy(node);
+        }
+
+        node.* = ast.Node{
+            .type = .Enum,
+            .pos = name_tok.?.pos,
+            .node_variant = .{ .enum_decl = .{ .name = name, .variants = variants } },
+        };
+
+        // Register as a symbol so it can be used as a datatype identifier.
+        try self.transpile_proc.push_symbol(.{ .type = .Node, .name = node.*.node_variant.?.enum_decl.name.items, .data = .{ .node = node.* }, .symbol_table = null });
 
         self.transpile_proc.nodes.push(node.*) catch {
             return ParseError.MemoryAllocationFailed;
@@ -2935,8 +3065,26 @@ pub const ParseProcess = struct {
         while (!self.next_token_is_symbol('}')) {
             var hist_down = utils.History.down(self.transpile_proc.allocator, hist, hist.flags);
             defer hist_down.deinit();
-            try self.parse_expressionable_root(&hist_down);
-            const condition_node = self.node_pop();
+            var condition_node: ?ast.Node = null;
+            // Always allow dot operator as fit branch pattern root.
+            const t = self.token_peek_next();
+            if (t != null and t.?.type == .Operator and mem.eql(u8, t.?.data.sval.items, ".")) {
+                // Directly parse `.Variant` as fit branch pattern, bypassing normal root logic.
+                _ = self.token_next(); // skip '.'
+                _ = try self.parse_identifier();
+                var node_right = self.node_pop();
+                node_right.?.flags = .{ .inside_expression = true };
+                var blank_left: ast.Node = .{ .type = .Blank, .pos = t.?.pos };
+                blank_left.flags = .{ .inside_expression = true };
+                try self.make_expression_node(&blank_left, &node_right.?, ".", t.?.pos);
+                var exp_node = self.node_pop();
+                try self.parse_reorder_expression(&exp_node.?);
+                condition_node = exp_node;
+            } else {
+                // If not dot, use normal root logic.
+                try self.parse_expressionable_root(&hist_down);
+                condition_node = self.node_pop();
+            }
             if (condition_node.?.type == .Expression and mem.eql(u8, condition_node.?.node_variant.?.exp.op, "=")) {
                 self.transpile_proc.err("expected expression, got assignment", .{});
                 return ParseError.InvalidExpression;
@@ -3385,6 +3533,8 @@ pub const ParseProcess = struct {
 
         if (mem.eql(u8, "imp", sval)) {
             return try self.parse_import();
+        } else if (mem.eql(u8, "enum", sval)) {
+            return try self.parse_enum();
         } else if (mem.eql(u8, "compound", sval)) {
             return try self.parse_compound();
         } else if (mem.eql(u8, "quirk", sval)) {

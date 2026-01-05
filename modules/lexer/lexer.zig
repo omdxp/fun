@@ -642,7 +642,32 @@ pub const LexProcess = struct {
             return LexError.MemoryAllocationFailed;
         };
         const pc = try self.peek_char();
-        if (op0 == '*' and pc != null and pc.? == '=') {
+        // Always treat == as a single operator token, even with whitespace between
+        if (op0 == '=') {
+            var peek = pc;
+            var ws = false;
+            // Skip whitespace between '=' and '='
+            while (peek != null and (peek.? == ' ' or peek.? == '\t')) {
+                ws = true;
+                _ = try self.next_char();
+                peek = try self.peek_char();
+            }
+            if (peek != null and peek.? == '=') {
+                buffer.append('=') catch |e| {
+                    std.debug.print("Error appending to buffer: {s}\n", .{@errorName(e)});
+                    return LexError.MemoryAllocationFailed;
+                };
+                _ = try self.next_char();
+                single_operator = false;
+            }
+        } else if (op0 == '!' and pc != null and pc.? == '=') {
+            buffer.append(pc.?) catch |e| {
+                std.debug.print("Error appending to buffer: {s}\n", .{@errorName(e)});
+                return LexError.MemoryAllocationFailed;
+            };
+            _ = try self.next_char();
+            single_operator = false;
+        } else if (op0 == '*' and pc != null and pc.? == '=') {
             buffer.append(pc.?) catch |e| {
                 std.debug.print("Error appending to buffer: {s}\n", .{@errorName(e)});
                 return LexError.MemoryAllocationFailed;

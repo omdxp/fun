@@ -1545,6 +1545,72 @@ test "fls e2e: builtin sizeof completion + hover + signatureHelp" {
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: enum variant dot completion + hover" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "imp std.c.io;\n" ++
+        "\n" ++
+        "enum Color {\n" ++
+        "  Red;\n" ++
+        "  Green;\n" ++
+        "  Blue;\n" ++
+        "}\n" ++
+        "\n" ++
+        "fun main() {\n" ++
+        "  Color c = Color.Red;\n" ++
+        "  Color.\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-enum.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // Completion: after `Color.` should offer enum variants.
+    const dot_pos = try findPosition(doc_text, "Color.", 0);
+    const comp_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, dot_pos.line, dot_pos.col + @as(i64, @intCast("Color.".len)) },
+    );
+    defer allocator.free(comp_params);
+    const comp_id = try lsp.request("textDocument/completion", comp_params);
+    var comp_res = try lsp.waitResponse(comp_id, 15000);
+    defer comp_res.deinit();
+    const comp_val = try jsonResultFromResponseObj(comp_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, comp_val, "Red");
+    try expectCompletionHasLabel(allocator, comp_val, "Green");
+    try expectCompletionHasLabel(allocator, comp_val, "Blue");
+
+    // Hover: hovering `Color` in `enum Color` should show it's an enum.
+    const enum_pos = try findPosition(doc_text, "enum Color", 0);
+    const hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, enum_pos.line, enum_pos.col + @as(i64, @intCast("enum ".len)) + 1 },
+    );
+    defer allocator.free(hover_params);
+    const hover_id = try lsp.request("textDocument/hover", hover_params);
+    var hover_res = try lsp.waitResponse(hover_id, 15000);
+    defer hover_res.deinit();
+    const hover_val = try jsonResultFromResponseObj(hover_res.parsed.value.object);
+    try expectHoverContains(allocator, hover_val, "enum Color");
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: dot completion finds impl methods across imported files" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
