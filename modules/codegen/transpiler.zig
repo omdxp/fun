@@ -4708,6 +4708,34 @@ pub const TranspileProcess = struct {
             .Expression => {
                 const exp = node.node_variant.?.exp;
                 if (mem.eql(u8, exp.op, "()")) {
+                    // Builtin: `sizeof(Type)`
+                    // The argument is a type name, not a value expression.
+                    if (exp.left) |left| {
+                        if (left.type == .Identifier and left.data != null and mem.eql(u8, left.data.?.sval.items, "sizeof")) {
+                            const right = exp.right orelse {
+                                self.report_type_error(node, "sizeof expects exactly 1 argument", .{});
+                                return TranspileError.InvalidSizeof;
+                            };
+
+                            const inner = if (right.type == .ExpressionParenthesis and right.node_variant != null)
+                                right.node_variant.?.paren.exp.*
+                            else
+                                right.*;
+
+                            if (inner.type != .Identifier or inner.data == null) {
+                                self.report_type_error(node, "sizeof argument must be a type name", .{});
+                                return TranspileError.InvalidSizeof;
+                            }
+
+                            const type_name = inner.data.?.sval.items;
+                            const c_type = map_type_to_c(type_name);
+                            try self.write("(int)(sizeof(");
+                            try self.write(c_type);
+                            try self.write("))");
+                            return;
+                        }
+                    }
+
                     // Quirk method call: `q.method(...)` emits `q.vtable->method(q.self, ...)`.
                     if (exp.left) |left| {
                         if (left.type == .Expression and left.node_variant != null and mem.eql(u8, left.node_variant.?.exp.op, ".")) {

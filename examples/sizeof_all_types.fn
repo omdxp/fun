@@ -1,0 +1,51 @@
+imp std.c.io;
+
+// sizeof(Type) returns a `num` (C: int) with the size in bytes.
+// 
+// NOTE:
+// - `sizeof(void)` is not valid C.
+// - `raw` maps to C `void`, so `sizeof(raw)` is also invalid.
+// For that reason, this example focuses on the sized value types.
+
+quirk Greeter {
+  greet() void;
+}
+
+// Empty quirks are allowed.
+quirk Empty {
+}
+
+compound UserPlain {
+  str name;
+  num age;
+}
+
+compound UserImpl {
+  str name;
+  num age;
+}
+
+// Implementing a quirk should not change the in-memory layout of the compound.
+// (The compound is still a plain struct; the quirk value is a separate wrapper.)
+impl UserImpl Empty {
+}
+
+impl UserImpl Greeter {
+  greet() void {
+    // no-op
+  }
+}
+
+fun main() {
+  printf("sizeof(num)     = %d\n", sizeof(num));
+  printf("sizeof(dec)     = %d\n", sizeof(dec));
+  printf("sizeof(str)     = %d\n", sizeof(str));
+  printf("sizeof(bin)     = %d\n", sizeof(bin));
+  printf("sizeof(chr)     = %d\n", sizeof(chr));
+
+  // Custom types.
+  printf("sizeof(Empty)   = %d\n", sizeof(Empty));
+  printf("sizeof(Greeter) = %d\n", sizeof(Greeter));
+  printf("sizeof(UserPlain) = %d\n", sizeof(UserPlain));
+  printf("sizeof(UserImpl)  = %d\n", sizeof(UserImpl));
+}

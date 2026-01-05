@@ -291,6 +291,46 @@ pub const ParseProcess = struct {
         return null;
     }
 
+    /// Peeks the Nth previous non-skippable token (relative to the most recently consumed token).
+    ///
+    /// `n = 0` is equivalent to `token_peek_prev()`.
+    fn token_peek_prev_n(self: *Self, n: usize) ?token.Token {
+        var idx: isize = @as(isize, @intCast(self.transpile_proc.tokens.pindex)) - 2;
+        var seen: usize = 0;
+        while (idx >= 0) : (idx -= 1) {
+            const t = self.transpile_proc.tokens.at(@intCast(idx)) orelse return null;
+            if (token.is_nl_or_comment_or_newline_separator(t)) continue;
+            if (seen == n) return t;
+            seen += 1;
+        }
+        return null;
+    }
+
+    /// Peeks the Nth previous non-skippable token relative to the *next* token to be consumed.
+    ///
+    /// I.e. when `token_peek_next()` would return token at index `pindex`, this returns tokens
+    /// from `pindex-1`, `pindex-2`, etc. This is often the most intuitive notion of "previous"
+    /// when doing context-sensitive parsing.
+    fn token_peek_prev_stream_n(self: *Self, n: usize) ?token.Token {
+        var idx: isize = @as(isize, @intCast(self.transpile_proc.tokens.pindex)) - 1;
+        var seen: usize = 0;
+        while (idx >= 0) : (idx -= 1) {
+            const t = self.transpile_proc.tokens.at(@intCast(idx)) orelse return null;
+            if (token.is_nl_or_comment_or_newline_separator(t)) continue;
+            if (seen == n) return t;
+            seen += 1;
+        }
+        return null;
+    }
+
+    fn is_sizeof_type_operand_context(self: *Self) bool {
+        const prev = self.token_peek_prev_stream_n(0) orelse return false;
+        if (prev.type != .Operator or !mem.eql(u8, prev.data.sval.items, "(")) return false;
+        const prev2 = self.token_peek_prev_stream_n(1) orelse return false;
+        if (!(prev2.type == .Identifier or prev2.type == .Keyword)) return false;
+        return mem.eql(u8, prev2.data.sval.items, "sizeof");
+    }
+
     /// Retrieves the next token.
     ///
     /// This function peeks at the next token without incrementing the token stream's position.
@@ -720,6 +760,16 @@ pub const ParseProcess = struct {
                 const prev = self.token_peek_prev();
                 const is_member_access = prev != null and prev.?.type == .Operator and mem.eql(u8, prev.?.data.sval.items, ".");
 
+                // Allow type operands inside `sizeof(Type)` even if the identifier isn't declared
+                // as a value symbol yet (supports forward-declared custom types).
+                const is_sizeof_type_operand = blk: {
+                    if (prev == null) break :blk false;
+                    if (prev.?.type != .Operator or !mem.eql(u8, prev.?.data.sval.items, "(")) break :blk false;
+                    const prev2 = self.token_peek_prev_n(1) orelse break :blk false;
+                    if (prev2.type != .Identifier) break :blk false;
+                    break :blk mem.eql(u8, prev2.data.sval.items, "sizeof");
+                };
+
                 const is_c_macro_ident = struct {
                     fn ok(name: []const u8) bool {
                         if (name.len == 0) return false;
@@ -738,7 +788,7 @@ pub const ParseProcess = struct {
                 // It should be accepted even if it's not declared.
                 if (!mem.eql(u8, t.?.data.sval.items, "_")) {
                     if (!is_member_access) {
-                        if (self.transpile_proc.get_scope_entity(t.?.data.sval.items) == null) {
+                        if (!is_sizeof_type_operand and self.transpile_proc.get_scope_entity(t.?.data.sval.items) == null) {
                             if (self.transpile_proc.get_symbol(t.?.data.sval.items) == null and self.transpile_proc.global_symbols.get(t.?.data.sval.items) == null) {
                                 // Treat ALL_CAPS identifiers as C macro-style constants.
                                 if (!is_c_macro_ident) {
@@ -1524,9 +1574,39 @@ pub const ParseProcess = struct {
     fn parse_identifier(self: *Self) ParseError!bool {
         const t = self.token_peek_next();
         if (t != null and t.?.type != .Identifier) {
+            // Allow primitive type keywords as operands to the builtin `sizeof(Type)`.
+            // Example: `sizeof(num)`.
+            if (t.?.type == .Keyword) {
+                const kw = t.?.data.sval.items;
+                const is_prim_type_kw = mem.eql(u8, kw, "void") or
+                    mem.eql(u8, kw, "raw") or
+                    mem.eql(u8, kw, "chr") or
+                    mem.eql(u8, kw, "str") or
+                    mem.eql(u8, kw, "dec") or
+                    mem.eql(u8, kw, "num") or
+                    mem.eql(u8, kw, "bin");
+
+                const is_sizeof_type_operand = self.is_sizeof_type_operand_context();
+
+                if (is_prim_type_kw and is_sizeof_type_operand) {
+                    const consumed = self.token_next() orelse {
+                        self.transpile_proc.err("expected identifier, got eof", .{});
+                        return ParseError.InvalidIdentifier;
+                    };
+                    var ident_node = ast.Node{
+                        .type = .Identifier,
+                        .pos = consumed.pos,
+                        .data = .{ .sval = consumed.data.sval },
+                    };
+                    try self.create_node(&ident_node);
+                    return true;
+                }
+            }
+
             self.transpile_proc.err("expected identifier, got '{?}'", .{t.?.type});
             return ParseError.InvalidIdentifier;
         }
+
         return try self.parse_single_token_to_node();
     }
 
@@ -1655,6 +1735,34 @@ pub const ParseProcess = struct {
                 break :blk try self.parse_identifier();
             },
             .Keyword => {
+                const kw = t.?.data.sval.items;
+
+                // Allow primitive type keywords as operands to the builtin `sizeof(Type)`.
+                // Example: `sizeof(num)`.
+                const is_prim_type_kw = mem.eql(u8, kw, "void") or
+                    mem.eql(u8, kw, "raw") or
+                    mem.eql(u8, kw, "chr") or
+                    mem.eql(u8, kw, "str") or
+                    mem.eql(u8, kw, "dec") or
+                    mem.eql(u8, kw, "num") or
+                    mem.eql(u8, kw, "bin");
+
+                const is_sizeof_type_operand = self.is_sizeof_type_operand_context();
+
+                if (is_prim_type_kw and is_sizeof_type_operand) {
+                    const consumed = self.token_next() orelse {
+                        self.transpile_proc.err("expected identifier, got eof", .{});
+                        return ParseError.InvalidIdentifier;
+                    };
+                    var ident_node = ast.Node{
+                        .type = .Identifier,
+                        .pos = consumed.pos,
+                        .data = .{ .sval = consumed.data.sval },
+                    };
+                    try self.create_node(&ident_node);
+                    return true;
+                }
+
                 try self.parse_keyword(hist);
                 return true;
             },

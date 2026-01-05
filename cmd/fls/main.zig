@@ -1033,6 +1033,26 @@ const LspServer = struct {
             if (try self.trySendStdNamespaceHover(id_val, uri, idx, tok_i)) return;
         }
 
+        // Builtin hover.
+        if (std.mem.eql(u8, tok.text, "sizeof")) {
+            var buf = std.ArrayList(u8).init(self.allocator);
+            defer buf.deinit();
+            try buf.writer().writeAll(
+                "**sizeof**\n\n" ++
+                    "```\n" ++
+                    "sizeof(Type) num\n" ++
+                    "```\n" ++
+                    "Returns the size in bytes of `Type`.\n" ++
+                    "The argument must be a type name.\n",
+            );
+
+            const hover: Hover = .{ .contents = .{ .value = buf.items }, .range = tok.range };
+            const json = try std.json.stringifyAlloc(self.allocator, hover, .{});
+            defer self.allocator.free(json);
+            try self.sendResponseJson(id_val, json);
+            return;
+        }
+
         // Member hover: show info for `a.b` / `a.b.c` by resolving receiver type.
         if (findTokenIndexAt(idx.tokens, pos)) |tok_i| {
             if (tok_i > 0 and isDotToken(idx.tokens[tok_i - 1])) {
@@ -2239,6 +2259,11 @@ const LspServer = struct {
                 }
             }
 
+            // Builtins.
+            if (prefix.len == 0 or std.mem.startsWith(u8, "sizeof", prefix)) {
+                try items.append(.{ .label = try self.allocator.dupe(u8, "sizeof"), .kind = 3 });
+            }
+
             const list: CompletionList = .{ .items = items.items };
             const json = try std.json.stringifyAlloc(self.allocator, list, .{});
             defer self.allocator.free(json);
@@ -2393,6 +2418,15 @@ const LspServer = struct {
             if (prefix.len == 0 or std.mem.startsWith(u8, kw, prefix)) {
                 try items.append(.{ .label = try self.allocator.dupe(u8, kw), .kind = 14 });
             }
+        }
+
+        // Builtins.
+        if (prefix.len == 0 or std.mem.startsWith(u8, "sizeof", prefix)) {
+            try items.append(.{
+                .label = try self.allocator.dupe(u8, "sizeof"),
+                .kind = 3, // CompletionItemKind.Function
+                .detail = try self.allocator.dupe(u8, "builtin: sizeof(Type) num"),
+            });
         }
 
         // C macro constants (best-effort): offer completions when the corresponding
@@ -3586,6 +3620,10 @@ const LspServer = struct {
                         }
 
                         // Plain function call.
+                        if (std.mem.eql(u8, callee.text, "sizeof")) {
+                            return .{ .label = "sizeof(Type) num", .active_param = active_param };
+                        }
+
                         const def_local = findBestDefinition(idx.symbols, callee.text, p) orelse null;
                         const def_import = if (def_local == null) self.findAnyGlobalDefinitionInDirectImports(uri, callee.text) else null;
                         const label = blk: {

@@ -1059,7 +1059,7 @@ test "fls e2e: custom import namespace hover shows README" {
     // Create a custom module directory with a README.
     const mod_dir_abs = try std.fs.path.join(allocator, &[_][]const u8{ setup.root_abs, "mylib" });
     defer allocator.free(mod_dir_abs);
-    try std.fs.makeDirAbsolute(mod_dir_abs) catch |err| switch (err) {
+    std.fs.makeDirAbsolute(mod_dir_abs) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
@@ -1463,6 +1463,81 @@ test "fls e2e: signatureHelp for plain function call" {
     try expectSignatureHelpActiveParameter(allocator, sig_result, 1);
     try expectSignatureHelpHasParameter(allocator, sig_result, "num a");
     try expectSignatureHelpHasParameter(allocator, sig_result, "num b");
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: builtin sizeof completion + hover + signatureHelp" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "compound User {\n" ++
+        "  num age;\n" ++
+        "}\n\n" ++
+        "fun main() {\n" ++
+        "  num s;\n" ++
+        "  s = sizeof(User);\n" ++
+        "  siz;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-sizeof.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // Completion: typing `siz` should include `sizeof`.
+    const siz_pos = try findPosition(doc_text, "siz;", 0);
+    const comp_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, siz_pos.line, siz_pos.col + 3 },
+    );
+    defer allocator.free(comp_params);
+    const comp_id = try lsp.request("textDocument/completion", comp_params);
+    var comp_res = try lsp.waitResponse(comp_id, 15000);
+    defer comp_res.deinit();
+    const comp_val = try jsonResultFromResponseObj(comp_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, comp_val, "sizeof");
+
+    // Hover: hovering `sizeof` should show builtin docs.
+    const sizeof_pos = try findPosition(doc_text, "sizeof(User)", 0);
+    const hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, sizeof_pos.line, sizeof_pos.col + 1 },
+    );
+    defer allocator.free(hover_params);
+    const hover_id = try lsp.request("textDocument/hover", hover_params);
+    var hover_res = try lsp.waitResponse(hover_id, 15000);
+    defer hover_res.deinit();
+    const hover_val = try jsonResultFromResponseObj(hover_res.parsed.value.object);
+    try expectHoverContains(allocator, hover_val, "sizeof(Type)");
+
+    // SignatureHelp: inside `sizeof(...)` should show the builtin signature.
+    const sig_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, sizeof_pos.line, sizeof_pos.col + @as(i64, @intCast("sizeof(".len)) + 1 },
+    );
+    defer allocator.free(sig_params);
+    const sig_id = try lsp.request("textDocument/signatureHelp", sig_params);
+    var sig_res = try lsp.waitResponse(sig_id, 15000);
+    defer sig_res.deinit();
+    const sig_val = try jsonResultFromResponseObj(sig_res.parsed.value.object);
+    try expectSignatureHelpLabelContains(allocator, sig_val, "sizeof(Type)");
+    try expectSignatureHelpActiveParameter(allocator, sig_val, 0);
+    try expectSignatureHelpHasParameter(allocator, sig_val, "Type");
 
     const shutdown_id = try lsp.request("shutdown", "{}");
     var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
