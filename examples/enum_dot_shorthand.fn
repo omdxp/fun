@@ -1,7 +1,10 @@
 imp std.c.io;
 
+// This example demonstrates the use of enum dot shorthand notation
 enum Color {
+  // Representing the color red
   Red,
+  // Representing the color green
   Green,
   Blue,
 }

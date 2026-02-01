@@ -729,8 +729,8 @@ const LspServer = struct {
                 .implementationProvider = true,
                 .referencesProvider = true,
                 .renameProvider = true,
-                .completionProvider = .{},
-                .signatureHelpProvider = .{},
+                .completionProvider = .{ .triggerCharacters = &[_][]const u8{ ".", "(", ":" } },
+                .signatureHelpProvider = .{ .triggerCharacters = &[_][]const u8{ "(", "," } },
                 .documentSymbolProvider = true,
                 .workspaceSymbolProvider = true,
                 .semanticTokensProvider = .{
@@ -1051,6 +1051,28 @@ const LspServer = struct {
             defer self.allocator.free(json);
             try self.sendResponseJson(id_val, json);
             return;
+        }
+
+        // Enum dot-shorthand hover: `.Variant` where the enum type is inferred from context.
+        if (findTokenIndexAt(idx.tokens, pos)) |tok_i| {
+            if (tok_i > 0 and isDotToken(idx.tokens[tok_i - 1]) and (tok_i < 2 or idx.tokens[tok_i - 2].kind != .identifier)) {
+                if (self.guessEnumTypeForDotShorthand(uri, idx, tok_i)) |enum_name| {
+                    if (self.findMemberByContainer(uri, enum_name, tok.text, .enumMember)) |h| {
+                        var buf = std.ArrayList(u8).init(self.allocator);
+                        defer buf.deinit();
+                        try buf.writer().print("**{s}**\n\n", .{tok.text});
+                        try buf.writer().print("```\n{s}.{s}\n```\n", .{ enum_name, tok.text });
+                        if (self.docs.get(h.uri)) |hdoc| {
+                            _ = try appendDocCommentAboveLine(self.allocator, &buf, hdoc.text, h.sym.decl_range.start.line);
+                        }
+                        const hover: Hover = .{ .contents = .{ .value = buf.items }, .range = tok.range };
+                        const json = try std.json.stringifyAlloc(self.allocator, hover, .{});
+                        defer self.allocator.free(json);
+                        try self.sendResponseJson(id_val, json);
+                        return;
+                    }
+                }
+            }
         }
 
         // Member hover: show info for `a.b` / `a.b.c` by resolving receiver type.
@@ -1392,6 +1414,19 @@ const LspServer = struct {
         if (tok.kind != .identifier) {
             try self.sendResponseJson(id_val, "[]");
             return;
+        }
+
+        // Enum dot-shorthand definition: `.Variant` -> enum member declaration.
+        if (tok_i > 0 and isDotToken(idx.tokens[tok_i - 1]) and (tok_i < 2 or idx.tokens[tok_i - 2].kind != .identifier)) {
+            if (self.guessEnumTypeForDotShorthand(uri, idx, tok_i)) |enum_name| {
+                if (self.findMemberByContainer(uri, enum_name, tok.text, .enumMember)) |h| {
+                    const locs = [_]Location{.{ .uri = h.uri, .range = h.sym.selection_range }};
+                    const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
+                    defer self.allocator.free(json);
+                    try self.sendResponseJson(id_val, json);
+                    return;
+                }
+            }
         }
 
         // stdlib namespace definition: `std.<module>.<symbol>`.
@@ -1908,10 +1943,12 @@ const LspServer = struct {
         const found = if (looks_like_call)
             (self.findMemberByContainer(uri, current_type.?, member_name, .method) orelse
                 self.findMemberByContainer(uri, current_type.?, member_name, .field) orelse
-                self.findMemberByContainer(uri, current_type.?, member_name, .property))
+                self.findMemberByContainer(uri, current_type.?, member_name, .property) orelse
+                self.findMemberByContainer(uri, current_type.?, member_name, .enumMember))
         else
             (self.findMemberByContainer(uri, current_type.?, member_name, .field) orelse
                 self.findMemberByContainer(uri, current_type.?, member_name, .property) orelse
+                self.findMemberByContainer(uri, current_type.?, member_name, .enumMember) orelse
                 self.findMemberByContainer(uri, current_type.?, member_name, .method));
 
         if (found) |hit| {
@@ -1973,6 +2010,17 @@ const LspServer = struct {
             }
         }
         return false;
+    }
+
+    fn findEnumDefinitionAnyDoc(self: *LspServer, preferred_uri: []const u8, enum_name: []const u8) ?GlobalDefHit {
+        if (self.findTypeDefinitionAnyDoc(preferred_uri, enum_name)) |hit| {
+            if (hit.sym.kind == .enum_) return hit;
+        }
+        return null;
+    }
+
+    fn isEnumTypeName(self: *LspServer, preferred_uri: []const u8, name: []const u8) bool {
+        return self.findEnumDefinitionAnyDoc(preferred_uri, name) != null;
     }
 
     fn findTypeDefinitionAnyDoc(self: *LspServer, preferred_uri: []const u8, type_name: []const u8) ?GlobalDefHit {
@@ -2082,6 +2130,100 @@ const LspServer = struct {
             best = if (t_type.kind == .identifier) baseTypeName(t_type.text) else t_type.text;
         }
         return best;
+    }
+
+    fn parseTypeNameFromParamLabel(self: *LspServer, label: []const u8) ?[]const u8 {
+        _ = self;
+        var s = std.mem.trim(u8, label, " \t\r\n");
+        if (s.len == 0) return null;
+        const space_i = std.mem.indexOfAny(u8, s, " \t") orelse s.len;
+        var t = s[0..space_i];
+        while (t.len != 0 and (t[t.len - 1] == '*' or t[t.len - 1] == '&')) {
+            t = t[0 .. t.len - 1];
+        }
+        if (t.len == 0) return null;
+        return t;
+    }
+
+    fn guessEnumTypeForDotShorthand(self: *LspServer, uri: []const u8, idx: *const Index, tok_i: usize) ?[]const u8 {
+        var dot_i_opt: ?usize = null;
+        if (idx.tokens[tok_i].kind == .identifier) {
+            if (tok_i == 0 or !isDotToken(idx.tokens[tok_i - 1])) return null;
+            if (tok_i >= 2 and idx.tokens[tok_i - 2].kind == .identifier) return null; // not shorthand (e.g., Color.Red)
+            dot_i_opt = tok_i - 1;
+        } else if (isDotToken(idx.tokens[tok_i])) {
+            dot_i_opt = tok_i;
+        } else {
+            return null;
+        }
+
+        const dot_i = dot_i_opt.?;
+        const dot_pos = idx.tokens[dot_i].range.start;
+
+        // 1) Function-call context: use signature help to infer expected enum type.
+        if (self.guessCallSignatureAt(uri, idx, dot_pos)) |sig| {
+            const parsed = self.parseParamsFromSignatureLabel(sig.label) catch null;
+            if (parsed) |params| {
+                defer {
+                    for (params.items) |p| self.allocator.free(p.label);
+                    params.deinit();
+                }
+                if (params.items.len != 0) {
+                    var active: i64 = sig.active_param;
+                    const max_param: i64 = @intCast(params.items.len - 1);
+                    if (active > max_param) active = max_param;
+                    if (active < 0) active = 0;
+                    const p = params.items[@intCast(active)];
+                    if (self.parseTypeNameFromParamLabel(p.label)) |tname| {
+                        if (self.isEnumTypeName(uri, tname)) return tname;
+                    }
+                }
+            }
+        }
+
+        // 2) Binary context: `x = .Variant` or `x == .Variant`.
+        var k: isize = @as(isize, @intCast(dot_i)) - 1;
+        while (k >= 0) : (k -= 1) {
+            const t = idx.tokens[@intCast(k)];
+            if ((t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, ";")) break;
+            if (t.kind == .symbol or t.kind == .operator) {
+                if (std.mem.eql(u8, t.text, "=") or std.mem.eql(u8, t.text, "==") or std.mem.eql(u8, t.text, "!=")) {
+                    var j: isize = k - 1;
+                    while (j >= 0) : (j -= 1) {
+                        const lt = idx.tokens[@intCast(j)];
+                        if (lt.kind == .comment) continue;
+                        if (lt.kind == .identifier) {
+                            if (self.isEnumTypeName(uri, lt.text)) return lt.text;
+                            if (self.guessVariableType(idx, lt.text, dot_pos)) |vt| {
+                                if (self.isEnumTypeName(uri, vt)) return vt;
+                            }
+                            break;
+                        }
+                        if ((lt.kind == .symbol or lt.kind == .operator) and std.mem.eql(u8, lt.text, ";")) break;
+                    }
+                    break;
+                }
+            }
+        }
+
+        // 3) Fit context: `fit <enum_expr> { .Variant -> ... }`.
+        var f: isize = @as(isize, @intCast(dot_i)) - 1;
+        while (f >= 0) : (f -= 1) {
+            const t = idx.tokens[@intCast(f)];
+            if ((t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, ";")) break;
+            if (t.kind == .keyword and std.mem.eql(u8, t.text, "fit")) {
+                const after_i = nextNonTrivialTokenLite(idx.tokens, @as(usize, @intCast(f + 1))) orelse return null;
+                if (idx.tokens[after_i].kind != .identifier) return null;
+                const name = idx.tokens[after_i].text;
+                if (self.isEnumTypeName(uri, name)) return name;
+                if (self.guessVariableType(idx, name, dot_pos)) |vt| {
+                    if (self.isEnumTypeName(uri, vt)) return vt;
+                }
+                return null;
+            }
+        }
+
+        return null;
     }
 
     fn guessEnclosingImplType(self: *LspServer, idx: *const Index, at: Position) ?[]const u8 {
@@ -2455,6 +2597,149 @@ const LspServer = struct {
             seen.deinit();
         }
 
+        // --- Dot shorthand enum completions ---
+        // If the cursor is at a position where a dot shorthand is valid (e.g., after '=' or in a function argument),
+        // and the expected type is an enum, suggest all enum members as `.Variant`.
+        // This is a best-effort heuristic: we look for a prefix of "." and try to offer all enum members in scope.
+        const dot_shorthand_active: bool = blk: {
+            const cursor_b = byteIndexForPosition(doc.text, pos);
+            const dot_i_opt: ?usize = blk2: {
+                if (cursor_b > 0 and doc.text[cursor_b - 1] == '.') break :blk2 cursor_b - 1;
+                if (cursor_b < doc.text.len and doc.text[cursor_b] == '.') break :blk2 cursor_b;
+                break :blk2 null;
+            };
+            if (dot_i_opt == null) break :blk false;
+
+            // Ensure there's no receiver identifier before the dot (shorthand only).
+            var j: usize = dot_i_opt.?;
+            while (j > 0) {
+                const ch = doc.text[j - 1];
+                if (ch == ' ' or ch == '\t' or ch == '\r' or ch == '\n') {
+                    j -= 1;
+                    continue;
+                }
+                break;
+            }
+            var start: usize = j;
+            while (start > 0) {
+                const ch = doc.text[start - 1];
+                const ok = (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_';
+                if (!ok) break;
+                start -= 1;
+            }
+            const recv_name = if (start < j) doc.text[start..j] else "";
+            break :blk recv_name.len == 0;
+        };
+
+        if ((prefix.len == 1 and prefix[0] == '.') or dot_shorthand_active) {
+            const dot_tok_i_opt = findTokenIndexAt(idx.tokens, pos) orelse findLastTokenIndexBeforeOrAt(idx.tokens, pos);
+            if (dot_tok_i_opt) |dot_tok_i| {
+                if (self.guessEnumTypeForDotShorthand(uri, idx, dot_tok_i)) |enum_name| {
+                    // Offer only members of the inferred enum.
+                    // Current doc.
+                    for (idx.symbols) |s| {
+                        if (s.kind != .enumMember) continue;
+                        if (s.container_type == null or !std.mem.eql(u8, s.container_type.?, enum_name)) continue;
+                        const label = try self.allocator.dupe(u8, ".");
+                        const variant = try self.allocator.dupe(u8, s.name);
+                        const full = try self.allocator.alloc(u8, label.len + variant.len);
+                        std.mem.copyForwards(u8, full[0..label.len], label);
+                        std.mem.copyForwards(u8, full[label.len..], variant);
+                        try items.append(.{
+                            .label = full,
+                            .kind = 20,
+                            .detail = try self.allocator.dupe(u8, enum_name),
+                        });
+                    }
+
+                    // Direct imports.
+                    var import_uris = std.ArrayList([]u8).init(self.allocator);
+                    defer {
+                        for (import_uris.items) |u| self.allocator.free(u);
+                        import_uris.deinit();
+                    }
+                    try self.collectDirectImportUris(&import_uris, uri, idx);
+                    for (import_uris.items) |iu| {
+                        self.ensureDocIndexedFromDisk(iu) catch {};
+                        const imported = self.docs.get(iu) orelse continue;
+                        const didx = imported.index orelse continue;
+                        for (didx.symbols) |s| {
+                            if (s.kind != .enumMember) continue;
+                            if (s.container_type == null or !std.mem.eql(u8, s.container_type.?, enum_name)) continue;
+                            const label = try self.allocator.dupe(u8, ".");
+                            const variant = try self.allocator.dupe(u8, s.name);
+                            const full = try self.allocator.alloc(u8, label.len + variant.len);
+                            std.mem.copyForwards(u8, full[0..label.len], label);
+                            std.mem.copyForwards(u8, full[label.len..], variant);
+                            try items.append(.{
+                                .label = full,
+                                .kind = 20,
+                                .detail = try self.allocator.dupe(u8, enum_name),
+                            });
+                        }
+                    }
+
+                    const list: CompletionList = .{ .items = items.items };
+                    const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+                    defer self.allocator.free(json);
+                    try self.sendResponseJson(id_val, json);
+                    return;
+                }
+            }
+            // Collect all enums in scope (current doc + direct imports).
+            var enums = std.ArrayList(struct { name: []const u8, uri: []const u8 }).init(self.allocator);
+            defer {
+                for (enums.items) |e| self.allocator.free(e.name);
+                enums.deinit();
+            }
+            // Current doc.
+            for (idx.symbols) |s| {
+                if (s.kind == .enum_ and s.container_type == null) {
+                    try enums.append(.{ .name = try self.allocator.dupe(u8, s.name), .uri = uri });
+                }
+            }
+            // Direct imports.
+            var import_uris = std.ArrayList([]u8).init(self.allocator);
+            defer {
+                for (import_uris.items) |u| self.allocator.free(u);
+                import_uris.deinit();
+            }
+            try self.collectDirectImportUris(&import_uris, uri, idx);
+            for (import_uris.items) |iu| {
+                self.ensureDocIndexedFromDisk(iu) catch {};
+                const imported = self.docs.get(iu) orelse continue;
+                const didx = imported.index orelse continue;
+                for (didx.symbols) |s| {
+                    if (s.kind == .enum_ and s.container_type == null) {
+                        try enums.append(.{ .name = try self.allocator.dupe(u8, s.name), .uri = iu });
+                    }
+                }
+            }
+            // For each enum, offer its members as dot shorthand.
+            for (enums.items) |e| {
+                const eidx = self.docs.get(e.uri).?.index orelse continue;
+                for (eidx.symbols) |s| {
+                    if (s.kind != .enumMember) continue;
+                    if (s.container_type == null or !std.mem.eql(u8, s.container_type.?, e.name)) continue;
+                    // Only offer as .Variant (dot shorthand)
+                    const label = try self.allocator.dupe(u8, ".");
+                    const variant = try self.allocator.dupe(u8, s.name);
+                    const full = try self.allocator.alloc(u8, label.len + variant.len);
+                    std.mem.copyForwards(u8, full[0..label.len], label);
+                    std.mem.copyForwards(u8, full[label.len..], variant);
+                    try items.append(.{
+                        .label = full,
+                        .kind = 20, // CompletionItemKind.EnumMember
+                        .detail = try self.allocator.dupe(u8, e.name),
+                    });
+                }
+            }
+            const list: CompletionList = .{ .items = items.items };
+            const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+            defer self.allocator.free(json);
+            try self.sendResponseJson(id_val, json);
+            return;
+        }
         // Current doc.
         var has_locals_in_scope = false;
         for (idx.symbols) |s| {
@@ -5062,6 +5347,16 @@ fn findTokenIndexAt(tokens: []const TokenLite, p: Position) ?usize {
 
 fn isDotToken(t: TokenLite) bool {
     return (t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, ".");
+}
+
+fn nextNonTrivialTokenLite(tokens: []const TokenLite, start_index: usize) ?usize {
+    var i = start_index;
+    while (i < tokens.len) : (i += 1) {
+        const t = tokens[i];
+        if (t.kind == .comment) continue;
+        return i;
+    }
+    return null;
 }
 
 fn findLastTokenIndexBeforeOrAt(tokens: []const TokenLite, p: Position) ?usize {
