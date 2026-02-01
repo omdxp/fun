@@ -1048,6 +1048,120 @@ test "fls e2e: std namespace hover shows README and module docs" {
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: enum dot shorthand completion/hover/definition" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "imp std.c.io;\n\n" ++
+        "enum Color {\n" ++
+        "  Red,\n" ++
+        "  Green,\n" ++
+        "  Blue,\n" ++
+        "}\n\n" ++
+        "fun takes(Color c) {\n" ++
+        "  fit c {\n" ++
+        "    .Red -> { printf(\\\"R\\\\n\\\"); },\n" ++
+        "    .Green -> { printf(\\\"G\\\\n\\\"); },\n" ++
+        "    .Blue -> { printf(\\\"B\\\\n\\\"); },\n" ++
+        "  }\n" ++
+        "}\n\n" ++
+        "fun main() {\n" ++
+        "  Color c = .Blue;\n" ++
+        "  if c == .Blue {\n" ++
+        "    takes(.Red);\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-enum-dot.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // Completion after `.`, expect `.Blue`.
+    const comp_pos = try findPosition(doc_text, "= .", 0);
+    const comp_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, comp_pos.line, comp_pos.col + 3 },
+    );
+    defer allocator.free(comp_params);
+    const comp_id = try lsp.request("textDocument/completion", comp_params);
+    var comp_res = try lsp.waitResponse(comp_id, 15000);
+    defer comp_res.deinit();
+    const comp_result = try jsonResultFromResponseObj(comp_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, comp_result, ".Blue");
+
+    // Completion inside call args: `takes(.Red)` should offer `.Red`.
+    const comp_call_pos = try findPosition(doc_text, "takes(.Red)", 0);
+    const comp_call_params = try std.fmt.allocPrint(
+        allocator,
+        "{\"textDocument\":{\"uri\":\"{s}\"},\"position\":{\"line\":{d},\"character\":{d}}}",
+        .{ doc_uri, comp_call_pos.line, comp_call_pos.col + @as(i64, @intCast("takes(.".len)) },
+    );
+    defer allocator.free(comp_call_params);
+    const comp_call_id = try lsp.request("textDocument/completion", comp_call_params);
+    var comp_call_res = try lsp.waitResponse(comp_call_id, 15000);
+    defer comp_call_res.deinit();
+    const comp_call_result = try jsonResultFromResponseObj(comp_call_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, comp_call_result, ".Red");
+
+    // Completion inside if-condition: `if c == .Blue` should offer `.Blue`.
+    const comp_if_pos = try findPosition(doc_text, "== .Blue", 0);
+    const comp_if_params = try std.fmt.allocPrint(
+        allocator,
+        "{\"textDocument\":{\"uri\":\"{s}\"},\"position\":{\"line\":{d},\"character\":{d}}}",
+        .{ doc_uri, comp_if_pos.line, comp_if_pos.col + @as(i64, @intCast("== .".len)) },
+    );
+    defer allocator.free(comp_if_params);
+    const comp_if_id = try lsp.request("textDocument/completion", comp_if_params);
+    var comp_if_res = try lsp.waitResponse(comp_if_id, 15000);
+    defer comp_if_res.deinit();
+    const comp_if_result = try jsonResultFromResponseObj(comp_if_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, comp_if_result, ".Blue");
+
+    // Hover on `.Blue` should show `Color.Blue`.
+    const blue_pos = try findPosition(doc_text, ".Blue", 0);
+    const hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, blue_pos.line, blue_pos.col + 1 },
+    );
+    defer allocator.free(hover_params);
+    const hover_id = try lsp.request("textDocument/hover", hover_params);
+    var hover_res = try lsp.waitResponse(hover_id, 15000);
+    defer hover_res.deinit();
+    const hover_val = try jsonResultFromResponseObj(hover_res.parsed.value.object);
+    try expectHoverContains(allocator, hover_val, "Color.Blue");
+
+    // Definition on `.Red` should jump to the enum variant declaration.
+    const red_use = try findPosition(doc_text, "takes(.Red)", 0);
+    const def_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, red_use.line, red_use.col + @as(i64, @intCast("takes(.".len)) },
+    );
+    defer allocator.free(def_params);
+    const def_id = try lsp.request("textDocument/definition", def_params);
+    var def_res = try lsp.waitResponse(def_id, 15000);
+    defer def_res.deinit();
+    const def_val = try jsonResultFromResponseObj(def_res.parsed.value.object);
+    const red_decl = try findPosition(doc_text, "Red,", 0);
+    try expectDefinitionPointsTo(allocator, def_val, doc_uri, red_decl.line, red_decl.col);
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: custom import namespace hover shows README" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();

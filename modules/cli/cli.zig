@@ -927,11 +927,15 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
                     if (pt2.type == .Operator and operator_needs_spaces(pt2.data.sval.items)) break :blk true;
                     break :blk false;
                 }
-                // Ensure space after comparison or assignment operators before dot shorthand (enum variant)
+                // --- PATCH: Always insert a space after ==, !=, or = before dot shorthand enum (e.g., c == .Blue) ---
                 if (pt2.type == .Operator and (std.mem.eql(u8, pt2.data.sval.items, "==") or
                     std.mem.eql(u8, pt2.data.sval.items, "=") or
-                    std.mem.eql(u8, pt2.data.sval.items, "!=") or
-                    std.mem.eql(u8, pt2.data.sval.items, "<") or
+                    std.mem.eql(u8, pt2.data.sval.items, "!=")) and t2.type == .Operator and t2.data.sval.items.len > 0 and t2.data.sval.items[0] == '.')
+                {
+                    break :blk true;
+                }
+                // --- END PATCH ---
+                if (pt2.type == .Operator and (std.mem.eql(u8, pt2.data.sval.items, "<") or
                     std.mem.eql(u8, pt2.data.sval.items, "<=") or
                     std.mem.eql(u8, pt2.data.sval.items, ">") or
                     std.mem.eql(u8, pt2.data.sval.items, ">=")) and t2.type == .Operator and t2.data.sval.items.len > 0 and t2.data.sval.items[0] == '.')
