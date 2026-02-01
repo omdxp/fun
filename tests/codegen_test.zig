@@ -131,6 +131,37 @@ test "function definitions can be out of order (prototypes emitted)" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "enum types can be referenced before declaration" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_enum_after_main.fn";
+
+    const input =
+        "imp std.c.io;\n" ++
+        "\n" ++
+        "fun takesColor(Color c) num {\n" ++
+        "  if c == .Blue { ret 1; }\n" ++
+        "  ret 0;\n" ++
+        "}\n" ++
+        "\n" ++
+        "fun main() {\n" ++
+        "  num v = takesColor(.Blue);\n" ++
+        "  printf(\"%d\\n\", v);\n" ++
+        "}\n" ++
+        "\n" ++
+        "enum Color {\n" ++
+        "  Red,\n" ++
+        "  Blue,\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    // Ensure the enum variant constant made it through lowering/codegen.
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Color_Blue") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
 test "std.time import adds time.h include" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_std_time.fn";

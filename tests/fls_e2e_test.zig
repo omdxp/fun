@@ -1069,9 +1069,9 @@ test "fls e2e: enum dot shorthand completion/hover/definition" {
         "}\n\n" ++
         "fun takes(Color c) {\n" ++
         "  fit c {\n" ++
-        "    .Red -> { printf(\\\"R\\\\n\\\"); },\n" ++
-        "    .Green -> { printf(\\\"G\\\\n\\\"); },\n" ++
-        "    .Blue -> { printf(\\\"B\\\\n\\\"); },\n" ++
+        "    .Red -> { printf(\"R\\n\"); },\n" ++
+        "    .Green -> { printf(\"G\\n\"); },\n" ++
+        "    .Blue -> { printf(\"B\\n\"); },\n" ++
         "  }\n" ++
         "}\n\n" ++
         "fun main() {\n" ++
@@ -1103,7 +1103,7 @@ test "fls e2e: enum dot shorthand completion/hover/definition" {
     const comp_call_pos = try findPosition(doc_text, "takes(.Red)", 0);
     const comp_call_params = try std.fmt.allocPrint(
         allocator,
-        "{\"textDocument\":{\"uri\":\"{s}\"},\"position\":{\"line\":{d},\"character\":{d}}}",
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
         .{ doc_uri, comp_call_pos.line, comp_call_pos.col + @as(i64, @intCast("takes(.".len)) },
     );
     defer allocator.free(comp_call_params);
@@ -1117,7 +1117,7 @@ test "fls e2e: enum dot shorthand completion/hover/definition" {
     const comp_if_pos = try findPosition(doc_text, "== .Blue", 0);
     const comp_if_params = try std.fmt.allocPrint(
         allocator,
-        "{\"textDocument\":{\"uri\":\"{s}\"},\"position\":{\"line\":{d},\"character\":{d}}}",
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
         .{ doc_uri, comp_if_pos.line, comp_if_pos.col + @as(i64, @intCast("== .".len)) },
     );
     defer allocator.free(comp_if_params);

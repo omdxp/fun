@@ -1303,9 +1303,18 @@ pub const TranspileProcess = struct {
         stdlib_dir_override: ?[]const u8,
         input_mode: fs.File.OpenMode,
     ) TranspileError!Self {
-        const ifile = fs.cwd().openFile(ifilepath, .{ .mode = input_mode }) catch |e| {
-            std.debug.print("Error opening input file '{s}': {s}\\n", .{ ifilepath, @errorName(e) });
-            return TranspileError.FileOpenError;
+        const ifile = blk: {
+            const is_abs = fs.path.isAbsolute(ifilepath) or (@import("builtin").target.os.tag == .windows and ifilepath.len >= 2 and ifilepath[1] == ':');
+            if (is_abs) {
+                break :blk fs.openFileAbsolute(ifilepath, .{ .mode = input_mode }) catch |e| {
+                    std.debug.print("Error opening input file '{s}': {s}\n", .{ ifilepath, @errorName(e) });
+                    return TranspileError.FileOpenError;
+                };
+            }
+            break :blk fs.cwd().openFile(ifilepath, .{ .mode = input_mode }) catch |e| {
+                std.debug.print("Error opening input file '{s}': {s}\n", .{ ifilepath, @errorName(e) });
+                return TranspileError.FileOpenError;
+            };
         };
         errdefer ifile.close();
 
@@ -1321,9 +1330,18 @@ pub const TranspileProcess = struct {
         var outbuf: ?std.ArrayList(u8) = null;
 
         if (flags.outf) {
-            ofile = fs.cwd().createFile(ofilepath, .{ .read = true }) catch |e| {
-                std.debug.print("Error creating output file '{s}': {s}\\n", .{ ofilepath, @errorName(e) });
-                return TranspileError.FileOpenError;
+            ofile = blk: {
+                const is_abs = fs.path.isAbsolute(ofilepath) or (@import("builtin").target.os.tag == .windows and ofilepath.len >= 2 and ofilepath[1] == ':');
+                if (is_abs) {
+                    break :blk fs.createFileAbsolute(ofilepath, .{ .read = true }) catch |e| {
+                        std.debug.print("Error creating output file '{s}': {s}\n", .{ ofilepath, @errorName(e) });
+                        return TranspileError.FileOpenError;
+                    };
+                }
+                break :blk fs.cwd().createFile(ofilepath, .{ .read = true }) catch |e| {
+                    std.debug.print("Error creating output file '{s}': {s}\n", .{ ofilepath, @errorName(e) });
+                    return TranspileError.FileOpenError;
+                };
             };
             errdefer if (ofile) |f| f.close();
         } else {

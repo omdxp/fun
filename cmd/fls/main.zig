@@ -4,11 +4,36 @@ const codegen = @import("codegen");
 const parser = @import("parser");
 const lexer = @import("lexer");
 const utils = @import("utils");
+const build_options = @import("build_options");
 const token = lexer.token;
 
 const Allocator = std.mem.Allocator;
 
 pub fn main() !void {
+    // CLI helpers (used by installers / debugging PATH mismatches).
+    // Note: fls is normally launched by the VS Code extension with no args (stdio mode).
+    const argv = try std.process.argsAlloc(std.heap.page_allocator);
+    defer std.process.argsFree(std.heap.page_allocator, argv);
+
+    if (argv.len >= 2) {
+        if (std.mem.eql(u8, argv[1], "--version") or std.mem.eql(u8, argv[1], "-v")) {
+            const out = std.io.getStdOut().writer();
+            try out.print("fls {s}\n", .{build_options.version});
+            return;
+        }
+        if (std.mem.eql(u8, argv[1], "--help") or std.mem.eql(u8, argv[1], "-h")) {
+            const out = std.io.getStdOut().writer();
+            try out.writeAll(
+                "Fun Language Server (fls)\n\n" ++
+                    "Usage:\n" ++
+                    "  fls            Run language server over stdio (LSP)\n" ++
+                    "  fls --version  Print version\n" ++
+                    "  fls --help     Show this help\n",
+            );
+            return;
+        }
+    }
+
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -263,6 +288,14 @@ const LspServer = struct {
             if (self.root_path) |rp| dbg(true, "imports", "root_path={s}", .{rp});
             dbg(true, "imports", "fun_exe_path={s}", .{self.fun_exe_path});
             if (self.fls_exe_path) |fp| dbg(true, "imports", "fls_exe_path={s}", .{fp});
+        }
+
+        // Prefer repo/workspace checkout layout when available.
+        // This keeps fls working correctly when developing in a fun checkout even if
+        // the machine also has a global install (or FUN_STDLIB_DIR) configured.
+        if (self.tryStdlibRootFromWorkspace()) {
+            if (self.debug_imports) dbg(true, "imports", "stdlib root from workspace => {s}", .{self.stdlib_root_path.?});
+            return self.stdlib_root_path.?;
         }
 
         // Optional override for custom installs.
@@ -1023,8 +1056,9 @@ const LspServer = struct {
 
         // Import namespace hover (custom modules): if hovering a segment of `imp a.b.c;` and that
         // segment resolves to a directory with a README, show it.
+        if (try self.trySendImportNamespaceHoverLineBased(id_val, uri, doc.text, pos)) return;
         if (findTokenIndexAt(idx.tokens, pos)) |tok_i| {
-            if (try self.trySendImportNamespaceHover(id_val, uri, idx, tok_i)) return;
+            if (try self.trySendImportNamespaceHover(id_val, uri, idx, pos, tok_i)) return;
         }
 
         // Stdlib namespace hover (e.g. `std`, `std.c`, `std.c.io`, `std.c.io.printf`).
@@ -1055,13 +1089,18 @@ const LspServer = struct {
 
         // Enum dot-shorthand hover: `.Variant` where the enum type is inferred from context.
         if (findTokenIndexAt(idx.tokens, pos)) |tok_i| {
-            if (tok_i > 0 and isDotToken(idx.tokens[tok_i - 1]) and (tok_i < 2 or idx.tokens[tok_i - 2].kind != .identifier)) {
+            const t = idx.tokens[tok_i];
+            const merged = (t.kind == .identifier and t.text.len > 1 and t.text[0] == '.');
+            const is_shorthand = merged or (tok_i > 0 and isDotToken(idx.tokens[tok_i - 1]));
+            const not_member = merged or (tok_i < 2 or idx.tokens[tok_i - 2].kind != .identifier);
+            if (is_shorthand and not_member) {
+                const variant_name = if (merged) t.text[1..] else tok.text;
                 if (self.guessEnumTypeForDotShorthand(uri, idx, tok_i)) |enum_name| {
-                    if (self.findMemberByContainer(uri, enum_name, tok.text, .enumMember)) |h| {
+                    if (self.findMemberByContainer(uri, enum_name, variant_name, .enumMember)) |h| {
                         var buf = std.ArrayList(u8).init(self.allocator);
                         defer buf.deinit();
-                        try buf.writer().print("**{s}**\n\n", .{tok.text});
-                        try buf.writer().print("```\n{s}.{s}\n```\n", .{ enum_name, tok.text });
+                        try buf.writer().print("**{s}**\n\n", .{variant_name});
+                        try buf.writer().print("```\n{s}.{s}\n```\n", .{ enum_name, variant_name });
                         if (self.docs.get(h.uri)) |hdoc| {
                             _ = try appendDocCommentAboveLine(self.allocator, &buf, hdoc.text, h.sym.decl_range.start.line);
                         }
@@ -1153,6 +1192,13 @@ const LspServer = struct {
                 } else {
                     try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
                 }
+            } else if (d.kind == .enumMember) {
+                const recv_type = d.container_type orelse d.value_type orelse "";
+                if (recv_type.len != 0) {
+                    try buf.writer().print("```\n{s}.{s}\n```\n", .{ recv_type, tok.text });
+                } else {
+                    try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
+                }
             } else if ((d.kind == .struct_ or d.kind == .interface or d.kind == .enum_)) {
                 const kw = if (d.kind == .struct_) "compound" else if (d.kind == .interface) "quirk" else "enum";
                 try buf.writer().print("```\n{s} {s}\n```\n", .{ kw, tok.text });
@@ -1178,6 +1224,13 @@ const LspServer = struct {
                 const vt = d.value_type orelse self.guessVariableType(idx, tok.text, pos);
                 if (vt) |vts| {
                     try buf.writer().print("```\n{s} {s}\n```\n", .{ vts, tok.text });
+                } else {
+                    try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
+                }
+            } else if (d.kind == .enumMember) {
+                const recv_type = d.container_type orelse d.value_type orelse "";
+                if (recv_type.len != 0) {
+                    try buf.writer().print("```\n{s}.{s}\n```\n", .{ recv_type, tok.text });
                 } else {
                     try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
                 }
@@ -1417,14 +1470,20 @@ const LspServer = struct {
         }
 
         // Enum dot-shorthand definition: `.Variant` -> enum member declaration.
-        if (tok_i > 0 and isDotToken(idx.tokens[tok_i - 1]) and (tok_i < 2 or idx.tokens[tok_i - 2].kind != .identifier)) {
-            if (self.guessEnumTypeForDotShorthand(uri, idx, tok_i)) |enum_name| {
-                if (self.findMemberByContainer(uri, enum_name, tok.text, .enumMember)) |h| {
+        {
+            const merged = (tok.text.len > 1 and tok.text[0] == '.');
+            const is_shorthand = merged or (tok_i > 0 and isDotToken(idx.tokens[tok_i - 1]));
+            const not_member = merged or (tok_i < 2 or idx.tokens[tok_i - 2].kind != .identifier);
+            if (is_shorthand and not_member) {
+                const variant_name = if (merged) tok.text[1..] else tok.text;
+                if (self.guessEnumTypeForDotShorthand(uri, idx, tok_i)) |enum_name| {
+                    if (self.findMemberByContainer(uri, enum_name, variant_name, .enumMember)) |h| {
                     const locs = [_]Location{.{ .uri = h.uri, .range = h.sym.selection_range }};
                     const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
                     defer self.allocator.free(json);
                     try self.sendResponseJson(id_val, json);
                     return;
+                    }
                 }
             }
         }
@@ -1554,6 +1613,41 @@ const LspServer = struct {
         const current_path = uriToPath(self.allocator, current_uri) catch return false;
         defer self.allocator.free(current_path);
         const current_dir = std.fs.path.dirname(current_path) orelse return false;
+
+        // Fast path: hovering the first import segment (e.g. `imp mylib.foo;` on `mylib`).
+        // Show `<current_dir>/<segment>/README.md` when present.
+        const is_first_segment = blk: {
+            var scan_tok_i: usize = imp_i + 1;
+            while (scan_tok_i < idx.tokens.len) : (scan_tok_i += 1) {
+                const t2 = idx.tokens[scan_tok_i];
+                if ((t2.kind == .symbol or t2.kind == .operator) and std.mem.eql(u8, t2.text, ";")) break;
+                if (t2.kind == .identifier) break :blk (scan_tok_i == tok_i);
+            }
+            break :blk false;
+        };
+        if (is_first_segment) {
+            const seg_dir = try std.fs.path.join(self.allocator, &[_][]const u8{ current_dir, idx.tokens[tok_i].text });
+            defer self.allocator.free(seg_dir);
+            const readme_path_fast = try std.fs.path.join(self.allocator, &[_][]const u8{ seg_dir, "README.md" });
+            defer self.allocator.free(readme_path_fast);
+            if (self.tryOpenExistingFile(readme_path_fast)) {
+                const readme_text = blk: {
+                    if (std.fs.path.isAbsolute(readme_path_fast)) {
+                        var f = std.fs.openFileAbsolute(readme_path_fast, .{}) catch return false;
+                        defer f.close();
+                        break :blk f.readToEndAlloc(self.allocator, 128 * 1024) catch return false;
+                    }
+                    break :blk std.fs.cwd().readFileAlloc(self.allocator, readme_path_fast, 128 * 1024) catch return false;
+                };
+                defer self.allocator.free(readme_text);
+
+                const hover: Hover = .{ .contents = .{ .value = readme_text }, .range = idx.tokens[tok_i].range };
+                const json = try std.json.stringifyAlloc(self.allocator, hover, .{});
+                defer self.allocator.free(json);
+                try self.sendResponseJson(id_val, json);
+                return true;
+            }
+        }
 
         // Resolve filesystem base and relative segments.
         var base_segs = std.ArrayList([]const u8).init(self.allocator);
@@ -1688,7 +1782,7 @@ const LspServer = struct {
         return true;
     }
 
-    fn trySendImportNamespaceHover(self: *LspServer, id_val: ?std.json.Value, current_uri: []const u8, idx: *const Index, tok_i: usize) !bool {
+    fn trySendImportNamespaceHover(self: *LspServer, id_val: ?std.json.Value, current_uri: []const u8, idx: *const Index, pos: Position, tok_i: usize) !bool {
         if (idx.tokens[tok_i].kind != .identifier) return false;
 
         // Scan backwards to find an `imp` keyword without crossing ';'
@@ -1757,11 +1851,11 @@ const LspServer = struct {
         // Collect identifier tokens in the import statement and locate which one is hovered.
         var ident_toks = std.ArrayList(usize).init(self.allocator);
         defer ident_toks.deinit();
-        var i: usize = imp_i + 1;
-        while (i < idx.tokens.len) : (i += 1) {
-            const t = idx.tokens[i];
+        var scan_tok_i: usize = imp_i + 1;
+        while (scan_tok_i < idx.tokens.len) : (scan_tok_i += 1) {
+            const t = idx.tokens[scan_tok_i];
             if ((t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, ";")) break;
-            if (t.kind == .identifier) try ident_toks.append(i);
+            if (t.kind == .identifier) try ident_toks.append(scan_tok_i);
         }
         if (ident_toks.items.len == 0) return false;
 
@@ -1772,7 +1866,7 @@ const LspServer = struct {
                 break;
             }
         }
-        const selected_ident_ord = selected_ident_ord_opt orelse return false;
+        var selected_ident_ord: usize = selected_ident_ord_opt orelse 0;
 
         // Map identifier ordinal -> part index (skip parent segments "..").
         var non_parent_part_indices = std.ArrayList(usize).init(self.allocator);
@@ -1780,18 +1874,59 @@ const LspServer = struct {
         for (parts.items, 0..) |p, pi| {
             if (!std.mem.eql(u8, p, "..")) try non_parent_part_indices.append(pi);
         }
-        if (non_parent_part_indices.items.len != ident_toks.items.len) return false;
+        if (non_parent_part_indices.items.len != ident_toks.items.len) {
+            // Some lexers tokenize `mylib.foo` as a single identifier token.
+            // Fall back to selecting the segment based on hover position within that token.
+            if (ident_toks.items.len != 1) return false;
+            const t = idx.tokens[tok_i];
+            const dot_in_token = std.mem.indexOfScalar(u8, t.text, '.');
+            if (dot_in_token == null) return false;
 
+            if (pos.line != t.range.start.line) return false;
+            if (pos.character < t.range.start.character) return false;
+            const off: usize = @intCast(pos.character - t.range.start.character);
+
+            var seg_ord: usize = 0;
+            var start: usize = 0;
+            var scan_i: usize = 0;
+            while (scan_i <= t.text.len) : (scan_i += 1) {
+                if (scan_i == t.text.len or t.text[scan_i] == '.') {
+                    const seg_start = start;
+                    const seg_end = scan_i;
+                    if (off >= seg_start and off < seg_end) {
+                        selected_ident_ord = seg_ord;
+                        break;
+                    }
+                    // Cursor on dot: treat as next segment if possible.
+                    if (off == scan_i and scan_i != t.text.len) {
+                        selected_ident_ord = seg_ord + 1;
+                        break;
+                    }
+                    seg_ord += 1;
+                    start = scan_i + 1;
+                }
+            }
+        }
+
+        if (selected_ident_ord >= non_parent_part_indices.items.len) return false;
         const selected_part_index = non_parent_part_indices.items[selected_ident_ord];
 
         const current_path = uriToPath(self.allocator, current_uri) catch return false;
         defer self.allocator.free(current_path);
         const current_dir = std.fs.path.dirname(current_path) orelse return false;
 
+        const has_parent_segments = blk: {
+            for (parts.items) |p| {
+                if (std.mem.eql(u8, p, "..")) break :blk true;
+            }
+            break :blk false;
+        };
+        const base_dir = if (!has_parent_segments and self.root_path != null) self.root_path.? else current_dir;
+
         // Build the filesystem path (no extension) for the selected segment.
         var path_segs = std.ArrayList([]const u8).init(self.allocator);
         defer path_segs.deinit();
-        try path_segs.append(current_dir);
+        try path_segs.append(base_dir);
         var si: usize = 0;
         while (si <= selected_part_index) : (si += 1) {
             try path_segs.append(parts.items[si]);
@@ -2148,9 +2283,15 @@ const LspServer = struct {
     fn guessEnumTypeForDotShorthand(self: *LspServer, uri: []const u8, idx: *const Index, tok_i: usize) ?[]const u8 {
         var dot_i_opt: ?usize = null;
         if (idx.tokens[tok_i].kind == .identifier) {
+            // Some tokenizers may emit `.Variant` as a single identifier token (text starts with '.')
+            // rather than '.' + 'Variant'. Treat that as shorthand.
+            if (idx.tokens[tok_i].text.len > 1 and idx.tokens[tok_i].text[0] == '.') {
+                dot_i_opt = tok_i;
+            } else {
             if (tok_i == 0 or !isDotToken(idx.tokens[tok_i - 1])) return null;
             if (tok_i >= 2 and idx.tokens[tok_i - 2].kind == .identifier) return null; // not shorthand (e.g., Color.Red)
             dot_i_opt = tok_i - 1;
+            }
         } else if (isDotToken(idx.tokens[tok_i])) {
             dot_i_opt = tok_i;
         } else {
@@ -2175,7 +2316,7 @@ const LspServer = struct {
                     if (active < 0) active = 0;
                     const p = params.items[@intCast(active)];
                     if (self.parseTypeNameFromParamLabel(p.label)) |tname| {
-                        if (self.isEnumTypeName(uri, tname)) return tname;
+                        if (self.findEnumDefinitionAnyDoc(uri, tname)) |hit| return hit.sym.name;
                     }
                 }
             }
@@ -2602,8 +2743,31 @@ const LspServer = struct {
         // and the expected type is an enum, suggest all enum members as `.Variant`.
         // This is a best-effort heuristic: we look for a prefix of "." and try to offer all enum members in scope.
         const dot_shorthand_active: bool = blk: {
+            // Prefer token-based detection when possible.
+            const ti_opt = findTokenIndexAt(idx.tokens, pos) orelse findLastTokenIndexBeforeOrAt(idx.tokens, pos);
+            if (ti_opt) |ti| {
+                const t = idx.tokens[ti];
+                if (t.kind == .identifier and t.text.len > 1 and t.text[0] == '.') {
+                    break :blk true;
+                }
+                if (t.kind == .identifier and ti > 0 and isDotToken(idx.tokens[ti - 1])) {
+                    // Not shorthand when receiver exists: `Type.Member`
+                    if (ti >= 2 and idx.tokens[ti - 2].kind == .identifier) break :blk false;
+                    break :blk true;
+                }
+                if (isDotToken(t)) {
+                    // Not shorthand when receiver exists: `Type.`
+                    if (ti >= 1 and idx.tokens[ti - 1].kind == .identifier) break :blk false;
+                    break :blk true;
+                }
+            }
+
+            // Fallback: raw text heuristic (handles some lexer edge cases).
             const cursor_b = byteIndexForPosition(doc.text, pos);
+            const prefix_start: usize = if (cursor_b >= prefix.len) cursor_b - prefix.len else cursor_b;
+
             const dot_i_opt: ?usize = blk2: {
+                if (prefix.len != 0 and prefix_start > 0 and doc.text[prefix_start - 1] == '.') break :blk2 prefix_start - 1;
                 if (cursor_b > 0 and doc.text[cursor_b - 1] == '.') break :blk2 cursor_b - 1;
                 if (cursor_b < doc.text.len and doc.text[cursor_b] == '.') break :blk2 cursor_b;
                 break :blk2 null;
@@ -3102,14 +3266,38 @@ const LspServer = struct {
                 var dir_mut = dir;
                 defer dir_mut.close();
                 var it = dir_mut.iterate();
+
+                var saw_c_dir: bool = false;
+                var saw_any_fn: bool = false;
                 while (it.next() catch null) |entry| {
                     if (entry.kind == .directory) {
                         if (prefix.len != 0 and !std.mem.startsWith(u8, entry.name, prefix)) continue;
                         try items.append(.{ .label = try self.allocator.dupe(u8, entry.name), .kind = 19 });
+                        if (ids.items.len == 1 and std.mem.eql(u8, entry.name, "c")) saw_c_dir = true;
                     } else if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".fn")) {
                         const base_name = entry.name[0 .. entry.name.len - 3];
                         if (prefix.len != 0 and !std.mem.startsWith(u8, base_name, prefix)) continue;
                         try items.append(.{ .label = try self.allocator.dupe(u8, base_name), .kind = 17 });
+                        saw_any_fn = true;
+                    }
+                }
+
+                // Convenience: if completing `std.` and the repo layout places modules under `std/c/*`,
+                // surface those leaf modules directly at `std.` (e.g. `io`).
+                if (ids.items.len == 1 and saw_c_dir and !saw_any_fn) {
+                    const c_dir = try std.fs.path.join(self.allocator, &[_][]const u8{ receiver_path_no_ext, "c" });
+                    defer self.allocator.free(c_dir);
+                    if (std.fs.openDirAbsolute(c_dir, .{ .iterate = true }) catch null) |cdir| {
+                        var cdir_mut = cdir;
+                        defer cdir_mut.close();
+                        var it2 = cdir_mut.iterate();
+                        while (it2.next() catch null) |e2| {
+                            if (e2.kind != .file) continue;
+                            if (!std.mem.endsWith(u8, e2.name, ".fn")) continue;
+                            const base_name = e2.name[0 .. e2.name.len - 3];
+                            if (prefix.len != 0 and !std.mem.startsWith(u8, base_name, prefix)) continue;
+                            try items.append(.{ .label = try self.allocator.dupe(u8, base_name), .kind = 17 });
+                        }
                     }
                 }
             }
@@ -3846,14 +4034,37 @@ const LspServer = struct {
                 defer dir_mut.close();
 
                 var iter = dir_mut.iterate();
+                var saw_c_dir: bool = false;
+                var saw_any_fn: bool = false;
                 while (iter.next() catch null) |entry| {
                     if (entry.kind == .directory) {
                         if (partial.len != 0 and !std.mem.startsWith(u8, entry.name, partial)) continue;
                         try items.append(.{ .label = try self.allocator.dupe(u8, entry.name), .kind = 19 });
+                        if (parent_count == 1 and std.mem.eql(u8, parts.items[0], "std") and std.mem.eql(u8, entry.name, "c")) saw_c_dir = true;
                     } else if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".fn")) {
                         const base = entry.name[0 .. entry.name.len - 3];
                         if (partial.len != 0 and !std.mem.startsWith(u8, base, partial)) continue;
                         try items.append(.{ .label = try self.allocator.dupe(u8, base), .kind = 17 });
+                        saw_any_fn = true;
+                    }
+                }
+
+                // Convenience: completing `imp std.;` should surface common leaf modules like `io`
+                // even when the repo stdlib layout places them under `std/c/*`.
+                if (parent_count == 1 and std.mem.eql(u8, parts.items[0], "std") and saw_c_dir and !saw_any_fn) {
+                    const c_dir = try std.fs.path.join(self.allocator, &[_][]const u8{ base_dir_path, "c" });
+                    defer self.allocator.free(c_dir);
+                    if (std.fs.openDirAbsolute(c_dir, .{ .iterate = true }) catch null) |cdir| {
+                        var cdir_mut = cdir;
+                        defer cdir_mut.close();
+                        var it2 = cdir_mut.iterate();
+                        while (it2.next() catch null) |e2| {
+                            if (e2.kind != .file) continue;
+                            if (!std.mem.endsWith(u8, e2.name, ".fn")) continue;
+                            const base_name = e2.name[0 .. e2.name.len - 3];
+                            if (partial.len != 0 and !std.mem.startsWith(u8, base_name, partial)) continue;
+                            try items.append(.{ .label = try self.allocator.dupe(u8, base_name), .kind = 17 });
+                        }
                     }
                 }
             }
@@ -3861,6 +4072,74 @@ const LspServer = struct {
 
         const list: CompletionList = .{ .items = items.items };
         const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+        defer self.allocator.free(json);
+        try self.sendResponseJson(id_val, json);
+        return true;
+    }
+
+    fn trySendImportNamespaceHoverLineBased(self: *LspServer, id_val: ?std.json.Value, current_uri: []const u8, text: []const u8, pos: Position) !bool {
+        // Best-effort import hover for custom modules using line parsing.
+        // This is intentionally more tolerant than the token-based version.
+        const cursor = byteIndexForPosition(text, pos);
+        var line_start: usize = cursor;
+        while (line_start > 0 and text[line_start - 1] != '\n') : (line_start -= 1) {}
+        var line_end: usize = cursor;
+        while (line_end < text.len and text[line_end] != '\n') : (line_end += 1) {}
+
+        var line = text[line_start..line_end];
+        while (line.len != 0 and (line[0] == ' ' or line[0] == '\t' or line[0] == '\r')) line = line[1..];
+        if (!std.mem.startsWith(u8, line, "imp")) return false;
+        if (line.len < 3) return false;
+        if (line.len > 3 and !(line[3] == ' ' or line[3] == '\t')) return false;
+
+        const rel_cursor = cursor - line_start;
+        if (rel_cursor < 3) return false;
+
+        // Find start of spec after `imp` whitespace.
+        var spec_start: usize = 3;
+        while (spec_start < line.len and (line[spec_start] == ' ' or line[spec_start] == '\t')) : (spec_start += 1) {}
+        if (spec_start >= line.len) return false;
+        if (rel_cursor < spec_start) return false;
+
+        var spec = line[spec_start..];
+        if (std.mem.indexOfScalar(u8, spec, ';')) |semi| spec = spec[0..semi];
+        spec = std.mem.trim(u8, spec, " \t\r\n\"");
+        if (spec.len == 0) return false;
+
+        // Only handle non-stdlib here; std namespace hover has its own handler.
+        if (std.mem.startsWith(u8, spec, "std") and (spec.len == 3 or spec[3] == '.')) return false;
+
+        // Figure out the first segment and whether cursor is within it.
+        const dot_i = std.mem.indexOfScalar(u8, spec, '.') orelse spec.len;
+        const first_seg = std.mem.trim(u8, spec[0..dot_i], " \t\r\n\"");
+        if (first_seg.len == 0) return false;
+
+        const off_in_spec: usize = @intCast(rel_cursor - spec_start);
+        if (off_in_spec >= dot_i) return false; // cursor isn't in first segment
+
+        const current_path = uriToPath(self.allocator, current_uri) catch return false;
+        defer self.allocator.free(current_path);
+        const current_dir = std.fs.path.dirname(current_path) orelse return false;
+        const base_dir = if (self.root_path) |rp| rp else current_dir;
+
+        const seg_dir = try std.fs.path.join(self.allocator, &[_][]const u8{ base_dir, first_seg });
+        defer self.allocator.free(seg_dir);
+        const readme_path = try std.fs.path.join(self.allocator, &[_][]const u8{ seg_dir, "README.md" });
+        defer self.allocator.free(readme_path);
+        if (!self.tryOpenExistingFile(readme_path)) return false;
+
+        const readme_text = blk: {
+            if (std.fs.path.isAbsolute(readme_path)) {
+                var f = std.fs.openFileAbsolute(readme_path, .{}) catch return false;
+                defer f.close();
+                break :blk f.readToEndAlloc(self.allocator, 128 * 1024) catch return false;
+            }
+            break :blk std.fs.cwd().readFileAlloc(self.allocator, readme_path, 128 * 1024) catch return false;
+        };
+        defer self.allocator.free(readme_text);
+
+        const hover: Hover = .{ .contents = .{ .value = readme_text }, .range = .{ .start = pos, .end = pos } };
+        const json = try std.json.stringifyAlloc(self.allocator, hover, .{});
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
         return true;
@@ -5803,11 +6082,13 @@ fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path_opt
 
     if (parse_ok) {
         // Keep member/field symbols from the lexer scan (AST lacks positions for some of these).
+        // Also keep lexer-derived enums/variants (AST-backed symbol collection currently doesn't include them).
         // Also keep token-derived locals (including implicit `self` and params inside `impl` methods),
         // because the current AST-backed collection does not cover all method-body locals.
         for (symbols_token.items) |s| {
             switch (s.kind) {
                 .field, .property, .method => try symbols_out.append(s),
+                .enum_, .enumMember => try symbols_out.append(s),
                 .variable => {
                     if (s.container_fn_range != null) try symbols_out.append(s);
                 },
@@ -6729,8 +7010,8 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                         if (!isIdent(tk)) continue;
                         const after_name_i = nextNonTrivialToken(tokens, k + 1) orelse continue;
 
-                        // `Variant;`
-                        if (isSymbolChar(tokens[after_name_i], ';')) {
+                        // `Variant,` / `Variant;` / `Variant}`
+                        if (isPunctChar(tokens[after_name_i], ',') or isSymbolChar(tokens[after_name_i], ';') or isSymbolChar(tokens[after_name_i], '}')) {
                             const vname = tokenString(tk);
                             const vr = rangeFromTokenPos(tk.pos);
                             try out.append(.{
@@ -6746,17 +7027,16 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                             continue;
                         }
 
-                        // `Variant = 3;`
+                        // `Variant = 3,` / `Variant = 3;` / `Variant = 3}`
                         if (isPunctChar(tokens[after_name_i], '=')) {
                             const semi_i = nextNonTrivialToken(tokens, after_name_i + 1) orelse continue;
-                            // Scan forward to ';'
+                            // Scan forward to ',' / ';' / '}'
                             var m: usize = semi_i;
                             while (m < tokens.len) : (m += 1) {
-                                if (isSymbolChar(tokens[m], ';')) break;
+                                if (isPunctChar(tokens[m], ',') or isSymbolChar(tokens[m], ';') or isSymbolChar(tokens[m], '}')) break;
                                 if (isSymbolChar(tokens[m], '{')) break;
-                                if (isSymbolChar(tokens[m], '}')) break;
                             }
-                            if (m < tokens.len and isSymbolChar(tokens[m], ';')) {
+                            if (m < tokens.len and (isPunctChar(tokens[m], ',') or isSymbolChar(tokens[m], ';') or isSymbolChar(tokens[m], '}'))) {
                                 const vname = tokenString(tk);
                                 const vr = rangeFromTokenPos(tk.pos);
                                 try out.append(.{

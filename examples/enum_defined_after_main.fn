@@ -1,0 +1,21 @@
+imp std.c.io;
+
+// This example intentionally uses `Color` before the enum is declared.
+// The compiler should resolve type declarations regardless of their order in the file.
+
+fun takesColor(Color c) num {
+  if c == .Blue {
+    ret 1;
+  }
+  ret 0;
+}
+
+fun main() {
+  num v = takesColor(.Blue);
+  printf("%d\n", v);
+}
+
+enum Color {
+  Red,
+  Blue,
+}
