@@ -1478,11 +1478,11 @@ const LspServer = struct {
                 const variant_name = if (merged) tok.text[1..] else tok.text;
                 if (self.guessEnumTypeForDotShorthand(uri, idx, tok_i)) |enum_name| {
                     if (self.findMemberByContainer(uri, enum_name, variant_name, .enumMember)) |h| {
-                    const locs = [_]Location{.{ .uri = h.uri, .range = h.sym.selection_range }};
-                    const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
-                    defer self.allocator.free(json);
-                    try self.sendResponseJson(id_val, json);
-                    return;
+                        const locs = [_]Location{.{ .uri = h.uri, .range = h.sym.selection_range }};
+                        const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
+                        defer self.allocator.free(json);
+                        try self.sendResponseJson(id_val, json);
+                        return;
                     }
                 }
             }
@@ -2288,9 +2288,9 @@ const LspServer = struct {
             if (idx.tokens[tok_i].text.len > 1 and idx.tokens[tok_i].text[0] == '.') {
                 dot_i_opt = tok_i;
             } else {
-            if (tok_i == 0 or !isDotToken(idx.tokens[tok_i - 1])) return null;
-            if (tok_i >= 2 and idx.tokens[tok_i - 2].kind == .identifier) return null; // not shorthand (e.g., Color.Red)
-            dot_i_opt = tok_i - 1;
+                if (tok_i == 0 or !isDotToken(idx.tokens[tok_i - 1])) return null;
+                if (tok_i >= 2 and idx.tokens[tok_i - 2].kind == .identifier) return null; // not shorthand (e.g., Color.Red)
+                dot_i_opt = tok_i - 1;
             }
         } else if (isDotToken(idx.tokens[tok_i])) {
             dot_i_opt = tok_i;
