@@ -42,6 +42,8 @@ pub const NodeType = enum {
     StatementReturn,
     /// Represents a defer statement node.
     StatementDefer,
+    /// Represents an inline assembly statement node.
+    StatementAsm,
     /// Represents an if statement node.
     StatementIf,
     /// Represents a boolean node.
@@ -213,6 +215,23 @@ pub const Node = struct {
             defer_stmt: struct {
                 body: *Node,
             },
+            /// The inline assembly statement node.
+            asm_stmt: struct {
+                /// Assembly template text.
+                template: std.ArrayList(u8),
+                /// Whether the asm is volatile.
+                is_volatile: bool = false,
+                /// Optional target architecture name.
+                arch: ?std.ArrayList(u8) = null,
+                /// Output operands.
+                outputs: utils.Vector(AsmOperand),
+                /// Input operands.
+                inputs: utils.Vector(AsmOperand),
+                /// Clobber list (string literals).
+                clobbers: utils.Vector(std.ArrayList(u8)),
+                /// Whether the template was provided as a string literal.
+                is_string_literal: bool = false,
+            },
             /// The for statement node.
             for_stmt: union(enum) {
                 /// Condition/infinite loop: `for { ... }` or `for cond { ... }`
@@ -297,6 +316,12 @@ pub const FitBranch = struct {
     condition: ?*Node = null,
     /// The body of the branch statement.
     body: *Node,
+};
+
+pub const AsmOperand = struct {
+    name: std.ArrayList(u8),
+    constraint: std.ArrayList(u8),
+    expr: *Node,
 };
 
 /// Checks if the node is an expression or a parenthesis.

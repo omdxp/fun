@@ -339,3 +339,24 @@ test "structural quirks share canonical C type" {
 
     try fs.cwd().deleteFile(ifilepath);
 }
+
+test "asm statement transpiles" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_asm.fn";
+
+    const input =
+        "fun main() {\n" ++
+        "  num x = 1;\n" ++
+        "  num y = 0;\n" ++
+        "  asm volatile (out y: \"=r\" = y; in x: \"r\" = x; clobber \"memory\") \"mov %[x], %[y]\";\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "__asm__ __volatile__") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "\"=r\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "\"memory\"") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}

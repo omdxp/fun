@@ -1,0 +1,6 @@
+imp std.c.io;
+
+fun main() {
+    asm { nop };
+    printf("asm ok\n");
+}

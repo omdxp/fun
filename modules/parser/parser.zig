@@ -3574,6 +3574,8 @@ pub const ParseProcess = struct {
             return try self.parse_fit_statement(hist);
         } else if (mem.eql(u8, "defer", sval)) {
             return try self.parse_defer_statement(hist);
+        } else if (mem.eql(u8, "asm", sval)) {
+            return try self.parse_asm_statement(hist);
         } else if (mem.eql(u8, "ret", sval)) {
             return try self.parse_return(hist);
         } else if (mem.eql(u8, "break", sval)) {
@@ -3726,6 +3728,280 @@ pub const ParseProcess = struct {
         var defer_node = ast.Node{ .type = .StatementDefer, .pos = t.?.pos };
         defer_node.node_variant = .{ .statement = .{ .defer_stmt = .{ .body = body_ptr } } };
         self.transpile_proc.nodes.push(defer_node) catch |e| {
+            std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});
+            return ParseError.MemoryAllocationFailed;
+        };
+    }
+
+    fn parse_asm_statement(self: *Self, hist: *utils.History) ParseError!void {
+        const asm_tok = self.token_peek_next();
+        if (!hist.*.flags.inside_function_body) {
+            self.transpile_proc.err("asm statement outside of function", .{});
+            return ParseError.InvalidStatement;
+        }
+
+        _ = self.token_next(); // skip asm
+
+        var is_volatile = false;
+        var arch_name: ?std.ArrayList(u8) = null;
+
+        if (self.token_peek_next()) |t| {
+            if ((t.type == .Keyword or t.type == .Identifier) and mem.eql(u8, t.data.sval.items, "volatile")) {
+                _ = self.token_next();
+                is_volatile = true;
+            }
+        }
+
+        if (self.token_peek_next()) |t| {
+            if ((t.type == .Keyword or t.type == .Identifier) and mem.eql(u8, t.data.sval.items, "arch")) {
+                _ = self.token_next();
+                const arch_tok = self.token_next();
+                if (arch_tok == null or (arch_tok.?.type != .Identifier and arch_tok.?.type != .Keyword)) {
+                    self.transpile_proc.err("expected architecture name after 'arch'", .{});
+                    return ParseError.InvalidIdentifier;
+                }
+                arch_name = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, arch_tok.?.data.sval.items.len) catch {
+                    return ParseError.MemoryAllocationFailed;
+                };
+                arch_name.?.appendSlice(arch_tok.?.data.sval.items) catch {
+                    return ParseError.MemoryAllocationFailed;
+                };
+            }
+        }
+
+        var outputs = utils.Vector(ast.AsmOperand).init(self.transpile_proc.allocator);
+        var inputs = utils.Vector(ast.AsmOperand).init(self.transpile_proc.allocator);
+        var clobbers = utils.Vector(std.ArrayList(u8)).init(self.transpile_proc.allocator);
+
+        const parse_operand_list = struct {
+            fn call(self_: *Self, list: *utils.Vector(ast.AsmOperand), hist_: *utils.History) ParseError!void {
+                while (true) {
+                    while (token.is_nl_or_comment_or_newline_separator(self_.token_peek_next())) {
+                        _ = self_.token_next();
+                    }
+                    const name_tok = self_.token_next();
+                    if (name_tok == null or name_tok.?.type != .Identifier) {
+                        self_.transpile_proc.err("expected operand name", .{});
+                        return ParseError.InvalidIdentifier;
+                    }
+                    var name = std.ArrayList(u8).initCapacity(self_.transpile_proc.allocator, name_tok.?.data.sval.items.len) catch {
+                        return ParseError.MemoryAllocationFailed;
+                    };
+                    name.appendSlice(name_tok.?.data.sval.items) catch {
+                        return ParseError.MemoryAllocationFailed;
+                    };
+
+                    const colon = self_.token_next();
+                    if (colon == null or !((colon.?.type == .Operator and mem.eql(u8, colon.?.data.sval.items, ":")) or (colon.?.type == .Symbol and colon.?.data.cval == ':'))) {
+                        self_.transpile_proc.err("expected ':' after operand name", .{});
+                        return ParseError.InvalidOperator;
+                    }
+
+                    const constraint_tok = self_.token_next();
+                    if (constraint_tok == null or constraint_tok.?.type != .String) {
+                        self_.transpile_proc.err("expected constraint string", .{});
+                        return ParseError.InvalidString;
+                    }
+                    var constraint = std.ArrayList(u8).initCapacity(self_.transpile_proc.allocator, constraint_tok.?.data.sval.items.len) catch {
+                        return ParseError.MemoryAllocationFailed;
+                    };
+                    constraint.appendSlice(constraint_tok.?.data.sval.items) catch {
+                        return ParseError.MemoryAllocationFailed;
+                    };
+
+                    try self_.expect_op("=");
+                    try self_.parse_expressionable_root(hist_);
+                    const expr_node = self_.node_pop() orelse {
+                        self_.transpile_proc.err("expected operand expression", .{});
+                        return ParseError.InvalidOperand;
+                    };
+                    const expr_ptr = self_.transpile_proc.allocator.create(ast.Node) catch |e| {
+                        std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
+                        return ParseError.MemoryAllocationFailed;
+                    };
+                    expr_ptr.* = expr_node;
+
+                    list.push(.{ .name = name, .constraint = constraint, .expr = expr_ptr }) catch {
+                        return ParseError.MemoryAllocationFailed;
+                    };
+
+                    const peek_tok = self_.token_peek_next() orelse return;
+                    if (token.is_symbol(peek_tok, ',') or token.is_operator(peek_tok, ",")) {
+                        _ = self_.token_next();
+                        continue;
+                    }
+                    if (token.is_symbol(peek_tok, ';') or token.is_operator(peek_tok, ";")) {
+                        _ = self_.token_next();
+                        return;
+                    }
+                    if (token.is_symbol(peek_tok, ')') or token.is_operator(peek_tok, ")")) {
+                        return;
+                    }
+                    self_.transpile_proc.err("expected ',', ';', or ')' after operand", .{});
+                    return ParseError.InvalidOperator;
+                }
+            }
+        }.call;
+
+        const parse_clobbers = struct {
+            fn call(self_: *Self, list: *utils.Vector(std.ArrayList(u8))) ParseError!void {
+                while (true) {
+                    while (token.is_nl_or_comment_or_newline_separator(self_.token_peek_next())) {
+                        _ = self_.token_next();
+                    }
+                    const ctok = self_.token_next();
+                    if (ctok == null or ctok.?.type != .String) {
+                        self_.transpile_proc.err("expected clobber string", .{});
+                        return ParseError.InvalidString;
+                    }
+                    var cname = std.ArrayList(u8).initCapacity(self_.transpile_proc.allocator, ctok.?.data.sval.items.len) catch {
+                        return ParseError.MemoryAllocationFailed;
+                    };
+                    cname.appendSlice(ctok.?.data.sval.items) catch {
+                        return ParseError.MemoryAllocationFailed;
+                    };
+                    list.push(cname) catch {
+                        return ParseError.MemoryAllocationFailed;
+                    };
+
+                    const peek_tok = self_.token_peek_next() orelse return;
+                    if (token.is_symbol(peek_tok, ',') or token.is_operator(peek_tok, ",")) {
+                        _ = self_.token_next();
+                        continue;
+                    }
+                    if (token.is_symbol(peek_tok, ';') or token.is_operator(peek_tok, ";")) {
+                        _ = self_.token_next();
+                        return;
+                    }
+                    if (token.is_symbol(peek_tok, ')') or token.is_operator(peek_tok, ")")) {
+                        return;
+                    }
+                    self_.transpile_proc.err("expected ',', ';', or ')' after clobber", .{});
+                    return ParseError.InvalidOperator;
+                }
+            }
+        }.call;
+
+        if (self.next_token_is_symbol('(') or token.is_operator(self.token_peek_next(), "(")) {
+            _ = self.token_next(); // skip '('
+            while (true) {
+                while (token.is_nl_or_comment_or_newline_separator(self.token_peek_next())) {
+                    _ = self.token_next();
+                }
+                const peek_tok = self.token_peek_next() orelse {
+                    self.transpile_proc.err("expected ')' to close asm operands", .{});
+                    return ParseError.InvalidStatement;
+                };
+                if (token.is_symbol(peek_tok, ')') or token.is_operator(peek_tok, ")")) {
+                    _ = self.token_next();
+                    break;
+                }
+                const section_tok = self.token_next();
+                if (section_tok == null or (section_tok.?.type != .Identifier and section_tok.?.type != .Keyword)) {
+                    self.transpile_proc.err("expected asm operand section", .{});
+                    return ParseError.InvalidKeyword;
+                }
+                const section = section_tok.?.data.sval.items;
+                if (mem.eql(u8, section, "in")) {
+                    try parse_operand_list(self, &inputs, hist);
+                } else if (mem.eql(u8, section, "out")) {
+                    try parse_operand_list(self, &outputs, hist);
+                } else if (mem.eql(u8, section, "clobber")) {
+                    try parse_clobbers(self, &clobbers);
+                } else {
+                    self.transpile_proc.err("unknown asm section '{s}'", .{section});
+                    return ParseError.InvalidKeyword;
+                }
+            }
+        }
+
+        var template_buf = std.ArrayList(u8).init(self.transpile_proc.allocator);
+        var is_string_literal = false;
+
+        while (token.is_nl_or_comment_or_newline_separator(self.token_peek_next())) {
+            _ = self.token_next();
+        }
+
+        const next_tok = self.token_peek_next() orelse {
+            self.transpile_proc.err("expected asm body", .{});
+            return ParseError.InvalidStatement;
+        };
+
+        if (next_tok.type == .String) {
+            _ = self.token_next();
+            template_buf.appendSlice(next_tok.data.sval.items) catch return ParseError.MemoryAllocationFailed;
+            is_string_literal = true;
+        } else if (next_tok.type == .Symbol and next_tok.data.cval == '{') {
+            _ = self.token_next(); // skip '{'
+            var depth: usize = 1;
+            var prev_word = false;
+            while (true) {
+                const t = self.token_next() orelse {
+                    self.transpile_proc.err("unexpected end of file in asm block", .{});
+                    return ParseError.InvalidStatement;
+                };
+                if (t.type == .NewLine) {
+                    template_buf.append('\n') catch return ParseError.MemoryAllocationFailed;
+                    prev_word = false;
+                    continue;
+                }
+                if (t.type == .Comment) continue;
+                if (t.type == .Symbol and t.data.cval == '{') {
+                    depth += 1;
+                } else if (t.type == .Symbol and t.data.cval == '}') {
+                    depth -= 1;
+                    if (depth == 0) break;
+                }
+
+                const is_word = t.type == .Identifier or t.type == .Keyword or t.type == .Number or t.type == .String or t.type == .Boolean;
+                if (is_word and prev_word) {
+                    template_buf.append(' ') catch return ParseError.MemoryAllocationFailed;
+                }
+
+                switch (t.type) {
+                    .Identifier, .Keyword, .Operator, .String => {
+                        template_buf.appendSlice(t.data.sval.items) catch return ParseError.MemoryAllocationFailed;
+                    },
+                    .Number => {
+                        switch (t.data) {
+                            .llnum => |v| template_buf.writer().print("{d}", .{v}) catch return ParseError.MemoryAllocationFailed,
+                            .lnum => |v| template_buf.writer().print("{d}", .{v}) catch return ParseError.MemoryAllocationFailed,
+                            .inum => |v| template_buf.writer().print("{d}", .{v}) catch return ParseError.MemoryAllocationFailed,
+                            .dnum => |v| template_buf.writer().print("{e}", .{v}) catch return ParseError.MemoryAllocationFailed,
+                            .cval => |v| template_buf.writer().print("{d}", .{v}) catch return ParseError.MemoryAllocationFailed,
+                            else => {},
+                        }
+                    },
+                    .Symbol => {
+                        template_buf.append(t.data.cval) catch return ParseError.MemoryAllocationFailed;
+                    },
+                    .Boolean => {
+                        const bval = t.data.bval;
+                        template_buf.appendSlice(if (bval) "true" else "false") catch return ParseError.MemoryAllocationFailed;
+                    },
+                    else => {},
+                }
+                prev_word = is_word;
+            }
+        } else {
+            self.transpile_proc.err("expected asm body (string or block)", .{});
+            return ParseError.InvalidStatement;
+        }
+
+        try self.expect_sym(';');
+
+        var asm_node = ast.Node{ .type = .StatementAsm, .pos = if (asm_tok) |t| t.pos else null };
+        asm_node.node_variant = .{ .statement = .{ .asm_stmt = .{
+            .template = template_buf,
+            .is_volatile = is_volatile,
+            .arch = arch_name,
+            .outputs = outputs,
+            .inputs = inputs,
+            .clobbers = clobbers,
+            .is_string_literal = is_string_literal,
+        } } };
+
+        self.transpile_proc.nodes.push(asm_node) catch |e| {
             std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});
             return ParseError.MemoryAllocationFailed;
         };

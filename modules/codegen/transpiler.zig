@@ -56,6 +56,9 @@ pub const TranspileError = error{
     /// Error indicating a named type does not have a requested field.
     UnknownField,
 
+    /// Error indicating invalid inline assembly usage.
+    InvalidAsm,
+
     /// Error indicating an invalid `sizeof(...)` usage.
     InvalidSizeof,
     /// Error indicating a function call has the wrong number of arguments.
@@ -3022,6 +3025,15 @@ pub const TranspileProcess = struct {
                         _ = try self.infer_expr_type(d.body.*, env, fns);
                     }
                 },
+                .StatementAsm => {
+                    const asm_s = stmt.node_variant.?.statement.asm_stmt;
+                    for (asm_s.outputs.items()) |op| {
+                        _ = try self.infer_expr_type(op.expr.*, env, fns);
+                    }
+                    for (asm_s.inputs.items()) |op| {
+                        _ = try self.infer_expr_type(op.expr.*, env, fns);
+                    }
+                },
                 .StatementIf => {
                     const ifs = stmt.node_variant.?.statement.if_stmt;
                     const ct = try self.infer_expr_type(ifs.condition.*, env, fns);
@@ -4076,6 +4088,30 @@ pub const TranspileProcess = struct {
                         .defer_stmt => |d| {
                             _ = d;
                             // Defer bodies are owned elsewhere in the AST; avoid double-free.
+                        },
+                        .asm_stmt => |a| {
+                            a.template.deinit();
+                            if (a.arch) |*arch| {
+                                arch.deinit();
+                            }
+                            for (a.outputs.items()) |op| {
+                                op.name.deinit();
+                                op.constraint.deinit();
+                                self.deinit_node(op.expr.*);
+                                allocator.destroy(op.expr);
+                            }
+                            a.outputs.deinit();
+                            for (a.inputs.items()) |op| {
+                                op.name.deinit();
+                                op.constraint.deinit();
+                                self.deinit_node(op.expr.*);
+                                allocator.destroy(op.expr);
+                            }
+                            a.inputs.deinit();
+                            for (a.clobbers.items()) |cl| {
+                                cl.deinit();
+                            }
+                            a.clobbers.deinit();
                         },
                         .for_stmt => |for_s| {
                             switch (for_s) {
@@ -5845,7 +5881,7 @@ pub const TranspileProcess = struct {
                 try self.write_indent();
                 try self.write("}");
             },
-            .StatementReturn, .StatementDefer, .StatementIf, .StatementElseIf, .StatementElse, .StatementFit, .StatementFor => {
+            .StatementReturn, .StatementDefer, .StatementAsm, .StatementIf, .StatementElseIf, .StatementElse, .StatementFit, .StatementFor => {
                 // `ret;` is represented as StatementReturn with no node_variant.
                 if (node.type == .StatementReturn and node.node_variant == null) {
                     try self.emit_defers();
@@ -5863,6 +5899,113 @@ pub const TranspileProcess = struct {
                     .defer_stmt => |d| {
                         // Record defer for later emission; do not emit now.
                         self.defer_stack.append(d.body) catch return TranspileError.MemoryAllocationFailed;
+                    },
+                    .asm_stmt => |a| {
+                        // Validate optional arch selection.
+                        if (a.arch) |arch_name| {
+                            const arch_ok = blk: {
+                                const arch = builtin.target.cpu.arch;
+                                if (mem.eql(u8, arch_name.items, "x86_64") or mem.eql(u8, arch_name.items, "amd64")) {
+                                    break :blk arch == .x86_64;
+                                }
+                                if (mem.eql(u8, arch_name.items, "x86") or mem.eql(u8, arch_name.items, "i386")) {
+                                    break :blk arch == .x86;
+                                }
+                                if (mem.eql(u8, arch_name.items, "aarch64") or mem.eql(u8, arch_name.items, "arm64")) {
+                                    break :blk arch == .aarch64;
+                                }
+                                if (mem.eql(u8, arch_name.items, "arm")) {
+                                    break :blk arch == .arm;
+                                }
+                                break :blk false;
+                            };
+                            if (!arch_ok) {
+                                self.report_error(node, "asm arch '{s}' does not match target", .{arch_name.items});
+                                return TranspileError.InvalidAsm;
+                            }
+                        }
+
+                        const escapeAsm = struct {
+                            fn call(w: *Self, text: []const u8) TranspileError!void {
+                                for (text) |ch| {
+                                    switch (ch) {
+                                        '\\' => try w.write("\\\\"),
+                                        '"' => try w.write("\\\""),
+                                        '\n' => try w.write("\\n"),
+                                        '\r' => try w.write("\\r"),
+                                        '\t' => try w.write("\\t"),
+                                        0 => try w.write("\\0"),
+                                        else => {
+                                            var buf: [1]u8 = .{ch};
+                                            try w.write(buf[0..]);
+                                        },
+                                    }
+                                }
+                            }
+                        }.call;
+
+                        try self.write_indent();
+                        try self.write("__asm__");
+                        if (a.is_volatile) {
+                            try self.write(" __volatile__");
+                        }
+                        try self.write("(\"");
+                        try escapeAsm(self, a.template.items);
+                        try self.write("\"");
+
+                        const has_outputs = a.outputs.items().len != 0;
+                        const has_inputs = a.inputs.items().len != 0;
+                        const has_clobbers = a.clobbers.items().len != 0;
+
+                        if (has_outputs or has_inputs or has_clobbers) {
+                            try self.write(" : ");
+                            if (has_outputs) {
+                                var first = true;
+                                for (a.outputs.items()) |op| {
+                                    if (!first) try self.write(", ");
+                                    first = false;
+                                    try self.write("[");
+                                    try self.write(op.name.items);
+                                    try self.write("] \"");
+                                    try escapeAsm(self, op.constraint.items);
+                                    try self.write("\"(");
+                                    try self.transpile_node(op.expr.*);
+                                    try self.write(")");
+                                }
+                            }
+
+                            if (has_inputs or has_clobbers) {
+                                try self.write(" : ");
+                                if (has_inputs) {
+                                    var first_in = true;
+                                    for (a.inputs.items()) |op| {
+                                        if (!first_in) try self.write(", ");
+                                        first_in = false;
+                                        try self.write("[");
+                                        try self.write(op.name.items);
+                                        try self.write("] \"");
+                                        try escapeAsm(self, op.constraint.items);
+                                        try self.write("\"(");
+                                        try self.transpile_node(op.expr.*);
+                                        try self.write(")");
+                                    }
+                                }
+
+                                if (has_clobbers) {
+                                    try self.write(" : ");
+                                    var first_cl = true;
+                                    for (a.clobbers.items()) |cl| {
+                                        if (!first_cl) try self.write(", ");
+                                        first_cl = false;
+                                        try self.write("\"");
+                                        try escapeAsm(self, cl.items);
+                                        try self.write("\"");
+                                    }
+                                }
+                            }
+                        }
+
+                        try self.write(");");
                     },
                     .if_stmt => |if_s| {
                         try self.write("if (");

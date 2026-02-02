@@ -1,0 +1,10 @@
+fun main() {
+    asm arch aarch64 { nop };
+    asm arch aarch64 {
+        mov x0, x0
+        mov x1, x1
+    };
+
+    // Should fail on aarch64 targets (arch mismatch).
+    asm arch x86_64 { nop };
+}

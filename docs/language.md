@@ -60,6 +60,20 @@
     - Block: `defer { log("done"); cleanup(); }`
 - **Scope**: Defers execute before any `ret`, and before a function ends without an explicit `ret`.
 
+### Inline Assembly
+- **Block form**: `asm { ... };`
+- **String form**: `asm "...";` (use this for exact formatting/escapes)
+- **Volatile**: `asm volatile { ... };` prevents reordering/elision
+- **Architecture guard**: `asm arch x86_64 { ... };` (errors if target arch mismatches)
+- **Operands & clobbers**:
+    - Syntax:
+      - `asm volatile (out dst: "=r" = result; in src: "r" = value; clobber "rax", "memory") { ... };`
+    - Reference named operands in templates using `%[name]`.
+    - Outputs are first, then inputs, then clobbers (GCC-style extended asm).
+- **Notes**:
+    - The block form is tokenized and re-spaced; use the string form if you need exact spacing or numeric formatting.
+    - Supported arch names: `x86_64`/`amd64`, `x86`/`i386`, `aarch64`/`arm64`, `arm`.
+
 ### Functions
 - **Definition**: `fun name(type arg, ...) return_type { ... }`
 - **Return**: Use `ret value;` to return from a function.
