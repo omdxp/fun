@@ -34,6 +34,9 @@ zig-out/bin/fls examples/<example>.fn
 - advanced/fit_exhaustive_ok.fn
 - advanced/fit_exhaustive_warning.fn
 - advanced/for_loops.fn
+- advanced/asm_basic.fn
+- advanced/asm_operands.fn
+- advanced/asm_arch_specific.fn
 - advanced/quirks.fn
 
 ## Imports

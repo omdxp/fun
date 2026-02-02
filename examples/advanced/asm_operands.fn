@@ -1,0 +1,10 @@
+fun main() {
+    num x = 1;
+    num y = 0;
+
+    asm volatile (out y: "=r" = y; in x: "r" = x; clobber "memory") "/* uses %[x] -> %[y] */";
+
+    if y == 0 {
+        y = 1;
+    }
+}
