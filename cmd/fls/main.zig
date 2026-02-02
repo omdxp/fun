@@ -2738,8 +2738,8 @@ const LspServer = struct {
 
         // Keywords.
         const keywords = [_][]const u8{
-            "imp",  "fun", "compound", "quirk", "impl", "enum", "ret", "if",   "elif",  "else", "for", "fit", "break", "continue",
-            "void", "raw", "num",      "dec",   "str",  "bin",  "chr", "true", "false",
+            "imp",  "fun", "compound", "quirk", "impl", "enum", "defer", "ret",  "if",    "elif", "else", "for", "fit", "break", "continue",
+            "void", "raw", "num",      "dec",   "str",  "bin",  "chr",   "true", "false",
         };
         for (keywords) |kw| {
             if (prefix.len == 0 or std.mem.startsWith(u8, kw, prefix)) {
@@ -2874,6 +2874,48 @@ const LspServer = struct {
                     defer self.allocator.free(json);
                     try self.sendResponseJson(id_val, json);
                     return;
+                }
+            }
+            // Fallback: offer members of all enums in scope.
+            var enums = std.ArrayList(struct { name: []const u8, uri: []const u8 }).init(self.allocator);
+            defer {
+                for (enums.items) |e| self.allocator.free(e.name);
+                enums.deinit();
+            }
+            for (idx.symbols) |s| {
+                if (s.kind == .enum_ and s.container_type == null) {
+                    try enums.append(.{ .name = try self.allocator.dupe(u8, s.name), .uri = uri });
+                }
+            }
+            var import_uris = std.ArrayList([]u8).init(self.allocator);
+            defer {
+                for (import_uris.items) |u| self.allocator.free(u);
+                import_uris.deinit();
+            }
+            try self.collectDirectImportUris(&import_uris, uri, idx);
+            for (import_uris.items) |iu| {
+                self.ensureDocIndexedFromDisk(iu) catch {};
+                const imported = self.docs.get(iu) orelse continue;
+                const didx = imported.index orelse continue;
+                for (didx.symbols) |s| {
+                    if (s.kind == .enum_ and s.container_type == null) {
+                        try enums.append(.{ .name = try self.allocator.dupe(u8, s.name), .uri = iu });
+                    }
+                }
+            }
+            for (enums.items) |e| {
+                const eidx = self.docs.get(e.uri).?.index orelse continue;
+                for (eidx.symbols) |s| {
+                    if (s.kind != .enumMember) continue;
+                    if (s.container_type == null or !std.mem.eql(u8, s.container_type.?, e.name)) continue;
+                    const ft = try std.fmt.allocPrint(self.allocator, ".{s}", .{s.name});
+                    try items.append(.{
+                        .label = try self.allocator.dupe(u8, s.name),
+                        .kind = 20,
+                        .detail = try self.allocator.dupe(u8, e.name),
+                        .insertText = try self.allocator.dupe(u8, s.name),
+                        .filterText = ft,
+                    });
                 }
             }
             const list: CompletionList = .{ .items = items.items };
@@ -7439,6 +7481,10 @@ fn collectLocalVarsFromStatement(allocator: Allocator, out: *std.ArrayList(Symbo
     if (n.node_variant == null) return;
     switch (n.type) {
         .StatementReturn => try collectLocalVars(allocator, out, n.node_variant.?.statement.return_stmt, container_fn_range),
+        .StatementDefer => {
+            const st = n.node_variant.?.statement.defer_stmt;
+            try collectLocalVars(allocator, out, st.body, container_fn_range);
+        },
         .StatementIf => {
             const st = n.node_variant.?.statement;
             _ = st;
@@ -7454,6 +7500,7 @@ fn collectLocalVarsFromStatement(allocator: Allocator, out: *std.ArrayList(Symbo
             .statement => |st| {
                 switch (st) {
                     .return_stmt => |rn| try collectLocalVars(allocator, out, rn, container_fn_range),
+                    .defer_stmt => |dn| try collectLocalVars(allocator, out, dn.body, container_fn_range),
                     .for_stmt => |fs| switch (fs) {
                         .cond => |c| {
                             if (c.condition) |cond| try collectLocalVars(allocator, out, cond, container_fn_range);

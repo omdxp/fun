@@ -3,9 +3,6 @@
 This directory contains example programs for the fun language.
 
 
-## New examples
-
-
 Try running these with the fun CLI to see the language in action!
 
 ## Standard library examples

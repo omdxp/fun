@@ -38,6 +38,8 @@ pub const NodeType = enum {
     Body,
     /// Represents a return statement node.
     StatementReturn,
+    /// Represents a defer statement node.
+    StatementDefer,
     /// Represents an if statement node.
     StatementIf,
     /// Represents a boolean node.
@@ -205,6 +207,10 @@ pub const Node = struct {
         statement: union(enum) {
             /// The return statement node.
             return_stmt: *Node,
+            /// The defer statement node.
+            defer_stmt: struct {
+                body: *Node,
+            },
             /// The for statement node.
             for_stmt: union(enum) {
                 /// Condition/infinite loop: `for { ... }` or `for cond { ... }`

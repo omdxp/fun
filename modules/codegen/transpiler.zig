@@ -218,6 +218,13 @@ pub const TranspileProcess = struct {
     /// True while generating the C `main` body.
     in_main: bool = false,
 
+    /// Stack of deferred statements for the current function (LIFO).
+    defer_stack: std.ArrayList(*ast.Node),
+    /// Track whether we are emitting the current function body.
+    in_function_body: bool = false,
+    /// Depth counter for nested bodies inside a function.
+    function_body_depth: usize = 0,
+
     /// Currently transpiled function return type (for return-statement codegen).
     current_fn_return: ?CheckedType = null,
     /// Current indentation level for code formatting
@@ -1399,6 +1406,7 @@ pub const TranspileProcess = struct {
             .warnings = std.ArrayList(u8).init(a),
             .owned_nodes = std.ArrayList(*ast.Node).init(a),
             .owned_scope_entities = std.ArrayList(*scope.ScopeEntity).init(a),
+            .defer_stack = std.ArrayList(*ast.Node).init(a),
             .scope = null,
             .symbols = .{
                 .active_table = initial_table,
@@ -2881,6 +2889,14 @@ pub const TranspileProcess = struct {
                         }
                     }
                 },
+                .StatementDefer => {
+                    const d = stmt.node_variant.?.statement.defer_stmt;
+                    if (d.body.type == .Body) {
+                        try self.check_body(d.body, env, fns, fn_rtype);
+                    } else {
+                        _ = try self.infer_expr_type(d.body.*, env, fns);
+                    }
+                },
                 .StatementIf => {
                     const ifs = stmt.node_variant.?.statement.if_stmt;
                     const ct = try self.infer_expr_type(ifs.condition.*, env, fns);
@@ -3908,6 +3924,10 @@ pub const TranspileProcess = struct {
                             self.deinit_node(ret.*);
                             allocator.destroy(ret);
                         },
+                        .defer_stmt => |d| {
+                            _ = d;
+                            // Defer bodies are owned elsewhere in the AST; avoid double-free.
+                        },
                         .for_stmt => |for_s| {
                             switch (for_s) {
                                 .cond => |fc| {
@@ -4010,6 +4030,7 @@ pub const TranspileProcess = struct {
         // containers, then release the arena at the end.
         self.owned_scope_entities.deinit();
         self.owned_nodes.deinit();
+        self.defer_stack.deinit();
         if (self.symbols.active_table) |table| {
             table.symbols.deinit();
         }
@@ -4056,6 +4077,27 @@ pub const TranspileProcess = struct {
                 std.debug.print("Error writing to output buffer: {s}\\n", .{@errorName(e)});
                 return TranspileError.BufferWriteError;
             };
+        }
+    }
+
+    fn emit_defer_body(self: *Self, node: *ast.Node) TranspileError!void {
+        if (node.type == .Body) {
+            try self.transpile_node(node.*);
+            return;
+        }
+        try self.transpile_node(node.*);
+        if (node.type == .Expression or node.type == .ExpressionParenthesis or node.type == .Unary) {
+            try self.write(";");
+        }
+    }
+
+    fn emit_defers(self: *Self) TranspileError!void {
+        if (self.defer_stack.items.len == 0) return;
+        var i: usize = self.defer_stack.items.len;
+        while (i > 0) : (i -= 1) {
+            const d = self.defer_stack.items[i - 1];
+            try self.write_indent();
+            try self.emit_defer_body(d);
         }
     }
 
@@ -5464,6 +5506,9 @@ pub const TranspileProcess = struct {
             .Function => {
                 const function = node.node_variant.?.function;
 
+                // Reset defer stack for this function.
+                self.defer_stack.clearRetainingCapacity();
+
                 const prev_fn_return = self.current_fn_return;
                 defer self.current_fn_return = prev_fn_return;
                 self.current_fn_return = if (function.rtype) |rt| type_from_dtype(&rt) else CheckedType{ .base = .Void };
@@ -5532,8 +5577,16 @@ pub const TranspileProcess = struct {
                     try self.write(") ");
                     if (function.body) |body| {
                         const prev_in_main = self.in_main;
+                        const prev_in_fn_body = self.in_function_body;
+                        const prev_body_depth = self.function_body_depth;
                         self.in_main = true;
-                        defer self.in_main = prev_in_main;
+                        self.in_function_body = true;
+                        self.function_body_depth = 0;
+                        defer {
+                            self.in_main = prev_in_main;
+                            self.in_function_body = prev_in_fn_body;
+                            self.function_body_depth = prev_body_depth;
+                        }
                         try self.transpile_node(body.*);
                     }
                 } else {
@@ -5568,12 +5621,26 @@ pub const TranspileProcess = struct {
                     try self.write(") ");
 
                     if (function.body) |body| {
+                        const prev_in_fn_body = self.in_function_body;
+                        const prev_body_depth = self.function_body_depth;
+                        self.in_function_body = true;
+                        self.function_body_depth = 0;
+                        defer {
+                            self.in_function_body = prev_in_fn_body;
+                            self.function_body_depth = prev_body_depth;
+                        }
                         try self.transpile_node(body.*);
                     }
                 }
             },
             .Body => {
                 const body = node.node_variant.?.body;
+
+                const is_fn_body = self.in_function_body and self.function_body_depth == 0;
+                if (self.in_function_body) self.function_body_depth += 1;
+                defer {
+                    if (self.in_function_body) self.function_body_depth -= 1;
+                }
 
                 // Each body introduces a new scope.
                 _ = try self.new_scope();
@@ -5585,19 +5652,30 @@ pub const TranspileProcess = struct {
                     if (statement.type == .Variable) {
                         try self.register_scope_variable(statement);
                     }
-                    try self.write_indent();
+                    if (statement.type != .StatementReturn and statement.type != .StatementDefer) {
+                        try self.write_indent();
+                    }
                     try self.transpile_node(statement.*);
                     if (statement.type == .Expression) {
                         try self.write(";");
                     }
                 }
                 self.dedent();
+                if (is_fn_body) {
+                    const stmts = body.statements.items();
+                    const last_is_return = stmts.len > 0 and stmts[stmts.len - 1].*.type == .StatementReturn;
+                    if (!last_is_return) {
+                        try self.emit_defers();
+                    }
+                }
                 try self.write_indent();
                 try self.write("}");
             },
-            .StatementReturn, .StatementIf, .StatementElseIf, .StatementElse, .StatementFit, .StatementFor => {
+            .StatementReturn, .StatementDefer, .StatementIf, .StatementElseIf, .StatementElse, .StatementFit, .StatementFor => {
                 // `ret;` is represented as StatementReturn with no node_variant.
                 if (node.type == .StatementReturn and node.node_variant == null) {
+                    try self.emit_defers();
+                    try self.write_indent();
                     if (self.in_main) {
                         try self.write("return 0;");
                     } else {
@@ -5608,6 +5686,10 @@ pub const TranspileProcess = struct {
 
                 const statement = node.node_variant.?.statement;
                 switch (statement) {
+                    .defer_stmt => |d| {
+                        // Record defer for later emission; do not emit now.
+                        self.defer_stack.append(d.body) catch return TranspileError.MemoryAllocationFailed;
+                    },
                     .if_stmt => |if_s| {
                         try self.write("if (");
                         try self.transpile_node(if_s.condition.*);
@@ -5682,6 +5764,18 @@ pub const TranspileProcess = struct {
                         self.dedent();
                         try self.write_indent();
                         try self.write("}");
+                    },
+                    .return_stmt => |rn| {
+                        self.warn_if_returning_address_of_local(rn.*);
+                        try self.emit_defers();
+                        try self.write_indent();
+                        if (self.in_main) {
+                            try self.write("return 0;");
+                        } else {
+                            try self.write("return ");
+                            try self.transpile_node(rn.*);
+                            try self.write(";");
+                        }
                     },
                     .for_stmt => |for_s| {
                         switch (for_s) {
@@ -5871,12 +5965,7 @@ pub const TranspileProcess = struct {
                         try self.write_indent();
                         try self.write("}");
                     },
-                    .return_stmt => |ret| {
-                        self.warn_if_returning_address_of_local(ret.*);
-                        try self.write("return ");
-                        try self.transpile_node(ret.*);
-                        try self.write(";");
-                    },
+                    // return handled above with defers
                 }
             },
             .StatementBreak => {

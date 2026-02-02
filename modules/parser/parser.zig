@@ -3554,6 +3554,8 @@ pub const ParseProcess = struct {
             return try self.parse_else_statement(hist);
         } else if (mem.eql(u8, "fit", sval)) {
             return try self.parse_fit_statement(hist);
+        } else if (mem.eql(u8, "defer", sval)) {
+            return try self.parse_defer_statement(hist);
         } else if (mem.eql(u8, "ret", sval)) {
             return try self.parse_return(hist);
         } else if (mem.eql(u8, "break", sval)) {
@@ -3595,6 +3597,57 @@ pub const ParseProcess = struct {
         }
 
         self.transpile_proc.err("invalid keyword", .{});
+    }
+
+    fn parse_defer_statement(self: *Self, hist: *utils.History) ParseError!void {
+        const t = self.token_peek_next();
+        if (!hist.*.flags.inside_function_body) {
+            self.transpile_proc.err("defer statement outside of function", .{});
+            return ParseError.InvalidStatement;
+        }
+
+        _ = self.token_next(); // skip defer
+
+        const next_tok = self.token_peek_next() orelse {
+            self.transpile_proc.err("expected expression or body after 'defer'", .{});
+            return ParseError.InvalidStatement;
+        };
+
+        var body_ptr: *ast.Node = undefined;
+
+        if (next_tok.type == .Symbol and next_tok.data.cval == '{') {
+            // Defer block: `defer { ... }`
+            try self.parse_body(hist);
+            const last = self.transpile_proc.nodes.back() orelse {
+                self.transpile_proc.err("expected body after 'defer'", .{});
+                return ParseError.InvalidStatement;
+            };
+            body_ptr = self.transpile_proc.allocator.create(ast.Node) catch |e| {
+                std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
+                return ParseError.MemoryAllocationFailed;
+            };
+            body_ptr.* = last;
+        } else {
+            // Defer expression: `defer expr;`
+            try self.parse_expressionable_root(hist);
+            const expr_node = self.node_pop() orelse {
+                self.transpile_proc.err("expected expression after 'defer'", .{});
+                return ParseError.InvalidStatement;
+            };
+            body_ptr = self.transpile_proc.allocator.create(ast.Node) catch |e| {
+                std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
+                return ParseError.MemoryAllocationFailed;
+            };
+            body_ptr.* = expr_node;
+            try self.expect_sym(';');
+        }
+
+        var defer_node = ast.Node{ .type = .StatementDefer, .pos = t.?.pos };
+        defer_node.node_variant = .{ .statement = .{ .defer_stmt = .{ .body = body_ptr } } };
+        self.transpile_proc.nodes.push(defer_node) catch |e| {
+            std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});
+            return ParseError.MemoryAllocationFailed;
+        };
     }
 
     fn alloc_node_copy_shallow(self: *Self, node: ast.Node) ParseError!*ast.Node {
