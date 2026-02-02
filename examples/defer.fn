@@ -15,6 +15,30 @@ fun main() num {
     defer logLine("defer inside if");
   }
 
+  defer {
+    logLine("defer block line 1");
+    logLine("defer block line 2");
+  }
+
   logLine("about to return");
+  demoDeferBlockA();
+  demoDeferBlockB();
   ret 0;
+}
+
+fun demoDeferBlockA() {
+  logLine("demo A start");
+  defer {
+    logLine("demo A defer block");
+  }
+  logLine("demo A end");
+}
+
+fun demoDeferBlockB() {
+  logLine("demo B start");
+  defer {
+    logLine("demo B defer block 1");
+    logLine("demo B defer block 2");
+  }
+  logLine("demo B end");
 }

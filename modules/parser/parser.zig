@@ -3618,7 +3618,7 @@ pub const ParseProcess = struct {
         if (next_tok.type == .Symbol and next_tok.data.cval == '{') {
             // Defer block: `defer { ... }`
             try self.parse_body(hist);
-            const last = self.transpile_proc.nodes.back() orelse {
+            const last = self.node_pop() orelse {
                 self.transpile_proc.err("expected body after 'defer'", .{});
                 return ParseError.InvalidStatement;
             };
