@@ -453,23 +453,38 @@ fn resolveTestSetup(allocator: Allocator) !TestSetup {
     };
     defer if (exe_dir_opt) |d| allocator.free(d);
 
-    const fls_path = blk: {
-        if (exe_dir_opt) |dir| {
-            const p = try std.fs.path.join(allocator, &[_][]const u8{ dir, platformExeName("fls") });
-            break :blk p;
+    const exe_names = struct {
+        fn pickPath(allocator_: Allocator, name: []const u8, exe_dir: ?[]const u8) ![]u8 {
+            var candidates = std.ArrayList([]const u8).init(allocator_);
+            defer candidates.deinit();
+
+            if (exe_dir) |dir| {
+                try candidates.append(dir);
+            }
+            // Common build/test locations.
+            try candidates.append("zig-out/test-bin");
+            try candidates.append("zig-out/zig-out/test-bin");
+            try candidates.append("zig-out/bin");
+
+            for (candidates.items) |dir| {
+                const p = try std.fs.path.join(allocator_, &[_][]const u8{ dir, platformExeName(name) });
+                if (fileExists(p)) return p;
+                allocator_.free(p);
+            }
+
+            // Fall back to env dir even if it doesn't exist (preserves error context).
+            if (exe_dir) |dir| {
+                return try std.fs.path.join(allocator_, &[_][]const u8{ dir, platformExeName(name) });
+            }
+            return try std.fs.path.join(allocator_, &[_][]const u8{ "zig-out", "bin", platformExeName(name) });
         }
-        break :blk try std.fs.path.join(allocator, &[_][]const u8{ "zig-out", "bin", platformExeName("fls") });
     };
+
+    const fls_path = try exe_names.pickPath(allocator, "fls", exe_dir_opt);
     errdefer allocator.free(fls_path);
     try std.testing.expect(fileExists(fls_path));
 
-    const fun_path_rel_or_abs = blk: {
-        if (exe_dir_opt) |dir| {
-            const p = try std.fs.path.join(allocator, &[_][]const u8{ dir, platformExeName("fun") });
-            break :blk p;
-        }
-        break :blk try std.fs.path.join(allocator, &[_][]const u8{ "zig-out", "bin", platformExeName("fun") });
-    };
+    const fun_path_rel_or_abs = try exe_names.pickPath(allocator, "fun", exe_dir_opt);
     defer allocator.free(fun_path_rel_or_abs);
     try std.testing.expect(fileExists(fun_path_rel_or_abs));
     const fun_abs = try std.fs.cwd().realpathAlloc(allocator, fun_path_rel_or_abs);
@@ -1126,6 +1141,124 @@ test "fls e2e: enum dot shorthand completion/hover/definition" {
     defer comp_if_res.deinit();
     const comp_if_result = try jsonResultFromResponseObj(comp_if_res.parsed.value.object);
     try expectCompletionHasLabel(allocator, comp_if_result, "Blue");
+
+    // Completion right after `.` in a declaration: `Color c = .`
+    const dot_decl_text =
+        "enum Color {\n" ++
+        "  Red,\n" ++
+        "  Green,\n" ++
+        "  Blue,\n" ++
+        "}\n\n" ++
+        "fun main() {\n" ++
+        "  Color c = .\n" ++
+        "}\n";
+
+    const dot_decl_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-enum-dot-decl.fn");
+    defer allocator.free(dot_decl_uri);
+    try lspOpenDoc(allocator, &lsp, dot_decl_uri, 1, dot_decl_text);
+
+    const comp_decl_pos = try findPosition(dot_decl_text, "= .", 0);
+    const comp_decl_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ dot_decl_uri, comp_decl_pos.line, comp_decl_pos.col + @as(i64, @intCast("= .".len)) },
+    );
+    defer allocator.free(comp_decl_params);
+    const comp_decl_id = try lsp.request("textDocument/completion", comp_decl_params);
+    var comp_decl_res = try lsp.waitResponse(comp_decl_id, 15000);
+    defer comp_decl_res.deinit();
+    const comp_decl_result = try jsonResultFromResponseObj(comp_decl_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, comp_decl_result, "Red");
+
+    // Additional contexts: method call, function call, if-condition, and fit branch.
+    const ctx_text =
+        "enum Color {\n" ++
+        "  Red,\n" ++
+        "  Green,\n" ++
+        "  Blue,\n" ++
+        "}\n\n" ++
+        "enum Direction {\n" ++
+        "  North,\n" ++
+        "  East,\n" ++
+        "  West,\n" ++
+        "}\n\n" ++
+        "compound Painter {\n" ++
+        "  Color color;\n" ++
+        "}\n\n" ++
+        "impl Painter {\n" ++
+        "  setColor(Color c) { self.color = c; }\n" ++
+        "}\n\n" ++
+        "fun takesDir(Direction d) { ret; }\n\n" ++
+        "fun main() {\n" ++
+        "  Color c = .Red;\n" ++
+        "  Painter p;\n" ++
+        "  p.setColor(.Red);\n" ++
+        "  takesDir(.East);\n" ++
+        "  if c == .Red { ret; }\n" ++
+        "  fit c {\n" ++
+        "    .Red -> { ret; }\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const ctx_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-enum-dot-contexts.fn");
+    defer allocator.free(ctx_uri);
+    try lspOpenDoc(allocator, &lsp, ctx_uri, 1, ctx_text);
+
+    // Method call context: `p.setColor(.Red)`.
+    const comp_method_pos = try findPosition(ctx_text, "setColor(.Red)", 0);
+    const comp_method_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ ctx_uri, comp_method_pos.line, comp_method_pos.col + @as(i64, @intCast("setColor(.".len)) },
+    );
+    defer allocator.free(comp_method_params);
+    const comp_method_id = try lsp.request("textDocument/completion", comp_method_params);
+    var comp_method_res = try lsp.waitResponse(comp_method_id, 15000);
+    defer comp_method_res.deinit();
+    const comp_method_result = try jsonResultFromResponseObj(comp_method_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, comp_method_result, "Red");
+
+    // Function call context: `takesDir(.East)`.
+    const comp_fn_pos = try findPosition(ctx_text, "takesDir(.East)", 0);
+    const comp_fn_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ ctx_uri, comp_fn_pos.line, comp_fn_pos.col + @as(i64, @intCast("takesDir(.".len)) },
+    );
+    defer allocator.free(comp_fn_params);
+    const comp_fn_id = try lsp.request("textDocument/completion", comp_fn_params);
+    var comp_fn_res = try lsp.waitResponse(comp_fn_id, 15000);
+    defer comp_fn_res.deinit();
+    const comp_fn_result = try jsonResultFromResponseObj(comp_fn_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, comp_fn_result, "East");
+
+    // If-condition context: `if c == .Red`.
+    const comp_if2_pos = try findPosition(ctx_text, "== .Red", 0);
+    const comp_if2_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ ctx_uri, comp_if2_pos.line, comp_if2_pos.col + @as(i64, @intCast("== .".len)) },
+    );
+    defer allocator.free(comp_if2_params);
+    const comp_if2_id = try lsp.request("textDocument/completion", comp_if2_params);
+    var comp_if2_res = try lsp.waitResponse(comp_if2_id, 15000);
+    defer comp_if2_res.deinit();
+    const comp_if2_result = try jsonResultFromResponseObj(comp_if2_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, comp_if2_result, "Blue");
+
+    // Fit branch context: `fit c { .Red -> ... }`.
+    const comp_fit_pos = try findPosition(ctx_text, ".Red ->", 0);
+    const comp_fit_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ ctx_uri, comp_fit_pos.line, comp_fit_pos.col + 1 },
+    );
+    defer allocator.free(comp_fit_params);
+    const comp_fit_id = try lsp.request("textDocument/completion", comp_fit_params);
+    var comp_fit_res = try lsp.waitResponse(comp_fit_id, 15000);
+    defer comp_fit_res.deinit();
+    const comp_fit_result = try jsonResultFromResponseObj(comp_fit_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, comp_fit_result, "Green");
 
     // Hover on `.Blue` should show `Color.Blue`.
     const blue_pos = try findPosition(doc_text, ".Blue", 0);

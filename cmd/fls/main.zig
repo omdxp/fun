@@ -2282,6 +2282,30 @@ const LspServer = struct {
         return t;
     }
 
+    fn inferDeclTypeBeforeName(self: *LspServer, idx: *const Index, name_i: usize) ?[]const u8 {
+        _ = self;
+        if (name_i == 0) return null;
+        var i: isize = @as(isize, @intCast(name_i)) - 1;
+        while (i >= 0) : (i -= 1) {
+            const t = idx.tokens[@intCast(i)];
+            if (t.kind == .comment) continue;
+            if (t.kind == .operator and (std.mem.eql(u8, t.text, "*") or std.mem.eql(u8, t.text, "&"))) continue;
+            if ((t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, "]")) {
+                var j: isize = i - 1;
+                while (j >= 0) : (j -= 1) {
+                    const tj = idx.tokens[@intCast(j)];
+                    if (tj.kind == .comment) continue;
+                    if ((tj.kind == .symbol or tj.kind == .operator) and std.mem.eql(u8, tj.text, "[")) break;
+                }
+                i = j;
+                continue;
+            }
+            if (t.kind == .identifier or t.kind == .keyword) return t.text;
+            break;
+        }
+        return null;
+    }
+
     fn guessEnumTypeForDotShorthand(self: *LspServer, uri: []const u8, idx: *const Index, tok_i: usize) ?[]const u8 {
         var dot_i_opt: ?usize = null;
         if (idx.tokens[tok_i].kind == .identifier) {
@@ -2336,6 +2360,11 @@ const LspServer = struct {
                         const lt = idx.tokens[@intCast(j)];
                         if (lt.kind == .comment) continue;
                         if (lt.kind == .identifier) {
+                            if (std.mem.eql(u8, t.text, "=")) {
+                                if (self.inferDeclTypeBeforeName(idx, @intCast(j))) |tn| {
+                                    if (self.isEnumTypeName(uri, tn)) return tn;
+                                }
+                            }
                             if (self.isEnumTypeName(uri, lt.text)) return lt.text;
                             if (self.guessVariableType(idx, lt.text, dot_pos)) |vt| {
                                 if (self.isEnumTypeName(uri, vt)) return vt;
