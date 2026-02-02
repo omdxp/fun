@@ -3118,7 +3118,7 @@ const LspServer = struct {
             defer self.allocator.free(spec);
 
             if (std.mem.eql(u8, spec, "std.c.limits")) has_limits = true;
-            if (std.mem.eql(u8, spec, "std.c.stddef")) has_stddef = true;
+            if (std.mem.eql(u8, spec, "std.c.def")) has_stddef = true;
         }
 
         if (!has_limits and !has_stddef) return;

@@ -930,7 +930,7 @@ test "fls e2e: formatting never returns empty output" {
     try lsp.notify("exit", "{}");
 }
 
-test "fls e2e: C macro completion for std.c.limits and std.c.stddef" {
+test "fls e2e: C macro completion for std.c.limits and std.c.def" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -944,7 +944,7 @@ test "fls e2e: C macro completion for std.c.limits and std.c.stddef" {
 
     const doc_text =
         "imp std.c.limits;\n" ++
-        "imp std.c.stddef;\n\n" ++
+        "imp std.c.def;\n\n" ++
         "fun main() {\n" ++
         "    num x = INT;\n" ++
         "    num y = NUL;\n" ++

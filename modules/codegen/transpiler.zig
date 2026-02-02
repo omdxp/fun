@@ -6297,7 +6297,7 @@ pub const TranspileProcess = struct {
                 self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
                 return TranspileError.MemoryAllocationFailed;
             };
-        } else if (mem.eql(u8, import_path, "std.stddef") or mem.eql(u8, import_path, "std.c.stddef")) {
+        } else if (mem.eql(u8, import_path, "std.def") or mem.eql(u8, import_path, "std.c.def")) {
             header_name = self.allocator.dupe(u8, "stddef.h") catch |e| {
                 self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
                 return TranspileError.MemoryAllocationFailed;

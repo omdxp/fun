@@ -6,7 +6,7 @@
 // you typically *use the names directly* after importing this module.
 // 
 // Import:
-// - `imp std.c.stddef;`
+// - `imp std.c.def;`
 // 
 // Common typedef names
 // - `size_t`
