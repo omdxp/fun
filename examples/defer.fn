@@ -1,0 +1,20 @@
+imp std.c.io;
+
+fun logLine(str msg) {
+  printf("%s\n", msg);
+}
+
+fun main() num {
+  logLine("enter main");
+
+  defer logLine("first defer (runs last)");
+  defer logLine("second defer (runs first)");
+
+  num x = 42;
+  if x == 42 {
+    defer logLine("defer inside if");
+  }
+
+  logLine("about to return");
+  ret 0;
+}

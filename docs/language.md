@@ -51,6 +51,14 @@
     - Array: `for item : arr { ... }`
     - Indexed: `for i, item :: arr { ... }`
 
+### Defer
+- **Purpose**: Run cleanup logic automatically before a function returns.
+- **Order**: LIFO (last `defer` runs first).
+- **Forms**:
+    - Expression: `defer close(fd);`
+    - Block: `defer { log("done"); cleanup(); }`
+- **Scope**: Defers execute before any `ret`, and before a function ends without an explicit `ret`.
+
 ### Functions
 - **Definition**: `fun name(type arg, ...) return_type { ... }`
 - **Return**: Use `ret value;` to return from a function.

@@ -131,6 +131,60 @@ test "function definitions can be out of order (prototypes emitted)" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "defer emits in LIFO order before return" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_defer_lifo.fn";
+
+    const input =
+        "fun a() { ret; }\n" ++
+        "fun b() { ret; }\n" ++
+        "fun foo() num {\n" ++
+        "  defer a();\n" ++
+        "  defer b();\n" ++
+        "  ret 1;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    const b_pos_opt = std.mem.lastIndexOf(u8, out_owned, "b();");
+    const a_pos_opt = std.mem.lastIndexOf(u8, out_owned, "a();");
+    const ret_pos_opt = std.mem.lastIndexOf(u8, out_owned, "return 1;");
+    try std.testing.expect(b_pos_opt != null);
+    try std.testing.expect(a_pos_opt != null);
+    try std.testing.expect(ret_pos_opt != null);
+    const b_pos = b_pos_opt.?;
+    const a_pos = a_pos_opt.?;
+    const ret_pos = ret_pos_opt.?;
+    try std.testing.expect(b_pos < a_pos);
+    try std.testing.expect(a_pos < ret_pos);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
+test "defer block emits before function end" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_defer_block.fn";
+
+    const input =
+        "fun a() { ret; }\n" ++
+        "fun b() { ret; }\n" ++
+        "fun foo() {\n" ++
+        "  defer {\n" ++
+        "    a();\n" ++
+        "    b();\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "a();") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "b();") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
 test "enum types can be referenced before declaration" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_enum_after_main.fn";
