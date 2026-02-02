@@ -1,5 +1,5 @@
 imp std.c.io;
 
-fun grand_child() {
+pub fun grand_child() {
 	printf("grand_child\n");
 }

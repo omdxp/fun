@@ -182,6 +182,7 @@ const SymbolLite = struct {
     kind: SymbolKind,
     decl_range: Range,
     selection_range: Range,
+    is_public: bool = true,
     // For local symbols: function range that contains it.
     container_fn_range: ?Range = null,
     // For members: owning type name (compound/quirk).
@@ -1188,7 +1189,7 @@ const LspServer = struct {
                     try buf.writer().print("```\n{s}\n```\n", .{det});
                 }
             } else if (d.kind == .variable) {
-                const vt = d.value_type orelse self.guessVariableType(idx, tok.text, pos);
+                const vt = d.value_type orelse self.guessVariableType(idx, uri, tok.text, pos);
                 if (vt) |vts| {
                     try buf.writer().print("```\n{s} {s}\n```\n", .{ vts, tok.text });
                 } else {
@@ -1223,7 +1224,7 @@ const LspServer = struct {
                     try buf.writer().print("```\n{s}\n```\n", .{det});
                 }
             } else if (d.kind == .variable) {
-                const vt = d.value_type orelse self.guessVariableType(idx, tok.text, pos);
+                const vt = d.value_type orelse self.guessVariableType(idx, uri, tok.text, pos);
                 if (vt) |vts| {
                     try buf.writer().print("```\n{s} {s}\n```\n", .{ vts, tok.text });
                 } else {
@@ -1247,7 +1248,7 @@ const LspServer = struct {
             }
         } else {
             try buf.writer().print("**{s}**\n\n", .{tok.text});
-            if (self.guessVariableType(idx, tok.text, pos)) |vt| {
+            if (self.guessVariableType(idx, uri, tok.text, pos)) |vt| {
                 try buf.writer().print("```\n{s} {s}\n```\n", .{ vt, tok.text });
             }
         }
@@ -1297,10 +1298,10 @@ const LspServer = struct {
 
         if (std.mem.eql(u8, base_name, "self")) {
             current_type = self.guessEnclosingImplType(idx, at);
-        } else if (self.isKnownTypeName(base_name)) {
+        } else if (self.isKnownTypeName(uri, base_name)) {
             current_type = base_name;
         } else {
-            current_type = self.guessVariableType(idx, base_name, at);
+            current_type = self.guessVariableType(idx, uri, base_name, at);
         }
         if (current_type == null) return null;
 
@@ -1326,11 +1327,13 @@ const LspServer = struct {
         self: *LspServer,
         items: *std.ArrayList(CompletionItem),
         seen: *std.StringHashMap(void),
+        preferred_uri: []const u8,
         container_type: []const u8,
         prefix: []const u8,
     ) !void {
         var it = self.docs.iterator();
         while (it.next()) |entry| {
+            const uri = entry.value_ptr.uri;
             const didx = entry.value_ptr.index orelse continue;
             for (didx.symbols) |s| {
                 if (s.container_fn_range != null) continue;
@@ -1338,6 +1341,7 @@ const LspServer = struct {
                 if (!std.mem.eql(u8, s.container_type.?, container_type)) continue;
                 if (!(s.kind == .field or s.kind == .property or s.kind == .method or s.kind == .enumMember)) continue;
                 if (prefix.len != 0 and !std.mem.startsWith(u8, s.name, prefix)) continue;
+                if (!self.isSymbolVisibleFromUri(preferred_uri, uri, s)) continue;
 
                 const kind: i64 = switch (s.kind) {
                     .method => 2,
@@ -1429,7 +1433,7 @@ const LspServer = struct {
             }
 
             // 1) If the identifier itself is a known type name, go to its declaration.
-            if (self.isKnownTypeName(tok.text)) {
+            if (self.isKnownTypeName(uri, tok.text)) {
                 if (self.findTypeDefinitionAnyDoc(uri, tok.text)) |hit| {
                     const locs = [_]Location{.{ .uri = hit.uri, .range = hit.sym.selection_range }};
                     const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
@@ -1442,9 +1446,9 @@ const LspServer = struct {
             }
 
             // 2) If it's a variable, use its value_type to locate the type definition.
-            const var_type = self.guessVariableType(idx, tok.text, pos);
+            const var_type = self.guessVariableType(idx, uri, tok.text, pos);
             if (var_type) |vt| {
-                if (self.isKnownTypeName(vt)) {
+                if (self.isKnownTypeName(uri, vt)) {
                     if (self.findTypeDefinitionAnyDoc(uri, vt)) |hit| {
                         const locs = [_]Location{.{ .uri = hit.uri, .range = hit.sym.selection_range }};
                         const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
@@ -1524,7 +1528,7 @@ const LspServer = struct {
 
         // Final fallback for types: if the identifier is a known type name anywhere in the workspace,
         // jump to its declaration even if the current file forgot to import it.
-        if (self.isKnownTypeName(tok.text)) {
+        if (self.isKnownTypeName(uri, tok.text)) {
             if (self.findTypeDefinitionAnyDoc(uri, tok.text)) |hit| {
                 const locs = [_]Location{.{ .uri = hit.uri, .range = hit.sym.selection_range }};
                 const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
@@ -2039,10 +2043,10 @@ const LspServer = struct {
 
         if (std.mem.eql(u8, base_name, "self")) {
             current_type = self.guessEnclosingImplType(idx, pos);
-        } else if (self.isKnownTypeName(base_name)) {
+        } else if (self.isKnownTypeName(uri, base_name)) {
             current_type = base_name;
         } else {
-            current_type = self.guessVariableType(idx, base_name, pos);
+            current_type = self.guessVariableType(idx, uri, base_name, pos);
         }
 
         if (current_type == null) return false;
@@ -2101,6 +2105,28 @@ const LspServer = struct {
 
     const MemberHit = struct { uri: []const u8, sym: SymbolLite };
 
+    fn isSymbolVisibleFromUri(self: *LspServer, preferred_uri: []const u8, sym_uri: []const u8, s: SymbolLite) bool {
+        if (std.mem.eql(u8, preferred_uri, sym_uri)) return true;
+        if (!s.is_public) return false;
+
+        if (s.container_type) |ct| {
+            if (self.docs.get(sym_uri)) |doc| {
+                if (doc.index) |idx| {
+                    for (idx.symbols) |ts| {
+                        if (ts.container_fn_range != null) continue;
+                        if (ts.container_type != null) continue;
+                        if (!std.mem.eql(u8, ts.name, ct)) continue;
+                        if (ts.kind != .struct_ and ts.kind != .interface and ts.kind != .enum_) continue;
+                        if (!ts.is_public) return false;
+                        break;
+                    }
+                }
+            }
+        }
+
+        return true;
+    }
+
     fn findMemberByContainer(self: *LspServer, preferred_uri: []const u8, container_type: []const u8, name: []const u8, kind: SymbolKind) ?MemberHit {
         // Prefer current document first.
         if (self.docs.get(preferred_uri)) |doc| {
@@ -2127,23 +2153,27 @@ const LspServer = struct {
                 if (s.container_type == null) continue;
                 if (!std.mem.eql(u8, s.container_type.?, container_type)) continue;
                 if (!std.mem.eql(u8, s.name, name)) continue;
+                if (!self.isSymbolVisibleFromUri(preferred_uri, uri, s)) continue;
                 return .{ .uri = uri, .sym = s };
             }
         }
         return null;
     }
 
-    fn isKnownTypeName(self: *LspServer, name: []const u8) bool {
+    fn isKnownTypeName(self: *LspServer, preferred_uri: []const u8, name: []const u8) bool {
         var it = self.docs.iterator();
         while (it.next()) |entry| {
+            const uri = entry.value_ptr.uri;
             const idx = entry.value_ptr.index orelse continue;
             for (idx.symbols) |s| {
                 if (s.container_fn_range != null) continue;
                 if (!std.mem.eql(u8, s.name, name)) continue;
                 switch (s.kind) {
-                    .struct_, .interface, .enum_ => return true,
-                    else => {},
+                    .struct_, .interface, .enum_ => {},
+                    else => continue,
                 }
+                if (!self.isSymbolVisibleFromUri(preferred_uri, uri, s)) continue;
+                return true;
             }
         }
         return false;
@@ -2188,13 +2218,14 @@ const LspServer = struct {
                 if (s.container_fn_range != null) continue;
                 if (!std.mem.eql(u8, s.name, type_name)) continue;
                 if (s.kind != .struct_ and s.kind != .interface and s.kind != .enum_) continue;
+                if (!self.isSymbolVisibleFromUri(preferred_uri, uri, s)) continue;
                 return .{ .uri = uri, .sym = s };
             }
         }
         return null;
     }
 
-    fn guessVariableType(self: *LspServer, idx: *const Index, var_name: []const u8, at: Position) ?[]const u8 {
+    fn guessVariableType(self: *LspServer, idx: *const Index, preferred_uri: []const u8, var_name: []const u8, at: Position) ?[]const u8 {
         // Prefer symbol table (locals + globals) when available.
         if (findBestDefinition(idx.symbols, var_name, at)) |d| {
             if (d.kind == .variable) {
@@ -2233,7 +2264,7 @@ const LspServer = struct {
                 if (t_type.kind != .identifier) break :blk false;
                 const base = baseTypeName(t_type.text);
                 if (base.len == 0) break :blk false;
-                break :blk self.isKnownTypeName(base);
+                break :blk self.isKnownTypeName(preferred_uri, base);
             };
             if (!is_type_tok) continue;
 
@@ -2366,7 +2397,7 @@ const LspServer = struct {
                                 }
                             }
                             if (self.isEnumTypeName(uri, lt.text)) return lt.text;
-                            if (self.guessVariableType(idx, lt.text, dot_pos)) |vt| {
+                            if (self.guessVariableType(idx, uri, lt.text, dot_pos)) |vt| {
                                 if (self.isEnumTypeName(uri, vt)) return vt;
                             }
                             break;
@@ -2388,7 +2419,7 @@ const LspServer = struct {
                 if (idx.tokens[after_i].kind != .identifier) return null;
                 const name = idx.tokens[after_i].text;
                 if (self.isEnumTypeName(uri, name)) return name;
-                if (self.guessVariableType(idx, name, dot_pos)) |vt| {
+                if (self.guessVariableType(idx, uri, name, dot_pos)) |vt| {
                     if (self.isEnumTypeName(uri, vt)) return vt;
                 }
                 return null;
@@ -2577,8 +2608,8 @@ const LspServer = struct {
             }
 
             const keywords = [_][]const u8{
-                "imp",  "fun", "compound", "quirk", "impl", "enum", "ret", "if",   "elif",  "else", "for", "fit", "break", "continue",
-                "void", "raw", "num",      "dec",   "str",  "bin",  "chr", "true", "false",
+                "imp",  "pub", "fun", "compound", "quirk", "impl", "enum", "ret",  "if",    "elif", "else", "for", "fit", "break", "continue",
+                "void", "raw", "num", "dec",      "str",   "bin",  "chr",  "true", "false",
             };
             for (keywords) |kw| {
                 if (prefix.len == 0 or std.mem.startsWith(u8, kw, prefix)) {
@@ -2644,10 +2675,10 @@ const LspServer = struct {
                     var recv_type: ?[]const u8 = null;
                     if (std.mem.eql(u8, recv_name, "self")) {
                         recv_type = self.guessEnclosingImplType(idx, pos);
-                    } else if (self.isKnownTypeName(recv_name)) {
+                    } else if (self.isKnownTypeName(uri, recv_name)) {
                         recv_type = recv_name;
                     } else {
-                        recv_type = self.guessVariableType(idx, recv_name, pos);
+                        recv_type = self.guessVariableType(idx, uri, recv_name, pos);
                     }
 
                     if (recv_type) |rt| {
@@ -2658,7 +2689,7 @@ const LspServer = struct {
                             seen.deinit();
                         }
 
-                        try self.appendMemberCompletionsForType(&items, &seen, rt, prefix);
+                        try self.appendMemberCompletionsForType(&items, &seen, uri, rt, prefix);
                         const list: CompletionList = .{ .items = items.items };
                         const json = try std.json.stringifyAlloc(self.allocator, list, .{});
                         defer self.allocator.free(json);
@@ -2693,7 +2724,7 @@ const LspServer = struct {
                         while (it.next()) |e| self.allocator.free(e.key_ptr.*);
                         seen.deinit();
                     }
-                    try self.appendMemberCompletionsForType(&items, &seen, recv_type, prefix);
+                    try self.appendMemberCompletionsForType(&items, &seen, uri, recv_type, prefix);
 
                     const list: CompletionList = .{ .items = items.items };
                     const json = try std.json.stringifyAlloc(self.allocator, list, .{});
@@ -2711,10 +2742,10 @@ const LspServer = struct {
                     var recv_type: ?[]const u8 = null;
                     if (std.mem.eql(u8, recv_name, "self")) {
                         recv_type = self.guessEnclosingImplType(idx, pos);
-                    } else if (self.isKnownTypeName(recv_name)) {
+                    } else if (self.isKnownTypeName(uri, recv_name)) {
                         recv_type = recv_name;
                     } else {
-                        recv_type = self.guessVariableType(idx, recv_name, pos);
+                        recv_type = self.guessVariableType(idx, uri, recv_name, pos);
                     }
 
                     if (recv_type) |rt| {
@@ -2724,7 +2755,7 @@ const LspServer = struct {
                             while (it.next()) |e| self.allocator.free(e.key_ptr.*);
                             seen.deinit();
                         }
-                        try self.appendMemberCompletionsForType(&items, &seen, rt, prefix);
+                        try self.appendMemberCompletionsForType(&items, &seen, uri, rt, prefix);
 
                         const list: CompletionList = .{ .items = items.items };
                         const json = try std.json.stringifyAlloc(self.allocator, list, .{});
@@ -2738,8 +2769,8 @@ const LspServer = struct {
 
         // Keywords.
         const keywords = [_][]const u8{
-            "imp",  "fun", "compound", "quirk", "impl", "enum", "defer", "ret",  "if",    "elif", "else", "for", "fit", "break", "continue",
-            "void", "raw", "num",      "dec",   "str",  "bin",  "chr",   "true", "false",
+            "imp",  "pub", "fun", "compound", "quirk", "impl", "enum", "defer", "ret",   "if", "elif", "else", "for", "fit", "break", "continue",
+            "void", "raw", "num", "dec",      "str",   "bin",  "chr",  "true",  "false",
         };
         for (keywords) |kw| {
             if (prefix.len == 0 or std.mem.startsWith(u8, kw, prefix)) {
@@ -2858,6 +2889,7 @@ const LspServer = struct {
                         for (didx.symbols) |s| {
                             if (s.kind != .enumMember) continue;
                             if (s.container_type == null or !std.mem.eql(u8, s.container_type.?, enum_name)) continue;
+                            if (!self.isSymbolVisibleFromUri(uri, iu, s)) continue;
                             const ft = try std.fmt.allocPrint(self.allocator, ".{s}", .{s.name});
                             try items.append(.{
                                 .label = try self.allocator.dupe(u8, s.name),
@@ -2899,6 +2931,7 @@ const LspServer = struct {
                 const didx = imported.index orelse continue;
                 for (didx.symbols) |s| {
                     if (s.kind == .enum_ and s.container_type == null) {
+                        if (!self.isSymbolVisibleFromUri(uri, iu, s)) continue;
                         try enums.append(.{ .name = try self.allocator.dupe(u8, s.name), .uri = iu });
                     }
                 }
@@ -2908,6 +2941,7 @@ const LspServer = struct {
                 for (eidx.symbols) |s| {
                     if (s.kind != .enumMember) continue;
                     if (s.container_type == null or !std.mem.eql(u8, s.container_type.?, e.name)) continue;
+                    if (!self.isSymbolVisibleFromUri(uri, e.uri, s)) continue;
                     const ft = try std.fmt.allocPrint(self.allocator, ".{s}", .{s.name});
                     try items.append(.{
                         .label = try self.allocator.dupe(u8, s.name),
@@ -3027,6 +3061,7 @@ const LspServer = struct {
                 // (Fields/properties are typically completed after '.' and can be very noisy.)
                 if (s.container_type != null) continue;
                 if (s.container_fn_range != null) continue;
+                if (!self.isSymbolVisibleFromUri(uri, iu, s)) continue;
 
                 if (prefix.len != 0 and !std.mem.startsWith(u8, s.name, prefix)) continue;
 
@@ -3083,7 +3118,7 @@ const LspServer = struct {
             defer self.allocator.free(spec);
 
             if (std.mem.eql(u8, spec, "std.c.limits")) has_limits = true;
-            if (std.mem.eql(u8, spec, "std.c.stddef")) has_stddef = true;
+            if (std.mem.eql(u8, spec, "std.c.def")) has_stddef = true;
         }
 
         if (!has_limits and !has_stddef) return;
@@ -3257,6 +3292,7 @@ const LspServer = struct {
                 if (s.container_type != null) continue;
                 if (s.container_fn_range != null) continue;
                 if (prefix.len != 0 and !std.mem.startsWith(u8, s.name, prefix)) continue;
+                if (!self.isSymbolVisibleFromUri(current_uri, receiver_uri, s)) continue;
 
                 const kind: i64 = switch (s.kind) {
                     .function => 3,
@@ -3436,6 +3472,7 @@ const LspServer = struct {
         for (idx.symbols) |s| {
             if (s.container_type != null) continue;
             if (s.container_fn_range != null) continue;
+            if (!s.is_public) continue;
             if (std.mem.eql(u8, s.name, name)) return s;
         }
         return null;
@@ -3911,6 +3948,7 @@ const LspServer = struct {
             const imported = self.docs.get(iu) orelse continue;
             const didx = imported.index orelse continue;
             if (findAnyGlobalDefinition(didx.symbols, name)) |s| {
+                if (!self.isSymbolVisibleFromUri(current_uri, imported.uri, s)) continue;
                 // Note: `iu` is freed by our defer; return the stable doc-owned URI.
                 return .{ .uri = imported.uri, .sym = s };
             }
@@ -6109,6 +6147,7 @@ fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path_opt
             switch (s.kind) {
                 .field, .property, .method => try symbols_out.append(s),
                 .enum_, .enumMember => try symbols_out.append(s),
+                .struct_, .interface => try symbols_out.append(s),
                 .variable => {
                     if (s.container_fn_range != null) try symbols_out.append(s);
                 },
@@ -6119,6 +6158,28 @@ fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path_opt
         // Add AST-backed globals/locals/types.
         for (tp.nodes.items()) |n| {
             try collectSymbolsFromTopLevel(tmp_alloc, &symbols_out, n);
+        }
+
+        // If the AST missed pub flags, fall back to token-derived visibility for top-level symbols.
+        var token_public = std.StringHashMap(bool).init(tmp_alloc);
+        defer token_public.deinit();
+        for (symbols_token.items) |s| {
+            if (s.container_type != null) continue;
+            if (s.container_fn_range != null) continue;
+            if (!token_public.contains(s.name)) {
+                try token_public.put(s.name, s.is_public);
+            } else if (s.is_public) {
+                // Preserve any public signal from tokens.
+                try token_public.put(s.name, true);
+            }
+        }
+        for (symbols_out.items) |*s| {
+            if (s.container_type != null) continue;
+            if (s.container_fn_range != null) continue;
+            if (s.is_public) continue;
+            if (token_public.get(s.name)) |pub_flag| {
+                if (pub_flag) s.is_public = true;
+            }
         }
     } else {
         // Fallback: token-only symbol index.
@@ -6756,6 +6817,26 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
         }
     }.call;
 
+    const prevNonTrivialToken = struct {
+        fn call(tokens_: []const token.Token, start_index: usize) ?usize {
+            if (start_index == 0) return null;
+            var i: isize = @intCast(start_index);
+            while (i > 0) : (i -= 1) {
+                const t = tokens_[@intCast(i - 1)];
+                if (t.type == .NewLine or t.type == .Comment) continue;
+                return @intCast(i - 1);
+            }
+            return null;
+        }
+    }.call;
+
+    const isPubToken = struct {
+        fn call(t: token.Token) bool {
+            if (t.type != .Keyword and t.type != .Identifier) return false;
+            return std.mem.eql(u8, tokenString(t), "pub");
+        }
+    }.call;
+
     const parseParamsAfterLParen = struct {
         fn call(tokens_: []const token.Token, lparen_i: usize, params: *std.ArrayList(ParamLite)) void {
             // Parse `Type name` pairs until the matching ')'. Best-effort; ignore failures.
@@ -6902,6 +6983,10 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
         if (isKeyword(t, "fun")) {
             resetPendingBody(&pending_body, &pending_params, &pending_impl_owner);
             pending_body = .fun_decl;
+            const is_public = blk: {
+                const prev = prevNonTrivialToken(tokens, i) orelse break :blk false;
+                break :blk isPubToken(tokens[prev]);
+            };
             const name_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
             if (!isIdent(tokens[name_i])) continue;
             const name = tokenString(tokens[name_i]);
@@ -6916,6 +7001,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                     .kind = .function,
                     .decl_range = r,
                     .selection_range = r,
+                    .is_public = is_public,
                     .container_type = null,
                     .value_type = sig.return_type,
                     .detail = sig.detail,
@@ -6932,6 +7018,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 .kind = .function,
                 .decl_range = r,
                 .selection_range = r,
+                .is_public = is_public,
                 .container_type = null,
                 .value_type = sig.return_type,
                 .detail = sig.detail,
@@ -6940,6 +7027,10 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
         }
 
         if (isKeyword(t, "compound")) {
+            const is_public = blk: {
+                const prev = prevNonTrivialToken(tokens, i) orelse break :blk false;
+                break :blk isPubToken(tokens[prev]);
+            };
             const name_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
             if (!isIdent(tokens[name_i])) continue;
             const name = tokenString(tokens[name_i]);
@@ -6949,6 +7040,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 .kind = .struct_,
                 .decl_range = r,
                 .selection_range = r,
+                .is_public = is_public,
                 .container_type = null,
                 .value_type = null,
                 .detail = null,
@@ -6984,6 +7076,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                             .kind = .field,
                             .decl_range = fr,
                             .selection_range = fr,
+                            .is_public = is_public,
                             .container_type = try allocator.dupe(u8, owner_name),
                             .value_type = try allocator.dupe(u8, ftype),
                             .detail = null,
@@ -7000,6 +7093,10 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
         }
 
         if (isKeyword(t, "enum")) {
+            const is_public = blk: {
+                const prev = prevNonTrivialToken(tokens, i) orelse break :blk false;
+                break :blk isPubToken(tokens[prev]);
+            };
             const name_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
             if (!isIdent(tokens[name_i])) continue;
             const name = tokenString(tokens[name_i]);
@@ -7009,6 +7106,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 .kind = .enum_,
                 .decl_range = r,
                 .selection_range = r,
+                .is_public = is_public,
                 .container_type = null,
                 .value_type = null,
                 .detail = null,
@@ -7039,6 +7137,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                                 .kind = .enumMember,
                                 .decl_range = vr,
                                 .selection_range = vr,
+                                .is_public = is_public,
                                 .container_type = try allocator.dupe(u8, owner_name),
                                 .value_type = try allocator.dupe(u8, owner_name),
                                 .detail = null,
@@ -7064,6 +7163,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                                     .kind = .enumMember,
                                     .decl_range = vr,
                                     .selection_range = vr,
+                                    .is_public = is_public,
                                     .container_type = try allocator.dupe(u8, owner_name),
                                     .value_type = try allocator.dupe(u8, owner_name),
                                     .detail = null,
@@ -7081,6 +7181,10 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
         }
 
         if (isKeyword(t, "quirk")) {
+            const is_public = blk: {
+                const prev = prevNonTrivialToken(tokens, i) orelse break :blk false;
+                break :blk isPubToken(tokens[prev]);
+            };
             const name_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
             if (!isIdent(tokens[name_i])) continue;
             const name = tokenString(tokens[name_i]);
@@ -7090,6 +7194,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 .kind = .interface,
                 .decl_range = r,
                 .selection_range = r,
+                .is_public = is_public,
                 .container_type = null,
                 .value_type = null,
                 .detail = null,
@@ -7121,6 +7226,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                             .kind = .method,
                             .decl_range = mr,
                             .selection_range = mr,
+                            .is_public = is_public,
                             .container_type = try allocator.dupe(u8, owner_name),
                             .value_type = sig.return_type,
                             .detail = sig.detail,
@@ -7169,6 +7275,11 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
 
                         const sig = try buildSignatureFromTokens(allocator, tokens, k, false);
 
+                        const is_public = blk: {
+                            const prev = prevNonTrivialToken(tokens, k) orelse break :blk false;
+                            break :blk isPubToken(tokens[prev]);
+                        };
+
                         const mname = tokenString(tk);
                         const r = rangeFromTokenPos(tk.pos);
                         try out.append(.{
@@ -7176,6 +7287,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                             .kind = .method,
                             .decl_range = r,
                             .selection_range = r,
+                            .is_public = is_public,
                             .container_type = try allocator.dupe(u8, owner_name),
                             .value_type = sig.return_type,
                             .detail = sig.detail,
@@ -7310,6 +7422,10 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 .container_type = null,
                 .value_type = try allocator.dupe(u8, vtype),
                 .detail = try allocator.dupe(u8, det_buf.items),
+                .is_public = blk: {
+                    const prev = prevNonTrivialToken(tokens, i) orelse break :blk false;
+                    break :blk isPubToken(tokens[prev]);
+                },
             });
             continue;
         }
@@ -7333,6 +7449,7 @@ fn collectSymbolsFromTopLevel(allocator: Allocator, out: *std.ArrayList(SymbolLi
                 .kind = .variable,
                 .decl_range = r,
                 .selection_range = r,
+                .is_public = if (n.flags) |f| f.is_public else false,
                 .container_type = null,
                 .value_type = try allocator.dupe(u8, v.type.type_str.items),
                 .detail = try detail_buf.toOwnedSlice(),
@@ -7350,6 +7467,7 @@ fn collectSymbolsFromTopLevel(allocator: Allocator, out: *std.ArrayList(SymbolLi
                 .kind = .function,
                 .decl_range = decl_range,
                 .selection_range = decl_range,
+                .is_public = if (n.flags) |f| f.is_public else false,
                 .container_type = null,
                 .value_type = null,
                 .detail = detail,
@@ -7369,6 +7487,7 @@ fn collectSymbolsFromTopLevel(allocator: Allocator, out: *std.ArrayList(SymbolLi
                 .kind = .struct_,
                 .decl_range = r,
                 .selection_range = r,
+                .is_public = if (n.flags) |f| f.is_public else false,
                 .container_type = null,
                 .value_type = null,
                 .detail = null,
@@ -7383,6 +7502,7 @@ fn collectSymbolsFromTopLevel(allocator: Allocator, out: *std.ArrayList(SymbolLi
                 .kind = .interface,
                 .decl_range = r,
                 .selection_range = r,
+                .is_public = if (n.flags) |f| f.is_public else false,
                 .container_type = null,
                 .value_type = null,
                 .detail = null,

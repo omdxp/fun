@@ -7,6 +7,7 @@
 - **Statically-typed, C-inspired**: All variables and functions have explicit types.
 - **Functions**: Defined with `fun name(args) type { ... }`.
 - **Imports**: Use `imp module;` to import standard or user modules.
+- **Visibility**: Prefix declarations with `pub` to export them; declarations without `pub` are module-private.
 - **Compounds**: Custom types (like structs): `compound Point { num x; num y; }`.
 - **Quirks (Interfaces)**: Define required methods: `quirk Shape { area() num; }`.
 - **Implementations**:

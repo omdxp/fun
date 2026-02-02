@@ -437,7 +437,7 @@ pub const ParseProcess = struct {
                         .flags = .{},
                     };
                     try self.parse_datatype(dt);
-                    try self.parse_variable(dt, hist);
+                    try self.parse_variable(dt, hist, false);
                     try self.expect_sym(';');
                     return;
                 }
@@ -1756,7 +1756,7 @@ pub const ParseProcess = struct {
                         .flags = .{},
                     };
                     try self.parse_datatype(dt);
-                    try self.parse_variable(dt, hist);
+                    try self.parse_variable(dt, hist, false);
                     try self.expect_sym(';');
                     break :blk true;
                 }
@@ -1799,7 +1799,7 @@ pub const ParseProcess = struct {
         };
     }
 
-    fn parse_compound(self: *Self) ParseError!void {
+    fn parse_compound(self: *Self, is_public: bool) ParseError!void {
         try self.expect_keyword("compound");
 
         const name_tok = self.token_next();
@@ -1921,6 +1921,7 @@ pub const ParseProcess = struct {
         node.* = ast.Node{
             .type = .Compound,
             .pos = name_tok.?.pos,
+            .flags = .{ .is_public = is_public },
             .node_variant = .{ .compound = .{ .name = name, .fields = fields } },
         };
 
@@ -1935,7 +1936,7 @@ pub const ParseProcess = struct {
         };
     }
 
-    fn parse_quirk(self: *Self) ParseError!void {
+    fn parse_quirk(self: *Self, is_public: bool) ParseError!void {
         try self.expect_keyword("quirk");
 
         const name_tok = self.token_next();
@@ -2058,6 +2059,7 @@ pub const ParseProcess = struct {
         node.* = ast.Node{
             .type = .Quirk,
             .pos = name_tok.?.pos,
+            .flags = .{ .is_public = is_public },
             .node_variant = .{ .quirk = .{ .name = name, .methods = methods } },
         };
 
@@ -2072,7 +2074,7 @@ pub const ParseProcess = struct {
         };
     }
 
-    fn parse_enum(self: *Self) ParseError!void {
+    fn parse_enum(self: *Self, is_public: bool) ParseError!void {
         try self.expect_keyword("enum");
 
         const name_tok = self.token_next();
@@ -2161,6 +2163,7 @@ pub const ParseProcess = struct {
         node.* = ast.Node{
             .type = .Enum,
             .pos = name_tok.?.pos,
+            .flags = .{ .is_public = is_public },
             .node_variant = .{ .enum_decl = .{ .name = name, .variants = variants } },
         };
 
@@ -2175,7 +2178,7 @@ pub const ParseProcess = struct {
         };
     }
 
-    fn parse_impl(self: *Self) ParseError!void {
+    fn parse_impl(self: *Self, is_public: bool) ParseError!void {
         try self.expect_keyword("impl");
         const type_tok = self.token_next();
         if (type_tok == null or type_tok.?.type != .Identifier) {
@@ -2228,7 +2231,15 @@ pub const ParseProcess = struct {
         // Parse methods with syntax similar to functions but without the leading `fun` keyword.
         // Example: `fun1() void { ... }`
         while (!self.next_token_is_symbol('}')) {
-            const name_tok = self.token_next();
+            var method_is_public = is_public;
+            var name_tok = self.token_peek_next();
+            if (name_tok != null and name_tok.?.type == .Keyword and mem.eql(u8, name_tok.?.data.sval.items, "pub")) {
+                _ = self.token_next(); // skip pub
+                method_is_public = true;
+                name_tok = self.token_next();
+            } else {
+                name_tok = self.token_next();
+            }
             if (name_tok == null or name_tok.?.type != .Identifier) {
                 self.transpile_proc.err("expected method name in impl", .{});
                 return ParseError.InvalidIdentifier;
@@ -2240,6 +2251,7 @@ pub const ParseProcess = struct {
             var fn_node = ast.Node{
                 .type = .Function,
                 .pos = name_tok.?.pos,
+                .flags = .{ .is_public = method_is_public },
                 .node_variant = .{ .function = .{} },
             };
 
@@ -2383,6 +2395,7 @@ pub const ParseProcess = struct {
         node.* = ast.Node{
             .type = .Impl,
             .pos = type_tok.?.pos,
+            .flags = .{ .is_public = is_public },
             .node_variant = .{ .impl = .{ .type_name = type_name, .quirk_name = quirk_name, .methods = methods } },
         };
 
@@ -2493,7 +2506,7 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
-    fn parse_variable(self: *Self, dt: *dtype.DataType, hist: *utils.History) ParseError!void {
+    fn parse_variable(self: *Self, dt: *dtype.DataType, hist: *utils.History, is_public: bool) ParseError!void {
         if (self.next_token_is_operator("[")) {
             try self.parse_array_brackets(dt, hist);
         }
@@ -2537,6 +2550,7 @@ pub const ParseProcess = struct {
             node.* = ast.Node{
                 .type = .Variable,
                 .pos = ident_token.?.pos,
+                .flags = if (is_public) .{ .is_public = true } else null,
                 .node_variant = .{
                     .variable = .{
                         .name = name,
@@ -2579,6 +2593,7 @@ pub const ParseProcess = struct {
             node.* = ast.Node{
                 .type = .Variable,
                 .pos = ident_token.?.pos,
+                .flags = if (is_public) .{ .is_public = true } else null,
                 .node_variant = .{
                     .variable = .{
                         .name = name,
@@ -2632,7 +2647,7 @@ pub const ParseProcess = struct {
             .flags = .{},
         };
         try self.parse_datatype(dt);
-        try self.parse_variable(dt, hist);
+        try self.parse_variable(dt, hist, false);
     }
 
     /// Parses function arguments.
@@ -2699,7 +2714,7 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
-    fn parse_function(self: *Self) ParseError!void {
+    fn parse_function(self: *Self, is_public: bool) ParseError!void {
         _ = try self.transpile_proc.new_scope();
         errdefer self.transpile_proc.finish_scope();
         _ = self.token_next(); // skip fun
@@ -2707,6 +2722,7 @@ pub const ParseProcess = struct {
             .type = .Function,
             // Set once we read the function name token.
             .pos = self.*.transpile_proc.*.pos,
+            .flags = .{ .is_public = is_public },
             .node_variant = .{ .function = .{} },
         };
         // Initialize `dt` so optional fields are well-defined before `parse_datatype()`.
@@ -3527,23 +3543,25 @@ pub const ParseProcess = struct {
                 .flags = .{},
             };
             try self.parse_datatype(dt);
-            try self.parse_variable(dt, hist);
+            try self.parse_variable(dt, hist, false);
             try self.expect_sym(';');
             return;
         }
 
-        if (mem.eql(u8, "imp", sval)) {
+        if (mem.eql(u8, "pub", sval)) {
+            return try self.parse_pub_declaration();
+        } else if (mem.eql(u8, "imp", sval)) {
             return try self.parse_import();
         } else if (mem.eql(u8, "enum", sval)) {
-            return try self.parse_enum();
+            return try self.parse_enum(false);
         } else if (mem.eql(u8, "compound", sval)) {
-            return try self.parse_compound();
+            return try self.parse_compound(false);
         } else if (mem.eql(u8, "quirk", sval)) {
-            return try self.parse_quirk();
+            return try self.parse_quirk(false);
         } else if (mem.eql(u8, "impl", sval)) {
-            return try self.parse_impl();
+            return try self.parse_impl(false);
         } else if (mem.eql(u8, "fun", sval)) {
-            return try self.parse_function();
+            return try self.parse_function(false);
         } else if (mem.eql(u8, "for", sval)) {
             return try self.parse_for_statement(hist);
         } else if (mem.eql(u8, "if", sval)) {
@@ -3597,6 +3615,69 @@ pub const ParseProcess = struct {
         }
 
         self.transpile_proc.err("invalid keyword", .{});
+    }
+
+    fn parse_pub_declaration(self: *Self) ParseError!void {
+        _ = self.token_next(); // skip pub
+        const t = self.token_peek_next() orelse {
+            self.transpile_proc.err("expected declaration after 'pub'", .{});
+            return ParseError.InvalidKeyword;
+        };
+        if (t.type == .Keyword) {
+            const kw = t.data.sval.items;
+            if (utils.keyword_is_datatype(kw)) {
+                const dt = self.transpile_proc.allocator.create(dtype.DataType) catch |e| {
+                    std.debug.print("Error creating DataType: {}\n", .{e});
+                    return ParseError.MemoryAllocationFailed;
+                };
+                dt.* = dtype.DataType{
+                    .array = null,
+                    .pointer_depth = 0,
+                    .type = .Unknown,
+                    .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
+                    .flags = .{},
+                };
+                var hist = utils.History.init(self.transpile_proc.allocator, .{});
+                defer hist.deinit();
+                try self.parse_datatype(dt);
+                try self.parse_variable(dt, &hist, true);
+                try self.expect_sym(';');
+                return;
+            }
+            if (mem.eql(u8, "enum", kw)) {
+                return try self.parse_enum(true);
+            } else if (mem.eql(u8, "compound", kw)) {
+                return try self.parse_compound(true);
+            } else if (mem.eql(u8, "quirk", kw)) {
+                return try self.parse_quirk(true);
+            } else if (mem.eql(u8, "impl", kw)) {
+                return try self.parse_impl(true);
+            } else if (mem.eql(u8, "fun", kw)) {
+                return try self.parse_function(true);
+            }
+        } else if (t.type == .Identifier) {
+            // public variable with user-defined type: `pub User u;`
+            const dt = self.transpile_proc.allocator.create(dtype.DataType) catch |e| {
+                std.debug.print("Error creating DataType: {}\n", .{e});
+                return ParseError.MemoryAllocationFailed;
+            };
+            dt.* = dtype.DataType{
+                .array = null,
+                .pointer_depth = 0,
+                .type = .Unknown,
+                .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
+                .flags = .{},
+            };
+            var hist = utils.History.init(self.transpile_proc.allocator, .{});
+            defer hist.deinit();
+            try self.parse_datatype(dt);
+            try self.parse_variable(dt, &hist, true);
+            try self.expect_sym(';');
+            return;
+        }
+
+        self.transpile_proc.err("invalid declaration after 'pub'", .{});
+        return ParseError.InvalidKeyword;
     }
 
     fn parse_defer_statement(self: *Self, hist: *utils.History) ParseError!void {

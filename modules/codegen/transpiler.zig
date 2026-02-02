@@ -109,6 +109,7 @@ pub const GlobalSymbolInfo = struct {
     symbol_name: []const u8,
     file_path: []const u8,
     is_function: bool,
+    is_public: bool,
 };
 
 const ImplKey = struct {
@@ -1173,7 +1174,11 @@ pub const TranspileProcess = struct {
         const full_path = try self.build_full_import_path(import_path);
         defer self.backing_allocator.free(full_path);
 
-        std.fs.cwd().access(full_path, .{}) catch {
+        const canon_path = std.fs.cwd().realpathAlloc(self.allocator, full_path) catch null;
+        const canon = canon_path orelse (self.allocator.dupe(u8, full_path) catch return TranspileError.MemoryAllocationFailed);
+        defer self.allocator.free(canon);
+
+        std.fs.cwd().access(canon, .{}) catch {
             self.report_error(import_node, "Import file not found: {s}", .{full_path});
             return TranspileError.ImportFileNotFound;
         };
@@ -1211,7 +1216,7 @@ pub const TranspileProcess = struct {
             }
         }
 
-        var import_proc = try TranspileProcess.init(self.backing_allocator, full_path, "temp.c", .{ .exec = false, .outf = false, .ast = false });
+        var import_proc = try TranspileProcess.init(self.backing_allocator, canon, "temp.c", .{ .exec = false, .outf = false, .ast = false });
         defer import_proc.deinit();
 
         var lex_proc = lexer.LexProcess.init(&import_proc);
@@ -1223,7 +1228,18 @@ pub const TranspileProcess = struct {
         while (i < tokens.len) : (i += 1) {
             const t = tokens[i];
             if (t.type != .Keyword) continue;
-            if (!mem.eql(u8, t.data.sval.items, "fun")) continue;
+
+            var is_public = false;
+            if (mem.eql(u8, t.data.sval.items, "pub")) {
+                var j: usize = i + 1;
+                while (j < tokens.len and token.is_nl_or_comment_or_newline_separator(tokens[j])) : (j += 1) {}
+                if (j >= tokens.len) continue;
+                if (tokens[j].type != .Keyword or !mem.eql(u8, tokens[j].data.sval.items, "fun")) continue;
+                is_public = true;
+                i = j; // continue parsing as `fun`
+            } else if (!mem.eql(u8, t.data.sval.items, "fun")) {
+                continue;
+            }
 
             var j: usize = i + 1;
             while (j < tokens.len and token.is_nl_or_comment_or_newline_separator(tokens[j])) : (j += 1) {}
@@ -1234,9 +1250,10 @@ pub const TranspileProcess = struct {
 
             const name = name_tok.data.sval.items;
             if (mem.eql(u8, name, "main")) continue;
+            if (!is_public) continue;
 
             if (self.global_symbols.get(name)) |existing| {
-                if (!mem.eql(u8, existing.file_path, full_path) and !mem.eql(u8, existing.file_path, self.input_file_path)) {
+                if (!mem.eql(u8, existing.file_path, canon) and !mem.eql(u8, existing.file_path, self.input_file_path)) {
                     self.err("Symbol '{s}' already defined in module '{s}'", .{ name, existing.file_path });
                     return TranspileError.DuplicateSymbol;
                 }
@@ -1248,8 +1265,8 @@ pub const TranspileProcess = struct {
             };
             errdefer self.allocator.free(name_copy);
 
-            const path_copy = self.allocator.dupe(u8, full_path) catch |e| {
-                std.debug.print("Error duplicating file path '{any}': {s}\\n", .{ full_path, @errorName(e) });
+            const path_copy = self.allocator.dupe(u8, canon) catch |e| {
+                std.debug.print("Error duplicating file path '{any}': {s}\\n", .{ canon, @errorName(e) });
                 return TranspileError.MemoryAllocationFailed;
             };
             errdefer self.allocator.free(path_copy);
@@ -1258,6 +1275,7 @@ pub const TranspileProcess = struct {
                 .symbol_name = name_copy,
                 .file_path = path_copy,
                 .is_function = true,
+                .is_public = true,
             }) catch |e| {
                 std.debug.print("Error registering imported symbol '{any}': {s}\\n", .{ name_copy, @errorName(e) });
                 return TranspileError.MemoryAllocationFailed;
@@ -1542,6 +1560,7 @@ pub const TranspileProcess = struct {
                 .symbol_name = name_copy,
                 .file_path = path_copy,
                 .is_function = true,
+                .is_public = true,
             }) catch return;
         }
     }
@@ -1819,6 +1838,55 @@ pub const TranspileProcess = struct {
         };
     }
 
+    fn ensure_named_type_visible(self: *Self, ref_node: ast.Node, name: []const u8) TranspileError!void {
+        // Builtins are always visible.
+        if (mem.eql(u8, name, "void") or mem.eql(u8, name, "raw") or mem.eql(u8, name, "num") or mem.eql(u8, name, "dec") or mem.eql(u8, name, "str") or mem.eql(u8, name, "bin") or mem.eql(u8, name, "chr")) {
+            return;
+        }
+
+        // Known C typedef aliases are treated as externally visible.
+        if (utils.get_c_typedef_alias_datatype_type(name) != null) {
+            return;
+        }
+
+        const reg = self.root_registry() orelse {
+            self.report_type_error(ref_node, "unknown type '{s}'", .{name});
+            return TranspileError.SymbolNotDefined;
+        };
+
+        if (reg.enums_by_name.get(name)) |enode| {
+            if (!self.can_access(&ref_node, enode)) {
+                self.report_type_error(ref_node, "type '{s}' is private", .{name});
+                return TranspileError.SymbolNotDefined;
+            }
+            return;
+        }
+
+        if (reg.compounds_by_name.get(name)) |cnode| {
+            if (!self.can_access(&ref_node, cnode)) {
+                self.report_type_error(ref_node, "type '{s}' is private", .{name});
+                return TranspileError.SymbolNotDefined;
+            }
+            return;
+        }
+
+        if (reg.quirk_sig_by_name.get(name)) |sig| {
+            const qnode = reg.quirks_by_sig.get(sig) orelse null;
+            if (qnode == null or qnode.?.node_variant == null) {
+                self.report_type_error(ref_node, "unknown type '{s}'", .{name});
+                return TranspileError.SymbolNotDefined;
+            }
+            if (!self.can_access(&ref_node, qnode.?)) {
+                self.report_type_error(ref_node, "type '{s}' is private", .{name});
+                return TranspileError.SymbolNotDefined;
+            }
+            return;
+        }
+
+        self.report_type_error(ref_node, "unknown type '{s}'", .{name});
+        return TranspileError.SymbolNotDefined;
+    }
+
     fn is_known_type(t: CheckedType) bool {
         return t.base != .Unknown or t.name != null;
     }
@@ -1854,6 +1922,10 @@ pub const TranspileProcess = struct {
             self.report_type_error(node.*, "unknown enum '{s}'", .{enum_name});
             return TranspileError.TypeMismatch;
         };
+        if (!self.can_access(node, enode)) {
+            self.report_type_error(node.*, "enum '{s}' is private", .{enum_name});
+            return TranspileError.SymbolNotDefined;
+        }
         if (enode.node_variant == null) return .{ .base = .Unknown };
 
         var ok = false;
@@ -1899,7 +1971,7 @@ pub const TranspileProcess = struct {
         return null;
     }
 
-    fn lookup_quirk_method(self: *Self, quirk_name: []const u8, method_name: []const u8) ?ast.QuirkMethodSig {
+    fn lookup_quirk_method(self: *Self, ref_node: ast.Node, quirk_name: []const u8, method_name: []const u8) ?ast.QuirkMethodSig {
         const root = self.get_root();
         if (root.type_registry == null) return null;
         const reg = &root.type_registry.?;
@@ -1907,6 +1979,7 @@ pub const TranspileProcess = struct {
         const sig = reg.quirk_sig_by_name.get(quirk_name) orelse return null;
         const qnode = reg.quirks_by_sig.get(sig) orelse return null;
         if (qnode.node_variant == null) return null;
+        if (!self.can_access(&ref_node, qnode)) return null;
         const methods = qnode.node_variant.?.quirk.methods.items();
         for (methods) |m| {
             if (mem.eql(u8, m.name.items, method_name)) return m;
@@ -1918,6 +1991,10 @@ pub const TranspileProcess = struct {
         if (!is_user_named_type(base)) {
             self.report_type_error(node, "field access requires a compound-typed value", .{});
             return TranspileError.InvalidFieldAccess;
+        }
+
+        if (base.name) |tname| {
+            try self.ensure_named_type_visible(node, tname);
         }
 
         if (base.pointer_depth > 1) {
@@ -1932,7 +2009,7 @@ pub const TranspileProcess = struct {
         return type_from_dtype(fdt);
     }
 
-    fn lookup_plain_impl_method_fn_proc(self: *Self, proc: *Self, type_name: []const u8, method_name: []const u8) ?[]const u8 {
+    fn lookup_plain_impl_method_fn_proc(self: *Self, proc: *Self, ref_node: ?*const ast.Node, type_name: []const u8, method_name: []const u8) ?[]const u8 {
         for (proc.owned_nodes.items) |n| {
             if (n.type != .Impl or n.node_variant == null) continue;
             const im = n.node_variant.?.impl;
@@ -1941,6 +2018,7 @@ pub const TranspileProcess = struct {
 
             for (im.methods.items()) |m| {
                 if (m.type != .Function or m.node_variant == null) continue;
+                if (!self.can_access_method(ref_node, n, m)) continue;
                 const fnv = m.node_variant.?.function;
                 if (fnv.name == null) continue;
                 const full = fnv.name.?.items;
@@ -1955,14 +2033,42 @@ pub const TranspileProcess = struct {
         }
 
         for (proc.children.items) |child| {
-            if (self.lookup_plain_impl_method_fn_proc(child, type_name, method_name)) |n| return n;
+            if (self.lookup_plain_impl_method_fn_proc(child, ref_node, type_name, method_name)) |n| return n;
         }
         return null;
     }
 
-    fn lookup_plain_impl_method_fn(self: *Self, type_name: []const u8, method_name: []const u8) ?[]const u8 {
+    fn lookup_plain_impl_method_fn(self: *Self, ref_node: ?*const ast.Node, type_name: []const u8, method_name: []const u8) ?[]const u8 {
         const root = self.get_root();
-        return self.lookup_plain_impl_method_fn_proc(root, type_name, method_name);
+        return self.lookup_plain_impl_method_fn_proc(root, ref_node, type_name, method_name);
+    }
+
+    fn find_function_node_proc(self: *Self, proc: *Self, name: []const u8) ?*ast.Node {
+        for (proc.nodes.items()) |*n| {
+            if (n.type != .Function or n.node_variant == null) continue;
+            const fnv = n.node_variant.?.function;
+            if (fnv.name != null and mem.eql(u8, fnv.name.?.items, name)) return n;
+        }
+
+        for (proc.owned_nodes.items) |impl_node| {
+            if (impl_node.type != .Impl or impl_node.node_variant == null) continue;
+            const im = impl_node.node_variant.?.impl;
+            for (im.methods.items()) |m| {
+                if (m.type != .Function or m.node_variant == null) continue;
+                const fnv = m.node_variant.?.function;
+                if (fnv.name != null and mem.eql(u8, fnv.name.?.items, name)) return m;
+            }
+        }
+
+        for (proc.children.items) |child| {
+            if (self.find_function_node_proc(child, name)) |found| return found;
+        }
+        return null;
+    }
+
+    fn find_function_node(self: *Self, name: []const u8) ?*ast.Node {
+        const root = self.get_root();
+        return self.find_function_node_proc(root, name);
     }
 
     fn lookup_quirk_impl_method_fn_for_self(self: *Self, type_name: []const u8, method_name: []const u8) ?[]const u8 {
@@ -2015,7 +2121,7 @@ pub const TranspileProcess = struct {
         other_quirk_name: ?[]const u8 = null,
     };
 
-    fn resolve_quirk_impl_method_for_concrete(self: *Self, type_name: []const u8, method_name: []const u8) QuirkImplMethodResolution {
+    fn resolve_quirk_impl_method_for_concrete(self: *Self, ref_node: ast.Node, type_name: []const u8, method_name: []const u8) QuirkImplMethodResolution {
         const root = self.get_root();
         if (root.type_registry == null) return .{};
         const reg = &root.type_registry.?;
@@ -2033,6 +2139,7 @@ pub const TranspileProcess = struct {
 
             const qnode = reg.quirks_by_sig.get(key.quirk_sig) orelse continue;
             if (qnode.node_variant == null) continue;
+            if (!self.can_access(&ref_node, qnode)) continue;
             const q = qnode.node_variant.?.quirk;
             const qname = q.name.items;
 
@@ -2051,6 +2158,7 @@ pub const TranspileProcess = struct {
             var fn_name: ?[]const u8 = null;
             for (im.methods.items()) |m| {
                 if (m.type != .Function or m.node_variant == null) continue;
+                if (!self.can_access_method(&ref_node, impl_node, m)) continue;
                 const fnv = m.node_variant.?.function;
                 if (fnv.name == null) continue;
                 const full = fnv.name.?.items;
@@ -2385,12 +2493,22 @@ pub const TranspileProcess = struct {
                                 return TranspileError.InvalidSizeof;
                             }
 
+                            if (!is_builtin) {
+                                try self.ensure_named_type_visible(node, type_name);
+                            }
+
                             return .{ .base = .Num };
                         }
 
                         if (fns.get(fname)) |sig| {
                             maybe_sig = sig;
                             call_rtype = sig.rtype;
+                            if (self.find_function_node(fname)) |fn_node| {
+                                if (!self.can_access(&node, fn_node)) {
+                                    self.report_type_error(node, "function '{s}' is private", .{fname});
+                                    return TranspileError.SymbolNotDefined;
+                                }
+                            }
                         } else {
                             // If the name is known from preloaded imports/stdlib signatures, treat it
                             // as an external function and skip type checking.
@@ -2435,7 +2553,7 @@ pub const TranspileProcess = struct {
                         const recv_is_quirk = if (reg) |r| r.quirk_sig_by_name.contains(recv_t.name.?) else false;
 
                         if (recv_is_quirk) {
-                            method_sig = self.lookup_quirk_method(recv_t.name.?, mname) orelse {
+                            method_sig = self.lookup_quirk_method(node, recv_t.name.?, mname) orelse {
                                 self.report_type_error(node, "quirk '{s}' has no method '{s}'", .{ recv_t.name.?, mname });
                                 return TranspileError.NotCallable;
                             };
@@ -2446,18 +2564,18 @@ pub const TranspileProcess = struct {
                                 return TranspileError.NotCallable;
                             }
 
-                            var buf: [256]u8 = undefined;
-                            const gen_name = std.fmt.bufPrint(&buf, "{s}__{s}", .{ recv_t.name.?, mname }) catch unreachable;
-
-                            if (fns.get(gen_name)) |sig| {
-                                plain_method_sig = sig;
+                            if (self.lookup_plain_impl_method_fn(&node, recv_t.name.?, mname)) |fn_name| {
+                                plain_method_sig = fns.get(fn_name) orelse {
+                                    self.report_type_error(node, "type '{s}' has no method '{s}'", .{ recv_t.name.?, mname });
+                                    return TranspileError.NotCallable;
+                                };
                                 plain_method_name = mname;
-                                call_rtype = sig.rtype;
+                                call_rtype = plain_method_sig.?.rtype;
                             } else {
                                 // Also allow calling quirk-impl methods directly on concrete types.
                                 // If the type implements exactly one quirk that defines this method name,
                                 // lower/typecheck as a direct call to the generated impl function.
-                                const qres = self.resolve_quirk_impl_method_for_concrete(recv_t.name.?, mname);
+                                const qres = self.resolve_quirk_impl_method_for_concrete(node, recv_t.name.?, mname);
                                 if (qres.ambiguous) {
                                     self.report_type_error(node, "type '{s}' method '{s}' is ambiguous (quirks: '{s}', '{s}')", .{ recv_t.name.?, mname, qres.quirk_name orelse "<unknown>", qres.other_quirk_name orelse "<unknown>" });
                                     return TranspileError.NotCallable;
@@ -2600,6 +2718,10 @@ pub const TranspileProcess = struct {
                         if (root.type_registry != null) {
                             const reg = &root.type_registry.?;
                             if (reg.enums_by_name.get(enum_name)) |enode| {
+                                if (!self.can_access(&node, enode)) {
+                                    self.report_type_error(node, "enum '{s}' is private", .{enum_name});
+                                    return TranspileError.SymbolNotDefined;
+                                }
                                 if (enode.node_variant != null) {
                                     var ok = false;
                                     for (enode.node_variant.?.enum_decl.variants.items()) |v| {
@@ -2850,6 +2972,9 @@ pub const TranspileProcess = struct {
                     const v = stmt.node_variant.?.variable;
                     const name = v.name.items;
                     const vtype = type_from_dtype(v.type);
+                    if (vtype.name) |tname| {
+                        try self.ensure_named_type_visible(stmt, tname);
+                    }
                     try env.put_current(name, vtype);
                     if (v.val) |val| {
                         if (self.expected_enum_name(vtype)) |enum_name| {
@@ -3104,6 +3229,12 @@ pub const TranspileProcess = struct {
             const fnv = node.node_variant.?.function;
             const fn_rtype: CheckedType = if (fnv.rtype) |rt| type_from_dtype(&rt) else CheckedType{ .base = .Void };
 
+            if (fnv.rtype) |rt| {
+                if (rt.type == .Unknown and rt.type_str.items.len > 0) {
+                    try proc.ensure_named_type_visible(node, rt.type_str.items);
+                }
+            }
+
             var fn_env = TypeEnv.init(proc.allocator);
             defer fn_env.deinit();
             try fn_env.push();
@@ -3122,6 +3253,9 @@ pub const TranspileProcess = struct {
                     const arg = arg_ptr.*;
                     if (arg.type != .Variable or arg.node_variant == null) continue;
                     const v = arg.node_variant.?.variable;
+                    if (v.type.type == .Unknown and v.type.type_str.items.len > 0) {
+                        try proc.ensure_named_type_visible(node, v.type.type_str.items);
+                    }
                     try fn_env.put_current(v.name.items, type_from_dtype(v.type));
                 }
             }
@@ -3137,6 +3271,11 @@ pub const TranspileProcess = struct {
             if (n.type != .Impl or n.node_variant == null) continue;
             const im = n.node_variant.?.impl;
             const self_type: CheckedType = .{ .base = .Unknown, .name = im.type_name.items, .pointer_depth = 1 };
+
+            try proc.ensure_named_type_visible(n.*, im.type_name.items);
+            if (im.quirk_name) |qn| {
+                try proc.ensure_named_type_visible(n.*, qn.items);
+            }
 
             for (im.methods.items()) |m_ptr| {
                 const m = m_ptr.*;
@@ -3451,25 +3590,29 @@ pub const TranspileProcess = struct {
             }
         }
 
-        // Determine if this is a function symbol
+        // Determine if this is a function symbol and whether it is public.
         var is_function = false;
+        var is_public = false;
         if (s.type == symbol.SymbolType.Node) {
-            // For Node symbols, we need to check if the node is a Function
             if (s.data) |data| {
-                // We can't directly check the union tag, instead check based on the symbol type
-                is_function = s.type == symbol.SymbolType.Node and data.node.type == .Function;
+                is_function = data.node.type == .Function;
+                is_public = node_is_public(&data.node);
             }
         }
 
-        // Register the symbol in global registry to detect conflicts in other modules
-        self.global_symbols.put(s.name, .{
-            .symbol_name = s.name,
-            .file_path = self.input_file_path,
-            .is_function = is_function,
-        }) catch |e| {
-            std.debug.print("Error registering symbol '{s}': {s}\\n", .{ s.name, @errorName(e) });
-            return TranspileError.MemoryAllocationFailed;
-        };
+        // Register the symbol in global registry to detect conflicts in other modules.
+        // Only public symbols are visible across modules.
+        if (is_public and !mem.eql(u8, s.name, "main")) {
+            self.global_symbols.put(s.name, .{
+                .symbol_name = s.name,
+                .file_path = self.input_file_path,
+                .is_function = is_function,
+                .is_public = true,
+            }) catch |e| {
+                std.debug.print("Error registering symbol '{s}': {s}\n", .{ s.name, @errorName(e) });
+                return TranspileError.MemoryAllocationFailed;
+            };
+        }
 
         // Add the symbol to the active symbol table
         try self.push_symbol(s);
@@ -3502,15 +3645,18 @@ pub const TranspileProcess = struct {
                     return TranspileError.DuplicateSymbol;
                 }
 
-                // Register the symbol in global registry
-                self.global_symbols.put(variable.name.items, .{
-                    .symbol_name = variable.name.items,
-                    .file_path = self.input_file_path,
-                    .is_function = false,
-                }) catch |e| {
-                    std.debug.print("Error registering symbol '{s}': {s}\\n", .{ variable.name.items, @errorName(e) });
-                    return TranspileError.MemoryAllocationFailed;
-                };
+                if (node_is_public(&node)) {
+                    // Register the symbol in global registry
+                    self.global_symbols.put(variable.name.items, .{
+                        .symbol_name = variable.name.items,
+                        .file_path = self.input_file_path,
+                        .is_function = false,
+                        .is_public = true,
+                    }) catch |e| {
+                        std.debug.print("Error registering symbol '{s}': {s}\n", .{ variable.name.items, @errorName(e) });
+                        return TranspileError.MemoryAllocationFailed;
+                    };
+                }
 
                 try self.register_symbol(s);
             },
@@ -3538,15 +3684,18 @@ pub const TranspileProcess = struct {
                     }
                 }
 
-                // Register the symbol in global registry
-                self.global_symbols.put(function.name.?.items, .{
-                    .symbol_name = function.name.?.items,
-                    .file_path = self.input_file_path,
-                    .is_function = true,
-                }) catch |e| {
-                    std.debug.print("Error registering symbol '{s}': {s}\\n", .{ function.name.?.items, @errorName(e) });
-                    return TranspileError.MemoryAllocationFailed;
-                };
+                if (node_is_public(&node)) {
+                    // Register the symbol in global registry
+                    self.global_symbols.put(function.name.?.items, .{
+                        .symbol_name = function.name.?.items,
+                        .file_path = self.input_file_path,
+                        .is_function = true,
+                        .is_public = true,
+                    }) catch |e| {
+                        std.debug.print("Error registering symbol '{s}': {s}\n", .{ function.name.?.items, @errorName(e) });
+                        return TranspileError.MemoryAllocationFailed;
+                    };
+                }
 
                 try self.register_symbol(s);
             },
@@ -4242,6 +4391,31 @@ pub const TranspileProcess = struct {
         return self.is_quirk_name(dt.type_str.items);
     }
 
+    fn node_is_public(node: *const ast.Node) bool {
+        return node.flags != null and node.flags.?.is_public;
+    }
+
+    fn same_module(ref_node: ?*const ast.Node, def_node: *const ast.Node) bool {
+        if (ref_node == null) return true;
+        const ref_pos = ref_node.?.pos orelse return true;
+        const def_pos = def_node.pos orelse return true;
+        return mem.eql(u8, ref_pos.filename, def_pos.filename);
+    }
+
+    fn can_access(self: *Self, ref_node: ?*const ast.Node, def_node: *const ast.Node) bool {
+        _ = self;
+        return node_is_public(def_node) or same_module(ref_node, def_node);
+    }
+
+    fn method_is_public(self: *Self, impl_node: *const ast.Node, method_node: *const ast.Node) bool {
+        _ = self;
+        return node_is_public(method_node) or node_is_public(impl_node);
+    }
+
+    fn can_access_method(self: *Self, ref_node: ?*const ast.Node, impl_node: *const ast.Node, method_node: *const ast.Node) bool {
+        return self.method_is_public(impl_node, method_node) or same_module(ref_node, method_node);
+    }
+
     fn expr_pointer_depth_from_scope(self: *Self, node: ast.Node) usize {
         switch (node.type) {
             .Identifier => {
@@ -4805,22 +4979,22 @@ pub const TranspileProcess = struct {
                 emitted.put(fname, true) catch return TranspileError.MemoryAllocationFailed;
 
                 if (fnv.rtype) |rt| {
-                    try proc.write_type(rt);
+                    try self.write_type(rt);
                 } else {
-                    try proc.write("void");
+                    try self.write("void");
                 }
-                try proc.write(" ");
-                try proc.write(fname);
-                try proc.write("(");
-                proc.in_function_params = true;
+                try self.write(" ");
+                try self.write(fname);
+                try self.write("(");
+                self.in_function_params = true;
                 if (fnv.args) |args| {
                     for (args.items(), 0..) |arg, i| {
-                        if (i > 0) try proc.write(", ");
-                        try proc.transpile_node(arg.*);
+                        if (i > 0) try self.write(", ");
+                        try self.transpile_node(arg.*);
                     }
                 }
-                proc.in_function_params = false;
-                try proc.write(");\n");
+                self.in_function_params = false;
+                try self.write(");\n");
             }
         }
 
@@ -4845,31 +5019,31 @@ pub const TranspileProcess = struct {
                 emitted.put(fname, true) catch return TranspileError.MemoryAllocationFailed;
 
                 if (fnv.rtype) |rt| {
-                    try proc.write_type(rt);
+                    try self.write_type(rt);
                 } else {
-                    try proc.write("void");
+                    try self.write("void");
                 }
-                try proc.write(" ");
-                try proc.write(fname);
-                try proc.write("(");
-                proc.in_function_params = true;
+                try self.write(" ");
+                try self.write(fname);
+                try self.write("(");
+                self.in_function_params = true;
                 if (fnv.args) |args| {
                     for (args.items(), 0..) |arg, i| {
-                        if (i > 0) try proc.write(", ");
-                        try proc.transpile_node(arg.*);
+                        if (i > 0) try self.write(", ");
+                        try self.transpile_node(arg.*);
                     }
                 }
-                proc.in_function_params = false;
-                try proc.write(");\n");
+                self.in_function_params = false;
+                try self.write(");\n");
             }
-            try proc.write("\n");
+            try self.write("\n");
 
             for (im.methods.items()) |m| {
                 if (m.type != .Function or m.node_variant == null) continue;
                 const fnv = m.node_variant.?.function;
                 if (fnv.body == null) continue;
-                try proc.transpile_node(m.*);
-                try proc.write("\n\n");
+                try self.transpile_node(m.*);
+                try self.write("\n\n");
             }
         }
 
@@ -5145,7 +5319,7 @@ pub const TranspileProcess = struct {
                                     if (dt != null and dt.?.type == .Unknown and !self.is_quirk_name(dt.?.type_str.items) and (dt.?.pointer_depth == 0 or dt.?.pointer_depth == 1)) {
                                         const type_name = dt.?.type_str.items;
                                         const mname = member.?.data.?.sval.items;
-                                        if (self.lookup_plain_impl_method_fn(type_name, mname)) |fn_name| {
+                                        if (self.lookup_plain_impl_method_fn(&node, type_name, mname)) |fn_name| {
                                             try self.write("(");
                                             try self.write(fn_name);
                                             try self.write("(");
@@ -5174,7 +5348,7 @@ pub const TranspileProcess = struct {
                                         }
 
                                         // Also allow calling quirk-impl methods directly on concrete types.
-                                        const qres = self.resolve_quirk_impl_method_for_concrete(type_name, mname);
+                                        const qres = self.resolve_quirk_impl_method_for_concrete(node, type_name, mname);
                                         if (!qres.ambiguous) {
                                             if (qres.fn_name) |qfn_name| {
                                                 try self.write("(");
@@ -6123,7 +6297,7 @@ pub const TranspileProcess = struct {
                 self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
                 return TranspileError.MemoryAllocationFailed;
             };
-        } else if (mem.eql(u8, import_path, "std.stddef") or mem.eql(u8, import_path, "std.c.stddef")) {
+        } else if (mem.eql(u8, import_path, "std.def") or mem.eql(u8, import_path, "std.c.def")) {
             header_name = self.allocator.dupe(u8, "stddef.h") catch |e| {
                 self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
                 return TranspileError.MemoryAllocationFailed;
@@ -6224,7 +6398,6 @@ pub const TranspileProcess = struct {
             std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
             return TranspileError.MemoryAllocationFailed;
         };
-        errdefer self.backing_allocator.free(full_path);
         defer self.backing_allocator.free(full_path);
 
         const canon_path = std.fs.cwd().realpathAlloc(self.allocator, full_path) catch null;
@@ -6388,8 +6561,9 @@ pub const TranspileProcess = struct {
             const symbol_name = entry.key_ptr.*;
             const symbol_info = entry.value_ptr.*;
 
-            // Skip main functions entirely
+            // Skip non-public and main functions entirely
             if (mem.eql(u8, symbol_name, "main")) continue;
+            if (!symbol_info.is_public) continue;
 
             // Check if this symbol is already defined in the parent
             if (self.parent.?.global_symbols.get(symbol_name)) |existing| {
@@ -6409,6 +6583,7 @@ pub const TranspileProcess = struct {
                 .symbol_name = symbol_name,
                 .file_path = symbol_info.file_path,
                 .is_function = symbol_info.is_function,
+                .is_public = symbol_info.is_public,
             }) catch |e| {
                 std.debug.print("Failed to allocate memory for global symbol: {s}\\n", .{@errorName(e)});
                 return TranspileError.MemoryAllocationFailed;

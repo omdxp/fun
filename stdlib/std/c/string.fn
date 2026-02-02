@@ -11,7 +11,7 @@
 // 
 // Returns:
 // - number of bytes before the terminating NUL (C semantics)
-fun strlen(str s) num;
+pub fun strlen(str s) num;
 
 // Lexicographically compares two NUL-terminated strings.
 // 
@@ -21,7 +21,7 @@ fun strlen(str s) num;
 // 
 // Returns:
 // - <0, 0, >0 (C semantics)
-fun strcmp(str a, str b) num;
+pub fun strcmp(str a, str b) num;
 
 // Compares up to n characters of two strings.
 // 
@@ -32,7 +32,7 @@ fun strcmp(str a, str b) num;
 // 
 // Returns:
 // - <0, 0, >0 (C semantics)
-fun strncmp(str a, str b, num n) num;
+pub fun strncmp(str a, str b, num n) num;
 
 // Finds the first occurrence of a character in a string.
 // 
@@ -42,7 +42,7 @@ fun strncmp(str a, str b, num n) num;
 // 
 // Returns:
 // - pointer into s or null (C semantics)
-fun strchr(str s, chr c) str;
+pub fun strchr(str s, chr c) str;
 
 // Finds the last occurrence of a character in a string.
 // 
@@ -52,7 +52,7 @@ fun strchr(str s, chr c) str;
 // 
 // Returns:
 // - pointer into s or null (C semantics)
-fun strrchr(str s, chr c) str;
+pub fun strrchr(str s, chr c) str;
 
 // Computes the length of the initial segment of s that contains none of reject.
 // 
@@ -62,7 +62,7 @@ fun strrchr(str s, chr c) str;
 // 
 // Returns:
 // - length in bytes of the initial segment (C semantics)
-fun strcspn(str s, str reject) num;
+pub fun strcspn(str s, str reject) num;
 
 // Computes the length of the initial segment of s that contains only accept.
 // 
@@ -72,7 +72,7 @@ fun strcspn(str s, str reject) num;
 // 
 // Returns:
 // - length in bytes of the initial segment (C semantics)
-fun strspn(str s, str accept) num;
+pub fun strspn(str s, str accept) num;
 
 // Finds the first character in s that matches any character in accept.
 // 
@@ -82,7 +82,7 @@ fun strspn(str s, str accept) num;
 // 
 // Returns:
 // - pointer into s or null (C semantics)
-fun strpbrk(str s, str accept) str;
+pub fun strpbrk(str s, str accept) str;
 
 // Tokenizes a string using a set of delimiters.
 // 
@@ -92,7 +92,7 @@ fun strpbrk(str s, str accept) str;
 // 
 // Returns:
 // - next token or null (C semantics)
-fun strtok(str s, str delim) str;
+pub fun strtok(str s, str delim) str;
 
 // Returns a human-readable message for an error number.
 // 
@@ -101,7 +101,7 @@ fun strtok(str s, str delim) str;
 // 
 // Returns:
 // - pointer to message string (C semantics)
-fun strerror(num errnum) str;
+pub fun strerror(num errnum) str;
 
 // Copies a NUL-terminated string.
 // 
@@ -111,7 +111,7 @@ fun strerror(num errnum) str;
 // 
 // Returns:
 // - dst (C semantics)
-fun strcpy(str dst, str src) str;
+pub fun strcpy(str dst, str src) str;
 
 // Copies up to n characters of a string.
 // 
@@ -122,7 +122,7 @@ fun strcpy(str dst, str src) str;
 // 
 // Returns:
 // - dst (C semantics)
-fun strncpy(str dst, str src, num n) str;
+pub fun strncpy(str dst, str src, num n) str;
 
 // Appends a string to another.
 // 
@@ -132,7 +132,7 @@ fun strncpy(str dst, str src, num n) str;
 // 
 // Returns:
 // - dst (C semantics)
-fun strcat(str dst, str src) str;
+pub fun strcat(str dst, str src) str;
 
 // Appends up to n characters from src to dst.
 // 
@@ -143,7 +143,7 @@ fun strcat(str dst, str src) str;
 // 
 // Returns:
 // - dst (C semantics)
-fun strncat(str dst, str src, num n) str;
+pub fun strncat(str dst, str src, num n) str;
 
 // Finds the first occurrence of needle in haystack.
 // 
@@ -153,7 +153,7 @@ fun strncat(str dst, str src, num n) str;
 // 
 // Returns:
 // - pointer into haystack or null (C semantics)
-fun strstr(str haystack, str needle) str;
+pub fun strstr(str haystack, str needle) str;
 
 // Copies n bytes from src to dst (no overlap allowed).
 // 
@@ -164,7 +164,7 @@ fun strstr(str haystack, str needle) str;
 // 
 // Returns:
 // - dst (C semantics)
-fun memcpy(raw* dst, raw* src, num n) raw*;
+pub fun memcpy(raw* dst, raw* src, num n) raw*;
 
 // Copies n bytes from src to dst (overlap allowed).
 // 
@@ -175,7 +175,7 @@ fun memcpy(raw* dst, raw* src, num n) raw*;
 // 
 // Returns:
 // - dst (C semantics)
-fun memmove(raw* dst, raw* src, num n) raw*;
+pub fun memmove(raw* dst, raw* src, num n) raw*;
 
 // Sets n bytes of memory to a byte value.
 // 
@@ -186,7 +186,7 @@ fun memmove(raw* dst, raw* src, num n) raw*;
 // 
 // Returns:
 // - dst (C semantics)
-fun memset(raw* dst, num val, num n) raw*;
+pub fun memset(raw* dst, num val, num n) raw*;
 
 // Compares n bytes of two memory areas.
 // 
@@ -197,7 +197,7 @@ fun memset(raw* dst, num val, num n) raw*;
 // 
 // Returns:
 // - <0, 0, >0 (C semantics)
-fun memcmp(raw* a, raw* b, num n) num;
+pub fun memcmp(raw* a, raw* b, num n) num;
 
 // Searches for a byte value in the first n bytes.
 // 

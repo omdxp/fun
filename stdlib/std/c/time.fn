@@ -4,7 +4,7 @@
 // - Values follow C `time.h` semantics and platform libc behavior.
 // - Some functions return pointers to static storage (C semantics).
 
-compound tm {
+pub compound tm {
   // Seconds after the minute (0..60).
   num tm_sec;
   // Minutes after the hour (0..59).
@@ -32,13 +32,13 @@ compound tm {
 // 
 // Returns:
 // - time value (C semantics)
-fun time(num* tloc) num;
+pub fun time(num* tloc) num;
 
 // Returns processor time consumed by the program.
 // 
 // Returns:
 // - processor time value, or -1 if not available (C semantics)
-fun clock() num;
+pub fun clock() num;
 
 // Computes the difference between two time values.
 // 
@@ -48,7 +48,7 @@ fun clock() num;
 // 
 // Returns:
 // - difference in seconds as dec (C semantics)
-fun difftime(num time1, num time0) dec;
+pub fun difftime(num time1, num time0) dec;
 
 // Converts broken-down local time to calendar time.
 // 
@@ -57,7 +57,7 @@ fun difftime(num time1, num time0) dec;
 // 
 // Returns:
 // - calendar time value, or -1 on failure (C semantics)
-fun mktime(tm* t) num;
+pub fun mktime(tm* t) num;
 
 // Converts broken-down time to a textual representation.
 // 
@@ -66,7 +66,7 @@ fun mktime(tm* t) num;
 // 
 // Returns:
 // - pointer to static string (C semantics)
-fun asctime(tm* t) str;
+pub fun asctime(tm* t) str;
 
 // Converts calendar time to a textual representation.
 // 
@@ -75,7 +75,7 @@ fun asctime(tm* t) str;
 // 
 // Returns:
 // - pointer to static string (C semantics)
-fun ctime(num* timep) str;
+pub fun ctime(num* timep) str;
 
 // Converts calendar time to UTC broken-down time.
 // 
@@ -84,7 +84,7 @@ fun ctime(num* timep) str;
 // 
 // Returns:
 // - pointer to static tm (C semantics)
-fun gmtime(num* timep) tm*;
+pub fun gmtime(num* timep) tm*;
 
 // Converts calendar time to local broken-down time.
 // 
@@ -93,7 +93,7 @@ fun gmtime(num* timep) tm*;
 // 
 // Returns:
 // - pointer to static tm (C semantics)
-fun localtime(num* timep) tm*;
+pub fun localtime(num* timep) tm*;
 
 // Formats a broken-down time according to a format string.
 // 
@@ -105,4 +105,4 @@ fun localtime(num* timep) tm*;
 // 
 // Returns:
 // - number of bytes written (C semantics)
-fun strftime(str s, num max, str format, tm* t) num;
+pub fun strftime(str s, num max, str format, tm* t) num;

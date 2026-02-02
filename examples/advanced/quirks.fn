@@ -49,7 +49,7 @@ impl Rectangle Shape {
 
 impl Circle Shape {
   area() num {
-    ret 3.14159 * self.r * self.r;
+    ret 3 * self.r * self.r;
   }
 
   translate(num dx, num dy) {

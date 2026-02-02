@@ -11,7 +11,7 @@
 // 
 // Returns:
 // - nonzero if true, 0 if false (C semantics)
-fun isalnum(num c) num;
+pub fun isalnum(num c) num;
 
 // Checks if the character is alphabetic.
 // 
@@ -20,7 +20,7 @@ fun isalnum(num c) num;
 // 
 // Returns:
 // - nonzero if true, 0 if false (C semantics)
-fun isalpha(num c) num;
+pub fun isalpha(num c) num;
 
 // Checks if the character is blank (space or tab).
 // 
@@ -29,7 +29,7 @@ fun isalpha(num c) num;
 // 
 // Returns:
 // - nonzero if true, 0 if false (C semantics)
-fun isblank(num c) num;
+pub fun isblank(num c) num;
 
 // Checks if the character is a control character.
 // 
@@ -38,7 +38,7 @@ fun isblank(num c) num;
 // 
 // Returns:
 // - nonzero if true, 0 if false (C semantics)
-fun iscntrl(num c) num;
+pub fun iscntrl(num c) num;
 
 // Checks if the character is a decimal digit.
 // 
@@ -47,7 +47,7 @@ fun iscntrl(num c) num;
 // 
 // Returns:
 // - nonzero if true, 0 if false (C semantics)
-fun isdigit(num c) num;
+pub fun isdigit(num c) num;
 
 // Checks if the character has a graphical representation.
 // 
@@ -56,7 +56,7 @@ fun isdigit(num c) num;
 // 
 // Returns:
 // - nonzero if true, 0 if false (C semantics)
-fun isgraph(num c) num;
+pub fun isgraph(num c) num;
 
 // Checks if the character is lowercase.
 // 
@@ -65,7 +65,7 @@ fun isgraph(num c) num;
 // 
 // Returns:
 // - nonzero if true, 0 if false (C semantics)
-fun islower(num c) num;
+pub fun islower(num c) num;
 
 // Checks if the character is printable.
 // 
@@ -74,7 +74,7 @@ fun islower(num c) num;
 // 
 // Returns:
 // - nonzero if true, 0 if false (C semantics)
-fun isprint(num c) num;
+pub fun isprint(num c) num;
 
 // Checks if the character is punctuation.
 // 
@@ -83,7 +83,7 @@ fun isprint(num c) num;
 // 
 // Returns:
 // - nonzero if true, 0 if false (C semantics)
-fun ispunct(num c) num;
+pub fun ispunct(num c) num;
 
 // Checks if the character is whitespace.
 // 
@@ -92,7 +92,7 @@ fun ispunct(num c) num;
 // 
 // Returns:
 // - nonzero if true, 0 if false (C semantics)
-fun isspace(num c) num;
+pub fun isspace(num c) num;
 
 // Checks if the character is uppercase.
 // 
@@ -101,7 +101,7 @@ fun isspace(num c) num;
 // 
 // Returns:
 // - nonzero if true, 0 if false (C semantics)
-fun isupper(num c) num;
+pub fun isupper(num c) num;
 
 // Checks if the character is a hexadecimal digit.
 // 
@@ -110,7 +110,7 @@ fun isupper(num c) num;
 // 
 // Returns:
 // - nonzero if true, 0 if false (C semantics)
-fun isxdigit(num c) num;
+pub fun isxdigit(num c) num;
 
 // Converts a character code to lowercase if possible.
 // 
@@ -119,7 +119,7 @@ fun isxdigit(num c) num;
 // 
 // Returns:
 // - lowercased character code, or c if no conversion applies (C semantics)
-fun tolower(num c) num;
+pub fun tolower(num c) num;
 
 // Converts a character code to uppercase if possible.
 // 
@@ -128,4 +128,4 @@ fun tolower(num c) num;
 // 
 // Returns:
 // - uppercased character code, or c if no conversion applies (C semantics)
-fun toupper(num c) num;
+pub fun toupper(num c) num;

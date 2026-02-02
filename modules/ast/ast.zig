@@ -12,6 +12,8 @@ pub const NodeFlags = packed struct {
     inside_expression: bool = false,
     /// Indicates if the node has a combined variable.
     has_variable_combined: bool = false,
+    /// Indicates if the node is publicly visible outside its module.
+    is_public: bool = false,
 };
 
 /// Types of nodes.

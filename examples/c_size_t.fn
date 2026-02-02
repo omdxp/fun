@@ -3,7 +3,7 @@
 // - Doing arithmetic and printing with `%zu`
 
 imp std.c.io;
-imp std.c.stddef;
+imp std.c.def;
 
 fun main() {
   size_t n = 0;

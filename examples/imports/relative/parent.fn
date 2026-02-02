@@ -1,5 +1,5 @@
 imp child;
 
-fun parent() {
+pub fun parent() {
 	child();
 }

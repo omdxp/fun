@@ -11,7 +11,7 @@
 // 
 // Returns:
 // - sine of x (C semantics)
-fun sin(dec x) dec;
+pub fun sin(dec x) dec;
 
 // Computes cosine.
 // 
@@ -20,7 +20,7 @@ fun sin(dec x) dec;
 // 
 // Returns:
 // - cosine of x (C semantics)
-fun cos(dec x) dec;
+pub fun cos(dec x) dec;
 
 // Computes tangent.
 // 
@@ -29,7 +29,7 @@ fun cos(dec x) dec;
 // 
 // Returns:
 // - tangent of x (C semantics)
-fun tan(dec x) dec;
+pub fun tan(dec x) dec;
 
 // Computes arcsine.
 // 
@@ -38,7 +38,7 @@ fun tan(dec x) dec;
 // 
 // Returns:
 // - arcsine of x (C semantics)
-fun asin(dec x) dec;
+pub fun asin(dec x) dec;
 
 // Computes arccosine.
 // 
@@ -47,7 +47,7 @@ fun asin(dec x) dec;
 // 
 // Returns:
 // - arccosine of x (C semantics)
-fun acos(dec x) dec;
+pub fun acos(dec x) dec;
 
 // Computes arctangent.
 // 
@@ -56,7 +56,7 @@ fun acos(dec x) dec;
 // 
 // Returns:
 // - arctangent of x (C semantics)
-fun atan(dec x) dec;
+pub fun atan(dec x) dec;
 
 // Computes arctangent of y/x handling quadrants.
 // 
@@ -66,7 +66,7 @@ fun atan(dec x) dec;
 // 
 // Returns:
 // - arctangent of y/x in the correct quadrant (C semantics)
-fun atan2(dec y, dec x) dec;
+pub fun atan2(dec y, dec x) dec;
 
 // Computes square root.
 // 
@@ -75,7 +75,7 @@ fun atan2(dec y, dec x) dec;
 // 
 // Returns:
 // - square root of x (C semantics)
-fun sqrt(dec x) dec;
+pub fun sqrt(dec x) dec;
 
 // Computes x raised to the power y.
 // 
@@ -85,7 +85,7 @@ fun sqrt(dec x) dec;
 // 
 // Returns:
 // - x raised to the power y (C semantics)
-fun pow(dec x, dec y) dec;
+pub fun pow(dec x, dec y) dec;
 
 // Rounds down to the nearest integer value.
 // 
@@ -94,7 +94,7 @@ fun pow(dec x, dec y) dec;
 // 
 // Returns:
 // - largest integer value not greater than x (C semantics)
-fun floor(dec x) dec;
+pub fun floor(dec x) dec;
 
 // Rounds up to the nearest integer value.
 // 
@@ -103,7 +103,7 @@ fun floor(dec x) dec;
 // 
 // Returns:
 // - smallest integer value not less than x (C semantics)
-fun ceil(dec x) dec;
+pub fun ceil(dec x) dec;
 
 // Computes absolute value.
 // 
@@ -112,4 +112,4 @@ fun ceil(dec x) dec;
 // 
 // Returns:
 // - absolute value of x (C semantics)
-fun fabs(dec x) dec;
+pub fun fabs(dec x) dec;

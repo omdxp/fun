@@ -1,5 +1,4 @@
-// Real-world-ish: copy up to 1024 bytes from stdin to a file, then report bytes.
-// When you run the produced C program, type input then EOF (Ctrl+Z+Enter on Windows).
+// Real-world-ish: write a short message to a file, then report bytes.
 
 imp std.c.io;
 
@@ -10,13 +9,8 @@ fun main() {
     ret;
   }
 
-  num total = 0;
-  for total < 1024 {
-    num c = getchar();
-    if c == -1 { break; }
-    fputc(c, out);
-    total += 1;
-  }
+  str msg = "hello from fun\n";
+  num total = fputs(msg, out);
 
   fclose(out);
   printf("wrote %d bytes to out.txt\n", total);

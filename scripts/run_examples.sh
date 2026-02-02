@@ -52,6 +52,11 @@ is_expected_fail() {
     return 0
   fi
 
+  # Private visibility example should fail.
+  if [[ "$rel" == "examples/pub_visibility/private_access.fn" ]]; then
+    return 0
+  fi
+
   # Direct files in examples/error_cases are meant to fail.
   if [[ "$rel" =~ ^examples/error_cases/[^/]+\.fn$ ]]; then
     return 0
