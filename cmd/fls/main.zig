@@ -74,6 +74,8 @@ const CompletionItem = struct {
     label: []const u8,
     kind: ?i64 = null,
     detail: ?[]const u8 = null,
+    insertText: ?[]const u8 = null,
+    filterText: ?[]const u8 = null,
 };
 
 const CompletionList = struct {
@@ -2803,10 +2805,13 @@ const LspServer = struct {
                     for (idx.symbols) |s| {
                         if (s.kind != .enumMember) continue;
                         if (s.container_type == null or !std.mem.eql(u8, s.container_type.?, enum_name)) continue;
+                        const ft = try std.fmt.allocPrint(self.allocator, ".{s}", .{s.name});
                         try items.append(.{
                             .label = try self.allocator.dupe(u8, s.name),
                             .kind = 20,
                             .detail = try self.allocator.dupe(u8, enum_name),
+                            .insertText = try self.allocator.dupe(u8, s.name),
+                            .filterText = ft,
                         });
                     }
 
@@ -2824,10 +2829,13 @@ const LspServer = struct {
                         for (didx.symbols) |s| {
                             if (s.kind != .enumMember) continue;
                             if (s.container_type == null or !std.mem.eql(u8, s.container_type.?, enum_name)) continue;
+                            const ft = try std.fmt.allocPrint(self.allocator, ".{s}", .{s.name});
                             try items.append(.{
                                 .label = try self.allocator.dupe(u8, s.name),
                                 .kind = 20,
                                 .detail = try self.allocator.dupe(u8, enum_name),
+                                .insertText = try self.allocator.dupe(u8, s.name),
+                                .filterText = ft,
                             });
                         }
                     }
