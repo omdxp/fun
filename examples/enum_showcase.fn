@@ -1,0 +1,80 @@
+imp std.c.io;
+
+compound Person {
+  str name;
+  num age;
+  Color favoriteColor;
+}
+
+impl Person {
+  new(str name, num age, Color favoriteColor) {
+    self.name = name;
+    self.age = age;
+    self.favoriteColor = favoriteColor;
+  }
+
+  printInfo() {
+    printf("Name: %s, Age: %d, Favorite Color: %d\n", self.name, self.age, self.favoriteColor);
+  }
+}
+
+fun takesColor(Color c) {
+  if c == .Red { printf("takesColor: red\n"); }
+  if c == Color.Green { printf("takesColor: green\n"); }
+}
+
+fun takesDirection(Direction d) {
+  if d == .East { printf("takesDirection: east\n"); }
+}
+
+fun main() {
+  Direction d = .East;
+  Person p;
+  p.new("Alice", 30, Color.Green);
+  p.new("Bob", 25, .Blue);
+  p.printInfo();
+
+  // Longhand + shorthand comparisons
+  if d == Direction.East { printf("dir: east\n"); }
+  if d != .West { printf("dir: not west\n"); }
+
+  // Assignments (longhand + shorthand)
+  Color c = Color.Red;
+  c = .Green;
+
+  // Function args (longhand + shorthand)
+  takesColor(.Red);
+  takesColor(Color.Green);
+  takesDirection(.East);
+
+  // Fit with shorthand variants (exhaustive)
+  fit c {
+    .Red -> { printf("fit shorthand: red\n"); },
+    .Green -> { printf("fit shorthand: green\n"); },
+    .Blue -> { printf("fit shorthand: blue\n"); }
+  }
+
+  // Fit with longhand variants + catch-all
+  fit d {
+    Direction.North -> { printf("fit longhand: north\n"); },
+    Direction.East -> { printf("fit longhand: east\n"); },
+    _ -> { printf("fit longhand: other\n"); }
+  }
+}
+
+// Define an enumeration for colors
+enum Color {
+  // Assign explicit values to enum members
+  Red = 1,
+  // Implicitly assigned value (2)
+  Green,
+  // Implicitly assigned value (3)
+  Blue,
+}
+
+enum Direction {
+  North,
+  East,
+  South,
+  West,
+}

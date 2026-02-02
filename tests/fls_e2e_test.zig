@@ -1085,7 +1085,7 @@ test "fls e2e: enum dot shorthand completion/hover/definition" {
     defer allocator.free(doc_uri);
     try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
 
-    // Completion after `.`, expect `.Blue`.
+    // Completion after `.`, expect `Blue`.
     const comp_pos = try findPosition(doc_text, "= .", 0);
     const comp_params = try std.fmt.allocPrint(
         allocator,
@@ -1097,9 +1097,9 @@ test "fls e2e: enum dot shorthand completion/hover/definition" {
     var comp_res = try lsp.waitResponse(comp_id, 15000);
     defer comp_res.deinit();
     const comp_result = try jsonResultFromResponseObj(comp_res.parsed.value.object);
-    try expectCompletionHasLabel(allocator, comp_result, ".Blue");
+    try expectCompletionHasLabel(allocator, comp_result, "Blue");
 
-    // Completion inside call args: `takes(.Red)` should offer `.Red`.
+    // Completion inside call args: `takes(.Red)` should offer `Red`.
     const comp_call_pos = try findPosition(doc_text, "takes(.Red)", 0);
     const comp_call_params = try std.fmt.allocPrint(
         allocator,
@@ -1111,9 +1111,9 @@ test "fls e2e: enum dot shorthand completion/hover/definition" {
     var comp_call_res = try lsp.waitResponse(comp_call_id, 15000);
     defer comp_call_res.deinit();
     const comp_call_result = try jsonResultFromResponseObj(comp_call_res.parsed.value.object);
-    try expectCompletionHasLabel(allocator, comp_call_result, ".Red");
+    try expectCompletionHasLabel(allocator, comp_call_result, "Red");
 
-    // Completion inside if-condition: `if c == .Blue` should offer `.Blue`.
+    // Completion inside if-condition: `if c == .Blue` should offer `Blue`.
     const comp_if_pos = try findPosition(doc_text, "== .Blue", 0);
     const comp_if_params = try std.fmt.allocPrint(
         allocator,
@@ -1125,7 +1125,7 @@ test "fls e2e: enum dot shorthand completion/hover/definition" {
     var comp_if_res = try lsp.waitResponse(comp_if_id, 15000);
     defer comp_if_res.deinit();
     const comp_if_result = try jsonResultFromResponseObj(comp_if_res.parsed.value.object);
-    try expectCompletionHasLabel(allocator, comp_if_result, ".Blue");
+    try expectCompletionHasLabel(allocator, comp_if_result, "Blue");
 
     // Hover on `.Blue` should show `Color.Blue`.
     const blue_pos = try findPosition(doc_text, ".Blue", 0);

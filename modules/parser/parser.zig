@@ -795,7 +795,8 @@ pub const ParseProcess = struct {
                                     // Allow out-of-order function calls: if an unknown identifier is
                                     // immediately called (`foo(...)`), accept it and defer validation
                                     // to later passes / C compilation.
-                                    if (!self.next_token_is_operator("(")) {
+                                    const is_possible_enum_member_access = self.next_token_is_operator(".");
+                                    if (!self.next_token_is_operator("(") and !is_possible_enum_member_access) {
                                         self.transpile_proc.err("unknown identifier '{s}'", .{t.?.data.sval.items});
                                         return ParseError.InvalidIdentifier;
                                     }

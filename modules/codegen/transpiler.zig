@@ -2584,30 +2584,27 @@ pub const TranspileProcess = struct {
                     const right = exp.right orelse return .{ .base = .Unknown };
 
                     // Enum variant constant: `Enum.Variant`.
-                    // Only treat this form as enum access when `Enum` is not a value in the current env.
+                    // Treat this form as enum access when `Enum` is a known enum type (even if declared later).
                     if (left.*.type == .Identifier and left.*.data != null and right.*.type == .Identifier and right.*.data != null) {
                         const enum_name = left.*.data.?.sval.items;
                         const variant_name = right.*.data.?.sval.items;
-
-                        if (env.get(enum_name) == null) {
-                            const root = self.get_root();
-                            if (root.type_registry != null) {
-                                const reg = &root.type_registry.?;
-                                if (reg.enums_by_name.get(enum_name)) |enode| {
-                                    if (enode.node_variant != null) {
-                                        var ok = false;
-                                        for (enode.node_variant.?.enum_decl.variants.items()) |v| {
-                                            if (mem.eql(u8, v.name.items, variant_name)) {
-                                                ok = true;
-                                                break;
-                                            }
+                        const root = self.get_root();
+                        if (root.type_registry != null) {
+                            const reg = &root.type_registry.?;
+                            if (reg.enums_by_name.get(enum_name)) |enode| {
+                                if (enode.node_variant != null) {
+                                    var ok = false;
+                                    for (enode.node_variant.?.enum_decl.variants.items()) |v| {
+                                        if (mem.eql(u8, v.name.items, variant_name)) {
+                                            ok = true;
+                                            break;
                                         }
-                                        if (!ok) {
-                                            self.report_type_error(node, "enum '{s}' has no variant '{s}'", .{ enum_name, variant_name });
-                                            return TranspileError.UnknownField;
-                                        }
-                                        return .{ .base = .Unknown, .name = enum_name };
                                     }
+                                    if (!ok) {
+                                        self.report_type_error(node, "enum '{s}' has no variant '{s}'", .{ enum_name, variant_name });
+                                        return TranspileError.UnknownField;
+                                    }
+                                    return .{ .base = .Unknown, .name = enum_name };
                                 }
                             }
                         }

@@ -27,6 +27,21 @@
 - **Pointers**: `Node* next;` (self-referential and forward-declared types supported)
 - **Type Inference**: Not supported; all types must be explicit.
 
+### Enums
+- **Declaration**: `enum Color { Red, Green, Blue }`
+- **Longhand access**: `Color.Red` (works even if the enum is declared later in the file).
+- **Shorthand access**: `.Red` (contextual; the expected enum type must be known from assignment, argument, or `fit`).
+- **Assignments**:
+    - `Color c = Color.Green;`
+    - `Color c = .Green;`
+- **Function arguments**:
+    - `fun takes(Color c) { ... }`
+    - `takes(.Blue);`
+- **Pattern matching (`fit`)**:
+    - `fit c { .Red -> { ... }, .Green -> { ... }, _ -> { ... } }`
+    - `fit c { Color.Red -> { ... }, Color.Green -> { ... }, Color.Blue -> { ... } }`
+- **Exhaustiveness**: Missing enum variants in `fit` may emit a warning unless a `_` catch-all branch is present.
+
 ### Control Flow
 - **If/Else**: Standard conditional branching.
 - **Elif**: Else-if chaining.

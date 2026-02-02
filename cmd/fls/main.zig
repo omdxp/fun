@@ -2740,8 +2740,7 @@ const LspServer = struct {
 
         // --- Dot shorthand enum completions ---
         // If the cursor is at a position where a dot shorthand is valid (e.g., after '=' or in a function argument),
-        // and the expected type is an enum, suggest all enum members as `.Variant`.
-        // This is a best-effort heuristic: we look for a prefix of "." and try to offer all enum members in scope.
+        // and the expected type is an enum, suggest only the matching enum members (no leading '.' in labels).
         const dot_shorthand_active: bool = blk: {
             // Prefer token-based detection when possible.
             const ti_opt = findTokenIndexAt(idx.tokens, pos) orelse findLastTokenIndexBeforeOrAt(idx.tokens, pos);
@@ -2804,13 +2803,8 @@ const LspServer = struct {
                     for (idx.symbols) |s| {
                         if (s.kind != .enumMember) continue;
                         if (s.container_type == null or !std.mem.eql(u8, s.container_type.?, enum_name)) continue;
-                        const label = try self.allocator.dupe(u8, ".");
-                        const variant = try self.allocator.dupe(u8, s.name);
-                        const full = try self.allocator.alloc(u8, label.len + variant.len);
-                        std.mem.copyForwards(u8, full[0..label.len], label);
-                        std.mem.copyForwards(u8, full[label.len..], variant);
                         try items.append(.{
-                            .label = full,
+                            .label = try self.allocator.dupe(u8, s.name),
                             .kind = 20,
                             .detail = try self.allocator.dupe(u8, enum_name),
                         });
@@ -2830,13 +2824,8 @@ const LspServer = struct {
                         for (didx.symbols) |s| {
                             if (s.kind != .enumMember) continue;
                             if (s.container_type == null or !std.mem.eql(u8, s.container_type.?, enum_name)) continue;
-                            const label = try self.allocator.dupe(u8, ".");
-                            const variant = try self.allocator.dupe(u8, s.name);
-                            const full = try self.allocator.alloc(u8, label.len + variant.len);
-                            std.mem.copyForwards(u8, full[0..label.len], label);
-                            std.mem.copyForwards(u8, full[label.len..], variant);
                             try items.append(.{
-                                .label = full,
+                                .label = try self.allocator.dupe(u8, s.name),
                                 .kind = 20,
                                 .detail = try self.allocator.dupe(u8, enum_name),
                             });
@@ -2848,54 +2837,6 @@ const LspServer = struct {
                     defer self.allocator.free(json);
                     try self.sendResponseJson(id_val, json);
                     return;
-                }
-            }
-            // Collect all enums in scope (current doc + direct imports).
-            var enums = std.ArrayList(struct { name: []const u8, uri: []const u8 }).init(self.allocator);
-            defer {
-                for (enums.items) |e| self.allocator.free(e.name);
-                enums.deinit();
-            }
-            // Current doc.
-            for (idx.symbols) |s| {
-                if (s.kind == .enum_ and s.container_type == null) {
-                    try enums.append(.{ .name = try self.allocator.dupe(u8, s.name), .uri = uri });
-                }
-            }
-            // Direct imports.
-            var import_uris = std.ArrayList([]u8).init(self.allocator);
-            defer {
-                for (import_uris.items) |u| self.allocator.free(u);
-                import_uris.deinit();
-            }
-            try self.collectDirectImportUris(&import_uris, uri, idx);
-            for (import_uris.items) |iu| {
-                self.ensureDocIndexedFromDisk(iu) catch {};
-                const imported = self.docs.get(iu) orelse continue;
-                const didx = imported.index orelse continue;
-                for (didx.symbols) |s| {
-                    if (s.kind == .enum_ and s.container_type == null) {
-                        try enums.append(.{ .name = try self.allocator.dupe(u8, s.name), .uri = iu });
-                    }
-                }
-            }
-            // For each enum, offer its members as dot shorthand.
-            for (enums.items) |e| {
-                const eidx = self.docs.get(e.uri).?.index orelse continue;
-                for (eidx.symbols) |s| {
-                    if (s.kind != .enumMember) continue;
-                    if (s.container_type == null or !std.mem.eql(u8, s.container_type.?, e.name)) continue;
-                    // Only offer as .Variant (dot shorthand)
-                    const label = try self.allocator.dupe(u8, ".");
-                    const variant = try self.allocator.dupe(u8, s.name);
-                    const full = try self.allocator.alloc(u8, label.len + variant.len);
-                    std.mem.copyForwards(u8, full[0..label.len], label);
-                    std.mem.copyForwards(u8, full[label.len..], variant);
-                    try items.append(.{
-                        .label = full,
-                        .kind = 20, // CompletionItemKind.EnumMember
-                        .detail = try self.allocator.dupe(u8, e.name),
-                    });
                 }
             }
             const list: CompletionList = .{ .items = items.items };
