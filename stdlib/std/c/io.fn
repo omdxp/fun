@@ -8,7 +8,7 @@
 // - Error reporting follows C conventions (return values + errno).
 
 // Opaque stdio types
-compound FILE {
+pub compound FILE {
   // Opaque payload (represents the underlying FILE structure).
   num _opaque;
 }
@@ -21,7 +21,7 @@ compound FILE {
 // 
 // Returns:
 // - number of characters written, or a negative value on error (C semantics)
-fun printf(str fmt, ...) num;
+pub fun printf(str fmt, ...) num;
 
 // Prints formatted output to a stream (e.g. stderr).
 // 
@@ -32,7 +32,7 @@ fun printf(str fmt, ...) num;
 // 
 // Returns:
 // - number of characters written, or a negative value on error (C semantics)
-fun fprintf(num stream, str fmt, ...) num;
+pub fun fprintf(num stream, str fmt, ...) num;
 
 // Formats output into a destination buffer.
 // 
@@ -43,7 +43,7 @@ fun fprintf(num stream, str fmt, ...) num;
 // 
 // Returns:
 // - number of characters written (excluding the trailing NUL), or a negative value on error (C semantics)
-fun sprintf(str dst, str fmt, ...) num;
+pub fun sprintf(str dst, str fmt, ...) num;
 
 // Formats output into a destination buffer with a maximum size.
 // 
@@ -55,7 +55,7 @@ fun sprintf(str dst, str fmt, ...) num;
 // 
 // Returns:
 // - number of characters that would have been written (excluding NUL), or a negative value on error (C semantics)
-fun snprintf(str dst, num n, str fmt, ...) num;
+pub fun snprintf(str dst, num n, str fmt, ...) num;
 
 // Scans formatted input from stdin.
 // 
@@ -65,7 +65,7 @@ fun snprintf(str dst, num n, str fmt, ...) num;
 // 
 // Returns:
 // - number of items successfully read, or EOF on input failure (C semantics)
-fun scanf(str fmt, ...) num;
+pub fun scanf(str fmt, ...) num;
 
 // Scans formatted input from a string.
 // 
@@ -76,7 +76,7 @@ fun scanf(str fmt, ...) num;
 // 
 // Returns:
 // - number of items successfully read, or EOF on input failure (C semantics)
-fun sscanf(str src, str fmt, ...) num;
+pub fun sscanf(str src, str fmt, ...) num;
 
 // Writes a string and a trailing newline to stdout.
 // 
@@ -85,7 +85,7 @@ fun sscanf(str src, str fmt, ...) num;
 // 
 // Returns:
 // - nonnegative on success, or EOF on error (C semantics)
-fun puts(str s) num;
+pub fun puts(str s) num;
 
 // Writes a single character to stdout.
 // 
@@ -94,13 +94,13 @@ fun puts(str s) num;
 // 
 // Returns:
 // - written character as num, or EOF on error (C semantics)
-fun putchar(chr c) num;
+pub fun putchar(chr c) num;
 
 // Reads a single character from stdin.
 // 
 // Returns:
 // - next byte as num, or EOF (C semantics)
-fun getchar() num;
+pub fun getchar() num;
 
 // File IO
 // Opens a file.
@@ -111,7 +111,7 @@ fun getchar() num;
 // 
 // Returns:
 // - FILE* handle or null (C semantics)
-fun fopen(str path, str mode) FILE*;
+pub fun fopen(str path, str mode) FILE*;
 
 // Reopens a stream with a new file and mode.
 // 
@@ -122,7 +122,7 @@ fun fopen(str path, str mode) FILE*;
 // 
 // Returns:
 // - FILE* handle or null (C semantics)
-fun freopen(str path, str mode, FILE* stream) FILE*;
+pub fun freopen(str path, str mode, FILE* stream) FILE*;
 
 // Closes a stream.
 // 
@@ -131,7 +131,7 @@ fun freopen(str path, str mode, FILE* stream) FILE*;
 // 
 // Returns:
 // - 0 on success, EOF on failure (C semantics)
-fun fclose(FILE* stream) num;
+pub fun fclose(FILE* stream) num;
 
 // Flushes buffered output to the underlying stream.
 // 
@@ -140,7 +140,7 @@ fun fclose(FILE* stream) num;
 // 
 // Returns:
 // - 0 on success, EOF on failure (C semantics)
-fun fflush(FILE* stream) num;
+pub fun fflush(FILE* stream) num;
 
 // Reads a single byte from a stream.
 // 
@@ -149,7 +149,7 @@ fun fflush(FILE* stream) num;
 // 
 // Returns:
 // - next byte as num, or EOF (C semantics)
-fun fgetc(FILE* stream) num;
+pub fun fgetc(FILE* stream) num;
 
 // Writes a single byte to a stream.
 // 
@@ -159,7 +159,7 @@ fun fgetc(FILE* stream) num;
 // 
 // Returns:
 // - written byte as num, or EOF on error (C semantics)
-fun fputc(num c, FILE* stream) num;
+pub fun fputc(num c, FILE* stream) num;
 
 // Reads a line (or up to n-1 bytes) into a buffer.
 // 
@@ -170,7 +170,7 @@ fun fputc(num c, FILE* stream) num;
 // 
 // Returns:
 // - s on success or null (C semantics)
-fun fgets(str s, num n, FILE* stream) str;
+pub fun fgets(str s, num n, FILE* stream) str;
 
 // Writes a string to a stream.
 // 
@@ -180,7 +180,7 @@ fun fgets(str s, num n, FILE* stream) str;
 // 
 // Returns:
 // - nonnegative on success, or EOF on error (C semantics)
-fun fputs(str s, FILE* stream) num;
+pub fun fputs(str s, FILE* stream) num;
 
 // Reads nmemb elements of size bytes from a stream into memory.
 // 
@@ -192,7 +192,7 @@ fun fputs(str s, FILE* stream) num;
 // 
 // Returns:
 // - number of elements read (C semantics)
-fun fread(raw* ptr, num size, num nmemb, FILE* stream) num;
+pub fun fread(raw* ptr, num size, num nmemb, FILE* stream) num;
 
 // Writes nmemb elements of size bytes from memory into a stream.
 // 
@@ -204,7 +204,7 @@ fun fread(raw* ptr, num size, num nmemb, FILE* stream) num;
 // 
 // Returns:
 // - number of elements written (C semantics)
-fun fwrite(raw* ptr, num size, num nmemb, FILE* stream) num;
+pub fun fwrite(raw* ptr, num size, num nmemb, FILE* stream) num;
 
 // Sets the file position indicator.
 // 
@@ -215,7 +215,7 @@ fun fwrite(raw* ptr, num size, num nmemb, FILE* stream) num;
 // 
 // Returns:
 // - 0 on success, nonzero on failure (C semantics)
-fun fseek(FILE* stream, num offset, num whence) num;
+pub fun fseek(FILE* stream, num offset, num whence) num;
 
 // Returns the current file position indicator.
 // 
@@ -224,13 +224,13 @@ fun fseek(FILE* stream, num offset, num whence) num;
 // 
 // Returns:
 // - current position on success, or a negative value on failure (C semantics)
-fun ftell(FILE* stream) num;
+pub fun ftell(FILE* stream) num;
 
 // Resets the file position indicator to the beginning.
 // 
 // Params:
 // - stream: target stream
-fun rewind(FILE* stream);
+pub fun rewind(FILE* stream);
 
 // Tests the end-of-file indicator.
 // 
@@ -239,7 +239,7 @@ fun rewind(FILE* stream);
 // 
 // Returns:
 // - nonzero if EOF, otherwise 0 (C semantics)
-fun feof(FILE* stream) num;
+pub fun feof(FILE* stream) num;
 
 // Tests the error indicator.
 // 
@@ -248,13 +248,13 @@ fun feof(FILE* stream) num;
 // 
 // Returns:
 // - nonzero if error, otherwise 0 (C semantics)
-fun ferror(FILE* stream) num;
+pub fun ferror(FILE* stream) num;
 
 // Prints a human-readable error message for the current errno.
 // 
 // Params:
 // - s: optional prefix string
-fun perror(str s);
+pub fun perror(str s);
 
 // Removes a file.
 // 
@@ -263,7 +263,7 @@ fun perror(str s);
 // 
 // Returns:
 // - 0 on success, nonzero on failure (C semantics)
-fun remove(str path) num;
+pub fun remove(str path) num;
 
 // Renames (moves) a file.
 // 
@@ -273,13 +273,13 @@ fun remove(str path) num;
 // 
 // Returns:
 // - 0 on success, nonzero on failure (C semantics)
-fun rename(str oldpath, str newpath) num;
+pub fun rename(str oldpath, str newpath) num;
 
 // Creates a temporary binary file.
 // 
 // Returns:
 // - FILE* handle or null (C semantics)
-fun tmpfile() FILE*;
+pub fun tmpfile() FILE*;
 
 // Generates a temporary filename.
 // 
@@ -288,4 +288,4 @@ fun tmpfile() FILE*;
 // 
 // Returns:
 // - pointer to temporary name string (C semantics)
-fun tmpnam(str s) str;
+pub fun tmpnam(str s) str;

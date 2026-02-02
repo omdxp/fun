@@ -1,7 +1,7 @@
 imp std.c.io;
 imp user;
 
-impl User {
+pub impl User {
   greet() {
     printf("hi %s\n", self.name);
   }

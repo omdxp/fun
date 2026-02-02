@@ -1,1 +1,1 @@
-num x = 1;
+pub num x = 1;

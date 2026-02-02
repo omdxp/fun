@@ -1,0 +1,7 @@
+compound Secret {
+  num value;
+}
+
+fun secretFn() num {
+  ret 7;
+}

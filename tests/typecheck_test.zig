@@ -197,6 +197,60 @@ test "typecheck sizeof rejects non-type operand" {
     try runTranspileExpectError(std.testing.allocator, "typecheck_sizeof_bad_operand.fn", input);
 }
 
+test "pub allows access across modules" {
+    const lib_input =
+        "pub compound PubType { num x; }\n" ++
+        "pub fun pubFn() num { ret 1; }\n" ++
+        "impl PubType {\n" ++
+        "  pub get() num { ret self.x; }\n" ++
+        "}\n";
+
+    const lib_path = "typecheck_pub_lib.fn";
+    {
+        const file = try fs.cwd().createFile(lib_path, .{ .read = true });
+        defer file.close();
+        try file.writeAll(lib_input);
+    }
+    defer fs.cwd().deleteFile(lib_path) catch {};
+
+    const input =
+        "imp typecheck_pub_lib;\n" ++
+        "fun main() {\n" ++
+        "  PubType p;\n" ++
+        "  p.x = 1;\n" ++
+        "  num a = pubFn();\n" ++
+        "  p.get();\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_pub_access.fn", input);
+}
+
+test "private declarations are not visible across modules" {
+    const lib_input =
+        "compound PrivType { num x; }\n" ++
+        "fun privFn() num { ret 1; }\n" ++
+        "impl PrivType {\n" ++
+        "  get() num { ret self.x; }\n" ++
+        "}\n";
+
+    const lib_path = "typecheck_priv_lib.fn";
+    {
+        const file = try fs.cwd().createFile(lib_path, .{ .read = true });
+        defer file.close();
+        try file.writeAll(lib_input);
+    }
+    defer fs.cwd().deleteFile(lib_path) catch {};
+
+    const input =
+        "imp typecheck_priv_lib;\n" ++
+        "fun main() {\n" ++
+        "  PrivType p;\n" ++
+        "  p.x = 1;\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_priv_access.fn", input);
+}
+
 test "typecheck missing field errors in plain impl body" {
     const input =
         "compound User {\n" ++

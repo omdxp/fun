@@ -1,0 +1,10 @@
+imp std.c.io;
+imp lib;
+
+fun main() void {
+  User u = makeUser("Ada", .Red);
+  greetUser(u);
+
+  User* up = &u;
+  up.greet("hello");
+}

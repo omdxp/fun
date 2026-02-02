@@ -1,0 +1,32 @@
+imp std.c.io;
+
+pub enum Color {
+  Red,
+  Blue,
+}
+
+pub compound User {
+  str name;
+  Color favorite;
+}
+
+pub quirk Greeter {
+  greet(str prefix) void;
+}
+
+pub fun makeUser(str name, Color favorite) User {
+  User u;
+  u.name = name;
+  u.favorite = favorite;
+  ret u;
+}
+
+pub fun greetUser(User u) {
+  printf("hi %s\n", u.name);
+}
+
+pub impl User Greeter {
+  pub greet(str prefix) void {
+    printf("%s %s\n", prefix, self.name);
+  }
+}

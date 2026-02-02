@@ -1,0 +1,7 @@
+imp private_lib;
+
+fun main() {
+  Secret s;
+  s.value = 1;
+  num x = secretFn();
+}

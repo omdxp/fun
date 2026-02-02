@@ -3,7 +3,7 @@ imp std.c.io;
 
 num x = 5;
 
-fun child() {
+pub fun child() {
 	grand_child();
 	printf("child\n");
 }
