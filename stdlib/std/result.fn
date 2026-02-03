@@ -20,7 +20,7 @@ pub compound ResultStr {
 // Construct a successful string result.
 pub fun ok_str(str value) ResultStr {
   ResultStr r;
-  r.ok = 1;
+  r.ok = true;
   r.value = value;
   r.err.code = 0;
   r.err.message = "";
@@ -30,7 +30,7 @@ pub fun ok_str(str value) ResultStr {
 // Construct an error string result.
 pub fun err_str(num code, str message) ResultStr {
   ResultStr r;
-  r.ok = 0;
+  r.ok = false;
   r.value = NULL;
   r.err.code = code;
   r.err.message = message;
@@ -55,7 +55,7 @@ pub compound ResultNum {
 // Construct a successful numeric result.
 pub fun ok_num(num value) ResultNum {
   ResultNum r;
-  r.ok = 1;
+  r.ok = true;
   r.value = value;
   r.err.code = 0;
   r.err.message = "";
@@ -65,7 +65,7 @@ pub fun ok_num(num value) ResultNum {
 // Construct an error numeric result.
 pub fun err_num(num code, str message) ResultNum {
   ResultNum r;
-  r.ok = 0;
+  r.ok = false;
   r.value = 0;
   r.err.code = code;
   r.err.message = message;

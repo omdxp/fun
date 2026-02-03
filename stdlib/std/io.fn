@@ -69,14 +69,14 @@ impl File {
     }
 
     num read = fread(buf, 1, size, self.handle);
-    buf[read] = 0;
+    buf[read] = '\0';
     ret buf;
   }
 
   // Write a string to the file.
   pub write(str data) bin {
     if self.handle == NULL {
-      ret 0;
+      ret false;
     }
     num n = len(data);
     num wrote = fwrite(data, 1, n, self.handle);
@@ -112,7 +112,7 @@ pub fun read_all(str path) str {
 pub fun write_all(str path, str data) bin {
   File f = open_write(path);
   if f.handle == NULL {
-    ret 0;
+    ret false;
   }
   bin ok = f.write(data);
   f.close();
