@@ -1,0 +1,122 @@
+// CLI argument parsing.
+
+imp std.map;
+imp std.vec;
+imp std.string;
+imp std.quirks;
+
+// Parsed command-line arguments.
+// 
+// Fields:
+// - opts: parsed --key/--key=value flags
+// - positionals: non-flag arguments
+pub compound CliArgs {
+  // opts: parsed --key/--key=value flags
+  StrMap opts;
+  // positionals: non-flag arguments
+  StrVec positionals;
+}
+
+// Parse argv into options and positionals.
+// 
+// Params:
+// - args: argv-style array (args[0] is program name)
+// 
+// Returns:
+// - parsed CliArgs
+pub fun cli_parse(str[] args) CliArgs {
+  CliArgs out;
+  out.opts = map_init(8);
+  out.positionals = str_vec_init(8);
+
+  num i = 1;
+  for args[i] != 0 {
+    str arg = args[i];
+    if arg[0] == '-' {
+      if arg[1] == '-' {
+      // --key or --key=value
+      num eq_idx = index_of_char(arg, '=');
+      if eq_idx == -1 {
+        str key = substr(arg, 2, len(arg) - 2);
+        out.opts.put(key, "1");
+      } else {
+        num key_len = eq_idx - 2;
+        str key = substr(arg, 2, key_len);
+        str val = substr(arg, eq_idx + 1, len(arg) - (eq_idx + 1));
+        out.opts.put(key, val);
+      }
+      } else {
+        out.positionals.push(arg);
+      }
+    } else {
+      out.positionals.push(arg);
+    }
+    i = i + 1;
+  }
+
+  ret out;
+}
+
+impl CliArgs Sized {
+  // Number of positional arguments.
+  pub len() num {
+    ret self.positionals.len;
+  }
+
+  // Returns true when no positionals are present.
+  pub is_empty() bin {
+    ret self.positionals.len == 0;
+  }
+}
+
+impl CliArgs {
+  // Check if an option exists.
+  pub has(str key) bin {
+    ret self.opts.has(key);
+  }
+
+  // Get an option value.
+  pub get(str key) str {
+    ret self.opts.get(key);
+  }
+
+  // Read a positional argument by index.
+  pub positional(num i) str {
+    ret self.positionals.get(i);
+  }
+
+  // Free internal storage.
+  pub free() {
+    self.opts.free();
+    self.positionals.free();
+  }
+}
+
+// C-style wrapper for option existence.
+// 
+// Params:
+// - args: parsed args
+// - key: option name
+// 
+// Returns:
+// - true if present
+pub fun cli_has(CliArgs* args, str key) bin {
+  ret args.has(key);
+}
+
+// C-style wrapper for option value.
+// 
+// Params:
+// - args: parsed args
+// - key: option name
+// 
+// Returns:
+// - value string or null
+pub fun cli_get(CliArgs* args, str key) str {
+  ret args.get(key);
+}
+
+// C-style wrapper for cleanup.
+pub fun cli_free(CliArgs* args) {
+  args.free();
+}

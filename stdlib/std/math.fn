@@ -1,0 +1,144 @@
+// Math helpers beyond C bindings.
+
+imp std.c.math;
+
+// 2D vector for simple math utilities.
+// 
+// Fields:
+// - x: x component
+// - y: y component
+pub compound Vec2 {
+  // x: x component
+  dec x;
+  // y: y component
+  dec y;
+}
+
+impl Vec2 {
+  // Euclidean distance to another vector.
+  pub distance(Vec2 other) dec {
+    dec dx = self.x - other.x;
+    dec dy = self.y - other.y;
+    ret sqrt(dx * dx + dy * dy);
+  }
+}
+
+// Absolute value (num).
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - |x|
+pub fun abs_num(num x) num {
+  if x < 0 {
+    ret -x;
+  }
+  ret x;
+}
+
+// Absolute value (dec).
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - |x|
+pub fun abs_dec(dec x) dec {
+  if x < 0.0 {
+    ret -x;
+  }
+  ret x;
+}
+
+// Minimum of two numbers.
+// 
+// Params:
+// - a: first value
+// - b: second value
+// 
+// Returns:
+// - smaller value
+pub fun min_num(num a, num b) num {
+  if a < b {
+    ret a;
+  }
+  ret b;
+}
+
+// Maximum of two numbers.
+// 
+// Params:
+// - a: first value
+// - b: second value
+// 
+// Returns:
+// - larger value
+pub fun max_num(num a, num b) num {
+  if a > b {
+    ret a;
+  }
+  ret b;
+}
+
+// Clamp a number to [lo, hi].
+// 
+// Params:
+// - x: value
+// - lo: lower bound
+// - hi: upper bound
+// 
+// Returns:
+// - clamped value
+pub fun clamp_num(num x, num lo, num hi) num {
+  if x < lo {
+    ret lo;
+  }
+  if x > hi {
+    ret hi;
+  }
+  ret x;
+}
+
+// Linear interpolation between a and b.
+// 
+// Params:
+// - a: start
+// - b: end
+// - t: interpolation factor
+// 
+// Returns:
+// - interpolated value
+pub fun lerp_dec(dec a, dec b, dec t) dec {
+  ret a + (b - a) * t;
+}
+
+// Integer power (non-negative exp).
+// 
+// Params:
+// - base: base value
+// - exp: exponent
+// 
+// Returns:
+// - base^exp
+pub fun pow_int(num base, num exp) num {
+  num result = 1;
+  num i = 0;
+  for i < exp {
+    result = result * base;
+    i = i + 1;
+  }
+  ret result;
+}
+
+// Convenience function for Vec2 distance.
+// 
+// Params:
+// - a: vector
+// - b: vector
+// 
+// Returns:
+// - distance between a and b
+pub fun distance(Vec2 a, Vec2 b) dec {
+  ret a.distance(b);
+}

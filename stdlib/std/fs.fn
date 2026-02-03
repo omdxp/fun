@@ -1,0 +1,98 @@
+// File system helpers built on std.io.
+
+imp std.io;
+imp std.c.io;
+imp std.c.def;
+
+// File system helper container.
+pub compound Fs { }
+
+// Create an Fs helper instance.
+// 
+// Returns:
+// - Fs helper
+pub fun fs() Fs {
+  Fs f;
+  ret f;
+}
+
+impl Fs {
+  // Check file existence.
+  pub exists(str path) bin {
+    FILE* f = fopen(path, "rb");
+    if f == NULL {
+      ret false;
+    }
+    fclose(f);
+    ret true;
+  }
+
+  // Read an entire file into a string.
+  pub read_to_string(str path) str {
+    ret read_all(path);
+  }
+
+  // Write a string to a file.
+  pub write_string(str path, str data) bin {
+    ret write_all(path, data);
+  }
+
+  // Copy a file by reading into memory and writing out.
+  pub copy_file(str src, str dst) bin {
+    str data = read_all(src);
+    if data == NULL {
+      ret false;
+    }
+    ret write_all(dst, data);
+  }
+}
+
+// Check file existence.
+// 
+// Params:
+// - path: file path
+// 
+// Returns:
+// - true if file can be opened
+pub fun exists(str path) bin {
+  Fs f = fs();
+  ret f.exists(path);
+}
+
+// Read an entire file into a string.
+// 
+// Params:
+// - path: file path
+// 
+// Returns:
+// - file contents or null
+pub fun read_to_string(str path) str {
+  Fs f = fs();
+  ret f.read_to_string(path);
+}
+
+// Write a string to a file.
+// 
+// Params:
+// - path: file path
+// - data: contents
+// 
+// Returns:
+// - true on success
+pub fun write_string(str path, str data) bin {
+  Fs f = fs();
+  ret f.write_string(path, data);
+}
+
+// Copy a file by reading into memory and writing out.
+// 
+// Params:
+// - src: source path
+// - dst: destination path
+// 
+// Returns:
+// - true on success
+pub fun copy_file(str src, str dst) bin {
+  Fs f = fs();
+  ret f.copy_file(src, dst);
+}

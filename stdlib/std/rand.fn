@@ -1,0 +1,84 @@
+// Simple PRNG.
+
+// Pseudo-random number generator.
+// 
+// Fields:
+// - state: internal PRNG state
+pub compound Rand {
+  // state: internal PRNG state
+  num state;
+}
+
+// Initialize a PRNG with a seed.
+// 
+// Params:
+// - seed: initial seed
+// 
+// Returns:
+// - Rand instance
+pub fun rand_init(num seed) Rand {
+  Rand r;
+  r.state = seed;
+  ret r;
+}
+
+impl Rand {
+  // Next pseudo-random integer.
+  pub next() num {
+    num s = self.state % 32768;
+    s = (s * 1103 + 12345) % 32768;
+    self.state = s;
+    ret s;
+  }
+
+  // Random integer in [min, max].
+  pub range(num min, num max) num {
+    num v = self.next();
+    num span = max - min + 1;
+    if span <= 0 {
+      ret min;
+    }
+    ret min + (v % span);
+  }
+
+  // Next pseudo-random decimal in [0, 1).
+  pub next_dec() dec {
+    dec v = self.next();
+    ret v / 32768.0;
+  }
+}
+
+// C-style wrapper for next().
+// 
+// Params:
+// - r: generator
+// 
+// Returns:
+// - next number
+pub fun rand_next(Rand* r) num {
+  ret r.next();
+}
+
+// C-style wrapper for range().
+// 
+// Params:
+// - r: generator
+// - min: lower bound
+// - max: upper bound
+// 
+// Returns:
+// - random value in range
+pub fun rand_range(Rand* r, num min, num max) num {
+  ret r.range(min, max);
+}
+
+// C-style wrapper for next_dec().
+// 
+// Params:
+// - r: generator
+// 
+// Returns:
+// - random value in [0, 1)
+pub fun rand_dec(Rand* r) dec {
+  ret r.next_dec();
+}

@@ -1,0 +1,12 @@
+// Array helpers example.
+
+imp std.c.io;
+imp std.array;
+
+fun main() {
+  num[] arr = [1, 2, 3, 4];
+  num len = 4;
+  NumArray a = num_array_wrap(arr, len);
+  printf("sum=%d\n", a.sum());
+  printf("min=%d max=%d\n", a.min(), a.max());
+}

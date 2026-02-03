@@ -1,0 +1,15 @@
+// Math helpers example.
+
+imp std.c.io;
+imp std.math;
+
+fun main() {
+  printf("abs(-5)=%d\n", abs_num(-5));
+  printf("clamp(15,0,10)=%d\n", clamp_num(15, 0, 10));
+
+  Vec2 a;
+  a.x = 0.0; a.y = 0.0;
+  Vec2 b;
+  b.x = 3.0; b.y = 4.0;
+  printf("distance=%f\n", a.distance(b));
+}

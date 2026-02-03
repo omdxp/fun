@@ -1,0 +1,409 @@
+// String helpers implemented in Fun.
+
+imp std.c.mem;
+imp std.c.def;
+imp std.vec;
+imp std.quirks;
+
+// String builder for efficient concatenation.
+// 
+// Fields:
+// - parts: vector of string fragments
+// - total_len: total length of fragments
+pub compound StringBuilder {
+  // parts: vector of string fragments
+  StrVec parts;
+  // total_len: total length of fragments
+  num total_len;
+}
+
+// Create a string builder with initial capacity.
+// 
+// Params:
+// - cap: initial capacity for internal parts
+// 
+// Returns:
+// - StringBuilder
+pub fun string_builder_init(num cap) StringBuilder {
+  StringBuilder b;
+  b.parts = str_vec_init(cap);
+  b.total_len = 0;
+  ret b;
+}
+
+impl StringBuilder Sized {
+  // Total length of appended content.
+  pub len() num {
+    ret self.total_len;
+  }
+
+  // True when empty.
+  pub is_empty() bin {
+    ret self.total_len == 0;
+  }
+}
+
+impl StringBuilder {
+  // Append a string fragment.
+  pub append(str s) {
+    self.parts.push(s);
+    self.total_len = self.total_len + _string_len(s);
+  }
+
+  // Append a single character.
+  pub append_char(chr c) {
+    str tmp = malloc(2);
+    if tmp == NULL {
+      ret;
+    }
+    tmp[0] = c;
+    tmp[1] = '\0';
+    self.parts.push(tmp);
+    self.total_len = self.total_len + 1;
+  }
+
+  // Clear fragments (keeps capacity).
+  pub clear() {
+    self.parts.clear();
+    self.total_len = 0;
+  }
+
+  // Free internal storage.
+  pub free() {
+    self.parts.free();
+    self.total_len = 0;
+  }
+
+  // Build the final string.
+  pub build() str {
+    ret self.parts.join("");
+  }
+}
+
+fun _string_len(str s) num {
+  num i = 0;
+  for s[i] != 0 {
+    i = i + 1;
+  }
+  ret i;
+}
+
+fun _is_space(chr c) bin {
+  if c == ' ' { ret true; }
+  if c == '\n' { ret true; }
+  if c == '\t' { ret true; }
+  if c == '\r' { ret true; }
+  ret false;
+}
+
+// Length of a string.
+// 
+// Params:
+// - s: input string
+// 
+// Returns:
+// - number of characters
+pub fun len(str s) num {
+  ret _string_len(s);
+}
+
+// True when string is empty.
+// 
+// Params:
+// - s: input string
+// 
+// Returns:
+// - true if empty
+pub fun is_empty(str s) bin {
+  ret _string_len(s) == 0;
+}
+
+// Compare two strings for equality.
+// 
+// Params:
+// - a: first string
+// - b: second string
+// 
+// Returns:
+// - true if equal
+pub fun equals(str a, str b) bin {
+  num i = 0;
+  for true {
+    chr ca = a[i];
+    chr cb = b[i];
+    if ca != cb {
+      ret false;
+    }
+    if ca == 0 {
+      ret true;
+    }
+    i = i + 1;
+  }
+}
+
+// Check whether s starts with prefix.
+// 
+// Params:
+// - s: input string
+// - prefix: prefix to test
+// 
+// Returns:
+// - true if prefix matches
+pub fun starts_with(str s, str prefix) bin {
+  num sl = _string_len(s);
+  num pl = _string_len(prefix);
+  if pl > sl {
+    ret false;
+  }
+  num i = 0;
+  for i < pl {
+    if s[i] != prefix[i] {
+      ret false;
+    }
+    i = i + 1;
+  }
+  ret true;
+}
+
+// Check whether s ends with suffix.
+// 
+// Params:
+// - s: input string
+// - suffix: suffix to test
+// 
+// Returns:
+// - true if suffix matches
+pub fun ends_with(str s, str suffix) bin {
+  num sl = _string_len(s);
+  num su = _string_len(suffix);
+  if su > sl {
+    ret false;
+  }
+  num i = 0;
+  num start = sl - su;
+  for i < su {
+    if s[start + i] != suffix[i] {
+      ret false;
+    }
+    i = i + 1;
+  }
+  ret true;
+}
+
+// True when needle appears in s.
+// 
+// Params:
+// - s: input string
+// - needle: substring to search
+// 
+// Returns:
+// - true if found
+pub fun contains(str s, str needle) bin {
+  ret index_of_str(s, needle) != -1;
+}
+
+// Substring by start/length.
+// 
+// Params:
+// - s: input string
+// - start: starting index
+// - length: substring length
+// 
+// Returns:
+// - new string (or null on alloc failure)
+pub fun substr(str s, num start, num length) str {
+  str out = malloc(length + 1);
+  if out == NULL {
+    ret NULL;
+  }
+  num i = 0;
+  for i < length {
+    out[i] = s[start + i];
+    i = i + 1;
+  }
+  out[length] = '\0';
+  ret out;
+}
+
+// Trim whitespace from both ends.
+// 
+// Params:
+// - s: input string
+// 
+// Returns:
+// - trimmed string
+pub fun trim(str s) str {
+  num n = _string_len(s);
+  if n == 0 {
+    ret substr(s, 0, 0);
+  }
+
+  num start = 0;
+  for start < n {
+    chr c = s[start];
+    if _is_space(c) == false {
+      break;
+    }
+    start = start + 1;
+  }
+
+  if start == n {
+    ret substr(s, 0, 0);
+  }
+
+  num end = n;
+  for end > 0 {
+    chr c = s[end - 1];
+    if _is_space(c) == false {
+      break;
+    }
+    end = end - 1;
+  }
+
+  num out_len = end - start;
+  ret substr(s, start, out_len);
+}
+
+// Split on a delimiter.
+// 
+// Params:
+// - s: input string
+// - delim: delimiter character
+// 
+// Returns:
+// - StrVec of segments
+pub fun split(str s, chr delim) StrVec {
+  StrVec parts = str_vec_init(4);
+  num n = _string_len(s);
+  num start = 0;
+  num i = 0;
+  for i <= n {
+    if s[i] == delim {
+      num seg_len = i - start;
+      str seg = substr(s, start, seg_len);
+      parts.push(seg);
+      start = i + 1;
+    } elif s[i] == 0 {
+      num seg_len = i - start;
+      str seg = substr(s, start, seg_len);
+      parts.push(seg);
+      start = i + 1;
+    }
+    i = i + 1;
+  }
+  ret parts;
+}
+
+// Join parts with a separator.
+// 
+// Params:
+// - parts: vector of strings
+// - sep: separator string
+// 
+// Returns:
+// - joined string
+pub fun join(StrVec* parts, str sep) str {
+  ret parts.join(sep);
+}
+
+// First index of a character.
+// 
+// Params:
+// - s: input string
+// - ch: character
+// 
+// Returns:
+// - index or -1
+pub fun index_of_char(str s, chr ch) num {
+  num i = 0;
+  for s[i] != 0 {
+    if s[i] == ch {
+      ret i;
+    }
+    i = i + 1;
+  }
+  ret -1;
+}
+
+// Last index of a character.
+// 
+// Params:
+// - s: input string
+// - ch: character
+// 
+// Returns:
+// - index or -1
+pub fun last_index_of_char(str s, chr ch) num {
+  num i = _string_len(s);
+  for i > 0 {
+    if s[i - 1] == ch {
+      ret i - 1;
+    }
+    i = i - 1;
+  }
+  ret -1;
+}
+
+// First index of a substring.
+// 
+// Params:
+// - s: input string
+// - needle: substring
+// 
+// Returns:
+// - index or -1
+pub fun index_of_str(str s, str needle) num {
+  num sl = _string_len(s);
+  num nl = _string_len(needle);
+  if nl == 0 {
+    ret 0;
+  }
+  if nl > sl {
+    ret -1;
+  }
+  num i = 0;
+  for i <= sl - nl {
+    num j = 0;
+    bin ok = true;
+    for j < nl {
+      if s[i + j] != needle[j] {
+        ok = false;
+        break;
+      }
+      j = j + 1;
+    }
+    if ok {
+      ret i;
+    }
+    i = i + 1;
+  }
+  ret -1;
+}
+
+// Parse a signed integer from a string.
+// 
+// Params:
+// - s: input string
+// 
+// Returns:
+// - parsed number
+pub fun parse_int(str s) num {
+  num i = 0;
+  num sign = 1;
+  if s[0] == '-' {
+    sign = -1;
+    i = 1;
+  }
+  num value = 0;
+  for s[i] != 0 {
+    if s[i] < '0' {
+      break;
+    }
+    if s[i] > '9' {
+      break;
+    }
+    value = value * 10 + (s[i] - '0');
+    i = i + 1;
+  }
+  ret value * sign;
+}

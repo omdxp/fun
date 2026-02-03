@@ -1,0 +1,12 @@
+// Net helpers example.
+
+imp std.c.io;
+imp std.net;
+
+fun main() {
+  Url u = parse_url("https://example.com:8080/path");
+  printf("scheme=%s host=%s port=%d path=%s\n", u.scheme, u.host, u.port, u.path);
+
+  str req = u.build_http_get();
+  printf("request:\n%s\n", req);
+}

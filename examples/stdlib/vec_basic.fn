@@ -1,0 +1,19 @@
+// Vec helpers example.
+
+imp std.c.io;
+imp std.vec;
+
+fun main() {
+  NumVec v = num_vec_init(0);
+  v.push(10);
+  v.push(20);
+  v.push(30);
+
+  num i = 0;
+  for i < v.len() {
+    printf("v[%d]=%d\n", i, v.get(i));
+    i = i + 1;
+  }
+
+  v.free();
+}

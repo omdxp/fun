@@ -1,0 +1,15 @@
+// Set helpers example.
+
+imp std.c.io;
+imp std.set;
+
+fun main() {
+  StrSet s = set_init(8);
+  s.add("alpha");
+  s.add("beta");
+
+  printf("has alpha=%d\n", s.has("alpha"));
+  printf("has gamma=%d\n", s.has("gamma"));
+
+  s.free();
+}

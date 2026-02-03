@@ -1,0 +1,23 @@
+// Time helpers example.
+
+imp std.c.io;
+imp std.c.mem;
+imp std.time;
+
+fun main() {
+  str buf = malloc(64);
+  if buf != 0 {
+    num n = now_string(buf, 64);
+    if n >= 0 {
+      printf("now=%s\n", buf);
+    }
+    num human = now_human(buf, 64);
+    if human > 0 {
+      printf("human=%s\n", buf);
+    }
+    num fmt = format_local(now_epoch(), buf, 64, "%Y-%m-%d %H:%M:%S");
+    if fmt > 0 {
+      printf("formatted=%s\n", buf);
+    }
+  }
+}
