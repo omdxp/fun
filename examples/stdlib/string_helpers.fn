@@ -1,0 +1,31 @@
+// String helpers example.
+
+imp std.c.io;
+imp std.string;
+imp std.vec;
+
+fun main() {
+  str input = "  hello,world  ";
+  str trimmed = trim(input);
+  printf("trimmed='%s'\n", trimmed);
+
+  StrVec parts = split(trimmed, ',');
+  num i = 0;
+  for i < parts.len() {
+    printf("part[%d]=%s\n", i, parts.get(i));
+    i = i + 1;
+  }
+
+  str joined = parts.join("|");
+  printf("joined=%s\n", joined);
+
+  StringBuilder b = string_builder_init(4);
+  b.append("hello");
+  b.append_char(' ');
+  b.append("builder");
+  str built = b.build();
+  printf("built=%s\n", built);
+  b.free();
+
+  parts.free();
+}

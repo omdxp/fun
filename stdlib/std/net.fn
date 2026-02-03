@@ -1,0 +1,93 @@
+// Basic URL parsing and HTTP request building.
+
+imp std.string;
+imp std.vec;
+
+// Parsed URL components.
+// 
+// Fields:
+// - scheme: protocol (http/https)
+// - host: hostname
+// - port: port number
+// - path: request path
+pub compound Url {
+  // scheme: protocol (http/https)
+  str scheme;
+  // host: hostname
+  str host;
+  // port: port number
+  num port;
+  // path: request path
+  str path;
+}
+
+impl Url {
+  // Build a simple HTTP/1.1 GET request string.
+  pub build_http_get() str {
+    StrVec parts = str_vec_init(4);
+    parts.push("GET ");
+    parts.push(self.path);
+    parts.push(" HTTP/1.1\r\nHost: ");
+    parts.push(self.host);
+    parts.push("\r\nConnection: close\r\n\r\n");
+    str out = parts.join("");
+    parts.free();
+    ret out;
+  }
+}
+
+// Parse a URL into components (scheme/host/port/path).
+// 
+// Params:
+// - s: URL string
+// 
+// Returns:
+// - parsed Url
+pub fun parse_url(str s) Url {
+  Url u;
+  u.scheme = "http";
+  u.host = "";
+  u.port = 80;
+  u.path = "/";
+
+  num scheme_idx = index_of_str(s, "://");
+  if scheme_idx != -1 {
+    u.scheme = substr(s, 0, scheme_idx);
+    num rest_start = scheme_idx + 3;
+    s = substr(s, rest_start, len(s) - rest_start);
+  }
+
+  num slash_idx = index_of_char(s, '/');
+  if slash_idx == -1 {
+    u.host = s;
+    u.path = "/";
+  } else {
+    u.host = substr(s, 0, slash_idx);
+    u.path = substr(s, slash_idx, len(s) - slash_idx);
+  }
+
+  num colon_idx = index_of_char(u.host, ':');
+  if colon_idx != -1 {
+    str host_only = substr(u.host, 0, colon_idx);
+    str port_str = substr(u.host, colon_idx + 1, len(u.host) - (colon_idx + 1));
+    u.host = host_only;
+    u.port = parse_int(port_str);
+  } else {
+    if equals(u.scheme, "https") != false {
+      u.port = 443;
+    }
+  }
+
+  ret u;
+}
+
+// Build a simple HTTP GET request from a Url.
+// 
+// Params:
+// - url: URL instance
+// 
+// Returns:
+// - request string
+pub fun build_http_get(Url* url) str {
+  ret url.build_http_get();
+}

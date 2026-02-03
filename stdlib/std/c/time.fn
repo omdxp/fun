@@ -57,7 +57,7 @@ pub fun difftime(num time1, num time0) dec;
 // 
 // Returns:
 // - calendar time value, or -1 on failure (C semantics)
-pub fun mktime(tm* t) num;
+pub fun mktime(raw* t) num;
 
 // Converts broken-down time to a textual representation.
 // 
@@ -66,7 +66,7 @@ pub fun mktime(tm* t) num;
 // 
 // Returns:
 // - pointer to static string (C semantics)
-pub fun asctime(tm* t) str;
+pub fun asctime(raw* t) str;
 
 // Converts calendar time to a textual representation.
 // 
@@ -84,7 +84,7 @@ pub fun ctime(num* timep) str;
 // 
 // Returns:
 // - pointer to static tm (C semantics)
-pub fun gmtime(num* timep) tm*;
+pub fun gmtime(num* timep) raw*;
 
 // Converts calendar time to local broken-down time.
 // 
@@ -93,7 +93,7 @@ pub fun gmtime(num* timep) tm*;
 // 
 // Returns:
 // - pointer to static tm (C semantics)
-pub fun localtime(num* timep) tm*;
+pub fun localtime(num* timep) raw*;
 
 // Formats a broken-down time according to a format string.
 // 
@@ -105,4 +105,4 @@ pub fun localtime(num* timep) tm*;
 // 
 // Returns:
 // - number of bytes written (C semantics)
-pub fun strftime(str s, num max, str format, tm* t) num;
+pub fun strftime(str s, num max, str format, raw* t) num;

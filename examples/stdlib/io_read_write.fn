@@ -1,0 +1,14 @@
+// IO helpers example.
+
+imp std.c.io;
+imp std.fs;
+
+fun main() {
+  str path = "tmp_fun_io.txt";
+  Fs f = fs();
+  f.write_string(path, "hello from fun\n");
+  str data = f.read_to_string(path);
+  if data != 0 {
+    printf("read: %s", data);
+  }
+}

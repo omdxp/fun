@@ -1382,8 +1382,9 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
                 allocator.free(result.stderr);
             }
 
-            if (result.term.Exited != 0) {
-                return CliError.ExecutionFailed;
+            switch (result.term) {
+                .Exited => |code| if (code != 0) return CliError.ExecutionFailed,
+                else => return CliError.ExecutionFailed,
             }
 
             try stdout.print("{s}", .{result.stdout});
@@ -1396,8 +1397,9 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
             child.stderr_behavior = .Inherit;
             try child.spawn();
             const term = try child.wait();
-            if (term.Exited != 0) {
-                return CliError.ExecutionFailed;
+            switch (term) {
+                .Exited => |code| if (code != 0) return CliError.ExecutionFailed,
+                else => return CliError.ExecutionFailed,
             }
         }
     }

@@ -1,0 +1,180 @@
+// Basic JSON object parsing/serialization (string values).
+
+imp std.map;
+imp std.string;
+imp std.vec;
+
+// JSON object with string values.
+// 
+// Fields:
+// - values: key/value map (string values)
+pub compound JsonObject {
+  // values: key/value map (string values)
+  StrMap values;
+}
+
+// Create a new empty JSON object.
+// 
+// Returns:
+// - JsonObject with empty map
+pub fun json_object_init() JsonObject {
+  JsonObject o;
+  o.values = map_init(8);
+  ret o;
+}
+
+impl JsonObject {
+  // Get a value by key.
+  pub get(str key) str {
+    ret self.values.get(key);
+  }
+
+  // Set a string value by key.
+  pub set(str key, str value) {
+    self.values.put(key, value);
+  }
+
+  // Free internal storage.
+  pub free() {
+    self.values.free();
+  }
+
+  // Serialize object to JSON (string values).
+  pub stringify() str {
+    StringBuilder b = string_builder_init(self.values.len() * 2 + 4);
+    b.append_char('{');
+
+    MapEntry* entries = self.values.entries;
+
+    num i = 0;
+    num added = 0;
+    for i < self.values.cap {
+      MapEntry item = entries[i];
+      if item.used {
+        if item.tomb == false {
+          if added > 0 {
+            b.append(", ");
+          }
+          b.append_char('"');
+          b.append(item.key);
+          b.append_char('"');
+          b.append(": ");
+          b.append_char('"');
+          b.append(item.value);
+          b.append_char('"');
+          added = added + 1;
+        }
+      }
+      i = i + 1;
+    }
+
+    b.append_char('}');
+    str out = b.build();
+    b.free();
+    ret out;
+  }
+}
+
+fun _skip_ws(str s, num* i) {
+  for s[*i] != 0 {
+    if s[*i] != ' ' {
+      if s[*i] != '\n' {
+        if s[*i] != '\t' {
+          if s[*i] != '\r' {
+            break;
+          }
+        }
+      }
+    }
+    *i = *i + 1;
+  }
+}
+
+fun _parse_string(str s, num* i) str {
+  if s[*i] != '"' {
+    ret "";
+  }
+  *i = *i + 1;
+  num start = *i;
+  for s[*i] != 0 {
+    if s[*i] == '"' {
+      break;
+    }
+    *i = *i + 1;
+  }
+  num len = *i - start;
+  str out = substr(s, start, len);
+  if s[*i] == '"' {
+    *i = *i + 1;
+  }
+  ret out;
+}
+
+fun _parse_value(str s, num* i) str {
+  _skip_ws(s, i);
+  if s[*i] == '"' {
+    ret _parse_string(s, i);
+  }
+
+  num start = *i;
+  for s[*i] != 0 {
+    if s[*i] == ',' {
+      break;
+    }
+    if s[*i] == '}' {
+      break;
+    }
+    *i = *i + 1;
+  }
+  num len = *i - start;
+  str out = trim(substr(s, start, len));
+  ret out;
+}
+
+// Parse a JSON object with string values.
+// 
+// Params:
+// - s: JSON string
+// 
+// Returns:
+// - parsed JsonObject
+pub fun parse_object(str s) JsonObject {
+  JsonObject out = json_object_init();
+  num i = 0;
+  _skip_ws(s, &i);
+  if s[i] == '{' {
+    i = i + 1;
+  }
+
+  for s[i] != 0 {
+    _skip_ws(s, &i);
+    if s[i] == '}' {
+      break;
+    }
+
+    str key = _parse_string(s, &i);
+    _skip_ws(s, &i);
+    if s[i] == ':' {
+      i = i + 1;
+    }
+    str value = _parse_value(s, &i);
+    out.set(key, value);
+    _skip_ws(s, &i);
+    if s[i] == ',' {
+      i = i + 1;
+    }
+  }
+
+  ret out;
+}
+
+// Serialize a JSON object.
+// 
+// Params:
+// - obj: JSON object
+// 
+// Returns:
+// - JSON string
+pub fun stringify_object(JsonObject* obj) str {
+  ret obj.stringify();
+}

@@ -1,0 +1,15 @@
+// Map helpers example.
+
+imp std.c.io;
+imp std.map;
+
+fun main() {
+  StrMap m = map_init(8);
+  m.put("name", "fun");
+  m.put("lang", "Fun");
+
+  printf("name=%s\n", m.get("name"));
+  printf("lang=%s\n", m.get("lang"));
+
+  m.free();
+}

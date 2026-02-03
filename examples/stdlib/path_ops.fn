@@ -1,0 +1,13 @@
+// Path helpers example.
+
+imp std.c.io;
+imp std.path;
+
+fun main() {
+  str p = path_join("a/b", "c.txt");
+  Path pp = path(p);
+  printf("path=%s\n", p);
+  printf("base=%s\n", pp.basename());
+  printf("dir=%s\n", pp.dirname());
+  printf("ext=%s\n", pp.extname());
+}

@@ -1,0 +1,190 @@
+// Time helpers.
+
+imp std.c.time;
+imp std.c.io;
+imp std.c.mem;
+imp std.c.string;
+imp std.c.def;
+
+// Timestamp wrapper (epoch seconds).
+// 
+// Fields:
+// - epoch: seconds since Unix epoch
+pub compound Timestamp {
+  // epoch: seconds since Unix epoch
+  num epoch;
+}
+
+// Current timestamp (epoch seconds).
+// 
+// Returns:
+// - Timestamp with epoch seconds
+pub fun now() Timestamp {
+  Timestamp t;
+  t.epoch = time(NULL);
+  ret t;
+}
+
+fun _copy_str(str dst, num dst_len, str src) num {
+  if dst == NULL {
+    ret 0;
+  }
+  if dst_len <= 0 {
+    ret 0;
+  }
+  num i = 0;
+  for i < dst_len - 1 {
+    if src[i] == 0 {
+      break;
+    }
+    dst[i] = src[i];
+    i = i + 1;
+  }
+  dst[i] = '\0';
+  ret i;
+}
+
+fun _time_buf_from_epoch(num epoch) raw* {
+  raw* buf = malloc(8);
+  if buf == NULL {
+    ret NULL;
+  }
+  memset(buf, 0, 8);
+  num* p = buf;
+  *p = epoch;
+  ret buf;
+}
+
+fun _localtime_from_epoch(num epoch) raw* {
+  raw* tbuf = _time_buf_from_epoch(epoch);
+  if tbuf == NULL {
+    ret NULL;
+  }
+  raw* tm = localtime(tbuf);
+  free(tbuf);
+  ret tm;
+}
+
+impl Timestamp {
+  // Format using a custom strftime format.
+  pub format_local(str buf, num buf_len, str format) num {
+    raw* t = _localtime_from_epoch(self.epoch);
+    if t == NULL {
+      ret 0;
+    }
+    ret strftime(buf, buf_len, format, t);
+  }
+
+  // Format using a default pattern.
+  pub to_string(str buf, num buf_len) num {
+    raw* t = _localtime_from_epoch(self.epoch);
+    if t == NULL {
+      ret 0;
+    }
+    ret strftime(buf, buf_len, "%Y-%m-%d %H:%M:%S", t);
+  }
+}
+
+// Current epoch seconds.
+// 
+// Returns:
+// - seconds since epoch
+pub fun now_epoch() num {
+  Timestamp t = now();
+  ret t.epoch;
+}
+
+// Format an epoch value with a custom format.
+// 
+// Params:
+// - epoch: seconds since epoch
+// - buf: output buffer
+// - buf_len: buffer capacity
+// - format: strftime format
+// 
+// Returns:
+// - number of bytes written
+pub fun format_local(num epoch, str buf, num buf_len, str format) num {
+  Timestamp t;
+  t.epoch = epoch;
+  ret t.format_local(buf, buf_len, format);
+}
+
+// Format an epoch value using C's human-readable format (ctime).
+// 
+// Params:
+// - epoch: seconds since epoch
+// - buf: output buffer
+// - buf_len: buffer capacity
+// 
+// Returns:
+// - number of bytes written
+pub fun format_human(num epoch, str buf, num buf_len) num {
+  raw* tbuf = _time_buf_from_epoch(epoch);
+  if tbuf == NULL {
+    ret 0;
+  }
+  str cstr = ctime(tbuf);
+  num n = 0;
+  if cstr != NULL {
+    n = _copy_str(buf, buf_len, cstr);
+  }
+  free(tbuf);
+  ret n;
+}
+
+// Return a human-readable time string for an epoch (ctime).
+// 
+// Params:
+// - epoch: seconds since epoch
+// 
+// Returns:
+// - pointer to static C string (or null)
+pub fun format_human_cstr(num epoch) str {
+  raw* tbuf = _time_buf_from_epoch(epoch);
+  if tbuf == NULL {
+    ret NULL;
+  }
+  str cstr = ctime(tbuf);
+  free(tbuf);
+  ret cstr;
+}
+
+// Format current time with default format.
+// 
+// Params:
+// - buf: output buffer
+// - buf_len: buffer capacity
+// 
+// Returns:
+// - number of bytes written
+pub fun now_string(str buf, num buf_len) num {
+  Timestamp t = now();
+  num n = t.to_string(buf, buf_len);
+  if n > 0 {
+    ret n;
+  }
+  ret snprintf(buf, buf_len, "%d", t.epoch);
+}
+
+// Format current time using C's human-readable format (ctime).
+// 
+// Params:
+// - buf: output buffer
+// - buf_len: buffer capacity
+// 
+// Returns:
+// - number of bytes written
+pub fun now_human(str buf, num buf_len) num {
+  Timestamp t = now();
+  ret format_human(t.epoch, buf, buf_len);
+}
+
+// Return a human-readable string for the current time (ctime).
+// 
+// Returns:
+// - pointer to static C string (or null)
+pub fun now_human_cstr() str {
+  Timestamp t = now();
+  ret format_human_cstr(t.epoch);
+}

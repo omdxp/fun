@@ -49,12 +49,42 @@ zig-out/bin/fls examples/<example>.fn
 - imports/quirk_in_subfolder/main.fn
 
 ## Standard library
+- stdlib/array_helpers.fn
+- stdlib/cli_parse.fn
 - stdlib/ctype_validate_identifier.fn
 - stdlib/io_file_copy.fn
+- stdlib/io_read_write.fn
+- stdlib/json_basic.fn
+- stdlib/log_levels.fn
+- stdlib/map_basic.fn
 - stdlib/math_distance.fn
+- stdlib/math_helpers.fn
 - stdlib/mem_env_random.fn
+- stdlib/net_url_parse.fn
+- stdlib/path_ops.fn
+- stdlib/rand_basic.fn
+- stdlib/set_basic.fn
+- stdlib/string_helpers.fn
 - stdlib/string_parse_csv_line.fn
 - stdlib/time_format_now.fn
+- stdlib/time_helpers.fn
+- stdlib/toml_basic.fn
+- stdlib/vec_basic.fn
+- stdlib/array_helpers.fn
+- stdlib/cli_parse.fn
+- stdlib/io_read_write.fn
+- stdlib/json_basic.fn
+- stdlib/log_levels.fn
+- stdlib/map_basic.fn
+- stdlib/math_helpers.fn
+- stdlib/net_url_parse.fn
+- stdlib/path_ops.fn
+- stdlib/rand_basic.fn
+- stdlib/set_basic.fn
+- stdlib/string_helpers.fn
+- stdlib/time_helpers.fn
+- stdlib/toml_basic.fn
+- stdlib/vec_basic.fn
 
 ## Visibility (pub)
 - pub_visibility/main.fn

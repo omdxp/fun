@@ -1,0 +1,14 @@
+// Collection quirks and helpers.
+
+imp std.quirks;
+
+// A minimal collection quirk aligned with std.quirks.Sized.
+// Kept here for discoverability when browsing stdlib.
+// Collection quirk for len/is_empty.
+pub quirk Collection {
+  len() num;
+  is_empty() bin;
+}
+
+// Bridge to std.quirks.Sized (same methods).
+// Users can accept either quirk as needed.

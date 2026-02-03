@@ -1,0 +1,8 @@
+// Common quirks for stdlib compounds.
+
+// Basic size/introspection for collections.
+// Basic size/introspection for collections.
+pub quirk Sized {
+  len() num;
+  is_empty() bin;
+}

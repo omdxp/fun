@@ -1,17 +1,12 @@
 // Real-world-ish: write a short message to a file, then report bytes.
 
 imp std.c.io;
+imp std.fs;
 
 fun main() {
-  FILE* out = fopen("out.txt", "w");
-  if out == 0 {
-    perror("fopen");
-    ret;
+  Fs f = fs();
+  f.write_string("out.txt", "hello from fun\n");
+  if f.copy_file("out.txt", "out_copy.txt") {
+    printf("copied out.txt -> out_copy.txt\n");
   }
-
-  str msg = "hello from fun\n";
-  num total = fputs(msg, out);
-
-  fclose(out);
-  printf("wrote %d bytes to out.txt\n", total);
 }

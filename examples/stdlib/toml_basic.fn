@@ -1,0 +1,15 @@
+// TOML helpers example.
+
+imp std.c.io;
+imp std.toml;
+
+fun main() {
+  str src = "name = fun\nversion = 1\n";
+  TomlDoc obj = parse(src);
+
+  printf("name=%s\n", obj.get("name"));
+  str out = obj.stringify();
+  printf("toml=\n%s", out);
+
+  obj.free();
+}

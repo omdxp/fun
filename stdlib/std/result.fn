@@ -1,0 +1,73 @@
+// Result compounds for stdlib operations.
+
+imp std.error;
+
+// Result container for string-returning APIs.
+// 
+// Fields:
+// - ok: success flag
+// - value: return value
+// - err: error details
+pub compound ResultStr {
+  // ok: success flag
+  bin ok;
+  // value: return value
+  str value;
+  // err: error details
+  Error err;
+}
+
+// Construct a successful string result.
+pub fun ok_str(str value) ResultStr {
+  ResultStr r;
+  r.ok = 1;
+  r.value = value;
+  r.err.code = 0;
+  r.err.message = "";
+  ret r;
+}
+
+// Construct an error string result.
+pub fun err_str(num code, str message) ResultStr {
+  ResultStr r;
+  r.ok = 0;
+  r.value = NULL;
+  r.err.code = code;
+  r.err.message = message;
+  ret r;
+}
+
+// Result container for numeric-returning APIs.
+// 
+// Fields:
+// - ok: success flag
+// - value: return value
+// - err: error details
+pub compound ResultNum {
+  // ok: success flag
+  bin ok;
+  // value: return value
+  num value;
+  // err: error details
+  Error err;
+}
+
+// Construct a successful numeric result.
+pub fun ok_num(num value) ResultNum {
+  ResultNum r;
+  r.ok = 1;
+  r.value = value;
+  r.err.code = 0;
+  r.err.message = "";
+  ret r;
+}
+
+// Construct an error numeric result.
+pub fun err_num(num code, str message) ResultNum {
+  ResultNum r;
+  r.ok = 0;
+  r.value = 0;
+  r.err.code = code;
+  r.err.message = message;
+  ret r;
+}

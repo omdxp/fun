@@ -1,0 +1,27 @@
+// CLI helpers example.
+// Run:
+//   fun -in examples/stdlib/cli_parse.fn -- --name=fun --debug file1 file2
+
+imp std.c.io;
+imp std.cli;
+
+fun main(str[] args) {
+  CliArgs parsed = cli_parse(args);
+
+  if parsed.has("debug") {
+    printf("debug mode\n");
+  }
+
+  str name = parsed.get("name");
+  if name != 0 {
+    printf("name=%s\n", name);
+  }
+
+  num i = 0;
+  for i < parsed.len() {
+    printf("pos[%d]=%s\n", i, parsed.positional(i));
+    i = i + 1;
+  }
+
+  parsed.free();
+}

@@ -1,0 +1,127 @@
+// Simple logging.
+
+imp std.c.io;
+
+// Log severity levels.
+pub enum LogLevel { Debug, Info, Warn, Error }
+
+// Logger with a minimum severity threshold.
+pub compound Logger {
+  // level: minimum severity to emit
+  LogLevel level;
+}
+
+// Create a logger with a threshold level.
+// 
+// Params:
+// - level: minimum severity to emit
+// 
+// Returns:
+// - Logger
+pub fun logger_init(LogLevel level) Logger {
+  Logger l;
+  l.level = level;
+  ret l;
+}
+
+// Convert log level to a label string.
+// 
+// Params:
+// - level: severity
+// 
+// Returns:
+// - label string
+pub fun level_name(LogLevel level) str {
+  fit level {
+    .Debug -> { ret "DEBUG"; }
+    .Info -> { ret "INFO"; }
+    .Warn -> { ret "WARN"; }
+    .Error -> { ret "ERROR"; }
+  }
+  ret "INFO";
+}
+
+fun level_value(LogLevel level) num {
+  fit level {
+    .Debug -> { ret 0; }
+    .Info -> { ret 1; }
+    .Warn -> { ret 2; }
+    .Error -> { ret 3; }
+  }
+  ret 1;
+}
+
+impl Logger {
+  // Log if level is >= logger threshold.
+  pub log(LogLevel level, str msg) {
+    if level_value(level) >= level_value(self.level) {
+      printf("[%s] %s\n", level_name(level), msg);
+    }
+  }
+
+  // Convenience: debug-level logging.
+  pub debug(str msg) {
+    self.log(.Debug, msg);
+  }
+
+  // Convenience: info-level logging.
+  pub info(str msg) {
+    self.log(.Info, msg);
+  }
+
+  // Convenience: warn-level logging.
+  pub warn(str msg) {
+    self.log(.Warn, msg);
+  }
+
+  // Convenience: error-level logging.
+  pub error(str msg) {
+    self.log(.Error, msg);
+  }
+}
+
+// One-off log with debug threshold.
+// 
+// Params:
+// - level: severity
+// - msg: message
+pub fun log(LogLevel level, str msg) {
+  Logger l = logger_init(.Debug);
+  l.log(level, msg);
+}
+
+// One-off debug log.
+// 
+// Params:
+// - msg: message
+pub fun log_debug(str msg) {
+  Logger l = logger_init(.Debug);
+  l.debug(msg);
+}
+
+// One-off info log.
+// 
+// Params:
+// - msg: message
+pub fun log_info(str msg) {
+  Logger l = logger_init(.Debug);
+  l.info(msg);
+}
+
+// One-off warn log.
+// 
+// Params:
+// - msg: message
+pub fun log_warn(str msg) {
+  Logger l = logger_init(.Debug);
+  l.warn(msg);
+}
+
+// One-off error log.
+// 
+// Params:
+// - msg: message
+pub fun log_error(str msg) {
+  Logger l = logger_init(.Debug);
+  l.error(msg);
+}

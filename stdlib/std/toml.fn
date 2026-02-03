@@ -1,0 +1,120 @@
+// Basic TOML parsing/serialization (flat key=value).
+
+imp std.map;
+imp std.string;
+imp std.vec;
+
+// TOML document wrapper.
+// 
+// Fields:
+// - values: key/value map
+pub compound TomlDoc {
+  // values: key/value map
+  StrMap values;
+}
+
+// Create a new TOML document.
+// 
+// Returns:
+// - TomlDoc with empty map
+pub fun toml_doc_init() TomlDoc {
+  TomlDoc d;
+  d.values = map_init(8);
+  ret d;
+}
+
+impl TomlDoc {
+  // Get a value by key.
+  pub get(str key) str {
+    ret self.values.get(key);
+  }
+
+  // Set a value by key.
+  pub set(str key, str value) {
+    self.values.put(key, value);
+  }
+
+  // Free internal storage.
+  pub free() {
+    self.values.free();
+  }
+
+  // Serialize the document to a string.
+  pub stringify() str {
+    StrVec parts = str_vec_init(self.values.len() * 2 + 4);
+    num i = 0;
+    for i < self.values.cap {
+      MapEntry entry = self.values.entries[i];
+      if entry.used != false {
+        if entry.tomb == false {
+          parts.push(entry.key);
+          parts.push(" = ");
+          parts.push(entry.value);
+          parts.push("\n");
+        }
+      }
+      i = i + 1;
+    }
+    str out = parts.join("");
+    parts.free();
+    ret out;
+  }
+}
+
+// Parse a TOML document (flat key=value).
+// 
+// Params:
+// - s: TOML string
+// 
+// Returns:
+// - parsed TomlDoc
+pub fun parse(str s) TomlDoc {
+  TomlDoc out = toml_doc_init();
+  num i = 0;
+  num start = 0;
+
+  for s[i] != 0 {
+    if s[i] == '\n' {
+      num line_len = i - start;
+      if line_len > 0 {
+        str line = substr(s, start, line_len);
+        num eq_idx = index_of_char(line, '=');
+        if eq_idx != -1 {
+          num key_len = eq_idx;
+          str key = trim(substr(line, 0, key_len));
+          str val = trim(substr(line, eq_idx + 1, len(line) - (eq_idx + 1)));
+          out.set(key, val);
+        }
+      }
+      i = i + 1;
+      start = i;
+    } else {
+      i = i + 1;
+    }
+  }
+
+  if i > start {
+    num line_len = i - start;
+    str line = substr(s, start, line_len);
+    num eq_idx = index_of_char(line, '=');
+    if eq_idx != -1 {
+      num key_len = eq_idx;
+      str key = trim(substr(line, 0, key_len));
+      str val = trim(substr(line, eq_idx + 1, len(line) - (eq_idx + 1)));
+      out.set(key, val);
+    }
+  }
+
+  ret out;
+}
+
+// Serialize a TOML document.
+// 
+// Params:
+// - obj: TOML document
+// 
+// Returns:
+// - TOML string
+pub fun stringify(TomlDoc* obj) str {
+  ret obj.stringify();
+}

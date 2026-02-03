@@ -1,0 +1,11 @@
+// Log helpers example.
+
+imp std.log;
+
+fun main() {
+  Logger l = logger_init(.Debug);
+  l.debug("debug message");
+  l.info("info message");
+  l.warn("warn message");
+  l.error("error message");
+}

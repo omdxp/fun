@@ -1,12 +1,14 @@
 // Real-world-ish: print the current time (epoch seconds).
 
 imp std.c.io;
-imp std.c.time;
+imp std.c.mem;
+imp std.time;
 fun main() {
-  // `time()` returns a `time_t` and `ctime()` expects a `time_t*`.
-  time_t now = time(NULL);
-  printf("epoch_seconds=%lld\n", now);
-  // human-readable format
-  str time_str = ctime(&now);
-  printf("time_str=%s", time_str); // ctime() adds its own newline
+  Timestamp t = now();
+  printf("epoch_seconds=%d\n", t.epoch);
+  str buf = malloc(64);
+  if buf != 0 {
+    t.to_string(buf, 64);
+    printf("time_str=%s", buf);
+  }
 }

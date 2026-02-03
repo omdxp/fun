@@ -1,0 +1,33 @@
+// JSON helpers example.
+
+imp std.c.io;
+imp std.json;
+imp std.string;
+
+fun main() {
+  StringBuilder b = string_builder_init(8);
+  b.append_char('{');
+  b.append_char('"');
+  b.append("name");
+  b.append_char('"');
+  b.append(": ");
+  b.append_char('"');
+  b.append("fun");
+  b.append_char('"');
+  b.append(", ");
+  b.append_char('"');
+  b.append("version");
+  b.append_char('"');
+  b.append(": 1");
+  b.append_char('}');
+  str src = b.build();
+  b.free();
+
+  JsonObject obj = parse_object(src);
+  printf("name=%s\n", obj.get("name"));
+
+  str out = obj.stringify();
+  printf("json=%s\n", out);
+
+  obj.free();
+}

@@ -1,0 +1,120 @@
+// File and buffer IO utilities.
+
+imp std.c.io;
+imp std.c.mem;
+imp std.c.def;
+imp std.string;
+
+// File handle wrapper.
+// 
+// Fields:
+// - handle: C FILE pointer (null if unopened)
+pub compound File {
+  // handle: C FILE pointer (null if unopened)
+  FILE* handle;
+}
+
+// Open file for reading (binary).
+// 
+// Params:
+// - path: file path
+// 
+// Returns:
+// - File with handle set (null on failure)
+pub fun open_read(str path) File {
+  File f;
+  f.handle = fopen(path, "rb");
+  ret f;
+}
+
+// Open file for writing (binary).
+// 
+// Params:
+// - path: file path
+// 
+// Returns:
+// - File with handle set (null on failure)
+pub fun open_write(str path) File {
+  File f;
+  f.handle = fopen(path, "wb");
+  ret f;
+}
+
+impl File {
+  // Close the file handle.
+  pub close() {
+    if self.handle != NULL {
+      fclose(self.handle);
+      self.handle = NULL;
+    }
+  }
+
+  // Read entire file into a new string.
+  pub read_all() str {
+    if self.handle == NULL {
+      ret NULL;
+    }
+
+    fseek(self.handle, 0, 2);
+    num size = ftell(self.handle);
+    fseek(self.handle, 0, 0);
+
+    if size < 0 {
+      ret NULL;
+    }
+
+    str buf = malloc(size + 1);
+    if buf == NULL {
+      ret NULL;
+    }
+
+    num read = fread(buf, 1, size, self.handle);
+    buf[read] = 0;
+    ret buf;
+  }
+
+  // Write a string to the file.
+  pub write(str data) bin {
+    if self.handle == NULL {
+      ret 0;
+    }
+    num n = len(data);
+    num wrote = fwrite(data, 1, n, self.handle);
+    ret wrote == n;
+  }
+}
+
+// Read a file into a string.
+// 
+// Params:
+// - path: file path
+// 
+// Returns:
+// - file contents or null
+pub fun read_all(str path) str {
+  File f = open_read(path);
+  if f.handle == NULL {
+    ret NULL;
+  }
+  str out = f.read_all();
+  f.close();
+  ret out;
+}
+
+// Write a string to a file.
+// 
+// Params:
+// - path: file path
+// - data: contents
+// 
+// Returns:
+// - true on success
+pub fun write_all(str path, str data) bin {
+  File f = open_write(path);
+  if f.handle == NULL {
+    ret 0;
+  }
+  bin ok = f.write(data);
+  f.close();
+  ret ok;
+}

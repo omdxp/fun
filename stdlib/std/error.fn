@@ -1,0 +1,13 @@
+// Simple error compound for stdlib results.
+
+// Simple error representation (code + message).
+// 
+// Fields:
+// - code: numeric error code
+// - message: human-readable message
+pub compound Error {
+  // code: numeric error code
+  num code;
+  // message: human-readable message
+  str message;
+}
