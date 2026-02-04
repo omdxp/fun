@@ -8,6 +8,7 @@
     { "include": "#numbers" },
     { "include": "#operators" },
     { "include": "#typeDeclarations" },
+    { "include": "#genericTypes" },
     { "include": "#types" },
     { "include": "#functions" },
     { "include": "#booleans" },
@@ -57,6 +58,18 @@
         }
       ]
     },
+    "genericTypes": {
+      "patterns": [
+        {
+          "name": "meta.type.generic.fun",
+          "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(<[^>]+>)",
+          "captures": {
+            "1": { "name": "entity.name.type.fun" },
+            "2": { "name": "entity.name.type.parameters.fun" }
+          }
+        }
+      ]
+    },
     "comments": {
       "patterns": [
         {
@@ -101,10 +114,11 @@
       "patterns": [
         {
           "name": "meta.function.declaration.fun",
-          "match": "\\b(fun)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "match": "\\b(fun)\\s+([A-Za-z_][A-Za-z0-9_]*)(\\s*<[^>]+>)?\\b",
           "captures": {
             "1": { "name": "keyword.control.fun" },
-            "2": { "name": "entity.name.function.fun" }
+            "2": { "name": "entity.name.function.fun" },
+            "3": { "name": "entity.name.type.parameters.fun" }
           }
         },
         {
