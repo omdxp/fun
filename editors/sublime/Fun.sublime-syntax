@@ -1,0 +1,39 @@
+%YAML 1.2
+---
+name: Fun
+file_extensions:
+  - fn
+scope: source.fun
+
+contexts:
+  main:
+    - match: //.*$
+      scope: comment.line.double-slash.fun
+    - match: '"'
+      scope: punctuation.definition.string.begin.fun
+      push: double_quoted
+    - match: "'"
+      scope: punctuation.definition.string.begin.fun
+      push: single_quoted
+    - match: \b(imp|pub|fun|compound|quirk|impl|enum|asm|volatile|arch|defer|ret|if|elif|else|for|fit|break|continue|assert)\b
+      scope: keyword.control.fun
+    - match: \b(void|raw|num|dec|str|bin|chr|true|false)\b
+      scope: constant.language.fun
+    - match: \b\d+(\.\d+)?\b
+      scope: constant.numeric.fun
+
+  double_quoted:
+    - meta_scope: string.quoted.double.fun
+    - match: '\\.'
+      scope: constant.character.escape.fun
+    - match: '"'
+      scope: punctuation.definition.string.end.fun
+      pop: true
+
+  single_quoted:
+    - meta_scope: string.quoted.single.fun
+    - match: "\\.'"
+      scope: constant.character.escape.fun
+    - match: "'"
+      scope: punctuation.definition.string.end.fun
+      pop: true

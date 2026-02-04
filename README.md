@@ -179,6 +179,10 @@ There is a minimal VS Code extension scaffold in [editors/vscode](editors/vscode
 - Build `fun` + `fls` first (`zig build`)
 - Then open `editors/vscode` in VS Code and follow its README.
 
+### Other Editors
+
+See [editors/README.md](editors/README.md) for Vim/Neovim, Emacs, JetBrains, and Sublime setup.
+
 ### GitHub Syntax Highlighting
 
 This repo maps `.fn` files to C highlighting on GitHub via [/.gitattributes](.gitattributes).

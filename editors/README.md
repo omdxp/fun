@@ -1,0 +1,8 @@
+# Editor support
+
+- VS Code: see [editors/vscode](vscode/)
+- Vim: see [editors/vim](vim/)
+- Neovim: see [editors/neovim](neovim/)
+- Emacs: see [editors/emacs](emacs/)
+- Sublime Text: see [editors/sublime](sublime/)
+- JetBrains: see [editors/jetbrains](jetbrains/)
