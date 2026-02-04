@@ -116,7 +116,7 @@ Arguments:
 
 ### C Compiler Selection
 
-By default, `fun` uses `zig cc`. You can override the C compiler with environment variables:
+By default, `fun` uses `zig cc` unless `FUN_CC` is set. Release installers on macOS/Linux set `FUN_CC=gcc` by default. The Windows MSI sets `FUN_CC` to use `cl` with a template command. You can override the C compiler with environment variables:
 
 - `FUN_CC`: compiler command. If it includes `{src}` and `{out}`, it is treated as a full template.
 - `FUN_CC_ARGS`: extra arguments appended after the base command.
