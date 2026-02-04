@@ -4,6 +4,7 @@
 - Written in Zig
 - Transpiles fun code to C
 - CLI tool for compilation and execution
+- 64-bit numeric core (`num` → `int64_t`, `dec` → `double`)
 
 ## Main Components
 - **Lexer**: Tokenizes source code

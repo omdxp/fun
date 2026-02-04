@@ -4,7 +4,7 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/omdxp/fun/ci-dev.yml?branch=main)](https://github.com/omdxp/fun/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Fun** is a statically-typed programming language that transpiles to C, designed for safety, performance, and simplicity. Written in Zig.
+**Fun** is a statically-typed programming language that transpiles to C, designed for safety, performance, and simplicity. Written in Zig. By default, Fun is a 64-bit language: `num` is a signed 64-bit integer and `dec` is a 64-bit IEEE double.
 
 ---
 
@@ -17,6 +17,7 @@
   - [CLI Usage](#cli-usage)
   - [Quickstart](#quickstart)
   - [Examples](#examples)
+  - [Documentation](#documentation)
   - [Project Structure](#project-structure)
   - [Contributing](#contributing)
   - [Changelog](#changelog)
@@ -33,6 +34,7 @@
 ## Features
 
 - Statically-typed, C-like performance
+- 64-bit numeric core (`num` = int64, `dec` = double)
 - Transpiles to readable C code
 - Simple, expressive syntax
 - Modular imports
@@ -100,7 +102,7 @@ Write your first program in `hello.fn`:
 imp std.c.io;
 
 fun main(str[] args) {
-    printf("Hello, World!\n");
+  printf("Hello, World!\n");
 }
 ```
 
@@ -119,6 +121,11 @@ Explore the [`examples/`](examples/) directory for more:
 - Imports: [`imports/main.fn`](examples/imports/main.fn)
 - Imports (parent traversal `....`): [`imports/parent_traversal_2up/nested/level1/main.fn`](examples/imports/parent_traversal_2up/nested/level1/main.fn)
 - Error cases: [`error_cases/`](examples/error_cases/)
+
+## Documentation
+
+- Language overview: [docs/language.md](docs/language.md)
+- Full reference: [docs/reference.md](docs/reference.md)
 
 ## Project Structure
 

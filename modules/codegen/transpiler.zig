@@ -4964,7 +4964,7 @@ pub const TranspileProcess = struct {
 
     /// Maps fun language types to C types
     fn map_type_to_c(type_str: []const u8) []const u8 {
-        if (mem.eql(u8, type_str, "num")) return "int";
+        if (mem.eql(u8, type_str, "num")) return "int64_t";
         if (mem.eql(u8, type_str, "dec")) return "double";
         if (mem.eql(u8, type_str, "str")) return "char*";
         if (mem.eql(u8, type_str, "bin")) return "bool";
@@ -5589,7 +5589,6 @@ pub const TranspileProcess = struct {
             try self.write(c.name.items);
             try self.write(";\n\n");
         }
-
 
         // Quirk canonical structs per signature
         var q_it = reg.quirks_by_sig.iterator();
@@ -8166,6 +8165,7 @@ pub const TranspileProcess = struct {
 
         // Always include core headers once.
         try add_header(self, &seen, "stdbool.h");
+        try add_header(self, &seen, "stdint.h");
         try add_header(self, &seen, "stdlib.h");
         try add_header(self, &seen, "string.h");
     }

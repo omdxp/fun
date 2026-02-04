@@ -18,8 +18,8 @@
 
 ### Types
 - **Primitive Types**:
-    - `num`: Integer number
-    - `dec`: Decimal (floating-point) number
+    - `num`: Signed 64-bit integer (maps to C `int64_t`)
+    - `dec`: 64-bit floating-point (IEEE double; maps to C `double`)
     - `str`: String
     - `bin`: Boolean
     - `chr`: Character
@@ -71,7 +71,7 @@
     - Reference named operands in templates using `%[name]`.
     - Outputs are first, then inputs, then clobbers (GCC-style extended asm).
 - **Notes**:
-    - The block form is tokenized and re-spaced; use the string form if you need exact spacing or numeric formatting.
+    - The formatter preserves asm block contents as raw text; use the string form when you need explicit escape control.
     - Supported arch names: `x86_64`/`amd64`, `x86`/`i386`, `aarch64`/`arm64`, `arm`.
 
 ### Functions
@@ -94,6 +94,7 @@
 - **C Macros**: ALL_CAPS identifiers (e.g., `NULL`, `INT_MAX`) are allowed if the right header is imported.
 - **Direct Mapping**: `imp std.c.*;` maps to C headers (`stdio.h`, `limits.h`, etc.).
 - **Signature-only stdlib**: Fun stdlib modules only declare signatures; C provides implementations.
+- **Printf formats**: `num` is `int64_t` in C. Use `PRId64` (from `<inttypes.h>`) or cast to `long long` with `%lld` when printing.
 
 ### Error Handling
 - **Type Checking**: Errors for type mismatches, e.g., assigning `str` to `num`.

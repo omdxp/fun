@@ -6,6 +6,9 @@ A: To explore language design, static typing, and transpilation to C for perform
 **Q: How do I run a fun program?**
 A: See the Quickstart in the main [README](../README.md).
 
+**Q: What are the numeric sizes?**
+A: Fun is 64-bit by default: `num` is a signed 64-bit integer and `dec` is a 64-bit double.
+
 **Q: Where can I find examples?**
 A: In the [examples/](../examples/) directory.
 

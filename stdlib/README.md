@@ -13,6 +13,8 @@ This directory contains standard library modules for the Fun language.
 
 ### Pure Fun modules (std/*)
 
+Note: Fun is 64-bit by default (`num` → `int64_t`, `dec` → `double`).
+
 - **std/array.fn**: Fixed-size array helpers.
 - **std/cli.fn**: Command-line argument parsing helpers.
 - **std/fs.fn**: File system helpers built on C stdio.
