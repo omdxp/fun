@@ -68,7 +68,7 @@ test "array indexing expression transpiles" {
     const out_owned = try runTranspile(allocator, ifilepath, input);
     defer allocator.free(out_owned);
 
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "int arr[] = {1, 2, 3};") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t arr[] = {1, 2, 3};") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "arr[1]") != null);
 
     try fs.cwd().deleteFile(ifilepath);
@@ -254,7 +254,7 @@ test "compounds + quirks + impl vtables transpile" {
     defer allocator.free(out_owned);
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "typedef struct Point") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "int x;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t x;") != null);
 
     // Canonical quirk types and impl helpers use hashed names.
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "__fun_quirk_") != null);

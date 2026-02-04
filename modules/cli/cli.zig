@@ -602,6 +602,73 @@ const AsmRawRange = struct {
     end_pos: token.Pos,
 };
 
+fn free_arg_list(allocator: mem.Allocator, args: []const []const u8) void {
+    for (args) |a| allocator.free(a);
+}
+
+fn parse_command_line(allocator: mem.Allocator, text: []const u8) !std.ArrayList([]const u8) {
+    var out = std.ArrayList([]const u8).init(allocator);
+    var i: usize = 0;
+    while (i < text.len) {
+        while (i < text.len and std.ascii.isWhitespace(text[i])) : (i += 1) {}
+        if (i >= text.len) break;
+
+        var buf = std.ArrayList(u8).init(allocator);
+        errdefer buf.deinit();
+
+        const quote: ?u8 = if (text[i] == '"' or text[i] == '\'') blk: {
+            const q = text[i];
+            i += 1;
+            break :blk q;
+        } else null;
+
+        while (i < text.len) : (i += 1) {
+            const c = text[i];
+            if (quote != null) {
+                if (c == quote.?) {
+                    i += 1;
+                    break;
+                }
+                if (c == '\\' and i + 1 < text.len) {
+                    i += 1;
+                    try buf.append(text[i]);
+                    continue;
+                }
+                try buf.append(c);
+            } else {
+                if (std.ascii.isWhitespace(c)) break;
+                try buf.append(c);
+            }
+        }
+
+        const slice = try buf.toOwnedSlice();
+        try out.append(slice);
+    }
+    return out;
+}
+
+fn replace_placeholders(allocator: mem.Allocator, text: []const u8, src: []const u8, out_path: []const u8) ![]const u8 {
+    var buf = std.ArrayList(u8).init(allocator);
+    errdefer buf.deinit();
+
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        if (i + 5 <= text.len and std.mem.eql(u8, text[i .. i + 5], "{src}")) {
+            try buf.appendSlice(src);
+            i += 4;
+            continue;
+        }
+        if (i + 5 <= text.len and std.mem.eql(u8, text[i .. i + 5], "{out}")) {
+            try buf.appendSlice(out_path);
+            i += 4;
+            continue;
+        }
+        try buf.append(text[i]);
+    }
+
+    return buf.toOwnedSlice();
+}
+
 fn prev_significant_index(toks: []const token.Token, idx: usize) ?usize {
     if (idx == 0) return null;
     var i: isize = @as(isize, @intCast(idx)) - 1;
@@ -1463,40 +1530,94 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
 
     // Compile the C file
     {
-        // Use `zig cc` instead of relying on a system `gcc`.
-        // NOTE: When `fun` itself is built/tested via Zig, invoking `zig` from within
-        // Zig tests can deadlock on shared cache locks. To avoid that, give this nested
-        // `zig cc` invocation its own cache directories.
-        // IMPORTANT: Do not create/delete a fresh cache tree per call.
-        // On Windows this can be extremely slow (or appear hung) due to file locking/AV.
-        // Reuse stable cache dirs under the project's .zig-cache.
-        const global_cache_dir_rel = ".zig-cache/fun_cli_global_cache";
-        const local_cache_dir_rel = ".zig-cache/fun_cli_local_cache";
-        try fs.cwd().makePath(global_cache_dir_rel);
-        try fs.cwd().makePath(local_cache_dir_rel);
-
-        const global_cache_dir_abs = try fs.cwd().realpathAlloc(allocator, global_cache_dir_rel);
-        defer allocator.free(global_cache_dir_abs);
-        const local_cache_dir_abs = try fs.cwd().realpathAlloc(allocator, local_cache_dir_rel);
-        defer allocator.free(local_cache_dir_abs);
-
-        var env_map = try process.getEnvMap(allocator);
-        defer env_map.deinit();
-        try env_map.put("ZIG_GLOBAL_CACHE_DIR", global_cache_dir_abs);
-        try env_map.put("ZIG_LOCAL_CACHE_DIR", local_cache_dir_abs);
-
-        const cc_args = [_][]const u8{
-            "zig",
-            "cc",
-            "-g0",
-            c_path,
-            "-o",
-            exe_file,
+        var fun_cc: ?[]const u8 = null;
+        var fun_cc_args: ?[]const u8 = null;
+        fun_cc = process.getEnvVarOwned(allocator, "FUN_CC") catch |err| switch (err) {
+            error.EnvironmentVariableNotFound => null,
+            else => return err,
         };
+        defer if (fun_cc) |v| allocator.free(v);
+
+        fun_cc_args = process.getEnvVarOwned(allocator, "FUN_CC_ARGS") catch |err| switch (err) {
+            error.EnvironmentVariableNotFound => null,
+            else => return err,
+        };
+        defer if (fun_cc_args) |v| allocator.free(v);
+
+        var argv_list = std.ArrayList([]const u8).init(allocator);
+        defer argv_list.deinit();
+        defer free_arg_list(allocator, argv_list.items);
+
+        var using_zig = false;
+        if (fun_cc != null and fun_cc.?.len > 0) {
+            var base = try parse_command_line(allocator, fun_cc.?);
+            defer base.deinit();
+            defer free_arg_list(allocator, base.items);
+
+            const uses_template = std.mem.indexOf(u8, fun_cc.?, "{src}") != null or std.mem.indexOf(u8, fun_cc.?, "{out}") != null;
+            if (uses_template) {
+                for (base.items) |a| {
+                    const replaced = try replace_placeholders(allocator, a, c_path, exe_file);
+                    try argv_list.append(replaced);
+                }
+            } else {
+                for (base.items) |a| {
+                    try argv_list.append(try allocator.dupe(u8, a));
+                }
+                try argv_list.append(try allocator.dupe(u8, "-g0"));
+                try argv_list.append(try allocator.dupe(u8, c_path));
+                try argv_list.append(try allocator.dupe(u8, "-o"));
+                try argv_list.append(try allocator.dupe(u8, exe_file));
+            }
+        } else {
+            try argv_list.append(try allocator.dupe(u8, "zig"));
+            try argv_list.append(try allocator.dupe(u8, "cc"));
+            try argv_list.append(try allocator.dupe(u8, "-g0"));
+            try argv_list.append(try allocator.dupe(u8, c_path));
+            try argv_list.append(try allocator.dupe(u8, "-o"));
+            try argv_list.append(try allocator.dupe(u8, exe_file));
+        }
+
+        if (fun_cc_args != null and fun_cc_args.?.len > 0) {
+            var extra = try parse_command_line(allocator, fun_cc_args.?);
+            defer extra.deinit();
+            defer free_arg_list(allocator, extra.items);
+            for (extra.items) |a| {
+                try argv_list.append(try allocator.dupe(u8, a));
+            }
+        }
+
+        if (argv_list.items.len >= 1) {
+            const cc_base = std.fs.path.basename(argv_list.items[0]);
+            if (std.mem.eql(u8, cc_base, "zig") or std.mem.eql(u8, cc_base, "zig.exe")) {
+                using_zig = true;
+            }
+        }
+
+        var env_map_opt: ?process.EnvMap = null;
+        defer if (env_map_opt) |*m| m.deinit();
+        if (using_zig) {
+            // Avoid Zig cache lock contention by using dedicated cache dirs.
+            const global_cache_dir_rel = ".zig-cache/fun_cli_global_cache";
+            const local_cache_dir_rel = ".zig-cache/fun_cli_local_cache";
+            try fs.cwd().makePath(global_cache_dir_rel);
+            try fs.cwd().makePath(local_cache_dir_rel);
+
+            const global_cache_dir_abs = try fs.cwd().realpathAlloc(allocator, global_cache_dir_rel);
+            defer allocator.free(global_cache_dir_abs);
+            const local_cache_dir_abs = try fs.cwd().realpathAlloc(allocator, local_cache_dir_rel);
+            defer allocator.free(local_cache_dir_abs);
+
+            var env_map = try process.getEnvMap(allocator);
+            try env_map.put("ZIG_GLOBAL_CACHE_DIR", global_cache_dir_abs);
+            try env_map.put("ZIG_LOCAL_CACHE_DIR", local_cache_dir_abs);
+            env_map_opt = env_map;
+        }
+
         const result = process.Child.run(.{
             .allocator = allocator,
-            .argv = &cc_args,
-            .env_map = &env_map,
+            .argv = argv_list.items,
+            .env_map = if (env_map_opt) |*m| m else null,
         }) catch |err| switch (err) {
             error.FileNotFound => return CliError.MissingCCompiler,
             else => return err,

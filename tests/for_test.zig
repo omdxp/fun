@@ -44,7 +44,7 @@ test "for range transpiles" {
     const out_owned = try runTranspile(allocator, ifilepath, input);
     defer allocator.free(out_owned);
 
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "for (int i = 0; i < 3; i++)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "for (int64_t i = 0; i < 3; i++)") != null);
 
     try fs.cwd().deleteFile(ifilepath);
 }
@@ -65,9 +65,9 @@ test "for array item transpiles" {
     const out_owned = try runTranspile(allocator, ifilepath, input);
     defer allocator.free(out_owned);
 
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "int arr[] = {1, 2, 3};") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "for (int __fun_i = 0;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "int item = arr[__fun_i];") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t arr[] = {1, 2, 3};") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "for (int64_t __fun_i = 0;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t item = arr[__fun_i];") != null);
 
     try fs.cwd().deleteFile(ifilepath);
 }
@@ -88,8 +88,8 @@ test "for array index and item transpiles" {
     const out_owned = try runTranspile(allocator, ifilepath, input);
     defer allocator.free(out_owned);
 
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "for (int i = 0;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "int item = arr[i];") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "for (int64_t i = 0;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t item = arr[i];") != null);
 
     try fs.cwd().deleteFile(ifilepath);
 }

@@ -95,6 +95,7 @@
 - **Direct Mapping**: `imp std.c.*;` maps to C headers (`stdio.h`, `limits.h`, etc.).
 - **Signature-only stdlib**: Fun stdlib modules only declare signatures; C provides implementations.
 - **Printf formats**: `num` is `int64_t` in C. Use `PRId64` (from `<inttypes.h>`) or cast to `long long` with `%lld` when printing.
+- **Compiler selection**: `fun` uses `zig cc` by default. Override with `FUN_CC` and optional `FUN_CC_ARGS`.
 
 ### Error Handling
 - **Type Checking**: Errors for type mismatches, e.g., assigning `str` to `num`.

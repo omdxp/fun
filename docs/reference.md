@@ -130,6 +130,19 @@ asm volatile (out y: "=r" = y; in x: "r" = x; clobber "memory") {
 - C constants (e.g., `NULL`, `INT_MAX`) are allowed when headers are imported.
 - `num` maps to `int64_t`; for `printf`, use `PRId64` (from `<inttypes.h>`) or cast to `long long` and use `%lld`.
 
+## C Compiler Selection
+
+By default, `fun` uses `zig cc`. You can override the compiler with environment variables:
+
+- `FUN_CC`: compiler command. If it contains `{src}` and `{out}`, it is treated as a full template.
+- `FUN_CC_ARGS`: extra arguments appended after the base command.
+
+Examples:
+
+- `FUN_CC=clang`
+- `FUN_CC=zig` and `FUN_CC_ARGS="cc"`
+- `FUN_CC="clang -O2 {src} -o {out}"`
+
 ## Formatting
 - `fun -fmt -in file.fn` formats a file in place.
 - `fun -fmt-all -in file.fn` formats local imports (skips `std.*`).

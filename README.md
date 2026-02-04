@@ -94,6 +94,22 @@ Arguments:
   -help            Show this help message
 ```
 
+### C Compiler Selection
+
+By default, `fun` uses `zig cc`. You can override the C compiler with environment variables:
+
+- `FUN_CC`: compiler command. If it includes `{src}` and `{out}`, it is treated as a full template.
+- `FUN_CC_ARGS`: extra arguments appended after the base command.
+
+Examples:
+
+- Use clang:
+  - `FUN_CC=clang`
+- Use zig cc explicitly:
+  - `FUN_CC=zig` and `FUN_CC_ARGS="cc"`
+- Use a template with explicit placeholders:
+  - `FUN_CC="clang -O2 {src} -o {out}"`
+
 ## Quickstart
 
 Write your first program in `hello.fn`:

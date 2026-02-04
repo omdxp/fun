@@ -7522,7 +7522,7 @@ pub const TranspileProcess = struct {
                                 const start = range_exp.left orelse return TranspileError.UnsupportedNodeType;
                                 const end = range_exp.right orelse return TranspileError.UnsupportedNodeType;
 
-                                try self.write("for (int ");
+                                try self.write("for (int64_t ");
                                 try self.write(fr.index_name);
                                 try self.write(" = ");
                                 try self.transpile_node(start.*);
@@ -7566,11 +7566,11 @@ pub const TranspileProcess = struct {
 
                                 const idx_name = fi.index_name orelse "__fun_i";
 
-                                try self.write("for (int ");
+                                try self.write("for (int64_t ");
                                 try self.write(idx_name);
                                 try self.write(" = 0; ");
                                 try self.write(idx_name);
-                                try self.write(" < (int)(sizeof(");
+                                try self.write(" < (int64_t)(sizeof(");
                                 try self.write(arr_name);
                                 try self.write(")/sizeof(");
                                 try self.write(arr_name);
@@ -7581,7 +7581,7 @@ pub const TranspileProcess = struct {
 
                                 // Declare the item binding each iteration.
                                 // If we can find the array type in scope, use it.
-                                var item_c_type: []const u8 = "int";
+                                var item_c_type: []const u8 = "int64_t";
                                 if (self.get_scope_entity(arr_name)) |ent| {
                                     if (ent.node) |arr_node| {
                                         if (arr_node.type == .Variable) {

@@ -45,6 +45,8 @@ mkdir -p "$dest_share"
 cat >"$env_snippet" <<EOF
 # Fun environment
 export FUN_STDLIB_DIR="$dest_stdlib"
+export FUN_CC="zig"
+export FUN_CC_ARGS="cc"
 EOF
 
 # Persist FUN_STDLIB_DIR into the user's shell profile (best-effort).
@@ -79,6 +81,8 @@ append_block_fish() {
     echo
     echo "$marker_begin"
     echo "set -gx FUN_STDLIB_DIR \"$dest_stdlib\""
+    echo "set -gx FUN_CC \"zig\""
+    echo "set -gx FUN_CC_ARGS \"cc\""
     echo "$marker_end"
   } >>"$profile"
 }
