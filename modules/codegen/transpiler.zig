@@ -7819,6 +7819,24 @@ pub const TranspileProcess = struct {
                 self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
                 return TranspileError.MemoryAllocationFailed;
             };
+        } else if (mem.eql(u8, import_path, "std.c.net")) {
+            header_name = self.allocator.dupe(u8, "sys/socket.h") catch |e| {
+                self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
+                return TranspileError.MemoryAllocationFailed;
+            };
+            // Additional headers needed for inet_addr and sockaddr_in.
+            self.std_imports.append(self.allocator.dupe(u8, "netinet/in.h") catch |e| {
+                self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
+                return TranspileError.MemoryAllocationFailed;
+            }) catch return TranspileError.MemoryAllocationFailed;
+            self.std_imports.append(self.allocator.dupe(u8, "arpa/inet.h") catch |e| {
+                self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
+                return TranspileError.MemoryAllocationFailed;
+            }) catch return TranspileError.MemoryAllocationFailed;
+            self.std_imports.append(self.allocator.dupe(u8, "unistd.h") catch |e| {
+                self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
+                return TranspileError.MemoryAllocationFailed;
+            }) catch return TranspileError.MemoryAllocationFailed;
         } else if (mem.eql(u8, import_path, "std.c.limits")) {
             header_name = self.allocator.dupe(u8, "limits.h") catch |e| {
                 self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});

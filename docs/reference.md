@@ -154,12 +154,15 @@ Examples:
 
 ## Standard Library (high level)
 - `std.array`: array helpers
+- `std.io`: file helpers + print utilities
 - `std.vec`: dynamic vectors
 - `std.map`: string-keyed maps
 - `std.set`: sets built on maps
 - `std.string`: string helpers
 - `std.json`, `std.toml`: minimal serialization helpers
 - `std.time`, `std.rand`, `std.math`, `std.path`, `std.net`, etc.
+- `std.sys`: environment and process helpers (`sys_exit`, `sys_abort`, `sys_system`)
+- `std.net`: URL parsing + pure Fun POSIX TCP/HTTP helpers (POSIX sockets)
 
 ## CLI
 ```

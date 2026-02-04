@@ -2,6 +2,9 @@
 
 imp std.string;
 imp std.vec;
+imp std.c.io;
+imp std.c.mem;
+imp std.c.net;
 
 // Parsed URL components.
 // 
@@ -91,4 +94,145 @@ pub fun parse_url(str s) Url {
 // - request string
 pub fun build_http_get(Url* url) str {
   ret url.build_http_get();
+}
+
+// POSIX socket constants (best-effort defaults).
+pub fun af_inet() num {
+  ret 2;
+}
+pub fun sock_stream() num {
+  ret 1;
+}
+
+// Packed 16-byte sockaddr_in representation using two 64-bit words.
+// word0 packs: family (bytes 0-1), port (2-3), addr (4-7)
+// word1 packs: zero (8-15)
+pub compound SockAddrInPacked {
+  num word0;
+  num word1;
+}
+
+fun _pack_sockaddr_in_linux(num port) SockAddrInPacked {
+  SockAddrInPacked a;
+  num fam = af_inet();
+  num prt = htons(port);
+  num addr = htonl(0);
+  a.word0 = fam + (prt * 65536) + (addr * 4294967296);
+  a.word1 = 0;
+  ret a;
+}
+
+fun _pack_sockaddr_in_bsd(num port) SockAddrInPacked {
+  SockAddrInPacked a;
+  num len = 16;
+  num fam = af_inet();
+  num prt = htons(port);
+  num addr = htonl(0);
+  a.word0 = len + (fam * 256) + (prt * 65536) + (addr * 4294967296);
+  a.word1 = 0;
+  ret a;
+}
+
+// Create a TCP listening socket on the given port.
+// 
+// Returns:
+// - server fd on success, or -1
+pub fun tcp_listen(num port) num {
+  num fd = socket(af_inet(), sock_stream(), 0);
+  if fd < 0 {
+    ret -1;
+  }
+
+  SockAddrInPacked addr = _pack_sockaddr_in_linux(port);
+  if bind(fd, &addr, 16) != 0 {
+    addr = _pack_sockaddr_in_bsd(port);
+    if bind(fd, &addr, 16) != 0 {
+      close(fd);
+      ret -1;
+    }
+  }
+
+  if listen(fd, 16) != 0 {
+    close(fd);
+    ret -1;
+  }
+
+  ret fd;
+}
+
+// Accept a client connection.
+// 
+// Returns:
+// - client fd, or -1
+pub fun tcp_accept(num server_fd) num {
+  ret accept(server_fd, NULL, NULL);
+}
+
+// Read from a socket.
+pub fun tcp_read(num fd, str buf, num len) num {
+  ret recv(fd, buf, len, 0);
+}
+
+// Write to a socket.
+pub fun tcp_write(num fd, str buf, num len) num {
+  ret send(fd, buf, len, 0);
+}
+
+// Close a socket.
+pub fun tcp_close(num fd) {
+  close(fd);
+}
+
+// Serve a single HTTP request with a fixed response.
+pub fun http_serve_once(num port, str body) num {
+  num server = tcp_listen(port);
+  if server < 0 {
+    ret -1;
+  }
+  defer tcp_close(server);
+
+  num client = tcp_accept(server);
+  if client < 0 {
+    ret -1;
+  }
+
+  str buf = malloc(1024);
+  if buf != NULL {
+    tcp_read(client, buf, 1023);
+    free(buf);
+  }
+
+  str hdr = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\n";
+  tcp_write(client, hdr, len(hdr));
+  tcp_write(client, body, len(body));
+  tcp_close(client);
+  ret 0;
+}
+
+// Serve HTTP requests forever (blocking loop).
+pub fun http_serve_forever(num port, str body) num {
+  num server = tcp_listen(port);
+  if server < 0 {
+    ret -1;
+  }
+  defer tcp_close(server);
+
+  for true {
+    num client = tcp_accept(server);
+    if client < 0 {
+      ret -1;
+    }
+
+    str buf = malloc(1024);
+    if buf != NULL {
+      tcp_read(client, buf, 1023);
+      free(buf);
+    }
+
+    str hdr = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\n";
+    tcp_write(client, hdr, len(hdr));
+    tcp_write(client, body, len(body));
+    tcp_close(client);
+  }
+  ret 0;
 }

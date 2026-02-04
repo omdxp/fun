@@ -1,0 +1,23 @@
+// POSIX sockets (sys/socket.h, netinet/in.h, arpa/inet.h, unistd.h)
+// 
+// Notes:
+// - These are declarations only; implementations come from system libc.
+// - This module targets POSIX-style sockets.
+
+// Socket API
+pub fun socket(num domain, num type, num protocol) num;
+pub fun bind(num sockfd, raw* addr, num addrlen) num;
+pub fun listen(num sockfd, num backlog) num;
+pub fun accept(num sockfd, raw* addr, raw* addrlen) num;
+pub fun recv(num sockfd, raw* buf, num len, num flags) num;
+pub fun send(num sockfd, raw* buf, num len, num flags) num;
+pub fun close(num fd) num;
+
+// Byte order helpers
+pub fun htons(num hostshort) num;
+pub fun htonl(num hostlong) num;
+pub fun ntohs(num netshort) num;
+pub fun ntohl(num netlong) num;
+
+// Address parsing
+pub fun inet_addr(str cp) num;

@@ -1,0 +1,54 @@
+// System utilities (process, environment, and randomness).
+
+imp std.c.mem;
+
+// Read an environment variable.
+// 
+// Params:
+// - name: variable name
+// 
+// Returns:
+// - value string or null
+pub fun env(str name) str {
+  ret getenv(name);
+}
+
+// Exit the process with a status code.
+// 
+// Params:
+// - code: exit status
+pub fun sys_exit(num code) {
+  exit(code);
+}
+
+// Abort the process immediately.
+pub fun sys_abort() {
+  abort();
+}
+
+// Execute a command using the host shell.
+// 
+// Params:
+// - command: command string
+// 
+// Returns:
+// - implementation-defined status code
+pub fun sys_system(str command) num {
+  ret system(command);
+}
+
+// Seed the pseudo-random generator.
+// 
+// Params:
+// - seed: seed value
+pub fun rand_seed(num seed) {
+  srand(seed);
+}
+
+// Get the next pseudo-random number.
+// 
+// Returns:
+// - integer in 0..RAND_MAX
+pub fun rand_next() num {
+  ret rand();
+}

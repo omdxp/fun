@@ -1,0 +1,12 @@
+// Minimal HTTP server example (POSIX sockets).
+
+imp std.c.io;
+imp std.net;
+
+fun main() {
+  num port = 8080;
+  str body = "Hello from Fun\n";
+  printf("Listening on http://127.0.0.1:%lld\n", port);
+  // Blocks forever, serving the same response.
+  http_serve_forever(port, body);
+}

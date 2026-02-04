@@ -3826,6 +3826,31 @@ pub const ParseProcess = struct {
                     });
                 }
             }
+        } else if (mem.eql(u8, path, "std.c.net")) {
+            const names = [_][]const u8{
+                "socket",
+                "bind",
+                "listen",
+                "accept",
+                "recv",
+                "send",
+                "close",
+                "htons",
+                "htonl",
+                "ntohs",
+                "ntohl",
+                "inet_addr",
+            };
+            for (names) |name| {
+                if (self.transpile_proc.get_symbol(name) == null) {
+                    try self.transpile_proc.push_symbol(.{
+                        .type = symbol.SymbolType.NativeFunction,
+                        .name = name,
+                        .data = null,
+                        .symbol_table = null,
+                    });
+                }
+            }
         } else if (mem.eql(u8, path, "std.c.math")) {
             const names = [_][]const u8{
                 "sin",

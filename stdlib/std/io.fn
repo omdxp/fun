@@ -5,6 +5,50 @@ imp std.c.mem;
 imp std.c.def;
 imp std.string;
 
+// Print a string to stdout (no newline).
+// 
+// Params:
+// - s: string to print
+pub fun print(str s) {
+  printf("%s", s);
+}
+
+// Print a string to stdout with newline.
+// 
+// Params:
+// - s: string to print
+pub fun println(str s) {
+  puts(s);
+}
+
+// Print a number to stdout (no newline).
+// 
+// Params:
+// - n: number to print
+pub fun print_num(num n) {
+  printf("%lld", n);
+}
+
+// Print a decimal to stdout (no newline).
+// 
+// Params:
+// - d: decimal to print
+pub fun print_dec(dec d) {
+  printf("%f", d);
+}
+
+// Print a boolean to stdout (no newline).
+// 
+// Params:
+// - b: boolean to print
+pub fun print_bin(bin b) {
+  if b {
+    printf("true");
+  } else {
+    printf("false");
+  }
+}
+
 // File handle wrapper.
 // 
 // Fields:
@@ -96,8 +140,8 @@ pub fun read_all(str path) str {
   if f.handle == NULL {
     ret NULL;
   }
+  defer f.close();
   str out = f.read_all();
-  f.close();
   ret out;
 }
 
@@ -114,7 +158,7 @@ pub fun write_all(str path, str data) bin {
   if f.handle == NULL {
     ret false;
   }
+  defer f.close();
   bin ok = f.write(data);
-  f.close();
   ret ok;
 }

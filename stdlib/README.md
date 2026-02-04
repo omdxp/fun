@@ -23,7 +23,9 @@ Note: Fun is 64-bit by default (`num` → `int64_t`, `dec` → `double`).
 - **std/log.fn**: Simple logging with levels.
 - **std/map.fn**: String-keyed hash map.
 - **std/math.fn**: Math helpers.
-- **std/net.fn**: Basic URL parsing and HTTP GET builder.
+- **std/net.fn**: Basic URL parsing, HTTP GET builder, and POSIX TCP/HTTP helpers.
+- **std/c/net.fn**: POSIX socket bindings (sys/socket.h, netinet/in.h, arpa/inet.h, unistd.h).
+- **std/sys.fn**: Environment, process control, and randomness helpers.
 - **std/path.fn**: Path helpers (join/basename/dirname/extname).
 - **std/rand.fn**: Simple PRNG utilities.
 - **std/string.fn**: String helpers (len, trim, split, join, contains, etc.).

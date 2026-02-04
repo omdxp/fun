@@ -97,6 +97,12 @@
 - **Printf formats**: `num` is `int64_t` in C. Use `PRId64` (from `<inttypes.h>`) or cast to `long long` with `%lld` when printing.
 - **Compiler selection**: `fun` uses `zig cc` by default. Override with `FUN_CC` and optional `FUN_CC_ARGS`.
 
+### Standard Library Highlights
+- **std.io**: file helpers + `print`/`println`/`print_num`/`print_dec`/`print_bin`
+- **std.sys**: env access, process control (`sys_exit`, `sys_abort`, `sys_system`), and PRNG wrappers
+- **std.net**: URL parsing, HTTP GET builder, and a best-effort local HTTP server launcher
+    - Note: std.net TCP/HTTP helpers use POSIX sockets via `std.c.net`.
+
 ### Error Handling
 - **Type Checking**: Errors for type mismatches, e.g., assigning `str` to `num`.
 - **Undeclared Symbols**: Errors for using undeclared variables or functions.
