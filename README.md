@@ -15,6 +15,7 @@
   - [Installation](#installation)
   - [Release installers (bundles)](#release-installers-bundles)
   - [CLI Usage](#cli-usage)
+    - [C Compiler Selection](#c-compiler-selection)
   - [Quickstart](#quickstart)
   - [Examples](#examples)
   - [Documentation](#documentation)
@@ -24,6 +25,8 @@
   - [License](#license)
   - [IDE / Language Server (fls)](#ide--language-server-fls)
     - [VS Code](#vs-code)
+    - [Other Editors](#other-editors)
+    - [GitHub Syntax Highlighting](#github-syntax-highlighting)
   - [Installation](#installation-1)
     - [Prerequisites](#prerequisites)
     - [Build from Source](#build-from-source)
@@ -185,9 +188,8 @@ See [editors/README.md](editors/README.md) for Vim/Neovim, Emacs, JetBrains, and
 
 ### GitHub Syntax Highlighting
 
-This repo maps `.fn` files to C highlighting on GitHub via [/.gitattributes](.gitattributes).
+This repo maps `.fn` files to Zig highlighting on GitHub via [/.gitattributes](.gitattributes).
 For native Fun highlighting, submit a Fun definition + TextMate grammar to GitHub Linguist.
----
 
 ## Installation
 
