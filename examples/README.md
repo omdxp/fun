@@ -63,6 +63,7 @@ zig-out/bin/fls examples/<example>.fn
 - stdlib/net_url_parse.fn
 - stdlib/path_ops.fn
 - stdlib/rand_basic.fn
+- stdlib/result_basic.fn
 - stdlib/set_basic.fn
 - stdlib/string_helpers.fn
 - stdlib/string_parse_csv_line.fn

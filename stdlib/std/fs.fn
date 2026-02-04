@@ -2,7 +2,9 @@
 
 imp std.io;
 imp std.c.io;
+imp std.c.mem;
 imp std.c.def;
+imp std.vec;
 
 // File system helper container.
 pub compound Fs {
@@ -33,9 +35,40 @@ impl Fs {
     ret read_all(path);
   }
 
+  // Read up to max_len bytes into a string.
+  pub read_bytes(str path, num max_len) str {
+    if max_len <= 0 {
+      ret NULL;
+    }
+    FILE* h = fopen(path, "rb");
+    if h == NULL {
+      ret NULL;
+    }
+    defer fclose(h);
+    str buf = malloc(max_len + 1);
+    if buf == NULL {
+      ret NULL;
+    }
+    num read = fread(buf, 1, max_len, h);
+    buf[read] = '\0';
+    ret buf;
+  }
+
   // Write a string to a file.
   pub write_string(str path, str data) bin {
     ret write_all(path, data);
+  }
+
+  // Append a string to a file.
+  pub append_string(str path, str data) bin {
+    FILE* h = fopen(path, "ab");
+    if h == NULL {
+      ret false;
+    }
+    defer fclose(h);
+    num n = len(data);
+    num wrote = fwrite(data, 1, n, h);
+    ret wrote == n;
   }
 
   // Copy a file by reading into memory and writing out.
@@ -45,6 +78,50 @@ impl Fs {
       ret false;
     }
     ret write_all(dst, data);
+  }
+
+  // Get file size (bytes), or -1.
+  pub size(str path) num {
+    FILE* h = fopen(path, "rb");
+    if h == NULL {
+      ret -1;
+    }
+    defer fclose(h);
+    if fseek(h, 0, 2) != 0 {
+      ret -1;
+    }
+    num end = ftell(h);
+    if end < 0 {
+      ret -1;
+    }
+    ret end;
+  }
+
+  // Read all lines into a Vec<str>.
+  pub read_lines(str path, num max_len) Vec < str > {
+    Vec<str> out;
+    out.init(8);
+    FILE* h = fopen(path, "rb");
+    if h == NULL {
+      ret out;
+    }
+    defer fclose(h);
+    for true {
+      if max_len <= 1 {
+        break;
+      }
+      str buf = malloc(max_len);
+      if buf == NULL {
+        break;
+      }
+      str res = fgets(buf, max_len, h);
+      if res == NULL {
+        free(buf);
+        break;
+      }
+      out.push(buf);
+    }
+    ret out;
   }
 }
 
@@ -72,6 +149,19 @@ pub fun read_to_string(str path) str {
   ret f.read_to_string(path);
 }
 
+// Read up to max_len bytes into a string.
+// 
+// Params:
+// - path: file path
+// - max_len: maximum bytes to read
+// 
+// Returns:
+// - bytes string or null
+pub fun read_bytes(str path, num max_len) str {
+  Fs f = fs();
+  ret f.read_bytes(path, max_len);
+}
+
 // Write a string to a file.
 // 
 // Params:
@@ -85,6 +175,19 @@ pub fun write_string(str path, str data) bin {
   ret f.write_string(path, data);
 }
 
+// Append a string to a file.
+// 
+// Params:
+// - path: file path
+// - data: contents
+// 
+// Returns:
+// - true on success
+pub fun append_string(str path, str data) bin {
+  Fs f = fs();
+  ret f.append_string(path, data);
+}
+
 // Copy a file by reading into memory and writing out.
 // 
 // Params:
@@ -96,4 +199,29 @@ pub fun write_string(str path, str data) bin {
 pub fun copy_file(str src, str dst) bin {
   Fs f = fs();
   ret f.copy_file(src, dst);
+}
+
+// Get file size in bytes (or -1 on failure).
+// 
+// Params:
+// - path: file path
+// 
+// Returns:
+// - size in bytes
+pub fun size(str path) num {
+  Fs f = fs();
+  ret f.size(path);
+}
+
+// Read all lines into a Vec<str>.
+// 
+// Params:
+// - path: file path
+// - max_len: maximum line length
+// 
+// Returns:
+// - Vec<str> of lines (may be empty)
+pub fun read_lines(str path, num max_len) Vec<str> {
+  Fs f = fs();
+  ret f.read_lines(path, max_len);
 }

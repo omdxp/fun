@@ -13,6 +13,15 @@ pub compound JsonObject {
   Map<str> values;
 }
 
+// JSON array of strings.
+// 
+// Fields:
+// - values: vector of string values
+pub compound JsonArray {
+  // values: vector of string values
+  Vec<str> values;
+}
+
 // Create a new empty JSON object.
 // 
 // Returns:
@@ -23,15 +32,84 @@ pub fun json_object_init() JsonObject {
   ret o;
 }
 
+// Create a new empty JSON array.
+// 
+// Returns:
+// - JsonArray with empty vector
+pub fun json_array_init() JsonArray {
+  JsonArray a;
+  a.values.init(8);
+  ret a;
+}
+
+fun _append_escaped(StringBuilder* b, str s) {
+  num i = 0;
+  for s[i] != 0 {
+    chr c = s[i];
+    if c == '"' {
+      b.append_char('\\');
+      b.append_char('"');
+    } elif c == '\\' {
+      b.append_char('\\');
+      b.append_char('\\');
+    } elif c == '\n' {
+      b.append_char('\\');
+      b.append_char('n');
+    } elif c == '\0' {
+      b.append_char('\\');
+      b.append_char('r');
+    } elif c == '\t' {
+      b.append_char('\\');
+      b.append_char('t');
+    } else {
+      b.append_char(c);
+    }
+    i = i + 1;
+  }
+}
+
 impl JsonObject {
   // Get a value by key.
   pub get(str key) str {
     ret self.values.get(key);
   }
 
+  // Check if a key exists.
+  pub has(str key) bin {
+    ret self.values.has(key);
+  }
+
   // Set a string value by key.
   pub set(str key, str value) {
     self.values.put(key, value);
+  }
+
+  // Remove a key.
+  pub remove(str key) bin {
+    ret self.values.remove(key);
+  }
+
+  // Return all keys.
+  pub keys() Vec < str > {
+    Vec<str> out;
+    out.init(self.values.len());
+
+    MapEntry* entries = self.values.entries;
+    if entries == NULL {
+      ret out;
+    }
+
+    num i = 0;
+    for i < self.values.cap {
+      MapEntry item = entries[i];
+      if item.used {
+        if item.tomb == false {
+          out.push(item.key);
+        }
+      }
+      i = i + 1;
+    }
+    ret out;
   }
 
   // Free internal storage.
@@ -56,11 +134,11 @@ impl JsonObject {
             b.append(", ");
           }
           b.append_char('"');
-          b.append(item.key);
+          _append_escaped( &b, item.key);
           b.append_char('"');
           b.append(": ");
           b.append_char('"');
-          b.append(self.values.get(item.key));
+          _append_escaped( &b, self.values.get(item.key));
           b.append_char('"');
           added = added + 1;
         }
@@ -69,6 +147,38 @@ impl JsonObject {
     }
 
     b.append_char('}');
+    str out = b.build();
+    b.free();
+    ret out;
+  }
+}
+
+impl JsonArray {
+  // Append a string value.
+  pub push(str value) {
+    self.values.push(value);
+  }
+
+  // Free internal storage.
+  pub free() {
+    self.values.free();
+  }
+
+  // Serialize array to JSON (string values).
+  pub stringify() str {
+    StringBuilder b = string_builder_init(self.values.len() * 2 + 4);
+    b.append_char('[');
+    num i = 0;
+    for i < self.values.len {
+      if i > 0 {
+        b.append(", ");
+      }
+      b.append_char('"');
+      _append_escaped( &b, self.values.get(i));
+      b.append_char('"');
+      i = i + 1;
+    }
+    b.append_char(']');
     str out = b.build();
     b.free();
     ret out;
@@ -168,6 +278,37 @@ pub fun parse_object(str s) JsonObject {
   ret out;
 }
 
+// Parse a JSON array of string values.
+// 
+// Params:
+// - s: JSON array string
+// 
+// Returns:
+// - parsed JsonArray
+pub fun parse_array(str s) JsonArray {
+  JsonArray out = json_array_init();
+  num i = 0;
+  _skip_ws(s, &i);
+  if s[i] == '[' {
+    i = i + 1;
+  }
+
+  for s[i] != 0 {
+    _skip_ws(s, &i);
+    if s[i] == ']' {
+      break;
+    }
+    str value = _parse_value(s, &i);
+    out.push(value);
+    _skip_ws(s, &i);
+    if s[i] == ',' {
+      i = i + 1;
+    }
+  }
+
+  ret out;
+}
+
 // Serialize a JSON object.
 // 
 // Params:
@@ -177,4 +318,15 @@ pub fun parse_object(str s) JsonObject {
 // - JSON string
 pub fun stringify_object(JsonObject* obj) str {
   ret obj.stringify();
+}
+
+// Serialize a JSON array.
+// 
+// Params:
+// - arr: JSON array
+// 
+// Returns:
+// - JSON string
+pub fun stringify_array(JsonArray* arr) str {
+  ret arr.stringify();
 }

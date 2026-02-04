@@ -15,23 +15,25 @@ This directory contains standard library modules for the Fun language.
 
 Note: Fun is 64-bit by default (`num` → `int64_t`, `dec` → `double`).
 
-- **std/array.fn**: Fixed-size array helpers.
-- **std/cli.fn**: Command-line argument parsing helpers.
-- **std/fs.fn**: File system helpers built on C stdio.
-- **std/io.fn**: Simple buffered I/O helpers.
-- **std/json.fn**: Minimal JSON stringify utilities.
-- **std/log.fn**: Simple logging with levels.
-- **std/map.fn**: String-keyed hash map.
+- **std/array.fn**: Fixed-size array helpers (get/set/swap/reverse).
+- **std/cli.fn**: Command-line argument parsing helpers (long/short flags, bundling, `--` stop).
+- **std/fs.fn**: File system helpers (exists, read/write, copy, read_lines).
+- **std/io.fn**: File helpers (append, size, read bytes, read line, flush).
+- **std/json.fn**: JSON stringify/parse for string objects and arrays (with escaping, keys/has/remove).
+- **std/log.fn**: Logging with levels and typed log helpers.
+- **std/map.fn**: String-keyed hash map with keys and defaults.
 - **std/math.fn**: Math helpers.
 - **std/net.fn**: Basic URL parsing, HTTP GET builder, and POSIX TCP/HTTP helpers.
 - **std/c/net.fn**: POSIX socket bindings (sys/socket.h, netinet/in.h, arpa/inet.h, unistd.h).
 - **std/sys.fn**: Environment, process control, and randomness helpers.
-- **std/path.fn**: Path helpers (join/basename/dirname/extname).
-- **std/rand.fn**: Simple PRNG utilities.
-- **std/string.fn**: String helpers (len, trim, split, join, contains, etc.).
-- **std/time.fn**: Time helpers (epoch, formatting).
+- **std/path.fn**: Path helpers (join, join_many, basename, dirname, extname, strip_ext, change_ext, is_abs).
+- **std/rand.fn**: PRNG utilities (range_dec, chance, shuffle).
+- **std/string.fn**: String helpers (count, strip prefix/suffix, split lines, replace, case conversion, repeat, etc.).
+- **std/time.fn**: Time helpers (epoch, formatting, UTC, diffs).
 - **std/toml.fn**: Minimal TOML parse/stringify for flat key/value.
-- **std/vec.fn**: Dynamic vector helpers.
+- **std/vec.fn**: Dynamic vector helpers (reserve/insert/remove/pop/swap_remove/extend/resize/shrink_to_fit).
+- **std/error.fn**: Error value helpers (construct/check ok/err).
+- **std/result.fn**: Result containers for str/num/dec/bin with helpers.
 
 ### C signature modules (std/c/*)
 

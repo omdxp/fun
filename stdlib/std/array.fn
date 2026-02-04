@@ -13,6 +13,16 @@ pub compound Array<T> {
 }
 
 impl Array<T> {
+  // Get element at index.
+  pub get(num i) T {
+    ret self.data[i];
+  }
+
+  // Set element at index.
+  pub set(num i, T value) {
+    self.data[i] = value;
+  }
+
   // Fill array with a value.
   pub fill(T value) {
     num i = 0;
@@ -28,6 +38,27 @@ impl Array<T> {
     for i < len {
       self.data[i] = src[i];
       i = i + 1;
+    }
+  }
+
+  // Swap two elements.
+  pub swap(num i, num j) {
+    T tmp = self.data[i];
+    self.data[i] = self.data[j];
+    self.data[j] = tmp;
+  }
+
+  // Reverse the array in-place.
+  pub reverse() {
+    if self.len <= 1 {
+      ret;
+    }
+    num i = 0;
+    num j = self.len - 1;
+    for i < j {
+      self.swap(i, j);
+      i = i + 1;
+      j = j - 1;
     }
   }
 }

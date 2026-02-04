@@ -1,5 +1,7 @@
 // Simple PRNG.
 
+imp std.vec;
+
 // Pseudo-random number generator.
 // 
 // Fields:
@@ -46,6 +48,23 @@ impl Rand {
     dec v = self.next();
     ret v / 32768;
   }
+
+  // Random decimal in [min, max).
+  pub range_dec(dec min, dec max) dec {
+    dec v = self.next_dec();
+    ret min + (max - min) * v;
+  }
+
+  // True with probability p (0..1).
+  pub chance(dec p) bin {
+    if p <= 0 {
+      ret false;
+    }
+    if p >= 1 {
+      ret true;
+    }
+    ret self.next_dec() < p;
+  }
 }
 
 // C-style wrapper for next().
@@ -81,4 +100,67 @@ pub fun rand_range(Rand* r, num min, num max) num {
 // - random value in [0, 1)
 pub fun rand_dec(Rand* r) dec {
   ret r.next_dec();
+}
+
+// C-style wrapper for range_dec().
+// 
+// Params:
+// - r: generator
+// - min: lower bound
+// - max: upper bound
+// 
+// Returns:
+// - random value in range
+pub fun rand_range_dec(Rand* r, dec min, dec max) dec {
+  ret r.range_dec(min, max);
+}
+
+// C-style wrapper for chance().
+// 
+// Params:
+// - r: generator
+// - p: probability (0..1)
+// 
+// Returns:
+// - true with probability p
+pub fun rand_chance(Rand* r, dec p) bin {
+  ret r.chance(p);
+}
+
+// Shuffle a Vec<num> in-place.
+// 
+// Params:
+// - r: generator
+// - v: vector
+pub fun rand_shuffle_nums(Rand* r, Vec<num>*v) {
+  if v.len() <= 1 {
+    ret;
+  }
+  num i = v.len() - 1;
+  for i > 0 {
+    num j = r.range(0, i);
+    num tmp = v.data[i];
+    v.data[i] = v.data[j];
+    v.data[j] = tmp;
+    i = i - 1;
+  }
+}
+
+// Shuffle a Vec<str> in-place.
+// 
+// Params:
+// - r: generator
+// - v: vector
+pub fun rand_shuffle_strs(Rand* r, Vec<str>*v) {
+  if v.len() <= 1 {
+    ret;
+  }
+  num i = v.len() - 1;
+  for i > 0 {
+    num j = r.range(0, i);
+    str tmp = v.data[i];
+    v.data[i] = v.data[j];
+    v.data[j] = tmp;
+    i = i - 1;
+  }
 }

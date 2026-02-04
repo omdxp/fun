@@ -1,0 +1,33 @@
+// Result helpers example.
+
+imp std.c.io;
+imp std.result;
+
+fun main() {
+  Result<num> n = ok(42);
+  printf("n ok=%d val=%d\n", n.is_ok(), n.value);
+
+  Result<num> n2 = err(1, "bad", 0);
+  printf("n2 ok=%d val=%d def=%d\n", n2.is_ok(), n2.value, n2.unwrap_or(99));
+  if n2.is_err() {
+    printf("n2 err=%d %s\n", n2.err_code, n2.err_message);
+  }
+
+  Result<str> s = ok("hi");
+  printf("s=%s\n", s.unwrap_or("none"));
+
+  Result<str> s2 = err(2, "oops", "fallback");
+  printf("s2=%s\n", s2.unwrap_or("none"));
+
+  Result<dec> d = ok(3.14);
+  printf("d=%.2f\n", d.unwrap_or(0));
+
+  Result<bin> b = ok(true);
+  printf("b=%d\n", b.unwrap_or(false));
+
+  Result<num> m;
+  m.set_err(3, "manual", 0);
+  printf("m ok=%d\n", m.is_ok());
+  m.set_ok(7);
+  printf("m ok=%d val=%d\n", m.is_ok(), m.unwrap_or(0));
+}

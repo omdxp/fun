@@ -73,6 +73,16 @@ fun level_value(LogLevel level) num {
 }
 
 impl Logger {
+  // Set the minimum severity level.
+  pub set_level(LogLevel level) {
+    self.level = level;
+  }
+
+  // True if a level would be emitted.
+  pub enabled(LogLevel level) bin {
+    ret level_value(level) >= level_value(self.level);
+  }
+
   // Log if level is >= logger threshold.
   pub log(LogLevel level, str msg) {
     if level_value(level) >= level_value(self.level) {
@@ -98,6 +108,38 @@ impl Logger {
   // Convenience: error-level logging.
   pub error(str msg) {
     self.log(.Error, msg);
+  }
+
+  // Log a tagged message.
+  pub log_tag(LogLevel level, str tag, str msg) {
+    if level_value(level) >= level_value(self.level) {
+      printf("[%s] [%s] %s\n", level_name(level), tag, msg);
+    }
+  }
+
+  // Log a number value.
+  pub log_num(LogLevel level, str label, num value) {
+    if level_value(level) >= level_value(self.level) {
+      printf("[%s] %s=%lld\n", level_name(level), label, value);
+    }
+  }
+
+  // Log a decimal value.
+  pub log_dec(LogLevel level, str label, dec value) {
+    if level_value(level) >= level_value(self.level) {
+      printf("[%s] %s=%f\n", level_name(level), label, value);
+    }
+  }
+
+  // Log a boolean value.
+  pub log_bin(LogLevel level, str label, bin value) {
+    if level_value(level) >= level_value(self.level) {
+      if value {
+        printf("[%s] %s=true\n", level_name(level), label);
+      } else {
+        printf("[%s] %s=false\n", level_name(level), label);
+      }
+    }
   }
 }
 

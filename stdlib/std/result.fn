@@ -1,73 +1,64 @@
 // Result compounds for stdlib operations.
 
-imp std.error;
-
-// Result container for string-returning APIs.
+// Generic result container for stdlib operations.
 // 
 // Fields:
 // - ok: success flag
 // - value: return value
-// - err: error details
-pub compound ResultStr {
+// - err_code: error code
+// - err_message: error message
+pub compound Result<T> {
   // ok: success flag
   bin ok;
   // value: return value
-  str value;
-  // err: error details
-  Error err;
+  T value;
+  // err_code: error code
+  num err_code;
+  // err_message: error message
+  str err_message;
 }
 
-// Construct a successful string result.
-pub fun ok_str(str value) ResultStr {
-  ResultStr r;
-  r.ok = true;
-  r.value = value;
-  r.err.code = 0;
-  r.err.message = "";
+impl Result<T> {
+  pub is_ok() bin {
+    ret self.ok;
+  }
+
+  pub is_err() bin {
+    ret self.ok == false;
+  }
+
+  pub unwrap_or(T default_value) T {
+    if self.ok {
+      ret self.value;
+    }
+    ret default_value;
+  }
+
+  pub set_ok(T value) {
+    self.ok = true;
+    self.value = value;
+    self.err_code = 0;
+    self.err_message = "";
+  }
+
+  pub set_err(num code, str message, T default_value) {
+    self.ok = false;
+    self.value = default_value;
+    self.err_code = code;
+    self.err_message = message;
+  }
+}
+
+// Construct a successful generic result.
+pub fun ok<T> (T value) Result<T> {
+  Result<T> r;
+  r.set_ok(value);
   ret r;
 }
 
-// Construct an error string result.
-pub fun err_str(num code, str message) ResultStr {
-  ResultStr r;
-  r.ok = false;
-  r.value = NULL;
-  r.err.code = code;
-  r.err.message = message;
-  ret r;
-}
-
-// Result container for numeric-returning APIs.
-// 
-// Fields:
-// - ok: success flag
-// - value: return value
-// - err: error details
-pub compound ResultNum {
-  // ok: success flag
-  bin ok;
-  // value: return value
-  num value;
-  // err: error details
-  Error err;
-}
-
-// Construct a successful numeric result.
-pub fun ok_num(num value) ResultNum {
-  ResultNum r;
-  r.ok = true;
-  r.value = value;
-  r.err.code = 0;
-  r.err.message = "";
-  ret r;
-}
-
-// Construct an error numeric result.
-pub fun err_num(num code, str message) ResultNum {
-  ResultNum r;
-  r.ok = false;
-  r.value = 0;
-  r.err.code = code;
-  r.err.message = message;
+// Construct an error generic result.
+pub fun err<T> (num code, str message, T default_value) Result<T> {
+  Result<T> r;
+  r.set_err(code, message, default_value);
   ret r;
 }

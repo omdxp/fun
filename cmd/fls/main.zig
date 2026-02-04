@@ -7817,11 +7817,32 @@ fn collectSymbolsFromTopLevel(allocator: Allocator, out: *std.ArrayList(SymbolLi
 fn formatFunctionSignature(allocator: Allocator, name: []const u8, fnv: anytype) ![]u8 {
     var buf = std.ArrayList(u8).init(allocator);
     errdefer buf.deinit();
-    try buf.writer().print("fun {s}(", .{name});
+    try buf.writer().print("fun {s}", .{name});
+
+    if (@hasField(@TypeOf(fnv), "type_params")) {
+        if (fnv.type_params) |params| {
+            try buf.append('<');
+            for (params.items(), 0..) |p, i| {
+                if (i != 0) try buf.appendSlice(", ");
+                try buf.appendSlice(p.items);
+            }
+            try buf.append('>');
+        }
+    }
+
+    try buf.append('(');
 
     const appendDType = struct {
         fn call(out_buf: *std.ArrayList(u8), dt: anytype) !void {
             try out_buf.appendSlice(dt.type_str.items);
+            if (dt.generic_args) |gargs| {
+                try out_buf.append('<');
+                for (gargs.items(), 0..) |ga, i| {
+                    if (i != 0) try out_buf.appendSlice(", ");
+                    try call(out_buf, ga.*);
+                }
+                try out_buf.append('>');
+            }
             var i: usize = 0;
             while (i < dt.pointer_depth) : (i += 1) {
                 try out_buf.append('*');

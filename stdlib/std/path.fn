@@ -3,6 +3,7 @@
 imp std.c.mem;
 imp std.c.def;
 imp std.string;
+imp std.vec;
 
 // Path wrapper.
 // 
@@ -45,6 +46,11 @@ impl Path {
   // File extension of the path.
   pub extname() str {
     ret extname(self.value);
+  }
+
+  // True if path is absolute (posix).
+  pub is_abs() bin {
+    ret is_abs(self.value);
   }
 }
 
@@ -109,6 +115,40 @@ pub fun path_join(str a, str b) str {
 
   out[pos] = '\0';
   ret out;
+}
+
+// Join multiple segments.
+// 
+// Params:
+// - parts: vector of path parts
+// 
+// Returns:
+// - joined path
+pub fun path_join_many(Vec<str>*parts) str {
+  if parts.len() == 0 {
+    ret "";
+  }
+  str out = parts.get(0);
+  num i = 1;
+  for i < parts.len() {
+    out = path_join(out, parts.get(i));
+    i = i + 1;
+  }
+  ret out;
+}
+
+// True if path is absolute (posix).
+// 
+// Params:
+// - path: path string
+// 
+// Returns:
+// - true if absolute
+pub fun is_abs(str path) bin {
+  if len(path) == 0 {
+    ret false;
+  }
+  ret path[0] == '/';
 }
 
 // Base name of a path.
@@ -200,4 +240,68 @@ pub fun extname(str path) str {
     }
   }
   ret substr(path, last_dot, path_len - last_dot);
+}
+
+// Strip extension from a path.
+// 
+// Params:
+// - path: path string
+// 
+// Returns:
+// - path without extension
+pub fun strip_ext(str path) str {
+  str ext = extname(path);
+  if len(ext) == 0 {
+    ret substr(path, 0, len(path));
+  }
+  num plen = len(path);
+  num elen = len(ext);
+  ret substr(path, 0, plen - elen);
+}
+
+// Change or add an extension.
+// 
+// Params:
+// - path: path string
+// - new_ext: new extension (with or without leading dot)
+// 
+// Returns:
+// - path with new extension
+pub fun change_ext(str path, str new_ext) str {
+  str base = strip_ext(path);
+  if len(new_ext) == 0 {
+    ret base;
+  }
+  num base_len = len(base);
+  num ext_len = len(new_ext);
+  bin has_dot = new_ext[0] == '.';
+  num extra = 0;
+  if has_dot == false {
+    extra = 1;
+  }
+
+  str out = malloc(base_len + ext_len + extra + 1);
+  if out == NULL {
+    ret NULL;
+  }
+
+  num i = 0;
+  num pos = 0;
+  for i < base_len {
+    out[pos] = base[i];
+    pos = pos + 1;
+    i = i + 1;
+  }
+  if has_dot == false {
+    out[pos] = '.';
+    pos = pos + 1;
+  }
+  i = 0;
+  for i < ext_len {
+    out[pos] = new_ext[i];
+    pos = pos + 1;
+    i = i + 1;
+  }
+  out[pos] = '\0';
+  ret out;
 }

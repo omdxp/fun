@@ -5,6 +5,7 @@ imp std.c.string;
 imp std.c.def;
 imp std.quirks;
 imp std.string;
+imp std.vec;
 
 // Internal map entry (key/value pointer + flags).
 // 
@@ -70,6 +71,11 @@ impl Map<T> Sized {
   pub is_empty() bin {
     ret self.len == 0;
   }
+
+  // Current capacity.
+  pub capacity() num {
+    ret self.cap;
+  }
 }
 
 impl Map<T> {
@@ -84,6 +90,20 @@ impl Map<T> {
       cap = 8;
     }
     self.alloc(cap);
+  }
+
+  // Ensure capacity is at least min_cap.
+  pub reserve(num min_cap) {
+    if min_cap < 8 {
+      min_cap = 8;
+    }
+    if self.cap == 0 {
+      self.alloc(min_cap);
+      ret;
+    }
+    if min_cap > self.cap {
+      self.rehash(min_cap);
+    }
   }
 
   // Allocate backing storage.
@@ -225,6 +245,43 @@ impl Map<T> {
     ret self.zero_value();
   }
 
+  // Get a value by key or a fallback value if missing.
+  pub get_or(str key, T fallback) T {
+    if self.has(key) != false {
+      ret self.get(key);
+    }
+    ret fallback;
+  }
+
+  // Try to get a value by key; writes to out and returns true on success.
+  pub try_get(str key, T* out) bin {
+    if self.cap == 0 {
+      ret false;
+    }
+
+    num idx = _hash_str(key) % self.cap;
+    num steps = 0;
+    for steps < self.cap {
+      MapEntry entry = self.entries[idx];
+      if entry.used == false {
+        ret false;
+      }
+      if entry.tomb == false {
+        if equals(entry.key, key) != false {
+          if entry.value != NULL {
+            memcpy(out, entry.value, self.value_size);
+            ret true;
+          }
+          ret false;
+        }
+      }
+      idx = idx + 1;
+      idx = idx % self.cap;
+      steps = steps + 1;
+    }
+    ret false;
+  }
+
   // Insert or update a value by key.
   pub put(str key, T value) {
     if self.cap == 0 {
@@ -272,6 +329,15 @@ impl Map<T> {
       idx = idx % self.cap;
       steps = steps + 1;
     }
+  }
+
+  // Insert only if missing; returns true if inserted.
+  pub put_if_absent(str key, T value) bin {
+    if self.has(key) != false {
+      ret false;
+    }
+    self.put(key, value);
+    ret true;
   }
 
   // Remove a key; returns true if removed.
@@ -325,4 +391,26 @@ impl Map<T> {
     }
     self.len = 0;
   }
+
+  // Return all keys as a Vec<str>.
+  pub keys() Vec < str > {
+    Vec<str> out;
+    out.init(self.len);
+    if self.entries == NULL {
+      ret out;
+    }
+
+    num i = 0;
+    for i < self.cap {
+      MapEntry entry = self.entries[i];
+      if entry.used != false {
+        if entry.tomb == false {
+          out.push(entry.key);
+        }
+      }
+      i = i + 1;
+    }
+    ret out;
+  }
+
 }

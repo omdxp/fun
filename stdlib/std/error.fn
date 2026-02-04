@@ -11,3 +11,29 @@ pub compound Error {
   // message: human-readable message
   str message;
 }
+
+// Create a new error value.
+pub fun error_new(num code, str message) Error {
+  Error e;
+  e.code = code;
+  e.message = message;
+  ret e;
+}
+
+// Create an OK (no-error) value.
+pub fun error_ok() Error {
+  Error e;
+  e.code = 0;
+  e.message = "";
+  ret e;
+}
+
+// True when error code is zero.
+pub fun error_is_ok(Error* e) bin {
+  ret e.code == 0;
+}
+
+// True when error code is non-zero.
+pub fun error_is_err(Error* e) bin {
+  ret e.code != 0;
+}

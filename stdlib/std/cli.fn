@@ -57,6 +57,90 @@ pub fun cli_parse(str[] args) CliArgs {
   ret out;
 }
 
+// Parse argv with extended rules:
+// - supports --key value
+// - supports -k value
+// - supports -abc (bundled short flags)
+// - supports -- to end option parsing
+pub fun cli_parse_ext(str[] args) CliArgs {
+  CliArgs out;
+  out.opts.init(8);
+  out.positionals.init(8);
+
+  num i = 1;
+  bin end_opts = false;
+  for args[i] != 0 {
+    str arg = args[i];
+
+    if end_opts {
+      out.positionals.push(arg);
+      i = i + 1;
+      continue;
+    }
+
+    if arg == "--" {
+      end_opts = true;
+      i = i + 1;
+      continue;
+    }
+
+    if arg[0] == '-' {
+      if arg[1] == '-' {
+        // --key or --key=value or --key value
+        num eq_idx = index_of_char(arg, '=');
+        if eq_idx == -1 {
+          str key = substr(arg, 2, len(arg) - 2);
+          if args[i + 1] != 0 {
+            if args[i + 1][0] != '-' {
+              out.opts.put(key, args[i + 1]);
+              i = i + 2;
+              continue;
+            }
+          }
+          out.opts.put(key, "1");
+        } else {
+          num key_len = eq_idx - 2;
+          str key = substr(arg, 2, key_len);
+          str val = substr(arg, eq_idx + 1, len(arg) - (eq_idx + 1));
+          out.opts.put(key, val);
+        }
+      } else {
+        // -k or -k=value or -abc or -k value
+        num eq_idx = index_of_char(arg, '=');
+        if eq_idx != -1 {
+          str key = substr(arg, 1, eq_idx - 1);
+          str val = substr(arg, eq_idx + 1, len(arg) - (eq_idx + 1));
+          out.opts.put(key, val);
+        } else {
+          if len(arg) == 2 {
+            str key = substr(arg, 1, 1);
+            if args[i + 1] != 0 {
+              if args[i + 1][0] != '-' {
+                out.opts.put(key, args[i + 1]);
+                i = i + 2;
+                continue;
+              }
+            }
+            out.opts.put(key, "1");
+          } else {
+            num j = 1;
+            for j < len(arg) {
+              str key = substr(arg, j, 1);
+              out.opts.put(key, "1");
+              j = j + 1;
+            }
+          }
+        }
+      }
+    } else {
+      out.positionals.push(arg);
+    }
+    i = i + 1;
+  }
+
+  ret out;
+}
+
 impl CliArgs Sized {
   // Number of positional arguments.
   pub len() num {
@@ -78,6 +162,14 @@ impl CliArgs {
   // Get an option value.
   pub get(str key) str {
     ret self.opts.get(key);
+  }
+
+  // Get an option value or default if missing.
+  pub get_or(str key, str default_value) str {
+    if self.opts.has(key) {
+      ret self.opts.get(key);
+    }
+    ret default_value;
   }
 
   // Read a positional argument by index.

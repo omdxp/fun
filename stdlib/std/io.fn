@@ -4,6 +4,7 @@ imp std.c.io;
 imp std.c.mem;
 imp std.c.def;
 imp std.string;
+imp std.vec;
 
 // Print a string to stdout (no newline).
 // 
@@ -84,6 +85,19 @@ pub fun open_write(str path) File {
   ret f;
 }
 
+// Open file for appending (binary).
+// 
+// Params:
+// - path: file path
+// 
+// Returns:
+// - File with handle set (null on failure)
+pub fun open_append(str path) File {
+  File f;
+  f.handle = fopen(path, "ab");
+  ret f;
+}
+
 impl File {
   // Close the file handle.
   pub close() {
@@ -115,6 +129,132 @@ impl File {
     num read = fread(buf, 1, size, self.handle);
     buf[read] = '\0';
     ret buf;
+  }
+
+  // Read up to max_len bytes (binary-safe). Returns allocated buffer (NUL-terminated).
+  pub read_bytes(num max_len) str {
+    if self.handle == NULL {
+      ret NULL;
+    }
+    if max_len <= 0 {
+      ret NULL;
+    }
+    str buf = malloc(max_len + 1);
+    if buf == NULL {
+      ret NULL;
+    }
+    num read = fread(buf, 1, max_len, self.handle);
+    buf[read] = '\0';
+    ret buf;
+  }
+
+  // Read a line up to max_len (including newline if present).
+  pub read_line_max(num max_len) str {
+    if self.handle == NULL {
+      ret NULL;
+    }
+    if max_len <= 1 {
+      ret NULL;
+    }
+    str buf = malloc(max_len);
+    if buf == NULL {
+      ret NULL;
+    }
+    str res = fgets(buf, max_len, self.handle);
+    if res == NULL {
+      free(buf);
+      ret NULL;
+    }
+    ret buf;
+  }
+
+  // Read all lines (up to max_len per line).
+  pub read_lines(num max_len) Vec < str > {
+    Vec<str> out;
+    out.init(8);
+    if self.handle == NULL {
+      ret out;
+    }
+    for true {
+      str line = self.read_line_max(max_len);
+      if line == NULL {
+        break;
+      }
+      out.push(line);
+    }
+    ret out;
+  }
+
+  // Write raw bytes to the file.
+  pub write_bytes(raw* data, num len) bin {
+    if self.handle == NULL {
+      ret false;
+    }
+    if data == NULL {
+      ret false;
+    }
+    num wrote = fwrite(data, 1, len, self.handle);
+    ret wrote == len;
+  }
+
+  // Read raw bytes into a buffer; returns bytes read.
+  pub read_into(raw* dst, num len) num {
+    if self.handle == NULL {
+      ret 0;
+    }
+    if dst == NULL {
+      ret 0;
+    }
+    ret fread(dst, 1, len, self.handle);
+  }
+
+  // Seek within the file (whence: 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END).
+  pub seek(num offset, num whence) bin {
+    if self.handle == NULL {
+      ret false;
+    }
+    ret fseek(self.handle, offset, whence) == 0;
+  }
+
+  // Tell current file position.
+  pub tell() num {
+    if self.handle == NULL {
+      ret -1;
+    }
+    ret ftell(self.handle);
+  }
+
+  // Rewind to start of file.
+  pub rewind() {
+    if self.handle == NULL {
+      ret;
+    }
+    rewind(self.handle);
+  }
+
+  // Flush buffered output.
+  pub flush() bin {
+    if self.handle == NULL {
+      ret false;
+    }
+    ret fflush(self.handle) == 0;
+  }
+
+  // Get file size (best-effort; returns -1 on failure).
+  pub size() num {
+    if self.handle == NULL {
+      ret -1;
+    }
+    num cur = ftell(self.handle);
+    if cur < 0 {
+      ret -1;
+    }
+    if fseek(self.handle, 0, 2) != 0 {
+      ret -1;
+    }
+    num end = ftell(self.handle);
+    fseek(self.handle, cur, 0);
+    ret end;
   }
 
   // Write a string to the file.

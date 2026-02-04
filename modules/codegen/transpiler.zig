@@ -268,6 +268,13 @@ pub const TranspileProcess = struct {
     forced_generic_instantiations: std.ArrayList(*const dtype.DataType),
     forced_generic_instantiation_keys: std.StringHashMap(bool),
 
+    /// Forced generic function instantiations discovered during typecheck.
+    generic_fn_instantiations: std.ArrayList(GenericFnInstantiation),
+    generic_fn_instantiation_keys: std.StringHashMap(bool),
+
+    /// Call-site overrides for generic function names (keyed by position).
+    generic_call_overrides: std.StringHashMap([]const u8),
+
     /// Import chain to detect circular dependencies
     import_chain: std.ArrayList([]const u8),
 
@@ -853,6 +860,162 @@ pub const TranspileProcess = struct {
         }
         root.forced_generic_instantiation_keys.put(key, true) catch return TranspileError.MemoryAllocationFailed;
         root.forced_generic_instantiations.append(dt) catch return TranspileError.MemoryAllocationFailed;
+    }
+
+    fn call_pos_key_alloc(self: *Self, p: token.Pos) TranspileError![]const u8 {
+        const end_line = if (p.end_line == 0) p.line else p.end_line;
+        return std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}:{d}:{d}", .{ p.filename, p.line, p.start_col, end_line, p.end_col }) catch {
+            return TranspileError.MemoryAllocationFailed;
+        };
+    }
+
+    fn call_pos_key_buf(p: token.Pos, buf: []u8) ?[]const u8 {
+        const end_line = if (p.end_line == 0) p.line else p.end_line;
+        return std.fmt.bufPrint(buf, "{s}:{d}:{d}:{d}:{d}", .{ p.filename, p.line, p.start_col, end_line, p.end_col }) catch null;
+    }
+
+    fn lookup_generic_call_override(self: *Self, node: ast.Node) ?[]const u8 {
+        const p = node.pos orelse return null;
+        var buf: [512]u8 = undefined;
+        const key = call_pos_key_buf(p, &buf) orelse return null;
+        return self.generic_call_overrides.get(key);
+    }
+
+    fn base_type_name(t: CheckedType) ?[]const u8 {
+        if (t.base == .Unknown) return t.name;
+        return switch (t.base) {
+            .Void => "void",
+            .Raw => "raw",
+            .Chr => "chr",
+            .Str => "str",
+            .Dec => "dec",
+            .Num => "num",
+            .Bin => "bin",
+            .Unknown => null,
+        };
+    }
+
+    fn checked_type_to_dtype(self: *Self, t: CheckedType) TranspileError!?*dtype.DataType {
+        if (t.dtype_ref) |dt| return @constCast(dt);
+        const name = base_type_name(t) orelse return null;
+        const out = self.allocator.create(dtype.DataType) catch {
+            return TranspileError.MemoryAllocationFailed;
+        };
+        out.* = .{
+            .flags = null,
+            .type = t.base,
+            .type_str = std.ArrayList(u8).init(self.allocator),
+            .pointer_depth = t.pointer_depth,
+            .array = null,
+            .generic_args = null,
+        };
+        if (t.is_array) {
+            var flags = out.flags orelse dtype.DataTypeFlags{};
+            flags.is_array = true;
+            out.flags = flags;
+        }
+        out.type_str.appendSlice(name) catch return TranspileError.MemoryAllocationFailed;
+        return out;
+    }
+
+    fn clone_dtype_with_ptr_adjust(self: *Self, dt: *const dtype.DataType, new_ptr_depth: usize) TranspileError!*dtype.DataType {
+        const out = self.allocator.create(dtype.DataType) catch {
+            return TranspileError.MemoryAllocationFailed;
+        };
+        out.* = dt.*;
+        out.pointer_depth = new_ptr_depth;
+        if (new_ptr_depth > 0) {
+            var flags = out.flags orelse dtype.DataTypeFlags{};
+            flags.is_pointer = true;
+            out.flags = flags;
+        }
+        out.type_str = std.ArrayList(u8).init(self.allocator);
+        out.type_str.appendSlice(dt.type_str.items) catch return TranspileError.MemoryAllocationFailed;
+        return out;
+    }
+
+    fn dtype_equiv(a: *const dtype.DataType, b: *const dtype.DataType) bool {
+        if (a.pointer_depth != b.pointer_depth) return false;
+        if ((a.flags != null and a.flags.?.is_array) != (b.flags != null and b.flags.?.is_array)) return false;
+        const a_name = a.type_str.items;
+        const b_name = b.type_str.items;
+        if (!mem.eql(u8, a_name, b_name)) return false;
+        if ((a.generic_args == null) != (b.generic_args == null)) return false;
+        if (a.generic_args) |ag| {
+            const bg = b.generic_args.?.items();
+            if (ag.items().len != bg.len) return false;
+            for (ag.items(), 0..) |ga, i| {
+                if (!dtype_equiv(ga, bg[i])) return false;
+            }
+        }
+        return true;
+    }
+
+    fn bind_generic_param(self: *Self, expected: *const dtype.DataType, actual: *const dtype.DataType, params: *const utils.Vector(std.ArrayList(u8)), out: *std.StringHashMap(*dtype.DataType)) TranspileError!bool {
+        // Type param match.
+        if ((expected.type == null or expected.type == .Unknown) and expected.type_str.items.len > 0) {
+            for (params.items()) |p| {
+                if (mem.eql(u8, p.items, expected.type_str.items)) {
+                    if (actual.pointer_depth < expected.pointer_depth) return false;
+                    const adj_ptr = actual.pointer_depth - expected.pointer_depth;
+                    const adj = if (expected.pointer_depth == 0) @constCast(actual) else try self.clone_dtype_with_ptr_adjust(actual, adj_ptr);
+                    if (out.get(p.items)) |existing| {
+                        if (!dtype_equiv(existing, adj)) return false;
+                    } else {
+                        out.put(p.items, adj) catch return TranspileError.MemoryAllocationFailed;
+                    }
+                    return true;
+                }
+            }
+        }
+
+        // Non-param: ensure base matches.
+        if (expected.pointer_depth != actual.pointer_depth) return false;
+        if ((expected.flags != null and expected.flags.?.is_array) != (actual.flags != null and actual.flags.?.is_array)) return false;
+        if (expected.type != null and expected.type != .Unknown) {
+            if (expected.type != actual.type) return false;
+        } else {
+            if (!mem.eql(u8, expected.type_str.items, actual.type_str.items)) return false;
+        }
+
+        if (expected.generic_args) |eg| {
+            const ag = actual.generic_args orelse return false;
+            if (eg.items().len != ag.items().len) return false;
+            for (eg.items(), 0..) |egv, i| {
+                if (!(try self.bind_generic_param(egv, ag.items()[i], params, out))) return false;
+            }
+        }
+        return true;
+    }
+
+    fn mangle_generic_fn_name(self: *Self, fname: []const u8, gargs: []*dtype.DataType) TranspileError![]const u8 {
+        var buf = std.ArrayList(u8).init(self.allocator);
+        errdefer buf.deinit();
+        buf.appendSlice(fname) catch return TranspileError.MemoryAllocationFailed;
+        for (gargs) |ga| {
+            buf.appendSlice("__") catch return TranspileError.MemoryAllocationFailed;
+            try self.append_mangled_type(&buf, ga);
+        }
+        return buf.toOwnedSlice() catch return TranspileError.MemoryAllocationFailed;
+    }
+
+    fn register_generic_fn_instantiation(self: *Self, fn_node: *ast.Node, params: *const utils.Vector(std.ArrayList(u8)), gargs: []*dtype.DataType, name: []const u8) TranspileError!void {
+        const root = self.get_root();
+        var key_buf = std.ArrayList(u8).init(self.allocator);
+        defer key_buf.deinit();
+        key_buf.appendSlice(name) catch return TranspileError.MemoryAllocationFailed;
+        const key = key_buf.toOwnedSlice() catch return TranspileError.MemoryAllocationFailed;
+        if (root.generic_fn_instantiation_keys.contains(key)) {
+            self.allocator.free(key);
+            return;
+        }
+        root.generic_fn_instantiation_keys.put(key, true) catch return TranspileError.MemoryAllocationFailed;
+        root.generic_fn_instantiations.append(.{
+            .fn_node = fn_node,
+            .params = params,
+            .args = gargs,
+            .name = name,
+        }) catch return TranspileError.MemoryAllocationFailed;
     }
 
     fn append_quirk_method_stub_sig(self: *Self, buf: *std.ArrayList(u8), m: ast.QuirkMethodSig) TranspileError!void {
@@ -1507,6 +1670,9 @@ pub const TranspileProcess = struct {
             .std_imports = std.ArrayList([]const u8).init(a),
             .forced_generic_instantiations = std.ArrayList(*const dtype.DataType).init(a),
             .forced_generic_instantiation_keys = std.StringHashMap(bool).init(a),
+            .generic_fn_instantiations = std.ArrayList(GenericFnInstantiation).init(a),
+            .generic_fn_instantiation_keys = std.StringHashMap(bool).init(a),
+            .generic_call_overrides = std.StringHashMap([]const u8).init(a),
             .input_file_path = input_file_path,
             .stdlib_dir = discovered_stdlib_dir,
         };
@@ -1772,6 +1938,14 @@ pub const TranspileProcess = struct {
         rtype: CheckedType,
         args: []CheckedType,
         is_variadic: bool = false,
+        type_params: ?*const utils.Vector(std.ArrayList(u8)) = null,
+    };
+
+    const GenericFnInstantiation = struct {
+        fn_node: *ast.Node,
+        params: *const utils.Vector(std.ArrayList(u8)),
+        args: []*dtype.DataType,
+        name: []const u8,
     };
 
     const TypeEnv = struct {
@@ -2719,9 +2893,12 @@ pub const TranspileProcess = struct {
                     var plain_method_sig: ?FnSig = null;
                     var plain_method_name: ?[]const u8 = null;
                     var skip_signature_typecheck: bool = false;
+                    var handled_generic_call: bool = false;
+                    var callee_name: ?[]const u8 = null;
 
                     if (callee.type == .Identifier and callee.data != null) {
                         const fname = callee.data.?.sval.items;
+                        callee_name = fname;
 
                         // Builtin: `sizeof(Type)`.
                         if (mem.eql(u8, fname, "sizeof")) {
@@ -2967,6 +3144,105 @@ pub const TranspileProcess = struct {
                         for (args_nodes.items) |arg_node| {
                             _ = try self.infer_expr_type(arg_node.*, env, fns);
                         }
+                        return call_rtype;
+                    }
+
+                    // Generic function call inference.
+                    if (callee_name != null) {
+                        const fn_node = self.find_function_node(callee_name.?) orelse null;
+                        if (fn_node != null and fn_node.?.node_variant != null and fn_node.?.node_variant.?.function.type_params != null) {
+                            const fnv = fn_node.?.node_variant.?.function;
+                            const params = fnv.type_params.?;
+
+                            // Infer type arguments from call arguments.
+                            var bindings = std.StringHashMap(*dtype.DataType).init(self.allocator);
+                            defer bindings.deinit();
+
+                            const expected_items = if (fnv.args) |args| args.items() else &[_]*ast.Node{};
+                            const fixed_len = expected_items.len;
+
+                            if (!fnv.is_variadic and args_nodes.items.len != fixed_len) {
+                                self.report_type_error(node, "function '{s}' expects {d} args, got {d}", .{ callee_name.?, fixed_len, args_nodes.items.len });
+                                return TranspileError.WrongArgCount;
+                            }
+                            if (fnv.is_variadic and args_nodes.items.len < fixed_len) {
+                                self.report_type_error(node, "function '{s}' expects at least {d} args, got {d}", .{ callee_name.?, fixed_len, args_nodes.items.len });
+                                return TranspileError.WrongArgCount;
+                            }
+
+                            var idx: usize = 0;
+                            while (idx < args_nodes.items.len and idx < fixed_len) : (idx += 1) {
+                                const arg_node = args_nodes.items[idx];
+                                const expected_node = expected_items[idx];
+                                if (expected_node.type != .Variable or expected_node.node_variant == null) continue;
+                                const expected_dt = expected_node.node_variant.?.variable.type;
+
+                                const actual_ct = try self.infer_expr_type(arg_node.*, env, fns);
+                                const actual_dt = (try self.checked_type_to_dtype(actual_ct)) orelse {
+                                    self.report_type_error(node, "cannot infer generic argument from value", .{});
+                                    return TranspileError.TypeMismatch;
+                                };
+
+                                const ok = try self.bind_generic_param(expected_dt, actual_dt, &params, &bindings);
+                                if (!ok) {
+                                    self.report_type_error(node, "type mismatch in call to '{s}' argument {d}", .{ callee_name.?, idx + 1 });
+                                    return TranspileError.TypeMismatch;
+                                }
+                            }
+
+                            // Ensure all params are bound.
+                            var gargs = self.allocator.alloc(*dtype.DataType, params.count) catch {
+                                return TranspileError.MemoryAllocationFailed;
+                            };
+                            var pi: usize = 0;
+                            for (params.items()) |p| {
+                                if (bindings.get(p.items)) |dt_ptr| {
+                                    gargs[pi] = dt_ptr;
+                                } else {
+                                    self.report_type_error(node, "cannot infer generic parameter '{s}' for '{s}'", .{ p.items, callee_name.? });
+                                    return TranspileError.TypeMismatch;
+                                }
+                                pi += 1;
+                            }
+
+                            // Typecheck args against substituted signature.
+                            idx = 0;
+                            while (idx < args_nodes.items.len and idx < fixed_len) : (idx += 1) {
+                                const expected_node = expected_items[idx];
+                                if (expected_node.type != .Variable or expected_node.node_variant == null) continue;
+                                const expected_dt = expected_node.node_variant.?.variable.type;
+                                const expected_t = try self.type_from_dtype_with_subst(expected_dt, params, gargs);
+                                const actual_t = try self.infer_expr_type(args_nodes.items[idx].*, env, fns);
+                                if (is_known_type(expected_t) and is_known_type(actual_t) and !(try self.can_implicit_coerce(expected_t, actual_t))) {
+                                    self.report_type_error(node, "type mismatch in call to '{s}' argument {d}", .{ callee_name.?, idx + 1 });
+                                    return TranspileError.TypeMismatch;
+                                }
+                            }
+
+                            // Compute specialized return type.
+                            if (fnv.rtype) |rt| {
+                                call_rtype = try self.type_from_dtype_with_subst(&rt, params, gargs);
+                            } else {
+                                call_rtype = .{ .base = .Void };
+                            }
+
+                            // Register instantiation and call override for codegen.
+                            const spec_name = try self.mangle_generic_fn_name(callee_name.?, gargs);
+                            try self.register_generic_fn_instantiation(fn_node.?, &params, gargs, spec_name);
+                            if (node.pos) |p| {
+                                const key = try self.call_pos_key_alloc(p);
+                                if (!self.generic_call_overrides.contains(key)) {
+                                    self.generic_call_overrides.put(key, spec_name) catch return TranspileError.MemoryAllocationFailed;
+                                } else {
+                                    self.allocator.free(key);
+                                }
+                            }
+
+                            handled_generic_call = true;
+                        }
+                    }
+
+                    if (handled_generic_call) {
                         return call_rtype;
                     }
 
@@ -3596,6 +3872,7 @@ pub const TranspileProcess = struct {
                 .rtype = if (fnv.rtype) |rt| try self.type_from_dtype_with_mangled(&rt) else .{ .base = .Void },
                 .args = args_slice,
                 .is_variadic = fnv.is_variadic,
+                .type_params = if (fnv.type_params) |*params| params else null,
             }) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
@@ -3672,6 +3949,7 @@ pub const TranspileProcess = struct {
                             .rtype = if (fnv.rtype) |rt| try self.type_from_dtype_with_subst(&rt, params.*, gargs) else .{ .base = .Void },
                             .args = args_slice,
                             .is_variadic = fnv.is_variadic,
+                            .type_params = null,
                         }) catch {
                             return TranspileError.MemoryAllocationFailed;
                         };
@@ -3713,6 +3991,7 @@ pub const TranspileProcess = struct {
                     .rtype = if (fnv.rtype) |rt| try self.type_from_dtype_with_mangled(&rt) else .{ .base = .Void },
                     .args = args_slice,
                     .is_variadic = fnv.is_variadic,
+                    .type_params = null,
                 }) catch {
                     return TranspileError.MemoryAllocationFailed;
                 };
@@ -4897,6 +5176,24 @@ pub const TranspileProcess = struct {
         self.children.deinit();
 
         self.std_imports.deinit();
+
+        // Generic function instantiation tracking.
+        if (self.generic_fn_instantiation_keys.count() > 0) {
+            var it = self.generic_fn_instantiation_keys.iterator();
+            while (it.next()) |e| {
+                self.allocator.free(e.key_ptr.*);
+            }
+        }
+        self.generic_fn_instantiation_keys.deinit();
+        self.generic_fn_instantiations.deinit();
+
+        if (self.generic_call_overrides.count() > 0) {
+            var it2 = self.generic_call_overrides.iterator();
+            while (it2.next()) |e| {
+                self.allocator.free(e.key_ptr.*);
+            }
+        }
+        self.generic_call_overrides.deinit();
 
         // Release all arena allocations back to the backing allocator.
         self.arena.deinit();
@@ -6356,6 +6653,32 @@ pub const TranspileProcess = struct {
         }
     }
 
+    fn emit_generic_function_specializations(self: *Self) TranspileError!void {
+        const root = self.get_root();
+        var emitted = std.StringHashMap(bool).init(self.allocator);
+        defer emitted.deinit();
+
+        for (root.generic_fn_instantiations.items) |inst| {
+            if (emitted.contains(inst.name)) continue;
+            emitted.put(inst.name, true) catch return TranspileError.MemoryAllocationFailed;
+
+            const prev_params = self.type_subst_params;
+            const prev_args = self.type_subst_args;
+            const prev_override = self.override_fn_name;
+            self.type_subst_params = inst.params;
+            self.type_subst_args = inst.args;
+            self.override_fn_name = inst.name;
+            defer {
+                self.type_subst_params = prev_params;
+                self.type_subst_args = prev_args;
+                self.override_fn_name = prev_override;
+            }
+
+            try self.transpile_node(inst.fn_node.*);
+            try self.write("\n\n");
+        }
+    }
+
     /// Transpiles all nodes in the AST to C code
     pub fn transpile(self: *Self) GeneralError!void {
         // The parser uses scopes only for parse-time identifier validation.
@@ -6440,6 +6763,11 @@ pub const TranspileProcess = struct {
             try self.emit_impls_and_vtables();
         }
 
+        // Emit generic function specializations after impls and before user code.
+        if (!self.is_importing) {
+            try self.emit_generic_function_specializations();
+        }
+
         // Output content from child imports recursively
         if (!self.is_importing) {
             var seen_children = std.StringHashMap(bool).init(self.backing_allocator);
@@ -6451,6 +6779,10 @@ pub const TranspileProcess = struct {
         for (self.nodes.items()) |node| {
             if (node.type != .Import) { // Skip import nodes as they've been processed
                 if (node.type == .Compound or node.type == .Quirk) continue;
+                if (node.type == .Function and node.node_variant != null) {
+                    const function = node.node_variant.?.function;
+                    if (function.type_params != null) continue;
+                }
                 try self.transpile_node(node);
                 try self.write("\n\n");
             }
@@ -6464,6 +6796,7 @@ pub const TranspileProcess = struct {
         var emitted = std.StringHashMap(bool).init(self.backing_allocator);
         defer emitted.deinit();
         try self.emit_function_prototypes_module(self, &emitted);
+        try self.emit_generic_function_prototypes(&emitted);
         try self.write("\n");
     }
 
@@ -6473,6 +6806,7 @@ pub const TranspileProcess = struct {
             if (self.is_std_c_signature_node(&node)) continue;
             const function = node.node_variant.?.function;
             if (function.body == null) continue;
+            if (function.type_params != null) continue;
             if (function.name != null and mem.eql(u8, function.name.?.items, "main")) continue;
 
             if (function.name) |fname| {
@@ -6485,6 +6819,28 @@ pub const TranspileProcess = struct {
 
         for (proc.children.items) |child| {
             try self.emit_function_prototypes_module(child, emitted);
+        }
+    }
+
+    fn emit_generic_function_prototypes(self: *Self, emitted: *std.StringHashMap(bool)) TranspileError!void {
+        const root = self.get_root();
+        for (root.generic_fn_instantiations.items) |inst| {
+            if (emitted.contains(inst.name)) continue;
+            emitted.put(inst.name, true) catch return TranspileError.MemoryAllocationFailed;
+
+            const prev_params = self.type_subst_params;
+            const prev_args = self.type_subst_args;
+            const prev_override = self.override_fn_name;
+            self.type_subst_params = inst.params;
+            self.type_subst_args = inst.args;
+            self.override_fn_name = inst.name;
+            defer {
+                self.type_subst_params = prev_params;
+                self.type_subst_args = prev_args;
+                self.override_fn_name = prev_override;
+            }
+
+            try self.write_function_prototype(inst.fn_node.*);
         }
     }
 
@@ -6501,7 +6857,8 @@ pub const TranspileProcess = struct {
 
         try self.write(" ");
         if (function.name) |name| {
-            try self.write(name.items);
+            const out_name = if (self.override_fn_name) |ov| ov else name.items;
+            try self.write(out_name);
         }
 
         try self.write("(");
@@ -6540,6 +6897,9 @@ pub const TranspileProcess = struct {
                         const function = node.node_variant.?.function;
                         if (function.name != null and mem.eql(u8, function.name.?.items, "main")) {
                             continue; // Skip this main function from an imported module
+                        }
+                        if (function.type_params != null) {
+                            continue;
                         }
                     }
 
@@ -6839,6 +7199,17 @@ pub const TranspileProcess = struct {
                         }
                     }
                     if (exp.left) |left| {
+                        if (left.type == .Identifier and left.data != null) {
+                            if (self.lookup_generic_call_override(node)) |ov| {
+                                try self.write(ov);
+                                try self.write("(");
+                                if (exp.right) |right| {
+                                    try self.transpile_node(right.*);
+                                }
+                                try self.write(")");
+                                return;
+                            }
+                        }
                         try self.transpile_node(left.*);
                         try self.write("(");
                         if (exp.right) |right| {
@@ -7101,6 +7472,10 @@ pub const TranspileProcess = struct {
             },
             .Function => {
                 const function = node.node_variant.?.function;
+
+                if (function.type_params != null and self.override_fn_name == null) {
+                    return;
+                }
 
                 // Reset defer stack for this function.
                 self.defer_stack.clearRetainingCapacity();

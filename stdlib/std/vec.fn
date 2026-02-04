@@ -1,6 +1,7 @@
 // Dynamic vectors for common types.
 
 imp std.c.mem;
+imp std.c.string;
 imp std.c.def;
 imp std.quirks;
 
@@ -37,6 +38,11 @@ impl Vec<T> Sized {
   pub is_empty() bin {
     ret self.len == 0;
   }
+
+  // Current capacity.
+  pub capacity() num {
+    ret self.cap;
+  }
 }
 
 impl Vec<T> {
@@ -46,6 +52,20 @@ impl Vec<T> {
     self.cap = 0;
     if cap > 0 {
       self.grow(cap);
+    }
+  }
+
+  // Create a zero value for T.
+  pub zero_value() T {
+    T out;
+    memset( &out, 0, sizeof(T));
+    ret out;
+  }
+
+  // Ensure capacity is at least min_cap.
+  pub reserve(num min_cap) {
+    if min_cap > self.cap {
+      self.grow(min_cap);
     }
   }
 
@@ -96,9 +116,156 @@ impl Vec<T> {
     self.len = self.len + 1;
   }
 
+  // Append multiple values from a slice.
+  pub push_many(T[] src, num len) {
+    if len <= 0 {
+      ret;
+    }
+    self.reserve(self.len + len);
+    num i = 0;
+    for i < len {
+      self.data[self.len + i] = src[i];
+      i = i + 1;
+    }
+    self.len = self.len + len;
+  }
+
+  // Append values from another Vec.
+  pub extend(Vec<T> *other) {
+    num i = 0;
+    for i < other.len {
+      self.push(other.data[i]);
+      i = i + 1;
+    }
+  }
+
+  // Return last element (zero if empty).
+  pub last() T {
+    if self.len == 0 {
+      ret self.zero_value();
+    }
+    ret self.data[self.len - 1];
+  }
+
+  // Pop last element (zero if empty).
+  pub pop() T {
+    if self.len == 0 {
+      ret self.zero_value();
+    }
+    self.len = self.len - 1;
+    ret self.data[self.len];
+  }
+
+  // Insert a value at index (clamped to [0, len]).
+  pub insert(num idx, T value) {
+    if idx < 0 {
+      idx = 0;
+    }
+    if idx > self.len {
+      idx = self.len;
+    }
+    if self.len + 1 > self.cap {
+      self.grow(self.len + 1);
+    }
+    num i = self.len;
+    for i > idx {
+      self.data[i] = self.data[i - 1];
+      i = i - 1;
+    }
+    self.data[idx] = value;
+    self.len = self.len + 1;
+  }
+
+  // Remove element at index (preserve order). Returns removed value or zero.
+  pub remove_at(num idx) T {
+    if idx < 0 {
+      ret self.zero_value();
+    }
+    if idx >= self.len {
+      ret self.zero_value();
+    }
+    T out = self.data[idx];
+    num i = idx;
+    for i + 1 < self.len {
+      self.data[i] = self.data[i + 1];
+      i = i + 1;
+    }
+    self.len = self.len - 1;
+    ret out;
+  }
+
+  // Remove element at index by swapping with last. Returns removed value or zero.
+  pub swap_remove(num idx) T {
+    if idx < 0 {
+      ret self.zero_value();
+    }
+    if idx >= self.len {
+      ret self.zero_value();
+    }
+    T out = self.data[idx];
+    self.len = self.len - 1;
+    if idx != self.len {
+      self.data[idx] = self.data[self.len];
+    }
+    ret out;
+  }
+
   // Clear without freeing capacity.
   pub clear() {
     self.len = 0;
+  }
+
+  // Swap two elements.
+  pub swap(num i, num j) {
+    T tmp = self.data[i];
+    self.data[i] = self.data[j];
+    self.data[j] = tmp;
+  }
+
+  // Reverse elements in-place.
+  pub reverse() {
+    if self.len <= 1 {
+      ret;
+    }
+    num i = 0;
+    num j = self.len - 1;
+    for i < j {
+      self.swap(i, j);
+      i = i + 1;
+      j = j - 1;
+    }
+  }
+
+  // Resize vector to new_len, filling new slots with value.
+  pub resize(num new_len, T value) {
+    if new_len < 0 {
+      ret;
+    }
+    if new_len <= self.len {
+      self.len = new_len;
+      ret;
+    }
+    self.reserve(new_len);
+    for self.len < new_len {
+      self.data[self.len] = value;
+      self.len = self.len + 1;
+    }
+  }
+
+  // Shrink capacity to current length.
+  pub shrink_to_fit() {
+    if self.cap == self.len {
+      ret;
+    }
+    if self.len == 0 {
+      if self.cap != 0 {
+        free(self.data);
+      }
+      self.cap = 0;
+      ret;
+    }
+    self.data = realloc(self.data, self.len * sizeof(T));
+    self.cap = self.len;
   }
 }
 

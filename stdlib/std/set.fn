@@ -1,15 +1,15 @@
-// String set built on Map<bin>.
+// String set built on Map<num>.
 
 imp std.map;
 imp std.quirks;
 
-// String set backed by Map<bin>.
+// String set backed by Map<num>.
 // 
 // Fields:
 // - map: backing map
 pub compound StrSet {
   // map: backing map
-  Map<bin> map;
+  Map<num> map;
 }
 
 // Create a string set with initial capacity.
@@ -50,7 +50,7 @@ impl StrSet {
 
   // Add a key.
   pub add(str key) {
-    self.map.put(key, true);
+    self.map.put(key, 1);
   }
 
   // Remove a key; returns true if removed.

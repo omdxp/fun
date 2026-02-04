@@ -65,6 +65,16 @@ fun _localtime_from_epoch(num epoch) raw* {
   ret tm;
 }
 
+fun _gmtime_from_epoch(num epoch) raw* {
+  raw* tbuf = _time_buf_from_epoch(epoch);
+  if tbuf == NULL {
+    ret NULL;
+  }
+  raw* tm = gmtime(tbuf);
+  free(tbuf);
+  ret tm;
+}
+
 impl Timestamp {
   // Format using a custom strftime format.
   pub format_local(str buf, num buf_len, str format) num {
@@ -75,9 +85,27 @@ impl Timestamp {
     ret strftime(buf, buf_len, format, t);
   }
 
+  // Format using a custom strftime format (UTC).
+  pub format_utc(str buf, num buf_len, str format) num {
+    raw* t = _gmtime_from_epoch(self.epoch);
+    if t == NULL {
+      ret 0;
+    }
+    ret strftime(buf, buf_len, format, t);
+  }
+
   // Format using a default pattern.
   pub to_string(str buf, num buf_len) num {
     raw* t = _localtime_from_epoch(self.epoch);
+    if t == NULL {
+      ret 0;
+    }
+    ret strftime(buf, buf_len, "%Y-%m-%d %H:%M:%S", t);
+  }
+
+  // Format using a default pattern (UTC).
+  pub to_string_utc(str buf, num buf_len) num {
+    raw* t = _gmtime_from_epoch(self.epoch);
     if t == NULL {
       ret 0;
     }
@@ -94,6 +122,30 @@ pub fun now_epoch() num {
   ret t.epoch;
 }
 
+// Add seconds to an epoch value.
+// 
+// Params:
+// - epoch: seconds since epoch
+// - delta: seconds to add
+// 
+// Returns:
+// - new epoch value
+pub fun add_seconds(num epoch, num delta) num {
+  ret epoch + delta;
+}
+
+// Difference between two epoch values in seconds.
+// 
+// Params:
+// - a: first epoch
+// - b: second epoch
+// 
+// Returns:
+// - difference in seconds
+pub fun diff_seconds(num a, num b) dec {
+  ret difftime(a, b);
+}
+
 // Format an epoch value with a custom format.
 // 
 // Params:
@@ -108,6 +160,22 @@ pub fun format_local(num epoch, str buf, num buf_len, str format) num {
   Timestamp t;
   t.epoch = epoch;
   ret t.format_local(buf, buf_len, format);
+}
+
+// Format an epoch value with a custom format (UTC).
+// 
+// Params:
+// - epoch: seconds since epoch
+// - buf: output buffer
+// - buf_len: buffer capacity
+// - format: strftime format
+// 
+// Returns:
+// - number of bytes written
+pub fun format_utc(num epoch, str buf, num buf_len, str format) num {
+  Timestamp t;
+  t.epoch = epoch;
+  ret t.format_utc(buf, buf_len, format);
 }
 
 // Format an epoch value using C's human-readable format (ctime).
@@ -161,6 +229,23 @@ pub fun format_human_cstr(num epoch) str {
 pub fun now_string(str buf, num buf_len) num {
   Timestamp t = now();
   num n = t.to_string(buf, buf_len);
+  if n > 0 {
+    ret n;
+  }
+  ret snprintf(buf, buf_len, "%d", t.epoch);
+}
+
+// Format current time with default format (UTC).
+// 
+// Params:
+// - buf: output buffer
+// - buf_len: buffer capacity
+// 
+// Returns:
+// - number of bytes written
+pub fun now_string_utc(str buf, num buf_len) num {
+  Timestamp t = now();
+  num n = t.to_string_utc(buf, buf_len);
   if n > 0 {
     ret n;
   }
