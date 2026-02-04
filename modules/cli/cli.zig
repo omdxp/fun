@@ -1654,8 +1654,15 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
         defer if (env_map_opt) |*m| m.deinit();
         if (using_zig) {
             // Avoid Zig cache lock contention by using dedicated cache dirs.
-            const global_cache_dir_rel = ".zig-cache/fun_cli_global_cache";
-            const local_cache_dir_rel = ".zig-cache/fun_cli_local_cache";
+            // Place caches next to the input file under `.fun-cache/`.
+            const cache_root = std.fs.path.dirname(input_file) orelse ".";
+            const cache_base = try std.fs.path.join(allocator, &.{ cache_root, ".fun-cache" });
+            defer allocator.free(cache_base);
+            const global_cache_dir_rel = try std.fs.path.join(allocator, &.{ cache_base, "fun_cli_global_cache" });
+            defer allocator.free(global_cache_dir_rel);
+            const local_cache_dir_rel = try std.fs.path.join(allocator, &.{ cache_base, "fun_cli_local_cache" });
+            defer allocator.free(local_cache_dir_rel);
+
             try fs.cwd().makePath(global_cache_dir_rel);
             try fs.cwd().makePath(local_cache_dir_rel);
 

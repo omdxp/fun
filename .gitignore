@@ -1,3 +1,4 @@
 .zig-cache
+.fun-cache
 zig-out
 zig-cache
