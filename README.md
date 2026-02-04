@@ -14,6 +14,7 @@
   - [Features](#features)
   - [Installation](#installation)
   - [Release installers (bundles)](#release-installers-bundles)
+  - [GitHub Actions](#github-actions)
   - [CLI Usage](#cli-usage)
     - [C Compiler Selection](#c-compiler-selection)
   - [Quickstart](#quickstart)
@@ -82,6 +83,22 @@ The compiler discovers the standard library at runtime using, in order:
 - `FUN_STDLIB_DIR` (explicit override)
 - `<exe>/../share/fun` (installed layout)
 - common system locations (platform-dependent)
+
+## GitHub Actions
+
+Use the published setup action to install `fun` in CI:
+
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: omdxp/setup-fun@v1
+        with:
+          version: latest
+      - run: fun -version
+```
 
 ## CLI Usage
 
