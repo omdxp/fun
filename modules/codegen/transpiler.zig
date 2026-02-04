@@ -5808,8 +5808,63 @@ pub const TranspileProcess = struct {
             return TranspileError.MemoryAllocationFailed;
         };
 
-        var ordered = std.ArrayList(*ast.Node).init(self.allocator);
-        defer ordered.deinit();
+        const GenericSpec = struct {
+            cnode: *ast.Node,
+            dt: *const dtype.DataType,
+            mangled: []const u8,
+        };
+
+        var spec_keys = std.StringHashMap(bool).init(self.allocator);
+        defer spec_keys.deinit();
+
+        var specs = std.ArrayList(GenericSpec).init(self.allocator);
+        defer {
+            for (specs.items) |s| self.allocator.free(s.mangled);
+            specs.deinit();
+        }
+
+        // Collect concrete generic compound specializations.
+        for (compound_nodes.items) |cnode| {
+            if (cnode.node_variant == null) continue;
+            if (self.is_std_c_signature_node(cnode)) continue;
+            const c = cnode.node_variant.?.compound;
+            const params = c.type_params orelse continue;
+
+            var inst_keys = std.StringHashMap(bool).init(self.allocator);
+            defer {
+                var it = inst_keys.iterator();
+                while (it.next()) |e| {
+                    self.allocator.free(e.key_ptr.*);
+                }
+                inst_keys.deinit();
+            }
+
+            var inst_list = std.ArrayList(*const dtype.DataType).init(self.allocator);
+            defer inst_list.deinit();
+
+            try self.collect_generic_instantiations_recursive(self, c.name.items, &inst_keys, &inst_list);
+
+            for (inst_list.items) |dt| {
+                if (dt.generic_args == null) continue;
+                const gargs = dt.generic_args.?.items();
+                if (gargs.len != params.count) continue;
+                if (self.dtype_contains_type_param(dt, &params)) continue;
+
+                const mangled = try self.type_name_mangled(dt);
+                if (self.mangled_contains_type_param(mangled, &params)) {
+                    self.allocator.free(mangled);
+                    continue;
+                }
+                if (!spec_keys.contains(mangled)) {
+                    spec_keys.put(mangled, true) catch return TranspileError.MemoryAllocationFailed;
+                    specs.append(.{ .cnode = cnode, .dt = dt, .mangled = mangled }) catch {
+                        return TranspileError.MemoryAllocationFailed;
+                    };
+                } else {
+                    self.allocator.free(mangled);
+                }
+            }
+        }
 
         // Forward typedefs allow pointer fields (including self-pointers) to refer to
         // types declared later.
@@ -5827,19 +5882,31 @@ pub const TranspileProcess = struct {
         }
         if (compound_nodes.items.len > 0) try self.write("\n");
 
-        // Emit generic compound specializations after forward typedefs so
-        // pointer fields can reference non-generic types, and before
-        // non-generic definitions to satisfy by-value dependencies.
-        for (compound_nodes.items) |cnode| {
-            if (cnode.node_variant == null) continue;
-            if (self.is_std_c_signature_node(cnode)) continue;
-            const c = cnode.node_variant.?.compound;
-            if (c.type_params == null) continue;
-            try self.emit_generic_compound_specializations(cnode);
-        }
+        var remaining_specs = std.ArrayList(GenericSpec).init(self.allocator);
+        defer remaining_specs.deinit();
+        remaining_specs.appendSlice(specs.items) catch {
+            return TranspileError.MemoryAllocationFailed;
+        };
 
-        while (remaining.items.len > 0) {
+        while (remaining.items.len > 0 or remaining_specs.items.len > 0) {
             var progress = false;
+
+            var si: usize = 0;
+            while (si < remaining_specs.items.len) {
+                const s = remaining_specs.items[si];
+                if (!try self.generic_spec_deps_satisfied(s.cnode, s.dt, &emitted_compounds)) {
+                    si += 1;
+                    continue;
+                }
+
+                try self.emit_generic_compound_specialization(s.cnode, s.dt);
+                emitted_compounds.put(s.mangled, true) catch {
+                    return TranspileError.MemoryAllocationFailed;
+                };
+                _ = remaining_specs.swapRemove(si);
+                progress = true;
+            }
+
             var i: usize = 0;
             while (i < remaining.items.len) {
                 const cnode = remaining.items[i];
@@ -5848,26 +5915,59 @@ pub const TranspileProcess = struct {
                     continue;
                 }
                 const c = cnode.node_variant.?.compound;
+                if (c.type_params != null) {
+                    _ = remaining.swapRemove(i);
+                    continue;
+                }
 
                 var deps_satisfied = true;
                 for (c.fields.items()) |f| {
                     // Only enforce ordering for by-value named compound dependencies.
                     // Pointer-typed fields can refer to incomplete types.
+                    if (f.dtype.flags != null and f.dtype.flags.?.is_array) continue;
                     if (f.dtype.pointer_depth != 0) continue;
                     if (f.dtype.type != .Unknown) continue;
                     if (f.dtype.type_str.items.len == 0) continue;
-                    const dep = f.dtype.type_str.items;
-                    if (!reg.compounds_by_name.contains(dep)) continue;
-                    if (!emitted_compounds.contains(dep)) {
-                        deps_satisfied = false;
-                        break;
+                    if (f.dtype.generic_args != null) {
+                        const dep = try self.type_name_mangled(f.dtype);
+                        defer self.allocator.free(dep);
+                        if (!emitted_compounds.contains(dep)) {
+                            deps_satisfied = false;
+                            break;
+                        }
+                    } else {
+                        const dep = f.dtype.type_str.items;
+                        if (!reg.compounds_by_name.contains(dep)) continue;
+                        if (!emitted_compounds.contains(dep)) {
+                            deps_satisfied = false;
+                            break;
+                        }
                     }
                 }
 
                 if (deps_satisfied) {
-                    ordered.append(cnode) catch {
-                        return TranspileError.MemoryAllocationFailed;
-                    };
+                    try self.write("typedef struct ");
+                    try self.write(c.name.items);
+                    try self.write(" {\n");
+
+                    for (c.fields.items()) |f| {
+                        try self.write("  ");
+                        if (f.dtype.flags != null and f.dtype.flags.?.is_array) {
+                            var dt = f.dtype.*;
+                            if (dt.flags) |*flags| flags.is_array = false;
+                            if (dt.pointer_depth == 0) dt.pointer_depth = 1;
+                            try self.write_type(dt);
+                        } else {
+                            try self.write_type(f.dtype.*);
+                        }
+                        try self.write(" ");
+                        try self.write(f.name.items);
+                        try self.write(";\n");
+                    }
+                    try self.write("} ");
+                    try self.write(c.name.items);
+                    try self.write(";\n\n");
+
                     emitted_compounds.put(c.name.items, true) catch {
                         return TranspileError.MemoryAllocationFailed;
                     };
@@ -5883,35 +5983,6 @@ pub const TranspileProcess = struct {
                 self.report_error(null, "cyclic by-value compound dependency (use pointers to break the cycle)", .{});
                 return TranspileError.CyclicCompoundDependency;
             }
-        }
-
-        for (ordered.items) |cnode| {
-            if (cnode.node_variant == null) continue;
-            if (self.is_std_c_signature_node(cnode)) continue;
-            const c = cnode.node_variant.?.compound;
-            if (c.type_params != null) continue;
-
-            try self.write("typedef struct ");
-            try self.write(c.name.items);
-            try self.write(" {\n");
-
-            for (c.fields.items()) |f| {
-                try self.write("  ");
-                if (f.dtype.flags != null and f.dtype.flags.?.is_array) {
-                    var dt = f.dtype.*;
-                    if (dt.flags) |*flags| flags.is_array = false;
-                    if (dt.pointer_depth == 0) dt.pointer_depth = 1;
-                    try self.write_type(dt);
-                } else {
-                    try self.write_type(f.dtype.*);
-                }
-                try self.write(" ");
-                try self.write(f.name.items);
-                try self.write(";\n");
-            }
-            try self.write("} ");
-            try self.write(c.name.items);
-            try self.write(";\n\n");
         }
 
         // Quirk canonical structs per signature
@@ -6381,29 +6452,87 @@ pub const TranspileProcess = struct {
             defer self.allocator.free(mangled);
             if (self.mangled_contains_type_param(mangled, &params)) continue;
 
-            try self.write("typedef struct ");
-            try self.write(mangled);
-            try self.write(" {\n");
+            try self.emit_generic_compound_specialization(cnode, dt);
+        }
+    }
 
-            for (c.fields.items()) |f| {
-                try self.write("  ");
-                if (f.dtype.flags != null and f.dtype.flags.?.is_array) {
-                    var field_dt = f.dtype.*;
-                    if (field_dt.flags) |*flags| flags.is_array = false;
-                    if (field_dt.pointer_depth == 0) field_dt.pointer_depth = 1;
-                    try self.write_type_with_subst(&field_dt, params, gargs);
-                } else {
-                    try self.write_type_with_subst(f.dtype, params, gargs);
+    fn emit_generic_compound_specialization(self: *Self, cnode: *ast.Node, dt: *const dtype.DataType) TranspileError!void {
+        const c = cnode.node_variant.?.compound;
+        const params = c.type_params orelse return;
+        const gargs = dt.generic_args orelse return;
+
+        const mangled = try self.type_name_mangled(dt);
+        defer self.allocator.free(mangled);
+
+        try self.write("typedef struct ");
+        try self.write(mangled);
+        try self.write(" {\n");
+
+        for (c.fields.items()) |f| {
+            try self.write("  ");
+            if (f.dtype.flags != null and f.dtype.flags.?.is_array) {
+                var field_dt = f.dtype.*;
+                if (field_dt.flags) |*flags| flags.is_array = false;
+                if (field_dt.pointer_depth == 0) field_dt.pointer_depth = 1;
+                try self.write_type_with_subst(&field_dt, params, gargs.items());
+            } else {
+                try self.write_type_with_subst(f.dtype, params, gargs.items());
+            }
+            try self.write(" ");
+            try self.write(f.name.items);
+            try self.write(";\n");
+        }
+
+        try self.write("} ");
+        try self.write(mangled);
+        try self.write(";\n\n");
+    }
+
+    fn generic_spec_deps_satisfied(self: *Self, cnode: *ast.Node, dt: *const dtype.DataType, emitted: *std.StringHashMap(bool)) TranspileError!bool {
+        const c = cnode.node_variant.?.compound;
+        const params = c.type_params orelse return true;
+        const gargs = dt.generic_args orelse return true;
+
+        for (c.fields.items()) |f| {
+            if (f.dtype.flags != null and f.dtype.flags.?.is_array) continue;
+            if (f.dtype.pointer_depth != 0) continue;
+
+            var dep_name: ?[]const u8 = null;
+            var needs_free = false;
+
+            if (f.dtype.generic_args != null) {
+                dep_name = try self.type_name_mangled_with_subst(f.dtype, params, gargs.items());
+                needs_free = true;
+            } else if (f.dtype.type == .Unknown and f.dtype.type_str.items.len > 0) {
+                const params_items = params.items();
+                var matched_param = false;
+                for (params_items, 0..) |p, i| {
+                    if (!mem.eql(u8, p.items, f.dtype.type_str.items)) continue;
+                    matched_param = true;
+                    const arg_dt = gargs.items()[i];
+                    if (arg_dt.pointer_depth != 0) break;
+                    if (arg_dt.flags != null and arg_dt.flags.?.is_array) break;
+                    if (arg_dt.type != .Unknown or arg_dt.type_str.items.len == 0) break;
+                    if (arg_dt.generic_args != null) {
+                        dep_name = try self.type_name_mangled(arg_dt);
+                        needs_free = true;
+                    } else {
+                        dep_name = arg_dt.type_str.items;
+                    }
+                    break;
                 }
-                try self.write(" ");
-                try self.write(f.name.items);
-                try self.write(";\n");
+                if (!matched_param) {
+                    dep_name = f.dtype.type_str.items;
+                }
             }
 
-            try self.write("} ");
-            try self.write(mangled);
-            try self.write(";\n\n");
+            if (dep_name) |dep| {
+                defer if (needs_free) self.allocator.free(dep);
+                if (!emitted.contains(dep)) return false;
+            }
         }
+
+        return true;
     }
 
     fn write_type_with_subst(self: *Self, dt: *const dtype.DataType, params: utils.Vector(std.ArrayList(u8)), args: []*dtype.DataType) TranspileError!void {
