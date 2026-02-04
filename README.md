@@ -178,6 +178,11 @@ There is a minimal VS Code extension scaffold in [editors/vscode](editors/vscode
 
 - Build `fun` + `fls` first (`zig build`)
 - Then open `editors/vscode` in VS Code and follow its README.
+
+### GitHub Syntax Highlighting
+
+This repo maps `.fn` files to C highlighting on GitHub via [/.gitattributes](.gitattributes).
+For native Fun highlighting, submit a Fun definition + TextMate grammar to GitHub Linguist.
 ---
 
 ## Installation

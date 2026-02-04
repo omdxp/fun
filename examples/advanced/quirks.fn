@@ -89,7 +89,7 @@ fun main() {
   printf("circ area = %d\n", scirc.area());
 
   srect.translate(1, -1);
-  scirc.translate( -1, 2);
+  scirc.translate(-1, 2);
 
   printf("rect moved a=(%d,%d)\n", rect.a.x, rect.a.y);
   printf("circ moved center=(%d,%d)\n", circ.center.x, circ.center.y);

@@ -1,4 +1,10 @@
 // Basic TOML parsing/serialization (flat key=value).
+// 
+// Usage:
+// ```
+// TomlDoc d = toml_doc_init();
+// d.set("key", "value");
+// ```
 
 imp std.map;
 imp std.string;

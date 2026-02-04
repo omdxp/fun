@@ -54,6 +54,7 @@ zig-out/bin/fls examples/<example>.fn
 - stdlib/assert_basic.fn
 - stdlib/cli_parse.fn
 - stdlib/ctype_validate_identifier.fn
+- stdlib/error_basic.fn
 - stdlib/io_file_copy.fn
 - stdlib/io_read_write.fn
 - stdlib/json_basic.fn
@@ -63,6 +64,7 @@ zig-out/bin/fls examples/<example>.fn
 - stdlib/math_helpers.fn
 - stdlib/mem_env_random.fn
 - stdlib/net_url_parse.fn
+- stdlib/option_basic.fn
 - stdlib/path_ops.fn
 - stdlib/rand_basic.fn
 - stdlib/result_basic.fn

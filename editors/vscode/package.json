@@ -40,8 +40,13 @@
     "languages": [
       {
         "id": "fun",
-        "aliases": ["Fun", "fun"],
-        "extensions": [".fn"],
+        "aliases": [
+          "Fun",
+          "fun"
+        ],
+        "extensions": [
+          ".fn"
+        ],
         "configuration": "./language-configuration.json",
         "icon": {
           "light": "fun.png",
@@ -68,6 +73,11 @@
           "type": "string",
           "default": "",
           "description": "Optional path to the fun executable; passed to fls via FLS_FUN_PATH."
+        },
+        "fun.fls.stdlibDir": {
+          "type": "string",
+          "default": "",
+          "description": "Optional stdlib root (folder that contains std/); passed to fls via FUN_STDLIB_DIR."
         },
         "fun.fls.debug": {
           "type": "boolean",

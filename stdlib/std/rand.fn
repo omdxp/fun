@@ -1,4 +1,10 @@
 // Simple PRNG.
+// 
+// Usage:
+// ```
+// Rand r = rand_init(123);
+// num v = r.range(1, 10);
+// ```
 
 imp std.vec;
 
@@ -132,7 +138,7 @@ pub fun rand_chance(Rand* r, dec p) bin {
 // Params:
 // - r: generator
 // - v: vector
-pub fun rand_shuffle_nums(Rand* r, Vec<num>*v) {
+pub fun rand_shuffle_nums(Rand* r, Vec<num>* v) {
   if v.len() <= 1 {
     ret;
   }
@@ -151,7 +157,7 @@ pub fun rand_shuffle_nums(Rand* r, Vec<num>*v) {
 // Params:
 // - r: generator
 // - v: vector
-pub fun rand_shuffle_strs(Rand* r, Vec<str>*v) {
+pub fun rand_shuffle_strs(Rand* r, Vec<str>* v) {
   if v.len() <= 1 {
     ret;
   }

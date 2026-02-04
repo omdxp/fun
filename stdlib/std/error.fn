@@ -1,4 +1,10 @@
 // Simple error compound for stdlib results.
+// 
+// Usage:
+// ```
+// Error e = error_new(1, "oops");
+// if error_is_err(&e) { ... }
+// ```
 
 // Simple error representation (code + message).
 // 

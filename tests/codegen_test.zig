@@ -232,6 +232,45 @@ test "std.time import adds time.h include" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "generic function specialization emits concrete names" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_generic_fn.fn";
+
+    const input =
+        "fun id<T>(T x) T { ret x; }\n" ++
+        "fun main() {\n" ++
+        "  num a = id(1);\n" ++
+        "  str b = id(\"hi\");\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "id__num") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "id__str") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "id__T") == null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
+test "assert emits abort and message" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_assert.fn";
+
+    const input =
+        "fun main() {\n" ++
+        "  assert true, \"ok\";\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "fprintf(stderr, \"Assertion failed at ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "abort()") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
 test "compounds + quirks + impl vtables transpile" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_quirk_vtable.fn";

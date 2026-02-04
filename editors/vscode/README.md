@@ -36,6 +36,9 @@ These settings live under **Settings → Extensions → Fun**:
 - `fun.fls.funPath`
   - Optional path to the `fun` executable.
   - When set to a valid executable, it is passed to `fls` via the `FLS_FUN_PATH` environment variable.
+- `fun.fls.stdlibDir`
+  - Optional stdlib root (folder containing `std/`).
+  - Passed to `fls` via `FUN_STDLIB_DIR` and takes precedence over derived paths.
 
 Notes:
 

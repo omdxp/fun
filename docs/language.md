@@ -79,6 +79,8 @@
 - **Definition**: `fun name(type arg, ...) return_type { ... }`
 - **Return**: Use `ret value;` to return from a function.
 - **No Nested Functions**: Functions cannot be declared inside other functions.
+- **Generic Functions**: `fun id<T>(T x) T { ret x; }`
+    - Type arguments are inferred from call sites: `num v = id(1);`.
 
 ### Compounds & Quirks
 - **Compounds**: Like C structs, can have methods via `impl`.
@@ -103,6 +105,9 @@
 - **std.sys**: env access, process control (`sys_exit`, `sys_abort`, `sys_system`), and PRNG wrappers
 - **std.net**: URL parsing, HTTP GET builder, and a best-effort local HTTP server launcher
     - Note: std.net TCP/HTTP helpers use POSIX sockets via `std.c.net`.
+- **std.option**: Generic `Option<T>` container with `some<T>`/`none<T>` helpers.
+- **std.result**: Generic `Result<T>` container with `ok<T>`/`err<T>` helpers.
+- **std.collections**: Collection quirk helpers (len/is_empty).
 
 ### Error Handling
 - **Type Checking**: Errors for type mismatches, e.g., assigning `str` to `num`.

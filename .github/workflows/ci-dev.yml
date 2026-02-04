@@ -27,6 +27,15 @@ jobs:
         with:
           version: ${{ env.zig_version }}
       - run: zig build run -- -in examples/test.fn # usingnamespace is not supported for incremental compilation
+  examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ env.zig_version }}
+      - run: zig build
+      - run: ./scripts/run_examples.sh
   lint:
     runs-on: ubuntu-latest
     steps:

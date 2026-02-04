@@ -1,4 +1,11 @@
 // String-keyed hash map with generic values.
+// 
+// Usage:
+// ```
+// Map<num> m;
+// m.init(8);
+// m.set("a", 1);
+// ```
 
 imp std.c.mem;
 imp std.c.string;
@@ -161,7 +168,7 @@ impl Map<T> {
 
   pub zero_value() T {
     T out;
-    memset( &out, 0, sizeof(T));
+    memset(&out, 0, sizeof(T));
     ret out;
   }
 
@@ -170,8 +177,8 @@ impl Map<T> {
       ret self.zero_value();
     }
     T out;
-    memset( &out, 0, sizeof(T));
-    memcpy( &out, entry.value, self.value_size);
+    memset(&out, 0, sizeof(T));
+    memcpy(&out, entry.value, self.value_size);
     ret out;
   }
 
@@ -235,7 +242,7 @@ impl Map<T> {
       }
       if entry.tomb == false {
         if equals(entry.key, key) != false {
-          ret self.load_value( &entry);
+          ret self.load_value(&entry);
         }
       }
       idx = idx + 1;
@@ -303,7 +310,7 @@ impl Map<T> {
           entry = self.entries[idx];
         }
         entry.key = key;
-        self.store_value( &entry, value);
+        self.store_value(&entry, value);
         entry.used = true;
         entry.tomb = false;
         self.entries[idx] = entry;
@@ -313,7 +320,7 @@ impl Map<T> {
 
       if entry.tomb == false {
         if equals(entry.key, key) != false {
-          self.store_value( &entry, value);
+          self.store_value(&entry, value);
           self.entries[idx] = entry;
           ret;
         }

@@ -1,4 +1,10 @@
 // String set built on Map<num>.
+// 
+// Usage:
+// ```
+// StrSet s = set_init(8);
+// s.add("a");
+// ```
 
 imp std.map;
 imp std.quirks;

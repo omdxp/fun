@@ -1,4 +1,9 @@
 // Common quirks for stdlib compounds.
+// 
+// Usage:
+// ```
+// fun len_of(Sized s) num { ret s.len(); }
+// ```
 
 // Basic size/introspection for collections.
 pub quirk Sized {

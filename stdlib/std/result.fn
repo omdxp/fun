@@ -19,14 +19,17 @@ pub compound Result<T> {
 }
 
 impl Result<T> {
+  // Returns true when the result is ok.
   pub is_ok() bin {
     ret self.ok;
   }
 
+  // Returns true when the result is an error.
   pub is_err() bin {
     ret self.ok == false;
   }
 
+  // Returns the stored value or a default when in error state.
   pub unwrap_or(T default_value) T {
     if self.ok {
       ret self.value;
@@ -34,6 +37,7 @@ impl Result<T> {
     ret default_value;
   }
 
+  // Set the result to ok and clear error fields.
   pub set_ok(T value) {
     self.ok = true;
     self.value = value;
@@ -41,6 +45,7 @@ impl Result<T> {
     self.err_message = "";
   }
 
+  // Set the result to error and store error fields.
   pub set_err(num code, str message, T default_value) {
     self.ok = false;
     self.value = default_value;

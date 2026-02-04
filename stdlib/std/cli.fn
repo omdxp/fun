@@ -1,4 +1,10 @@
 // CLI argument parsing.
+// 
+// Usage:
+// ```
+// CliArgs c = cli_parse(args);
+// if c.has("help") { ... }
+// ```
 
 imp std.map;
 imp std.vec;

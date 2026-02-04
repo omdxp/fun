@@ -5,6 +5,9 @@ imp std.quirks;
 // A minimal collection quirk aligned with std.quirks.Sized.
 // Kept here for discoverability when browsing stdlib.
 // Collection quirk for len/is_empty.
+// 
+// Example:
+// fun takes(Collection c) { if c.is_empty() { ... } }
 pub quirk Collection {
   len() num;
   is_empty() bin;

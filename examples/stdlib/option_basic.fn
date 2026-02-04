@@ -1,0 +1,18 @@
+// Option helpers example.
+
+imp std.c.io;
+imp std.option;
+
+fun main() {
+  Option<num> a = some(7);
+  printf("a some=%d val=%d\n", a.is_some(), a.unwrap_or(0));
+
+  Option<num> b = none(0);
+  printf("b none=%d val=%d\n", b.is_none(), b.unwrap_or(9));
+
+  Option<str> s = some("hi");
+  printf("s=%s\n", s.unwrap_or("none"));
+
+  Option<str> s2 = none("fallback");
+  printf("s2=%s\n", s2.unwrap_or("none"));
+}

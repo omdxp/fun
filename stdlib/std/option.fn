@@ -1,0 +1,60 @@
+// Option container for optional values.
+// 
+// Usage:
+// ```
+// Option<num> v = some(1);
+// Option<num> w = none(0);
+// if v.is_some() { ... }
+// ```
+pub compound Option<T> {
+  // Whether a value is present.
+  bin has;
+  // Stored value (meaningful when `has == true`).
+  T value;
+}
+
+impl Option<T> {
+  // Returns true when a value is present.
+  pub is_some() bin {
+    ret self.has;
+  }
+
+  // Returns true when no value is present.
+  pub is_none() bin {
+    ret self.has == false;
+  }
+
+  // Returns the stored value or a default when empty.
+  pub unwrap_or(T default_value) T {
+    if self.has {
+      ret self.value;
+    }
+    ret default_value;
+  }
+
+  // Set the option to a value.
+  pub set_some(T value) {
+    self.has = true;
+    self.value = value;
+  }
+
+  // Clear the option and store a default value.
+  pub set_none(T default_value) {
+    self.has = false;
+    self.value = default_value;
+  }
+}
+
+// Construct an Option with a value.
+pub fun some<T> (T value) Option<T> {
+  Option<T> o;
+  o.set_some(value);
+  ret o;
+}
+
+// Construct an empty Option with a default value.
+pub fun none<T> (T default_value) Option<T> {
+  Option<T> o;
+  o.set_none(default_value);
+  ret o;
+}

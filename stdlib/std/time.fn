@@ -1,4 +1,10 @@
 // Time helpers.
+// 
+// Usage:
+// ```
+// Timestamp t = now();
+// str iso = time_format_iso(t);
+// ```
 
 imp std.c.time;
 imp std.c.io;

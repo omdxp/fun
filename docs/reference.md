@@ -82,6 +82,10 @@ fun add(num a, num b) num {
 ```
 - No nested function declarations.
 - Use `ret` for return.
+- Generic functions are supported:
+```fun
+fun id<T>(T x) T { ret x; }
+```
 
 ## Control Flow
 ### If / Elif / Else
@@ -158,6 +162,9 @@ Examples:
 - `std.vec`: dynamic vectors
 - `std.map`: string-keyed maps
 - `std.set`: sets built on maps
+- `std.option`: generic `Option<T>` container
+- `std.result`: generic `Result<T>` container
+- `std.collections`: collection quirks (len/is_empty)
 - `std.string`: string helpers
 - `std.json`, `std.toml`: minimal serialization helpers
 - `std.time`, `std.rand`, `std.math`, `std.path`, `std.net`, etc.

@@ -1,4 +1,10 @@
 // System utilities (process, environment, and randomness).
+// 
+// Usage:
+// ```
+// str home = env("HOME");
+// if home == NULL { sys_exit(1); }
+// ```
 
 imp std.c.mem;
 

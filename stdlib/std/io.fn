@@ -1,4 +1,10 @@
 // File and buffer IO utilities.
+// 
+// Usage:
+// ```
+// print("hi");
+// println("bye");
+// ```
 
 imp std.c.io;
 imp std.c.mem;

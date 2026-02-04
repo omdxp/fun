@@ -2133,6 +2133,11 @@ const LspServer = struct {
         return true;
     }
 
+    fn completionInsertTextForSymbol(self: *LspServer, s: SymbolLite) !?[]const u8 {
+        if (!(s.kind == .struct_ or s.kind == .interface or s.kind == .enum_)) return null;
+        return try makeGenericTypeInsertText(self.allocator, s.name, s.detail);
+    }
+
     fn findMemberByContainer(self: *LspServer, preferred_uri: []const u8, container_type: []const u8, name: []const u8, kind: SymbolKind) ?MemberHit {
         const container_base = baseTypeNameForLookup(container_type);
         // Prefer current document first.
@@ -3077,6 +3082,7 @@ const LspServer = struct {
             }
             try seen.put(key, {});
 
+            const insert_text = try self.completionInsertTextForSymbol(s);
             try items.append(.{
                 .label = try self.allocator.dupe(u8, s.name),
                 .kind = kind,
@@ -3087,6 +3093,7 @@ const LspServer = struct {
                     }
                     break :blk null;
                 },
+                .insertText = insert_text,
             });
         }
 
@@ -3112,6 +3119,7 @@ const LspServer = struct {
             }
             try seen.put(key, {});
 
+            const insert_text = try self.completionInsertTextForSymbol(s);
             try items.append(.{
                 .label = try self.allocator.dupe(u8, s.name),
                 .kind = kind,
@@ -3122,6 +3130,7 @@ const LspServer = struct {
                     }
                     break :blk null;
                 },
+                .insertText = insert_text,
             });
         }
 
@@ -3162,6 +3171,7 @@ const LspServer = struct {
                 }
                 try seen.put(key, {});
 
+                const insert_text = try self.completionInsertTextForSymbol(s);
                 try items.append(.{
                     .label = try self.allocator.dupe(u8, s.name),
                     .kind = kind,
@@ -3172,6 +3182,7 @@ const LspServer = struct {
                         }
                         break :blk null;
                     },
+                    .insertText = insert_text,
                 });
             }
         }
@@ -6615,10 +6626,22 @@ fn buildSignatureFromAst(
     errdefer buf.deinit();
 
     if (include_fun_prefix) {
-        try buf.writer().print("fun {s}(", .{name});
+        try buf.writer().print("fun {s}", .{name});
     } else {
-        try buf.writer().print("{s}(", .{name});
+        try buf.writer().print("{s}", .{name});
     }
+    if (@hasField(@TypeOf(fnv), "type_params")) {
+        if (fnv.type_params) |params| {
+            try buf.append('<');
+            for (params.items(), 0..) |p, i| {
+                if (i != 0) try buf.appendSlice(", ");
+                try buf.appendSlice(p.items);
+            }
+            try buf.append('>');
+        }
+    }
+
+    try buf.append('(');
 
     if (fnv.args) |args| {
         var first: bool = true;
@@ -6665,6 +6688,23 @@ fn buildQuirkMethodSignatureFromAst(allocator: Allocator, m: ast.QuirkMethodSig)
     try buf.append(')');
     try buf.append(' ');
     try appendDType(&buf, m.rtype);
+    return try buf.toOwnedSlice();
+}
+
+fn makeGenericTypeInsertText(allocator: Allocator, name: []const u8, detail_opt: ?[]const u8) !?[]const u8 {
+    const det = detail_opt orelse return null;
+    const open_opt = std.mem.indexOfScalar(u8, det, '<') orelse return null;
+    const close_rel_opt = std.mem.indexOfScalar(u8, det[open_opt + 1 ..], '>') orelse return null;
+    const close_idx = open_opt + 1 + close_rel_opt;
+    if (close_idx <= open_opt + 1) return null;
+
+    const params = std.mem.trim(u8, det[open_opt + 1 .. close_idx], " \t\r\n");
+    var buf = std.ArrayList(u8).init(allocator);
+    errdefer buf.deinit();
+    try buf.appendSlice(name);
+    try buf.append('<');
+    if (params.len != 0) try buf.appendSlice(params);
+    try buf.append('>');
     return try buf.toOwnedSlice();
 }
 
@@ -6758,6 +6798,48 @@ test "fls index: generic locals are indexed" {
         break;
     }
     try std.testing.expect(found);
+}
+
+test "fls index: generic function signature includes params" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const text =
+        "fun id<T>(T x) T { ret x; }\n" ++
+        "fun main() { num v = id(1); }\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found = false;
+    for (idx.symbols) |s| {
+        if (s.kind != .function) continue;
+        if (!std.mem.eql(u8, s.name, "id")) continue;
+        found = true;
+        try std.testing.expect(s.detail != null);
+        try std.testing.expect(std.mem.indexOf(u8, s.detail.?, "id<T>") != null);
+        break;
+    }
+    try std.testing.expect(found);
+}
+
+test "fls completion: generic insert text helper" {
+    const allocator = std.testing.allocator;
+
+    const ins = try makeGenericTypeInsertText(allocator, "Option", "compound Option<T>");
+    defer if (ins) |s| allocator.free(s);
+    try std.testing.expect(ins != null);
+    try std.testing.expect(std.mem.eql(u8, ins.?, "Option<T>"));
+
+    const ins_multi = try makeGenericTypeInsertText(allocator, "Pair", "compound Pair<A, B>");
+    defer if (ins_multi) |s| allocator.free(s);
+    try std.testing.expect(ins_multi != null);
+    try std.testing.expect(std.mem.eql(u8, ins_multi.?, "Pair<A, B>"));
+
+    const ins2 = try makeGenericTypeInsertText(allocator, "Point", "compound Point");
+    defer if (ins2) |s| allocator.free(s);
+    try std.testing.expect(ins2 == null);
 }
 
 test "fls index: impl methods include self, params, locals" {
@@ -6945,7 +7027,48 @@ fn buildSignatureFromTokens(
     if (name_i >= tokens.len) return .{ .detail = null, .return_type = null };
     if (!isIdent(tokens[name_i])) return .{ .detail = null, .return_type = null };
 
-    const after_name_i = nextNonTrivialToken(tokens, name_i + 1) orelse return .{ .detail = null, .return_type = null };
+    var after_name_i = nextNonTrivialToken(tokens, name_i + 1) orelse return .{ .detail = null, .return_type = null };
+
+    var name_buf = std.ArrayList(u8).init(allocator);
+    errdefer name_buf.deinit();
+    try name_buf.appendSlice(tokenString(tokens[name_i]));
+
+    // Optional generic params between name and '(' (e.g., `fun id<T>(...)`).
+    if (isPunctChar(tokens[after_name_i], '<')) {
+        var depth: i64 = 0;
+        var i: usize = after_name_i;
+        var first_param = true;
+        var params_buf = std.ArrayList(u8).init(allocator);
+        defer params_buf.deinit();
+
+        while (i < tokens.len) : (i += 1) {
+            const t = tokens[i];
+            if (t.type == .NewLine or t.type == .Comment) continue;
+            if (isPunctChar(t, '<')) {
+                depth += 1;
+                continue;
+            }
+            if (isPunctChar(t, '>')) {
+                depth -= 1;
+                if (depth == 0) break;
+                continue;
+            }
+            if (depth == 1 and isIdent(t)) {
+                if (!first_param) try params_buf.appendSlice(", ");
+                first_param = false;
+                try params_buf.appendSlice(tokenString(t));
+            }
+        }
+
+        if (params_buf.items.len != 0) {
+            try name_buf.append('<');
+            try name_buf.appendSlice(params_buf.items);
+            try name_buf.append('>');
+        }
+
+        after_name_i = skipGenericArgsForward(tokens, after_name_i);
+    }
+
     if (!isPunctChar(tokens[after_name_i], '(')) return .{ .detail = null, .return_type = null };
 
     // Find matching ')'
@@ -6965,15 +7088,13 @@ fn buildSignatureFromTokens(
     }
     if (rparen_i == null) return .{ .detail = null, .return_type = null };
 
-    const name_raw = tokenString(tokens[name_i]);
-    const name = allocator.dupe(u8, name_raw) catch name_raw;
     var buf = std.ArrayList(u8).init(allocator);
     errdefer buf.deinit();
 
     if (include_fun_prefix) {
-        try buf.writer().print("fun {s}(", .{name});
+        try buf.writer().print("fun {s}(", .{name_buf.items});
     } else {
-        try buf.writer().print("{s}(", .{name});
+        try buf.writer().print("{s}(", .{name_buf.items});
     }
 
     const parsed = struct {
@@ -7779,6 +7900,17 @@ fn collectSymbolsFromTopLevel(allocator: Allocator, out: *std.ArrayList(SymbolLi
             const c = n.node_variant.?.compound;
             const name = c.name.items;
             const r = if (n.pos) |p| rangeFromTokenPos(p) else Range{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 0 } };
+            var detail_buf = std.ArrayList(u8).init(allocator);
+            errdefer detail_buf.deinit();
+            try detail_buf.writer().print("compound {s}", .{name});
+            if (c.type_params) |params| {
+                try detail_buf.append('<');
+                for (params.items(), 0..) |p, i| {
+                    if (i != 0) try detail_buf.appendSlice(", ");
+                    try detail_buf.appendSlice(p.items);
+                }
+                try detail_buf.append('>');
+            }
             try out.append(.{
                 .name = try allocator.dupe(u8, name),
                 .kind = .struct_,
@@ -7787,13 +7919,16 @@ fn collectSymbolsFromTopLevel(allocator: Allocator, out: *std.ArrayList(SymbolLi
                 .is_public = if (n.flags) |f| f.is_public else false,
                 .container_type = null,
                 .value_type = null,
-                .detail = null,
+                .detail = try detail_buf.toOwnedSlice(),
             });
         },
         .Quirk => {
             const q = n.node_variant.?.quirk;
             const name = q.name.items;
             const r = if (n.pos) |p| rangeFromTokenPos(p) else Range{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 0 } };
+            var detail_buf = std.ArrayList(u8).init(allocator);
+            errdefer detail_buf.deinit();
+            try detail_buf.writer().print("quirk {s}", .{name});
             try out.append(.{
                 .name = try allocator.dupe(u8, name),
                 .kind = .interface,
@@ -7802,7 +7937,7 @@ fn collectSymbolsFromTopLevel(allocator: Allocator, out: *std.ArrayList(SymbolLi
                 .is_public = if (n.flags) |f| f.is_public else false,
                 .container_type = null,
                 .value_type = null,
-                .detail = null,
+                .detail = try detail_buf.toOwnedSlice(),
             });
         },
         .Impl => {

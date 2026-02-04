@@ -1,4 +1,12 @@
 // Dynamic vectors for common types.
+// 
+// Usage:
+// ```
+// Vec<num> v;
+// v.init(0);
+// v.push(1);
+// v.push(2);
+// ```
 
 imp std.c.mem;
 imp std.c.string;
@@ -58,7 +66,7 @@ impl Vec<T> {
   // Create a zero value for T.
   pub zero_value() T {
     T out;
-    memset( &out, 0, sizeof(T));
+    memset(&out, 0, sizeof(T));
     ret out;
   }
 
@@ -131,7 +139,7 @@ impl Vec<T> {
   }
 
   // Append values from another Vec.
-  pub extend(Vec<T> *other) {
+  pub extend(Vec<T>* other) {
     num i = 0;
     for i < other.len {
       self.push(other.data[i]);

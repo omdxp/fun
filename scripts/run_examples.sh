@@ -7,6 +7,10 @@ PROGRESS_EVERY="${PROGRESS_EVERY:-6}"
 
 cd "$REPO_ROOT"
 
+if [[ -z "${FUN_STDLIB_DIR:-}" ]]; then
+  export FUN_STDLIB_DIR="$REPO_ROOT/stdlib"
+fi
+
 # Prefer Windows build output if present (WSL can execute .exe), otherwise use native binary.
 FUN_EXE=""
 if [[ -f "$REPO_ROOT/zig-out/bin/fun.exe" ]]; then

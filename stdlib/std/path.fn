@@ -1,4 +1,10 @@
 // Path helpers.
+// 
+// Usage:
+// ```
+// Path p = path("/tmp");
+// str joined = p.join("file.txt");
+// ```
 
 imp std.c.mem;
 imp std.c.def;
@@ -124,7 +130,7 @@ pub fun path_join(str a, str b) str {
 // 
 // Returns:
 // - joined path
-pub fun path_join_many(Vec<str>*parts) str {
+pub fun path_join_many(Vec<str>* parts) str {
   if parts.len() == 0 {
     ret "";
   }

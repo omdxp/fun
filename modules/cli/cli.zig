@@ -566,7 +566,11 @@ fn nextSignificantToken(toks: []const token.Token, start_at: usize) ?token.Token
 }
 
 fn isPointerTypeStarContext(toks: []const token.Token, idx: usize, prev: token.Token, in_decl_only_ctx: bool) bool {
-    if (!in_decl_only_ctx and !isLikelyTypeToken(prev)) return false;
+    if (!in_decl_only_ctx and !isLikelyTypeToken(prev)) {
+        const is_generic_close = (prev.type == .Operator and std.mem.eql(u8, prev.data.sval.items, ">")) or
+            (prev.type == .Symbol and prev.data.cval == '>');
+        if (!is_generic_close) return false;
+    }
 
     const next = nextSignificantToken(toks, idx + 1) orelse return false;
     // Return type pointers: `...) Type* {` or `...) Type*;`
@@ -1091,10 +1095,62 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
         // Decide whether to add a space before this token.
         if (state.prev_token.*) |pt2| {
             const needs_space = blk: {
+                if (is_word_like(t2) and idx >= 2) {
+                    const prev_of_star = toks[idx - 2];
+                    if ((pt2.type == .Symbol and pt2.data.cval == '*') or
+                        (pt2.type == .Operator and std.mem.eql(u8, pt2.data.sval.items, "*")))
+                    {
+                        if (isPointerTypeStarContext(toks, idx - 1, prev_of_star, in_decl_only_ctx)) break :blk true;
+                    }
+                }
                 if (prev_unary_prefix) {
                     // Keep unary prefix operators glued to their operand: `-w`, `-1`, `+(x)`.
                     prev_unary_prefix = false;
                     break :blk false;
+                }
+                if (pt2.type == .Operator and (std.mem.eql(u8, pt2.data.sval.items, "=") or
+                    std.mem.eql(u8, pt2.data.sval.items, "!=") or std.mem.eql(u8, pt2.data.sval.items, "==")) and t2.type == .Operator and
+                    (std.mem.eql(u8, t2.data.sval.items, "&") or std.mem.eql(u8, t2.data.sval.items, "*") or
+                        std.mem.eql(u8, t2.data.sval.items, "+") or std.mem.eql(u8, t2.data.sval.items, "-")))
+                {
+                    break :blk true;
+                }
+                if (pt2.type == .Keyword and std.mem.eql(u8, pt2.data.sval.items, "ret")) {
+                    if (t2.type == .Operator and (std.mem.eql(u8, t2.data.sval.items, "+") or std.mem.eql(u8, t2.data.sval.items, "-"))) {
+                        break :blk true;
+                    }
+                    if (t2.type == .Symbol and (t2.data.cval == '+' or t2.data.cval == '-')) {
+                        break :blk true;
+                    }
+                }
+                if (t2.type == .Operator) {
+                    const op2 = t2.data.sval.items;
+                    if (std.mem.eql(u8, op2, "-") or std.mem.eql(u8, op2, "+") or std.mem.eql(u8, op2, "&") or std.mem.eql(u8, op2, "*")) {
+                        const unary_ctx = blk_unary: {
+                            if (pt2.type == .Keyword) {
+                                const kw = pt2.data.sval.items;
+                                if (std.mem.eql(u8, kw, "ret") or std.mem.eql(u8, kw, "if") or std.mem.eql(u8, kw, "elif") or std.mem.eql(u8, kw, "for")) break :blk_unary true;
+                            }
+                            if (is_word_like(pt2)) break :blk_unary false;
+                            if (pt2.type == .Symbol and is_closing_symbol(pt2.data.cval)) break :blk_unary false;
+                            break :blk_unary true;
+                        };
+                        if (unary_ctx) break :blk false;
+                    }
+                }
+                if (t2.type == .Symbol and (t2.data.cval == '&' or t2.data.cval == '*' or t2.data.cval == '+' or t2.data.cval == '-')) {
+                    if (pt2.type == .Operator and (std.mem.eql(u8, pt2.data.sval.items, "=") or
+                        std.mem.eql(u8, pt2.data.sval.items, "!=") or std.mem.eql(u8, pt2.data.sval.items, "=="))) break :blk true;
+                    const unary_ctx = blk_unary_sym: {
+                        if (pt2.type == .Keyword) {
+                            const kw = pt2.data.sval.items;
+                            if (std.mem.eql(u8, kw, "ret") or std.mem.eql(u8, kw, "if") or std.mem.eql(u8, kw, "elif") or std.mem.eql(u8, kw, "for")) break :blk_unary_sym true;
+                        }
+                        if (is_word_like(pt2)) break :blk_unary_sym false;
+                        if (pt2.type == .Symbol and is_closing_symbol(pt2.data.cval)) break :blk_unary_sym false;
+                        break :blk_unary_sym true;
+                    };
+                    if (unary_ctx) break :blk false;
                 }
                 if (t2.type == .Operator and std.mem.eql(u8, t2.data.sval.items, "*") and isPointerTypeStarContext(toks, idx, pt2, in_decl_only_ctx)) {
                     // Pointer types: `Type* name` / `Type* {`.

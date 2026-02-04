@@ -1,4 +1,10 @@
 // Simple logging.
+// 
+// Usage:
+// ```
+// Logger l = logger_init(.Info);
+// l.info("hello");
+// ```
 
 imp std.c.io;
 

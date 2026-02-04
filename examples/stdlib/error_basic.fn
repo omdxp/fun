@@ -1,0 +1,12 @@
+// Error helpers example.
+
+imp std.c.io;
+imp std.error;
+
+fun main() {
+  Error e = error_new(1, "bad");
+  printf("e ok=%d code=%d msg=%s\n", error_is_ok(&e), e.code, e.message);
+
+  Error ok = error_ok();
+  printf("ok=%d code=%d\n", error_is_ok(&ok), ok.code);
+}

@@ -1,4 +1,11 @@
 // String helpers implemented in Fun.
+// 
+// Usage:
+// ```
+// StringBuilder b = string_builder_init(4);
+// b.push("hello");
+// b.push("world");
+// ```
 
 imp std.c.mem;
 imp std.c.def;
@@ -398,7 +405,7 @@ pub fun split_whitespace(str s) Vec<str> {
 // 
 // Returns:
 // - joined string
-pub fun join(Vec<str>*parts, str sep) str {
+pub fun join(Vec<str>* parts, str sep) str {
   ret parts.join(sep);
 }
 
