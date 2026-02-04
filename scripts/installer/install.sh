@@ -106,7 +106,8 @@ case "$shell_name" in
     append_block_fish "$HOME/.config/fish/config.fish" && persisted="yes"
     ;;
   *)
-    persisted="no"
+    # Best-effort fallback for POSIX shells or unknowns.
+    append_block_sh "$HOME/.profile" && persisted="yes"
     ;;
 esac
 
@@ -114,8 +115,14 @@ echo "Installed fun to: $prefix"
 echo "Installed fls to: $prefix"
 echo "Stdlib installed to: $dest_share"
 echo "FUN_STDLIB_DIR snippet: $env_snippet"
+echo "FUN_CC=zig"
+echo "FUN_CC_ARGS=cc"
 if [ "$persisted" = "yes" ]; then
-  echo "FUN_STDLIB_DIR persisted for shell: $shell_name"
+  if [ -n "$shell_name" ]; then
+    echo "FUN_STDLIB_DIR persisted for shell: $shell_name"
+  else
+    echo "FUN_STDLIB_DIR persisted in: $HOME/.profile"
+  fi
 else
   echo "To enable in your shell: . \"$env_snippet\""
 fi

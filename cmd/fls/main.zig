@@ -1323,6 +1323,10 @@ const LspServer = struct {
         return current_type.?;
     }
 
+    fn baseTypeNameForLookup(name: []const u8) []const u8 {
+        return if (std.mem.indexOfScalar(u8, name, '<')) |idx| name[0..idx] else name;
+    }
+
     fn appendMemberCompletionsForType(
         self: *LspServer,
         items: *std.ArrayList(CompletionItem),
@@ -1331,6 +1335,7 @@ const LspServer = struct {
         container_type: []const u8,
         prefix: []const u8,
     ) !void {
+        const container_base = baseTypeNameForLookup(container_type);
         var it = self.docs.iterator();
         while (it.next()) |entry| {
             const uri = entry.value_ptr.uri;
@@ -1338,7 +1343,7 @@ const LspServer = struct {
             for (didx.symbols) |s| {
                 if (s.container_fn_range != null) continue;
                 if (s.container_type == null) continue;
-                if (!std.mem.eql(u8, s.container_type.?, container_type)) continue;
+                if (!std.mem.eql(u8, baseTypeNameForLookup(s.container_type.?), container_base)) continue;
                 if (!(s.kind == .field or s.kind == .property or s.kind == .method or s.kind == .enumMember)) continue;
                 if (prefix.len != 0 and !std.mem.startsWith(u8, s.name, prefix)) continue;
                 if (!self.isSymbolVisibleFromUri(preferred_uri, uri, s)) continue;
@@ -2110,12 +2115,13 @@ const LspServer = struct {
         if (!s.is_public) return false;
 
         if (s.container_type) |ct| {
+            const ct_base = baseTypeNameForLookup(ct);
             if (self.docs.get(sym_uri)) |doc| {
                 if (doc.index) |idx| {
                     for (idx.symbols) |ts| {
                         if (ts.container_fn_range != null) continue;
                         if (ts.container_type != null) continue;
-                        if (!std.mem.eql(u8, ts.name, ct)) continue;
+                        if (!std.mem.eql(u8, ts.name, ct_base)) continue;
                         if (ts.kind != .struct_ and ts.kind != .interface and ts.kind != .enum_) continue;
                         if (!ts.is_public) return false;
                         break;
@@ -2128,6 +2134,7 @@ const LspServer = struct {
     }
 
     fn findMemberByContainer(self: *LspServer, preferred_uri: []const u8, container_type: []const u8, name: []const u8, kind: SymbolKind) ?MemberHit {
+        const container_base = baseTypeNameForLookup(container_type);
         // Prefer current document first.
         if (self.docs.get(preferred_uri)) |doc| {
             if (doc.index) |idx| {
@@ -2135,7 +2142,7 @@ const LspServer = struct {
                     if (s.container_fn_range != null) continue;
                     if (s.kind != kind) continue;
                     if (s.container_type == null) continue;
-                    if (!std.mem.eql(u8, s.container_type.?, container_type)) continue;
+                    if (!std.mem.eql(u8, baseTypeNameForLookup(s.container_type.?), container_base)) continue;
                     if (!std.mem.eql(u8, s.name, name)) continue;
                     return .{ .uri = preferred_uri, .sym = s };
                 }
@@ -2151,7 +2158,7 @@ const LspServer = struct {
                 if (s.container_fn_range != null) continue;
                 if (s.kind != kind) continue;
                 if (s.container_type == null) continue;
-                if (!std.mem.eql(u8, s.container_type.?, container_type)) continue;
+                if (!std.mem.eql(u8, baseTypeNameForLookup(s.container_type.?), container_base)) continue;
                 if (!std.mem.eql(u8, s.name, name)) continue;
                 if (!self.isSymbolVisibleFromUri(preferred_uri, uri, s)) continue;
                 return .{ .uri = uri, .sym = s };
@@ -2871,11 +2878,12 @@ const LspServer = struct {
             const dot_tok_i_opt = findTokenIndexAt(idx.tokens, pos) orelse findLastTokenIndexBeforeOrAt(idx.tokens, pos);
             if (dot_tok_i_opt) |dot_tok_i| {
                 if (self.guessEnumTypeForDotShorthand(uri, idx, dot_tok_i)) |enum_name| {
+                    const enum_base = baseTypeNameForLookup(enum_name);
                     // Offer only members of the inferred enum.
                     // Current doc.
                     for (idx.symbols) |s| {
                         if (s.kind != .enumMember) continue;
-                        if (s.container_type == null or !std.mem.eql(u8, s.container_type.?, enum_name)) continue;
+                        if (s.container_type == null or !std.mem.eql(u8, baseTypeNameForLookup(s.container_type.?), enum_base)) continue;
                         const ft = try std.fmt.allocPrint(self.allocator, ".{s}", .{s.name});
                         try items.append(.{
                             .label = try self.allocator.dupe(u8, s.name),
@@ -2899,7 +2907,7 @@ const LspServer = struct {
                         const didx = imported.index orelse continue;
                         for (didx.symbols) |s| {
                             if (s.kind != .enumMember) continue;
-                            if (s.container_type == null or !std.mem.eql(u8, s.container_type.?, enum_name)) continue;
+                            if (s.container_type == null or !std.mem.eql(u8, baseTypeNameForLookup(s.container_type.?), enum_base)) continue;
                             if (!self.isSymbolVisibleFromUri(uri, iu, s)) continue;
                             const ft = try std.fmt.allocPrint(self.allocator, ".{s}", .{s.name});
                             try items.append(.{
