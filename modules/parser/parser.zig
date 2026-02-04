@@ -3944,6 +3944,8 @@ pub const ParseProcess = struct {
             return try self.parse_asm_statement(hist);
         } else if (mem.eql(u8, "ret", sval)) {
             return try self.parse_return(hist);
+        } else if (mem.eql(u8, "assert", sval)) {
+            return try self.parse_assert(hist);
         } else if (mem.eql(u8, "break", sval)) {
             _ = self.token_next(); // skip break
             self.transpile_proc.nodes.push(ast.Node{ .type = .StatementBreak, .pos = t.?.pos }) catch |e| {
@@ -3983,6 +3985,58 @@ pub const ParseProcess = struct {
         }
 
         self.transpile_proc.err("invalid keyword", .{});
+    }
+
+    /// Parses an assert statement.
+    ///
+    /// Syntax: `assert <expr>;`
+    fn parse_assert(self: *Self, hist: *utils.History) ParseError!void {
+        const assert_token = self.token_peek_next();
+        _ = self.token_next(); // skip assert
+
+        try self.parse_expressionable_root(hist);
+        const exp_node = self.node_pop();
+
+        var cond_ptr: ?*ast.Node = null;
+        var msg_ptr: ?*ast.Node = null;
+
+        if (exp_node != null and exp_node.?.type == .Expression and exp_node.?.node_variant != null and mem.eql(u8, exp_node.?.node_variant.?.exp.op, ",")) {
+            const expv = exp_node.?.node_variant.?.exp;
+            cond_ptr = expv.left;
+            msg_ptr = expv.right;
+        } else {
+            const exp = self.transpile_proc.allocator.create(ast.Node) catch |e| {
+                std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer self.transpile_proc.allocator.destroy(exp);
+            exp.* = exp_node.?;
+            cond_ptr = exp;
+
+            const next_tok = self.token_peek_next();
+            if (next_tok != null and next_tok.?.type == .Operator and mem.eql(u8, next_tok.?.data.sval.items, ",")) {
+                _ = self.token_next(); // skip ','
+                try self.parse_expressionable_root(hist);
+                const msg_node = self.node_pop();
+                const msg = self.transpile_proc.allocator.create(ast.Node) catch |e| {
+                    std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
+                    return ParseError.MemoryAllocationFailed;
+                };
+                errdefer self.transpile_proc.allocator.destroy(msg);
+                msg.* = msg_node.?;
+                msg_ptr = msg;
+            }
+        }
+
+        self.transpile_proc.nodes.push(ast.Node{
+            .type = .StatementAssert,
+            .pos = if (assert_token) |t| t.pos else null,
+            .node_variant = .{ .statement = .{ .assert_stmt = .{ .condition = cond_ptr.?, .message = msg_ptr } } },
+        }) catch |e| {
+            std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});
+            return ParseError.MemoryAllocationFailed;
+        };
+        try self.expect_sym(';');
     }
 
     fn parse_pub_declaration(self: *Self) ParseError!void {

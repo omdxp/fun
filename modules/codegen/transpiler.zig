@@ -3151,8 +3151,12 @@ pub const TranspileProcess = struct {
                     if (callee_name != null) {
                         const fn_node = self.find_function_node(callee_name.?) orelse null;
                         if (fn_node != null and fn_node.?.node_variant != null and fn_node.?.node_variant.?.function.type_params != null) {
-                            const fnv = fn_node.?.node_variant.?.function;
-                            const params = fnv.type_params.?;
+                            const fnv = &fn_node.?.node_variant.?.function;
+                            const params_ptr = blk: {
+                                if (fnv.type_params) |*p| break :blk p;
+                                self.report_type_error(node, "unknown function '{s}'", .{callee_name.?});
+                                return TranspileError.SymbolNotDefined;
+                            };
 
                             // Infer type arguments from call arguments.
                             var bindings = std.StringHashMap(*dtype.DataType).init(self.allocator);
@@ -3183,7 +3187,7 @@ pub const TranspileProcess = struct {
                                     return TranspileError.TypeMismatch;
                                 };
 
-                                const ok = try self.bind_generic_param(expected_dt, actual_dt, &params, &bindings);
+                                const ok = try self.bind_generic_param(expected_dt, actual_dt, params_ptr, &bindings);
                                 if (!ok) {
                                     self.report_type_error(node, "type mismatch in call to '{s}' argument {d}", .{ callee_name.?, idx + 1 });
                                     return TranspileError.TypeMismatch;
@@ -3191,11 +3195,11 @@ pub const TranspileProcess = struct {
                             }
 
                             // Ensure all params are bound.
-                            var gargs = self.allocator.alloc(*dtype.DataType, params.count) catch {
+                            var gargs = self.allocator.alloc(*dtype.DataType, params_ptr.count) catch {
                                 return TranspileError.MemoryAllocationFailed;
                             };
                             var pi: usize = 0;
-                            for (params.items()) |p| {
+                            for (params_ptr.items()) |p| {
                                 if (bindings.get(p.items)) |dt_ptr| {
                                     gargs[pi] = dt_ptr;
                                 } else {
@@ -3211,7 +3215,7 @@ pub const TranspileProcess = struct {
                                 const expected_node = expected_items[idx];
                                 if (expected_node.type != .Variable or expected_node.node_variant == null) continue;
                                 const expected_dt = expected_node.node_variant.?.variable.type;
-                                const expected_t = try self.type_from_dtype_with_subst(expected_dt, params, gargs);
+                                const expected_t = try self.type_from_dtype_with_subst(expected_dt, params_ptr.*, gargs);
                                 const actual_t = try self.infer_expr_type(args_nodes.items[idx].*, env, fns);
                                 if (is_known_type(expected_t) and is_known_type(actual_t) and !(try self.can_implicit_coerce(expected_t, actual_t))) {
                                     self.report_type_error(node, "type mismatch in call to '{s}' argument {d}", .{ callee_name.?, idx + 1 });
@@ -3221,14 +3225,14 @@ pub const TranspileProcess = struct {
 
                             // Compute specialized return type.
                             if (fnv.rtype) |rt| {
-                                call_rtype = try self.type_from_dtype_with_subst(&rt, params, gargs);
+                                call_rtype = try self.type_from_dtype_with_subst(&rt, params_ptr.*, gargs);
                             } else {
                                 call_rtype = .{ .base = .Void };
                             }
 
                             // Register instantiation and call override for codegen.
                             const spec_name = try self.mangle_generic_fn_name(callee_name.?, gargs);
-                            try self.register_generic_fn_instantiation(fn_node.?, &params, gargs, spec_name);
+                            try self.register_generic_fn_instantiation(fn_node.?, params_ptr, gargs, spec_name);
                             if (node.pos) |p| {
                                 const key = try self.call_pos_key_alloc(p);
                                 if (!self.generic_call_overrides.contains(key)) {
@@ -3829,6 +3833,21 @@ pub const TranspileProcess = struct {
                 },
                 .Body => {
                     try self.check_body(stmt_ptr, env, fns, fn_rtype);
+                },
+                .StatementAssert => {
+                    const stmtv = stmt.node_variant.?.statement.assert_stmt;
+                    const ct = try self.infer_expr_type(stmtv.condition.*, env, fns);
+                    if (ct.base != .Bin) {
+                        self.report_type_error(stmt, "assert expects bin condition", .{});
+                        return TranspileError.TypeMismatch;
+                    }
+                    if (stmtv.message) |msg| {
+                        const mt = try self.infer_expr_type(msg.*, env, fns);
+                        if (mt.base != .Str) {
+                            self.report_type_error(stmt, "assert message must be str", .{});
+                            return TranspileError.TypeMismatch;
+                        }
+                    }
                 },
                 else => {
                     // Expression statements, break/continue, etc.
@@ -5105,6 +5124,14 @@ pub const TranspileProcess = struct {
                                 allocator.destroy(branch.body);
                             }
                             fit.branches.deinit();
+                        },
+                        .assert_stmt => |asrt| {
+                            self.deinit_node(asrt.condition.*);
+                            allocator.destroy(asrt.condition);
+                            if (asrt.message) |msg| {
+                                self.deinit_node(msg.*);
+                                allocator.destroy(msg);
+                            }
                         },
                     }
                 },
@@ -7643,7 +7670,7 @@ pub const TranspileProcess = struct {
                 try self.write_indent();
                 try self.write("}");
             },
-            .StatementReturn, .StatementDefer, .StatementAsm, .StatementIf, .StatementElseIf, .StatementElse, .StatementFit, .StatementFor => {
+            .StatementReturn, .StatementDefer, .StatementAsm, .StatementIf, .StatementElseIf, .StatementElse, .StatementFit, .StatementFor, .StatementAssert => {
                 // `ret;` is represented as StatementReturn with no node_variant.
                 if (node.type == .StatementReturn and node.node_variant == null) {
                     try self.emit_defers();
@@ -7855,6 +7882,22 @@ pub const TranspileProcess = struct {
                             try self.transpile_node(rn.*);
                             try self.write(";");
                         }
+                    },
+                    .assert_stmt => |asrt| {
+                        try self.write_indent();
+                        try self.write("if (!(");
+                        try self.transpile_node(asrt.condition.*);
+                        try self.write(")) { ");
+                        if (asrt.message) |msg| {
+                            try self.write("fprintf(stderr, \"Assertion failed at ");
+                            if (node.pos) |p| {
+                                try self.print("{s}:{d}: ", .{ p.filename, p.line });
+                            }
+                            try self.write("%s\\n\", ");
+                            try self.transpile_node(msg.*);
+                            try self.write("); ");
+                        }
+                        try self.write("abort(); }");
                     },
                     .for_stmt => |for_s| {
                         switch (for_s) {
@@ -8557,6 +8600,7 @@ pub const TranspileProcess = struct {
         }
 
         // Always include core headers once.
+        try add_header(self, &seen, "stdio.h");
         try add_header(self, &seen, "stdbool.h");
         try add_header(self, &seen, "stdint.h");
         try add_header(self, &seen, "stdlib.h");

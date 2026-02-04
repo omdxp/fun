@@ -1,0 +1,16 @@
+// Assert with message (advanced example).
+// Note: calling fail_demo() will abort.
+
+imp std.c.io;
+
+fun fail_demo() {
+  assert false, "this should never happen";
+}
+
+fun main() {
+  num x = 2;
+  assert x == 2, "x must be 2";
+  // Uncomment to see failure:
+  // fail_demo();
+  printf("ok\n");
+}

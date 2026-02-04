@@ -31,6 +31,7 @@ zig-out/bin/fls examples/<example>.fn
 - advanced/chr.fn
 - advanced/custom_functions.fn
 - advanced/dec.fn
+- advanced/assert_with_message.fn
 - advanced/fit_exhaustive_ok.fn
 - advanced/fit_exhaustive_warning.fn
 - advanced/for_loops.fn
@@ -50,6 +51,7 @@ zig-out/bin/fls examples/<example>.fn
 
 ## Standard library
 - stdlib/array_helpers.fn
+- stdlib/assert_basic.fn
 - stdlib/cli_parse.fn
 - stdlib/ctype_validate_identifier.fn
 - stdlib/io_file_copy.fn

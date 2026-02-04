@@ -142,7 +142,7 @@
       "patterns": [
         {
           "name": "keyword.control.fun",
-          "match": "\\b(imp|pub|fun|compound|quirk|impl|enum|asm|volatile|arch|if|elif|else|fit|ret|for|break|continue|defer)\\b"
+          "match": "\\b(imp|pub|fun|compound|quirk|impl|enum|asm|volatile|arch|if|elif|else|fit|ret|for|break|continue|defer|assert)\\b"
         }
       ]
     }

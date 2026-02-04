@@ -74,7 +74,8 @@ pub fn is_keyword(str: []const u8) bool {
         mem.eql(u8, "chr", str) or
         mem.eql(u8, "for", str) or
         mem.eql(u8, "break", str) or
-        mem.eql(u8, "continue", str);
+        mem.eql(u8, "continue", str) or
+        mem.eql(u8, "assert", str);
 }
 
 /// Checks if the given character is a boolean keyword.

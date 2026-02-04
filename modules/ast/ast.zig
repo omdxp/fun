@@ -58,6 +58,8 @@ pub const NodeType = enum {
     StatementBreak,
     /// Represents a continue statement node.
     StatementContinue,
+    /// Represents an assert statement node.
+    StatementAssert,
     /// Represents a fit statement node.
     StatementFit,
     /// Represents a case statement node.
@@ -288,6 +290,13 @@ pub const Node = struct {
                 branches: utils.Vector(FitBranch),
                 /// Indicates if the fit statement has a default branch.
                 has_default_branch: bool,
+            },
+            /// The assert statement node.
+            assert_stmt: struct {
+                /// The condition to assert.
+                condition: *Node,
+                /// Optional message expression (should be str).
+                message: ?*Node = null,
             },
         },
     } = null,

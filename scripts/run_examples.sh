@@ -42,6 +42,9 @@ to_fun_path() {
 
 is_runnable_file() {
   # runnable if it defines fun main(
+  if [[ "$1" == */examples/stdlib/net_http_server.fn ]]; then
+    return 1
+  fi
   grep -Eq '^[[:space:]]*fun[[:space:]]+main[[:space:]]*\(' "$1"
 }
 

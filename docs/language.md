@@ -47,6 +47,7 @@
 - **If/Else**: Standard conditional branching.
 - **Elif**: Else-if chaining.
 - **Pattern Matching**: `fit` statement for exhaustive and non-exhaustive matches.
+- **Assert**: `assert <condition>;` aborts if condition is false. Optional message: `assert <condition>, "msg";`.
 - **For Loops**:
     - Range: `for i : 0..10 { ... }`
     - Array: `for item : arr { ... }`

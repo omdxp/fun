@@ -1,0 +1,9 @@
+// Assert statement example.
+
+imp std.c.io;
+
+fun main() {
+  num x = 5;
+  assert x == 5;
+  printf("x is %d\n", x);
+}
