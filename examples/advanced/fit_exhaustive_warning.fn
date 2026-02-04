@@ -1,11 +1,11 @@
 // Demonstrates the transpiler warning for non-exhaustive `fit` on `bin`.
-//
+// 
 // Run:
-//   fun -in .\examples\advanced\fit_exhaustive_warning.fn
-//
+// fun -in .\examples\advanced\fit_exhaustive_warning.fn
+// 
 // Expected:
 // - A warning like:
-//   "fit statement is not exhausted for bin condition (missing false branch)"
+// "fit statement is not exhausted for bin condition (missing false branch)"
 // - Program still runs normally.
 
 imp std.c.io;
@@ -15,6 +15,8 @@ fun main() {
 
   // Not exhaustive: missing a `false -> ...` branch and no `_ -> ...` default.
   fit x {
-    true -> { printf("x was true\n"); }
+    true -> {
+      printf("x was true\n");
+    }
   }
 }

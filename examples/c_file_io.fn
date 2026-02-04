@@ -8,7 +8,7 @@ fun main() {
   str path = "./_fun_c_file_io_demo.txt";
 
   FILE* f = fopen(path, "wb+");
-  if (f == NULL) {
+  if f == NULL {
     perror("fopen");
     ret;
   }

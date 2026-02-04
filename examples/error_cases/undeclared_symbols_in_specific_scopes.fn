@@ -1,16 +1,17 @@
 fun function() {
-	num x = 1;
-	{
-		num y = 2;
-		{
-			num z = x + y;
-			{
-				y = 1;
-			}
-			y = 2;
-			z = 3;
-		}
-		y = 2;
-		z = 3; // Error: undeclared symbol 'z'
-	}
+  num x = 1;
+  {
+    num y = 2;
+    {
+      num z = x + y;
+      {
+        y = 1;
+      }
+      y = 2;
+      z = 3;
+    }
+    y = 2;
+    z = 3;
+    // Error: undeclared symbol 'z'
+  }
 }

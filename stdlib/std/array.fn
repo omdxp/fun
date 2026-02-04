@@ -1,78 +1,20 @@
 // Helper utilities for fixed arrays.
 
-// View over a numeric array.
+// View over a generic array.
 // 
 // Fields:
 // - data: backing storage
 // - len: number of elements
-pub compound NumArray {
+pub compound Array<T> {
   // data: backing storage
-  num[] data;
+  T[] data;
   // len: number of elements
   num len;
 }
 
-// Wrap a raw array pointer and length as NumArray.
-// 
-// Params:
-// - data: array pointer
-// - len: element count
-// 
-// Returns:
-// - NumArray view
-pub fun num_array_wrap(num[] data, num len) NumArray {
-  NumArray a;
-  a.data = data;
-  a.len = len;
-  ret a;
-}
-
-impl NumArray {
-  // Sum all elements.
-  pub sum() num {
-    num total = 0;
-    num i = 0;
-    for i < self.len {
-      total = total + self.data[i];
-      i = i + 1;
-    }
-    ret total;
-  }
-
-  // Minimum value in the array (0 if empty).
-  pub min() num {
-    if self.len == 0 {
-      ret 0;
-    }
-    num min = self.data[0];
-    num i = 1;
-    for i < self.len {
-      if self.data[i] < min {
-        min = self.data[i];
-      }
-      i = i + 1;
-    }
-    ret min;
-  }
-
-  // Maximum value in the array (0 if empty).
-  pub max() num {
-    if self.len == 0 {
-      ret 0;
-    }
-    num max = self.data[0];
-    num i = 1;
-    for i < self.len {
-      if self.data[i] > max {
-        max = self.data[i];
-      }
-      i = i + 1;
-    }
-    ret max;
-  }
-
+impl Array<T> {
   // Fill array with a value.
-  pub fill(num value) {
+  pub fill(T value) {
     num i = 0;
     for i < self.len {
       self.data[i] = value;
@@ -81,7 +23,7 @@ impl NumArray {
   }
 
   // Copy values from another array.
-  pub copy_from(num[] src, num len) {
+  pub copy_from(T[] src, num len) {
     num i = 0;
     for i < len {
       self.data[i] = src[i];
@@ -99,8 +41,13 @@ impl NumArray {
 // Returns:
 // - total sum
 pub fun sum_num(num[] arr, num len) num {
-  NumArray a = num_array_wrap(arr, len);
-  ret a.sum();
+  num total = 0;
+  num i = 0;
+  for i < len {
+    total = total + arr[i];
+    i = i + 1;
+  }
+  ret total;
 }
 
 // Minimum value in a numeric array slice.
@@ -112,8 +59,18 @@ pub fun sum_num(num[] arr, num len) num {
 // Returns:
 // - minimum value (0 if empty)
 pub fun min_num(num[] arr, num len) num {
-  NumArray a = num_array_wrap(arr, len);
-  ret a.min();
+  if len == 0 {
+    ret 0;
+  }
+  num min = arr[0];
+  num i = 1;
+  for i < len {
+    if arr[i] < min {
+      min = arr[i];
+    }
+    i = i + 1;
+  }
+  ret min;
 }
 
 // Maximum value in a numeric array slice.
@@ -125,8 +82,18 @@ pub fun min_num(num[] arr, num len) num {
 // Returns:
 // - maximum value (0 if empty)
 pub fun max_num(num[] arr, num len) num {
-  NumArray a = num_array_wrap(arr, len);
-  ret a.max();
+  if len == 0 {
+    ret 0;
+  }
+  num max = arr[0];
+  num i = 1;
+  for i < len {
+    if arr[i] > max {
+      max = arr[i];
+    }
+    i = i + 1;
+  }
+  ret max;
 }
 
 // Fill a numeric array slice with a value.
@@ -136,8 +103,11 @@ pub fun max_num(num[] arr, num len) num {
 // - len: element count
 // - value: fill value
 pub fun fill_num(num[] arr, num len, num value) {
-  NumArray a = num_array_wrap(arr, len);
-  a.fill(value);
+  num i = 0;
+  for i < len {
+    arr[i] = value;
+    i = i + 1;
+  }
 }
 
 // Copy between numeric array slices.
@@ -147,6 +117,9 @@ pub fun fill_num(num[] arr, num len, num value) {
 // - src: source array
 // - len: element count
 pub fun copy_num(num[] dst, num[] src, num len) {
-  NumArray a = num_array_wrap(dst, len);
-  a.copy_from(src, len);
+  num i = 0;
+  for i < len {
+    dst[i] = src[i];
+    i = i + 1;
+  }
 }

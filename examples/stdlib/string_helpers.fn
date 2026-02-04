@@ -9,7 +9,7 @@ fun main() {
   str trimmed = trim(input);
   printf("trimmed='%s'\n", trimmed);
 
-  Vec < str > parts = split(trimmed, ',');
+  Vec<str> parts = split(trimmed, ',');
   num i = 0;
   for i < parts.len() {
     printf("part[%d]=%s\n", i, parts.get(i));

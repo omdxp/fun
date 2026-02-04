@@ -2,14 +2,14 @@ imp std.c.io;
 
 // this calculates the factorial of a number
 fun factorial(num n) num {
-    if n == 0 {
-        ret 1;
-    }
-    ret n * factorial(n - 1);
+  if n == 0 {
+    ret 1;
+  }
+  ret n * factorial(n - 1);
 }
 
 fun main() {
-    num number = 5;
-    num result = factorial(number);
-    printf("The factorial of %d is: %d\n", number, result);
+  num number = 5;
+  num result = factorial(number);
+  printf("The factorial of %d is: %d\n", number, result);
 }

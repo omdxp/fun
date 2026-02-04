@@ -5,7 +5,8 @@ imp std.c.io;
 imp std.c.def;
 
 // File system helper container.
-pub compound Fs { }
+pub compound Fs {
+}
 
 // Create an Fs helper instance.
 // 

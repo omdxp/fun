@@ -4,6 +4,6 @@ imp std.c.io;
 num x = 5;
 
 pub fun child() {
-	grand_child();
-	printf("child\n");
+  grand_child();
+  printf("child\n");
 }

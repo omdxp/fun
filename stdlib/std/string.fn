@@ -12,7 +12,7 @@ imp std.quirks;
 // - total_len: total length of fragments
 pub compound StringBuilder {
   // parts: vector of string fragments
-  Vec < str > parts;
+  Vec<str> parts;
   // total_len: total length of fragments
   num total_len;
 }
@@ -280,8 +280,8 @@ pub fun trim(str s) str {
 // 
 // Returns:
 // - Vec<str> of segments
-pub fun split(str s, chr delim) Vec < str > {
-  Vec < str > parts;
+pub fun split(str s, chr delim) Vec<str> {
+  Vec<str> parts;
   parts.init(4);
   num n = _string_len(s);
   num start = 0;
@@ -311,7 +311,7 @@ pub fun split(str s, chr delim) Vec < str > {
 // 
 // Returns:
 // - joined string
-pub fun join(Vec < str >*parts, str sep) str {
+pub fun join(Vec<str>*parts, str sep) str {
   ret parts.join(sep);
 }
 

@@ -45,7 +45,7 @@ pub fun abs_num(num x) num {
 // Returns:
 // - |x|
 pub fun abs_dec(dec x) dec {
-  if x < 0.0 {
+  if x < 0 {
     ret -x;
   }
   ret x;

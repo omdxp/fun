@@ -1,5 +1,6 @@
 fun add(num a, num b) num {
-	ret a + b;
+  ret a + b;
 }
 
-fun main() {}
+fun main() {
+}

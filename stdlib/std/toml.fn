@@ -10,7 +10,7 @@ imp std.vec;
 // - values: key/value map
 pub compound TomlDoc {
   // values: key/value map
-  Map < str > values;
+  Map<str> values;
 }
 
 // Create a new TOML document.
@@ -41,7 +41,7 @@ impl TomlDoc {
 
   // Serialize the document to a string.
   pub stringify() str {
-    Vec < str > parts;
+    Vec<str> parts;
     parts.init(self.values.len() * 2 + 4);
     num i = 0;
     for i < self.values.cap {

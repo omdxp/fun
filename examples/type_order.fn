@@ -24,8 +24,10 @@ compound Node {
 
 fun main() {
   Segment s;
-  s.a.x = 1; s.a.y = 2;
-  s.b.x = 3; s.b.y = 4;
+  s.a.x = 1;
+  s.a.y = 2;
+  s.b.x = 3;
+  s.b.y = 4;
 
   Node n1;
   Node n2;

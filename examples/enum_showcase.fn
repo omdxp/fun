@@ -19,12 +19,18 @@ impl Person {
 }
 
 fun takesColor(Color c) {
-  if c == .Red { printf("takesColor: red\n"); }
-  if c == Color.Green { printf("takesColor: green\n"); }
+  if c == .Red {
+    printf("takesColor: red\n");
+  }
+  if c == Color.Green {
+    printf("takesColor: green\n");
+  }
 }
 
 fun takesDirection(Direction d) {
-  if d == .East { printf("takesDirection: east\n"); }
+  if d == .East {
+    printf("takesDirection: east\n");
+  }
 }
 
 fun main() {
@@ -35,8 +41,12 @@ fun main() {
   p.printInfo();
 
   // Longhand + shorthand comparisons
-  if d == Direction.East { printf("dir: east\n"); }
-  if d != .West { printf("dir: not west\n"); }
+  if d == Direction.East {
+    printf("dir: east\n");
+  }
+  if d != .West {
+    printf("dir: not west\n");
+  }
 
   // Assignments (longhand + shorthand)
   Color c = Color.Red;
@@ -49,16 +59,28 @@ fun main() {
 
   // Fit with shorthand variants (exhaustive)
   fit c {
-    .Red -> { printf("fit shorthand: red\n"); },
-    .Green -> { printf("fit shorthand: green\n"); },
-    .Blue -> { printf("fit shorthand: blue\n"); }
+    .Red -> {
+      printf("fit shorthand: red\n");
+    },
+    .Green -> {
+      printf("fit shorthand: green\n");
+    },
+    .Blue -> {
+      printf("fit shorthand: blue\n");
+    }
   }
 
   // Fit with longhand variants + catch-all
   fit d {
-    Direction.North -> { printf("fit longhand: north\n"); },
-    Direction.East -> { printf("fit longhand: east\n"); },
-    _ -> { printf("fit longhand: other\n"); }
+    Direction.North -> {
+      printf("fit longhand: north\n");
+    },
+    Direction.East -> {
+      printf("fit longhand: east\n");
+    },
+    _ -> {
+      printf("fit longhand: other\n");
+    }
   }
 }
 

@@ -3,6 +3,7 @@
 imp std.c.io;
 imp std.c.mem;
 imp std.time;
+
 fun main() {
   Timestamp t = now();
   printf("epoch_seconds=%d\n", t.epoch);

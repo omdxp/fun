@@ -1,9 +1,9 @@
 imp std.c.io;
 
 fun main() {
-    dec x = 1;
-    dec y = 2.5;
-    dec z = x + y * 2;
+  dec x = 1;
+  dec y = 2.5;
+  dec z = x + y * 2;
 
-    printf("x=%f y=%f z=%f\n", x, y, z);
+  printf("x=%f y=%f z=%f\n", x, y, z);
 }

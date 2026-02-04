@@ -34,8 +34,8 @@ impl Rectangle Shape {
   area() num {
     num w = self.b.x - self.a.x;
     num h = self.b.y - self.a.y;
-    if (w < 0) w = -w;
-    if (h < 0) h = -h;
+    if (w<0) w = -w;
+    if (h<0) h = -h;
     ret w * h;
   }
 
@@ -82,8 +82,8 @@ fun main() {
   circ.center.y = 1;
   circ.r = 2;
 
-  Shape srect = & rect;
-  Shape scirc = & circ;
+  Shape srect = &rect;
+  Shape scirc = &circ;
 
   printf("rect area = %d\n", srect.area());
   printf("circ area = %d\n", scirc.area());
@@ -94,7 +94,7 @@ fun main() {
   printf("rect moved a=(%d,%d)\n", rect.a.x, rect.a.y);
   printf("circ moved center=(%d,%d)\n", circ.center.x, circ.center.y);
 
-  HasX hx_rect = & rect;
-  HasX hx_circ = & circ;
+  HasX hx_rect = &rect;
+  HasX hx_circ = &circ;
   printf("rect.getX=%d circ.getX=%d\n", hx_rect.getX(), hx_circ.getX());
 }

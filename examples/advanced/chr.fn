@@ -1,7 +1,7 @@
 imp std.c.io;
 
 fun main() {
-    chr a = 'A';
-    chr nl = '\n';
-    printf("%c%c", a, nl);
+  chr a = 'A';
+  chr nl = '\n';
+  printf("%c%c", a, nl);
 }

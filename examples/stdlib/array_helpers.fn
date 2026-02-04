@@ -1,12 +1,16 @@
 // Array helpers example.
 
 imp std.c.io;
+imp std.c.mem;
 imp std.array;
 
 fun main() {
   num[] arr = [1, 2, 3, 4];
   num len = 4;
-  NumArray a = num_array_wrap(arr, len);
-  printf("sum=%d\n", a.sum());
-  printf("min=%d max=%d\n", a.min(), a.max());
+  Array<num> a;
+  a.len = len;
+  a.data = malloc(len * sizeof(num));
+  a.fill(0);
+  printf("sum=%d\n", sum_num(arr, len));
+  printf("min=%d max=%d\n", min_num(arr, len), max_num(arr, len));
 }

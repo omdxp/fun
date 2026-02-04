@@ -3,5 +3,5 @@ imp error_cases.circular_dependency.circular1;
 imp std.c.io;
 
 fun test_circular() {
-    printf("Testing circular dependency detection\n");
+  printf("Testing circular dependency detection\n");
 }

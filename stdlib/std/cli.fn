@@ -12,9 +12,9 @@ imp std.quirks;
 // - positionals: non-flag arguments
 pub compound CliArgs {
   // opts: parsed --key/--key=value flags
-  Map < str > opts;
+  Map<str> opts;
   // positionals: non-flag arguments
-  Vec < str > positionals;
+  Vec<str> positionals;
 }
 
 // Parse argv into options and positionals.

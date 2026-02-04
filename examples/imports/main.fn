@@ -2,5 +2,5 @@ imp std.c.io;
 imp relative.parent;
 
 fun main() {
-	parent();
+  parent();
 }

@@ -31,7 +31,7 @@ pub compound MapEntry {
 // - len: number of live entries
 // - cap: allocated capacity
 // - value_size: size of stored values
-pub compound Map < T > {
+pub compound Map<T> {
   // entries: backing storage
   MapEntry* entries;
   // len: number of live entries
@@ -60,7 +60,7 @@ fun _hash_str(str s) num {
 
 // (helpers are implemented as Map<T> methods)
 
-impl Map < T > Sized {
+impl Map<T> Sized {
   // Number of stored entries.
   pub len() num {
     ret self.len;
@@ -72,7 +72,7 @@ impl Map < T > Sized {
   }
 }
 
-impl Map < T > {
+impl Map<T> {
   // Initialize with an initial capacity.
   pub init(num cap) {
     self.entries = NULL;

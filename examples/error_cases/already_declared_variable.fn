@@ -1,4 +1,5 @@
 fun function() {
-	num a = 1;
-	num a = 2; // Error: variable 'a' already declared
+  num a = 1;
+  num a = 2;
+  // Error: variable 'a' already declared
 }

@@ -1,6 +1,6 @@
 // CLI helpers example.
 // Run:
-//   fun -in examples/stdlib/cli_parse.fn -- --name=fun --debug file1 file2
+// fun -in examples/stdlib/cli_parse.fn -- --name=fun --debug file1 file2
 
 imp std.c.io;
 imp std.cli;

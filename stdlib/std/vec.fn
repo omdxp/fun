@@ -10,7 +10,7 @@ imp std.quirks;
 // - data: backing storage
 // - len: number of elements
 // - cap: allocated capacity
-pub compound Vec < T > {
+pub compound Vec<T> {
   // data: backing storage
   T[] data;
   // len: number of elements
@@ -27,7 +27,7 @@ fun _str_len(str s) num {
   ret i;
 }
 
-impl Vec < T > Sized {
+impl Vec<T> Sized {
   // Number of elements.
   pub len() num {
     ret self.len;
@@ -39,7 +39,7 @@ impl Vec < T > Sized {
   }
 }
 
-impl Vec < T > {
+impl Vec<T> {
   // Initialize with an optional capacity.
   pub init(num cap) {
     self.len = 0;
@@ -102,7 +102,7 @@ impl Vec < T > {
   }
 }
 
-impl Vec < str > {
+impl Vec<str> {
   // Join elements with a separator.
   pub join(str sep) str {
     num sep_len = _str_len(sep);

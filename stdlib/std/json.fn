@@ -10,7 +10,7 @@ imp std.vec;
 // - values: key/value map (string values)
 pub compound JsonObject {
   // values: key/value map (string values)
-  Map < str > values;
+  Map<str> values;
 }
 
 // Create a new empty JSON object.

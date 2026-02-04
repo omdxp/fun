@@ -1,7 +1,7 @@
 // Demonstrates an exhaustive `fit` on `bin` (no warning).
-//
+// 
 // Run:
-//   fun -in .\examples\advanced\fit_exhaustive_ok.fn
+// fun -in .\examples\advanced\fit_exhaustive_ok.fn
 
 imp std.c.io;
 
@@ -10,7 +10,11 @@ fun main() {
 
   // Exhaustive via default branch (`_`).
   fit x {
-    true -> { printf("x was true\n"); },
-    _ -> { printf("x was false\n"); }
+    true -> {
+      printf("x was true\n");
+    },
+    _ -> {
+      printf("x was false\n");
+    }
   }
 }

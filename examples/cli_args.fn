@@ -1,7 +1,7 @@
 // Demonstrates reading CLI arguments.
-//
+// 
 // Run:
-//   fun -in examples/cli_args.fn -- one two three
+// fun -in examples/cli_args.fn -- one two three
 
 imp std.c.io;
 

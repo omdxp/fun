@@ -595,6 +595,117 @@ const EmitState = struct {
     allocator: mem.Allocator,
 };
 
+const AsmRawRange = struct {
+    start_idx: usize,
+    end_idx: usize,
+    start_pos: token.Pos,
+    end_pos: token.Pos,
+};
+
+fn prev_significant_index(toks: []const token.Token, idx: usize) ?usize {
+    if (idx == 0) return null;
+    var i: isize = @as(isize, @intCast(idx)) - 1;
+    while (i >= 0) : (i -= 1) {
+        const t = toks[@intCast(i)];
+        if (t.type == .NewLine or t.type == .Comment) continue;
+        return @intCast(i);
+    }
+    return null;
+}
+
+fn next_significant_index(toks: []const token.Token, idx: usize) ?usize {
+    var i: usize = idx + 1;
+    while (i < toks.len) : (i += 1) {
+        const t = toks[i];
+        if (t.type == .NewLine or t.type == .Comment) continue;
+        return i;
+    }
+    return null;
+}
+
+fn is_generic_angle_open(toks: []const token.Token, idx: usize, in_decl_only_ctx: bool) bool {
+    if (idx >= toks.len) return false;
+    const t = toks[idx];
+    if (!(t.type == .Operator and std.mem.eql(u8, t.data.sval.items, "<"))) return false;
+
+    const prev_idx = prev_significant_index(toks, idx) orelse return false;
+    const next_idx = next_significant_index(toks, idx) orelse return false;
+    const prev = toks[prev_idx];
+    const next = toks[next_idx];
+
+    if (!is_word_like(prev)) return false;
+    if (!(is_word_like(next) or next.type == .Keyword)) return false;
+
+    if (in_decl_only_ctx) return true;
+
+    const before_prev_idx = prev_significant_index(toks, prev_idx);
+    if (before_prev_idx == null) return true;
+    const before_prev = toks[before_prev_idx.?];
+    if (before_prev.type == .Keyword) {
+        const kw = before_prev.data.sval.items;
+        if (std.mem.eql(u8, kw, "impl") or std.mem.eql(u8, kw, "compound") or std.mem.eql(u8, kw, "fun") or std.mem.eql(u8, kw, "pub")) return true;
+    }
+    if (before_prev.type == .Symbol) {
+        const c = before_prev.data.cval;
+        if (c == '{' or c == '}' or c == ';' or c == ',' or c == '(') return true;
+    }
+    if (before_prev.type == .Operator) {
+        const op = before_prev.data.sval.items;
+        if (std.mem.eql(u8, op, "(") or std.mem.eql(u8, op, "[") or std.mem.eql(u8, op, ",") or std.mem.eql(u8, op, ":")) return true;
+    }
+    return false;
+}
+
+fn find_asm_body_block(toks: []const token.Token, asm_idx: usize) ?AsmRawRange {
+    var paren_depth: isize = 0;
+    var i: usize = asm_idx + 1;
+    while (i < toks.len) : (i += 1) {
+        const t = toks[i];
+        if (t.type == .NewLine or t.type == .Comment) continue;
+
+        if (t.type == .Operator and std.mem.eql(u8, t.data.sval.items, "(")) {
+            paren_depth += 1;
+            continue;
+        }
+        if (t.type == .Symbol and t.data.cval == ')') {
+            if (paren_depth > 0) paren_depth -= 1;
+            continue;
+        }
+
+        if (paren_depth == 0) {
+            if (t.type == .String) return null;
+            if (t.type == .Symbol and t.data.cval == '{') {
+                var depth: isize = 1;
+                var j: usize = i + 1;
+                while (j < toks.len) : (j += 1) {
+                    const tj = toks[j];
+                    if (tj.type == .NewLine or tj.type == .Comment) continue;
+                    if (tj.type == .Symbol and tj.data.cval == '{') depth += 1;
+                    if (tj.type == .Symbol and tj.data.cval == '}') {
+                        depth -= 1;
+                        if (depth == 0) {
+                            return .{ .start_idx = i, .end_idx = j, .start_pos = t.pos, .end_pos = tj.pos };
+                        }
+                    }
+                }
+                return null;
+            }
+        }
+    }
+    return null;
+}
+
+fn pos_to_index(line_starts: []const usize, pos: token.Pos, use_end: bool) usize {
+    const line = if (use_end and pos.end_line != 0) pos.end_line else pos.line;
+    const col = if (use_end and pos.end_line != 0) pos.end_col else pos.start_col;
+    if (line == 0) return 0;
+    const li: usize = @as(usize, @intCast(line - 1));
+    if (li >= line_starts.len) return line_starts[line_starts.len - 1];
+    const base = line_starts[li];
+    if (col == 0) return base;
+    return base + @as(usize, col - 1);
+}
+
 const fmt_indent_width: usize = 2;
 
 fn ensureBlankLine(out: *std.ArrayList(u8)) !void {
@@ -617,7 +728,7 @@ fn is_top_level_construct_keyword(kw: []const u8) bool {
         std.mem.eql(u8, kw, "impl");
 }
 
-fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
+fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, line_starts: []const usize) !void {
     var idx: usize = 0;
     var pending_newlines: usize = 0;
     var cond_paren_depth: usize = 0;
@@ -630,6 +741,8 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
     var decl_block_depth: isize = 0;
     var pending_enum_block_open: bool = false;
     var enum_block_depth: isize = 0;
+    var generic_angle_depth: usize = 0;
+    var asm_raw: ?AsmRawRange = null;
     while (idx < toks.len) : (idx += 1) {
         const t2 = toks[idx];
         if (t2.type == .NewLine) {
@@ -645,6 +758,25 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
             state.prev_token.* = null;
         }
         pending_newlines = 0;
+
+        if (asm_raw) |range| {
+            if (idx == range.start_idx) {
+                const start = pos_to_index(line_starts, range.start_pos, false);
+                const end_excl = pos_to_index(line_starts, range.end_pos, true);
+                if (start <= end_excl and end_excl <= source.len) {
+                    try state.out.appendSlice(source[start..end_excl]);
+                    if (end_excl > start and source[end_excl - 1] == '\n') {
+                        state.at_line_start.* = true;
+                    } else {
+                        state.at_line_start.* = false;
+                    }
+                }
+                state.prev_token.* = null;
+                asm_raw = null;
+                idx = range.end_idx;
+                continue;
+            }
+        }
 
         // Strip outer parentheses in conditions: `if (cond)` -> `if cond`.
         // Preserve inner parentheses to keep grouping.
@@ -711,6 +843,9 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
 
         if (t2.type == .Keyword) {
             const kw2 = t2.data.sval.items;
+            if (std.mem.eql(u8, kw2, "asm")) {
+                asm_raw = find_asm_body_block(toks, idx);
+            }
             if (std.mem.eql(u8, kw2, "fun")) {
                 in_fun_signature = true;
             }
@@ -884,6 +1019,7 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
         }
 
         const in_decl_only_ctx = in_fun_signature or decl_block_depth > 0;
+        const generic_open = is_generic_angle_open(toks, idx, in_decl_only_ctx);
 
         // Decide whether to add a space before this token.
         if (state.prev_token.*) |pt2| {
@@ -941,6 +1077,15 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
                     std.mem.eql(u8, pt2.data.sval.items, ">=")) and t2.type == .Operator and t2.data.sval.items.len > 0 and t2.data.sval.items[0] == '.')
                 {
                     break :blk true;
+                }
+                if (t2.type == .Operator and std.mem.eql(u8, t2.data.sval.items, "<") and (generic_open or generic_angle_depth > 0)) {
+                    break :blk false;
+                }
+                if (t2.type == .Operator and std.mem.eql(u8, t2.data.sval.items, ">") and generic_angle_depth > 0) {
+                    break :blk false;
+                }
+                if (pt2.type == .Operator and std.mem.eql(u8, pt2.data.sval.items, "<") and generic_angle_depth > 0) {
+                    break :blk false;
                 }
                 if (t2.type == .Operator) {
                     break :blk operator_needs_spaces(t2.data.sval.items);
@@ -1056,11 +1201,28 @@ fn emitTokens(state: *EmitState, toks: []const token.Token) !void {
                 if (unary_ctx) prev_unary_prefix = true;
             }
         }
+        if (generic_open) {
+            generic_angle_depth += 1;
+        } else if (t2.type == .Operator and std.mem.eql(u8, t2.data.sval.items, ">") and generic_angle_depth > 0) {
+            generic_angle_depth -= 1;
+        }
         state.prev_token.* = t2;
     }
 }
 
 pub fn format_file_in_place(allocator: mem.Allocator, input_file: []const u8) !void {
+    const source = try std.fs.cwd().readFileAlloc(allocator, input_file, 16 * 1024 * 1024);
+    defer allocator.free(source);
+
+    var line_starts = std.ArrayList(usize).init(allocator);
+    defer line_starts.deinit();
+    try line_starts.append(0);
+    for (source, 0..) |c, i| {
+        if (c == '\n') {
+            try line_starts.append(i + 1);
+        }
+    }
+
     // Lex tokens from the file.
     var tp = try codegen.TranspileProcess.init_rw(
         allocator,
@@ -1196,7 +1358,7 @@ pub fn format_file_in_place(allocator: mem.Allocator, input_file: []const u8) !v
     var state: EmitState = .{ .indent = &indent, .at_line_start = &at_line_start, .prev_token = &prev_token, .out = &out, .allocator = allocator };
 
     if (imports.items.len > 0) {
-        try emitTokens(&state, imports.items);
+        try emitTokens(&state, imports.items, source, line_starts.items);
         if (out.items.len > 0 and out.items[out.items.len - 1] != '\n') try out.append('\n');
         try out.append('\n');
         at_line_start = true;
@@ -1204,14 +1366,14 @@ pub fn format_file_in_place(allocator: mem.Allocator, input_file: []const u8) !v
     }
 
     if (globals.items.len > 0) {
-        try emitTokens(&state, globals.items);
+        try emitTokens(&state, globals.items, source, line_starts.items);
         if (out.items.len > 0 and out.items[out.items.len - 1] != '\n') try out.append('\n');
         try out.append('\n');
         at_line_start = true;
         prev_token = null;
     }
 
-    try emitTokens(&state, rest.items);
+    try emitTokens(&state, rest.items, source, line_starts.items);
 
     // Ensure exactly one trailing newline.
     if (out.items.len == 0 or out.items[out.items.len - 1] != '\n') {

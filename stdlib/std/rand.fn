@@ -44,7 +44,7 @@ impl Rand {
   // Next pseudo-random decimal in [0, 1).
   pub next_dec() dec {
     dec v = self.next();
-    ret v / 32768.0;
+    ret v / 32768;
   }
 }
 

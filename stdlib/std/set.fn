@@ -9,7 +9,7 @@ imp std.quirks;
 // - map: backing map
 pub compound StrSet {
   // map: backing map
-  Map < bin > map;
+  Map<bin> map;
 }
 
 // Create a string set with initial capacity.
