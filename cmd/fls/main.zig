@@ -2235,6 +2235,8 @@ const LspServer = struct {
     }
 
     fn guessVariableType(self: *LspServer, idx: *const Index, preferred_uri: []const u8, var_name: []const u8, at: Position) ?[]const u8 {
+        _ = self;
+        _ = preferred_uri;
         // Prefer symbol table (locals + globals) when available.
         if (findBestDefinition(idx.symbols, var_name, at)) |d| {
             if (d.kind == .variable) {
@@ -2282,7 +2284,8 @@ const LspServer = struct {
                 if (t_type.kind != .identifier) break :blk false;
                 const base = baseTypeName(t_type.text);
                 if (base.len == 0) break :blk false;
-                break :blk self.isKnownTypeName(preferred_uri, base);
+                // Treat any identifier as a potential type token in explicit declarations.
+                break :blk true;
             };
             if (!is_type_tok) continue;
 
@@ -2294,13 +2297,21 @@ const LspServer = struct {
                 }
             }
 
-            // Allow pointer/reference markers between the base type token and the name.
+            // Allow generic args and pointer/reference markers between the base type token and the name.
             // We still return the base type so member completion can match `impl Type { ... }`.
             var name_i: usize = i + 1;
-            while (name_i < idx.tokens.len) : (name_i += 1) {
+            while (name_i < idx.tokens.len) {
                 const tt = idx.tokens[name_i];
-                if (tt.kind == .comment) continue;
+                if (tt.kind == .comment) {
+                    name_i += 1;
+                    continue;
+                }
+                if ((tt.kind == .symbol or tt.kind == .operator) and std.mem.eql(u8, tt.text, "<")) {
+                    name_i = skipGenericArgsLite(idx.tokens, name_i);
+                    continue;
+                }
                 if ((tt.kind == .operator or tt.kind == .symbol) and (std.mem.eql(u8, tt.text, "*") or std.mem.eql(u8, tt.text, "&"))) {
+                    name_i += 1;
                     continue;
                 }
                 break;
@@ -2467,7 +2478,7 @@ const LspServer = struct {
                 var j = i + 1;
                 while (j < idx.tokens.len and (idx.tokens[j].kind == .comment or idx.tokens[j].kind == .keyword)) : (j += 1) {}
                 if (j < idx.tokens.len and idx.tokens[j].kind == .identifier) {
-                    pending_impl_type = idx.tokens[j].text;
+                    pending_impl_type = baseTypeNameForLookup(idx.tokens[j].text);
                 }
             }
 
@@ -2656,6 +2667,37 @@ const LspServer = struct {
             items.deinit();
         }
 
+        // Robust text-based member completion for `receiver.` before other fallbacks.
+        const recv_name_opt = guessReceiverNameAtCursor(doc.text, pos) orelse guessReceiverNameBeforeCursor(doc.text, pos);
+        if (recv_name_opt) |recv_name| {
+            var recv_type: ?[]const u8 = null;
+            if (std.mem.eql(u8, recv_name, "self")) {
+                recv_type = self.guessEnclosingImplType(idx, pos);
+            } else if (self.isKnownTypeName(uri, recv_name)) {
+                recv_type = recv_name;
+            } else {
+                recv_type = self.guessVariableType(idx, uri, recv_name, pos);
+            }
+            if (recv_type == null) {
+                recv_type = guessTypeFromTextFallback(doc.text, recv_name, pos);
+            }
+
+            if (recv_type) |rt| {
+                var seen = std.StringHashMap(void).init(self.allocator);
+                defer {
+                    var it = seen.iterator();
+                    while (it.next()) |e| self.allocator.free(e.key_ptr.*);
+                    seen.deinit();
+                }
+                try self.appendMemberCompletionsForType(&items, &seen, uri, rt, prefix);
+                const list: CompletionList = .{ .items = items.items };
+                const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+                defer self.allocator.free(json);
+                try self.sendResponseJson(id_val, json);
+                return;
+            }
+        }
+
         // Text-based dot completion fallback.
         // Some lexer states can treat `u.` as a single token, which breaks the
         // token-based dot detection below. Prefer the user's cursor context: if the
@@ -2697,6 +2739,10 @@ const LspServer = struct {
                         recv_type = recv_name;
                     } else {
                         recv_type = self.guessVariableType(idx, uri, recv_name, pos);
+                    }
+
+                    if (recv_type == null) {
+                        recv_type = guessTypeFromTextFallback(doc.text, recv_name, pos);
                     }
 
                     if (recv_type) |rt| {
@@ -2749,6 +2795,22 @@ const LspServer = struct {
                     defer self.allocator.free(json);
                     try self.sendResponseJson(id_val, json);
                     return;
+                } else {
+                    const recv_name = idx.tokens[ri].text;
+                    if (guessTypeFromTextFallback(doc.text, recv_name, pos)) |rt| {
+                        var seen = std.StringHashMap(void).init(self.allocator);
+                        defer {
+                            var it = seen.iterator();
+                            while (it.next()) |e| self.allocator.free(e.key_ptr.*);
+                            seen.deinit();
+                        }
+                        try self.appendMemberCompletionsForType(&items, &seen, uri, rt, prefix);
+                        const list: CompletionList = .{ .items = items.items };
+                        const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+                        defer self.allocator.free(json);
+                        try self.sendResponseJson(id_val, json);
+                        return;
+                    }
                 }
             }
 
@@ -5715,6 +5777,24 @@ fn nextNonTrivialTokenLite(tokens: []const TokenLite, start_index: usize) ?usize
     return null;
 }
 
+fn skipGenericArgsLite(tokens: []const TokenLite, start_index: usize) usize {
+    if (start_index >= tokens.len) return start_index;
+    const t0 = tokens[start_index];
+    if (!((t0.kind == .symbol or t0.kind == .operator) and std.mem.eql(u8, t0.text, "<"))) return start_index;
+    var depth: i64 = 0;
+    var i: usize = start_index;
+    while (i < tokens.len) : (i += 1) {
+        const t = tokens[i];
+        if (t.kind == .comment) continue;
+        if ((t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, "<")) depth += 1;
+        if ((t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, ">")) {
+            depth -= 1;
+            if (depth == 0) return nextNonTrivialTokenLite(tokens, i + 1) orelse (i + 1);
+        }
+    }
+    return i;
+}
+
 fn findLastTokenIndexBeforeOrAt(tokens: []const TokenLite, p: Position) ?usize {
     var last: ?usize = null;
     for (tokens, 0..) |t, i| {
@@ -5831,6 +5911,143 @@ fn guessIdentifierPrefix(text: []const u8, p: Position) []const u8 {
         start -= 1;
     }
     return text[start..idx];
+}
+
+fn guessTypeFromTextFallback(text: []const u8, name: []const u8, at: Position) ?[]const u8 {
+    if (name.len == 0) return null;
+    var limit = byteIndexForPosition(text, at);
+    if (limit < name.len and text.len >= name.len) {
+        limit = text.len;
+    }
+    if (limit < name.len) return null;
+
+    const is_ident_char = struct {
+        fn call(ch: u8) bool {
+            return (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_';
+        }
+    }.call;
+
+    var i: usize = limit;
+    while (i >= name.len) : (i -= 1) {
+        const start = i - name.len;
+        if (!std.mem.eql(u8, text[start..i], name)) continue;
+
+        // Ensure identifier boundaries.
+        if (start > 0 and is_ident_char(text[start - 1])) continue;
+        if (i < text.len and is_ident_char(text[i])) continue;
+
+        // Walk left to find the type token.
+        var j: usize = start;
+        // Skip whitespace.
+        while (j > 0) {
+            const ch = text[j - 1];
+            if (ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r') {
+                j -= 1;
+                continue;
+            }
+            break;
+        }
+
+        // Skip generic args if present: `Type<...> name`.
+        if (j > 0 and text[j - 1] == '>') {
+            var depth: i64 = 0;
+            var k: isize = @as(isize, @intCast(j)) - 1;
+            while (k >= 0) : (k -= 1) {
+                const ch = text[@intCast(k)];
+                if (ch == '>') depth += 1;
+                if (ch == '<') {
+                    depth -= 1;
+                    if (depth == 0) {
+                        j = @as(usize, @intCast(k));
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Skip whitespace and pointer/ref markers.
+        while (j > 0) {
+            const ch = text[j - 1];
+            if (ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r' or ch == '*' or ch == '&') {
+                j -= 1;
+                continue;
+            }
+            break;
+        }
+
+        const end = j;
+        while (j > 0 and is_ident_char(text[j - 1])) {
+            j -= 1;
+        }
+        if (end == j) continue;
+
+        return text[j..end];
+    }
+
+    return null;
+}
+
+fn guessReceiverNameBeforeCursor(text: []const u8, p: Position) ?[]const u8 {
+    const idx = byteIndexForPosition(text, p);
+    if (idx == 0) return null;
+
+    var dot_i_opt: ?usize = null;
+    var i: usize = idx;
+    while (i > 0) {
+        const ch = text[i - 1];
+        if (ch == '\n' or ch == '\r') break;
+        if (ch == '.') {
+            dot_i_opt = i - 1;
+            break;
+        }
+        i -= 1;
+    }
+    const dot_i = dot_i_opt orelse return null;
+
+    // Scan left to find receiver identifier.
+    var j: usize = dot_i;
+    while (j > 0) {
+        const ch = text[j - 1];
+        if (ch == ' ' or ch == '\t' or ch == '\r' or ch == '\n') {
+            j -= 1;
+            continue;
+        }
+        break;
+    }
+    var start: usize = j;
+    while (start > 0) {
+        const ch = text[start - 1];
+        const ok = (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_';
+        if (!ok) break;
+        start -= 1;
+    }
+    if (start >= j) return null;
+    return text[start..j];
+}
+
+fn guessReceiverNameAtCursor(text: []const u8, p: Position) ?[]const u8 {
+    const idx = byteIndexForPosition(text, p);
+    if (idx == 0) return null;
+    if (text[idx - 1] != '.') return null;
+
+    var j: usize = idx - 1;
+    while (j > 0) {
+        const ch = text[j - 1];
+        if (ch == ' ' or ch == '\t' or ch == '\r' or ch == '\n') {
+            j -= 1;
+            continue;
+        }
+        break;
+    }
+    var start: usize = j;
+    while (start > 0) {
+        const ch = text[start - 1];
+        const ok = (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_';
+        if (!ok) break;
+        start -= 1;
+    }
+    if (start >= j) return null;
+    return text[start..j];
 }
 
 const ParsedTextDocPosition = struct { uri: []const u8, pos: Position };
@@ -6515,6 +6732,34 @@ test "fls index: locals are indexed inside fun bodies" {
     try std.testing.expect(found_p);
 }
 
+test "fls index: generic locals are indexed" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const text =
+        "imp std.vec;\n\n" ++
+        "fun main() {\n" ++
+        "  Vec<num> nums;\n" ++
+        "  nums.clear();\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found = false;
+    for (idx.symbols) |s| {
+        if (s.kind != .variable) continue;
+        if (!std.mem.eql(u8, s.name, "nums")) continue;
+        found = true;
+        if (s.value_type) |vt| {
+            try std.testing.expect(std.mem.startsWith(u8, vt, "Vec"));
+        }
+        break;
+    }
+    try std.testing.expect(found);
+}
+
 test "fls index: impl methods include self, params, locals" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -6668,6 +6913,23 @@ fn nextNonTrivialToken(tokens: []const token.Token, start_index: usize) ?usize {
     return null;
 }
 
+fn skipGenericArgsForward(tokens: []const token.Token, start_index: usize) usize {
+    if (start_index >= tokens.len) return start_index;
+    if (!isPunctChar(tokens[start_index], '<')) return start_index;
+    var depth: i64 = 0;
+    var i: usize = start_index;
+    while (i < tokens.len) : (i += 1) {
+        const t = tokens[i];
+        if (t.type == .NewLine or t.type == .Comment) continue;
+        if (isPunctChar(t, '<')) depth += 1;
+        if (isPunctChar(t, '>')) {
+            depth -= 1;
+            if (depth == 0) return nextNonTrivialToken(tokens, i + 1) orelse (i + 1);
+        }
+    }
+    return i;
+}
+
 fn rangeFromTokenSpan(start_t: token.Token, end_t: token.Token) Range {
     const sr = rangeFromTokenPos(start_t.pos);
     const er = rangeFromTokenPos(end_t.pos);
@@ -6759,7 +7021,9 @@ fn buildSignatureFromTokens(
         var ptype_buf = std.ArrayList(u8).init(allocator);
         defer ptype_buf.deinit();
         try ptype_buf.appendSlice(ptype);
-        const after_ptr_i = try parsed.appendPointerSuffix(&ptype_buf, tokens, pi + 1);
+        var after_type_i = nextNonTrivialToken(tokens, pi + 1) orelse break;
+        after_type_i = skipGenericArgsForward(tokens, after_type_i);
+        const after_ptr_i = try parsed.appendPointerSuffix(&ptype_buf, tokens, after_type_i);
 
         const pname_i = nextNonTrivialToken(tokens, after_ptr_i) orelse break;
         if (!isIdent(tokens[pname_i])) {
@@ -6784,7 +7048,8 @@ fn buildSignatureFromTokens(
         if (isTypeToken(rt)) {
             const rts_raw = tokenString(rt);
             const rts = allocator.dupe(u8, rts_raw) catch rts_raw;
-            const suffix_len = parsed.pointerSuffixLen(tokens, ri + 1);
+            const after_generic_i = skipGenericArgsForward(tokens, ri + 1);
+            const suffix_len = parsed.pointerSuffixLen(tokens, after_generic_i);
 
             var rt_buf = std.ArrayList(u8).init(allocator);
             errdefer rt_buf.deinit();
@@ -6898,6 +7163,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
 
                 // Allow pointer/reference markers between type and name: `Type* name` / `Type & name`.
                 var name_i = nextNonTrivialToken(tokens_, pi + 1) orelse break;
+                name_i = skipGenericArgsForward(tokens_, name_i);
                 var markers = std.ArrayList(u8).init(allocator_);
                 defer markers.deinit();
                 while (name_i < tokens_.len and (isPunctChar(tokens_[name_i], '*') or isPunctChar(tokens_[name_i], '&'))) {
@@ -7270,8 +7536,9 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 impl_owner_name = null;
                 continue;
             };
-            if (isIdent(tokens[type_i2])) {
-                impl_owner_name = tokenString(tokens[type_i2]);
+            const type_i2_norm = type_i2;
+            if (isIdent(tokens[type_i2_norm])) {
+                impl_owner_name = tokenString(tokens[type_i2_norm]);
             } else {
                 impl_owner_name = null;
             }
@@ -7279,8 +7546,9 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
             const type_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
             if (!isIdent(tokens[type_i])) continue;
             const owner_name = tokenString(tokens[type_i]);
+            const after_type_i = skipGenericArgsForward(tokens, type_i + 1);
             // Find opening '{'
-            var j_opt = nextNonTrivialToken(tokens, type_i + 1);
+            var j_opt = nextNonTrivialToken(tokens, after_type_i);
             while (j_opt) |j| {
                 if (isSymbolChar(tokens[j], '{')) {
                     // Scan methods: look for `<ident>(` until matching '}'
@@ -7355,6 +7623,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
             const vtype_base = allocator.dupe(u8, vtype_base_raw) catch vtype_base_raw;
 
             var name_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
+            name_i = skipGenericArgsForward(tokens, name_i);
             var markers = std.ArrayList(u8).init(allocator);
             defer markers.deinit();
             while (name_i < tokens.len and (isPunctChar(tokens[name_i], '*') or isPunctChar(tokens[name_i], '&'))) {
@@ -7425,7 +7694,8 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 }
             }
 
-            const name_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
+            var name_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
+            name_i = skipGenericArgsForward(tokens, name_i);
             if (!isIdent(tokens[name_i])) continue;
             const after_i = nextNonTrivialToken(tokens, name_i + 1) orelse continue;
             const after = tokens[after_i];
