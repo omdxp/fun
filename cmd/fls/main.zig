@@ -2161,13 +2161,14 @@ const LspServer = struct {
     }
 
     fn isKnownTypeName(self: *LspServer, preferred_uri: []const u8, name: []const u8) bool {
+        const base = if (std.mem.indexOfScalar(u8, name, '<')) |idx| name[0..idx] else name;
         var it = self.docs.iterator();
         while (it.next()) |entry| {
             const uri = entry.value_ptr.uri;
             const idx = entry.value_ptr.index orelse continue;
             for (idx.symbols) |s| {
                 if (s.container_fn_range != null) continue;
-                if (!std.mem.eql(u8, s.name, name)) continue;
+                if (!std.mem.eql(u8, s.name, base)) continue;
                 switch (s.kind) {
                     .struct_, .interface, .enum_ => {},
                     else => continue,
@@ -2191,12 +2192,13 @@ const LspServer = struct {
     }
 
     fn findTypeDefinitionAnyDoc(self: *LspServer, preferred_uri: []const u8, type_name: []const u8) ?GlobalDefHit {
+        const base = if (std.mem.indexOfScalar(u8, type_name, '<')) |idx| type_name[0..idx] else type_name;
         // Prefer current document first.
         if (self.docs.get(preferred_uri)) |doc| {
             if (doc.index) |idx| {
                 for (idx.symbols) |s| {
                     if (s.container_fn_range != null) continue;
-                    if (!std.mem.eql(u8, s.name, type_name)) continue;
+                    if (!std.mem.eql(u8, s.name, base)) continue;
                     if (s.kind != .struct_ and s.kind != .interface and s.kind != .enum_) continue;
                     return .{ .uri = preferred_uri, .sym = s };
                 }
@@ -2216,7 +2218,7 @@ const LspServer = struct {
             const idx = entry.value_ptr.index orelse continue;
             for (idx.symbols) |s| {
                 if (s.container_fn_range != null) continue;
-                if (!std.mem.eql(u8, s.name, type_name)) continue;
+                if (!std.mem.eql(u8, s.name, base)) continue;
                 if (s.kind != .struct_ and s.kind != .interface and s.kind != .enum_) continue;
                 if (!self.isSymbolVisibleFromUri(preferred_uri, uri, s)) continue;
                 return .{ .uri = uri, .sym = s };
@@ -2243,6 +2245,15 @@ const LspServer = struct {
         const baseTypeName = struct {
             fn go(s: []const u8) []const u8 {
                 var end = s.len;
+                var cut = end;
+                var i: usize = 0;
+                while (i < s.len) : (i += 1) {
+                    if (s[i] == '<') {
+                        cut = i;
+                        break;
+                    }
+                }
+                end = cut;
                 while (end > 0) {
                     const ch = s[end - 1];
                     if (ch == '*' or ch == '&') {

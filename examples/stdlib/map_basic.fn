@@ -4,7 +4,8 @@ imp std.c.io;
 imp std.map;
 
 fun main() {
-  StrMap m = map_init(8);
+  Map < str > m;
+  m.init(8);
   m.put("name", "fun");
   m.put("lang", "Fun");
 

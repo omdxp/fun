@@ -12,9 +12,9 @@ imp std.quirks;
 // - positionals: non-flag arguments
 pub compound CliArgs {
   // opts: parsed --key/--key=value flags
-  StrMap opts;
+  Map < str > opts;
   // positionals: non-flag arguments
-  StrVec positionals;
+  Vec < str > positionals;
 }
 
 // Parse argv into options and positionals.
@@ -26,25 +26,25 @@ pub compound CliArgs {
 // - parsed CliArgs
 pub fun cli_parse(str[] args) CliArgs {
   CliArgs out;
-  out.opts = map_init(8);
-  out.positionals = str_vec_init(8);
+  out.opts.init(8);
+  out.positionals.init(8);
 
   num i = 1;
   for args[i] != 0 {
     str arg = args[i];
     if arg[0] == '-' {
       if arg[1] == '-' {
-      // --key or --key=value
-      num eq_idx = index_of_char(arg, '=');
-      if eq_idx == -1 {
-        str key = substr(arg, 2, len(arg) - 2);
-        out.opts.put(key, "1");
-      } else {
-        num key_len = eq_idx - 2;
-        str key = substr(arg, 2, key_len);
-        str val = substr(arg, eq_idx + 1, len(arg) - (eq_idx + 1));
-        out.opts.put(key, val);
-      }
+        // --key or --key=value
+        num eq_idx = index_of_char(arg, '=');
+        if eq_idx == -1 {
+          str key = substr(arg, 2, len(arg) - 2);
+          out.opts.put(key, "1");
+        } else {
+          num key_len = eq_idx - 2;
+          str key = substr(arg, 2, key_len);
+          str val = substr(arg, eq_idx + 1, len(arg) - (eq_idx + 1));
+          out.opts.put(key, val);
+        }
       } else {
         out.positionals.push(arg);
       }

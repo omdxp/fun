@@ -412,6 +412,7 @@ pub const ParseProcess = struct {
             // expression statements like `w * h;` as `w* h;`.
             if (self.transpile_proc.get_scope_entity(t.?.data.sval.items) == null) {
                 var off: usize = 1;
+                _ = self.skip_generic_args_tokens(&off);
                 while (true) {
                     const tn = self.token_peek_n(off);
                     if (tn == null) break;
@@ -652,6 +653,263 @@ pub const ParseProcess = struct {
         return depth;
     }
 
+    fn skip_generic_args_tokens(self: *Self, off: *usize) bool {
+        const first = self.token_peek_n(off.*) orelse return false;
+        if (!(first.type == .Operator and mem.eql(u8, first.data.sval.items, "<"))) return false;
+
+        var depth: isize = 0;
+        while (true) {
+            const tok = self.token_peek_n(off.*) orelse return false;
+            if (tok.type == .Operator) {
+                if (mem.eql(u8, tok.data.sval.items, "<")) {
+                    depth += 1;
+                    off.* += 1;
+                    continue;
+                }
+                if (mem.eql(u8, tok.data.sval.items, ">")) {
+                    depth -= 1;
+                    off.* += 1;
+                    if (depth == 0) break;
+                    continue;
+                }
+                if (mem.eql(u8, tok.data.sval.items, ">>")) {
+                    depth -= 2;
+                    off.* += 1;
+                    if (depth <= 0) break;
+                    continue;
+                }
+            }
+            off.* += 1;
+        }
+        return true;
+    }
+
+    fn split_angle_closer_token_if_needed(self: *Self) ParseError!void {
+        const t = self.token_peek_next() orelse return;
+        if (t.type != .Operator or !mem.eql(u8, t.data.sval.items, ">>")) return;
+
+        const idx: usize = @intCast(self.transpile_proc.tokens.pindex);
+        if (idx >= self.transpile_proc.tokens.data.items.len) return;
+
+        var tok_ptr = &self.transpile_proc.tokens.data.items[idx];
+        tok_ptr.data.sval.items.len = 0;
+        tok_ptr.data.sval.append('>') catch return ParseError.MemoryAllocationFailed;
+
+        var new_sval = std.ArrayList(u8).init(self.transpile_proc.allocator);
+        errdefer new_sval.deinit();
+        new_sval.append('>') catch return ParseError.MemoryAllocationFailed;
+
+        const new_tok = token.Token{
+            .type = .Operator,
+            .data = .{ .sval = new_sval },
+            .pos = tok_ptr.pos,
+            .num = null,
+            .whitespace = tok_ptr.whitespace,
+            .between_brackets = null,
+            .between_args = null,
+        };
+        self.transpile_proc.tokens.push_at(idx + 1, new_tok) catch return ParseError.MemoryAllocationFailed;
+    }
+
+    fn split_angle_opener_token_if_needed(self: *Self) ParseError!void {
+        const t = self.token_peek_next() orelse return;
+        if (t.type != .Operator or !mem.eql(u8, t.data.sval.items, "<<")) return;
+
+        const idx: usize = @intCast(self.transpile_proc.tokens.pindex);
+        if (idx >= self.transpile_proc.tokens.data.items.len) return;
+
+        var tok_ptr = &self.transpile_proc.tokens.data.items[idx];
+        tok_ptr.data.sval.items.len = 0;
+        tok_ptr.data.sval.append('<') catch return ParseError.MemoryAllocationFailed;
+
+        var new_sval = std.ArrayList(u8).init(self.transpile_proc.allocator);
+        errdefer new_sval.deinit();
+        new_sval.append('<') catch return ParseError.MemoryAllocationFailed;
+
+        const new_tok = token.Token{
+            .type = .Operator,
+            .data = .{ .sval = new_sval },
+            .pos = tok_ptr.pos,
+            .num = null,
+            .whitespace = tok_ptr.whitespace,
+            .between_brackets = null,
+            .between_args = null,
+        };
+        self.transpile_proc.tokens.push_at(idx + 1, new_tok) catch return ParseError.MemoryAllocationFailed;
+    }
+
+    fn impl_generic_args_are_params(self: *Self) bool {
+        var off: usize = 0;
+        const first = self.token_peek_n(off) orelse return false;
+        if (!((first.type == .Operator and mem.eql(u8, first.data.sval.items, "<")) or (first.type == .Symbol and first.data.cval == '<'))) return false;
+        off += 1;
+
+        var saw_any = false;
+        while (true) {
+            const tok = self.token_peek_n(off) orelse return false;
+            if (tok.type == .Identifier) {
+                saw_any = true;
+                off += 1;
+            } else if (tok.type == .Keyword and utils.keyword_is_datatype(tok.data.sval.items)) {
+                return false;
+            } else {
+                return false;
+            }
+
+            const next_tok = self.token_peek_n(off) orelse return false;
+            if (next_tok.type == .Operator and mem.eql(u8, next_tok.data.sval.items, ",")) {
+                off += 1;
+                continue;
+            }
+            if (next_tok.type == .Operator and (mem.eql(u8, next_tok.data.sval.items, ">") or mem.eql(u8, next_tok.data.sval.items, ">>"))) {
+                return saw_any;
+            }
+            if (next_tok.type == .Symbol and next_tok.data.cval == '>') {
+                return saw_any;
+            }
+            return false;
+        }
+    }
+
+    fn next_token_is_angle_open(self: *Self) bool {
+        const t = self.token_peek_next() orelse return false;
+        return switch (t.type) {
+            .Operator => t.data.sval.items.len > 0 and t.data.sval.items[0] == '<',
+            .Symbol => t.data.cval == '<',
+            else => false,
+        };
+    }
+
+    fn parse_generic_type_params(self: *Self) ParseError!?utils.Vector(std.ArrayList(u8)) {
+        try self.split_angle_opener_token_if_needed();
+        if (!self.next_token_is_angle_open()) return null;
+        _ = self.token_next();
+
+        var params = utils.Vector(std.ArrayList(u8)).init(self.transpile_proc.allocator);
+        errdefer {
+            for (params.items()) |*p| p.deinit();
+            params.deinit();
+        }
+
+        while (true) {
+            const tok = self.token_next();
+            if (tok == null or tok.?.type != .Identifier) {
+                self.transpile_proc.err("expected generic parameter name", .{});
+                return ParseError.InvalidIdentifier;
+            }
+
+            var name = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, tok.?.data.sval.items.len) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer name.deinit();
+            name.appendSlice(tok.?.data.sval.items) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+
+            params.push(name) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+
+            if (self.next_token_is_operator(",")) {
+                _ = self.token_next();
+                continue;
+            }
+            break;
+        }
+
+        try self.split_angle_closer_token_if_needed();
+        if (self.next_token_is_operator(">")) {
+            try self.expect_op(">");
+        } else {
+            try self.expect_sym('>');
+        }
+        return params;
+    }
+
+    fn parse_generic_type_args(self: *Self, dt: *dtype.DataType) ParseError!void {
+        try self.split_angle_opener_token_if_needed();
+        if (!self.next_token_is_angle_open()) return;
+        _ = self.token_next();
+
+        var args = utils.Vector(*dtype.DataType).init(self.transpile_proc.allocator);
+        errdefer {
+            for (args.items()) |a| {
+                a.type_str.deinit();
+                if (a.array) |array| {
+                    if (!array.brackets.is_empty()) {
+                        for (array.brackets.items()) |bracket| self.transpile_proc.deinit_node(bracket);
+                    }
+                    array.brackets.deinit();
+                }
+                if (a.generic_args) |*gargs| {
+                    for (gargs.items()) |ga| {
+                        ga.type_str.deinit();
+                        if (ga.array) |array| {
+                            if (!array.brackets.is_empty()) {
+                                for (array.brackets.items()) |bracket| self.transpile_proc.deinit_node(bracket);
+                            }
+                            array.brackets.deinit();
+                        }
+                        self.transpile_proc.allocator.destroy(ga);
+                    }
+                    gargs.deinit();
+                }
+                self.transpile_proc.allocator.destroy(a);
+            }
+            args.deinit();
+        }
+
+        while (true) {
+            const adt = self.transpile_proc.allocator.create(dtype.DataType) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer self.transpile_proc.allocator.destroy(adt);
+            adt.* = dtype.DataType{
+                .array = null,
+                .pointer_depth = 0,
+                .type = .Unknown,
+                .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
+                .flags = .{},
+                .generic_args = null,
+            };
+
+            var hist_tmp = utils.History.init(self.transpile_proc.allocator, .{});
+            defer hist_tmp.deinit();
+            try self.parse_datatype(adt);
+            if (self.next_token_is_operator("[")) {
+                try self.parse_array_brackets(adt, &hist_tmp);
+            }
+
+            args.push(adt) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+
+            if (self.next_token_is_operator(",")) {
+                _ = self.token_next();
+                continue;
+            }
+            break;
+        }
+
+        try self.split_angle_closer_token_if_needed();
+        if (self.next_token_is_operator(">")) {
+            try self.expect_op(">");
+        } else {
+            try self.expect_sym('>');
+        }
+        dt.generic_args = args;
+    }
+
+    fn append_mangled_dtype_name(self: *Self, buf: *std.ArrayList(u8), dt: *const dtype.DataType) ParseError!void {
+        buf.appendSlice(dt.type_str.items) catch return ParseError.MemoryAllocationFailed;
+        if (dt.generic_args) |gargs| {
+            for (gargs.items()) |ga| {
+                buf.appendSlice("__") catch return ParseError.MemoryAllocationFailed;
+                try self.append_mangled_dtype_name(buf, ga);
+            }
+        }
+    }
+
     /// Parses a datatype.
     ///
     /// This function expects a datatype keyword and retrieves its pointer depth,
@@ -669,14 +927,6 @@ pub const ParseProcess = struct {
         if (dt_token == null or (dt_token.?.type != .Keyword and dt_token.?.type != .Identifier)) {
             self.transpile_proc.err("expected datatype, got '{?}'", .{if (dt_token) |t| t.type else null});
             return ParseError.InvalidDataType;
-        }
-
-        const ptr_depth = self.parse_get_pointer_depth();
-        if (ptr_depth > 0) {
-            var flags = dt.*.flags orelse dtype.DataTypeFlags{};
-            flags.is_pointer = true;
-            dt.*.flags = flags;
-            dt.*.pointer_depth = ptr_depth;
         }
         // Builtins use `dt.type`, user-defined types keep `.Unknown` and rely on `type_str`.
         if (dt_token.?.type == .Keyword and utils.keyword_is_datatype(dt_token.?.data.sval.items)) {
@@ -704,6 +954,16 @@ pub const ParseProcess = struct {
             std.debug.print("Error appending to type string: {s}", .{@errorName(e)});
             return ParseError.MemoryAllocationFailed;
         };
+
+        try self.parse_generic_type_args(dt);
+
+        const ptr_depth = self.parse_get_pointer_depth();
+        if (ptr_depth > 0) {
+            var flags = dt.*.flags orelse dtype.DataTypeFlags{};
+            flags.is_pointer = true;
+            dt.*.flags = flags;
+            dt.*.pointer_depth = ptr_depth;
+        }
     }
 
     /// Parses a single token to a node.
@@ -1697,6 +1957,9 @@ pub const ParseProcess = struct {
                     fn check(p: *Self) bool {
                         var off: usize = 1;
 
+                        // Optional generic args after the type name.
+                        _ = p.skip_generic_args_tokens(&off);
+
                         // Optional pointer stars after the type name.
                         while (true) {
                             const tok = p.token_peek_n(off) orelse break;
@@ -1816,6 +2079,8 @@ pub const ParseProcess = struct {
             return ParseError.MemoryAllocationFailed;
         };
 
+        const type_params = try self.parse_generic_type_params();
+
         try self.expect_sym('{');
 
         var fields = utils.Vector(ast.CompoundField).init(self.transpile_proc.allocator);
@@ -1890,6 +2155,8 @@ pub const ParseProcess = struct {
                     return ParseError.MemoryAllocationFailed;
                 };
 
+                field_dt.*.generic_args = dt.generic_args;
+
                 if (field_count > 0) {
                     field_dt.*.array = null;
                 }
@@ -1905,6 +2172,7 @@ pub const ParseProcess = struct {
 
             // Original dt storage is now unused; destroy it.
             dt.*.type_str.deinit();
+            dt.*.generic_args = null;
             self.transpile_proc.allocator.destroy(dt);
 
             try self.expect_sym(';');
@@ -1922,7 +2190,7 @@ pub const ParseProcess = struct {
             .type = .Compound,
             .pos = name_tok.?.pos,
             .flags = .{ .is_public = is_public },
-            .node_variant = .{ .compound = .{ .name = name, .fields = fields } },
+            .node_variant = .{ .compound = .{ .name = name, .fields = fields, .type_params = type_params } },
         };
 
         // Register as a symbol so it can be used as a datatype identifier.
@@ -2186,9 +2454,41 @@ pub const ParseProcess = struct {
             return ParseError.InvalidIdentifier;
         }
 
+        var type_params: ?utils.Vector(std.ArrayList(u8)) = null;
+
         // `impl Type Quirk { ... }` (quirk impl) OR `impl Type { ... }` (plain impl).
-        const peek_after_type = self.token_peek_next();
+        var peek_after_type = self.token_peek_next();
         var quirk_tok: ?token.Token = null;
+        var type_name_override: ?std.ArrayList(u8) = null;
+        errdefer if (type_name_override) |*o| o.deinit();
+
+        if (self.next_token_is_angle_open()) {
+            if (self.impl_generic_args_are_params()) {
+                type_params = try self.parse_generic_type_params();
+                peek_after_type = self.token_peek_next();
+            } else {
+                var dt: dtype.DataType = .{
+                    .array = null,
+                    .pointer_depth = 0,
+                    .type = .Unknown,
+                    .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
+                    .flags = .{},
+                    .generic_args = null,
+                };
+                defer dt.type_str.deinit();
+                dt.type_str.appendSlice(type_tok.?.data.sval.items) catch return ParseError.MemoryAllocationFailed;
+                try self.parse_generic_type_args(&dt);
+
+                var mangled = std.ArrayList(u8).init(self.transpile_proc.allocator);
+                errdefer mangled.deinit();
+                try self.append_mangled_dtype_name(&mangled, &dt);
+                type_name_override = mangled;
+                peek_after_type = self.token_peek_next();
+            }
+        } else {
+            type_params = try self.parse_generic_type_params();
+            peek_after_type = self.token_peek_next();
+        }
         if (peek_after_type != null and peek_after_type.?.type == .Identifier) {
             quirk_tok = self.token_next();
         } else if (peek_after_type == null or peek_after_type.?.type != .Symbol or peek_after_type.?.data.cval != '{') {
@@ -2196,13 +2496,18 @@ pub const ParseProcess = struct {
             return ParseError.InvalidIdentifier;
         }
 
-        var type_name = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, type_tok.?.data.sval.items.len) catch {
-            return ParseError.MemoryAllocationFailed;
-        };
-        errdefer type_name.deinit();
-        type_name.appendSlice(type_tok.?.data.sval.items) catch {
-            return ParseError.MemoryAllocationFailed;
-        };
+        var type_name = if (type_name_override) |o|
+            o
+        else
+            std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, type_tok.?.data.sval.items.len) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+        if (type_name_override == null) {
+            errdefer type_name.deinit();
+            type_name.appendSlice(type_tok.?.data.sval.items) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+        }
 
         var quirk_name: ?std.ArrayList(u8) = null;
         errdefer if (quirk_name) |*qn| qn.deinit();
@@ -2292,10 +2597,45 @@ pub const ParseProcess = struct {
                 .type = .Unknown,
                 .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
                 .flags = .{ .is_pointer = true },
+                .generic_args = null,
             };
             self_dt.type_str.appendSlice(type_name.items) catch {
                 return ParseError.MemoryAllocationFailed;
             };
+
+            if (type_params) |params| {
+                var gargs = utils.Vector(*dtype.DataType).init(self.transpile_proc.allocator);
+                errdefer {
+                    for (gargs.items()) |ga| {
+                        ga.type_str.deinit();
+                        self.transpile_proc.allocator.destroy(ga);
+                    }
+                    gargs.deinit();
+                }
+
+                for (params.items()) |p| {
+                    const ga = self.transpile_proc.allocator.create(dtype.DataType) catch {
+                        return ParseError.MemoryAllocationFailed;
+                    };
+                    errdefer self.transpile_proc.allocator.destroy(ga);
+                    ga.* = dtype.DataType{
+                        .array = null,
+                        .pointer_depth = 0,
+                        .type = .Unknown,
+                        .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
+                        .flags = .{},
+                        .generic_args = null,
+                    };
+                    ga.type_str.appendSlice(p.items) catch {
+                        return ParseError.MemoryAllocationFailed;
+                    };
+                    gargs.push(ga) catch {
+                        return ParseError.MemoryAllocationFailed;
+                    };
+                }
+
+                self_dt.generic_args = gargs;
+            }
 
             var self_name = std.ArrayList(u8).init(self.transpile_proc.allocator);
             errdefer self_name.deinit();
@@ -2396,7 +2736,7 @@ pub const ParseProcess = struct {
             .type = .Impl,
             .pos = type_tok.?.pos,
             .flags = .{ .is_public = is_public },
-            .node_variant = .{ .impl = .{ .type_name = type_name, .quirk_name = quirk_name, .methods = methods } },
+            .node_variant = .{ .impl = .{ .type_name = type_name, .type_params = type_params, .quirk_name = quirk_name, .methods = methods } },
         };
 
         self.transpile_proc.nodes.push(node.*) catch {
@@ -2754,6 +3094,7 @@ pub const ParseProcess = struct {
         };
         function_node.node_variant.?.function.name = fname;
         self.parser_current_function = function_node;
+        function_node.node_variant.?.function.type_params = try self.parse_generic_type_params();
         try self.expect_op("(");
         var hist_args = utils.History.init(self.transpile_proc.allocator, .{});
         defer hist_args.deinit();

@@ -12,7 +12,7 @@ imp std.quirks;
 // - total_len: total length of fragments
 pub compound StringBuilder {
   // parts: vector of string fragments
-  StrVec parts;
+  Vec < str > parts;
   // total_len: total length of fragments
   num total_len;
 }
@@ -26,7 +26,7 @@ pub compound StringBuilder {
 // - StringBuilder
 pub fun string_builder_init(num cap) StringBuilder {
   StringBuilder b;
-  b.parts = str_vec_init(cap);
+  b.parts.init(cap);
   b.total_len = 0;
   ret b;
 }
@@ -89,10 +89,18 @@ fun _string_len(str s) num {
 }
 
 fun _is_space(chr c) bin {
-  if c == ' ' { ret true; }
-  if c == '\n' { ret true; }
-  if c == '\t' { ret true; }
-  if c == '\r' { ret true; }
+  if c == ' ' {
+    ret true;
+  }
+  if c == '\n' {
+    ret true;
+  }
+  if c == '\t' {
+    ret true;
+  }
+  if c == '\0' {
+    ret true;
+  }
   ret false;
 }
 
@@ -271,9 +279,10 @@ pub fun trim(str s) str {
 // - delim: delimiter character
 // 
 // Returns:
-// - StrVec of segments
-pub fun split(str s, chr delim) StrVec {
-  StrVec parts = str_vec_init(4);
+// - Vec<str> of segments
+pub fun split(str s, chr delim) Vec < str > {
+  Vec < str > parts;
+  parts.init(4);
   num n = _string_len(s);
   num start = 0;
   num i = 0;
@@ -302,7 +311,7 @@ pub fun split(str s, chr delim) StrVec {
 // 
 // Returns:
 // - joined string
-pub fun join(StrVec* parts, str sep) str {
+pub fun join(Vec < str >*parts, str sep) str {
   ret parts.join(sep);
 }
 

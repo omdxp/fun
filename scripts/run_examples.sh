@@ -62,6 +62,11 @@ is_expected_fail() {
     return 0
   fi
 
+  # Arch-specific asm example is expected to fail on some targets.
+  if [[ "$rel" == "examples/advanced/asm_arch_specific.fn" ]]; then
+    return 0
+  fi
+
   # Circular dependency demonstration (each file fails on its own).
   if [[ "$rel" =~ ^examples/error_cases/circular_dependency/[^/]+\.fn$ ]]; then
     return 0

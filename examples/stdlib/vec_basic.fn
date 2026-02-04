@@ -4,7 +4,8 @@ imp std.c.io;
 imp std.vec;
 
 fun main() {
-  NumVec v = num_vec_init(0);
+  Vec < num > v;
+  v.init(0);
   v.push(10);
   v.push(20);
   v.push(30);

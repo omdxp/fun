@@ -10,7 +10,7 @@ imp std.vec;
 // - values: key/value map
 pub compound TomlDoc {
   // values: key/value map
-  StrMap values;
+  Map < str > values;
 }
 
 // Create a new TOML document.
@@ -19,7 +19,7 @@ pub compound TomlDoc {
 // - TomlDoc with empty map
 pub fun toml_doc_init() TomlDoc {
   TomlDoc d;
-  d.values = map_init(8);
+  d.values.init(8);
   ret d;
 }
 
@@ -41,7 +41,8 @@ impl TomlDoc {
 
   // Serialize the document to a string.
   pub stringify() str {
-    StrVec parts = str_vec_init(self.values.len() * 2 + 4);
+    Vec < str > parts;
+    parts.init(self.values.len() * 2 + 4);
     num i = 0;
     for i < self.values.cap {
       MapEntry entry = self.values.entries[i];
@@ -49,7 +50,7 @@ impl TomlDoc {
         if entry.tomb == false {
           parts.push(entry.key);
           parts.push(" = ");
-          parts.push(entry.value);
+          parts.push(self.values.get(entry.key));
           parts.push("\n");
         }
       }

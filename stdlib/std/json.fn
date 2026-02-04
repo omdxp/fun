@@ -10,7 +10,7 @@ imp std.vec;
 // - values: key/value map (string values)
 pub compound JsonObject {
   // values: key/value map (string values)
-  StrMap values;
+  Map < str > values;
 }
 
 // Create a new empty JSON object.
@@ -19,7 +19,7 @@ pub compound JsonObject {
 // - JsonObject with empty map
 pub fun json_object_init() JsonObject {
   JsonObject o;
-  o.values = map_init(8);
+  o.values.init(8);
   ret o;
 }
 
@@ -60,7 +60,7 @@ impl JsonObject {
           b.append_char('"');
           b.append(": ");
           b.append_char('"');
-          b.append(item.value);
+          b.append(self.values.get(item.key));
           b.append_char('"');
           added = added + 1;
         }
@@ -76,11 +76,11 @@ impl JsonObject {
 }
 
 fun _skip_ws(str s, num* i) {
-  for s[*i] != 0 {
-    if s[*i] != ' ' {
-      if s[*i] != '\n' {
-        if s[*i] != '\t' {
-          if s[*i] != '\r' {
+  for s[ *i] != 0 {
+    if s[ *i] != ' ' {
+      if s[ *i] != '\n' {
+        if s[ *i] != '\t' {
+          if s[ *i] != '\0' {
             break;
           }
         }
@@ -91,20 +91,20 @@ fun _skip_ws(str s, num* i) {
 }
 
 fun _parse_string(str s, num* i) str {
-  if s[*i] != '"' {
+  if s[ *i] != '"' {
     ret "";
   }
   *i = *i + 1;
   num start = *i;
-  for s[*i] != 0 {
-    if s[*i] == '"' {
+  for s[ *i] != 0 {
+    if s[ *i] == '"' {
       break;
     }
     *i = *i + 1;
   }
   num len = *i - start;
   str out = substr(s, start, len);
-  if s[*i] == '"' {
+  if s[ *i] == '"' {
     *i = *i + 1;
   }
   ret out;
@@ -112,16 +112,16 @@ fun _parse_string(str s, num* i) str {
 
 fun _parse_value(str s, num* i) str {
   _skip_ws(s, i);
-  if s[*i] == '"' {
+  if s[ *i] == '"' {
     ret _parse_string(s, i);
   }
 
   num start = *i;
-  for s[*i] != 0 {
-    if s[*i] == ',' {
+  for s[ *i] != 0 {
+    if s[ *i] == ',' {
       break;
     }
-    if s[*i] == '}' {
+    if s[ *i] == '}' {
       break;
     }
     *i = *i + 1;

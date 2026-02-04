@@ -52,4 +52,7 @@ pub const DataType = struct {
         /// The dimensions of the array.
         brackets: utils.Vector(ast.Node),
     } = null,
+
+    /// Optional generic arguments (e.g. Vec<num> -> [num]).
+    generic_args: ?utils.Vector(*DataType) = null,
 };

@@ -24,7 +24,8 @@ pub compound Url {
 impl Url {
   // Build a simple HTTP/1.1 GET request string.
   pub build_http_get() str {
-    StrVec parts = str_vec_init(4);
+    Vec < str > parts;
+    parts.init(4);
     parts.push("GET ");
     parts.push(self.path);
     parts.push(" HTTP/1.1\r\nHost: ");

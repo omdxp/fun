@@ -178,6 +178,8 @@ pub const Node = struct {
             rtype: ?dtype.DataType = null,
             /// The name of the function.
             name: ?std.ArrayList(u8) = null,
+            /// Optional generic type parameters.
+            type_params: ?utils.Vector(std.ArrayList(u8)) = null,
             /// The arguments of the function.
             args: ?utils.Vector(*Node) = null,
             /// Whether the function is variadic (C-style varargs).
@@ -189,6 +191,8 @@ pub const Node = struct {
         compound: struct {
             name: std.ArrayList(u8),
             fields: utils.Vector(CompoundField),
+            /// Optional generic type parameters (e.g. Vec<T> -> ["T"]).
+            type_params: ?utils.Vector(std.ArrayList(u8)) = null,
         },
 
         quirk: struct {
@@ -203,6 +207,8 @@ pub const Node = struct {
 
         impl: struct {
             type_name: std.ArrayList(u8),
+            /// Optional generic type parameters for impl blocks.
+            type_params: ?utils.Vector(std.ArrayList(u8)) = null,
             /// Optional quirk name. When null, this is a plain impl block: `impl Type { ... }`.
             quirk_name: ?std.ArrayList(u8) = null,
             methods: utils.Vector(*Node),

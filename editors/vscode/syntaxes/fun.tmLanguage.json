@@ -30,26 +30,29 @@
       "patterns": [
         {
           "name": "meta.type.declaration.struct.fun",
-          "match": "\\b(compound)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "match": "\\b(compound)\\s+([A-Za-z_][A-Za-z0-9_]*)(\\s*<[^>]+>)?",
           "captures": {
             "1": { "name": "storage.type.struct.fun" },
-            "2": { "name": "entity.name.type.struct.fun" }
+            "2": { "name": "entity.name.type.struct.fun" },
+            "3": { "name": "entity.name.type.parameters.fun" }
           }
         },
         {
           "name": "meta.type.declaration.enum.fun",
-          "match": "\\b(enum)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "match": "\\b(enum)\\s+([A-Za-z_][A-Za-z0-9_]*)(\\s*<[^>]+>)?",
           "captures": {
             "1": { "name": "storage.type.enum.fun" },
-            "2": { "name": "entity.name.type.enum.fun" }
+            "2": { "name": "entity.name.type.enum.fun" },
+            "3": { "name": "entity.name.type.parameters.fun" }
           }
         },
         {
           "name": "meta.type.declaration.interface.fun",
-          "match": "\\b(quirk)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "match": "\\b(quirk)\\s+([A-Za-z_][A-Za-z0-9_]*)(\\s*<[^>]+>)?",
           "captures": {
             "1": { "name": "storage.type.interface.fun" },
-            "2": { "name": "entity.name.type.interface.fun" }
+            "2": { "name": "entity.name.type.interface.fun" },
+            "3": { "name": "entity.name.type.parameters.fun" }
           }
         }
       ]

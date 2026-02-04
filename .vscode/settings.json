@@ -2,8 +2,8 @@
   "files.associations": {
     "*.fn": "fun"
   },
-  "fun.fls.path": "${workspaceFolder}/zig-out/bin/fls.exe",
-  "fun.fls.funPath": "${workspaceFolder}/zig-out/bin/fun.exe",
+  "fun.fls.path": "${workspaceFolder}/zig-out/bin/fls",
+  "fun.fls.funPath": "${workspaceFolder}/zig-out/bin/fun",
   "fun.fls.debugImports": true,
   "fun.fls.debugDefinitions": true
 }

@@ -14,7 +14,6 @@ const semantics = @import("semantics");
 const scope = semantics.scope;
 const symbol = semantics.symbol;
 const dtype = semantics.dtype;
-
 /// Errors that can occur during the transpilation process.
 pub const TranspileError = error{
     /// Error indicating that a file is not found.
@@ -169,88 +168,77 @@ pub const TypeRegistry = struct {
     }
 
     pub fn deinit(self: *TypeRegistry) void {
-        // compound/quirk name keys are borrowed from AST node allocations.
         self.enums_by_name.deinit();
         self.compounds_by_name.deinit();
         self.quirk_sig_by_name.deinit();
         self.quirks_by_sig.deinit();
         self.quirk_hash_by_sig.deinit();
         self.impls_by_key.deinit();
-
-        for (self.owned_keys.items) |k| {
-            self.allocator.free(k);
+        for (self.owned_keys.items) |key| {
+            self.allocator.free(key);
         }
         self.owned_keys.deinit();
     }
 };
 
-/// `TranspileProcess` represents the state and configuration of a transpilation process.
 pub const TranspileProcess = struct {
-    /// `flags` is a set of flags that control the behavior of the transpilation process.
+    /// Transpilation flags for this process.
     flags: TranspileProcessFlags,
-    /// `pos` is the current position in the token stream.
+
+    /// Current token position for diagnostics.
     pos: token.Pos,
-    /// `ifile` is the input file being read for transpilation.
+
+    /// Input/output file handles.
     ifile: fs.File,
-    /// `ofile` is the output file where the transpiled code will be written.
-    /// Only used when outf flag is true.
     ofile: ?fs.File,
-    /// Buffer to store generated C code when outf is false
     outbuf: ?std.ArrayList(u8),
-    /// `tokens` is a vector of tokens generated from the input file.
+
+    /// Token and node storage.
     tokens: utils.Vector(token.Token),
-    /// `nodes` is a list of AST (Abstract Syntax Tree) nodes.
     nodes: utils.Vector(ast.Node),
-
-    /// Accumulates warning text emitted during transpilation (useful for tests/tooling).
     warnings: std.ArrayList(u8),
-
-    /// Heap-allocated node containers that are referenced by other structures (e.g. scope entities)
-    /// but whose contents are owned/deinitialized via `nodes`.
     owned_nodes: std.ArrayList(*ast.Node),
-
-    /// Heap-allocated scope entities created by the parser.
     owned_scope_entities: std.ArrayList(*scope.ScopeEntity),
-
-    /// Guard to avoid emitting type/vtable prelude more than once.
-    did_emit_user_types: bool = false,
-    /// Guard to avoid emitting impl bodies/vtables more than once.
-    did_emit_impls: bool = false,
-    /// Track if we're currently transpiling function parameters
-    in_function_params: bool = false,
-
-    /// True while generating the C `main` body.
-    in_main: bool = false,
-
-    /// Stack of deferred statements for the current function (LIFO).
     defer_stack: std.ArrayList(*ast.Node),
-    /// Track whether we are emitting the current function body.
-    in_function_body: bool = false,
-    /// Depth counter for nested bodies inside a function.
-    function_body_depth: usize = 0,
 
-    /// Currently transpiled function return type (for return-statement codegen).
-    current_fn_return: ?CheckedType = null,
-    /// Current indentation level for code formatting
-    indent_level: u32 = 0,
-    /// Represents a scope structure used in the transpiler.
+    /// Scope tracking.
     scope: ?struct {
-        /// A pointer to the root scope.
         root: ?*scope.Scope,
-        /// A pointer to the current scope.
         current: ?*scope.Scope,
     } = null,
-    /// Represents a struct containing the active symbol table and a list of symbol tables.
+
+    /// Active symbol tables.
     symbols: struct {
-        /// The active symbol table.
-        active_table: ?*symbol.SymbolTable = null,
-        /// A list of symbol tables.
+        active_table: ?*symbol.SymbolTable,
         tables: utils.Vector(*symbol.SymbolTable),
     },
-    /// The allocator to be used for memory allocation operations.
+
+    /// Arena allocator used for most allocations.
     allocator: mem.Allocator,
 
-    /// Backing allocator used by this process's arena.
+    /// Current indentation level (4 spaces per level).
+    indent_level: u32 = 0,
+
+    /// Generic type substitution during emission.
+    type_subst_params: ?*const utils.Vector(std.ArrayList(u8)) = null,
+    type_subst_args: ?[]*dtype.DataType = null,
+
+    /// Optional override for specialized function names during emission.
+    override_fn_name: ?[]const u8 = null,
+
+    /// Track if we're emitting function params/body.
+    in_function_params: bool = false,
+    in_function_body: bool = false,
+    function_body_depth: usize = 0,
+    in_main: bool = false,
+
+    /// Track return type of current function (for warnings).
+    current_fn_return: ?CheckedType = null,
+
+    /// One-time emission guards.
+    did_emit_user_types: bool = false,
+    did_emit_impls: bool = false,
+
     backing_allocator: mem.Allocator,
 
     /// Arena used for AST/scopes/registries (simplifies ownership and cleanup).
@@ -275,6 +263,10 @@ pub const TranspileProcess = struct {
 
     /// Track imported files to avoid circular imports
     imported_files: std.StringHashMap(bool),
+
+    /// Forced generic instantiations discovered during typecheck.
+    forced_generic_instantiations: std.ArrayList(*const dtype.DataType),
+    forced_generic_instantiation_keys: std.StringHashMap(bool),
 
     /// Import chain to detect circular dependencies
     import_chain: std.ArrayList([]const u8),
@@ -431,10 +423,17 @@ pub const TranspileProcess = struct {
     }
 
     fn append_dtype_sig(self: *Self, buf: *std.ArrayList(u8), dt: *const dtype.DataType) TranspileError!void {
-        _ = self;
         buf.appendSlice(dt.type_str.items) catch {
             return TranspileError.MemoryAllocationFailed;
         };
+        if (dt.generic_args) |gargs| {
+            buf.append('<') catch return TranspileError.MemoryAllocationFailed;
+            for (gargs.items(), 0..) |ga, i| {
+                if (i != 0) buf.appendSlice(",") catch return TranspileError.MemoryAllocationFailed;
+                try self.append_dtype_sig(buf, ga);
+            }
+            buf.append('>') catch return TranspileError.MemoryAllocationFailed;
+        }
         if (dt.pointer_depth > 0) {
             var i: usize = 0;
             while (i < dt.pointer_depth) : (i += 1) {
@@ -666,7 +665,7 @@ pub const TranspileProcess = struct {
             if (m.type != .Function or m.node_variant == null) continue;
             const fnv = m.node_variant.?.function;
             const gen = if (fnv.name) |nm| nm.items else continue;
-            const base = base_method_name_from_generated(gen);
+            const base = base_method_name_from_generated(gen) orelse continue;
             if (base.len == 0) continue;
             // Keep the first occurrence; duplicates are already handled elsewhere.
             if (!methods_by_name.contains(base)) {
@@ -798,6 +797,15 @@ pub const TranspileProcess = struct {
 
     fn dtype_sig_equal(a: *const dtype.DataType, b: *const dtype.DataType) bool {
         if (!mem.eql(u8, a.type_str.items, b.type_str.items)) return false;
+        if ((a.generic_args == null) != (b.generic_args == null)) return false;
+        if (a.generic_args) |ga| {
+            const gb = b.generic_args.?.items();
+            const ai = ga.items();
+            if (ai.len != gb.len) return false;
+            for (ai, 0..) |a_dt, i| {
+                if (!dtype_sig_equal(a_dt, gb[i])) return false;
+            }
+        }
         if (a.pointer_depth != b.pointer_depth) return false;
         const a_arr = a.array;
         const b_arr = b.array;
@@ -810,7 +818,7 @@ pub const TranspileProcess = struct {
         return true;
     }
 
-    fn base_method_name_from_generated(gen: []const u8) []const u8 {
+    fn base_method_name_from_generated(gen: []const u8) ?[]const u8 {
         // Split on "__" and return the last segment.
         var i: usize = gen.len;
         while (i >= 2) : (i -= 1) {
@@ -818,7 +826,33 @@ pub const TranspileProcess = struct {
                 return gen[i..];
             }
         }
-        return "";
+        return null;
+    }
+
+    fn impl_type_params(self: *Self, impl_node: *const ast.Node) ?*const utils.Vector(std.ArrayList(u8)) {
+        if (impl_node.node_variant == null) return null;
+        const im = &impl_node.node_variant.?.impl;
+        if (im.type_params) |*params| return params;
+        if (mem.indexOf(u8, im.type_name.items, "__") != null) return null;
+        const base = if (mem.indexOf(u8, im.type_name.items, "__")) |idx| im.type_name.items[0..idx] else im.type_name.items;
+        const reg = self.root_registry() orelse return null;
+        const cnode = reg.compounds_by_name.get(base) orelse return null;
+        if (cnode.node_variant == null) return null;
+        const c = &cnode.node_variant.?.compound;
+        if (c.type_params) |*params| return params;
+        return null;
+    }
+
+    fn register_generic_instantiation(self: *Self, dt: *const dtype.DataType) TranspileError!void {
+        if (dt.generic_args == null) return;
+        const root = self.get_root();
+        const key = try self.type_name_mangled(dt);
+        if (root.forced_generic_instantiation_keys.contains(key)) {
+            self.allocator.free(key);
+            return;
+        }
+        root.forced_generic_instantiation_keys.put(key, true) catch return TranspileError.MemoryAllocationFailed;
+        root.forced_generic_instantiations.append(dt) catch return TranspileError.MemoryAllocationFailed;
     }
 
     fn append_quirk_method_stub_sig(self: *Self, buf: *std.ArrayList(u8), m: ast.QuirkMethodSig) TranspileError!void {
@@ -1471,6 +1505,8 @@ pub const TranspileProcess = struct {
             .global_symbols = std.StringHashMap(GlobalSymbolInfo).init(a),
             .children = std.ArrayList(*TranspileProcess).init(a),
             .std_imports = std.ArrayList([]const u8).init(a),
+            .forced_generic_instantiations = std.ArrayList(*const dtype.DataType).init(a),
+            .forced_generic_instantiation_keys = std.StringHashMap(bool).init(a),
             .input_file_path = input_file_path,
             .stdlib_dir = discovered_stdlib_dir,
         };
@@ -1715,14 +1751,20 @@ pub const TranspileProcess = struct {
         is_null_literal: bool = false,
         /// For user-defined types, `base` is `.Unknown` and `name` holds the identifier.
         name: ?[]const u8 = null,
+        /// For generic specializations, a mangled name (e.g. Vec__num).
+        mangled_name: ?[]const u8 = null,
+        /// Optional backing dtype (preserves generic args for named types).
+        dtype_ref: ?*const dtype.DataType = null,
 
         fn eql(a: CheckedType, b: CheckedType) bool {
             if (a.base != b.base) return false;
             if (a.is_array != b.is_array) return false;
             if (a.pointer_depth != b.pointer_depth) return false;
-            if (a.name == null and b.name == null) return true;
-            if (a.name == null or b.name == null) return false;
-            return mem.eql(u8, a.name.?, b.name.?);
+            const a_name = a.mangled_name orelse a.name;
+            const b_name = b.mangled_name orelse b.name;
+            if (a_name == null and b_name == null) return true;
+            if (a_name == null or b_name == null) return false;
+            return mem.eql(u8, a_name.?, b_name.?);
         }
     };
 
@@ -1735,11 +1777,13 @@ pub const TranspileProcess = struct {
     const TypeEnv = struct {
         allocator: mem.Allocator,
         scopes: std.ArrayList(std.StringHashMap(CheckedType)),
+        type_params: ?[]const []const u8 = null,
 
         fn init(allocator: mem.Allocator) TypeEnv {
             return .{
                 .allocator = allocator,
                 .scopes = std.ArrayList(std.StringHashMap(CheckedType)).init(allocator),
+                .type_params = null,
             };
         }
 
@@ -1777,6 +1821,19 @@ pub const TranspileProcess = struct {
                 if (self.scopes.items[i - 1].get(name)) |t| return t;
             }
             return null;
+        }
+
+        fn set_type_params(self: *TypeEnv, params: ?[]const []const u8) void {
+            self.type_params = params;
+        }
+
+        fn has_type_param(self: *TypeEnv, name: []const u8) bool {
+            if (self.type_params) |params| {
+                for (params) |p| {
+                    if (mem.eql(u8, p, name)) return true;
+                }
+            }
+            return false;
         }
     };
 
@@ -1863,17 +1920,27 @@ pub const TranspileProcess = struct {
             .is_array = (dt.flags != null and dt.flags.?.is_array),
             .pointer_depth = dt.pointer_depth,
             .name = if (base == .Unknown and dt.type_str.items.len > 0) dt.type_str.items else null,
+            .dtype_ref = dt,
         };
     }
 
+    fn type_from_dtype_with_mangled(self: *Self, dt: *const dtype.DataType) TranspileError!CheckedType {
+        var t = type_from_dtype(dt);
+        if (dt.type == .Unknown and dt.generic_args != null) {
+            t.mangled_name = try self.type_name_mangled(dt);
+        }
+        return t;
+    }
+
     fn ensure_named_type_visible(self: *Self, ref_node: ast.Node, name: []const u8) TranspileError!void {
+        const base_name = if (mem.indexOf(u8, name, "__")) |idx| name[0..idx] else name;
         // Builtins are always visible.
-        if (mem.eql(u8, name, "void") or mem.eql(u8, name, "raw") or mem.eql(u8, name, "num") or mem.eql(u8, name, "dec") or mem.eql(u8, name, "str") or mem.eql(u8, name, "bin") or mem.eql(u8, name, "chr")) {
+        if (mem.eql(u8, base_name, "void") or mem.eql(u8, base_name, "raw") or mem.eql(u8, base_name, "num") or mem.eql(u8, base_name, "dec") or mem.eql(u8, base_name, "str") or mem.eql(u8, base_name, "bin") or mem.eql(u8, base_name, "chr")) {
             return;
         }
 
         // Known C typedef aliases are treated as externally visible.
-        if (utils.get_c_typedef_alias_datatype_type(name) != null) {
+        if (utils.get_c_typedef_alias_datatype_type(base_name) != null) {
             return;
         }
 
@@ -1882,37 +1949,60 @@ pub const TranspileProcess = struct {
             return TranspileError.SymbolNotDefined;
         };
 
-        if (reg.enums_by_name.get(name)) |enode| {
+        if (reg.enums_by_name.get(base_name)) |enode| {
             if (!self.can_access(&ref_node, enode)) {
-                self.report_type_error(ref_node, "type '{s}' is private", .{name});
+                self.report_type_error(ref_node, "type '{s}' is private", .{base_name});
                 return TranspileError.SymbolNotDefined;
             }
             return;
         }
 
-        if (reg.compounds_by_name.get(name)) |cnode| {
+        if (reg.compounds_by_name.get(base_name)) |cnode| {
             if (!self.can_access(&ref_node, cnode)) {
-                self.report_type_error(ref_node, "type '{s}' is private", .{name});
+                self.report_type_error(ref_node, "type '{s}' is private", .{base_name});
                 return TranspileError.SymbolNotDefined;
             }
             return;
         }
 
-        if (reg.quirk_sig_by_name.get(name)) |sig| {
+        if (reg.quirk_sig_by_name.get(base_name)) |sig| {
             const qnode = reg.quirks_by_sig.get(sig) orelse null;
             if (qnode == null or qnode.?.node_variant == null) {
-                self.report_type_error(ref_node, "unknown type '{s}'", .{name});
+                self.report_type_error(ref_node, "unknown type '{s}'", .{base_name});
                 return TranspileError.SymbolNotDefined;
             }
             if (!self.can_access(&ref_node, qnode.?)) {
-                self.report_type_error(ref_node, "type '{s}' is private", .{name});
+                self.report_type_error(ref_node, "type '{s}' is private", .{base_name});
                 return TranspileError.SymbolNotDefined;
             }
             return;
         }
 
-        self.report_type_error(ref_node, "unknown type '{s}'", .{name});
+        self.report_type_error(ref_node, "unknown type '{s}'", .{base_name});
         return TranspileError.SymbolNotDefined;
+    }
+
+    fn ensure_dtype_visible(self: *Self, ref_node: ast.Node, dt: *const dtype.DataType, allow: ?[]const []const u8) TranspileError!void {
+        if ((dt.type == null or dt.type == .Unknown) and dt.type_str.items.len > 0) {
+            if (allow) |list| {
+                for (list) |p| {
+                    if (mem.eql(u8, p, dt.type_str.items)) return;
+                }
+                if (dt.type_str.items.len == 1) {
+                    const c = dt.type_str.items[0];
+                    if (c >= 'A' and c <= 'Z') return;
+                }
+            } else if (dt.type_str.items.len == 1) {
+                const c = dt.type_str.items[0];
+                if (c >= 'A' and c <= 'Z') return;
+            }
+            try self.ensure_named_type_visible(ref_node, dt.type_str.items);
+        }
+        if (dt.generic_args) |gargs| {
+            for (gargs.items()) |ga| {
+                try self.ensure_dtype_visible(ref_node, ga, allow);
+            }
+        }
     }
 
     fn is_known_type(t: CheckedType) bool {
@@ -1921,6 +2011,35 @@ pub const TranspileProcess = struct {
 
     fn is_user_named_type(t: CheckedType) bool {
         return t.base == .Unknown and t.name != null;
+    }
+
+    fn lookup_receiver_dtype(self: *Self, recv: ast.Node) ?*dtype.DataType {
+        if (recv.type == .Identifier and recv.data != null) {
+            const name = recv.data.?.sval.items;
+            if (self.get_scope_entity(name)) |ent| {
+                if (ent.node) |ent_node| {
+                    if (ent_node.type == .Variable and ent_node.node_variant != null) {
+                        return ent_node.node_variant.?.variable.type;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    fn concrete_type_name(self: *Self, recv: ast.Node, recv_t: CheckedType) TranspileError!?[]const u8 {
+        if (!is_user_named_type(recv_t)) return null;
+        if (recv_t.mangled_name) |mn| return mn;
+        if (recv_t.dtype_ref) |dt| {
+            if (dt.generic_args != null) {
+                return try self.type_name_mangled(dt);
+            }
+        } else if (self.lookup_receiver_dtype(recv)) |dt| {
+            if (dt.generic_args != null) {
+                return try self.type_name_mangled(dt);
+            }
+        }
+        return recv_t.name.?;
     }
 
     fn expected_enum_name(self: *Self, t: CheckedType) ?[]const u8 {
@@ -2021,20 +2140,20 @@ pub const TranspileProcess = struct {
             return TranspileError.InvalidFieldAccess;
         }
 
-        if (base.name) |tname| {
-            try self.ensure_named_type_visible(node, tname);
-        }
+        const tname = base.name.?;
+        const base_name = if (mem.indexOf(u8, tname, "__")) |idx| tname[0..idx] else tname;
+        try self.ensure_named_type_visible(node, base_name);
 
         if (base.pointer_depth > 1) {
             self.report_type_error(node, "field access supports at most one pointer indirection", .{});
             return TranspileError.InvalidFieldAccess;
         }
 
-        const fdt = self.lookup_compound_field(base.name.?, field_name) orelse {
-            self.report_type_error(node, "type '{s}' has no field '{s}'", .{ base.name.?, field_name });
+        const fdt = self.lookup_compound_field(base_name, field_name) orelse {
+            self.report_type_error(node, "type '{s}' has no field '{s}'", .{ base_name, field_name });
             return TranspileError.UnknownField;
         };
-        return type_from_dtype(fdt);
+        return try self.type_from_dtype_with_mangled(fdt);
     }
 
     fn lookup_plain_impl_method_fn_proc(self: *Self, proc: *Self, ref_node: ?*const ast.Node, type_name: []const u8, method_name: []const u8) ?[]const u8 {
@@ -2042,7 +2161,26 @@ pub const TranspileProcess = struct {
             if (n.type != .Impl or n.node_variant == null) continue;
             const im = n.node_variant.?.impl;
             if (im.quirk_name != null) continue; // only plain impl
-            if (!mem.eql(u8, im.type_name.items, type_name)) continue;
+            if (!mem.eql(u8, im.type_name.items, type_name)) {
+                if (self.impl_type_params(n) != null) {
+                    const base = if (mem.indexOf(u8, type_name, "__")) |idx| type_name[0..idx] else type_name;
+                    if (!mem.eql(u8, im.type_name.items, base)) continue;
+
+                    for (im.methods.items()) |m| {
+                        if (m.type != .Function or m.node_variant == null) continue;
+                        if (!self.can_access_method(ref_node, n, m)) continue;
+                        const fnv = m.node_variant.?.function;
+                        if (fnv.name == null) continue;
+                        const full = fnv.name.?.items;
+                        if (!mem.startsWith(u8, full, im.type_name.items)) continue;
+                        const base_name = base_method_name_from_generated(full) orelse continue;
+                        if (!mem.eql(u8, base_name, method_name)) continue;
+
+                        return std.fmt.allocPrint(self.allocator, "{s}__{s}", .{ type_name, method_name }) catch null;
+                    }
+                }
+                continue;
+            }
 
             for (im.methods.items()) |m| {
                 if (m.type != .Function or m.node_variant == null) continue;
@@ -2069,6 +2207,70 @@ pub const TranspileProcess = struct {
     fn lookup_plain_impl_method_fn(self: *Self, ref_node: ?*const ast.Node, type_name: []const u8, method_name: []const u8) ?[]const u8 {
         const root = self.get_root();
         return self.lookup_plain_impl_method_fn_proc(root, ref_node, type_name, method_name);
+    }
+
+    const PlainImplMethodHit = struct {
+        impl_node: *ast.Node,
+        method_node: *ast.Node,
+    };
+
+    fn find_plain_impl_method_node_proc(self: *Self, proc: *Self, type_base: []const u8, method_name: []const u8) ?PlainImplMethodHit {
+        for (proc.owned_nodes.items) |n| {
+            if (n.type != .Impl or n.node_variant == null) continue;
+            const im = n.node_variant.?.impl;
+            if (im.quirk_name != null) continue;
+            const base = if (mem.indexOf(u8, im.type_name.items, "__")) |idx| im.type_name.items[0..idx] else im.type_name.items;
+            if (!mem.eql(u8, base, type_base)) continue;
+
+            for (im.methods.items()) |m| {
+                if (m.type != .Function or m.node_variant == null) continue;
+                const fnv = m.node_variant.?.function;
+                if (fnv.name == null) continue;
+                const full = fnv.name.?.items;
+                const base_name = base_method_name_from_generated(full) orelse continue;
+                if (!mem.eql(u8, base_name, method_name)) continue;
+                return .{ .impl_node = n, .method_node = m };
+            }
+        }
+
+        for (proc.children.items) |child| {
+            if (self.find_plain_impl_method_node_proc(child, type_base, method_name)) |hit| return hit;
+        }
+        return null;
+    }
+
+    fn find_plain_impl_method_node(self: *Self, type_base: []const u8, method_name: []const u8) ?PlainImplMethodHit {
+        const root = self.get_root();
+        return self.find_plain_impl_method_node_proc(root, type_base, method_name);
+    }
+
+    fn synthesize_generic_plain_method_sig(self: *Self, recv_dt: *const dtype.DataType, recv_name: []const u8, method_name: []const u8) ?FnSig {
+        if (recv_dt.generic_args == null) return null;
+        const base = if (mem.indexOf(u8, recv_name, "__")) |idx| recv_name[0..idx] else recv_name;
+        const hit = self.find_plain_impl_method_node(base, method_name) orelse return null;
+        if (hit.method_node.node_variant == null) return null;
+        const fnv = hit.method_node.node_variant.?.function;
+        const params = self.impl_type_params(hit.impl_node) orelse return null;
+        const gargs = recv_dt.generic_args.?.items();
+        if (gargs.len != params.count) return null;
+
+        const args_vec = fnv.args orelse utils.Vector(*ast.Node).init(self.allocator);
+        const args_items = args_vec.items();
+        var args_slice = self.allocator.alloc(CheckedType, args_items.len) catch return null;
+
+        var i: usize = 0;
+        for (args_items) |arg_ptr| {
+            const arg = arg_ptr.*;
+            if (arg.type == .Variable and arg.node_variant != null) {
+                args_slice[i] = self.type_from_dtype_with_subst(arg.node_variant.?.variable.type, params.*, gargs) catch return null;
+            } else {
+                args_slice[i] = .{ .base = .Unknown };
+            }
+            i += 1;
+        }
+
+        const rtype = if (fnv.rtype) |rt| self.type_from_dtype_with_subst(&rt, params.*, gargs) catch return null else CheckedType{ .base = .Void };
+        return .{ .rtype = rtype, .args = args_slice, .is_variadic = fnv.is_variadic };
     }
 
     fn find_function_node_proc(self: *Self, proc: *Self, name: []const u8) ?*ast.Node {
@@ -2154,11 +2356,15 @@ pub const TranspileProcess = struct {
         if (root.type_registry == null) return .{};
         const reg = &root.type_registry.?;
 
+        const base_name = if (mem.indexOf(u8, type_name, "__")) |idx| type_name[0..idx] else type_name;
+
         var res: QuirkImplMethodResolution = .{};
         var it = reg.impls_by_key.iterator();
         while (it.next()) |entry| {
             const key = entry.key_ptr.*;
-            if (!mem.eql(u8, key.type_name, type_name)) continue;
+            const matches_exact = mem.eql(u8, key.type_name, type_name);
+            const matches_generic = mem.eql(u8, key.type_name, base_name);
+            if (!matches_exact and !matches_generic) continue;
 
             const impl_node = entry.value_ptr.*;
             if (impl_node.node_variant == null) continue;
@@ -2191,7 +2397,11 @@ pub const TranspileProcess = struct {
                 if (fnv.name == null) continue;
                 const full = fnv.name.?.items;
                 if (mem.endsWith(u8, full, suf)) {
-                    fn_name = full;
+                    if (matches_exact) {
+                        fn_name = full;
+                    } else {
+                        fn_name = std.fmt.allocPrint(self.allocator, "{s}__{s}__{s}", .{ type_name, qname, method_name }) catch null;
+                    }
                     break;
                 }
             }
@@ -2544,12 +2754,14 @@ pub const TranspileProcess = struct {
                                 break :blk false;
                             };
 
-                            if (!is_builtin and !is_declared) {
+                            const is_type_param = env.has_type_param(type_name);
+
+                            if (!is_builtin and !is_declared and !is_type_param) {
                                 self.report_type_error(node, "sizeof unknown type '{s}'", .{type_name});
                                 return TranspileError.InvalidSizeof;
                             }
 
-                            if (!is_builtin) {
+                            if (!is_builtin and !is_type_param) {
                                 try self.ensure_named_type_visible(node, type_name);
                             }
 
@@ -2602,15 +2814,31 @@ pub const TranspileProcess = struct {
                             return TranspileError.NotCallable;
                         }
 
+                        if (recv_t.dtype_ref) |dt| {
+                            if (dt.generic_args != null) {
+                                try self.register_generic_instantiation(dt);
+                            }
+                        } else if (self.lookup_receiver_dtype(recv.*)) |dt| {
+                            if (dt.generic_args != null) {
+                                try self.register_generic_instantiation(dt);
+                            }
+                        }
+
+                        const recv_name = try self.concrete_type_name(recv.*, recv_t) orelse {
+                            self.report_type_error(node, "method calls require a named receiver", .{});
+                            return TranspileError.NotCallable;
+                        };
+                        const recv_name_owned = if (self.lookup_receiver_dtype(recv.*)) |dt| dt.generic_args != null else false;
+
                         // If the receiver is a quirk type, typecheck against the quirk signature.
                         // Otherwise, treat as a plain impl method call and typecheck against the
                         // generated `Type__method` function signature.
                         const reg = self.root_registry();
-                        const recv_is_quirk = if (reg) |r| r.quirk_sig_by_name.contains(recv_t.name.?) else false;
+                        const recv_is_quirk = if (reg) |r| r.quirk_sig_by_name.contains(recv_name) else false;
 
                         if (recv_is_quirk) {
-                            method_sig = self.lookup_quirk_method(node, recv_t.name.?, mname) orelse {
-                                self.report_type_error(node, "quirk '{s}' has no method '{s}'", .{ recv_t.name.?, mname });
+                            method_sig = self.lookup_quirk_method(node, recv_name, mname) orelse {
+                                self.report_type_error(node, "quirk '{s}' has no method '{s}'", .{ recv_name, mname });
                                 return TranspileError.NotCallable;
                             };
                             call_rtype = type_from_dtype(&method_sig.?.rtype);
@@ -2620,34 +2848,112 @@ pub const TranspileProcess = struct {
                                 return TranspileError.NotCallable;
                             }
 
-                            if (self.lookup_plain_impl_method_fn(&node, recv_t.name.?, mname)) |fn_name| {
-                                plain_method_sig = fns.get(fn_name) orelse {
-                                    self.report_type_error(node, "type '{s}' has no method '{s}'", .{ recv_t.name.?, mname });
-                                    return TranspileError.NotCallable;
-                                };
-                                plain_method_name = mname;
-                                call_rtype = plain_method_sig.?.rtype;
-                            } else {
-                                // Also allow calling quirk-impl methods directly on concrete types.
-                                // If the type implements exactly one quirk that defines this method name,
-                                // lower/typecheck as a direct call to the generated impl function.
-                                const qres = self.resolve_quirk_impl_method_for_concrete(node, recv_t.name.?, mname);
-                                if (qres.ambiguous) {
-                                    self.report_type_error(node, "type '{s}' method '{s}' is ambiguous (quirks: '{s}', '{s}')", .{ recv_t.name.?, mname, qres.quirk_name orelse "<unknown>", qres.other_quirk_name orelse "<unknown>" });
-                                    return TranspileError.NotCallable;
+                            const recv_dt = if (recv_t.dtype_ref) |dt| dt else self.lookup_receiver_dtype(recv.*) orelse null;
+                            if (recv_dt != null and recv_dt.?.generic_args != null) {
+                                if (self.synthesize_generic_plain_method_sig(recv_dt.?, recv_name, mname)) |sig| {
+                                    plain_method_sig = sig;
+                                    plain_method_name = mname;
+                                    call_rtype = sig.rtype;
                                 }
-                                if (qres.fn_name) |qfn| {
-                                    plain_method_sig = fns.get(qfn) orelse {
-                                        self.report_type_error(node, "type '{s}' has no method '{s}'", .{ recv_t.name.?, mname });
+                            }
+
+                            if (plain_method_sig == null) {
+                                if (self.lookup_plain_impl_method_fn(&node, recv_name, mname)) |fn_name| {
+                                    plain_method_sig = fns.get(fn_name) orelse blk: {
+                                        const recv_dt2 = if (recv_t.dtype_ref) |dt| dt else self.lookup_receiver_dtype(recv.*) orelse null;
+                                        if (recv_dt2 != null) {
+                                            if (self.synthesize_generic_plain_method_sig(recv_dt2.?, recv_name, mname)) |sig| {
+                                                break :blk sig;
+                                            }
+                                        }
+                                        self.report_type_error(node, "type '{s}' has no method '{s}'", .{ recv_name, mname });
                                         return TranspileError.NotCallable;
                                     };
                                     plain_method_name = mname;
                                     call_rtype = plain_method_sig.?.rtype;
-                                } else {
-                                    self.report_type_error(node, "type '{s}' has no method '{s}'", .{ recv_t.name.?, mname });
-                                    return TranspileError.NotCallable;
                                 }
                             }
+
+                            if (plain_method_sig != null) {
+                                // Resolved via plain impl.
+                            } else {
+                                // fallback to alt generic name or quirk impl
+                                // Retry with a mangled generic receiver name if available.
+                                var alt_name: ?[]const u8 = null;
+                                var alt_owned = false;
+                                if (recv_t.dtype_ref) |dt| {
+                                    if (dt.generic_args != null) {
+                                        alt_name = try self.type_name_mangled(dt);
+                                        alt_owned = true;
+                                    }
+                                } else if (self.lookup_receiver_dtype(recv.*)) |dt| {
+                                    if (dt.generic_args != null) {
+                                        alt_name = try self.type_name_mangled(dt);
+                                        alt_owned = true;
+                                    }
+                                }
+
+                                if (alt_name) |alt| {
+                                    if (self.lookup_plain_impl_method_fn(&node, alt, mname)) |fn_name| {
+                                        plain_method_sig = fns.get(fn_name) orelse blk: {
+                                            const recv_dt_alt = if (recv_t.dtype_ref) |dt| dt else self.lookup_receiver_dtype(recv.*) orelse null;
+                                            if (recv_dt_alt != null) {
+                                                if (self.synthesize_generic_plain_method_sig(recv_dt_alt.?, alt, mname)) |sig| {
+                                                    break :blk sig;
+                                                }
+                                            }
+                                            if (alt_owned) self.allocator.free(@constCast(alt));
+                                            self.report_type_error(node, "type '{s}' has no method '{s}'", .{ recv_name, mname });
+                                            return TranspileError.NotCallable;
+                                        };
+                                        plain_method_name = mname;
+                                        call_rtype = plain_method_sig.?.rtype;
+                                        if (alt_owned) self.allocator.free(@constCast(alt));
+                                    } else {
+                                        if (alt_owned) self.allocator.free(@constCast(alt));
+                                        const qres = self.resolve_quirk_impl_method_for_concrete(node, recv_name, mname);
+                                        if (qres.ambiguous) {
+                                            self.report_type_error(node, "type '{s}' method '{s}' is ambiguous (quirks: '{s}', '{s}')", .{ recv_t.name.?, mname, qres.quirk_name orelse "<unknown>", qres.other_quirk_name orelse "<unknown>" });
+                                            return TranspileError.NotCallable;
+                                        }
+                                        if (qres.fn_name) |qfn| {
+                                            plain_method_sig = fns.get(qfn) orelse {
+                                                self.report_type_error(node, "type '{s}' has no method '{s}'", .{ recv_name, mname });
+                                                return TranspileError.NotCallable;
+                                            };
+                                            plain_method_name = mname;
+                                            call_rtype = plain_method_sig.?.rtype;
+                                        } else {
+                                            self.report_type_error(node, "type '{s}' has no method '{s}'", .{ recv_name, mname });
+                                            return TranspileError.NotCallable;
+                                        }
+                                    }
+                                } else {
+                                    // Also allow calling quirk-impl methods directly on concrete types.
+                                    // If the type implements exactly one quirk that defines this method name,
+                                    // lower/typecheck as a direct call to the generated impl function.
+                                    const qres = self.resolve_quirk_impl_method_for_concrete(node, recv_name, mname);
+                                    if (qres.ambiguous) {
+                                        self.report_type_error(node, "type '{s}' method '{s}' is ambiguous (quirks: '{s}', '{s}')", .{ recv_t.name.?, mname, qres.quirk_name orelse "<unknown>", qres.other_quirk_name orelse "<unknown>" });
+                                        return TranspileError.NotCallable;
+                                    }
+                                    if (qres.fn_name) |qfn| {
+                                        plain_method_sig = fns.get(qfn) orelse {
+                                            self.report_type_error(node, "type '{s}' has no method '{s}'", .{ recv_name, mname });
+                                            return TranspileError.NotCallable;
+                                        };
+                                        plain_method_name = mname;
+                                        call_rtype = plain_method_sig.?.rtype;
+                                    } else {
+                                        self.report_type_error(node, "type '{s}' has no method '{s}'", .{ recv_name, mname });
+                                        return TranspileError.NotCallable;
+                                    }
+                                }
+                            }
+                        }
+
+                        if (recv_name_owned) {
+                            self.allocator.free(recv_name);
                         }
                     } else {
                         self.report_type_error(node, "only calling named functions or quirk methods is supported", .{});
@@ -3100,9 +3406,10 @@ pub const TranspileProcess = struct {
                 .Variable => {
                     const v = stmt.node_variant.?.variable;
                     const name = v.name.items;
-                    const vtype = type_from_dtype(v.type);
-                    if (vtype.name) |tname| {
-                        try self.ensure_named_type_visible(stmt, tname);
+                    const vtype = try self.type_from_dtype_with_mangled(v.type);
+                    try self.ensure_dtype_visible(stmt, v.type, env.type_params);
+                    if (v.type.generic_args != null) {
+                        try self.register_generic_instantiation(v.type);
                     }
                     try env.put_current(name, vtype);
                     if (v.val) |val| {
@@ -3265,17 +3572,17 @@ pub const TranspileProcess = struct {
             if (fns.contains(name)) continue;
 
             const args_vec = fnv.args orelse utils.Vector(*ast.Node).init(proc.allocator);
-            const args_len = args_vec.count;
-            var args_slice = proc.allocator.alloc(CheckedType, args_len) catch {
+            const args_items = args_vec.items();
+            var args_slice = proc.allocator.alloc(CheckedType, args_items.len) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
             errdefer proc.allocator.free(args_slice);
 
             var i: usize = 0;
-            for (args_vec.items()) |arg_ptr| {
+            for (args_items) |arg_ptr| {
                 const arg = arg_ptr.*;
                 if (arg.type == .Variable and arg.node_variant != null) {
-                    args_slice[i] = type_from_dtype(arg.node_variant.?.variable.type);
+                    args_slice[i] = try self.type_from_dtype_with_mangled(arg.node_variant.?.variable.type);
                 } else {
                     args_slice[i] = .{ .base = .Unknown };
                 }
@@ -3286,7 +3593,7 @@ pub const TranspileProcess = struct {
                 return TranspileError.MemoryAllocationFailed;
             };
             fns.put(name, .{
-                .rtype = if (fnv.rtype) |rt| type_from_dtype(&rt) else .{ .base = .Void },
+                .rtype = if (fnv.rtype) |rt| try self.type_from_dtype_with_mangled(&rt) else .{ .base = .Void },
                 .args = args_slice,
                 .is_variadic = fnv.is_variadic,
             }) catch {
@@ -3299,6 +3606,80 @@ pub const TranspileProcess = struct {
         for (proc.owned_nodes.items) |n| {
             if (n.type != .Impl or n.node_variant == null) continue;
             const im = n.node_variant.?.impl;
+            if (proc.impl_type_params(n)) |params| {
+                var inst_keys = std.StringHashMap(bool).init(self.allocator);
+                defer {
+                    var it = inst_keys.iterator();
+                    while (it.next()) |e| {
+                        self.allocator.free(e.key_ptr.*);
+                    }
+                    inst_keys.deinit();
+                }
+
+                var inst_list = std.ArrayList(*const dtype.DataType).init(self.allocator);
+                defer inst_list.deinit();
+                const base_name = if (mem.indexOf(u8, im.type_name.items, "__")) |idx| im.type_name.items[0..idx] else im.type_name.items;
+                try self.collect_generic_instantiations_recursive(self, base_name, &inst_keys, &inst_list);
+
+                for (inst_list.items) |dt| {
+                    if (dt.generic_args == null) continue;
+                    const gargs = dt.generic_args.?.items();
+                    if (gargs.len != params.count) continue;
+                    if (self.dtype_contains_type_param(dt, params)) continue;
+
+                    const mangled = try self.type_name_mangled(dt);
+                    defer self.allocator.free(mangled);
+                    if (self.mangled_contains_type_param(mangled, params)) continue;
+
+                    for (im.methods.items()) |m| {
+                        if (m.type != .Function or m.node_variant == null) continue;
+                        const fnv = m.node_variant.?.function;
+                        if (fnv.name == null) continue;
+                        const base = base_method_name_from_generated(fnv.name.?.items) orelse continue;
+                        const spec_name = if (im.quirk_name) |qn|
+                            (std.fmt.allocPrint(proc.allocator, "{s}__{s}__{s}", .{ mangled, qn.items, base }) catch {
+                                return TranspileError.MemoryAllocationFailed;
+                            })
+                        else
+                            (std.fmt.allocPrint(proc.allocator, "{s}__{s}", .{ mangled, base }) catch {
+                                return TranspileError.MemoryAllocationFailed;
+                            });
+
+                        if (fns.contains(spec_name)) continue;
+
+                        const args_vec = fnv.args orelse utils.Vector(*ast.Node).init(proc.allocator);
+                        const args_items = args_vec.items();
+                        var args_slice = proc.allocator.alloc(CheckedType, args_items.len) catch {
+                            return TranspileError.MemoryAllocationFailed;
+                        };
+                        errdefer proc.allocator.free(args_slice);
+
+                        var i: usize = 0;
+                        for (args_items) |arg_ptr| {
+                            const arg = arg_ptr.*;
+                            if (arg.type == .Variable and arg.node_variant != null) {
+                                args_slice[i] = try self.type_from_dtype_with_subst(arg.node_variant.?.variable.type, params.*, gargs);
+                            } else {
+                                args_slice[i] = .{ .base = .Unknown };
+                            }
+                            i += 1;
+                        }
+
+                        owned_args.append(args_slice) catch {
+                            return TranspileError.MemoryAllocationFailed;
+                        };
+                        fns.put(spec_name, .{
+                            .rtype = if (fnv.rtype) |rt| try self.type_from_dtype_with_subst(&rt, params.*, gargs) else .{ .base = .Void },
+                            .args = args_slice,
+                            .is_variadic = fnv.is_variadic,
+                        }) catch {
+                            return TranspileError.MemoryAllocationFailed;
+                        };
+                    }
+                }
+
+                continue;
+            }
             for (im.methods.items()) |m| {
                 if (m.type != .Function or m.node_variant == null) continue;
                 const fnv = m.node_variant.?.function;
@@ -3308,17 +3689,17 @@ pub const TranspileProcess = struct {
                 if (fns.contains(name)) continue;
 
                 const args_vec = fnv.args orelse utils.Vector(*ast.Node).init(proc.allocator);
-                const args_len = args_vec.count;
-                var args_slice = proc.allocator.alloc(CheckedType, args_len) catch {
+                const args_items = args_vec.items();
+                var args_slice = proc.allocator.alloc(CheckedType, args_items.len) catch {
                     return TranspileError.MemoryAllocationFailed;
                 };
                 errdefer proc.allocator.free(args_slice);
 
                 var i: usize = 0;
-                for (args_vec.items()) |arg_ptr| {
+                for (args_items) |arg_ptr| {
                     const arg = arg_ptr.*;
                     if (arg.type == .Variable and arg.node_variant != null) {
-                        args_slice[i] = type_from_dtype(arg.node_variant.?.variable.type);
+                        args_slice[i] = try self.type_from_dtype_with_mangled(arg.node_variant.?.variable.type);
                     } else {
                         args_slice[i] = .{ .base = .Unknown };
                     }
@@ -3329,7 +3710,7 @@ pub const TranspileProcess = struct {
                     return TranspileError.MemoryAllocationFailed;
                 };
                 fns.put(name, .{
-                    .rtype = if (fnv.rtype) |rt| type_from_dtype(&rt) else .{ .base = .Void },
+                    .rtype = if (fnv.rtype) |rt| try self.type_from_dtype_with_mangled(&rt) else .{ .base = .Void },
                     .args = args_slice,
                     .is_variadic = fnv.is_variadic,
                 }) catch {
@@ -3365,23 +3746,34 @@ pub const TranspileProcess = struct {
         for (proc.nodes.items()) |node| {
             if (node.type != .Function or node.node_variant == null) continue;
             const fnv = node.node_variant.?.function;
-            const fn_rtype: CheckedType = if (fnv.rtype) |rt| type_from_dtype(&rt) else CheckedType{ .base = .Void };
+            const fn_rtype: CheckedType = if (fnv.rtype) |rt| try proc.type_from_dtype_with_mangled(&rt) else CheckedType{ .base = .Void };
+
+            var allow_params: ?[]const []const u8 = null;
+            var allow_store: ?std.ArrayList([]const u8) = null;
+            defer if (allow_store) |*s| s.deinit();
+            if (fnv.type_params) |params| {
+                var buf = std.ArrayList([]const u8).init(proc.allocator);
+                for (params.items()) |p| {
+                    buf.append(p.items) catch return TranspileError.MemoryAllocationFailed;
+                }
+                allow_store = buf;
+                allow_params = allow_store.?.items;
+            }
 
             if (fnv.rtype) |rt| {
-                if (rt.type == .Unknown and rt.type_str.items.len > 0) {
-                    try proc.ensure_named_type_visible(node, rt.type_str.items);
-                }
+                try proc.ensure_dtype_visible(node, &rt, allow_params);
             }
 
             var fn_env = TypeEnv.init(proc.allocator);
             defer fn_env.deinit();
             try fn_env.push();
+            fn_env.set_type_params(allow_params);
 
             // Add module-level globals (nodes without binded context).
             for (proc.nodes.items()) |gn| {
                 if (gn.type == .Variable and gn.node_variant != null and gn.binded == null) {
                     const v = gn.node_variant.?.variable;
-                    try fn_env.put_current(v.name.items, type_from_dtype(v.type));
+                    try fn_env.put_current(v.name.items, try proc.type_from_dtype_with_mangled(v.type));
                 }
             }
 
@@ -3391,10 +3783,8 @@ pub const TranspileProcess = struct {
                     const arg = arg_ptr.*;
                     if (arg.type != .Variable or arg.node_variant == null) continue;
                     const v = arg.node_variant.?.variable;
-                    if (v.type.type == .Unknown and v.type.type_str.items.len > 0) {
-                        try proc.ensure_named_type_visible(node, v.type.type_str.items);
-                    }
-                    try fn_env.put_current(v.name.items, type_from_dtype(v.type));
+                    try proc.ensure_dtype_visible(node, v.type, allow_params);
+                    try fn_env.put_current(v.name.items, try proc.type_from_dtype_with_mangled(v.type));
                 }
             }
 
@@ -3408,7 +3798,53 @@ pub const TranspileProcess = struct {
         for (proc.owned_nodes.items) |n| {
             if (n.type != .Impl or n.node_variant == null) continue;
             const im = n.node_variant.?.impl;
-            const self_type: CheckedType = .{ .base = .Unknown, .name = im.type_name.items, .pointer_depth = 1 };
+            const self_base = if (mem.indexOf(u8, im.type_name.items, "__")) |idx| im.type_name.items[0..idx] else im.type_name.items;
+            const self_type: CheckedType = .{ .base = .Unknown, .name = self_base, .mangled_name = im.type_name.items, .pointer_depth = 1 };
+
+            var allow_params: ?[]const []const u8 = null;
+            var allow_store: ?std.ArrayList([]const u8) = null;
+            defer if (allow_store) |*s| s.deinit();
+            if (im.type_params) |*params| {
+                var buf = std.ArrayList([]const u8).init(proc.allocator);
+                for (params.items()) |p| {
+                    buf.append(p.items) catch return TranspileError.MemoryAllocationFailed;
+                }
+                allow_store = buf;
+                allow_params = allow_store.?.items;
+            } else if (proc.impl_type_params(n)) |params| {
+                var buf = std.ArrayList([]const u8).init(proc.allocator);
+                for (params.items()) |p| {
+                    buf.append(p.items) catch return TranspileError.MemoryAllocationFailed;
+                }
+                allow_store = buf;
+                allow_params = allow_store.?.items;
+            }
+
+            if (allow_params == null) {
+                if (mem.indexOf(u8, im.type_name.items, "__")) |_| {
+                    var buf = std.ArrayList([]const u8).init(proc.allocator);
+                    var i: usize = 0;
+                    var seg_start: usize = 0;
+                    while (i + 1 < im.type_name.items.len) : (i += 1) {
+                        if (im.type_name.items[i] == '_' and im.type_name.items[i + 1] == '_') {
+                            if (seg_start != 0 and i > seg_start) {
+                                buf.append(im.type_name.items[seg_start..i]) catch return TranspileError.MemoryAllocationFailed;
+                            }
+                            i += 1;
+                            seg_start = i + 1;
+                        }
+                    }
+                    if (seg_start != 0 and seg_start < im.type_name.items.len) {
+                        buf.append(im.type_name.items[seg_start..]) catch return TranspileError.MemoryAllocationFailed;
+                    }
+                    if (buf.items.len > 0) {
+                        allow_store = buf;
+                        allow_params = allow_store.?.items;
+                    } else {
+                        buf.deinit();
+                    }
+                }
+            }
 
             try proc.ensure_named_type_visible(n.*, im.type_name.items);
             if (im.quirk_name) |qn| {
@@ -3419,17 +3855,22 @@ pub const TranspileProcess = struct {
                 const m = m_ptr.*;
                 if (m.type != .Function or m.node_variant == null) continue;
                 const fnv = m.node_variant.?.function;
-                const fn_rtype: CheckedType = if (fnv.rtype) |rt| type_from_dtype(&rt) else CheckedType{ .base = .Void };
+                const fn_rtype: CheckedType = if (fnv.rtype) |rt| try proc.type_from_dtype_with_mangled(&rt) else CheckedType{ .base = .Void };
+
+                if (fnv.rtype) |rt| {
+                    try proc.ensure_dtype_visible(n.*, &rt, allow_params);
+                }
 
                 var fn_env = TypeEnv.init(proc.allocator);
                 defer fn_env.deinit();
                 try fn_env.push();
+                fn_env.set_type_params(allow_params);
 
                 // Add module-level globals.
                 for (proc.nodes.items()) |gn| {
                     if (gn.type == .Variable and gn.node_variant != null and gn.binded == null) {
                         const v = gn.node_variant.?.variable;
-                        try fn_env.put_current(v.name.items, type_from_dtype(v.type));
+                        try fn_env.put_current(v.name.items, try proc.type_from_dtype_with_mangled(v.type));
                     }
                 }
 
@@ -3442,7 +3883,8 @@ pub const TranspileProcess = struct {
                         const arg = arg_ptr.*;
                         if (arg.type != .Variable or arg.node_variant == null) continue;
                         const v = arg.node_variant.?.variable;
-                        try fn_env.put_current(v.name.items, type_from_dtype(v.type));
+                        try proc.ensure_dtype_visible(n.*, v.type, allow_params);
+                        try fn_env.put_current(v.name.items, try proc.type_from_dtype_with_mangled(v.type));
                     }
                 }
 
@@ -4095,6 +4537,21 @@ pub const TranspileProcess = struct {
                         allocator.destroy(val);
                     }
                     variable.type.type_str.deinit();
+                    if (variable.type.generic_args) |*gargs| {
+                        for (gargs.items()) |ga| {
+                            ga.type_str.deinit();
+                            if (ga.array) |array| {
+                                if (!array.brackets.is_empty()) {
+                                    for (array.brackets.items()) |bracket| {
+                                        self.deinit_node(bracket);
+                                    }
+                                }
+                                array.brackets.deinit();
+                            }
+                            allocator.destroy(ga);
+                        }
+                        gargs.deinit();
+                    }
                     if (variable.type.array) |array| {
                         if (!array.brackets.is_empty()) {
                             for (array.brackets.items()) |bracket| {
@@ -4141,8 +4598,29 @@ pub const TranspileProcess = struct {
                         self.deinit_node(body.*);
                         allocator.destroy(body);
                     }
+                    if (function.type_params) |*params| {
+                        for (params.items()) |*p| {
+                            p.deinit();
+                        }
+                        params.deinit();
+                    }
                     if (function.rtype) |rtype| {
                         rtype.type_str.deinit();
+                        if (rtype.generic_args) |*gargs| {
+                            for (gargs.items()) |ga| {
+                                ga.type_str.deinit();
+                                if (ga.array) |array| {
+                                    if (!array.brackets.is_empty()) {
+                                        for (array.brackets.items()) |bracket| {
+                                            self.deinit_node(bracket);
+                                        }
+                                    }
+                                    array.brackets.deinit();
+                                }
+                                allocator.destroy(ga);
+                            }
+                            gargs.deinit();
+                        }
                     }
                     if (function.name) |name| {
                         name.deinit();
@@ -4150,9 +4628,30 @@ pub const TranspileProcess = struct {
                 },
                 .compound => |c| {
                     c.name.deinit();
+                    if (c.type_params) |*params| {
+                        for (params.items()) |*p| {
+                            p.deinit();
+                        }
+                        params.deinit();
+                    }
                     for (c.fields.items()) |f| {
                         f.name.deinit();
                         f.dtype.type_str.deinit();
+                        if (f.dtype.generic_args) |*gargs| {
+                            for (gargs.items()) |ga| {
+                                ga.type_str.deinit();
+                                if (ga.array) |array| {
+                                    if (!array.brackets.is_empty()) {
+                                        for (array.brackets.items()) |bracket| {
+                                            self.deinit_node(bracket);
+                                        }
+                                    }
+                                    array.brackets.deinit();
+                                }
+                                allocator.destroy(ga);
+                            }
+                            gargs.deinit();
+                        }
                         if (f.dtype.array) |array| {
                             if (!array.brackets.is_empty()) {
                                 for (array.brackets.items()) |bracket| {
@@ -4170,9 +4669,39 @@ pub const TranspileProcess = struct {
                     for (q.methods.items()) |m| {
                         m.name.deinit();
                         m.rtype.type_str.deinit();
+                        if (m.rtype.generic_args) |*gargs| {
+                            for (gargs.items()) |ga| {
+                                ga.type_str.deinit();
+                                if (ga.array) |array| {
+                                    if (!array.brackets.is_empty()) {
+                                        for (array.brackets.items()) |bracket| {
+                                            self.deinit_node(bracket);
+                                        }
+                                    }
+                                    array.brackets.deinit();
+                                }
+                                allocator.destroy(ga);
+                            }
+                            gargs.deinit();
+                        }
                         for (m.args.items()) |a| {
                             a.name.deinit();
                             a.dtype.type_str.deinit();
+                            if (a.dtype.generic_args) |*gargs| {
+                                for (gargs.items()) |ga| {
+                                    ga.type_str.deinit();
+                                    if (ga.array) |array| {
+                                        if (!array.brackets.is_empty()) {
+                                            for (array.brackets.items()) |bracket| {
+                                                self.deinit_node(bracket);
+                                            }
+                                        }
+                                        array.brackets.deinit();
+                                    }
+                                    allocator.destroy(ga);
+                                }
+                                gargs.deinit();
+                            }
                             if (a.dtype.array) |array| {
                                 if (!array.brackets.is_empty()) {
                                     for (array.brackets.items()) |bracket| {
@@ -4196,6 +4725,12 @@ pub const TranspileProcess = struct {
                 },
                 .impl => |im| {
                     im.type_name.deinit();
+                    if (im.type_params) |*params| {
+                        for (params.items()) |*p| {
+                            p.deinit();
+                        }
+                        params.deinit();
+                    }
                     if (im.quirk_name) |*qn| {
                         qn.deinit();
                     }
@@ -4438,10 +4973,151 @@ pub const TranspileProcess = struct {
         return type_str;
     }
 
-    /// Helper function to write data type to output
-    fn write_type(self: *Self, data_type: dtype.DataType) TranspileError!void {
-        const c_type = map_type_to_c(data_type.type_str.items);
-        try self.write(c_type);
+    fn append_mangled_type(self: *Self, buf: *std.ArrayList(u8), dt: *const dtype.DataType) TranspileError!void {
+        buf.appendSlice(dt.type_str.items) catch return TranspileError.MemoryAllocationFailed;
+        if (dt.generic_args) |gargs| {
+            for (gargs.items()) |ga| {
+                buf.appendSlice("__") catch return TranspileError.MemoryAllocationFailed;
+                try self.append_mangled_type(buf, ga);
+            }
+        }
+    }
+
+    fn type_name_mangled(self: *Self, dt: *const dtype.DataType) TranspileError![]const u8 {
+        var buf = std.ArrayList(u8).init(self.allocator);
+        errdefer buf.deinit();
+        try self.append_mangled_type(&buf, dt);
+        return buf.toOwnedSlice() catch return TranspileError.MemoryAllocationFailed;
+    }
+
+    fn append_mangled_type_with_subst(self: *Self, buf: *std.ArrayList(u8), dt: *const dtype.DataType, params: utils.Vector(std.ArrayList(u8)), args: []*dtype.DataType) TranspileError!void {
+        if ((dt.type == null or dt.type == .Unknown) and dt.type_str.items.len > 0) {
+            for (params.items(), 0..) |p, i| {
+                if (mem.eql(u8, p.items, dt.type_str.items)) {
+                    try self.append_mangled_type(buf, args[i]);
+                    return;
+                }
+            }
+        }
+
+        buf.appendSlice(dt.type_str.items) catch return TranspileError.MemoryAllocationFailed;
+        if (dt.generic_args) |gargs| {
+            for (gargs.items()) |ga| {
+                buf.appendSlice("__") catch return TranspileError.MemoryAllocationFailed;
+                try self.append_mangled_type_with_subst(buf, ga, params, args);
+            }
+        }
+    }
+
+    fn type_name_mangled_with_subst(self: *Self, dt: *const dtype.DataType, params: utils.Vector(std.ArrayList(u8)), args: []*dtype.DataType) TranspileError![]const u8 {
+        var buf = std.ArrayList(u8).init(self.allocator);
+        errdefer buf.deinit();
+        try self.append_mangled_type_with_subst(&buf, dt, params, args);
+        return buf.toOwnedSlice() catch return TranspileError.MemoryAllocationFailed;
+    }
+
+    fn type_name_mangled_for_emit(self: *Self, dt: *const dtype.DataType) TranspileError![]const u8 {
+        if (self.type_subst_params != null and self.type_subst_args != null) {
+            if (self.dtype_needs_subst(dt)) {
+                return self.type_name_mangled_with_subst(dt, self.type_subst_params.?.*, self.type_subst_args.?);
+            }
+        }
+        return self.type_name_mangled(dt);
+    }
+
+    fn type_from_dtype_with_subst(self: *Self, dt: *const dtype.DataType, params: utils.Vector(std.ArrayList(u8)), args: []*dtype.DataType) TranspileError!CheckedType {
+        if ((dt.type == null or dt.type == .Unknown) and dt.type_str.items.len > 0) {
+            const params_items = params.items();
+            var i: usize = 0;
+            while (i < params_items.len and i < args.len) : (i += 1) {
+                const p = params_items[i];
+                if (mem.eql(u8, p.items, dt.type_str.items)) {
+                    var sub = args[i].*;
+                    if (dt.pointer_depth > 0) {
+                        var flags = sub.flags orelse dtype.DataTypeFlags{};
+                        flags.is_pointer = true;
+                        sub.flags = flags;
+                        sub.pointer_depth += dt.pointer_depth;
+                    }
+                    return try self.type_from_dtype_with_mangled(&sub);
+                }
+            }
+        }
+
+        var out = type_from_dtype(dt);
+        if (dt.generic_args != null and (dt.type == null or dt.type == .Unknown)) {
+            out.mangled_name = try self.type_name_mangled_with_subst(dt, params, args);
+        }
+        return out;
+    }
+
+    fn dtype_needs_subst(self: *Self, dt: *const dtype.DataType) bool {
+        const params = self.type_subst_params orelse return false;
+        if ((dt.type == null or dt.type == .Unknown) and dt.type_str.items.len > 0) {
+            for (params.items()) |p| {
+                if (mem.eql(u8, p.items, dt.type_str.items)) return true;
+            }
+        }
+        if (dt.generic_args) |gargs| {
+            for (gargs.items()) |ga| {
+                if (self.dtype_needs_subst(ga)) return true;
+            }
+        }
+        return false;
+    }
+
+    fn dtype_contains_type_param(self: *Self, dt: *const dtype.DataType, params: *const utils.Vector(std.ArrayList(u8))) bool {
+        if ((dt.type == null or dt.type == .Unknown) and dt.type_str.items.len > 0) {
+            for (params.items()) |p| {
+                if (mem.eql(u8, p.items, dt.type_str.items)) return true;
+            }
+        }
+        if (dt.generic_args) |gargs| {
+            for (gargs.items()) |ga| {
+                if (self.dtype_contains_type_param(ga, params)) return true;
+            }
+        }
+        return false;
+    }
+
+    fn mangled_contains_type_param(self: *Self, mangled: []const u8, params: *const utils.Vector(std.ArrayList(u8))) bool {
+        _ = self;
+        for (params.items()) |p| {
+            const needle = p.items;
+            if (needle.len == 0) continue;
+            var start: usize = 0;
+            while (true) {
+                const idx_opt = mem.indexOfPos(u8, mangled, start, "__") orelse break;
+                const seg_start = idx_opt + 2;
+                if (seg_start + needle.len <= mangled.len and mem.eql(u8, mangled[seg_start .. seg_start + needle.len], needle)) {
+                    const seg_end = seg_start + needle.len;
+                    if (seg_end == mangled.len or (seg_end + 1 <= mangled.len and mem.eql(u8, mangled[seg_end .. seg_end + 2], "__"))) {
+                        return true;
+                    }
+                }
+                start = seg_start;
+            }
+        }
+        return false;
+    }
+
+    fn generic_args_are_concrete(self: *Self, params: *const utils.Vector(std.ArrayList(u8)), gargs: []*dtype.DataType) bool {
+        for (gargs) |ga| {
+            if (self.dtype_contains_type_param(ga, params)) return false;
+        }
+        return true;
+    }
+
+    /// Helper function to write data type to output (no substitutions).
+    fn write_type_no_subst(self: *Self, data_type: dtype.DataType) TranspileError!void {
+        if (data_type.generic_args != null and data_type.type == .Unknown) {
+            const mangled = try self.type_name_mangled(&data_type);
+            defer self.allocator.free(mangled);
+            try self.write(mangled);
+        } else {
+            const c_type = map_type_to_c(data_type.type_str.items);
+            try self.write(c_type);
+        }
 
         const ptr_depth: usize = if (data_type.pointer_depth > 0) data_type.pointer_depth else blk: {
             if (data_type.flags != null and data_type.flags.?.is_pointer) break :blk 1;
@@ -4461,6 +5137,16 @@ pub const TranspileProcess = struct {
         //         try self.write("]");
         //     }
         // }
+    }
+
+    /// Helper function to write data type to output
+    fn write_type(self: *Self, data_type: dtype.DataType) TranspileError!void {
+        if (self.type_subst_params != null and self.type_subst_args != null) {
+            if (self.dtype_needs_subst(&data_type)) {
+                return self.write_type_with_subst(&data_type, self.type_subst_params.?.*, self.type_subst_args.?);
+            }
+        }
+        return self.write_type_no_subst(data_type);
     }
 
     fn c_ident_sanitize(self: *Self, raw: []const u8) TranspileError![]const u8 {
@@ -4807,6 +5493,8 @@ pub const TranspileProcess = struct {
             if (cnode.node_variant == null) continue;
             if (self.is_std_c_signature_node(cnode)) continue;
             const c = cnode.node_variant.?.compound;
+
+            if (c.type_params != null) continue;
             try self.write("typedef struct ");
             try self.write(c.name.items);
             try self.write(" ");
@@ -4814,6 +5502,17 @@ pub const TranspileProcess = struct {
             try self.write(";\n");
         }
         if (compound_nodes.items.len > 0) try self.write("\n");
+
+        // Emit generic compound specializations after forward typedefs so
+        // pointer fields can reference non-generic types, and before
+        // non-generic definitions to satisfy by-value dependencies.
+        for (compound_nodes.items) |cnode| {
+            if (cnode.node_variant == null) continue;
+            if (self.is_std_c_signature_node(cnode)) continue;
+            const c = cnode.node_variant.?.compound;
+            if (c.type_params == null) continue;
+            try self.emit_generic_compound_specializations(cnode);
+        }
 
         while (remaining.items.len > 0) {
             var progress = false;
@@ -4866,6 +5565,7 @@ pub const TranspileProcess = struct {
             if (cnode.node_variant == null) continue;
             if (self.is_std_c_signature_node(cnode)) continue;
             const c = cnode.node_variant.?.compound;
+            if (c.type_params != null) continue;
 
             try self.write("typedef struct ");
             try self.write(c.name.items);
@@ -4889,6 +5589,7 @@ pub const TranspileProcess = struct {
             try self.write(c.name.items);
             try self.write(";\n\n");
         }
+
 
         // Quirk canonical structs per signature
         var q_it = reg.quirks_by_sig.iterator();
@@ -4954,6 +5655,201 @@ pub const TranspileProcess = struct {
         try self.write("\n");
     }
 
+    fn emit_quirk_impl_instance(
+        self: *Self,
+        impl_node: *ast.Node,
+        type_name: []const u8,
+        quirk_name: []const u8,
+        sig_h: u64,
+        q: anytype,
+        params: ?*const utils.Vector(std.ArrayList(u8)),
+        gargs: ?[]*dtype.DataType,
+    ) TranspileError!void {
+        if (impl_node.node_variant == null) return;
+        const im = impl_node.node_variant.?.impl;
+
+        const names = try write_quirk_c_names_hash(sig_h);
+        const quirk_c = names.quirk[0..names.quirk_len];
+        const vtable_c = names.vtable[0..names.vtable_len];
+
+        const prev_params = self.type_subst_params;
+        const prev_args = self.type_subst_args;
+        self.type_subst_params = params;
+        self.type_subst_args = gargs;
+        defer {
+            self.type_subst_params = prev_params;
+            self.type_subst_args = prev_args;
+        }
+
+        var type_stack: [128]u8 = undefined;
+        const type_s = try self.c_ident_sanitize_temp(type_name, &type_stack);
+        defer if (type_s.owned) self.backing_allocator.free(type_s.slice);
+
+        var vtbl_buf: [96]u8 = undefined;
+        const vtbl_name = (std.fmt.bufPrint(&vtbl_buf, "__fun_impl_{s}_{x}_vtable", .{ type_s.slice, sig_h }) catch unreachable);
+
+        var coerce_buf: [96]u8 = undefined;
+        const coerce_name = (std.fmt.bufPrint(&coerce_buf, "__fun_coerce_{s}_{x}", .{ type_s.slice, sig_h }) catch unreachable);
+
+        // Forward declare generated impl methods so wrappers can call them.
+        for (im.methods.items()) |m| {
+            if (m.type != .Function or m.node_variant == null) continue;
+            const fnv = m.node_variant.?.function;
+            if (fnv.name == null) continue;
+            const base = base_method_name_from_generated(fnv.name.?.items) orelse continue;
+
+            var impl_fn_name = fnv.name.?.items;
+            var impl_fn_owned = false;
+            if (!mem.eql(u8, type_name, im.type_name.items)) {
+                impl_fn_name = std.fmt.allocPrint(self.allocator, "{s}__{s}__{s}", .{ type_name, quirk_name, base }) catch {
+                    return TranspileError.MemoryAllocationFailed;
+                };
+                impl_fn_owned = true;
+            }
+            defer if (impl_fn_owned) self.allocator.free(impl_fn_name);
+
+            if (fnv.rtype) |rt| {
+                try self.write_type(rt);
+            } else {
+                try self.write("void");
+            }
+            try self.write(" ");
+            try self.write(impl_fn_name);
+            try self.write("(");
+            self.in_function_params = true;
+            if (fnv.args) |args| {
+                for (args.items(), 0..) |arg, i| {
+                    if (i > 0) try self.write(", ");
+                    try self.transpile_node(arg.*);
+                }
+            }
+            self.in_function_params = false;
+            try self.write(");\n");
+        }
+        try self.write("\n");
+
+        // Emit method bodies.
+        for (im.methods.items()) |m| {
+            if (m.type != .Function or m.node_variant == null) continue;
+            const fnv = m.node_variant.?.function;
+            if (fnv.body == null) continue;
+            if (fnv.name == null) continue;
+            const base = base_method_name_from_generated(fnv.name.?.items) orelse continue;
+
+            var impl_fn_name = fnv.name.?.items;
+            var impl_fn_owned = false;
+            if (!mem.eql(u8, type_name, im.type_name.items)) {
+                impl_fn_name = std.fmt.allocPrint(self.allocator, "{s}__{s}__{s}", .{ type_name, quirk_name, base }) catch {
+                    return TranspileError.MemoryAllocationFailed;
+                };
+                impl_fn_owned = true;
+            }
+            const prev_override = self.override_fn_name;
+            self.override_fn_name = impl_fn_name;
+            defer self.override_fn_name = prev_override;
+
+            try self.transpile_node(m.*);
+            if (impl_fn_owned) self.allocator.free(impl_fn_name);
+            try self.write("\n\n");
+        }
+
+        // Wrappers with `void* self` to match vtable signature.
+        for (q.methods.items()) |m| {
+            var impl_fn_name: ?[]const u8 = null;
+            var impl_fn_owned = false;
+            if (!mem.eql(u8, type_name, im.type_name.items)) {
+                impl_fn_name = std.fmt.allocPrint(self.allocator, "{s}__{s}__{s}", .{ type_name, quirk_name, m.name.items }) catch {
+                    return TranspileError.MemoryAllocationFailed;
+                };
+                impl_fn_owned = true;
+            } else {
+                for (im.methods.items()) |fm| {
+                    if (fm.type != .Function or fm.node_variant == null) continue;
+                    const fnv = fm.node_variant.?.function;
+                    if (fnv.name == null) continue;
+                    const base = base_method_name_from_generated(fnv.name.?.items) orelse continue;
+                    if (mem.eql(u8, base, m.name.items)) {
+                        impl_fn_name = fnv.name.?.items;
+                        break;
+                    }
+                }
+            }
+            if (impl_fn_name == null) continue;
+            defer if (impl_fn_owned) self.allocator.free(impl_fn_name.?);
+
+            var m_stack: [128]u8 = undefined;
+            const m_s = try self.c_ident_sanitize_temp(m.name.items, &m_stack);
+            defer if (m_s.owned) self.backing_allocator.free(m_s.slice);
+            var wrap_buf: [128]u8 = undefined;
+            const wrap_name = (std.fmt.bufPrint(&wrap_buf, "__fun_wrap_{s}_{x}_{s}", .{ type_s.slice, sig_h, m_s.slice }) catch unreachable);
+
+            try self.write("static ");
+            try self.write_type(m.rtype);
+            try self.write(" ");
+            try self.write(wrap_name);
+            try self.write("(void* self");
+            for (m.args.items(), 0..) |a, i| {
+                try self.write(", ");
+                try self.write_type(a.dtype.*);
+                var an: [16]u8 = undefined;
+                const aname = (std.fmt.bufPrint(&an, " a{d}", .{i}) catch unreachable);
+                try self.write(aname);
+            }
+            try self.write(") {\n");
+
+            try self.write("  ");
+            if (m.rtype.type != .Void) {
+                try self.write("return ");
+            }
+            try self.write(impl_fn_name.?);
+            try self.write("((");
+            try self.write(type_name);
+            try self.write("*)self");
+            for (m.args.items(), 0..) |_, i| {
+                var an2: [16]u8 = undefined;
+                const aname2 = (std.fmt.bufPrint(&an2, ", a{d}", .{i}) catch unreachable);
+                try self.write(aname2);
+            }
+            try self.write(");\n");
+            try self.write("}\n\n");
+        }
+
+        // Vtable instance
+        try self.write("static const ");
+        try self.write(vtable_c);
+        try self.write(" ");
+        try self.write(vtbl_name);
+        try self.write(" = {\n");
+        for (q.methods.items()) |m| {
+            var m_stack2: [128]u8 = undefined;
+            const m_s = try self.c_ident_sanitize_temp(m.name.items, &m_stack2);
+            defer if (m_s.owned) self.backing_allocator.free(m_s.slice);
+            var wrap_buf2: [128]u8 = undefined;
+            const wrap_name2 = (std.fmt.bufPrint(&wrap_buf2, "__fun_wrap_{s}_{x}_{s}", .{ type_s.slice, sig_h, m_s.slice }) catch unreachable);
+            try self.write("  .");
+            try self.write(m.name.items);
+            try self.write(" = ");
+            try self.write(wrap_name2);
+            try self.write(",\n");
+        }
+        try self.write("};\n\n");
+
+        // Coercion helper
+        try self.write("static inline ");
+        try self.write(quirk_c);
+        try self.write(" ");
+        try self.write(coerce_name);
+        try self.write("(");
+        try self.write(type_name);
+        try self.write("* self) {\n");
+        try self.write("  return (");
+        try self.write(quirk_c);
+        try self.write("){ .self = self, .vtable = &");
+        try self.write(vtbl_name);
+        try self.write(" };\n");
+        try self.write("}\n\n");
+    }
+
     fn emit_impls_and_vtables(self: *Self) TranspileError!void {
         if (self.did_emit_impls) return;
         self.did_emit_impls = true;
@@ -4977,7 +5873,6 @@ pub const TranspileProcess = struct {
             const impl_node = entry.value_ptr.*;
             if (impl_node.node_variant == null) continue;
             const im = impl_node.node_variant.?.impl;
-            const type_name = im.type_name.items;
             const quirk_name = if (im.quirk_name) |qn| qn.items else continue;
             const sig = reg.quirk_sig_by_name.get(quirk_name) orelse continue;
             const sig_h = self.quirk_sig_hash_cached(sig);
@@ -4985,143 +5880,35 @@ pub const TranspileProcess = struct {
             if (qnode.node_variant == null) continue;
             const q = qnode.node_variant.?.quirk;
 
-            const names = try write_quirk_c_names_hash(sig_h);
-            const quirk_c = names.quirk[0..names.quirk_len];
-            const vtable_c = names.vtable[0..names.vtable_len];
-
-            var type_stack: [128]u8 = undefined;
-            const type_s = try self.c_ident_sanitize_temp(type_name, &type_stack);
-            defer if (type_s.owned) self.backing_allocator.free(type_s.slice);
-
-            var vtbl_buf: [96]u8 = undefined;
-            const vtbl_name = (std.fmt.bufPrint(&vtbl_buf, "__fun_impl_{s}_{x}_vtable", .{ type_s.slice, sig_h }) catch unreachable);
-
-            var coerce_buf: [96]u8 = undefined;
-            const coerce_name = (std.fmt.bufPrint(&coerce_buf, "__fun_coerce_{s}_{x}", .{ type_s.slice, sig_h }) catch unreachable);
-
-            // Forward declare generated impl methods so wrappers can call them.
-            for (im.methods.items()) |m| {
-                if (m.type != .Function or m.node_variant == null) continue;
-                const fnv = m.node_variant.?.function;
-                if (fnv.name == null) continue;
-                if (fnv.rtype) |rt| {
-                    try self.write_type(rt);
-                } else {
-                    try self.write("void");
-                }
-                try self.write(" ");
-                try self.write(fnv.name.?.items);
-                try self.write("(");
-                self.in_function_params = true;
-                if (fnv.args) |args| {
-                    for (args.items(), 0..) |arg, i| {
-                        if (i > 0) try self.write(", ");
-                        try self.transpile_node(arg.*);
+            if (self.impl_type_params(impl_node)) |params| {
+                var inst_keys = std.StringHashMap(bool).init(self.allocator);
+                defer {
+                    var it = inst_keys.iterator();
+                    while (it.next()) |e| {
+                        self.allocator.free(e.key_ptr.*);
                     }
+                    inst_keys.deinit();
                 }
-                self.in_function_params = false;
-                try self.write(");\n");
+
+                var inst_list = std.ArrayList(*const dtype.DataType).init(self.allocator);
+                defer inst_list.deinit();
+                const base_name = if (mem.indexOf(u8, im.type_name.items, "__")) |idx| im.type_name.items[0..idx] else im.type_name.items;
+                try self.collect_generic_instantiations_recursive(self, base_name, &inst_keys, &inst_list);
+
+                for (inst_list.items) |dt| {
+                    if (dt.generic_args == null) continue;
+                    const gargs = dt.generic_args.?.items();
+                    if (gargs.len != params.items().len) continue;
+                    if (self.dtype_contains_type_param(dt, params)) continue;
+
+                    const mangled = try self.type_name_mangled(dt);
+                    defer self.allocator.free(mangled);
+                    if (self.mangled_contains_type_param(mangled, params)) continue;
+                    try self.emit_quirk_impl_instance(impl_node, mangled, quirk_name, sig_h, q, params, gargs);
+                }
+            } else {
+                try self.emit_quirk_impl_instance(impl_node, im.type_name.items, quirk_name, sig_h, q, null, null);
             }
-            try self.write("\n");
-
-            // Emit method bodies.
-            for (im.methods.items()) |m| {
-                if (m.type != .Function or m.node_variant == null) continue;
-                const fnv = m.node_variant.?.function;
-                if (fnv.body == null) continue;
-                try self.transpile_node(m.*);
-                try self.write("\n\n");
-            }
-
-            // Wrappers with `void* self` to match vtable signature.
-            for (q.methods.items()) |m| {
-                // Find the generated method function name by suffix match.
-                var impl_fn_name: ?[]const u8 = null;
-                for (im.methods.items()) |fm| {
-                    if (fm.type != .Function or fm.node_variant == null) continue;
-                    const fnv = fm.node_variant.?.function;
-                    if (fnv.name == null) continue;
-                    const n = fnv.name.?.items;
-                    var suf_buf: [128]u8 = undefined;
-                    const suf = (std.fmt.bufPrint(&suf_buf, "__{s}", .{m.name.items}) catch unreachable);
-                    if (mem.endsWith(u8, n, suf)) {
-                        impl_fn_name = n;
-                        break;
-                    }
-                }
-                if (impl_fn_name == null) continue;
-
-                var m_stack: [128]u8 = undefined;
-                const m_s = try self.c_ident_sanitize_temp(m.name.items, &m_stack);
-                defer if (m_s.owned) self.backing_allocator.free(m_s.slice);
-                var wrap_buf: [128]u8 = undefined;
-                const wrap_name = (std.fmt.bufPrint(&wrap_buf, "__fun_wrap_{s}_{x}_{s}", .{ type_s.slice, sig_h, m_s.slice }) catch unreachable);
-
-                try self.write("static ");
-                try self.write_type(m.rtype);
-                try self.write(" ");
-                try self.write(wrap_name);
-                try self.write("(void* self");
-                for (m.args.items(), 0..) |a, i| {
-                    try self.write(", ");
-                    try self.write_type(a.dtype.*);
-                    var an: [16]u8 = undefined;
-                    const aname = (std.fmt.bufPrint(&an, " a{d}", .{i}) catch unreachable);
-                    try self.write(aname);
-                }
-                try self.write(") {\n");
-
-                try self.write("  ");
-                if (m.rtype.type != .Void) {
-                    try self.write("return ");
-                }
-                try self.write(impl_fn_name.?);
-                try self.write("((");
-                try self.write(type_name);
-                try self.write("*)self");
-                for (m.args.items(), 0..) |_, i| {
-                    var an2: [16]u8 = undefined;
-                    const aname2 = (std.fmt.bufPrint(&an2, ", a{d}", .{i}) catch unreachable);
-                    try self.write(aname2);
-                }
-                try self.write(");\n");
-                try self.write("}\n\n");
-            }
-
-            // Vtable instance
-            try self.write("static const ");
-            try self.write(vtable_c);
-            try self.write(" ");
-            try self.write(vtbl_name);
-            try self.write(" = {\n");
-            for (q.methods.items()) |m| {
-                var m_stack2: [128]u8 = undefined;
-                const m_s = try self.c_ident_sanitize_temp(m.name.items, &m_stack2);
-                defer if (m_s.owned) self.backing_allocator.free(m_s.slice);
-                var wrap_buf2: [128]u8 = undefined;
-                const wrap_name2 = (std.fmt.bufPrint(&wrap_buf2, "__fun_wrap_{s}_{x}_{s}", .{ type_s.slice, sig_h, m_s.slice }) catch unreachable);
-                try self.write("  .");
-                try self.write(m.name.items);
-                try self.write(" = ");
-                try self.write(wrap_name2);
-                try self.write(",\n");
-            }
-            try self.write("};\n\n");
-
-            // Coercion helper
-            try self.write("static inline ");
-            try self.write(quirk_c);
-            try self.write(" ");
-            try self.write(coerce_name);
-            try self.write("(");
-            try self.write(type_name);
-            try self.write("* self) {\n");
-            try self.write("  return (");
-            try self.write(quirk_c);
-            try self.write("){ .self = self, .vtable = &");
-            try self.write(vtbl_name);
-            try self.write(" };\n");
-            try self.write("}\n\n");
         }
 
         // Plain impl method bodies (non-quirk): `impl Type { ... }`
@@ -5136,6 +5923,79 @@ pub const TranspileProcess = struct {
             if (n.type != .Impl or n.node_variant == null) continue;
             const im = n.node_variant.?.impl;
             if (im.quirk_name != null) continue;
+
+            if (self.impl_type_params(n)) |params| {
+                var inst_keys = std.StringHashMap(bool).init(self.allocator);
+                defer {
+                    var it = inst_keys.iterator();
+                    while (it.next()) |e| {
+                        self.allocator.free(e.key_ptr.*);
+                    }
+                    inst_keys.deinit();
+                }
+
+                var inst_list = std.ArrayList(*const dtype.DataType).init(self.allocator);
+                defer inst_list.deinit();
+                const base_name = if (mem.indexOf(u8, im.type_name.items, "__")) |idx| im.type_name.items[0..idx] else im.type_name.items;
+                try self.collect_generic_instantiations_recursive(self, base_name, &inst_keys, &inst_list);
+
+                for (inst_list.items) |dt| {
+                    if (dt.generic_args == null) continue;
+                    const gargs = dt.generic_args.?.items();
+                    if (gargs.len != params.count) continue;
+                    if (self.dtype_contains_type_param(dt, params)) continue;
+
+                    const mangled = try self.type_name_mangled(dt);
+                    defer self.allocator.free(mangled);
+                    if (self.mangled_contains_type_param(mangled, params)) continue;
+
+                    for (im.methods.items()) |m| {
+                        if (m.type != .Function or m.node_variant == null) continue;
+                        const fnv = m.node_variant.?.function;
+                        if (fnv.name == null) continue;
+                        const base = base_method_name_from_generated(fnv.name.?.items) orelse continue;
+                        const spec_name = std.fmt.allocPrint(self.allocator, "{s}__{s}", .{ mangled, base }) catch {
+                            return TranspileError.MemoryAllocationFailed;
+                        };
+
+                        const gop = emitted.getOrPut(spec_name) catch return TranspileError.MemoryAllocationFailed;
+                        if (gop.found_existing) continue;
+                        gop.value_ptr.* = true;
+
+                        const prev_params = self.type_subst_params;
+                        const prev_args = self.type_subst_args;
+                        self.type_subst_params = params;
+                        self.type_subst_args = gargs;
+                        defer {
+                            self.type_subst_params = prev_params;
+                            self.type_subst_args = prev_args;
+                        }
+
+                        if (fnv.rtype) |rt| {
+                            try self.write_type(rt);
+                        } else {
+                            try self.write("void");
+                        }
+                        try self.write(" ");
+                        try self.write(spec_name);
+                        try self.write("(");
+                        self.in_function_params = true;
+                        if (fnv.args) |args| {
+                            for (args.items(), 0..) |arg, i| {
+                                if (i > 0) try self.write(", ");
+                                try self.transpile_node(arg.*);
+                            }
+                        }
+                        self.in_function_params = false;
+                        try self.write(");\n");
+                    }
+                }
+                continue;
+            }
+
+            if (mem.indexOf(u8, im.type_name.items, "__") != null) {
+                if (!(try self.concrete_impl_is_instantiated(im.type_name.items))) continue;
+            }
 
             for (im.methods.items()) |m| {
                 if (m.type != .Function or m.node_variant == null) continue;
@@ -5170,11 +6030,314 @@ pub const TranspileProcess = struct {
         }
     }
 
+    fn emit_generic_compound_specializations(self: *Self, cnode: *ast.Node) TranspileError!void {
+        const c = cnode.node_variant.?.compound;
+        const params = c.type_params orelse return;
+
+        var inst_keys = std.StringHashMap(bool).init(self.allocator);
+        defer {
+            var it = inst_keys.iterator();
+            while (it.next()) |e| {
+                self.allocator.free(e.key_ptr.*);
+            }
+            inst_keys.deinit();
+        }
+
+        var inst_list = std.ArrayList(*const dtype.DataType).init(self.allocator);
+        defer inst_list.deinit();
+
+        try self.collect_generic_instantiations_recursive(self, c.name.items, &inst_keys, &inst_list);
+
+        for (inst_list.items) |dt| {
+            if (dt.generic_args == null) continue;
+            const gargs = dt.generic_args.?.items();
+            if (gargs.len != params.count) continue;
+            if (self.dtype_contains_type_param(dt, &params)) continue;
+
+            const mangled = try self.type_name_mangled(dt);
+            defer self.allocator.free(mangled);
+            if (self.mangled_contains_type_param(mangled, &params)) continue;
+
+            try self.write("typedef struct ");
+            try self.write(mangled);
+            try self.write(" {\n");
+
+            for (c.fields.items()) |f| {
+                try self.write("  ");
+                if (f.dtype.flags != null and f.dtype.flags.?.is_array) {
+                    var field_dt = f.dtype.*;
+                    if (field_dt.flags) |*flags| flags.is_array = false;
+                    if (field_dt.pointer_depth == 0) field_dt.pointer_depth = 1;
+                    try self.write_type_with_subst(&field_dt, params, gargs);
+                } else {
+                    try self.write_type_with_subst(f.dtype, params, gargs);
+                }
+                try self.write(" ");
+                try self.write(f.name.items);
+                try self.write(";\n");
+            }
+
+            try self.write("} ");
+            try self.write(mangled);
+            try self.write(";\n\n");
+        }
+    }
+
+    fn write_type_with_subst(self: *Self, dt: *const dtype.DataType, params: utils.Vector(std.ArrayList(u8)), args: []*dtype.DataType) TranspileError!void {
+        var idx: ?usize = null;
+        if ((dt.type == null or dt.type == .Unknown) and dt.type_str.items.len > 0) {
+            for (params.items(), 0..) |p, i| {
+                if (mem.eql(u8, p.items, dt.type_str.items)) {
+                    idx = i;
+                    break;
+                }
+            }
+        }
+
+        if (idx != null) {
+            var sub = args[idx.?].*;
+            if (dt.pointer_depth > 0) {
+                var flags = sub.flags orelse dtype.DataTypeFlags{};
+                flags.is_pointer = true;
+                sub.flags = flags;
+                sub.pointer_depth += dt.pointer_depth;
+            }
+            try self.write_type_no_subst(sub);
+            return;
+        }
+
+        if (dt.generic_args != null and (dt.type == null or dt.type == .Unknown)) {
+            const mangled = try self.type_name_mangled_with_subst(dt, params, args);
+            defer self.allocator.free(mangled);
+            try self.write(mangled);
+            const ptr_depth: usize = if (dt.pointer_depth > 0) dt.pointer_depth else blk: {
+                if (dt.flags != null and dt.flags.?.is_pointer) break :blk 1;
+                break :blk 0;
+            };
+            if (ptr_depth > 0) {
+                var i: usize = 0;
+                while (i < ptr_depth) : (i += 1) {
+                    try self.write("*");
+                }
+            }
+            return;
+        }
+
+        try self.write_type_no_subst(dt.*);
+    }
+
+    fn collect_generic_instantiations(self: *Self, proc: *Self, name: []const u8, keys: *std.StringHashMap(bool), out: *std.ArrayList(*const dtype.DataType)) TranspileError!void {
+        for (proc.nodes.items()) |node| {
+            try self.collect_generic_instantiations_node(node, name, keys, out);
+        }
+        for (proc.owned_nodes.items) |node| {
+            try self.collect_generic_instantiations_node(node.*, name, keys, out);
+        }
+    }
+
+    fn collect_generic_instantiations_recursive(self: *Self, proc: *Self, name: []const u8, keys: *std.StringHashMap(bool), out: *std.ArrayList(*const dtype.DataType)) TranspileError!void {
+        try self.collect_generic_instantiations(proc, name, keys, out);
+        for (proc.children.items) |child| {
+            try self.collect_generic_instantiations_recursive(child, name, keys, out);
+        }
+
+        const root = self.get_root();
+        for (root.forced_generic_instantiations.items) |dt| {
+            if (dt.type != .Unknown or dt.type_str.items.len == 0) continue;
+            if (!mem.eql(u8, dt.type_str.items, name)) continue;
+            const key = try self.type_name_mangled(dt);
+            if (!keys.contains(key)) {
+                keys.put(key, true) catch return TranspileError.MemoryAllocationFailed;
+                out.append(dt) catch return TranspileError.MemoryAllocationFailed;
+            } else {
+                self.allocator.free(key);
+            }
+        }
+    }
+
+    fn concrete_impl_is_instantiated(self: *Self, type_name: []const u8) TranspileError!bool {
+        const idx_opt = mem.indexOf(u8, type_name, "__") orelse return true;
+        const base = type_name[0..idx_opt];
+
+        var inst_keys = std.StringHashMap(bool).init(self.allocator);
+        defer {
+            var it = inst_keys.iterator();
+            while (it.next()) |e| {
+                self.allocator.free(e.key_ptr.*);
+            }
+            inst_keys.deinit();
+        }
+
+        var inst_list = std.ArrayList(*const dtype.DataType).init(self.allocator);
+        defer inst_list.deinit();
+
+        try self.collect_generic_instantiations_recursive(self, base, &inst_keys, &inst_list);
+
+        for (inst_list.items) |dt| {
+            const mangled = try self.type_name_mangled(dt);
+            defer self.allocator.free(mangled);
+            if (mem.eql(u8, mangled, type_name)) return true;
+        }
+        return false;
+    }
+
+    fn collect_generic_instantiations_node(self: *Self, node: ast.Node, name: []const u8, keys: *std.StringHashMap(bool), out: *std.ArrayList(*const dtype.DataType)) TranspileError!void {
+        switch (node.type) {
+            .Variable => if (node.node_variant) |v| try self.collect_generic_instantiations_dtype(v.variable.type, name, keys, out),
+            .Function => if (node.node_variant) |f| {
+                if (f.function.rtype) |rt| try self.collect_generic_instantiations_dtype(&rt, name, keys, out);
+                if (f.function.args) |args| {
+                    for (args.items()) |a| {
+                        if (a.node_variant) |av| {
+                            try self.collect_generic_instantiations_dtype(av.variable.type, name, keys, out);
+                        }
+                    }
+                }
+                if (f.function.body) |body| {
+                    try self.collect_generic_instantiations_in_body(body, name, keys, out);
+                }
+            },
+            .Compound => if (node.node_variant) |c| {
+                for (c.compound.fields.items()) |f| {
+                    try self.collect_generic_instantiations_dtype(f.dtype, name, keys, out);
+                }
+            },
+            .Body => if (node.node_variant) |b| {
+                const body_node = ast.Node{ .type = .Body, .node_variant = .{ .body = b.body } };
+                try self.collect_generic_instantiations_in_body(&body_node, name, keys, out);
+            },
+            else => {},
+        }
+    }
+
+    fn collect_generic_instantiations_in_body(self: *Self, body: *const ast.Node, name: []const u8, keys: *std.StringHashMap(bool), out: *std.ArrayList(*const dtype.DataType)) TranspileError!void {
+        if (body.type != .Body or body.node_variant == null) return;
+        const stmts = body.node_variant.?.body.statements;
+        for (stmts.items()) |stmt_ptr| {
+            const stmt = stmt_ptr.*;
+            switch (stmt.type) {
+                .Variable => {
+                    const v = stmt.node_variant.?.variable;
+                    try self.collect_generic_instantiations_dtype(v.type, name, keys, out);
+                },
+                .StatementIf => {
+                    const ifs = stmt.node_variant.?.statement.if_stmt;
+                    try self.collect_generic_instantiations_in_body(ifs.body, name, keys, out);
+                },
+                .StatementElseIf => {
+                    const elif = stmt.node_variant.?.statement.elif_stmt;
+                    try self.collect_generic_instantiations_in_body(elif.body, name, keys, out);
+                },
+                .StatementElse => {
+                    const els = stmt.node_variant.?.statement.else_stmt;
+                    try self.collect_generic_instantiations_in_body(els.body, name, keys, out);
+                },
+                .StatementFit => {
+                    const fit = stmt.node_variant.?.statement.fit_stmt;
+                    for (fit.branches.items()) |br| {
+                        try self.collect_generic_instantiations_in_body(br.body, name, keys, out);
+                    }
+                },
+                .StatementFor => {
+                    const f = stmt.node_variant.?.statement.for_stmt;
+                    switch (f) {
+                        .cond => |fc| try self.collect_generic_instantiations_in_body(fc.body, name, keys, out),
+                        .iter => |fi| try self.collect_generic_instantiations_in_body(fi.body, name, keys, out),
+                        .range => |fr| try self.collect_generic_instantiations_in_body(fr.body, name, keys, out),
+                    }
+                },
+                else => {},
+            }
+        }
+    }
+
+    fn collect_generic_instantiations_dtype(self: *Self, dt: *const dtype.DataType, name: []const u8, keys: *std.StringHashMap(bool), out: *std.ArrayList(*const dtype.DataType)) TranspileError!void {
+        if (dt.type == .Unknown and mem.eql(u8, dt.type_str.items, name)) {
+            if (dt.generic_args != null) {
+                const key = try self.type_name_mangled(dt);
+                if (!keys.contains(key)) {
+                    keys.put(key, true) catch return TranspileError.MemoryAllocationFailed;
+                    out.append(dt) catch return TranspileError.MemoryAllocationFailed;
+                } else {
+                    self.allocator.free(key);
+                }
+            }
+        }
+
+        if (dt.generic_args) |gargs| {
+            for (gargs.items()) |ga| {
+                try self.collect_generic_instantiations_dtype(ga, name, keys, out);
+            }
+        }
+    }
+
     fn emit_plain_impl_methods_module(self: *Self, proc: *Self, emitted: *std.StringHashMap(bool)) TranspileError!void {
         for (proc.owned_nodes.items) |n| {
             if (n.type != .Impl or n.node_variant == null) continue;
             const im = n.node_variant.?.impl;
             if (im.quirk_name != null) continue;
+
+            if (self.impl_type_params(n)) |params| {
+                var inst_keys = std.StringHashMap(bool).init(self.allocator);
+                defer {
+                    var it = inst_keys.iterator();
+                    while (it.next()) |e| {
+                        self.allocator.free(e.key_ptr.*);
+                    }
+                    inst_keys.deinit();
+                }
+
+                var inst_list = std.ArrayList(*const dtype.DataType).init(self.allocator);
+                defer inst_list.deinit();
+                const base_name = if (mem.indexOf(u8, im.type_name.items, "__")) |idx| im.type_name.items[0..idx] else im.type_name.items;
+                try self.collect_generic_instantiations_recursive(self, base_name, &inst_keys, &inst_list);
+
+                for (inst_list.items) |dt| {
+                    if (dt.generic_args == null) continue;
+                    const gargs = dt.generic_args.?.items();
+                    if (gargs.len != params.count) continue;
+                    if (self.dtype_contains_type_param(dt, params)) continue;
+
+                    const mangled = try self.type_name_mangled(dt);
+                    defer self.allocator.free(mangled);
+                    if (self.mangled_contains_type_param(mangled, params)) continue;
+
+                    for (im.methods.items()) |m| {
+                        if (m.type != .Function or m.node_variant == null) continue;
+                        const fnv = m.node_variant.?.function;
+                        if (fnv.body == null) continue;
+                        if (fnv.name == null) continue;
+                        const base = base_method_name_from_generated(fnv.name.?.items) orelse continue;
+                        const spec_name = std.fmt.allocPrint(self.allocator, "{s}__{s}", .{ mangled, base }) catch {
+                            return TranspileError.MemoryAllocationFailed;
+                        };
+
+                        const gop = emitted.getOrPut(spec_name) catch return TranspileError.MemoryAllocationFailed;
+                        if (gop.found_existing) continue;
+                        gop.value_ptr.* = true;
+
+                        const prev_params = self.type_subst_params;
+                        const prev_args = self.type_subst_args;
+                        const prev_override = self.override_fn_name;
+                        self.type_subst_params = params;
+                        self.type_subst_args = gargs;
+                        self.override_fn_name = spec_name;
+                        defer {
+                            self.type_subst_params = prev_params;
+                            self.type_subst_args = prev_args;
+                            self.override_fn_name = prev_override;
+                        }
+
+                        try self.transpile_node(m.*);
+                        try self.write("\n\n");
+                    }
+                }
+                continue;
+            }
+
+            if (mem.indexOf(u8, im.type_name.items, "__") != null) {
+                if (!(try self.concrete_impl_is_instantiated(im.type_name.items))) continue;
+            }
 
             for (im.methods.items()) |m| {
                 if (m.type != .Function or m.node_variant == null) continue;
@@ -5420,6 +6583,19 @@ pub const TranspileProcess = struct {
                             }
 
                             const type_name = inner.data.?.sval.items;
+                            if (self.type_subst_params != null and self.type_subst_args != null) {
+                                const params = self.type_subst_params.?.*;
+                                const args = self.type_subst_args.?;
+                                for (params.items(), 0..) |p, i| {
+                                    if (mem.eql(u8, p.items, type_name)) {
+                                        try self.write("(int)(sizeof(");
+                                        try self.write_type_no_subst(args[i].*);
+                                        try self.write("))");
+                                        return;
+                                    }
+                                }
+                            }
+
                             const c_type = map_type_to_c(type_name);
                             try self.write("(int)(sizeof(");
                             try self.write(c_type);
@@ -5478,7 +6654,12 @@ pub const TranspileProcess = struct {
                                             if (self.lookup_compound_field(base_dt.?.type_str.items, field_name)) |fdt| {
                                                 const field_type = type_from_dtype(fdt);
                                                 if (field_type.name != null and !self.is_quirk_name(field_type.name.?)) {
-                                                    const type_name = field_type.name.?;
+                                                    var type_name = field_type.name.?;
+                                                    var owned_name = false;
+                                                    if (fdt.generic_args != null) {
+                                                        type_name = try self.type_name_mangled_for_emit(fdt);
+                                                        owned_name = true;
+                                                    }
                                                     const mname = member.?.data.?.sval.items;
                                                     if (self.lookup_plain_impl_method_fn(&node, type_name, mname)) |fn_name| {
                                                         try self.write("(");
@@ -5506,10 +6687,12 @@ pub const TranspileProcess = struct {
 
                                                         try self.write(")");
                                                         try self.write(")");
+                                                        if (owned_name) self.allocator.free(@constCast(type_name));
                                                         return;
                                                     }
 
                                                     const qres = self.resolve_quirk_impl_method_for_concrete(node, type_name, mname);
+                                                    if (owned_name) self.allocator.free(@constCast(type_name));
                                                     if (!qres.ambiguous) {
                                                         if (qres.fn_name) |qfn_name| {
                                                             try self.write("(");
@@ -5550,7 +6733,12 @@ pub const TranspileProcess = struct {
                                     const rname = recv.?.data.?.sval.items;
                                     const dt = self.identifier_declared_dtype(rname) orelse null;
                                     if (dt != null and dt.?.type == .Unknown and !self.is_quirk_name(dt.?.type_str.items) and (dt.?.pointer_depth == 0 or dt.?.pointer_depth == 1)) {
-                                        const type_name = dt.?.type_str.items;
+                                        var type_name: []const u8 = dt.?.type_str.items;
+                                        var owned_name = false;
+                                        if (dt.?.generic_args != null) {
+                                            type_name = try self.type_name_mangled_for_emit(dt.?);
+                                            owned_name = true;
+                                        }
                                         const mname = member.?.data.?.sval.items;
                                         if (self.lookup_plain_impl_method_fn(&node, type_name, mname)) |fn_name| {
                                             try self.write("(");
@@ -5577,11 +6765,13 @@ pub const TranspileProcess = struct {
 
                                             try self.write(")");
                                             try self.write(")");
+                                            if (owned_name) self.allocator.free(@constCast(type_name));
                                             return;
                                         }
 
                                         // Also allow calling quirk-impl methods directly on concrete types.
                                         const qres = self.resolve_quirk_impl_method_for_concrete(node, type_name, mname);
+                                        if (owned_name) self.allocator.free(@constCast(type_name));
                                         if (!qres.ambiguous) {
                                             if (qres.fn_name) |qfn_name| {
                                                 try self.write("(");
@@ -6004,7 +7194,8 @@ pub const TranspileProcess = struct {
                     }
                     try self.write(" ");
                     if (function.name) |name| {
-                        try self.write(name.items);
+                        const out_name = if (self.override_fn_name) |ov| ov else name.items;
+                        try self.write(out_name);
                     }
                     try self.write("(");
                     self.in_function_params = true;
@@ -7010,10 +8201,4 @@ fn is_known_extern_function_name(name: []const u8) bool {
         mem.eql(u8, name, "rename") or
         mem.eql(u8, name, "tmpfile") or
         mem.eql(u8, name, "tmpnam");
-}
-
-fn typeRegistryRoot(proc: *TranspileProcess) ?*TypeRegistry {
-    const root = proc.get_root() orelse proc;
-    if (root.type_registry) |*reg| return reg;
-    return null;
 }

@@ -1,4 +1,4 @@
-// String-keyed hash map.
+// String-keyed hash map with generic values.
 
 imp std.c.mem;
 imp std.c.string;
@@ -6,18 +6,18 @@ imp std.c.def;
 imp std.quirks;
 imp std.string;
 
-// Internal map entry (key/value + flags).
+// Internal map entry (key/value pointer + flags).
 // 
 // Fields:
 // - key: entry key
-// - value: entry value
+// - value: heap-allocated value bytes
 // - used: slot has data
 // - tomb: slot is a tombstone
 pub compound MapEntry {
   // key: entry key
   str key;
-  // value: entry value
-  str value;
+  // value: heap-allocated value bytes
+  raw* value;
   // used: slot has data
   bin used;
   // tomb: slot is a tombstone
@@ -30,13 +30,16 @@ pub compound MapEntry {
 // - entries: backing storage
 // - len: number of live entries
 // - cap: allocated capacity
-pub compound StrMap {
+// - value_size: size of stored values
+pub compound Map < T > {
   // entries: backing storage
   MapEntry* entries;
   // len: number of live entries
   num len;
   // cap: allocated capacity
   num cap;
+  // value_size: size of stored values
+  num value_size;
 }
 
 fun _hash_str(str s) num {
@@ -55,78 +58,9 @@ fun _hash_str(str s) num {
   ret h;
 }
 
-fun _map_alloc(StrMap* m, num cap) {
-  m.entries = malloc(cap * sizeof(MapEntry));
-  if m.entries != NULL {
-    memset(m.entries, 0, cap * sizeof(MapEntry));
-  }
-  m.cap = cap;
-}
+// (helpers are implemented as Map<T> methods)
 
-fun _map_rehash(StrMap* m, num new_cap) {
-  MapEntry* old_entries = m.entries;
-  num old_cap = m.cap;
-
-  _map_alloc(m, new_cap);
-  m.len = 0;
-
-  if old_entries == NULL {
-    ret;
-  }
-
-  num i = 0;
-  for i < old_cap {
-    MapEntry entry = old_entries[i];
-    if entry.used != false {
-      if entry.tomb == false {
-        str key = entry.key;
-        str value = entry.value;
-        // reinsert
-        num idx = _hash_str(key) % m.cap;
-        num steps = 0;
-        for steps < m.cap {
-          MapEntry dst = m.entries[idx];
-          if dst.used == false {
-            dst.key = key;
-            dst.value = value;
-            dst.used = true;
-            dst.tomb = false;
-            m.entries[idx] = dst;
-            m.len = m.len + 1;
-            break;
-          }
-          idx = (idx + 1) % m.cap;
-          steps = steps + 1;
-        }
-      }
-    }
-    i = i + 1;
-  }
-
-  free(old_entries);
-}
-
-// Create a map with an initial capacity.
-// 
-// Params:
-// - cap: requested capacity (minimum 8)
-// 
-// Returns:
-// - initialized StrMap
-pub fun map_init(num cap) StrMap {
-  StrMap m;
-  m.entries = NULL;
-  m.len = 0;
-  m.cap = 0;
-
-  if cap < 8 {
-    cap = 8;
-  }
-  _map_alloc(&m, cap);
-  ret m;
-}
-
-impl StrMap Sized {
+impl Map < T > Sized {
   // Number of stored entries.
   pub len() num {
     ret self.len;
@@ -138,10 +72,102 @@ impl StrMap Sized {
   }
 }
 
-impl StrMap {
+impl Map < T > {
+  // Initialize with an initial capacity.
+  pub init(num cap) {
+    self.entries = NULL;
+    self.len = 0;
+    self.cap = 0;
+    self.value_size = sizeof(T);
+
+    if cap < 8 {
+      cap = 8;
+    }
+    self.alloc(cap);
+  }
+
+  // Allocate backing storage.
+  alloc(num cap) {
+    self.entries = malloc(cap * sizeof(MapEntry));
+    if self.entries != NULL {
+      memset(self.entries, 0, cap * sizeof(MapEntry));
+    }
+    self.cap = cap;
+  }
+
+  // Rehash into a new capacity.
+  rehash(num new_cap) {
+    MapEntry* old_entries = self.entries;
+    num old_cap = self.cap;
+
+    self.alloc(new_cap);
+    self.len = 0;
+
+    if old_entries == NULL {
+      ret;
+    }
+
+    num i = 0;
+    for i < old_cap {
+      MapEntry entry = old_entries[i];
+      if entry.used != false {
+        if entry.tomb == false {
+          str key = entry.key;
+          raw* value_ptr = entry.value;
+          // reinsert
+          num idx = _hash_str(key) % self.cap;
+          num steps = 0;
+          for steps < self.cap {
+            MapEntry dst = self.entries[idx];
+            if dst.used == false {
+              dst.key = key;
+              dst.value = value_ptr;
+              dst.used = true;
+              dst.tomb = false;
+              self.entries[idx] = dst;
+              self.len = self.len + 1;
+              break;
+            }
+            idx = (idx + 1) % self.cap;
+            steps = steps + 1;
+          }
+        }
+      }
+      i = i + 1;
+    }
+
+    free(old_entries);
+  }
+
+  pub zero_value() T {
+    T out;
+    memset( &out, 0, sizeof(T));
+    ret out;
+  }
+
+  pub load_value(MapEntry* entry) T {
+    if entry.value == NULL {
+      ret self.zero_value();
+    }
+    T out;
+    memset( &out, 0, sizeof(T));
+    memcpy( &out, entry.value, self.value_size);
+    ret out;
+  }
+
+  pub store_value(MapEntry* entry, T value) {
+    if entry.value == NULL {
+      entry.value = malloc(self.value_size);
+    }
+    if entry.value != NULL {
+      memcpy(entry.value, &value, self.value_size);
+    }
+  }
+
   // Free internal storage.
   pub free() {
     if self.entries != NULL {
+      self.clear();
       free(self.entries);
     }
     self.entries = NULL;
@@ -174,10 +200,10 @@ impl StrMap {
     ret false;
   }
 
-  // Get a value by key (or null).
-  pub get(str key) str {
+  // Get a value by key (or zero).
+  pub get(str key) T {
     if self.cap == 0 {
-      ret NULL;
+      ret self.zero_value();
     }
 
     num idx = _hash_str(key) % self.cap;
@@ -185,28 +211,28 @@ impl StrMap {
     for steps < self.cap {
       MapEntry entry = self.entries[idx];
       if entry.used == false {
-        ret NULL;
+        ret self.zero_value();
       }
       if entry.tomb == false {
         if equals(entry.key, key) != false {
-          ret entry.value;
+          ret self.load_value( &entry);
         }
       }
       idx = idx + 1;
       idx = idx % self.cap;
       steps = steps + 1;
     }
-    ret NULL;
+    ret self.zero_value();
   }
 
   // Insert or update a value by key.
-  pub put(str key, str value) {
+  pub put(str key, T value) {
     if self.cap == 0 {
-      _map_alloc(self, 8);
+      self.alloc(8);
     }
 
     if self.len * 10 + 10 >= self.cap * 7 {
-      _map_rehash(self, self.cap * 2);
+      self.rehash(self.cap * 2);
     }
 
     num idx = _hash_str(key) % self.cap;
@@ -220,7 +246,7 @@ impl StrMap {
           entry = self.entries[idx];
         }
         entry.key = key;
-        entry.value = value;
+        self.store_value( &entry, value);
         entry.used = true;
         entry.tomb = false;
         self.entries[idx] = entry;
@@ -230,7 +256,7 @@ impl StrMap {
 
       if entry.tomb == false {
         if equals(entry.key, key) != false {
-          entry.value = value;
+          self.store_value( &entry, value);
           self.entries[idx] = entry;
           ret;
         }
@@ -263,6 +289,10 @@ impl StrMap {
       }
       if entry.tomb == false {
         if equals(entry.key, key) != false {
+          if entry.value != NULL {
+            free(entry.value);
+            entry.value = NULL;
+          }
           entry.tomb = true;
           self.entries[idx] = entry;
           self.len = self.len - 1;
@@ -279,73 +309,20 @@ impl StrMap {
   // Clear all entries without freeing capacity.
   pub clear() {
     if self.entries != NULL {
+      num i = 0;
+      for i < self.cap {
+        MapEntry entry = self.entries[i];
+        if entry.used != false {
+          if entry.tomb == false {
+            if entry.value != NULL {
+              free(entry.value);
+            }
+          }
+        }
+        i = i + 1;
+      }
       memset(self.entries, 0, self.cap * sizeof(MapEntry));
     }
     self.len = 0;
   }
-}
-
-// C-style wrapper for map free.
-// 
-// Params:
-// - m: map instance
-pub fun map_free(StrMap* m) {
-  m.free();
-}
-
-// C-style wrapper for map length.
-// 
-// Params:
-// - m: map instance
-// 
-// Returns:
-// - number of entries
-pub fun map_len(StrMap* m) num {
-  ret m.len();
-}
-
-// C-style wrapper for map has.
-// 
-// Params:
-// - m: map instance
-// - key: lookup key
-// 
-// Returns:
-// - true if present
-pub fun map_has(StrMap* m, str key) bin {
-  ret m.has(key);
-}
-
-// C-style wrapper for map get.
-// 
-// Params:
-// - m: map instance
-// - key: lookup key
-// 
-// Returns:
-// - value or null
-pub fun map_get(StrMap* m, str key) str {
-  ret m.get(key);
-}
-
-// C-style wrapper for map put.
-// 
-// Params:
-// - m: map instance
-// - key: key
-// - value: value
-pub fun map_put(StrMap* m, str key, str value) {
-  m.put(key, value);
-}
-
-// C-style wrapper for map remove.
-// 
-// Params:
-// - m: map instance
-// - key: key
-// 
-// Returns:
-// - true if removed
-pub fun map_remove(StrMap* m, str key) bin {
-  ret m.remove(key);
 }

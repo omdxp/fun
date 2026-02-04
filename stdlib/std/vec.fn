@@ -4,30 +4,15 @@ imp std.c.mem;
 imp std.c.def;
 imp std.quirks;
 
-// Dynamic vector of numbers.
+// Dynamic vector.
 // 
 // Fields:
 // - data: backing storage
 // - len: number of elements
 // - cap: allocated capacity
-pub compound NumVec {
+pub compound Vec < T > {
   // data: backing storage
-  num[] data;
-  // len: number of elements
-  num len;
-  // cap: allocated capacity
-  num cap;
-}
-
-// Dynamic vector of strings.
-// 
-// Fields:
-// - data: backing storage
-// - len: number of elements
-// - cap: allocated capacity
-pub compound StrVec {
-  // data: backing storage
-  str[] data;
+  T[] data;
   // len: number of elements
   num len;
   // cap: allocated capacity
@@ -42,60 +27,7 @@ fun _str_len(str s) num {
   ret i;
 }
 
-fun _num_vec_grow(NumVec* v, num min_cap) {
-  num new_cap = v.cap;
-  if new_cap < 4 {
-    new_cap = 4;
-  }
-  for new_cap < min_cap {
-    new_cap = new_cap * 2;
-  }
-
-  num new_size = new_cap * sizeof(num);
-  if v.cap == 0 {
-    v.data = malloc(new_size);
-  } else {
-    v.data = realloc(v.data, new_size);
-  }
-  v.cap = new_cap;
-}
-
-fun _str_vec_grow(StrVec* v, num min_cap) {
-  num new_cap = v.cap;
-  if new_cap < 4 {
-    new_cap = 4;
-  }
-  for new_cap < min_cap {
-    new_cap = new_cap * 2;
-  }
-
-  num new_size = new_cap * sizeof(str);
-  if v.cap == 0 {
-    v.data = malloc(new_size);
-  } else {
-    v.data = realloc(v.data, new_size);
-  }
-  v.cap = new_cap;
-}
-
-// Create a numeric vector with optional capacity.
-// 
-// Params:
-// - cap: initial capacity (0 for none)
-// 
-// Returns:
-// - initialized NumVec
-pub fun num_vec_init(num cap) NumVec {
-  NumVec v;
-  v.len = 0;
-  v.cap = 0;
-  if cap > 0 {
-    _num_vec_grow(&v, cap);
-  }
-  ret v;
-}
-
-impl NumVec Sized {
+impl Vec < T > Sized {
   // Number of elements.
   pub len() num {
     ret self.len;
@@ -107,7 +39,35 @@ impl NumVec Sized {
   }
 }
 
-impl NumVec {
+impl Vec < T > {
+  // Initialize with an optional capacity.
+  pub init(num cap) {
+    self.len = 0;
+    self.cap = 0;
+    if cap > 0 {
+      self.grow(cap);
+    }
+  }
+
+  // Grow backing storage to at least min_cap.
+  grow(num min_cap) {
+    num new_cap = self.cap;
+    if new_cap < 4 {
+      new_cap = 4;
+    }
+    for new_cap < min_cap {
+      new_cap = new_cap * 2;
+    }
+
+    num new_size = new_cap * sizeof(T);
+    if self.cap == 0 {
+      self.data = malloc(new_size);
+    } else {
+      self.data = realloc(self.data, new_size);
+    }
+    self.cap = new_cap;
+  }
+
   // Free backing storage.
   pub free() {
     if self.cap != 0 {
@@ -118,19 +78,19 @@ impl NumVec {
   }
 
   // Get element at index.
-  pub get(num i) num {
+  pub get(num i) T {
     ret self.data[i];
   }
 
   // Set element at index.
-  pub set(num i, num value) {
+  pub set(num i, T value) {
     self.data[i] = value;
   }
 
   // Append a value.
-  pub push(num value) {
+  pub push(T value) {
     if self.len + 1 > self.cap {
-      _num_vec_grow(self, self.len + 1);
+      self.grow(self.len + 1);
     }
     self.data[self.len] = value;
     self.len = self.len + 1;
@@ -142,94 +102,7 @@ impl NumVec {
   }
 }
 
-// Free a NumVec.
-pub fun num_vec_free(NumVec* v) {
-  v.free();
-}
-
-// Get NumVec length.
-pub fun num_vec_len(NumVec* v) num {
-  ret v.len();
-}
-
-// Get NumVec element at index.
-pub fun num_vec_get(NumVec* v, num i) num {
-  ret v.get(i);
-}
-
-// Set NumVec element at index.
-pub fun num_vec_set(NumVec* v, num i, num value) {
-  v.set(i, value);
-}
-
-// Append to NumVec.
-pub fun num_vec_push(NumVec* v, num value) {
-  v.push(value);
-}
-
-// Create a string vector with optional capacity.
-// 
-// Params:
-// - cap: initial capacity (0 for none)
-// 
-// Returns:
-// - initialized StrVec
-pub fun str_vec_init(num cap) StrVec {
-  StrVec v;
-  v.len = 0;
-  v.cap = 0;
-  if cap > 0 {
-    _str_vec_grow(&v, cap);
-  }
-  ret v;
-}
-
-impl StrVec Sized {
-  // Number of elements.
-  pub len() num {
-    ret self.len;
-  }
-
-  // True when empty.
-  pub is_empty() bin {
-    ret self.len == 0;
-  }
-}
-
-impl StrVec {
-  // Free backing storage.
-  pub free() {
-    if self.cap != 0 {
-      free(self.data);
-    }
-    self.len = 0;
-    self.cap = 0;
-  }
-
-  // Get element at index.
-  pub get(num i) str {
-    ret self.data[i];
-  }
-
-  // Set element at index.
-  pub set(num i, str value) {
-    self.data[i] = value;
-  }
-
-  // Append a value.
-  pub push(str value) {
-    if self.len + 1 > self.cap {
-      _str_vec_grow(self, self.len + 1);
-    }
-    self.data[self.len] = value;
-    self.len = self.len + 1;
-  }
-
-  // Clear without freeing capacity.
-  pub clear() {
-    self.len = 0;
-  }
-
+impl Vec < str > {
   // Join elements with a separator.
   pub join(str sep) str {
     num sep_len = _str_len(sep);
@@ -277,27 +150,4 @@ impl StrVec {
   }
 }
 
-// Free a StrVec.
-pub fun str_vec_free(StrVec* v) {
-  v.free();
-}
-
-// Get StrVec length.
-pub fun str_vec_len(StrVec* v) num {
-  ret v.len();
-}
-
-// Get StrVec element at index.
-pub fun str_vec_get(StrVec* v, num i) str {
-  ret v.get(i);
-}
-
-// Set StrVec element at index.
-pub fun str_vec_set(StrVec* v, num i, str value) {
-  v.set(i, value);
-}
-
-// Append to StrVec.
-pub fun str_vec_push(StrVec* v, str value) {
-  v.push(value);
-}
+// Backwards-compatible helpers were removed in favor of generic Vec<T>.
