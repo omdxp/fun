@@ -45,8 +45,8 @@ mkdir -p "$dest_share"
 cat >"$env_snippet" <<EOF
 # Fun environment
 export FUN_STDLIB_DIR="$dest_stdlib"
-export FUN_CC="zig"
-export FUN_CC_ARGS="cc"
+export FUN_CC="gcc"
+export FUN_CC_ARGS=""
 EOF
 
 # Persist FUN_STDLIB_DIR into the user's shell profile (best-effort).
@@ -81,8 +81,8 @@ append_block_fish() {
     echo
     echo "$marker_begin"
     echo "set -gx FUN_STDLIB_DIR \"$dest_stdlib\""
-    echo "set -gx FUN_CC \"zig\""
-    echo "set -gx FUN_CC_ARGS \"cc\""
+    echo "set -gx FUN_CC \"gcc\""
+    echo "set -gx FUN_CC_ARGS \"\""
     echo "$marker_end"
   } >>"$profile"
 }
@@ -115,8 +115,8 @@ echo "Installed fun to: $prefix"
 echo "Installed fls to: $prefix"
 echo "Stdlib installed to: $dest_share"
 echo "FUN_STDLIB_DIR snippet: $env_snippet"
-echo "FUN_CC=zig"
-echo "FUN_CC_ARGS=cc"
+echo "FUN_CC=gcc"
+echo "FUN_CC_ARGS="
 if [ "$persisted" = "yes" ]; then
   if [ -n "$shell_name" ]; then
     echo "FUN_STDLIB_DIR persisted for shell: $shell_name"
