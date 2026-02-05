@@ -4,7 +4,7 @@ This directory contains example programs for the Fun language.
 
 Run any example:
 ```sh
-zig-out/bin/fls examples/<example>.fn
+zig-out/bin/fun -in examples/<example>.fn
 ```
 
 ## Basics
