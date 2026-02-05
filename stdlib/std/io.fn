@@ -11,6 +11,7 @@ imp std.c.mem;
 imp std.c.def;
 imp std.string;
 imp std.vec;
+imp std.quirks;
 
 // Print a string to stdout (no newline).
 // 
@@ -53,6 +54,165 @@ pub fun print_bin(bin b) {
     printf("true");
   } else {
     printf("false");
+  }
+}
+
+// Duplicate a string into a new buffer.
+fun _dup_str(str s) str {
+  num n = len(s);
+  str out = malloc(n + 1);
+  if out == NULL {
+    ret NULL;
+  }
+  num i = 0;
+  for i < n {
+    out[i] = s[i];
+    i = i + 1;
+  }
+  out[n] = '\0';
+  ret out;
+}
+
+// Format a number into a new string buffer.
+pub fun fmt_num(num n) str {
+  str buf = malloc(32);
+  if buf == NULL {
+    ret NULL;
+  }
+  snprintf(buf, 32, "%lld", n);
+  ret buf;
+}
+
+// Format a decimal into a new string buffer.
+pub fun fmt_dec(dec d) str {
+  str buf = malloc(64);
+  if buf == NULL {
+    ret NULL;
+  }
+  snprintf(buf, 64, "%g", d);
+  ret buf;
+}
+
+// Format a boolean into a new string buffer.
+pub fun fmt_bin(bin b) str {
+  if b {
+    ret _dup_str("true");
+  }
+  ret _dup_str("false");
+}
+
+// Format a character into a new string buffer.
+pub fun fmt_chr(chr c) str {
+  str buf = malloc(2);
+  if buf == NULL {
+    ret NULL;
+  }
+  buf[0] = c;
+  buf[1] = '\0';
+  ret buf;
+}
+
+// Format a string into a new string buffer.
+pub fun fmt_str(str s) str {
+  ret _dup_str(s);
+}
+
+// Format a raw pointer into a new string buffer.
+pub fun fmt_raw(raw* p) str {
+  str buf = malloc(32);
+  if buf == NULL {
+    ret NULL;
+  }
+  snprintf(buf, 32, "%p", p);
+  ret buf;
+}
+
+// Format using a pre-built Vec<str>.
+pub fun format_impl(str fmt, Vec<str>* args) str {
+  StringBuilder b = string_builder_init(8);
+  num i = 0;
+  num n = len(fmt);
+  num arg_i = 0;
+
+  for i < n {
+    chr c = fmt[i];
+
+    if c == '{' {
+      if i + 1 < n && fmt[i + 1] == '{' {
+        b.append_char('{');
+        i = i + 2;
+        continue;
+      }
+      if i + 1 < n && fmt[i + 1] == '}' {
+        if arg_i < args.len() {
+          b.append(args.get(arg_i));
+          arg_i = arg_i + 1;
+        } else {
+          b.append("{}");
+        }
+        i = i + 2;
+        continue;
+      }
+      if i + 4 < n && fmt[i + 4] == '}' {
+        if arg_i < args.len() {
+          b.append(args.get(arg_i));
+          arg_i = arg_i + 1;
+        } else {
+          b.append("{}");
+        }
+        i = i + 5;
+        continue;
+      }
+    }
+
+    if c == '}' {
+      if i + 1 < n && fmt[i + 1] == '}' {
+        b.append_char('}');
+        i = i + 2;
+        continue;
+      }
+    }
+
+    b.append_char(c);
+    i = i + 1;
+  }
+
+  str out = b.build();
+  b.free();
+  ret out;
+}
+// Format a string using "{}" placeholders.
+// 
+// Placeholder forms:
+// - {} or {str} : string
+// - {num}       : number
+// - {dec}       : decimal
+// - {bin}       : boolean
+// - {chr}       : character
+// - {ptr}       : raw pointer
+// 
+// Use "{{" and "}}" to emit literal braces.
+pub fun format(str fmt, ...) str {
+  ret format_impl(fmt, &vargs);
+}
+
+// Print a formatted string to stdout (no newline).
+// See format() for placeholder types.
+pub fun print_fmt(str fmt, ...) {
+  str out = format_impl(fmt, &vargs);
+  if out != NULL {
+    print(out);
+    free(out);
+  }
+}
+
+// Print a formatted string to stdout with newline.
+// See format() for placeholder types.
+pub fun println_fmt(str fmt, ...) {
+  str out = format_impl(fmt, &vargs);
+  if out != NULL {
+    println(out);
+    free(out);
   }
 }
 

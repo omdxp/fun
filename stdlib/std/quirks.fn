@@ -10,3 +10,8 @@ pub quirk Sized {
   len() num;
   is_empty() bin;
 }
+
+// Types that can render themselves as a string.
+pub quirk Display {
+  to_string() str;
+}

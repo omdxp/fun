@@ -57,6 +57,8 @@ zig-out/bin/fls examples/<example>.fn
 - stdlib/error_basic.fn
 - stdlib/io_file_copy.fn
 - stdlib/io_read_write.fn
+- stdlib/io_format.fn
+- stdlib/print_fmt_varargs.fn
 - stdlib/json_basic.fn
 - stdlib/log_levels.fn
 - stdlib/map_basic.fn

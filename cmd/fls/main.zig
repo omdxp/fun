@@ -7207,6 +7207,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
     var pending_params = std.ArrayList(ParamLite).init(allocator);
     defer pending_params.deinit();
     var pending_impl_owner: ?[]const u8 = null;
+    var pending_is_variadic: bool = false;
 
     var in_body: bool = false;
     var body_brace_depth: i64 = 0;
@@ -7219,10 +7220,17 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
     var impl_owner_name: ?[]const u8 = null;
 
     const resetPendingBody = struct {
-        fn call(kind: *PendingBodyKind, params: *std.ArrayList(ParamLite), owner: *?[]const u8) void {
+        fn call(kind: *PendingBodyKind, params: *std.ArrayList(ParamLite), owner: *?[]const u8, is_variadic: *bool) void {
             kind.* = .none;
             params.clearRetainingCapacity();
             owner.* = null;
+            is_variadic.* = false;
+        }
+    }.call;
+
+    const isEllipsisToken = struct {
+        fn call(t: token.Token) bool {
+            return t.type == .Operator and std.mem.eql(u8, tokenString(t), "...");
         }
     }.call;
 
@@ -7247,7 +7255,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
     }.call;
 
     const parseParamsAfterLParen = struct {
-        fn call(allocator_: Allocator, tokens_: []const token.Token, lparen_i: usize, params: *std.ArrayList(ParamLite)) void {
+        fn call(allocator_: Allocator, tokens_: []const token.Token, lparen_i: usize, params: *std.ArrayList(ParamLite), is_variadic: *bool) void {
             // Parse `Type name` pairs until the matching ')'. Best-effort; ignore failures.
             var depth: i64 = 0;
             var rparen_i: ?usize = null;
@@ -7271,6 +7279,10 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 if (pt.type == .NewLine or pt.type == .Comment) {
                     pi += 1;
                     continue;
+                }
+                if (isEllipsisToken(pt)) {
+                    is_variadic.* = true;
+                    break;
                 }
                 if (isPunctChar(pt, ',')) {
                     pi += 1;
@@ -7361,6 +7373,20 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 }
             }
 
+            // Add implicit `vargs` for variadic functions.
+            if (pending_is_variadic) {
+                try out.append(.{
+                    .name = try allocator.dupe(u8, "vargs"),
+                    .kind = .variable,
+                    .decl_range = br,
+                    .selection_range = br,
+                    .container_fn_range = body_range.?,
+                    .container_type = null,
+                    .value_type = try allocator.dupe(u8, "Vec<str>"),
+                    .detail = try allocator.dupe(u8, "Vec<str> vargs"),
+                });
+            }
+
             // Add params as locals within the body.
             for (pending_params.items) |pinfo| {
                 try out.append(.{
@@ -7380,11 +7406,11 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 });
             }
 
-            resetPendingBody(&pending_body, &pending_params, &pending_impl_owner);
+            resetPendingBody(&pending_body, &pending_params, &pending_impl_owner, &pending_is_variadic);
         }
         if (pending_body != .none and isSymbolChar(t, ';')) {
             // Prototype/no-body.
-            resetPendingBody(&pending_body, &pending_params, &pending_impl_owner);
+            resetPendingBody(&pending_body, &pending_params, &pending_impl_owner, &pending_is_variadic);
         }
         if (in_body and isSymbolChar(t, '}') and brace_depth < body_brace_depth) {
             in_body = false;
@@ -7392,7 +7418,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
         }
 
         if (isKeyword(t, "fun")) {
-            resetPendingBody(&pending_body, &pending_params, &pending_impl_owner);
+            resetPendingBody(&pending_body, &pending_params, &pending_impl_owner, &pending_is_variadic);
             pending_body = .fun_decl;
             const is_public = blk: {
                 const prev = prevNonTrivialToken(tokens, i) orelse break :blk false;
@@ -7420,7 +7446,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 continue;
             };
             if (isPunctChar(tokens[after_name_i], '(')) {
-                parseParamsAfterLParen(allocator, tokens, after_name_i, &pending_params);
+                parseParamsAfterLParen(allocator, tokens, after_name_i, &pending_params, &pending_is_variadic);
             }
 
             const sig = try buildSignatureFromTokens(allocator, tokens, name_i, true);
@@ -7719,10 +7745,10 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
             const after_name_i = nextNonTrivialToken(tokens, i + 1) orelse null;
             if (after_name_i != null and isPunctChar(tokens[after_name_i.?], '(')) {
                 // Avoid clobbering a pending `fun` body if the user is mid-edit.
-                resetPendingBody(&pending_body, &pending_params, &pending_impl_owner);
+                resetPendingBody(&pending_body, &pending_params, &pending_impl_owner, &pending_is_variadic);
                 pending_body = .impl_method;
                 pending_impl_owner = impl_owner_name;
-                parseParamsAfterLParen(allocator, tokens, after_name_i.?, &pending_params);
+                parseParamsAfterLParen(allocator, tokens, after_name_i.?, &pending_params, &pending_is_variadic);
             }
         }
 

@@ -3102,6 +3102,56 @@ pub const ParseProcess = struct {
         try self.expect_sym(')');
         function_node.node_variant.?.function.args = parsed_args.args;
         function_node.node_variant.?.function.is_variadic = parsed_args.is_variadic;
+
+        if (parsed_args.is_variadic) {
+            const vnode = self.transpile_proc.allocator.create(ast.Node) catch |e| {
+                std.debug.print("Error creating node: {s}\n", .{@errorName(e)});
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer self.transpile_proc.allocator.destroy(vnode);
+            vnode.* = ast.Node{
+                .type = .Variable,
+                .pos = function_node.pos,
+                .node_variant = .{
+                    .variable = .{
+                        .name = blk: {
+                            var name = std.ArrayList(u8).init(self.transpile_proc.allocator);
+                            name.appendSlice("vargs") catch |e| {
+                                std.debug.print("Error appending to vargs name: {s}\\n", .{@errorName(e)});
+                                return ParseError.MemoryAllocationFailed;
+                            };
+                            break :blk name;
+                        },
+                        .type = blk: {
+                            const vdt = self.transpile_proc.allocator.create(dtype.DataType) catch |e| {
+                                std.debug.print("Error creating DataType: {s}\\n", .{@errorName(e)});
+                                return ParseError.MemoryAllocationFailed;
+                            };
+                            vdt.* = .{ .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator) };
+                            vdt.type = .Unknown;
+                            vdt.type_str.appendSlice("Vec") catch |e| {
+                                std.debug.print("Error appending to type_str: {s}\\n", .{@errorName(e)});
+                                return ParseError.MemoryAllocationFailed;
+                            };
+                            break :blk vdt;
+                        },
+                    },
+                },
+            };
+
+            const scope_entity = try self.new_scope_entity(vnode, .{});
+            self.transpile_proc.owned_nodes.append(vnode) catch |e| {
+                std.debug.print("Error tracking node allocation: {s}\n", .{@errorName(e)});
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer _ = self.transpile_proc.owned_nodes.pop();
+            self.transpile_proc.owned_scope_entities.append(scope_entity) catch |e| {
+                std.debug.print("Error tracking scope entity allocation: {s}\n", .{@errorName(e)});
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer _ = self.transpile_proc.owned_scope_entities.pop();
+            try self.transpile_proc.push_scope_entity(scope_entity);
+        }
         const rtype_token = self.token_peek_next();
         if (rtype_token != null and ((rtype_token.?.type == .Keyword and utils.keyword_is_datatype(rtype_token.?.data.sval.items)) or rtype_token.?.type == .Identifier)) {
             try self.parse_datatype(&dt);

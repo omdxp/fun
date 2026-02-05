@@ -1,0 +1,48 @@
+// Demonstrates std.io format helpers and user-defined Display.
+
+imp std.io;
+imp std.c.mem;
+imp std.string;
+imp std.quirks;
+
+compound Point {
+  num x;
+  num y;
+}
+
+impl Point Display {
+  pub to_string() str {
+    str sx = fmt_num(self.x);
+    str sy = fmt_num(self.y);
+
+    StringBuilder b = string_builder_init(8);
+    b.append("Point{x=");
+    b.append(sx);
+    b.append(", y=");
+    b.append(sy);
+    b.append("}");
+
+    str out = b.build();
+    b.free();
+    free(sx);
+    free(sy);
+    ret out;
+  }
+}
+
+fun main() {
+  num n = 42;
+  dec d = 3.14159;
+  bin b = true;
+  chr c = 'Z';
+  str s = "hello";
+  raw* p = NULL;
+
+  Point pt;
+  pt.x = 7;
+  pt.y = 9;
+
+  str s_pt = pt.to_string();
+  println_fmt("num={num} dec={dec} bin={bin} chr={chr} str={str} ptr={ptr} pt={str}", n, d, b, c, s, p, s_pt);
+  free(s_pt);
+}

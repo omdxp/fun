@@ -235,6 +235,12 @@ pub const TranspileProcess = struct {
     /// Track return type of current function (for warnings).
     current_fn_return: ?CheckedType = null,
 
+    /// Track whether current function is variadic.
+    current_fn_is_variadic: bool = false,
+
+    /// Temp name counter for codegen.
+    tmp_counter: usize = 0,
+
     /// One-time emission guards.
     did_emit_user_types: bool = false,
     did_emit_impls: bool = false,
@@ -881,6 +887,389 @@ pub const TranspileProcess = struct {
         return self.generic_call_overrides.get(key);
     }
 
+    const PrintFmtArgKind = enum {
+        str,
+        num,
+        dec,
+        bin,
+        chr,
+        ptr,
+        raw,
+    };
+
+    fn escape_printf_literal(buf: *std.ArrayList(u8), s: []const u8) TranspileError!void {
+        for (s) |c| {
+            switch (c) {
+                '"' => buf.appendSlice("\\\"") catch return TranspileError.MemoryAllocationFailed,
+                '\\' => buf.appendSlice("\\\\") catch return TranspileError.MemoryAllocationFailed,
+                '\n' => buf.appendSlice("\\n") catch return TranspileError.MemoryAllocationFailed,
+                '\r' => buf.appendSlice("\\r") catch return TranspileError.MemoryAllocationFailed,
+                '\t' => buf.appendSlice("\\t") catch return TranspileError.MemoryAllocationFailed,
+                0 => buf.appendSlice("\\0") catch return TranspileError.MemoryAllocationFailed,
+                else => buf.append(c) catch return TranspileError.MemoryAllocationFailed,
+            }
+        }
+    }
+
+    fn next_tmp_name(self: *Self, prefix: []const u8) TranspileError![]const u8 {
+        var buf: [64]u8 = undefined;
+        const name = std.fmt.bufPrint(&buf, "__fun_{s}_{d}", .{ prefix, self.tmp_counter }) catch {
+            return TranspileError.MemoryAllocationFailed;
+        };
+        self.tmp_counter += 1;
+        return self.allocator.dupe(u8, name) catch TranspileError.MemoryAllocationFailed;
+    }
+
+    fn build_printf_format(fmt: []const u8, out_fmt: *std.ArrayList(u8), kinds: *std.ArrayList(PrintFmtArgKind)) TranspileError!void {
+        var i: usize = 0;
+        while (i < fmt.len) {
+            const c = fmt[i];
+            if (c == '{') {
+                if (i + 1 < fmt.len and fmt[i + 1] == '{') {
+                    out_fmt.append('{') catch return TranspileError.MemoryAllocationFailed;
+                    i += 2;
+                    continue;
+                }
+                if (i + 1 < fmt.len and fmt[i + 1] == '}') {
+                    out_fmt.appendSlice("%s") catch return TranspileError.MemoryAllocationFailed;
+                    kinds.append(.str) catch return TranspileError.MemoryAllocationFailed;
+                    i += 2;
+                    continue;
+                }
+                if (i + 4 < fmt.len and fmt[i + 4] == '}') {
+                    const a = fmt[i + 1];
+                    const b = fmt[i + 2];
+                    const d = fmt[i + 3];
+                    if (a == 's' and b == 't' and d == 'r') {
+                        out_fmt.appendSlice("%s") catch return TranspileError.MemoryAllocationFailed;
+                        kinds.append(.str) catch return TranspileError.MemoryAllocationFailed;
+                        i += 5;
+                        continue;
+                    }
+                    if (a == 'n' and b == 'u' and d == 'm') {
+                        out_fmt.appendSlice("%lld") catch return TranspileError.MemoryAllocationFailed;
+                        kinds.append(.num) catch return TranspileError.MemoryAllocationFailed;
+                        i += 5;
+                        continue;
+                    }
+                    if (a == 'd' and b == 'e' and d == 'c') {
+                        out_fmt.appendSlice("%g") catch return TranspileError.MemoryAllocationFailed;
+                        kinds.append(.dec) catch return TranspileError.MemoryAllocationFailed;
+                        i += 5;
+                        continue;
+                    }
+                    if (a == 'b' and b == 'i' and d == 'n') {
+                        out_fmt.appendSlice("%s") catch return TranspileError.MemoryAllocationFailed;
+                        kinds.append(.bin) catch return TranspileError.MemoryAllocationFailed;
+                        i += 5;
+                        continue;
+                    }
+                    if (a == 'c' and b == 'h' and d == 'r') {
+                        out_fmt.appendSlice("%c") catch return TranspileError.MemoryAllocationFailed;
+                        kinds.append(.chr) catch return TranspileError.MemoryAllocationFailed;
+                        i += 5;
+                        continue;
+                    }
+                    if (a == 'p' and b == 't' and d == 'r') {
+                        out_fmt.appendSlice("%p") catch return TranspileError.MemoryAllocationFailed;
+                        kinds.append(.ptr) catch return TranspileError.MemoryAllocationFailed;
+                        i += 5;
+                        continue;
+                    }
+                    if (a == 'r' and b == 'a' and d == 'w') {
+                        out_fmt.appendSlice("%p") catch return TranspileError.MemoryAllocationFailed;
+                        kinds.append(.raw) catch return TranspileError.MemoryAllocationFailed;
+                        i += 5;
+                        continue;
+                    }
+                }
+            }
+
+            if (c == '}' and i + 1 < fmt.len and fmt[i + 1] == '}') {
+                out_fmt.append('}') catch return TranspileError.MemoryAllocationFailed;
+                i += 2;
+                continue;
+            }
+
+            if (c == '%') {
+                out_fmt.appendSlice("%%") catch return TranspileError.MemoryAllocationFailed;
+            } else {
+                out_fmt.append(c) catch return TranspileError.MemoryAllocationFailed;
+            }
+            i += 1;
+        }
+    }
+
+    fn emit_print_fmt_literal(self: *Self, node: ast.Node, is_newline: bool, args_node: ?*ast.Node) TranspileError!bool {
+        if (args_node == null) return false;
+
+        var args_nodes = std.ArrayList(*ast.Node).init(self.allocator);
+        defer args_nodes.deinit();
+        try self.flatten_call_args_ptr(args_node.?, &args_nodes);
+        if (args_nodes.items.len == 0) return false;
+
+        const fmt_node = args_nodes.items[0].*;
+        if (fmt_node.type != .String or fmt_node.data == null) return false;
+
+        const fmt = fmt_node.data.?.sval.items;
+        var fmt_out = std.ArrayList(u8).init(self.allocator);
+        defer fmt_out.deinit();
+
+        var kinds = std.ArrayList(PrintFmtArgKind).init(self.allocator);
+        defer kinds.deinit();
+
+        try build_printf_format(fmt, &fmt_out, &kinds);
+
+        if (is_newline) {
+            fmt_out.append('\n') catch return TranspileError.MemoryAllocationFailed;
+        }
+
+        const expected_args = kinds.items.len;
+        const provided_args = if (args_nodes.items.len > 0) args_nodes.items.len - 1 else 0;
+        if (provided_args != expected_args) {
+            self.report_error(node, "print_fmt expects {d} arguments, got {d}", .{ expected_args, provided_args });
+            return true;
+        }
+
+        var escaped = std.ArrayList(u8).init(self.allocator);
+        defer escaped.deinit();
+        try escape_printf_literal(&escaped, fmt);
+
+        const vec_name = try self.next_tmp_name("fmt_args");
+        const out_name = try self.next_tmp_name("fmt_out");
+
+        try self.write("{ ");
+        try self.write("Vec__str ");
+        try self.write(vec_name);
+        try self.write("; ");
+        try self.write(vec_name);
+        try self.write(".len = ");
+        try self.print("{d}", .{expected_args});
+        try self.write("; ");
+        try self.write(vec_name);
+        try self.write(".cap = ");
+        try self.print("{d}", .{expected_args});
+        try self.write("; ");
+
+        if (expected_args > 0) {
+            try self.write(vec_name);
+            try self.write(".data = (char**)malloc(sizeof(char*) * ");
+            try self.print("{d}", .{expected_args});
+            try self.write("); ");
+
+            var arg_i: usize = 0;
+            while (arg_i < expected_args) : (arg_i += 1) {
+                const kind = kinds.items[arg_i];
+                const arg_node = args_nodes.items[arg_i + 1].*;
+                try self.write(vec_name);
+                try self.write(".data[");
+                try self.print("{d}", .{arg_i});
+                try self.write("] = ");
+                switch (kind) {
+                    .str => try self.transpile_node(arg_node),
+                    .num => {
+                        try self.write("fmt_num((long long)(");
+                        try self.transpile_node(arg_node);
+                        try self.write("))");
+                    },
+                    .dec => {
+                        try self.write("fmt_dec((double)(");
+                        try self.transpile_node(arg_node);
+                        try self.write("))");
+                    },
+                    .bin => {
+                        try self.write("fmt_bin((bool)(");
+                        try self.transpile_node(arg_node);
+                        try self.write("))");
+                    },
+                    .chr => {
+                        try self.write("fmt_chr((char)(");
+                        try self.transpile_node(arg_node);
+                        try self.write("))");
+                    },
+                    .ptr, .raw => {
+                        try self.write("fmt_raw((void*)(");
+                        try self.transpile_node(arg_node);
+                        try self.write("))");
+                    },
+                }
+                try self.write("; ");
+            }
+        } else {
+            try self.write(vec_name);
+            try self.write(".data = NULL; ");
+        }
+
+        try self.write("char* ");
+        try self.write(out_name);
+        try self.write(" = format_impl(\"");
+        try self.write(escaped.items);
+        try self.write("\", &");
+        try self.write(vec_name);
+        try self.write("); ");
+
+        try self.write("if (");
+        try self.write(out_name);
+        try self.write(") { ");
+        if (is_newline) {
+            try self.write("puts(");
+            try self.write(out_name);
+            try self.write("); ");
+        } else {
+            try self.write("printf(\"%s\", ");
+            try self.write(out_name);
+            try self.write("); ");
+        }
+        try self.write("free(");
+        try self.write(out_name);
+        try self.write("); }");
+
+        if (expected_args > 0) {
+            var free_i: usize = 0;
+            while (free_i < expected_args) : (free_i += 1) {
+                const kind = kinds.items[free_i];
+                if (kind == .str) continue;
+                try self.write(" free(");
+                try self.write(vec_name);
+                try self.write(".data[");
+                try self.print("{d}", .{free_i});
+                try self.write("]); ");
+            }
+            try self.write(" free(");
+            try self.write(vec_name);
+            try self.write(".data);");
+        }
+
+        try self.write(" }");
+        return true;
+    }
+
+    fn emit_format_literal(self: *Self, node: ast.Node, args_node: ?*ast.Node) TranspileError!bool {
+        if (args_node == null) return false;
+
+        var args_nodes = std.ArrayList(*ast.Node).init(self.allocator);
+        defer args_nodes.deinit();
+        try self.flatten_call_args_ptr(args_node.?, &args_nodes);
+        if (args_nodes.items.len == 0) return false;
+
+        const fmt_node = args_nodes.items[0].*;
+        if (fmt_node.type != .String or fmt_node.data == null) return false;
+
+        const fmt = fmt_node.data.?.sval.items;
+        var fmt_out = std.ArrayList(u8).init(self.allocator);
+        defer fmt_out.deinit();
+
+        var kinds = std.ArrayList(PrintFmtArgKind).init(self.allocator);
+        defer kinds.deinit();
+
+        try build_printf_format(fmt, &fmt_out, &kinds);
+
+        const expected_args = kinds.items.len;
+        const provided_args = if (args_nodes.items.len > 0) args_nodes.items.len - 1 else 0;
+        if (provided_args != expected_args) {
+            self.report_error(node, "format expects {d} arguments, got {d}", .{ expected_args, provided_args });
+            return true;
+        }
+
+        var escaped = std.ArrayList(u8).init(self.allocator);
+        defer escaped.deinit();
+        try escape_printf_literal(&escaped, fmt);
+
+        const vec_name = try self.next_tmp_name("fmt_args");
+        const out_name = try self.next_tmp_name("fmt_out");
+
+        try self.write("({ ");
+        try self.write("Vec__str ");
+        try self.write(vec_name);
+        try self.write("; ");
+        try self.write(vec_name);
+        try self.write(".len = ");
+        try self.print("{d}", .{expected_args});
+        try self.write("; ");
+        try self.write(vec_name);
+        try self.write(".cap = ");
+        try self.print("{d}", .{expected_args});
+        try self.write("; ");
+
+        if (expected_args > 0) {
+            try self.write(vec_name);
+            try self.write(".data = (char**)malloc(sizeof(char*) * ");
+            try self.print("{d}", .{expected_args});
+            try self.write("); ");
+
+            var arg_i: usize = 0;
+            while (arg_i < expected_args) : (arg_i += 1) {
+                const kind = kinds.items[arg_i];
+                const arg_node = args_nodes.items[arg_i + 1].*;
+                try self.write(vec_name);
+                try self.write(".data[");
+                try self.print("{d}", .{arg_i});
+                try self.write("] = ");
+                switch (kind) {
+                    .str => try self.transpile_node(arg_node),
+                    .num => {
+                        try self.write("fmt_num((long long)(");
+                        try self.transpile_node(arg_node);
+                        try self.write("))");
+                    },
+                    .dec => {
+                        try self.write("fmt_dec((double)(");
+                        try self.transpile_node(arg_node);
+                        try self.write("))");
+                    },
+                    .bin => {
+                        try self.write("fmt_bin((bool)(");
+                        try self.transpile_node(arg_node);
+                        try self.write("))");
+                    },
+                    .chr => {
+                        try self.write("fmt_chr((char)(");
+                        try self.transpile_node(arg_node);
+                        try self.write("))");
+                    },
+                    .ptr, .raw => {
+                        try self.write("fmt_raw((void*)(");
+                        try self.transpile_node(arg_node);
+                        try self.write("))");
+                    },
+                }
+                try self.write("; ");
+            }
+        } else {
+            try self.write(vec_name);
+            try self.write(".data = NULL; ");
+        }
+
+        try self.write("char* ");
+        try self.write(out_name);
+        try self.write(" = format_impl(\"");
+        try self.write(escaped.items);
+        try self.write("\", &");
+        try self.write(vec_name);
+        try self.write("); ");
+
+        if (expected_args > 0) {
+            var free_i: usize = 0;
+            while (free_i < expected_args) : (free_i += 1) {
+                const kind = kinds.items[free_i];
+                if (kind == .str) continue;
+                try self.write(" free(");
+                try self.write(vec_name);
+                try self.write(".data[");
+                try self.print("{d}", .{free_i});
+                try self.write("]); ");
+            }
+            try self.write(" free(");
+            try self.write(vec_name);
+            try self.write(".data);");
+        }
+
+        try self.write(" ");
+        try self.write(out_name);
+        try self.write("; })");
+        return true;
+    }
+
     fn base_type_name(t: CheckedType) ?[]const u8 {
         if (t.base == .Unknown) return t.name;
         return switch (t.base) {
@@ -916,6 +1305,38 @@ pub const TranspileProcess = struct {
         }
         out.type_str.appendSlice(name) catch return TranspileError.MemoryAllocationFailed;
         return out;
+    }
+
+    fn make_vec_str_dtype(self: *Self) TranspileError!*dtype.DataType {
+        const dt_str = self.allocator.create(dtype.DataType) catch {
+            return TranspileError.MemoryAllocationFailed;
+        };
+        dt_str.* = .{
+            .flags = null,
+            .type = .Str,
+            .type_str = std.ArrayList(u8).init(self.allocator),
+            .pointer_depth = 0,
+            .array = null,
+            .generic_args = null,
+        };
+        dt_str.type_str.appendSlice("str") catch return TranspileError.MemoryAllocationFailed;
+
+        var gargs = utils.Vector(*dtype.DataType).init(self.allocator);
+        gargs.push(dt_str) catch return TranspileError.MemoryAllocationFailed;
+
+        const dt_vec = self.allocator.create(dtype.DataType) catch {
+            return TranspileError.MemoryAllocationFailed;
+        };
+        dt_vec.* = .{
+            .flags = null,
+            .type = .Unknown,
+            .type_str = std.ArrayList(u8).init(self.allocator),
+            .pointer_depth = 0,
+            .array = null,
+            .generic_args = gargs,
+        };
+        dt_vec.type_str.appendSlice("Vec") catch return TranspileError.MemoryAllocationFailed;
+        return dt_vec;
     }
 
     fn clone_dtype_with_ptr_adjust(self: *Self, dt: *const dtype.DataType, new_ptr_depth: usize) TranspileError!*dtype.DataType {
@@ -2118,6 +2539,11 @@ pub const TranspileProcess = struct {
             return;
         }
 
+        // Allow stdarg.h variadic type.
+        if (mem.eql(u8, base_name, "va_list")) {
+            return;
+        }
+
         const reg = self.root_registry() orelse {
             self.report_type_error(ref_node, "unknown type '{s}'", .{name});
             return TranspileError.SymbolNotDefined;
@@ -2899,6 +3325,70 @@ pub const TranspileProcess = struct {
                     if (callee.type == .Identifier and callee.data != null) {
                         const fname = callee.data.?.sval.items;
                         callee_name = fname;
+
+                        if (mem.eql(u8, fname, "va_start")) {
+                            if (args_nodes.items.len != 2) {
+                                self.report_type_error(node, "va_start expects 2 arguments", .{});
+                                return TranspileError.WrongArgCount;
+                            }
+                            return .{ .base = .Void };
+                        }
+                        if (mem.eql(u8, fname, "va_end")) {
+                            if (args_nodes.items.len != 1) {
+                                self.report_type_error(node, "va_end expects 1 argument", .{});
+                                return TranspileError.WrongArgCount;
+                            }
+                            return .{ .base = .Void };
+                        }
+                        if (mem.eql(u8, fname, "va_copy")) {
+                            if (args_nodes.items.len != 2) {
+                                self.report_type_error(node, "va_copy expects 2 arguments", .{});
+                                return TranspileError.WrongArgCount;
+                            }
+                            return .{ .base = .Void };
+                        }
+                        if (mem.eql(u8, fname, "va_arg_num")) {
+                            if (args_nodes.items.len != 1) {
+                                self.report_type_error(node, "va_arg_num expects 1 argument", .{});
+                                return TranspileError.WrongArgCount;
+                            }
+                            return .{ .base = .Num };
+                        }
+                        if (mem.eql(u8, fname, "va_arg_dec")) {
+                            if (args_nodes.items.len != 1) {
+                                self.report_type_error(node, "va_arg_dec expects 1 argument", .{});
+                                return TranspileError.WrongArgCount;
+                            }
+                            return .{ .base = .Dec };
+                        }
+                        if (mem.eql(u8, fname, "va_arg_bin")) {
+                            if (args_nodes.items.len != 1) {
+                                self.report_type_error(node, "va_arg_bin expects 1 argument", .{});
+                                return TranspileError.WrongArgCount;
+                            }
+                            return .{ .base = .Bin };
+                        }
+                        if (mem.eql(u8, fname, "va_arg_chr")) {
+                            if (args_nodes.items.len != 1) {
+                                self.report_type_error(node, "va_arg_chr expects 1 argument", .{});
+                                return TranspileError.WrongArgCount;
+                            }
+                            return .{ .base = .Chr };
+                        }
+                        if (mem.eql(u8, fname, "va_arg_str")) {
+                            if (args_nodes.items.len != 1) {
+                                self.report_type_error(node, "va_arg_str expects 1 argument", .{});
+                                return TranspileError.WrongArgCount;
+                            }
+                            return .{ .base = .Str };
+                        }
+                        if (mem.eql(u8, fname, "va_arg_raw")) {
+                            if (args_nodes.items.len != 1) {
+                                self.report_type_error(node, "va_arg_raw expects 1 argument", .{});
+                                return TranspileError.WrongArgCount;
+                            }
+                            return .{ .base = .Raw, .pointer_depth = 1 };
+                        }
 
                         // Builtin: `sizeof(Type)`.
                         if (mem.eql(u8, fname, "sizeof")) {
@@ -4084,6 +4574,11 @@ pub const TranspileProcess = struct {
                     try proc.ensure_dtype_visible(node, v.type, allow_params);
                     try fn_env.put_current(v.name.items, try proc.type_from_dtype_with_mangled(v.type));
                 }
+            }
+
+            if (fnv.is_variadic) {
+                const vdt = try proc.make_vec_str_dtype();
+                try fn_env.put_current("vargs", try proc.type_from_dtype_with_mangled(vdt));
             }
 
             if (fnv.body) |body| {
@@ -7029,7 +7524,8 @@ pub const TranspileProcess = struct {
         }
         if (function.is_variadic) {
             if (wrote_any_param) try self.write(", ");
-            try self.write("...");
+            try self.write("char* __fun_vtags");
+            try self.write(", ...");
         }
         self.in_function_params = false;
         try self.write(");\n");
@@ -7070,6 +7566,13 @@ pub const TranspileProcess = struct {
     fn transpile_prelude(self: *Self) TranspileError!void {
         try self.write_std_imports();
         try self.write("\n");
+
+        if (!self.is_importing) {
+            try self.write("#define __fun_tag(x) _Generic((x), ");
+            try self.write("char*: 's', const char*: 's', ");
+            try self.write("long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', ");
+            try self.write("double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')\n\n");
+        }
     }
 
     /// Transpiles a node to C code
@@ -7078,6 +7581,23 @@ pub const TranspileProcess = struct {
             .Expression => {
                 const exp = node.node_variant.?.exp;
                 if (mem.eql(u8, exp.op, "()")) {
+                    if (exp.left) |left| {
+                        if (left.type == .Identifier and left.data != null) {
+                            const fname = left.data.?.sval.items;
+                            if (mem.eql(u8, fname, "print_fmt") or mem.eql(u8, fname, "println_fmt")) {
+                                const is_newline = mem.eql(u8, fname, "println_fmt");
+                                if (try self.emit_print_fmt_literal(node, is_newline, exp.right)) {
+                                    return;
+                                }
+                            }
+                            if (mem.eql(u8, fname, "format")) {
+                                if (try self.emit_format_literal(node, exp.right)) {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+
                     // Builtin: `sizeof(Type)`
                     // The argument is a type name, not a value expression.
                     if (exp.left) |left| {
@@ -7356,6 +7876,181 @@ pub const TranspileProcess = struct {
                     }
                     if (exp.left) |left| {
                         if (left.type == .Identifier and left.data != null) {
+                            const fname = left.data.?.sval.items;
+                            if (mem.eql(u8, fname, "va_start") or mem.eql(u8, fname, "va_end") or mem.eql(u8, fname, "va_copy") or
+                                mem.eql(u8, fname, "va_arg_num") or mem.eql(u8, fname, "va_arg_dec") or mem.eql(u8, fname, "va_arg_bin") or
+                                mem.eql(u8, fname, "va_arg_chr") or mem.eql(u8, fname, "va_arg_str") or mem.eql(u8, fname, "va_arg_raw"))
+                            {
+                                var args_nodes = std.ArrayList(*ast.Node).init(self.allocator);
+                                defer args_nodes.deinit();
+                                if (exp.right) |right| {
+                                    try self.flatten_call_args_ptr(right, &args_nodes);
+                                }
+
+                                if (mem.eql(u8, fname, "va_start")) {
+                                    if (args_nodes.items.len != 2) {
+                                        self.report_error(node, "va_start expects 2 arguments", .{});
+                                        return;
+                                    }
+                                    try self.write("va_start(");
+                                    try self.transpile_node(args_nodes.items[0].*);
+                                    try self.write(", ");
+                                    try self.transpile_node(args_nodes.items[1].*);
+                                    try self.write(")");
+                                    return;
+                                }
+                                if (mem.eql(u8, fname, "va_end")) {
+                                    if (args_nodes.items.len != 1) {
+                                        self.report_error(node, "va_end expects 1 argument", .{});
+                                        return;
+                                    }
+                                    try self.write("va_end(");
+                                    try self.transpile_node(args_nodes.items[0].*);
+                                    try self.write(")");
+                                    return;
+                                }
+                                if (mem.eql(u8, fname, "va_copy")) {
+                                    if (args_nodes.items.len != 2) {
+                                        self.report_error(node, "va_copy expects 2 arguments", .{});
+                                        return;
+                                    }
+                                    try self.write("va_copy(");
+                                    try self.transpile_node(args_nodes.items[0].*);
+                                    try self.write(", ");
+                                    try self.transpile_node(args_nodes.items[1].*);
+                                    try self.write(")");
+                                    return;
+                                }
+                                if (args_nodes.items.len != 1) {
+                                    self.report_error(node, "{s} expects 1 argument", .{fname});
+                                    return;
+                                }
+
+                                if (mem.eql(u8, fname, "va_arg_num")) {
+                                    try self.write("va_arg(");
+                                    try self.transpile_node(args_nodes.items[0].*);
+                                    try self.write(", long long)");
+                                    return;
+                                }
+                                if (mem.eql(u8, fname, "va_arg_dec")) {
+                                    try self.write("va_arg(");
+                                    try self.transpile_node(args_nodes.items[0].*);
+                                    try self.write(", double)");
+                                    return;
+                                }
+                                if (mem.eql(u8, fname, "va_arg_bin")) {
+                                    try self.write("(bool)va_arg(");
+                                    try self.transpile_node(args_nodes.items[0].*);
+                                    try self.write(", int)");
+                                    return;
+                                }
+                                if (mem.eql(u8, fname, "va_arg_chr")) {
+                                    try self.write("(char)va_arg(");
+                                    try self.transpile_node(args_nodes.items[0].*);
+                                    try self.write(", int)");
+                                    return;
+                                }
+                                if (mem.eql(u8, fname, "va_arg_str")) {
+                                    try self.write("va_arg(");
+                                    try self.transpile_node(args_nodes.items[0].*);
+                                    try self.write(", char*)");
+                                    return;
+                                }
+                                if (mem.eql(u8, fname, "va_arg_raw")) {
+                                    try self.write("va_arg(");
+                                    try self.transpile_node(args_nodes.items[0].*);
+                                    try self.write(", void*)");
+                                    return;
+                                }
+                            }
+
+                            if (self.find_function_node(fname)) |fn_node| {
+                                if (fn_node.node_variant != null and fn_node.node_variant.?.function.is_variadic and !self.is_std_c_signature_node(fn_node)) {
+                                    var args_nodes = std.ArrayList(*ast.Node).init(self.allocator);
+                                    defer args_nodes.deinit();
+                                    if (exp.right) |right| {
+                                        try self.flatten_call_args_ptr(right, &args_nodes);
+                                    }
+
+                                    const fnv = fn_node.node_variant.?.function;
+                                    const fixed_len: usize = if (fnv.args) |a| a.count else 0;
+                                    const total_len: usize = args_nodes.items.len;
+                                    const var_len: usize = if (total_len > fixed_len) total_len - fixed_len else 0;
+
+                                    if (var_len == 0) {
+                                        try self.write(fname);
+                                        try self.write("(");
+                                        var idx0: usize = 0;
+                                        while (idx0 < fixed_len) : (idx0 += 1) {
+                                            if (idx0 > 0) try self.write(", ");
+                                            try self.transpile_node(args_nodes.items[idx0].*);
+                                        }
+                                        if (fixed_len > 0) try self.write(", ");
+                                        try self.write("(const char[]){0}");
+                                        try self.write(")");
+                                        return;
+                                    }
+
+                                    try self.write("({ ");
+                                    var v: usize = 0;
+                                    while (v < var_len) : (v += 1) {
+                                        var tbuf: [64]u8 = undefined;
+                                        const tname = std.fmt.bufPrint(&tbuf, "__fun_va_{d}", .{v}) catch unreachable;
+                                        try self.write("__auto_type ");
+                                        try self.write(tname);
+                                        try self.write(" = ");
+                                        const var_node = args_nodes.items[fixed_len + v].*;
+                                        if (var_node.type == .Boolean) {
+                                            try self.write("(bool)");
+                                            try self.transpile_node(var_node);
+                                        } else if (var_node.type == .Identifier and var_node.data != null) {
+                                            const nm = var_node.data.?.sval.items;
+                                            if (self.identifier_declared_dtype(nm)) |dt| {
+                                                if (dt.type == .Bin) {
+                                                    try self.write("(bool)");
+                                                }
+                                            }
+                                            try self.transpile_node(var_node);
+                                        } else {
+                                            try self.transpile_node(var_node);
+                                        }
+                                        try self.write("; ");
+                                    }
+
+                                    try self.write(fname);
+                                    try self.write("(");
+                                    var i: usize = 0;
+                                    while (i < fixed_len) : (i += 1) {
+                                        if (i > 0) try self.write(", ");
+                                        try self.transpile_node(args_nodes.items[i].*);
+                                    }
+                                    if (fixed_len > 0) try self.write(", ");
+
+                                    try self.write("(const char[]){");
+                                    v = 0;
+                                    while (v < var_len) : (v += 1) {
+                                        if (v > 0) try self.write(", ");
+                                        var tbuf2: [64]u8 = undefined;
+                                        const tname2 = std.fmt.bufPrint(&tbuf2, "__fun_va_{d}", .{v}) catch unreachable;
+                                        try self.write("__fun_tag(");
+                                        try self.write(tname2);
+                                        try self.write(")");
+                                    }
+                                    if (var_len > 0) try self.write(", ");
+                                    try self.write("0}");
+
+                                    v = 0;
+                                    while (v < var_len) : (v += 1) {
+                                        try self.write(", ");
+                                        var tbuf3: [64]u8 = undefined;
+                                        const tname3 = std.fmt.bufPrint(&tbuf3, "__fun_va_{d}", .{v}) catch unreachable;
+                                        try self.write(tname3);
+                                    }
+                                    try self.write("); })");
+                                    return;
+                                }
+                            }
+
                             if (self.lookup_generic_call_override(node)) |ov| {
                                 try self.write(ov);
                                 try self.write("(");
@@ -7743,7 +8438,8 @@ pub const TranspileProcess = struct {
                     }
                     if (function.is_variadic) {
                         if (wrote_any_param) try self.write(", ");
-                        try self.write("...");
+                        try self.write("char* __fun_vtags");
+                        try self.write(", ...");
                     }
                     self.in_function_params = false;
                     try self.write(") ");
@@ -7751,11 +8447,14 @@ pub const TranspileProcess = struct {
                     if (function.body) |body| {
                         const prev_in_fn_body = self.in_function_body;
                         const prev_body_depth = self.function_body_depth;
+                        const prev_var = self.current_fn_is_variadic;
                         self.in_function_body = true;
                         self.function_body_depth = 0;
+                        self.current_fn_is_variadic = function.is_variadic;
                         defer {
                             self.in_function_body = prev_in_fn_body;
                             self.function_body_depth = prev_body_depth;
+                            self.current_fn_is_variadic = prev_var;
                         }
                         try self.transpile_node(body.*);
                     }
@@ -7776,6 +8475,59 @@ pub const TranspileProcess = struct {
 
                 try self.write("{");
                 self.indent();
+                if (is_fn_body and self.current_fn_is_variadic) {
+                    try self.write("\n");
+                    try self.write_indent();
+                    try self.write("Vec__str vargs;\n");
+                    try self.write_indent();
+                    try self.write("vargs.len = 0; vargs.cap = 0; vargs.data = NULL;\n");
+                    try self.write_indent();
+                    try self.write("if (__fun_vtags) {\n");
+                    self.indent();
+                    try self.write_indent();
+                    try self.write("size_t __fun_vc = 0; while (__fun_vtags[__fun_vc] != 0) { __fun_vc++; }\n");
+                    try self.write_indent();
+                    try self.write("vargs.len = (long long)__fun_vc; vargs.cap = (long long)__fun_vc;\n");
+                    try self.write_indent();
+                    try self.write("if (__fun_vc > 0) { vargs.data = (char**)malloc(sizeof(char*) * __fun_vc); }\n");
+                    try self.write_indent();
+                    try self.write("va_list __fun_ap; va_start(__fun_ap, __fun_vtags);\n");
+                    try self.write_indent();
+                    try self.write("size_t __fun_vi = 0; while (__fun_vi < __fun_vc) {\n");
+                    self.indent();
+                    try self.write_indent();
+                    try self.write("char __fun_tagc = __fun_vtags[__fun_vi];\n");
+                    try self.write_indent();
+                    try self.write("switch (__fun_tagc) {\n");
+                    self.indent();
+                    try self.write_indent();
+                    try self.write("case 's': vargs.data[__fun_vi] = va_arg(__fun_ap, char*); break;\n");
+                    try self.write_indent();
+                    try self.write("case 'n': vargs.data[__fun_vi] = fmt_num((long long)va_arg(__fun_ap, long long)); break;\n");
+                    try self.write_indent();
+                    try self.write("case 'd': vargs.data[__fun_vi] = fmt_dec((double)va_arg(__fun_ap, double)); break;\n");
+                    try self.write_indent();
+                    try self.write("case 'b': vargs.data[__fun_vi] = fmt_bin((bool)va_arg(__fun_ap, int)); break;\n");
+                    try self.write_indent();
+                    try self.write("case 'c': vargs.data[__fun_vi] = fmt_chr((char)va_arg(__fun_ap, int)); break;\n");
+                    try self.write_indent();
+                    try self.write("case 'p': vargs.data[__fun_vi] = fmt_raw((void*)va_arg(__fun_ap, void*)); break;\n");
+                    try self.write_indent();
+                    try self.write("default: vargs.data[__fun_vi] = fmt_raw((void*)va_arg(__fun_ap, void*)); break;\n");
+                    self.dedent();
+                    try self.write_indent();
+                    try self.write("}\n");
+                    try self.write_indent();
+                    try self.write("__fun_vi = __fun_vi + 1;\n");
+                    self.dedent();
+                    try self.write_indent();
+                    try self.write("}\n");
+                    try self.write_indent();
+                    try self.write("va_end(__fun_ap);\n");
+                    self.dedent();
+                    try self.write_indent();
+                    try self.write("}\n");
+                }
                 for (body.statements.items()) |statement| {
                     if (statement.type == .Variable) {
                         try self.register_scope_variable(statement);
@@ -8732,6 +9484,7 @@ pub const TranspileProcess = struct {
         try add_header(self, &seen, "stdio.h");
         try add_header(self, &seen, "stdbool.h");
         try add_header(self, &seen, "stdint.h");
+        try add_header(self, &seen, "stdarg.h");
         try add_header(self, &seen, "stdlib.h");
         try add_header(self, &seen, "string.h");
     }

@@ -237,6 +237,8 @@ pub fn get_c_typedef_alias_datatype_type(dt: []const u8) ?dtype.DataTypeType {
     if (mem.eql(u8, "clock_t", dt)) return .Num;
     // `stdio.h`
     if (mem.eql(u8, "FILE", dt)) return .Unknown;
+    // `stdarg.h`
+    if (mem.eql(u8, "va_list", dt)) return .Unknown;
     return null;
 }
 

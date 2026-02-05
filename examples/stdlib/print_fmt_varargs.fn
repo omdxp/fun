@@ -1,0 +1,27 @@
+// Demonstrates variadic print_fmt/println_fmt usage.
+
+imp std.io;
+imp std.c.def;
+
+fun log_fmt(str fmt, ...) {
+  str out = format_impl(fmt, &vargs);
+  if out != NULL {
+    println(out);
+    free(out);
+  }
+}
+
+fun main() {
+  println_fmt("no args");
+  println_fmt("num={num} str={str}", 123, "hello");
+  println_fmt("bin={bin} chr={chr}", true, 'A');
+
+  raw* p = NULL;
+  println_fmt("ptr={ptr} mixed {} {num} {str}", p, "raw", 99, "ok");
+
+  str msg = format("sum={num} str={str}", 7, "ok");
+  println(msg);
+  free(msg);
+
+  log_fmt("custom {} {} {}", "a", 1, true);
+}

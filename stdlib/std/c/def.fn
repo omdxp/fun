@@ -30,6 +30,10 @@
 // - Bounds-checked library size type (Annex K), if provided by the platform.
 // - In Fun, this is treated as numeric-compatible.
 // 
+// Variadic arguments
+// - `va_list`
+// - Opaque type used with `<stdarg.h>` macros.
+// 
 // Common macros
 // - `NULL`
 // - Null pointer constant.
