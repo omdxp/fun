@@ -4713,63 +4713,106 @@ pub const TranspileProcess = struct {
         // Exhaustive boolean fit: true + false present.
         if (has_true and has_false) return;
 
-        // Try enum exhaustiveness: only when the condition is a variable whose declared type is a named enum.
-        // (We keep this intentionally conservative for now.)
-        const root = self.get_root();
-        if (root.type_registry != null and condition.*.type == .Identifier and condition.*.data != null) {
-            const vname = condition.*.data.?.sval.items;
-            if (self.get_scope_entity(vname)) |ent| {
-                if (ent.node) |ent_node| {
-                    if (ent_node.type == .Variable and ent_node.node_variant != null) {
-                        const dt = ent_node.node_variant.?.variable.type;
-                        if (dt.type == .Unknown and dt.pointer_depth == 0 and dt.type_str.items.len > 0) {
-                            const enum_name = dt.type_str.items;
-                            const reg = &root.type_registry.?;
-                            if (reg.enums_by_name.get(enum_name)) |enode| {
-                                if (enode.node_variant != null) {
-                                    const variants = enode.node_variant.?.enum_decl.variants.items();
+        const resolve_enum_name = struct {
+            fn call(self_: *Self, cond: *ast.Node) ?[]const u8 {
+                var node = cond.*;
+                if (node.type == .ExpressionParenthesis and node.node_variant != null) {
+                    node = node.node_variant.?.paren.exp.*;
+                }
 
-                                    var covered = std.StringHashMap(bool).init(self.backing_allocator);
-                                    defer covered.deinit();
-
-                                    for (branches) |branch| {
-                                        const bcond = branch.condition orelse continue;
-                                        if (bcond.type != .Expression or bcond.node_variant == null) continue;
-                                        const exp = bcond.node_variant.?.exp;
-                                        if (!mem.eql(u8, exp.op, ".")) continue;
-                                        const left = exp.left orelse continue;
-                                        const right = exp.right orelse continue;
-                                        if (left.type != .Identifier or left.data == null) continue;
-                                        if (right.type != .Identifier or right.data == null) continue;
-                                        if (!mem.eql(u8, left.data.?.sval.items, enum_name)) continue;
-                                        covered.put(right.data.?.sval.items, true) catch {};
-                                    }
-
-                                    var missing = std.ArrayList(u8).init(self.backing_allocator);
-                                    defer missing.deinit();
-                                    const mw = missing.writer();
-
-                                    var missing_count: usize = 0;
-                                    for (variants) |v| {
-                                        if (covered.contains(v.name.items)) continue;
-                                        if (missing_count > 0) {
-                                            mw.writeAll(", ") catch {};
-                                        }
-                                        mw.print("{s}.{s}", .{ enum_name, v.name.items }) catch {};
-                                        missing_count += 1;
-                                    }
-
-                                    if (missing_count == 0) return;
-
-                                    self.report_warning(
-                                        fit_stmt,
-                                        "fit statement is not exhausted for enum '{s}' condition (missing: {s}; add catch-all '_' branch to silence)",
-                                        .{ enum_name, missing.items },
-                                    );
-                                    return;
+                if (node.type == .Identifier and node.data != null) {
+                    const vname = node.data.?.sval.items;
+                    if (self_.get_scope_entity(vname)) |ent| {
+                        if (ent.node) |ent_node| {
+                            if (ent_node.type == .Variable and ent_node.node_variant != null) {
+                                const dt = ent_node.node_variant.?.variable.type;
+                                if (dt.type == .Unknown and dt.pointer_depth == 0 and dt.type_str.items.len > 0) {
+                                    return dt.type_str.items;
                                 }
                             }
                         }
+                    }
+                    return null;
+                }
+
+                if (node.type == .Expression and node.node_variant != null and mem.eql(u8, node.node_variant.?.exp.op, ".")) {
+                    const exp = node.node_variant.?.exp;
+                    const left = exp.left orelse return null;
+                    const right = exp.right orelse return null;
+                    if (left.type != .Identifier or left.data == null) return null;
+                    if (right.type != .Identifier or right.data == null) return null;
+
+                    const base_name = left.data.?.sval.items;
+                    if (self_.get_scope_entity(base_name)) |ent| {
+                        if (ent.node) |ent_node| {
+                            if (ent_node.type == .Variable and ent_node.node_variant != null) {
+                                const dt = ent_node.node_variant.?.variable.type;
+                                if (dt.type == .Unknown and dt.type_str.items.len > 0) {
+                                    const field_dt = self_.lookup_compound_field(dt.type_str.items, right.data.?.sval.items) orelse return null;
+                                    if (field_dt.type == .Unknown and field_dt.pointer_depth == 0 and field_dt.type_str.items.len > 0) {
+                                        return field_dt.type_str.items;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                return null;
+            }
+        }.call;
+
+        // Try enum exhaustiveness for variables and field accesses (e.g. `self.color`).
+        const root = self.get_root();
+        if (root.type_registry != null) {
+            if (resolve_enum_name(self, condition)) |enum_name| {
+                const reg = &root.type_registry.?;
+                if (reg.enums_by_name.get(enum_name)) |enode| {
+                    if (enode.node_variant != null) {
+                        const variants = enode.node_variant.?.enum_decl.variants.items();
+
+                        var covered = std.StringHashMap(bool).init(self.backing_allocator);
+                        defer covered.deinit();
+
+                        for (branches) |branch| {
+                            const bcond = branch.condition orelse continue;
+                            if (dot_shorthand_variant_name(bcond)) |short_name| {
+                                covered.put(short_name, true) catch {};
+                                continue;
+                            }
+                            if (bcond.type != .Expression or bcond.node_variant == null) continue;
+                            const exp = bcond.node_variant.?.exp;
+                            if (!mem.eql(u8, exp.op, ".")) continue;
+                            const left = exp.left orelse continue;
+                            const right = exp.right orelse continue;
+                            if (left.type != .Identifier or left.data == null) continue;
+                            if (right.type != .Identifier or right.data == null) continue;
+                            if (!mem.eql(u8, left.data.?.sval.items, enum_name)) continue;
+                            covered.put(right.data.?.sval.items, true) catch {};
+                        }
+
+                        var missing = std.ArrayList(u8).init(self.backing_allocator);
+                        defer missing.deinit();
+                        const mw = missing.writer();
+
+                        var missing_count: usize = 0;
+                        for (variants) |v| {
+                            if (covered.contains(v.name.items)) continue;
+                            if (missing_count > 0) {
+                                mw.writeAll(", ") catch {};
+                            }
+                            mw.print("{s}.{s}", .{ enum_name, v.name.items }) catch {};
+                            missing_count += 1;
+                        }
+
+                        if (missing_count == 0) return;
+
+                        self.report_warning(
+                            fit_stmt,
+                            "fit statement is not exhausted for enum '{s}' condition (missing: {s}; add catch-all '_' branch to silence)",
+                            .{ enum_name, missing.items },
+                        );
+                        return;
                     }
                 }
             }
