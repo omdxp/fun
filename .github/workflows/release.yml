@@ -306,9 +306,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build-reference-site]
     if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
