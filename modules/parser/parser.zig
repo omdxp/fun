@@ -438,7 +438,7 @@ pub const ParseProcess = struct {
                         .flags = .{},
                     };
                     try self.parse_datatype(dt);
-                    try self.parse_variable(dt, hist, false);
+                    try self.parse_variable(dt, hist, false, false);
                     try self.expect_sym(';');
                     return;
                 }
@@ -941,7 +941,12 @@ pub const ParseProcess = struct {
             // semantic type so arithmetic/comparisons typecheck, while still
             // emitting the original identifier in C via `type_str`.
             if (dt_token.?.type == .Identifier) {
-                dt.*.type = utils.get_c_typedef_alias_datatype_type(dt_token.?.data.sval.items) orelse .Unknown;
+                const ident_type = utils.get_datatype_type(dt_token.?.data.sval.items);
+                if (ident_type != .Unknown) {
+                    dt.*.type = ident_type;
+                } else {
+                    dt.*.type = utils.get_c_typedef_alias_datatype_type(dt_token.?.data.sval.items) orelse .Unknown;
+                }
             } else {
                 dt.*.type = .Unknown;
             }
@@ -2169,7 +2174,7 @@ pub const ParseProcess = struct {
                         .flags = .{},
                     };
                     try self.parse_datatype(dt);
-                    try self.parse_variable(dt, hist, false);
+                    try self.parse_variable(dt, hist, false, false);
                     try self.expect_sym(';');
                     break :blk true;
                 }
@@ -2180,13 +2185,7 @@ pub const ParseProcess = struct {
 
                 // Allow primitive type keywords as operands to the builtin `sizeof(Type)`.
                 // Example: `sizeof(num)`.
-                const is_prim_type_kw = mem.eql(u8, kw, "void") or
-                    mem.eql(u8, kw, "raw") or
-                    mem.eql(u8, kw, "chr") or
-                    mem.eql(u8, kw, "str") or
-                    mem.eql(u8, kw, "dec") or
-                    mem.eql(u8, kw, "num") or
-                    mem.eql(u8, kw, "bin");
+                const is_prim_type_kw = utils.keyword_is_datatype(kw);
 
                 const is_sizeof_type_operand = self.is_sizeof_type_operand_context();
 
@@ -2996,7 +2995,7 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
-    fn parse_variable(self: *Self, dt: *dtype.DataType, hist: *utils.History, is_public: bool) ParseError!void {
+    fn parse_variable(self: *Self, dt: *dtype.DataType, hist: *utils.History, is_public: bool, require_initializer: bool) ParseError!void {
         if (self.next_token_is_operator("[")) {
             try self.parse_array_brackets(dt, hist);
         }
@@ -3019,6 +3018,10 @@ pub const ParseProcess = struct {
         };
         var value_node: ?ast.Node = null;
         const has_value = self.next_token_is_operator("=");
+        if (!has_value and require_initializer) {
+            self.transpile_proc.err("'let' declarations require an initializer", .{});
+            return ParseError.InvalidStatement;
+        }
         if (has_value) {
             _ = self.token_next(); // skip =
             try self.parse_expressionable_root(hist);
@@ -3137,7 +3140,33 @@ pub const ParseProcess = struct {
             .flags = .{},
         };
         try self.parse_datatype(dt);
-        try self.parse_variable(dt, hist, false);
+        try self.parse_variable(dt, hist, false, false);
+    }
+
+    fn parse_let_declaration(self: *Self, hist: *utils.History, is_public: bool) ParseError!void {
+        const let_token = self.token_next();
+        if (let_token == null or let_token.?.type != .Keyword or !mem.eql(u8, let_token.?.data.sval.items, "let")) {
+            self.transpile_proc.err("expected keyword 'let'", .{});
+            return ParseError.InvalidKeyword;
+        }
+
+        const dt = self.transpile_proc.allocator.create(dtype.DataType) catch |e| {
+            std.debug.print("Error creating DataType: {s}\n", .{@errorName(e)});
+            return ParseError.MemoryAllocationFailed;
+        };
+        dt.* = dtype.DataType{
+            .array = null,
+            .pointer_depth = 0,
+            .type = .Unknown,
+            .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
+            .flags = .{},
+        };
+        dt.*.type_str.appendSlice("__let_infer__") catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+
+        try self.parse_variable(dt, hist, is_public, true);
+        try self.expect_sym(';');
     }
 
     /// Parses function arguments.
@@ -4109,9 +4138,13 @@ pub const ParseProcess = struct {
                 .flags = .{},
             };
             try self.parse_datatype(dt);
-            try self.parse_variable(dt, hist, false);
+            try self.parse_variable(dt, hist, false, false);
             try self.expect_sym(';');
             return;
+        }
+
+        if (mem.eql(u8, "let", sval)) {
+            return try self.parse_let_declaration(hist, false);
         }
 
         if (mem.eql(u8, "pub", sval)) {
@@ -4262,9 +4295,14 @@ pub const ParseProcess = struct {
                 var hist = utils.History.init(self.transpile_proc.allocator, .{});
                 defer hist.deinit();
                 try self.parse_datatype(dt);
-                try self.parse_variable(dt, &hist, true);
+                try self.parse_variable(dt, &hist, true, false);
                 try self.expect_sym(';');
                 return;
+            }
+            if (mem.eql(u8, "let", kw)) {
+                var hist = utils.History.init(self.transpile_proc.allocator, .{});
+                defer hist.deinit();
+                return try self.parse_let_declaration(&hist, true);
             }
             if (mem.eql(u8, "enum", kw)) {
                 return try self.parse_enum(true);
@@ -4293,7 +4331,7 @@ pub const ParseProcess = struct {
             var hist = utils.History.init(self.transpile_proc.allocator, .{});
             defer hist.deinit();
             try self.parse_datatype(dt);
-            try self.parse_variable(dt, &hist, true);
+            try self.parse_variable(dt, &hist, true, false);
             try self.expect_sym(';');
             return;
         }

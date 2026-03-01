@@ -42,11 +42,39 @@ pub fn is_number(c: u8) bool {
 /// Returns:
 /// - `bool`: `true` if the string is a datatype keyword, otherwise `false`.
 pub fn keyword_is_datatype(str: []const u8) bool {
-    // TODO: more to add later
     return mem.eql(u8, "void", str) or
         mem.eql(u8, "raw", str) or
         mem.eql(u8, "num", str) or mem.eql(u8, "dec", str) or mem.eql(u8, "str", str) or
-        mem.eql(u8, "bin", str) or mem.eql(u8, "chr", str);
+        mem.eql(u8, "bin", str) or mem.eql(u8, "chr", str) or
+        mem.eql(u8, "f32", str) or mem.eql(u8, "f64", str) or
+        is_dynamic_int_datatype(str);
+}
+
+pub const DynamicIntType = struct {
+    is_signed: bool,
+    bits: usize,
+};
+
+fn parse_prefixed_bitwidth(str: []const u8, prefix: u8) ?usize {
+    if (str.len < 2 or str[0] != prefix) return null;
+    var i: usize = 1;
+    while (i < str.len) : (i += 1) {
+        if (!is_number(str[i])) return null;
+    }
+    if (str.len == 1) return null;
+    const bits = std.fmt.parseInt(usize, str[1..], 10) catch return null;
+    if (bits == 0) return null;
+    return bits;
+}
+
+pub fn parse_dynamic_int_datatype(str: []const u8) ?DynamicIntType {
+    if (parse_prefixed_bitwidth(str, 'i')) |bits| return .{ .is_signed = true, .bits = bits };
+    if (parse_prefixed_bitwidth(str, 'u')) |bits| return .{ .is_signed = false, .bits = bits };
+    return null;
+}
+
+pub fn is_dynamic_int_datatype(str: []const u8) bool {
+    return parse_dynamic_int_datatype(str) != null;
 }
 
 /// Checks if the given string is a keyword.
@@ -63,15 +91,16 @@ pub fn is_keyword(str: []const u8) bool {
     return mem.eql(u8, "imp", str) or mem.eql(u8, "pub", str) or mem.eql(u8, "fun", str) or
         mem.eql(u8, "enum", str) or
         mem.eql(u8, "compound", str) or mem.eql(u8, "quirk", str) or mem.eql(u8, "impl", str) or
+        mem.eql(u8, "let", str) or
         mem.eql(u8, "defer", str) or mem.eql(u8, "asm", str) or mem.eql(u8, "volatile", str) or mem.eql(u8, "arch", str) or
         mem.eql(u8, "void", str) or
         mem.eql(u8, "raw", str) or
         mem.eql(u8, "num", str) or mem.eql(u8, "dec", str) or mem.eql(u8, "str", str) or
+        mem.eql(u8, "bin", str) or mem.eql(u8, "chr", str) or
         mem.eql(u8, "if", str) or mem.eql(u8, "elif", str) or
-        mem.eql(u8, "else", str) or mem.eql(u8, "bin", str) or
+        mem.eql(u8, "else", str) or
         mem.eql(u8, "true", str) or mem.eql(u8, "false", str) or
         mem.eql(u8, "fit", str) or mem.eql(u8, "ret", str) or
-        mem.eql(u8, "chr", str) or
         mem.eql(u8, "for", str) or
         mem.eql(u8, "break", str) or
         mem.eql(u8, "continue", str) or
@@ -203,6 +232,8 @@ pub fn get_datatype_type(dt: []const u8) dtype.DataTypeType {
     if (mem.eql(u8, "dec", dt)) return .Dec;
     if (mem.eql(u8, "num", dt)) return .Num;
     if (mem.eql(u8, "bin", dt)) return .Bin;
+    if (mem.eql(u8, "f32", dt) or mem.eql(u8, "f64", dt)) return .Dec;
+    if (is_dynamic_int_datatype(dt)) return .Num;
     return .Unknown;
 }
 

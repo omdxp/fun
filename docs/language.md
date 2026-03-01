@@ -4,7 +4,7 @@
 ## Language Features
 
 ### Syntax & Structure
-- **Statically-typed, C-inspired**: All variables and functions have explicit types.
+- **Statically-typed, C-inspired**: Variables and functions are statically typed; variables can be explicitly typed or inferred via `let`.
 - **Functions**: Defined with `fun name(args) type { ... }`.
 - **Imports**: Use `imp module;` to import standard or user modules.
 - **Visibility**: Prefix declarations with `pub` to export them; declarations without `pub` are module-private.
@@ -20,13 +20,18 @@
 - **Primitive Types**:
     - `num`: Signed 64-bit integer (maps to C `int64_t`)
     - `dec`: 64-bit floating-point (IEEE double; maps to C `double`)
+    - `f32`: 32-bit floating-point (maps to C `float`)
+    - `f64`: 64-bit floating-point (maps to C `double`)
+    - `i8`, `i16`, `i32`, `i64`: Signed fixed-width integers
+    - `u8`, `u16`, `u32`, `u64`: Unsigned fixed-width integers
+    - `iN`, `uN`: Arbitrary-width signed/unsigned integers
     - `str`: String
     - `bin`: Boolean
     - `chr`: Character
     - `raw`: Opaque/"void" type (use `raw*` for C-style `void*`)
 - **Arrays**: `num[] arr = [1, 2, 3];`
 - **Pointers**: `Node* next;` (self-referential and forward-declared types supported)
-- **Type Inference**: Not supported; all types must be explicit.
+- **Type Inference**: Supported for variables via `let name = expr;` (initializer required).
 
 ### Enums
 - **Declaration**: `enum Color { Red, Green, Blue }`

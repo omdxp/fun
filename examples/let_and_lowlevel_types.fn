@@ -1,0 +1,100 @@
+imp std.c.io;
+
+compound Point {
+  num x;
+  num y;
+}
+
+quirk HasX {
+  get_x() num;
+}
+
+impl Point {
+  sum() num {
+    ret self.x + self.y;
+  }
+
+  shifted(num dx, num dy) Point {
+    Point out = Point{x = self.x + dx, y = self.y + dy};
+    ret out;
+  }
+}
+
+impl Point HasX {
+  get_x() num {
+    ret self.x;
+  }
+}
+
+fun add(num a, num b) num {
+  ret a + b;
+}
+
+fun is_positive(num n) bin {
+  ret n > 0;
+}
+
+fun make_point(num x, num y) Point {
+  ret Point{x = x, y = y};
+}
+
+fun pick_first<T>(T a, T b) T {
+  _ = b;
+  ret a;
+}
+
+fun as_hasx(Point* p) HasX {
+  ret p;
+}
+
+fun main(str[] args) {
+  let from_compound_init = Point{x = 1, y = 2};
+  let from_function_return = make_point(10, 20);
+  let from_method_return = from_function_return.shifted(3, 4);
+  let from_method_num = from_method_return.sum();
+  let from_generic_num = pick_first(100, 200);
+  let from_generic_compound = pick_first(from_compound_init, from_function_return);
+
+  let total = add(20, 22);
+  let bonus = 8;
+  let final_total = total + bonus;
+
+  i32 signed_32 = 1234;
+  u64 mask = 4294967295;
+
+  u2 tiny_u2 = 3;
+  i6 tiny_i6 = -17;
+
+  let from_u2 = tiny_u2;
+  let from_i6 = tiny_i6;
+  let mixed_small = from_u2 + from_i6;
+
+  f32 small = 1.5;
+  f64 large = 3.1415926535;
+  let inferred_dec = small + large;
+
+  let inferred_bool = is_positive(mixed_small);
+  let inferred_chr = 'Z';
+  let inferred_str = "let-inferred";
+
+  i128 wide_signed = 0;
+  u256 wide_unsigned = 0;
+  let from_wide_signed = wide_signed;
+  let from_wide_unsigned = wide_unsigned;
+
+  HasX explicit_quirk = &from_method_return;
+
+  // let inferred_quirk = as_hasx(&from_method_return);
+  // ^ invalid by design: let cannot infer quirk types; use explicit type:
+  // HasX inferred_quirk = as_hasx(&from_method_return);
+
+  printf("total=%lld final=%lld s32=%d u64=%llu\n", total, final_total, signed_32, mask);
+  printf("point sum=%lld generic_num=%lld generic_point_x=%lld\n", from_method_num, from_generic_num, from_generic_compound.x);
+  printf("small mix=%lld dec=%f bool=%d\n", mixed_small, inferred_dec, inferred_bool);
+  printf("quirk get_x=%lld\n", explicit_quirk.get_x());
+  printf("chr=%c str=%s\n", inferred_chr, inferred_str);
+
+  _ = from_wide_signed;
+  _ = from_wide_unsigned;
+  _ = args;
+}

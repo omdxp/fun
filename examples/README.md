@@ -19,6 +19,8 @@ zig-out/bin/fun -in examples/<example>.fn
 - enum_fit_non_exhaustive.fn
 - enum_showcase.fn
 - enums.fn
+- let_and_lowlevel_types.fn
+- let_quirk_explicit_ok.fn
 - plain_impl.fn
 - return_heap_ptr_ok.fn
 - return_local_ptr_warning.fn
@@ -102,6 +104,7 @@ zig-out/bin/fun -in examples/<example>.fn
 - error_cases/already_declared_variable.fn
 - error_cases/duplicate_symbols.fn
 - error_cases/functions_cannot_be_declared_inside_functions.fn
+- error_cases/let_infer_quirk_invalid.fn
 - error_cases/missing_import.fn
 - error_cases/quirk_impl_missing_methods.fn
 - error_cases/type_mismatch.fn

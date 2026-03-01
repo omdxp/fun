@@ -7,7 +7,7 @@ A: To explore language design, static typing, and transpilation to C for perform
 A: See the Quickstart in the main [README](../README.md).
 
 **Q: What are the numeric sizes?**
-A: Fun is 64-bit by default: `num` is a signed 64-bit integer and `dec` is a 64-bit double.
+A: `num`/`dec` stay 64-bit by default (`int64_t`/`double`), and Fun also supports low-level numeric types like `i32`, `u64`, `f32`, `f64`, plus arbitrary-width integers via `iN`/`uN`.
 
 **Q: Where can I find examples?**
 A: In the [examples/](../examples/) directory.

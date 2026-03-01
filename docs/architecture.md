@@ -4,7 +4,7 @@
 - Written in Zig
 - Transpiles fun code to C
 - CLI tool for compilation and execution
-- 64-bit numeric core (`num` → `int64_t`, `dec` → `double`)
+- Numeric model includes `num`/`dec`, fixed-width scalars (`i8`..`i64`, `u8`..`u64`, `f32`, `f64`), and arbitrary-width integers (`iN`, `uN`)
 
 ## Main Components
 - **Lexer**: Tokenizes source code

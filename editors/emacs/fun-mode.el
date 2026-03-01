@@ -12,10 +12,10 @@
 
 (defconst fun-keywords
   '("imp" "pub" "fun" "compound" "quirk" "impl" "enum" "asm" "volatile" "arch"
-    "defer" "ret" "if" "elif" "else" "for" "fit" "break" "continue" "assert"))
+    "defer" "ret" "if" "elif" "else" "for" "fit" "break" "continue" "assert" "let"))
 
 (defconst fun-types
-  '("void" "raw" "num" "dec" "str" "bin" "chr"))
+  '("void" "raw" "num" "dec" "f32" "f64" "str" "bin" "chr"))
 
 (defconst fun-constants
   '("true" "false"))
@@ -23,6 +23,7 @@
 (defvar fun-font-lock-keywords
   `((,(regexp-opt fun-keywords 'words) . font-lock-keyword-face)
     (,(regexp-opt fun-types 'words) . font-lock-type-face)
+    ("\\_<[iu][1-9][0-9]*\\_>" . font-lock-type-face)
     (,(regexp-opt fun-constants 'words) . font-lock-constant-face)))
 
 ;;;###autoload

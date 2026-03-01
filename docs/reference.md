@@ -3,9 +3,12 @@
 ## Overview
 Fun is a statically-typed, C-transpiling language focused on performance and clarity. The compiler emits readable C and relies on the system C toolchain for linking and execution.
 
-## Numeric Model (64-bit by default)
+## Numeric Model
 - `num` is a signed 64-bit integer (C `int64_t`).
 - `dec` is a 64-bit floating-point number (C `double`).
+- Fixed-width integers: `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`.
+- Fixed-width floats: `f32` (`float`), `f64` (`double`).
+- Arbitrary-width integers: `iN` / `uN` (emitted as `_BitInt(N)` / `unsigned _BitInt(N)` when width is not a standard 8/16/32/64).
 - `bin` is boolean (`bool`).
 - `chr` is a character (`char`).
 - `str` is a null-terminated string (`char*`).
@@ -24,7 +27,7 @@ Fun is a statically-typed, C-transpiling language focused on performance and cla
 
 ## Types
 ### Built-in Types
-- `num`, `dec`, `bin`, `chr`, `str`, `raw`
+- `num`, `dec`, `f32`, `f64`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `iN`, `uN`, `bin`, `chr`, `str`, `raw`
 
 ### Arrays
 - Syntax: `num[] arr = [1, 2, 3];`
@@ -68,10 +71,11 @@ impl Rectangle Shape {
 - Use `Vec<num>` etc. where required.
 
 ## Variables
-- All variables require a type declaration.
+- Variables can be explicitly typed or inferred with `let`.
 ```fun
 num x = 1;
 str name = "fun";
+let count = add(1, 2);
 ```
 
 ## Functions

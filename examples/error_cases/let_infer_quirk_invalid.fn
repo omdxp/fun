@@ -1,0 +1,26 @@
+// Expect: compiler error that let cannot infer quirk type; explicit quirk annotation is required.
+
+compound Point {
+  num x;
+  num y;
+}
+
+quirk HasX {
+  get_x() num;
+}
+
+impl Point HasX {
+  get_x() num {
+    ret self.x;
+  }
+}
+
+fun as_hasx(Point* p) HasX {
+  ret p;
+}
+
+fun main() {
+  Point p = Point{x = 1, y = 2};
+  let inferred_quirk = as_hasx(&p);
+  inferred_quirk.get_x();
+}

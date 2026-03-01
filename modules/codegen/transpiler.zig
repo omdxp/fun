@@ -1285,7 +1285,6 @@ pub const TranspileProcess = struct {
     }
 
     fn checked_type_to_dtype(self: *Self, t: CheckedType) TranspileError!?*dtype.DataType {
-        if (t.dtype_ref) |dt| return @constCast(dt);
         const name = base_type_name(t) orelse return null;
         const out = self.allocator.create(dtype.DataType) catch {
             return TranspileError.MemoryAllocationFailed;
@@ -3269,6 +3268,34 @@ pub const TranspileProcess = struct {
         return false;
     }
 
+    fn is_let_infer_dtype(dt: *const dtype.DataType) bool {
+        return (dt.type == null or dt.type == .Unknown) and mem.eql(u8, dt.type_str.items, "__let_infer__");
+    }
+
+    fn infer_let_variable_dtype(self: *Self, stmt: *ast.Node, env: *TypeEnv, fns: *const std.StringHashMap(FnSig)) TranspileError!void {
+        if (stmt.type != .Variable or stmt.node_variant == null) return;
+        const v = stmt.node_variant.?.variable;
+        if (!is_let_infer_dtype(v.type)) return;
+        const val = v.val orelse {
+            self.report_type_error(stmt.*, "'let' variable '{s}' requires an initializer", .{v.name.items});
+            return TranspileError.TypeMismatch;
+        };
+        const inferred_t = try self.infer_expr_type(val.*, env, fns);
+        if (!is_known_type(inferred_t)) {
+            self.report_type_error(stmt.*, "cannot infer type for let variable '{s}'", .{v.name.items});
+            return TranspileError.TypeMismatch;
+        }
+        if (self.is_quirk_named_type(inferred_t)) {
+            self.report_type_error(stmt.*, "let cannot infer quirk type for '{s}'; declare the quirk type explicitly", .{v.name.items});
+            return TranspileError.TypeMismatch;
+        }
+        const inferred_dt = (try self.checked_type_to_dtype(inferred_t)) orelse {
+            self.report_type_error(stmt.*, "cannot infer type for let variable '{s}'", .{v.name.items});
+            return TranspileError.TypeMismatch;
+        };
+        stmt.node_variant.?.variable.type = inferred_dt;
+    }
+
     fn flatten_call_args_ptr(self: *Self, node: *ast.Node, out: *std.ArrayList(*ast.Node)) TranspileError!void {
         // Function call arguments are parsed as a parenthesis node that wraps an expression.
         // For zero-arg calls this inner expression is `.Blank`.
@@ -3557,13 +3584,7 @@ pub const TranspileProcess = struct {
                             }
 
                             const type_name = arg0.data.?.sval.items;
-                            const is_builtin = mem.eql(u8, type_name, "void") or
-                                mem.eql(u8, type_name, "raw") or
-                                mem.eql(u8, type_name, "chr") or
-                                mem.eql(u8, type_name, "str") or
-                                mem.eql(u8, type_name, "dec") or
-                                mem.eql(u8, type_name, "num") or
-                                mem.eql(u8, type_name, "bin");
+                            const is_builtin = utils.keyword_is_datatype(type_name);
 
                             const is_declared = blk: {
                                 const root = self.get_root();
@@ -4341,7 +4362,8 @@ pub const TranspileProcess = struct {
             const stmt = stmt_ptr.*;
             switch (stmt.type) {
                 .Variable => {
-                    const v = stmt.node_variant.?.variable;
+                    try self.infer_let_variable_dtype(stmt_ptr, env, fns);
+                    const v = stmt_ptr.node_variant.?.variable;
                     const name = v.name.items;
                     const vtype = try self.type_from_dtype_with_mangled(v.type);
                     try self.ensure_dtype_visible(stmt, v.type, env.type_params);
@@ -4704,6 +4726,39 @@ pub const TranspileProcess = struct {
     }
 
     fn typecheck_module(proc: *Self, fns: *const std.StringHashMap(FnSig)) TranspileError!void {
+        var global_env = TypeEnv.init(proc.allocator);
+        defer global_env.deinit();
+        try global_env.push();
+
+        for (proc.nodes.items()) |*gn| {
+            if (gn.type != .Variable or gn.node_variant == null or gn.binded != null) continue;
+            try proc.infer_let_variable_dtype(gn, &global_env, fns);
+
+            const v = gn.node_variant.?.variable;
+            const vtype = try proc.type_from_dtype_with_mangled(v.type);
+            try proc.ensure_dtype_visible(gn.*, v.type, null);
+            if (v.type.generic_args != null) {
+                try proc.register_generic_instantiation(v.type);
+            }
+            try global_env.put_current(v.name.items, vtype);
+
+            if (v.val) |val| {
+                if (val.*.type == .CompoundInit) {
+                    try proc.bind_compound_init_expected(val, vtype, &global_env, fns);
+                }
+                if (proc.expected_enum_name(vtype)) |enum_name| {
+                    if (dot_shorthand_variant_name(val)) |_| {
+                        _ = try proc.resolve_dot_shorthand_enum_variant(val, enum_name);
+                    }
+                }
+                const init_t = try proc.infer_expr_type(val.*, &global_env, fns);
+                if (is_known_type(vtype) and is_known_type(init_t) and !(try proc.can_implicit_coerce(vtype, init_t))) {
+                    proc.report_type_error(gn.*, "type mismatch in initialization of '{s}'", .{v.name.items});
+                    return TranspileError.TypeMismatch;
+                }
+            }
+        }
+
         for (proc.nodes.items()) |node| {
             if (node.type != .Function or node.node_variant == null) continue;
             const fnv = node.node_variant.?.function;
@@ -6036,11 +6091,51 @@ pub const TranspileProcess = struct {
     fn map_type_to_c(type_str: []const u8) []const u8 {
         if (mem.eql(u8, type_str, "num")) return "int64_t";
         if (mem.eql(u8, type_str, "dec")) return "double";
+        if (mem.eql(u8, type_str, "f32")) return "float";
+        if (mem.eql(u8, type_str, "f64")) return "double";
+        if (mem.eql(u8, type_str, "i8")) return "int8_t";
+        if (mem.eql(u8, type_str, "i16")) return "int16_t";
+        if (mem.eql(u8, type_str, "i32")) return "int32_t";
+        if (mem.eql(u8, type_str, "i64")) return "int64_t";
+        if (mem.eql(u8, type_str, "u8")) return "uint8_t";
+        if (mem.eql(u8, type_str, "u16")) return "uint16_t";
+        if (mem.eql(u8, type_str, "u32")) return "uint32_t";
+        if (mem.eql(u8, type_str, "u64")) return "uint64_t";
         if (mem.eql(u8, type_str, "str")) return "char*";
         if (mem.eql(u8, type_str, "bin")) return "bool";
         if (mem.eql(u8, type_str, "chr")) return "char";
         if (mem.eql(u8, type_str, "raw")) return "void";
         return type_str;
+    }
+
+    fn write_dynamic_int_type(self: *Self, type_str: []const u8) TranspileError!bool {
+        const dyn = utils.parse_dynamic_int_datatype(type_str) orelse return false;
+        switch (dyn.bits) {
+            8 => {
+                try self.write(if (dyn.is_signed) "int8_t" else "uint8_t");
+                return true;
+            },
+            16 => {
+                try self.write(if (dyn.is_signed) "int16_t" else "uint16_t");
+                return true;
+            },
+            32 => {
+                try self.write(if (dyn.is_signed) "int32_t" else "uint32_t");
+                return true;
+            },
+            64 => {
+                try self.write(if (dyn.is_signed) "int64_t" else "uint64_t");
+                return true;
+            },
+            else => {
+                if (dyn.is_signed) {
+                    try self.print("_BitInt({d})", .{dyn.bits});
+                } else {
+                    try self.print("unsigned _BitInt({d})", .{dyn.bits});
+                }
+                return true;
+            },
+        }
     }
 
     fn append_mangled_type(self: *Self, buf: *std.ArrayList(u8), dt: *const dtype.DataType) TranspileError!void {
@@ -6185,8 +6280,10 @@ pub const TranspileProcess = struct {
             defer self.allocator.free(mangled);
             try self.write(mangled);
         } else {
-            const c_type = map_type_to_c(data_type.type_str.items);
-            try self.write(c_type);
+            if (!(try self.write_dynamic_int_type(data_type.type_str.items))) {
+                const c_type = map_type_to_c(data_type.type_str.items);
+                try self.write(c_type);
+            }
         }
 
         const ptr_depth: usize = if (data_type.pointer_depth > 0) data_type.pointer_depth else blk: {

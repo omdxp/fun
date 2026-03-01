@@ -15,9 +15,9 @@ contexts:
     - match: "'"
       scope: punctuation.definition.string.begin.fun
       push: single_quoted
-    - match: \b(imp|pub|fun|compound|quirk|impl|enum|asm|volatile|arch|defer|ret|if|elif|else|for|fit|break|continue|assert)\b
+    - match: \b(imp|pub|fun|compound|quirk|impl|enum|let|asm|volatile|arch|defer|ret|if|elif|else|for|fit|break|continue|assert)\b
       scope: keyword.control.fun
-    - match: \b(void|raw|num|dec|str|bin|chr|true|false)\b
+    - match: \b(void|raw|num|dec|f32|f64|str|bin|chr|i[1-9][0-9]*|u[1-9][0-9]*|true|false)\b
       scope: constant.language.fun
     - match: \b\d+(\.\d+)?\b
       scope: constant.numeric.fun

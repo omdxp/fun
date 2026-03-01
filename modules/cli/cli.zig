@@ -538,19 +538,13 @@ fn operator_needs_spaces(op: []const u8) bool {
 }
 
 fn is_builtin_type_keyword(kw: []const u8) bool {
-    return std.mem.eql(u8, kw, "void") or
-        std.mem.eql(u8, kw, "raw") or
-        std.mem.eql(u8, kw, "num") or
-        std.mem.eql(u8, kw, "dec") or
-        std.mem.eql(u8, kw, "str") or
-        std.mem.eql(u8, kw, "bin") or
-        std.mem.eql(u8, kw, "chr");
+    return utils.keyword_is_datatype(kw);
 }
 
 fn isLikelyTypeToken(t: token.Token) bool {
     return switch (t.type) {
         .Keyword => is_builtin_type_keyword(t.data.sval.items),
-        .Identifier => t.data.sval.items.len > 0 and (t.data.sval.items[0] >= 'A' and t.data.sval.items[0] <= 'Z'),
+        .Identifier => (t.data.sval.items.len > 0 and (t.data.sval.items[0] >= 'A' and t.data.sval.items[0] <= 'Z')) or utils.keyword_is_datatype(t.data.sval.items),
         else => false,
     };
 }
@@ -1214,6 +1208,15 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                     // Pointer types: `Type* name` / `Type* {`.
                     break :blk false;
                 }
+                if (t2.type == .Operator and std.mem.eql(u8, t2.data.sval.items, "*") and idx > 0) {
+                    const prev_tok = toks[idx - 1];
+                    if (prev_tok.type == .Identifier and prev_tok.data.sval.items.len > 0 and
+                        (prev_tok.data.sval.items[0] >= 'A' and prev_tok.data.sval.items[0] <= 'Z') and
+                        isPointerTypeStarContext(toks, idx, prev_tok, in_decl_only_ctx))
+                    {
+                        break :blk false;
+                    }
+                }
                 if (pt2.type == .Keyword) {
                     const pkw2 = pt2.data.sval.items;
                     if (std.mem.eql(u8, pkw2, "if") or std.mem.eql(u8, pkw2, "elif")) {
@@ -1228,6 +1231,16 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                 }
                 if (t2.type == .Symbol) {
                     const c2 = t2.data.cval;
+                    if (c2 == '*' and idx > 0) {
+                        const prev_tok = toks[idx - 1];
+                        if ((prev_tok.type == .Identifier and prev_tok.data.sval.items.len > 0 and (prev_tok.data.sval.items[0] >= 'A' and prev_tok.data.sval.items[0] <= 'Z')) or
+                            (prev_tok.type == .Keyword and is_builtin_type_keyword(prev_tok.data.sval.items)))
+                        {
+                            if (isPointerTypeStarContext(toks, idx, prev_tok, in_decl_only_ctx)) {
+                                break :blk false;
+                            }
+                        }
+                    }
                     if ((c2 == '<' and (generic_open or generic_angle_depth > 0)) or (c2 == '>' and generic_angle_depth > 0)) {
                         break :blk false;
                     }
@@ -1493,7 +1506,7 @@ pub fn format_file_in_place(allocator: mem.Allocator, input_file: []const u8) !v
         const kw = if (is_kw) t.data.sval.items else "";
 
         const starts_import_stmt = is_stmt_start and is_kw and std.mem.eql(u8, kw, "imp");
-        const starts_global_stmt = is_stmt_start and is_kw and is_builtin_type_keyword(kw);
+        const starts_global_stmt = is_stmt_start and is_kw and (is_builtin_type_keyword(kw) or std.mem.eql(u8, kw, "let"));
 
         if (starts_import_stmt or starts_global_stmt) {
             // Collect up to ';'

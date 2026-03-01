@@ -1,0 +1,32 @@
+// Companion to error_cases/let_infer_quirk_invalid.fn
+// Shows the correct pattern: explicit quirk annotation.
+
+imp std.c.io;
+
+compound Point {
+  num x;
+  num y;
+}
+
+quirk HasX {
+  get_x() num;
+}
+
+impl Point HasX {
+  get_x() num {
+    ret self.x;
+  }
+}
+
+fun as_hasx(Point* p) HasX {
+  ret p;
+}
+
+fun main() {
+  Point p = Point{x = 4, y = 9};
+
+  // Correct: explicit quirk type annotation.
+  HasX inferred_quirk = as_hasx(&p);
+
+  printf("x=%lld\n", inferred_quirk.get_x());
+}

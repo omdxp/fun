@@ -512,3 +512,41 @@ test "typecheck quirk impl missing methods errors" {
         "}\n";
     try runTranspileExpectError(std.testing.allocator, "typecheck_quirk_impl_missing_methods.fn", input);
 }
+
+test "typecheck let inference covers compounds methods function returns and generics" {
+    const input =
+        "compound Point { num x; num y; }\n" ++
+        "impl Point {\n" ++
+        "  sum() num { ret self.x + self.y; }\n" ++
+        "  shifted(num dx, num dy) Point { ret Point{x = self.x + dx, y = self.y + dy}; }\n" ++
+        "}\n" ++
+        "fun make_point(num x, num y) Point { ret Point{x = x, y = y}; }\n" ++
+        "fun pick_first<T>(T a, T b) T { _ = b; ret a; }\n" ++
+        "fun main() {\n" ++
+        "  let from_compound_init = Point{x = 1, y = 2};\n" ++
+        "  let from_function_return = make_point(10, 20);\n" ++
+        "  let from_method_return = from_function_return.shifted(3, 4);\n" ++
+        "  let from_method_num = from_method_return.sum();\n" ++
+        "  let from_generic_num = pick_first(100, 200);\n" ++
+        "  let from_generic_compound = pick_first(from_compound_init, from_function_return);\n" ++
+        "  num total = from_method_num + from_generic_num + from_generic_compound.x;\n" ++
+        "  if total > 0 { ret; }\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_let_infer_full_ok.fn", input);
+}
+
+test "typecheck let cannot infer quirk type" {
+    const input =
+        "compound Point { num x; num y; }\n" ++
+        "quirk HasX { get_x() num; }\n" ++
+        "impl Point HasX { get_x() num { ret self.x; } }\n" ++
+        "fun as_hasx(Point* p) HasX { ret p; }\n" ++
+        "fun main() {\n" ++
+        "  Point p = Point{x = 1, y = 2};\n" ++
+        "  let inferred_quirk = as_hasx(&p);\n" ++
+        "  inferred_quirk.get_x();\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_let_infer_quirk_err.fn", input);
+}

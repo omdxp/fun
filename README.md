@@ -4,7 +4,7 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/omdxp/fun/ci-dev.yml?branch=main)](https://github.com/omdxp/fun/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Fun** is a statically-typed programming language that transpiles to C, designed for safety, performance, and simplicity. Written in Zig. By default, Fun is a 64-bit language: `num` is a signed 64-bit integer and `dec` is a 64-bit IEEE double.
+**Fun** is a statically-typed programming language that transpiles to C, designed for safety, performance, and simplicity. Written in Zig. Fun includes high-level defaults (`num`, `dec`) and low-level fixed/arbitrary-width numeric types (`i32`, `u64`, `f32`, `f64`, `iN`, `uN`).
 
 ---
 
@@ -38,7 +38,7 @@
 ## Features
 
 - Statically-typed, C-like performance
-- 64-bit numeric core (`num` = int64, `dec` = double)
+- Rich numeric model (`num`/`dec`, fixed-width `i32`/`u64`, and arbitrary-width `iN`/`uN`)
 - Transpiles to readable C code
 - Simple, expressive syntax
 - Modular imports

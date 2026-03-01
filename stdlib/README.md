@@ -13,7 +13,7 @@ This directory contains standard library modules for the Fun language.
 
 ### Pure Fun modules (std/*)
 
-Note: Fun is 64-bit by default (`num` → `int64_t`, `dec` → `double`).
+Note: `num`/`dec` are 64-bit by default (`int64_t`/`double`), and Fun also supports fixed-width numeric types (`i8`..`i64`, `u8`..`u64`, `f32`, `f64`) plus arbitrary-width integers (`iN`, `uN`).
 
 - **std/array.fn**: Fixed-size array helpers (get/set/swap/reverse).
 - **std/cli.fn**: Command-line argument parsing helpers (long/short flags, bundling, `--` stop).
