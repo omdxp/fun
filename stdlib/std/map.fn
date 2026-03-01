@@ -94,11 +94,18 @@ impl Map<K, V> {
     raw* key_ptr = &key;
     u8* bytes = key_ptr;
     let key_size = sizeof(K);
-    num h = 2166136261;
+    num mod = 1000000007;
+    num mul = 16777619;
+    num h = 2166136261 % mod;
     num i = 0;
     for i < key_size {
       h = h ^ bytes[i];
-      h = h * 16777619;
+      if h < 0 {
+        h = -h;
+      }
+      h = h % mod;
+      h = h * mul;
+      h = h % mod;
       i = i + 1;
     }
     if h < 0 {
