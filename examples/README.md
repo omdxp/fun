@@ -54,6 +54,7 @@ zig-out/bin/fun -in examples/<example>.fn
 - stdlib/assert_basic.fn
 - stdlib/cli_parse.fn
 - stdlib/ctype_validate_identifier.fn
+- stdlib/compound_init.fn
 - stdlib/error_basic.fn
 - stdlib/io_file_copy.fn
 - stdlib/io_read_write.fn

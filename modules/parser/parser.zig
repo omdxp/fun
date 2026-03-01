@@ -1306,6 +1306,105 @@ pub const ParseProcess = struct {
         }
     }
 
+    fn parse_compound_init(self: *Self, dt: ?*dtype.DataType, hist: *utils.History, pos: ?token.Pos) ParseError!void {
+        const lbrace_tok = self.token_peek_next();
+        try self.expect_sym('{');
+
+        const deinit_dtype = struct {
+            fn call(allocator: mem.Allocator, dtype_ptr: *dtype.DataType) void {
+                dtype_ptr.type_str.deinit();
+                if (dtype_ptr.generic_args) |*gargs| {
+                    for (gargs.items()) |ga| {
+                        ga.type_str.deinit();
+                        if (ga.array) |array| {
+                            if (!array.brackets.is_empty()) {
+                                for (array.brackets.items()) |bracket| {
+                                    _ = bracket;
+                                }
+                            }
+                            array.brackets.deinit();
+                        }
+                        allocator.destroy(ga);
+                    }
+                    gargs.deinit();
+                }
+                if (dtype_ptr.array) |array| {
+                    if (!array.brackets.is_empty()) {
+                        for (array.brackets.items()) |bracket| {
+                            _ = bracket;
+                        }
+                    }
+                    array.brackets.deinit();
+                }
+                allocator.destroy(dtype_ptr);
+            }
+        }.call;
+
+        var fields = utils.Vector(ast.CompoundInitField).init(self.transpile_proc.allocator);
+        errdefer {
+            for (fields.items()) |f| {
+                f.name.deinit();
+                self.transpile_proc.deinit_node(f.value.*);
+                self.transpile_proc.allocator.destroy(f.value);
+            }
+            fields.deinit();
+            if (dt) |dtype_ptr| {
+                deinit_dtype(self.transpile_proc.allocator, dtype_ptr);
+            }
+        }
+
+        while (!self.next_token_is_symbol('}')) {
+            const field_tok = self.token_next();
+            if (field_tok == null or field_tok.?.type != .Identifier) {
+                self.transpile_proc.err("expected field name in compound initializer", .{});
+                return ParseError.InvalidIdentifier;
+            }
+
+            var fname = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, field_tok.?.data.sval.items.len) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer fname.deinit();
+            fname.appendSlice(field_tok.?.data.sval.items) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+
+            try self.expect_op("=");
+
+            var hist_down = utils.History.down(self.transpile_proc.allocator, hist, hist.flags);
+            hist_down.flags.stop_at_comma = true;
+            try self.parse_expressionable_root(&hist_down);
+            const value_node = self.node_pop();
+            const value_ptr = self.transpile_proc.allocator.create(ast.Node) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer self.transpile_proc.allocator.destroy(value_ptr);
+            value_ptr.* = value_node.?;
+
+            fields.push(.{ .name = fname, .value = value_ptr }) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+
+            if (self.next_token_is_operator(",")) {
+                _ = self.token_next();
+                if (self.next_token_is_symbol('}')) break;
+                continue;
+            }
+            break;
+        }
+
+        try self.expect_sym('}');
+
+        const init_node = ast.Node{
+            .type = .CompoundInit,
+            .pos = if (lbrace_tok) |t| t.pos else pos,
+            .node_variant = .{ .compound_init = .{ .dtype = dt, .fields = fields } },
+        };
+        self.transpile_proc.nodes.push(init_node) catch |e| {
+            std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});
+            return ParseError.MemoryAllocationFailed;
+        };
+    }
+
     /// Peeks at the expressionable node on top of the stack.
     ///
     /// This function returns the node on top of the stack if it is expressionable,
@@ -1750,6 +1849,14 @@ pub const ParseProcess = struct {
             // Parse as a dot-expression with a blank LHS so later passes can resolve it
             // using the expected enum type from context.
             if (mem.eql(u8, op, ".")) {
+                const next_tok = self.token_peek_n(1);
+                if (next_tok != null and next_tok.?.type == .Symbol and next_tok.?.data.cval == '{') {
+                    _ = self.token_next(); // skip '.'
+                    const lbrace_tok = self.token_peek_next();
+                    try self.parse_compound_init(null, hist, if (lbrace_tok) |lt| lt.pos else op_pos);
+                    return;
+                }
+
                 _ = self.token_next(); // skip '.'
 
                 // Expect a single identifier after '.'
@@ -1940,6 +2047,9 @@ pub const ParseProcess = struct {
         if (t == null) {
             return false;
         }
+        if (hist.flags.stop_at_comma and t.?.type == .Operator and mem.eql(u8, t.?.data.sval.items, ",")) {
+            return false;
+        }
         hist.flags.inside_expression = true;
         return switch (t.?.type) {
             .Number, .Boolean => try self.parse_single_token_to_node(),
@@ -1950,6 +2060,46 @@ pub const ParseProcess = struct {
                 return try self.parse_expression(hist);
             },
             .Identifier => blk: {
+                const looks_like_compound_init = struct {
+                    fn check(p: *Self, _: token.Token) bool {
+                        var off: usize = 1;
+                        _ = p.skip_generic_args_tokens(&off);
+                        const next_tok = p.token_peek_n(off) orelse return false;
+                        return next_tok.type == .Symbol and next_tok.data.cval == '{';
+                    }
+                }.check;
+
+                const is_known_compound = blk2: {
+                    const sym = self.transpile_proc.get_symbol(t.?.data.sval.items) orelse break :blk2 false;
+                    const node_opt = symbol.get_node_symbol(sym) orelse break :blk2 false;
+                    break :blk2 node_opt.type == .Compound;
+                };
+
+                const is_known_imported = blk3: {
+                    const hit = self.transpile_proc.global_symbols.get(t.?.data.sval.items) orelse break :blk3 false;
+                    break :blk3 !hit.is_function;
+                };
+
+                const is_value_in_scope = self.transpile_proc.get_scope_entity(t.?.data.sval.items) != null;
+
+                if (!is_value_in_scope and (is_known_compound or is_known_imported) and looks_like_compound_init(self, t.?)) {
+                    const dt = self.transpile_proc.allocator.create(dtype.DataType) catch |e| {
+                        std.debug.print("Error creating DataType: {}\n", .{e});
+                        return ParseError.MemoryAllocationFailed;
+                    };
+                    errdefer self.transpile_proc.allocator.destroy(dt);
+                    dt.* = dtype.DataType{
+                        .array = null,
+                        .pointer_depth = 0,
+                        .type = .Unknown,
+                        .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
+                        .flags = .{},
+                    };
+                    try self.parse_datatype(dt);
+                    const lbrace_tok = self.token_peek_next();
+                    try self.parse_compound_init(dt, hist, if (lbrace_tok) |lt| lt.pos else null);
+                    break :blk true;
+                }
                 // Support user-defined types at statement level: `Point p;`.
                 // If the next token is a known type name and the following token looks like a declaration,
                 // parse it as a variable declaration instead of an identifier expression.

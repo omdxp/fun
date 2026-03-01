@@ -46,14 +46,14 @@ impl Option<T> {
 }
 
 // Construct an Option with a value.
-pub fun some<T> (T value) Option<T> {
+pub fun some<T>(T value) Option<T> {
   Option<T> o;
   o.set_some(value);
   ret o;
 }
 
 // Construct an empty Option with a default value.
-pub fun none<T> (T default_value) Option<T> {
+pub fun none<T>(T default_value) Option<T> {
   Option<T> o;
   o.set_none(default_value);
   ret o;

@@ -1307,6 +1307,152 @@ pub const TranspileProcess = struct {
         return out;
     }
 
+    fn clone_dtype(self: *Self, dt: *const dtype.DataType) TranspileError!*dtype.DataType {
+        if (dt.array != null) return TranspileError.TypeMismatch;
+
+        const out = self.allocator.create(dtype.DataType) catch {
+            return TranspileError.MemoryAllocationFailed;
+        };
+        out.* = dt.*;
+        out.type_str = std.ArrayList(u8).init(self.allocator);
+        out.type_str.appendSlice(dt.type_str.items) catch return TranspileError.MemoryAllocationFailed;
+        out.generic_args = null;
+
+        if (dt.generic_args) |gargs| {
+            var out_args = utils.Vector(*dtype.DataType).init(self.allocator);
+            errdefer {
+                for (out_args.items()) |ga| {
+                    ga.type_str.deinit();
+                    self.allocator.destroy(ga);
+                }
+                out_args.deinit();
+            }
+            for (gargs.items()) |ga| {
+                const ga_copy = try self.clone_dtype(ga);
+                out_args.push(ga_copy) catch return TranspileError.MemoryAllocationFailed;
+            }
+            out.generic_args = out_args;
+        }
+
+        return out;
+    }
+
+    fn validate_compound_init(self: *Self, init_node: ast.Node, dt: *dtype.DataType, env: *TypeEnv, fns: *const std.StringHashMap(FnSig)) TranspileError!void {
+        if (dt.pointer_depth != 0 or (dt.flags != null and dt.flags.?.is_array)) {
+            self.report_type_error(init_node, "compound initializer expects a non-pointer, non-array compound type", .{});
+            return TranspileError.TypeMismatch;
+        }
+
+        try self.ensure_dtype_visible(init_node, dt, env.type_params);
+
+        const root = self.root_registry() orelse {
+            self.report_type_error(init_node, "unknown compound type", .{});
+            return TranspileError.SymbolNotDefined;
+        };
+        const base_name = if (mem.indexOf(u8, dt.type_str.items, "__")) |idx| dt.type_str.items[0..idx] else dt.type_str.items;
+        const cnode = root.compounds_by_name.get(base_name) orelse {
+            self.report_type_error(init_node, "type '{s}' is not a compound", .{base_name});
+            return TranspileError.TypeMismatch;
+        };
+        if (!self.can_access(&init_node, cnode)) {
+            self.report_type_error(init_node, "type '{s}' is private", .{base_name});
+            return TranspileError.SymbolNotDefined;
+        }
+
+        const cdef = cnode.node_variant.?.compound;
+        const params = cdef.type_params;
+        const gargs = if (dt.generic_args) |ga| ga.items() else null;
+        if (params != null) {
+            const pcount = params.?.count;
+            const gcount = if (gargs) |ga| ga.len else 0;
+            if (pcount != gcount) {
+                self.report_type_error(init_node, "compound initializer generic arg count mismatch", .{});
+                return TranspileError.TypeMismatch;
+            }
+        }
+        if (dt.generic_args != null) {
+            try self.register_generic_instantiation(dt);
+        }
+
+        var seen = std.StringHashMap(bool).init(self.allocator);
+        defer seen.deinit();
+
+        const ci = init_node.node_variant.?.compound_init;
+        for (ci.fields.items()) |field| {
+            if (seen.contains(field.name.items)) {
+                self.report_type_error(init_node, "duplicate field '{s}' in compound initializer", .{field.name.items});
+                return TranspileError.TypeMismatch;
+            }
+            seen.put(field.name.items, true) catch return TranspileError.MemoryAllocationFailed;
+
+            var fdt: ?*dtype.DataType = null;
+            for (cdef.fields.items()) |f| {
+                if (mem.eql(u8, f.name.items, field.name.items)) {
+                    fdt = f.dtype;
+                    break;
+                }
+            }
+            if (fdt == null) {
+                self.report_type_error(init_node, "unknown field '{s}' in compound initializer", .{field.name.items});
+                return TranspileError.UnknownField;
+            }
+
+            const expected = if (params != null and gargs != null)
+                try self.type_from_dtype_with_subst(fdt.?, params.?, gargs.?)
+            else
+                try self.type_from_dtype_with_mangled(fdt.?);
+
+            if (field.value.*.type == .CompoundInit) {
+                try self.bind_compound_init_expected(field.value, expected, env, fns);
+            }
+            if (self.expected_enum_name(expected)) |enum_name| {
+                if (dot_shorthand_variant_name(field.value)) |_| {
+                    _ = try self.resolve_dot_shorthand_enum_variant(field.value, enum_name);
+                }
+            }
+
+            const actual = try self.infer_expr_type(field.value.*, env, fns);
+            if (is_known_type(expected) and is_known_type(actual) and !(try self.can_implicit_coerce(expected, actual))) {
+                self.report_type_error(init_node, "type mismatch for field '{s}' in compound initializer", .{field.name.items});
+                return TranspileError.TypeMismatch;
+            }
+        }
+    }
+
+    fn bind_compound_init_expected(self: *Self, init_node: *ast.Node, expected: CheckedType, env: *TypeEnv, fns: *const std.StringHashMap(FnSig)) TranspileError!void {
+        if (init_node.type != .CompoundInit or init_node.node_variant == null) return;
+        const ci = &init_node.node_variant.?.compound_init;
+        if (ci.dtype == null) {
+            if (expected.dtype_ref) |dt| {
+                if (dt.pointer_depth != 0 or (dt.flags != null and dt.flags.?.is_array)) {
+                    self.report_type_error(init_node.*, "compound initializer expects a non-pointer, non-array compound type", .{});
+                    return TranspileError.TypeMismatch;
+                }
+                ci.dtype = try self.clone_dtype(dt);
+            } else if (expected.name) |name| {
+                const dt = self.allocator.create(dtype.DataType) catch {
+                    return TranspileError.MemoryAllocationFailed;
+                };
+                dt.* = .{
+                    .flags = null,
+                    .type = .Unknown,
+                    .type_str = std.ArrayList(u8).init(self.allocator),
+                    .pointer_depth = 0,
+                    .array = null,
+                    .generic_args = null,
+                };
+                dt.type_str.appendSlice(name) catch return TranspileError.MemoryAllocationFailed;
+                ci.dtype = dt;
+            } else {
+                return;
+            }
+        }
+
+        if (ci.dtype) |dt| {
+            try self.validate_compound_init(init_node.*, dt, env, fns);
+        }
+    }
+
     fn make_vec_str_dtype(self: *Self) TranspileError!*dtype.DataType {
         const dt_str = self.allocator.create(dtype.DataType) catch {
             return TranspileError.MemoryAllocationFailed;
@@ -3148,6 +3294,14 @@ pub const TranspileProcess = struct {
 
     fn infer_expr_type(self: *Self, node: ast.Node, env: *TypeEnv, fns: *const std.StringHashMap(FnSig)) TranspileError!CheckedType {
         switch (node.type) {
+            .CompoundInit => {
+                const ci = node.node_variant.?.compound_init;
+                if (ci.dtype == null) {
+                    return .{ .base = .Unknown };
+                }
+                try self.validate_compound_init(node, ci.dtype.?, env, fns);
+                return try self.type_from_dtype_with_mangled(ci.dtype.?);
+            },
             .Bracket => {
                 // Array literal: `[a, b, c]`. The parser stores elements under `bracket.inner`.
                 var elems = std.ArrayList(*ast.Node).init(self.allocator);
@@ -3756,6 +3910,9 @@ pub const TranspileProcess = struct {
                             // Enum shorthand args: `foo(.Blue)` where param type is `Color`.
                             if (idx < sig.args.len) {
                                 const expected = sig.args[idx];
+                                if (arg_node.type == .CompoundInit) {
+                                    try self.bind_compound_init_expected(arg_node, expected, env, fns);
+                                }
                                 if (self.expected_enum_name(expected)) |enum_name| {
                                     if (dot_shorthand_variant_name(arg_node)) |_| {
                                         _ = try self.resolve_dot_shorthand_enum_variant(arg_node, enum_name);
@@ -3782,6 +3939,9 @@ pub const TranspileProcess = struct {
                         }
                         for (args_nodes.items, 0..) |arg_node, idx| {
                             const expected = type_from_dtype(expected_args[idx].dtype);
+                            if (arg_node.type == .CompoundInit) {
+                                try self.bind_compound_init_expected(arg_node, expected, env, fns);
+                            }
                             if (self.expected_enum_name(expected)) |enum_name| {
                                 if (dot_shorthand_variant_name(arg_node)) |_| {
                                     _ = try self.resolve_dot_shorthand_enum_variant(arg_node, enum_name);
@@ -3816,6 +3976,9 @@ pub const TranspileProcess = struct {
                             const sig_idx = idx + 1; // skip implicit self
                             if (sig_idx < psig.args.len) {
                                 const expected = psig.args[sig_idx];
+                                if (arg_node.type == .CompoundInit) {
+                                    try self.bind_compound_init_expected(arg_node, expected, env, fns);
+                                }
                                 if (self.expected_enum_name(expected)) |enum_name| {
                                     if (dot_shorthand_variant_name(arg_node)) |_| {
                                         _ = try self.resolve_dot_shorthand_enum_variant(arg_node, enum_name);
@@ -4030,6 +4193,10 @@ pub const TranspileProcess = struct {
                         }
                     }
 
+                    if (right.*.type == .CompoundInit) {
+                        try self.bind_compound_init_expected(right, lt, env, fns);
+                    }
+
                     const rt = try self.infer_expr_type(right.*, env, fns);
 
                     // For compound assignments, require numeric types.
@@ -4183,6 +4350,9 @@ pub const TranspileProcess = struct {
                     }
                     try env.put_current(name, vtype);
                     if (v.val) |val| {
+                        if (val.*.type == .CompoundInit) {
+                            try self.bind_compound_init_expected(val, vtype, env, fns);
+                        }
                         if (self.expected_enum_name(vtype)) |enum_name| {
                             if (dot_shorthand_variant_name(val)) |_| {
                                 _ = try self.resolve_dot_shorthand_enum_variant(val, enum_name);
@@ -4208,6 +4378,9 @@ pub const TranspileProcess = struct {
                             return TranspileError.ReturnTypeMismatch;
                         }
                         const rv = stmt.node_variant.?.statement.return_stmt;
+                        if (rv.*.type == .CompoundInit) {
+                            try self.bind_compound_init_expected(rv, fn_rtype, env, fns);
+                        }
                         if (self.expected_enum_name(fn_rtype)) |enum_name| {
                             if (dot_shorthand_variant_name(rv)) |_| {
                                 _ = try self.resolve_dot_shorthand_enum_variant(rv, enum_name);
@@ -5414,6 +5587,41 @@ pub const TranspileProcess = struct {
                 .bracket => |bracket| {
                     self.deinit_node(bracket.inner.*);
                     allocator.destroy(bracket.inner);
+                },
+                .compound_init => |cinit| {
+                    if (cinit.dtype) |dt| {
+                        dt.type_str.deinit();
+                        if (dt.generic_args) |*gargs| {
+                            for (gargs.items()) |ga| {
+                                ga.type_str.deinit();
+                                if (ga.array) |array| {
+                                    if (!array.brackets.is_empty()) {
+                                        for (array.brackets.items()) |bracket| {
+                                            self.deinit_node(bracket);
+                                        }
+                                    }
+                                    array.brackets.deinit();
+                                }
+                                allocator.destroy(ga);
+                            }
+                            gargs.deinit();
+                        }
+                        if (dt.array) |array| {
+                            if (!array.brackets.is_empty()) {
+                                for (array.brackets.items()) |bracket| {
+                                    self.deinit_node(bracket);
+                                }
+                            }
+                            array.brackets.deinit();
+                        }
+                        allocator.destroy(dt);
+                    }
+                    for (cinit.fields.items()) |f| {
+                        f.name.deinit();
+                        self.deinit_node(f.value.*);
+                        allocator.destroy(f.value);
+                    }
+                    cinit.fields.deinit();
                 },
                 .body => |body| {
                     for (body.statements.items()) |statement| {
@@ -7621,6 +7829,32 @@ pub const TranspileProcess = struct {
     /// Transpiles a node to C code
     fn transpile_node(self: *Self, node: ast.Node) TranspileError!void {
         switch (node.type) {
+            .CompoundInit => {
+                const ci = node.node_variant.?.compound_init;
+                const dt = ci.dtype orelse {
+                    self.report_type_error(node, "compound initializer requires a concrete type", .{});
+                    return TranspileError.TypeMismatch;
+                };
+
+                try self.write("(");
+                try self.write_type(dt.*);
+                try self.write("){");
+
+                if (ci.fields.count == 0) {
+                    try self.write("0");
+                } else {
+                    for (ci.fields.items(), 0..) |f, i| {
+                        if (i > 0) try self.write(", ");
+                        try self.write(".");
+                        try self.write(f.name.items);
+                        try self.write(" = ");
+                        try self.transpile_node(f.value.*);
+                    }
+                }
+
+                try self.write("}");
+                return;
+            },
             .Expression => {
                 const exp = node.node_variant.?.exp;
                 if (mem.eql(u8, exp.op, "()")) {

@@ -104,7 +104,7 @@ impl Fs {
   }
 
   // Read all lines into a Vec<str>.
-  pub read_lines(str path, num max_len) Vec < str > {
+  pub read_lines(str path, num max_len) Vec<str> {
     Vec<str> out;
     out.init(8);
     FILE* h = fopen(path, "rb");

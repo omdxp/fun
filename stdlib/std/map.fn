@@ -400,7 +400,7 @@ impl Map<T> {
   }
 
   // Return all keys as a Vec<str>.
-  pub keys() Vec < str > {
+  pub keys() Vec<str> {
     Vec<str> out;
     out.init(self.len);
     if self.entries == NULL {

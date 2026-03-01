@@ -2,6 +2,12 @@
   "files.associations": {
     "*.fn": "fun"
   },
+  "files.exclude": {
+    "**/_fls_*.fn": true,
+    "**/.__fls_*.fn": true,
+    "**/_fls_idx_*.fn": true,
+    "**/__fls_unused__*.c": true
+  },
   "fun.fls.path": "${workspaceFolder}/zig-out/bin/fls",
   "fun.fls.funPath": "${workspaceFolder}/zig-out/bin/fun",
   "fun.fls.debugImports": true,

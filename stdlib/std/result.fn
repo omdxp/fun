@@ -55,14 +55,14 @@ impl Result<T> {
 }
 
 // Construct a successful generic result.
-pub fun ok<T> (T value) Result<T> {
+pub fun ok<T>(T value) Result<T> {
   Result<T> r;
   r.set_ok(value);
   ret r;
 }
 
 // Construct an error generic result.
-pub fun err<T> (num code, str message, T default_value) Result<T> {
+pub fun err<T>(num code, str message, T default_value) Result<T> {
   Result<T> r;
   r.set_err(code, message, default_value);
   ret r;

@@ -1,0 +1,21 @@
+// Demonstrates compound initialization (longhand and shorthand).
+
+imp std.io;
+
+compound User {
+  str name;
+  num age;
+  bin active;
+}
+
+fun main() {
+  User u1 = User{name = "Alice", age = 30};
+  User u2 = .{name = "Bob"};
+
+  // Partial init: set remaining fields later.
+  u2.age = 22;
+  u2.active = true;
+
+  println_fmt("u1={str} age={num} active={bin}", u1.name, u1.age, u1.active);
+  println_fmt("u2={str} age={num} active={bin}", u2.name, u2.age, u2.active);
+}

@@ -96,7 +96,7 @@ impl JsonObject {
   }
 
   // Return all keys.
-  pub keys() Vec < str > {
+  pub keys() Vec<str> {
     Vec<str> out;
     out.init(self.values.len());
 

@@ -72,6 +72,8 @@ pub const NodeType = enum {
     Tenary,
     /// Represents a bracket node.
     Bracket,
+    /// Represents a compound initializer (e.g. `Type{...}` or `.{...}`).
+    CompoundInit,
     /// Represents an import node.
     Import,
     /// Represents a user-defined compound type declaration.
@@ -168,6 +170,12 @@ pub const Node = struct {
         bracket: struct {
             /// The inner expression of the bracket.
             inner: *Node,
+        },
+        /// The compound initializer node.
+        compound_init: struct {
+            /// Optional type (present for `Type{...}`, inferred for `.{...}`).
+            dtype: ?*dtype.DataType = null,
+            fields: utils.Vector(CompoundInitField),
         },
         /// The body node.
         body: struct {
@@ -307,6 +315,11 @@ pub const CompoundField = struct {
     dtype: *dtype.DataType,
 };
 
+pub const CompoundInitField = struct {
+    name: std.ArrayList(u8),
+    value: *Node,
+};
+
 pub const QuirkMethodSig = struct {
     name: std.ArrayList(u8),
     rtype: dtype.DataType,
@@ -372,7 +385,7 @@ pub fn node_is_value_type(n: Node) bool {
     return node_is_expression_or_parenthesis(n) or
         n.type == .Identifier or n.type == .Number or
         n.type == .Unary or n.type == .Tenary or
-        n.type == .String;
+        n.type == .String or n.type == .CompoundInit;
 }
 
 /// Checks if the node is expressionable.
@@ -394,7 +407,8 @@ pub fn node_is_value_type(n: Node) bool {
 pub fn node_is_expressionable(n: Node) bool {
     return n.type == .Expression or n.type == .ExpressionParenthesis or
         n.type == .Unary or n.type == .Identifier or
-        n.type == .Number or n.type == .String or n.type == .Boolean;
+        n.type == .Number or n.type == .String or n.type == .Boolean or
+        n.type == .CompoundInit;
 }
 
 /// Checks if the node is an array expression.

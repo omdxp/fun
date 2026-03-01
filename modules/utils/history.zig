@@ -16,6 +16,8 @@ pub const HistoryFlags = packed struct {
     expression_is_unary: bool = false,
     /// Indicates that we are inside an expression.
     inside_expression: bool = false,
+    /// Stop parsing when encountering a top-level comma.
+    stop_at_comma: bool = false,
 };
 
 /// Represents the branches in a fit statement.
@@ -74,6 +76,7 @@ pub const History = struct {
         if (flags.inside_function_body) new_history.flags.inside_function_body = true;
         if (flags.is_global_scope) new_history.flags.is_global_scope = true;
         if (flags.parenthesis_not_function_call) new_history.flags.parenthesis_not_function_call = true;
+        if (flags.stop_at_comma) new_history.flags.stop_at_comma = true;
         return new_history;
     }
 

@@ -1,6 +1,6 @@
 fun bad() num* {
   num x = 123;
-  ret &x;
+  ret&x;
 }
 
 fun main() {

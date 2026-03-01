@@ -4801,7 +4801,7 @@ const LspServer = struct {
         // Create the temp file next to the current document, so relative `imp "..."` resolution
         // and diagnostic file paths match the user's project layout.
         var tmp_name_buf: [80]u8 = undefined;
-        const tmp_name = try std.fmt.bufPrint(&tmp_name_buf, "_fls_{d}_{d}.fn", .{ std.time.milliTimestamp(), std.time.nanoTimestamp() });
+        const tmp_name = try std.fmt.bufPrint(&tmp_name_buf, ".__fls_{d}_{d}.fn", .{ std.time.milliTimestamp(), std.time.nanoTimestamp() });
 
         const current_path_opt = uriToPath(self.allocator, current_uri) catch null;
         defer if (current_path_opt) |p| self.allocator.free(p);
@@ -4836,8 +4836,19 @@ const LspServer = struct {
 
     fn formatText(self: *LspServer, text: []const u8) ![]u8 {
         var tmp_dir = std.fs.cwd();
+        var tmp_abs_path: ?[]u8 = null;
+        defer if (tmp_abs_path) |p| self.allocator.free(p);
+
+        if (getOrInitFlsTempDirCached()) |res| {
+            tmp_dir = res.dir;
+        }
+
         var tmp_name_buf: [64]u8 = undefined;
-        const tmp_name = try std.fmt.bufPrint(&tmp_name_buf, "_fls_fmt_{d}.fn", .{std.time.milliTimestamp()});
+        const tmp_name = try std.fmt.bufPrint(&tmp_name_buf, ".__fls_fmt_{d}.fn", .{std.time.milliTimestamp()});
+
+        if (getOrInitFlsTempDirCached()) |res2| {
+            tmp_abs_path = try std.fs.path.join(self.allocator, &[_][]const u8{ res2.abs_path, tmp_name });
+        }
 
         {
             const f = try tmp_dir.createFile(tmp_name, .{ .read = true, .truncate = true });
@@ -4849,7 +4860,8 @@ const LspServer = struct {
         var stderr_buf = std.ArrayList(u8).init(self.allocator);
         defer stderr_buf.deinit();
 
-        const argv = [_][]const u8{ self.fun_exe_path, "-in", tmp_name, "-fmt", "-no-exec" };
+        const in_path = if (tmp_abs_path) |p| p else tmp_name;
+        const argv = [_][]const u8{ self.fun_exe_path, "-in", in_path, "-fmt", "-no-exec" };
         const code = try runCaptureStderr(self.allocator, &argv, &stderr_buf);
         if (code != 0) return error.FormatFailed;
 

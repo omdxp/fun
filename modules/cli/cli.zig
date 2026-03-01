@@ -694,18 +694,41 @@ fn next_significant_index(toks: []const token.Token, idx: usize) ?usize {
     return null;
 }
 
+fn has_paren_before_brace(toks: []const token.Token, idx: usize) bool {
+    if (idx == 0) return false;
+    var i: isize = @as(isize, @intCast(idx)) - 1;
+    while (i >= 0) : (i -= 1) {
+        const t = toks[@intCast(i)];
+        if (t.type == .NewLine or t.type == .Comment) continue;
+        if (t.type == .Symbol) {
+            const c = t.data.cval;
+            if (c == ')') return true;
+            if (c == '{' or c == '}' or c == ';' or c == ',') return false;
+        }
+        if (t.type == .Operator) {
+            const op = t.data.sval.items;
+            if (std.mem.eql(u8, op, "=") or std.mem.eql(u8, op, ",") or std.mem.eql(u8, op, ":")) return false;
+        }
+    }
+    return false;
+}
+
 fn is_generic_angle_open(toks: []const token.Token, idx: usize, in_decl_only_ctx: bool) bool {
     if (idx >= toks.len) return false;
     const t = toks[idx];
-    if (!(t.type == .Operator and std.mem.eql(u8, t.data.sval.items, "<"))) return false;
+    const is_lt = (t.type == .Operator and std.mem.eql(u8, t.data.sval.items, "<")) or
+        (t.type == .Symbol and t.data.cval == '<');
+    if (!is_lt) return false;
 
     const prev_idx = prev_significant_index(toks, idx) orelse return false;
     const next_idx = next_significant_index(toks, idx) orelse return false;
     const prev = toks[prev_idx];
     const next = toks[next_idx];
 
-    if (!is_word_like(prev)) return false;
-    if (!(is_word_like(next) or next.type == .Keyword)) return false;
+    if (!isLikelyTypeToken(prev)) {
+        if (!(in_decl_only_ctx and prev.type == .Identifier)) return false;
+    }
+    if (!isLikelyTypeToken(next)) return false;
 
     if (in_decl_only_ctx) return true;
 
@@ -718,7 +741,7 @@ fn is_generic_angle_open(toks: []const token.Token, idx: usize, in_decl_only_ctx
     }
     if (before_prev.type == .Symbol) {
         const c = before_prev.data.cval;
-        if (c == '{' or c == '}' or c == ';' or c == ',' or c == '(') return true;
+        if (c == '{' or c == '}' or c == ';' or c == ',' or c == '(' or c == ')') return true;
     }
     if (before_prev.type == .Operator) {
         const op = before_prev.data.sval.items;
@@ -812,8 +835,12 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
     var decl_block_depth: isize = 0;
     var pending_enum_block_open: bool = false;
     var enum_block_depth: isize = 0;
+    var pending_control_block_open: bool = false;
+    var function_body_depth: isize = 0;
     var generic_angle_depth: usize = 0;
     var asm_raw: ?AsmRawRange = null;
+    var brace_stack = std.ArrayList(bool).init(state.allocator);
+    defer brace_stack.deinit();
     while (idx < toks.len) : (idx += 1) {
         const t2 = toks[idx];
         if (t2.type == .NewLine) {
@@ -920,7 +947,7 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
             if (std.mem.eql(u8, kw2, "fun")) {
                 in_fun_signature = true;
             }
-            if (std.mem.eql(u8, kw2, "compound") or std.mem.eql(u8, kw2, "quirk")) {
+            if (std.mem.eql(u8, kw2, "compound") or std.mem.eql(u8, kw2, "quirk") or std.mem.eql(u8, kw2, "impl")) {
                 pending_decl_block_open = true;
             }
             if (std.mem.eql(u8, kw2, "enum")) {
@@ -930,6 +957,7 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                 // Decide whether this `if/elif` is a block (`{}`) or a single-statement form.
                 // If it's a block and the condition is parenthesized, we strip the outer parens.
                 // If it's single-statement and the condition is NOT parenthesized, we add parens.
+                pending_control_block_open = false;
                 var jcond: usize = idx + 1;
                 while (jcond < toks.len and (toks[jcond].type == .NewLine or toks[jcond].type == .Comment)) : (jcond += 1) {}
                 if (jcond < toks.len) {
@@ -968,6 +996,9 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                     if (is_block and cond_has_parens) {
                         skipping_cond_outer_parens = true;
                         cond_paren_depth = 0;
+                        pending_control_block_open = true;
+                    } else if (is_block) {
+                        pending_control_block_open = true;
                     } else if (is_single_stmt and !cond_has_parens) {
                         // Find a reasonable statement start boundary so we can wrap only the condition.
                         const stmt_keywords = [_][]const u8{ "ret", "break", "continue", "fit", "for", "if" };
@@ -1027,12 +1058,25 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                     }
                 }
             }
+            if (std.mem.eql(u8, kw2, "else") or std.mem.eql(u8, kw2, "for") or std.mem.eql(u8, kw2, "fit") or std.mem.eql(u8, kw2, "defer")) {
+                pending_control_block_open = true;
+            }
         }
 
         // Handle closing brace with optional same-line `elif`/`else`.
         if (t2.type == .Symbol and t2.data.cval == '}') {
+            const is_block_close = if (brace_stack.items.len > 0) brace_stack.items[brace_stack.items.len - 1] else true;
+            if (brace_stack.items.len > 0) _ = brace_stack.pop();
+
+            if (!is_block_close) {
+                try state.out.append('}');
+                state.prev_token.* = t2;
+                continue;
+            }
+
             if (decl_block_depth > 0) decl_block_depth -= 1;
             if (enum_block_depth > 0) enum_block_depth -= 1;
+            if (function_body_depth > 0) function_body_depth -= 1;
             if (!state.at_line_start.*) try state.out.append('\n');
             if (state.indent.* > 0) state.indent.* -= 1;
             try state.out.appendNTimes(' ', state.indent.* * fmt_indent_width);
@@ -1089,8 +1133,22 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
             state.at_line_start.* = false;
         }
 
-        const in_decl_only_ctx = in_fun_signature or decl_block_depth > 0;
+        const in_decl_only_ctx = in_fun_signature or (decl_block_depth > 0 and function_body_depth == 0);
         const generic_open = is_generic_angle_open(toks, idx, in_decl_only_ctx);
+        const prev_sig_idx = prev_significant_index(toks, idx);
+        const prev_sig = if (prev_sig_idx) |pi| toks[pi] else null;
+        const prev_prev_sig_idx = if (prev_sig_idx) |pi| prev_significant_index(toks, pi) else null;
+        const prev_prev_sig = if (prev_prev_sig_idx) |ppi| toks[ppi] else null;
+        const prev_sig_is_rparen = prev_sig != null and prev_sig.?.type == .Symbol and prev_sig.?.data.cval == ')';
+        const prev_prev_is_rparen = prev_prev_sig != null and prev_prev_sig.?.type == .Symbol and prev_prev_sig.?.data.cval == ')';
+        const prev_sig_is_type_after_paren = prev_prev_is_rparen and prev_sig != null and isLikelyTypeToken(prev_sig.?);
+        const prev_sig_is_arrow = prev_sig != null and prev_sig.?.type == .Operator and std.mem.eql(u8, prev_sig.?.data.sval.items, "->");
+        const prev_sig_is_comma = prev_sig != null and prev_sig.?.type == .Operator and std.mem.eql(u8, prev_sig.?.data.sval.items, ",");
+        const prev_sig_is_semicolon = prev_sig != null and prev_sig.?.type == .Symbol and prev_sig.?.data.cval == ';';
+        const prev_sig_is_lbrace = prev_sig != null and prev_sig.?.type == .Symbol and prev_sig.?.data.cval == '{';
+        const paren_before_brace = has_paren_before_brace(toks, idx);
+        const is_block_brace = t2.type == .Symbol and t2.data.cval == '{' and
+            (pending_decl_block_open or pending_enum_block_open or in_fun_signature or pending_control_block_open or prev_sig_is_rparen or prev_sig_is_type_after_paren or paren_before_brace or prev_sig_is_arrow or prev_sig_is_comma or prev_sig_is_semicolon or prev_sig_is_lbrace);
 
         // Decide whether to add a space before this token.
         if (state.prev_token.*) |pt2| {
@@ -1170,8 +1228,14 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                 }
                 if (t2.type == .Symbol) {
                     const c2 = t2.data.cval;
+                    if ((c2 == '<' and (generic_open or generic_angle_depth > 0)) or (c2 == '>' and generic_angle_depth > 0)) {
+                        break :blk false;
+                    }
                     if (c2 == ',' or c2 == ';' or c2 == ')' or c2 == ']' or c2 == '}' or c2 == ':') break :blk false;
-                    if (c2 == '{') break :blk true;
+                    if (c2 == '{') break :blk is_block_brace;
+                    if (c2 == '*' or c2 == '+' or c2 == '-' or c2 == '/' or c2 == '%' or c2 == '<' or c2 == '>' or c2 == '=' or c2 == '&' or c2 == '|' or c2 == '^') {
+                        break :blk true;
+                    }
                     if (c2 == '(' or c2 == '[') {
                         // No space for calls/indexing: `foo(`, `arr[`.
                         break :blk false;
@@ -1179,9 +1243,14 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                 }
                 if (pt2.type == .Symbol) {
                     const pc2 = pt2.data.cval;
+                    if (pc2 == '>' and (t2.type == .Symbol and t2.data.cval == '(')) break :blk false;
+                    if ((pc2 == '<' and generic_angle_depth > 0) or (pc2 == '>' and generic_angle_depth > 0)) break :blk false;
+                    if (pc2 == '*' or pc2 == '+' or pc2 == '-' or pc2 == '/' or pc2 == '%' or pc2 == '<' or pc2 == '>' or pc2 == '=' or pc2 == '&' or pc2 == '|' or pc2 == '^') break :blk true;
                     if (pc2 == '(' or pc2 == '[' or pc2 == '{') break :blk false;
                 }
                 if (t2.type == .Operator and (std.mem.eql(u8, t2.data.sval.items, "(") or std.mem.eql(u8, t2.data.sval.items, "["))) {
+                    if (pt2.type == .Symbol and pt2.data.cval == '>') break :blk false;
+                    if (pt2.type == .Operator and std.mem.eql(u8, pt2.data.sval.items, ">")) break :blk false;
                     // Distinguish grouping after spaced operators (e.g. `|| (`) from calls/indexing (e.g. `foo(`).
                     if (pt2.type == .Operator and operator_needs_spaces(pt2.data.sval.items)) break :blk true;
                     break :blk false;
@@ -1230,20 +1299,35 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
         if (t2.type == .Symbol) {
             const c2 = t2.data.cval;
             if (c2 == '{') {
-                if (pending_decl_block_open) {
-                    decl_block_depth += 1;
-                    pending_decl_block_open = false;
+                if (is_block_brace) {
+                    if (pending_decl_block_open) {
+                        decl_block_depth += 1;
+                        pending_decl_block_open = false;
+                    }
+                    if (pending_enum_block_open) {
+                        enum_block_depth += 1;
+                        pending_enum_block_open = false;
+                    }
+                    if (pending_control_block_open) pending_control_block_open = false;
+                    if (in_fun_signature) {
+                        in_fun_signature = false;
+                        function_body_depth += 1;
+                    } else if (function_body_depth == 0 and decl_block_depth > 0 and !pending_decl_block_open and !pending_enum_block_open and !pending_control_block_open and (prev_sig_is_rparen or prev_sig_is_type_after_paren or paren_before_brace)) {
+                        function_body_depth = 1;
+                    } else if (function_body_depth > 0) {
+                        function_body_depth += 1;
+                    }
+                    try brace_stack.append(true);
+                    try state.out.append('{');
+                    try state.out.append('\n');
+                    state.indent.* += 1;
+                    state.at_line_start.* = true;
+                    state.prev_token.* = null;
+                    continue;
                 }
-                if (pending_enum_block_open) {
-                    enum_block_depth += 1;
-                    pending_enum_block_open = false;
-                }
-                if (in_fun_signature) in_fun_signature = false;
+                try brace_stack.append(false);
                 try state.out.append('{');
-                try state.out.append('\n');
-                state.indent.* += 1;
-                state.at_line_start.* = true;
-                state.prev_token.* = null;
+                state.prev_token.* = t2;
                 continue;
             }
             if (c2 == ';') {
@@ -1326,7 +1410,9 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
         }
         if (generic_open) {
             generic_angle_depth += 1;
-        } else if (t2.type == .Operator and std.mem.eql(u8, t2.data.sval.items, ">") and generic_angle_depth > 0) {
+        } else if (((t2.type == .Operator and std.mem.eql(u8, t2.data.sval.items, ">")) or
+            (t2.type == .Symbol and t2.data.cval == '>')) and generic_angle_depth > 0)
+        {
             generic_angle_depth -= 1;
         }
         state.prev_token.* = t2;

@@ -335,7 +335,7 @@ impl File {
   }
 
   // Read all lines (up to max_len per line).
-  pub read_lines(num max_len) Vec < str > {
+  pub read_lines(num max_len) Vec<str> {
     Vec<str> out;
     out.init(8);
     if self.handle == NULL {
