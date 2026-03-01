@@ -284,7 +284,10 @@ export default function App() {
               This page is sourced from docs/language.md and includes runnable
               Fun code blocks.
             </p>
-            <MarkdownWithPlayground markdown={content.docs.language} />
+            <MarkdownWithPlayground
+              markdown={content.docs.language}
+              sourcePath="docs/language.md"
+            />
           </section>
         )}
 
@@ -294,7 +297,10 @@ export default function App() {
             <p className="lead">
               Syntax, semantics, runtime behavior, and interop details.
             </p>
-            <MarkdownWithPlayground markdown={content.docs.reference} />
+            <MarkdownWithPlayground
+              markdown={content.docs.reference}
+              sourcePath="docs/reference.md"
+            />
           </section>
         )}
 
@@ -311,6 +317,78 @@ export default function App() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
+
+            {activeModule && (
+              <section className="detail-card detail-card-sticky">
+                <div className="detail-head">
+                  <h2>std/{activeModule.module.replace(/\.fn$/, "")}</h2>
+                  <button className="copy-link-btn" onClick={copyStdlibLink}>
+                    {copyStatus === "ok"
+                      ? "Copied"
+                      : copyStatus === "err"
+                        ? "Copy failed"
+                        : "Copy link"}
+                  </button>
+                </div>
+                <p className="muted">
+                  Click a symbol below to view signature docs and examples.
+                </p>
+                {activeModule.docsMarkdown ? (
+                  <MarkdownWithPlayground
+                    markdown={activeModule.docsMarkdown}
+                    sourcePath={`stdlib/std/${activeModule.module}`}
+                  />
+                ) : (
+                  <p className="muted">No module-level docs found.</p>
+                )}
+
+                <div className="symbol-pills">
+                  {activeModule.symbols.map((s) => {
+                    const key = `${s.name}:${s.line}`;
+                    return (
+                      <a
+                        key={key}
+                        className={`symbol-pill ${
+                          activeSymbol &&
+                          activeSymbol.name === s.name &&
+                          activeSymbol.line === s.line
+                            ? "active"
+                            : ""
+                        }`}
+                        href={buildStdlibHash(activeModule.module, key)}
+                        onClick={() => setSelectedSymbolKey(key)}
+                      >
+                        <span className="badge">{s.kind}</span>
+                        <span>{s.name}</span>
+                      </a>
+                    );
+                  })}
+                </div>
+
+                {activeSymbol && (
+                  <article className="symbol-detail">
+                    <h3>
+                      {activeSymbol.name}{" "}
+                      <span className="muted">(line {activeSymbol.line})</span>
+                    </h3>
+                    <pre>
+                      <code>{activeSymbol.signature}</code>
+                    </pre>
+                    {activeSymbol.docsMarkdown ? (
+                      <MarkdownWithPlayground
+                        markdown={activeSymbol.docsMarkdown}
+                        sourcePath={`stdlib/std/${activeModule.module}`}
+                      />
+                    ) : (
+                      <p className="muted">
+                        No comment docs found above this declaration.
+                      </p>
+                    )}
+                  </article>
+                )}
+              </section>
+            )}
+
             <div className="stdlib-grid">
               {filteredModules.map((m) => (
                 <article
@@ -373,75 +451,6 @@ export default function App() {
                 </article>
               ))}
             </div>
-
-            {activeModule && (
-              <section className="detail-card">
-                <div className="detail-head">
-                  <h2>std/{activeModule.module.replace(/\.fn$/, "")}</h2>
-                  <button className="copy-link-btn" onClick={copyStdlibLink}>
-                    {copyStatus === "ok"
-                      ? "Copied"
-                      : copyStatus === "err"
-                        ? "Copy failed"
-                        : "Copy link"}
-                  </button>
-                </div>
-                <p className="muted">
-                  Click a symbol below to view signature docs and examples.
-                </p>
-                {activeModule.docsMarkdown ? (
-                  <MarkdownWithPlayground
-                    markdown={activeModule.docsMarkdown}
-                  />
-                ) : (
-                  <p className="muted">No module-level docs found.</p>
-                )}
-
-                <div className="symbol-pills">
-                  {activeModule.symbols.map((s) => {
-                    const key = `${s.name}:${s.line}`;
-                    return (
-                      <a
-                        key={key}
-                        className={`symbol-pill ${
-                          activeSymbol &&
-                          activeSymbol.name === s.name &&
-                          activeSymbol.line === s.line
-                            ? "active"
-                            : ""
-                        }`}
-                        href={buildStdlibHash(activeModule.module, key)}
-                        onClick={() => setSelectedSymbolKey(key)}
-                      >
-                        <span className="badge">{s.kind}</span>
-                        <span>{s.name}</span>
-                      </a>
-                    );
-                  })}
-                </div>
-
-                {activeSymbol && (
-                  <article className="symbol-detail">
-                    <h3>
-                      {activeSymbol.name}{" "}
-                      <span className="muted">(line {activeSymbol.line})</span>
-                    </h3>
-                    <pre>
-                      <code>{activeSymbol.signature}</code>
-                    </pre>
-                    {activeSymbol.docsMarkdown ? (
-                      <MarkdownWithPlayground
-                        markdown={activeSymbol.docsMarkdown}
-                      />
-                    ) : (
-                      <p className="muted">
-                        No comment docs found above this declaration.
-                      </p>
-                    )}
-                  </article>
-                )}
-              </section>
-            )}
           </section>
         )}
 
@@ -464,7 +473,10 @@ export default function App() {
             ))}
             <details>
               <summary>Raw stdlib docs source</summary>
-              <MarkdownWithPlayground markdown={content.docs.stdlibReadme} />
+              <MarkdownWithPlayground
+                markdown={content.docs.stdlibReadme}
+                sourcePath="stdlib/README.md"
+              />
             </details>
           </section>
         )}
