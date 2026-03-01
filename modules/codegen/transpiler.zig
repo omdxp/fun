@@ -8949,6 +8949,9 @@ pub const TranspileProcess = struct {
                     try self.emit_defers();
                     try self.write_indent();
                     if (self.in_main) {
+                        // `main` always emits as `int main(...)` in C.
+                        // For default-void `main`, bare `ret;` maps to success status 0.
+                        // For `main() num`, typecheck rejects bare `ret;`, but keep 0 as fallback.
                         try self.write("return 0;");
                     } else {
                         try self.write("return;");
@@ -9149,7 +9152,15 @@ pub const TranspileProcess = struct {
                         try self.emit_defers();
                         try self.write_indent();
                         if (self.in_main) {
-                            try self.write("return 0;");
+                            const main_ret = self.current_fn_return orelse CheckedType{ .base = .Void };
+                            if (main_ret.base == .Num and !main_ret.is_array and main_ret.pointer_depth == 0) {
+                                try self.write("return (int)(");
+                                try self.transpile_node(rn.*);
+                                try self.write(");");
+                            } else {
+                                // Default-void main ignores expression and returns success.
+                                try self.write("return 0;");
+                            }
                         } else {
                             try self.write("return ");
                             try self.transpile_node(rn.*);

@@ -1,0 +1,8 @@
+imp std.c.io;
+
+// Default main is effectively void-style (success = 0 when no explicit ret value).
+// This example demonstrates explicit exit status with `main() num`.
+fun main() num {
+  printf("main returning non-zero exit status for demonstration\n");
+  ret 7;
+}

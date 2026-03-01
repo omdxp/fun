@@ -405,7 +405,7 @@ test "transitive std.net import emits socket headers" {
     const ifilepath = "codegen_transitive_std_net.fn";
 
     const input =
-        "imp http.serve;\n" ++
+        "imp std.net;\n" ++
         "fun main() {\n" ++
         "  ret;\n" ++
         "}\n";
@@ -417,6 +417,24 @@ test "transitive std.net import emits socket headers" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <netinet/in.h>") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <arpa/inet.h>") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <unistd.h>") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
+test "main num return emits exit status" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_main_num_return.fn";
+
+    const input =
+        "fun main() num {\n" ++
+        "  ret 7;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "int main") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "return (int)(7);") != null);
 
     try fs.cwd().deleteFile(ifilepath);
 }

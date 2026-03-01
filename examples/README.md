@@ -21,6 +21,7 @@ zig-out/bin/fun -in examples/<example>.fn
 - enums.fn
 - let_and_lowlevel_types.fn
 - let_quirk_explicit_ok.fn
+- main_exit_status.fn
 - plain_impl.fn
 - return_heap_ptr_ok.fn
 - return_local_ptr_warning.fn

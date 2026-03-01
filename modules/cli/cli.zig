@@ -1843,7 +1843,12 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
             try child.spawn();
             const term = try child.wait();
             switch (term) {
-                .Exited => |code| if (code != 0) return CliError.ExecutionFailed,
+                .Exited => |code| {
+                    if (code != 0) {
+                        // Preserve program exit status for callers/shell scripts.
+                        std.process.exit(code);
+                    }
+                },
                 else => return CliError.ExecutionFailed,
             }
         }
