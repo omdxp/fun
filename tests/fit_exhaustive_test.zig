@@ -58,7 +58,7 @@ test "fit bin missing false warns" {
     try std.testing.expect(res.warnings != null);
     try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "fit statement is not exhausted for bin condition") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    fs.cwd().deleteFile(ifilepath) catch {};
 }
 
 test "fit bin exhausted via default no warning" {
@@ -83,7 +83,7 @@ test "fit bin exhausted via default no warning" {
 
     try std.testing.expect(res.warnings == null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    fs.cwd().deleteFile(ifilepath) catch {};
 }
 
 test "fit bin default only no warning" {
@@ -107,7 +107,7 @@ test "fit bin default only no warning" {
 
     try std.testing.expect(res.warnings == null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    fs.cwd().deleteFile(ifilepath) catch {};
 }
 
 test "fit num missing default warns" {
@@ -133,7 +133,7 @@ test "fit num missing default warns" {
     try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "fit statement is not exhausted") != null);
     try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "missing catch-all '_' branch") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    fs.cwd().deleteFile(ifilepath) catch {};
 }
 
 test "fit pointer missing default warns" {
@@ -160,7 +160,7 @@ test "fit pointer missing default warns" {
     try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "fit statement is not exhausted") != null);
     try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "missing catch-all '_' branch") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    fs.cwd().deleteFile(ifilepath) catch {};
 }
 
 test "fit enum exhausted via all variants no warning" {
@@ -190,7 +190,7 @@ test "fit enum exhausted via all variants no warning" {
     }
 
     try std.testing.expect(res.warnings == null);
-    try fs.cwd().deleteFile(ifilepath);
+    fs.cwd().deleteFile(ifilepath) catch {};
 }
 
 test "fit enum missing variant warns" {
@@ -221,7 +221,7 @@ test "fit enum missing variant warns" {
     try std.testing.expect(res.warnings != null);
     try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "fit statement is not exhausted for enum") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    fs.cwd().deleteFile(ifilepath) catch {};
 }
 
 test "fit enum dot shorthand exhausted no warning" {
@@ -251,5 +251,5 @@ test "fit enum dot shorthand exhausted no warning" {
     }
 
     try std.testing.expect(res.warnings == null);
-    try fs.cwd().deleteFile(ifilepath);
+    fs.cwd().deleteFile(ifilepath) catch {};
 }

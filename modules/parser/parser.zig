@@ -412,6 +412,18 @@ pub const ParseProcess = struct {
             // expression statements like `w * h;` as `w* h;`.
             if (self.transpile_proc.get_scope_entity(t.?.data.sval.items) == null) {
                 var off: usize = 1;
+
+                // Optional qualified type segments after the leading identifier:
+                // `alias.Type name;`
+                while (true) {
+                    const dot_tok = self.token_peek_n(off) orelse break;
+                    if (!(dot_tok.type == .Operator and mem.eql(u8, dot_tok.data.sval.items, "."))) break;
+
+                    const seg_tok = self.token_peek_n(off + 1) orelse break;
+                    if (seg_tok.type != .Identifier) break;
+                    off += 2;
+                }
+
                 _ = self.skip_generic_args_tokens(&off);
                 while (true) {
                     const tn = self.token_peek_n(off);

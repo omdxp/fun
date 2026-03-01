@@ -2680,6 +2680,8 @@ const LspServer = struct {
         // Robust text-based member completion for `receiver.` before other fallbacks.
         const recv_name_opt = guessReceiverNameAtCursor(doc.text, pos) orelse guessReceiverNameBeforeCursor(doc.text, pos);
         if (recv_name_opt) |recv_name| {
+            if (try self.trySendAliasNamespaceCompletions(id_val, uri, idx, recv_name, prefix)) return;
+
             var recv_type: ?[]const u8 = null;
             if (std.mem.eql(u8, recv_name, "self")) {
                 recv_type = self.guessEnclosingImplType(idx, pos);
@@ -2700,11 +2702,13 @@ const LspServer = struct {
                     seen.deinit();
                 }
                 try self.appendMemberCompletionsForType(&items, &seen, uri, rt, prefix);
-                const list: CompletionList = .{ .items = items.items };
-                const json = try std.json.stringifyAlloc(self.allocator, list, .{});
-                defer self.allocator.free(json);
-                try self.sendResponseJson(id_val, json);
-                return;
+                if (items.items.len != 0) {
+                    const list: CompletionList = .{ .items = items.items };
+                    const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+                    defer self.allocator.free(json);
+                    try self.sendResponseJson(id_val, json);
+                    return;
+                }
             }
         }
 
@@ -2766,11 +2770,13 @@ const LspServer = struct {
                         }
 
                         try self.appendMemberCompletionsForType(&items, &seen, uri, rt, prefix);
-                        const list: CompletionList = .{ .items = items.items };
-                        const json = try std.json.stringifyAlloc(self.allocator, list, .{});
-                        defer self.allocator.free(json);
-                        try self.sendResponseJson(id_val, json);
-                        return;
+                        if (items.items.len != 0) {
+                            const list: CompletionList = .{ .items = items.items };
+                            const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+                            defer self.allocator.free(json);
+                            try self.sendResponseJson(id_val, json);
+                            return;
+                        }
                     }
                 }
             }
@@ -2803,12 +2809,13 @@ const LspServer = struct {
                         seen.deinit();
                     }
                     try self.appendMemberCompletionsForType(&items, &seen, uri, recv_type, prefix);
-
-                    const list: CompletionList = .{ .items = items.items };
-                    const json = try std.json.stringifyAlloc(self.allocator, list, .{});
-                    defer self.allocator.free(json);
-                    try self.sendResponseJson(id_val, json);
-                    return;
+                    if (items.items.len != 0) {
+                        const list: CompletionList = .{ .items = items.items };
+                        const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+                        defer self.allocator.free(json);
+                        try self.sendResponseJson(id_val, json);
+                        return;
+                    }
                 } else {
                     const recv_name = idx.tokens[ri].text;
                     if (guessTypeFromTextFallback(doc.text, recv_name, pos)) |rt| {
@@ -2819,11 +2826,13 @@ const LspServer = struct {
                             seen.deinit();
                         }
                         try self.appendMemberCompletionsForType(&items, &seen, uri, rt, prefix);
-                        const list: CompletionList = .{ .items = items.items };
-                        const json = try std.json.stringifyAlloc(self.allocator, list, .{});
-                        defer self.allocator.free(json);
-                        try self.sendResponseJson(id_val, json);
-                        return;
+                        if (items.items.len != 0) {
+                            const list: CompletionList = .{ .items = items.items };
+                            const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+                            defer self.allocator.free(json);
+                            try self.sendResponseJson(id_val, json);
+                            return;
+                        }
                     }
                 }
             }
@@ -2833,6 +2842,8 @@ const LspServer = struct {
             if (t.kind == .identifier and t.text.len > 1 and std.mem.endsWith(u8, t.text, ".")) {
                 const recv_name = t.text[0 .. t.text.len - 1];
                 if (recv_name.len != 0) {
+                    if (try self.trySendAliasNamespaceCompletions(id_val, uri, idx, recv_name, prefix)) return;
+
                     var recv_type: ?[]const u8 = null;
                     if (std.mem.eql(u8, recv_name, "self")) {
                         recv_type = self.guessEnclosingImplType(idx, pos);
@@ -2850,12 +2861,13 @@ const LspServer = struct {
                             seen.deinit();
                         }
                         try self.appendMemberCompletionsForType(&items, &seen, uri, rt, prefix);
-
-                        const list: CompletionList = .{ .items = items.items };
-                        const json = try std.json.stringifyAlloc(self.allocator, list, .{});
-                        defer self.allocator.free(json);
-                        try self.sendResponseJson(id_val, json);
-                        return;
+                        if (items.items.len != 0) {
+                            const list: CompletionList = .{ .items = items.items };
+                            const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+                            defer self.allocator.free(json);
+                            try self.sendResponseJson(id_val, json);
+                            return;
+                        }
                     }
                 }
             }
@@ -3606,6 +3618,8 @@ const LspServer = struct {
         }
         if (items.items.len == 0) return false;
 
+        if (items.items.len == 0) return false;
+
         const list: CompletionList = .{ .items = items.items };
         const json = try std.json.stringifyAlloc(self.allocator, list, .{});
         defer self.allocator.free(json);
@@ -3618,8 +3632,11 @@ const LspServer = struct {
         defer self.allocator.free(target_uri);
 
         self.ensureDocIndexedFromDisk(target_uri) catch {};
-        const doc = self.docs.get(target_uri) orelse return false;
-        const didx = doc.index orelse return false;
+        const didx_opt: ?*const Index = blk: {
+            const doc = self.docs.get(target_uri) orelse break :blk null;
+            const didx = doc.index orelse break :blk null;
+            break :blk didx;
+        };
 
         var items = std.ArrayList(CompletionItem).init(self.allocator);
         defer {
@@ -3639,39 +3656,41 @@ const LspServer = struct {
             seen.deinit();
         }
 
-        for (didx.symbols) |s| {
-            if (!s.is_public) continue;
-            if (s.container_fn_range != null) continue;
-            if (s.container_type != null) continue;
-            if (prefix.len != 0 and !std.mem.startsWith(u8, s.name, prefix)) continue;
+        if (didx_opt) |didx| {
+            for (didx.symbols) |s| {
+                if (!s.is_public) continue;
+                if (s.container_fn_range != null) continue;
+                if (s.container_type != null) continue;
+                if (prefix.len != 0 and !std.mem.startsWith(u8, s.name, prefix)) continue;
 
-            const ck: i64 = switch (s.kind) {
-                .function => 3,
-                .variable => 6,
-                .constant => 21,
-                .enum_ => 13,
-                .struct_, .class, .interface, .typeParameter => 7,
-                else => 6,
-            };
+                const ck: i64 = switch (s.kind) {
+                    .function => 3,
+                    .variable => 6,
+                    .constant => 21,
+                    .enum_ => 13,
+                    .struct_, .class, .interface, .typeParameter => 7,
+                    else => 6,
+                };
 
-            var key_buf = std.ArrayList(u8).init(self.allocator);
-            defer key_buf.deinit();
-            try key_buf.writer().print("{s}:{d}", .{ s.name, ck });
-            const key = try self.allocator.dupe(u8, key_buf.items);
-            if (seen.contains(key)) {
-                self.allocator.free(key);
-                continue;
+                var key_buf = std.ArrayList(u8).init(self.allocator);
+                defer key_buf.deinit();
+                try key_buf.writer().print("{s}:{d}", .{ s.name, ck });
+                const key = try self.allocator.dupe(u8, key_buf.items);
+                if (seen.contains(key)) {
+                    self.allocator.free(key);
+                    continue;
+                }
+                try seen.put(key, {});
+
+                const insert_text = try self.completionInsertTextForSymbol(s);
+
+                try items.append(.{
+                    .label = try self.allocator.dupe(u8, s.name),
+                    .kind = ck,
+                    .detail = if (s.detail) |d| try self.allocator.dupe(u8, d) else null,
+                    .insertText = insert_text,
+                });
             }
-            try seen.put(key, {});
-
-            const insert_text = try self.completionInsertTextForSymbol(s);
-
-            try items.append(.{
-                .label = try self.allocator.dupe(u8, s.name),
-                .kind = ck,
-                .detail = if (s.detail) |d| try self.allocator.dupe(u8, d) else null,
-                .insertText = insert_text,
-            });
         }
 
         if (items.items.len == 0) {
@@ -5330,13 +5349,52 @@ const LspServer = struct {
 
         // `full` is typically absolute (current file dir is absolute or stdlib root is absolute).
         // Use absolute file APIs so installed stdlib works on Windows.
-        if (std.fs.path.isAbsolute(full)) {
-            var f = std.fs.openFileAbsolute(full, .{}) catch return null;
-            f.close();
-        } else {
-            std.fs.cwd().access(full, .{}) catch return null;
+        const full_exists = blk: {
+            if (std.fs.path.isAbsolute(full)) {
+                var f = std.fs.openFileAbsolute(full, .{}) catch break :blk false;
+                f.close();
+                break :blk true;
+            } else {
+                std.fs.cwd().access(full, .{}) catch break :blk false;
+                break :blk true;
+            }
+        };
+        if (full_exists) {
+            return try pathToUri(self.allocator, full);
         }
-        return try pathToUri(self.allocator, full);
+
+        // Fallback for editor temp buffers (e.g. files opened under `.zig-cache`):
+        // resolve relative imports from the workspace root when current-dir relative
+        // lookup fails.
+        if (!std.mem.eql(u8, parts.items[0], "std")) {
+            if (self.root_path) |root| {
+                var segs_root = std.ArrayList([]const u8).init(self.allocator);
+                defer segs_root.deinit();
+                try segs_root.append(root);
+                for (parts.items) |p| try segs_root.append(p);
+
+                const joined_root = try std.fs.path.join(self.allocator, segs_root.items);
+                defer self.allocator.free(joined_root);
+                const full_root = try std.mem.concat(self.allocator, u8, &[_][]const u8{ joined_root, ".fn" });
+                defer self.allocator.free(full_root);
+
+                const root_exists = blk: {
+                    if (std.fs.path.isAbsolute(full_root)) {
+                        var f = std.fs.openFileAbsolute(full_root, .{}) catch break :blk false;
+                        f.close();
+                        break :blk true;
+                    } else {
+                        std.fs.cwd().access(full_root, .{}) catch break :blk false;
+                        break :blk true;
+                    }
+                };
+                if (root_exists) {
+                    return try pathToUri(self.allocator, full_root);
+                }
+            }
+        }
+
+        return null;
     }
 
     fn publishDiagnostics(self: *LspServer, uri: []const u8, text: []const u8) !void {

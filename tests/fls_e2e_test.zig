@@ -1521,6 +1521,59 @@ test "fls e2e: import completion + go-to-definition works" {
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: alias namespace completion shows module publics" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "imp error.err as err;\n\n" ++
+        "fun main() {\n" ++
+        "  err.\n" ++
+        "}\n";
+
+    const doc_abs = try std.fs.path.join(allocator, &[_][]const u8{ setup.root_abs, "fls-e2e-alias-namespace.fn" });
+    defer allocator.free(doc_abs);
+    defer std.fs.deleteFileAbsolute(doc_abs) catch {};
+    {
+        const f = try std.fs.createFileAbsolute(doc_abs, .{ .truncate = true });
+        defer f.close();
+        try f.writeAll(doc_text);
+    }
+
+    const doc_uri = try pathToFileUriAlloc(allocator, doc_abs);
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const pos = try findPosition(doc_text, "err.", 0);
+    const comp_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, pos.line, pos.col + 4 },
+    );
+    defer allocator.free(comp_params);
+
+    const comp_id = try lsp.request("textDocument/completion", comp_params);
+    var comp_res = try lsp.waitResponse(comp_id, 15000);
+    defer comp_res.deinit();
+    try std.testing.expect(comp_res.parsed.value == .object);
+    const comp_result = try jsonResultFromResponseObj(comp_res.parsed.value.object);
+
+    try expectCompletionHasLabel(allocator, comp_result, "ErrorCode");
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: locals, dot completion, member signatureHelp" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();

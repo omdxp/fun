@@ -337,6 +337,10 @@ pub const LexProcess = struct {
     /// - Returns an error if reading the next character fails.
     fn read_special_token(self: *Self) LexError!?token.Token {
         const c = try self.peek_char();
+        if (c == null) {
+            return null;
+        }
+
         if (utils.is_alpha(c.?) or c.? == '_') {
             return self.token_make_identifier_or_keyword();
         }

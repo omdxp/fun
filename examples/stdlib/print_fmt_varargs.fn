@@ -2,6 +2,18 @@
 
 imp std.io;
 imp std.c.def;
+imp std.quirks;
+
+compound Point {
+  num x;
+  num y;
+}
+
+impl Point Display {
+  pub to_string() str {
+    ret format("Point({}, {})", self.x, self.y);
+  }
+}
 
 fun log_fmt(str fmt, ...) {
   str out = format_impl(fmt, &vargs);
@@ -22,6 +34,11 @@ fun main() {
   str msg = format("sum={num} str={str}", 7, "ok");
   println(msg);
   free(msg);
+
+  Point pt;
+  pt.x = 3;
+  pt.y = 4;
+  println_fmt("display {}", pt);
 
   log_fmt("custom {} {} {}", "a", 1, true);
 }

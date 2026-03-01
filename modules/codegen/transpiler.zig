@@ -1036,6 +1036,7 @@ pub const TranspileProcess = struct {
     }
 
     const PrintFmtArgKind = enum {
+        any,
         str,
         num,
         dec,
@@ -1080,7 +1081,7 @@ pub const TranspileProcess = struct {
                 }
                 if (i + 1 < fmt.len and fmt[i + 1] == '}') {
                     out_fmt.appendSlice("%s") catch return TranspileError.MemoryAllocationFailed;
-                    kinds.append(.str) catch return TranspileError.MemoryAllocationFailed;
+                    kinds.append(.any) catch return TranspileError.MemoryAllocationFailed;
                     i += 2;
                     continue;
                 }
@@ -1168,6 +1169,12 @@ pub const TranspileProcess = struct {
 
         try build_printf_format(fmt, &fmt_out, &kinds);
 
+        // Keep the optimization only for explicitly typed placeholders.
+        // Bare `{}` should use the regular vararg path, which handles mixed argument kinds.
+        for (kinds.items) |k| {
+            if (k == .any) return false;
+        }
+
         if (is_newline) {
             fmt_out.append('\n') catch return TranspileError.MemoryAllocationFailed;
         }
@@ -1214,6 +1221,7 @@ pub const TranspileProcess = struct {
                 try self.print("{d}", .{arg_i});
                 try self.write("] = ");
                 switch (kind) {
+                    .any => unreachable,
                     .str => try self.transpile_node(arg_node),
                     .num => {
                         try self.write("fmt_num((long long)(");
@@ -1312,6 +1320,12 @@ pub const TranspileProcess = struct {
 
         try build_printf_format(fmt, &fmt_out, &kinds);
 
+        // Keep the optimization only for explicitly typed placeholders.
+        // Bare `{}` should use the regular vararg path, which handles mixed argument kinds.
+        for (kinds.items) |k| {
+            if (k == .any) return false;
+        }
+
         const expected_args = kinds.items.len;
         const provided_args = if (args_nodes.items.len > 0) args_nodes.items.len - 1 else 0;
         if (provided_args != expected_args) {
@@ -1354,6 +1368,7 @@ pub const TranspileProcess = struct {
                 try self.print("{d}", .{arg_i});
                 try self.write("] = ");
                 switch (kind) {
+                    .any => unreachable,
                     .str => try self.transpile_node(arg_node),
                     .num => {
                         try self.write("fmt_num((long long)(");
@@ -3008,6 +3023,74 @@ pub const TranspileProcess = struct {
         return right.*.data.?.sval.items;
     }
 
+    const AliasEnumVariantParts = struct {
+        alias_name: []const u8,
+        enum_name: []const u8,
+        variant_name: []const u8,
+    };
+
+    fn extract_alias_enum_variant_parts(left: *ast.Node, right: *ast.Node) ?AliasEnumVariantParts {
+        // Right-associative parse shape:
+        //   alias . (Enum . Variant)
+        if (left.*.type == .Identifier and left.*.data != null and right.*.type == .Expression and right.*.node_variant != null and mem.eql(u8, right.*.node_variant.?.exp.op, ".")) {
+            const inner = right.*.node_variant.?.exp;
+            const enum_node = inner.left orelse return null;
+            const variant_node = inner.right orelse return null;
+            if (enum_node.*.type == .Identifier and enum_node.*.data != null and variant_node.*.type == .Identifier and variant_node.*.data != null) {
+                return .{
+                    .alias_name = left.*.data.?.sval.items,
+                    .enum_name = enum_node.*.data.?.sval.items,
+                    .variant_name = variant_node.*.data.?.sval.items,
+                };
+            }
+        }
+
+        // Left-associative parse shape:
+        //   (alias . Enum) . Variant
+        if (left.*.type == .Expression and left.*.node_variant != null and mem.eql(u8, left.*.node_variant.?.exp.op, ".") and right.*.type == .Identifier and right.*.data != null) {
+            const inner = left.*.node_variant.?.exp;
+            const alias_node = inner.left orelse return null;
+            const enum_node = inner.right orelse return null;
+            if (alias_node.*.type == .Identifier and alias_node.*.data != null and enum_node.*.type == .Identifier and enum_node.*.data != null) {
+                return .{
+                    .alias_name = alias_node.*.data.?.sval.items,
+                    .enum_name = enum_node.*.data.?.sval.items,
+                    .variant_name = right.*.data.?.sval.items,
+                };
+            }
+        }
+
+        return null;
+    }
+
+    fn resolve_enum_variant_constant_type(self: *Self, node: ast.Node, enum_name: []const u8, variant_name: []const u8) TranspileError!?CheckedType {
+        const root = self.get_root();
+        if (root.type_registry == null) return null;
+        const reg = &root.type_registry.?;
+        const enode = reg.enums_by_name.get(enum_name) orelse return null;
+
+        if (!self.can_access(&node, enode)) {
+            self.report_type_error(node, "enum '{s}' is private", .{enum_name});
+            return TranspileError.SymbolNotDefined;
+        }
+
+        if (enode.node_variant != null) {
+            var ok = false;
+            for (enode.node_variant.?.enum_decl.variants.items()) |v| {
+                if (mem.eql(u8, v.name.items, variant_name)) {
+                    ok = true;
+                    break;
+                }
+            }
+            if (!ok) {
+                self.report_type_error(node, "enum '{s}' has no variant '{s}'", .{ enum_name, variant_name });
+                return TranspileError.UnknownField;
+            }
+        }
+
+        return .{ .base = .Unknown, .name = enum_name };
+    }
+
     fn resolve_dot_shorthand_enum_variant(self: *Self, node: *ast.Node, enum_name: []const u8) TranspileError!CheckedType {
         const variant_name = dot_shorthand_variant_name(node) orelse return .{ .base = .Unknown };
         const reg = self.root_registry() orelse return .{ .base = .Unknown };
@@ -3298,6 +3381,11 @@ pub const TranspileProcess = struct {
         other_quirk_name: ?[]const u8 = null,
     };
 
+    const DisplayCallResolution = struct {
+        fn_name: []const u8,
+        pass_by_ref: bool,
+    };
+
     fn resolve_quirk_impl_method_for_concrete(self: *Self, ref_node: ast.Node, type_name: []const u8, method_name: []const u8) QuirkImplMethodResolution {
         const root = self.get_root();
         if (root.type_registry == null) return .{};
@@ -3367,12 +3455,69 @@ pub const TranspileProcess = struct {
         return res;
     }
 
+    fn resolve_display_call_for_expr(self: *Self, ref_node: ast.Node, expr: ast.Node) ?DisplayCallResolution {
+        if (expr.type == .ExpressionParenthesis and expr.node_variant != null) {
+            return self.resolve_display_call_for_expr(ref_node, expr.node_variant.?.paren.exp.*);
+        }
+
+        if (expr.type == .Identifier and expr.data != null) {
+            const nm = expr.data.?.sval.items;
+            const dt = self.identifier_declared_dtype(nm) orelse return null;
+            if (dt.type != .Unknown) return null;
+
+            const type_name = dt.type_str.items;
+            const res = self.resolve_quirk_impl_method_for_concrete(ref_node, type_name, "to_string");
+            if (res.fn_name == null or res.quirk_name == null or res.ambiguous) return null;
+            if (!mem.eql(u8, res.quirk_name.?, "Display")) return null;
+
+            return .{
+                .fn_name = res.fn_name.?,
+                .pass_by_ref = dt.pointer_depth == 0,
+            };
+        }
+
+        if (expr.type == .Unary and expr.node_variant != null) {
+            const u = expr.node_variant.?.unary;
+            if (mem.eql(u8, u.op, "&")) {
+                const op = u.operand.*;
+                if (op.type != .Identifier or op.data == null) return null;
+                const nm = op.data.?.sval.items;
+                const dt = self.identifier_declared_dtype(nm) orelse return null;
+                if (dt.type != .Unknown) return null;
+
+                const type_name = dt.type_str.items;
+                const res = self.resolve_quirk_impl_method_for_concrete(ref_node, type_name, "to_string");
+                if (res.fn_name == null or res.quirk_name == null or res.ambiguous) return null;
+                if (!mem.eql(u8, res.quirk_name.?, "Display")) return null;
+
+                return .{
+                    .fn_name = res.fn_name.?,
+                    .pass_by_ref = false,
+                };
+            }
+        }
+
+        return null;
+    }
+
     fn is_enum_named_type(self: *Self, t: CheckedType) bool {
         if (!is_user_named_type(t)) return false;
         if (t.is_array or t.pointer_depth != 0) return false;
         const root = self.get_root();
         if (root.type_registry == null) return false;
         return root.type_registry.?.enums_by_name.contains(t.name.?);
+    }
+
+    fn are_same_enum_type(self: *Self, a: CheckedType, b: CheckedType) bool {
+        if (!self.is_enum_named_type(a) or !self.is_enum_named_type(b)) return false;
+        const root = self.get_root();
+        if (root.type_registry == null) return false;
+        const reg = &root.type_registry.?;
+        const an = a.name orelse return false;
+        const bn = b.name orelse return false;
+        const a_node = reg.enums_by_name.get(an) orelse return false;
+        const b_node = reg.enums_by_name.get(bn) orelse return false;
+        return a_node == b_node;
     }
 
     fn is_numeric_type(self: *Self, t: CheckedType) bool {
@@ -3400,6 +3545,10 @@ pub const TranspileProcess = struct {
 
     fn can_implicit_coerce(self: *Self, expected: CheckedType, actual: CheckedType) TranspileError!bool {
         if (CheckedType.eql(expected, actual)) return true;
+
+        // Allow equivalent enum types referenced through different visible names
+        // (e.g. `ErrorCode` and `err__ErrorCode`).
+        if (self.are_same_enum_type(expected, actual)) return true;
 
         // Enums behave as numeric values for coercion with `num`.
         if (self.is_enum_named_type(expected) and !actual.is_array and actual.pointer_depth == 0 and actual.base == .Num) {
@@ -3467,6 +3616,8 @@ pub const TranspileProcess = struct {
 
     fn can_compare_or_match(self: *Self, a: CheckedType, b: CheckedType) bool {
         if (CheckedType.eql(a, b)) return true;
+
+        if (self.are_same_enum_type(a, b)) return true;
 
         // Numeric comparisons/coercion.
         if (self.is_numeric_type(a) and self.is_numeric_type(b)) return true;
@@ -4270,6 +4421,19 @@ pub const TranspileProcess = struct {
                     const left = exp.left orelse return .{ .base = .Unknown };
                     const right = exp.right orelse return .{ .base = .Unknown };
 
+                    // Aliased enum variant constant:
+                    // `alias.Enum.Variant` (supports both parse associativities).
+                    if (extract_alias_enum_variant_parts(left, right)) |parts| {
+                        if (self.import_aliases.contains(parts.alias_name)) {
+                            const qualified_enum = try self.make_alias_qualified_symbol_name(parts.alias_name, parts.enum_name);
+                            if (try self.resolve_enum_variant_constant_type(node, qualified_enum, parts.variant_name)) |_| {
+                                self.allocator.free(qualified_enum);
+                                return .{ .base = .Unknown, .name = parts.enum_name };
+                            }
+                            self.allocator.free(qualified_enum);
+                        }
+                    }
+
                     // Module alias symbol access (`alias.symbol`).
                     if (left.*.type == .Identifier and left.*.data != null and right.*.type == .Identifier and right.*.data != null) {
                         const alias_name = left.*.data.?.sval.items;
@@ -4285,29 +4449,8 @@ pub const TranspileProcess = struct {
                     if (left.*.type == .Identifier and left.*.data != null and right.*.type == .Identifier and right.*.data != null) {
                         const enum_name = left.*.data.?.sval.items;
                         const variant_name = right.*.data.?.sval.items;
-                        const root = self.get_root();
-                        if (root.type_registry != null) {
-                            const reg = &root.type_registry.?;
-                            if (reg.enums_by_name.get(enum_name)) |enode| {
-                                if (!self.can_access(&node, enode)) {
-                                    self.report_type_error(node, "enum '{s}' is private", .{enum_name});
-                                    return TranspileError.SymbolNotDefined;
-                                }
-                                if (enode.node_variant != null) {
-                                    var ok = false;
-                                    for (enode.node_variant.?.enum_decl.variants.items()) |v| {
-                                        if (mem.eql(u8, v.name.items, variant_name)) {
-                                            ok = true;
-                                            break;
-                                        }
-                                    }
-                                    if (!ok) {
-                                        self.report_type_error(node, "enum '{s}' has no variant '{s}'", .{ enum_name, variant_name });
-                                        return TranspileError.UnknownField;
-                                    }
-                                    return .{ .base = .Unknown, .name = enum_name };
-                                }
-                            }
+                        if (try self.resolve_enum_variant_constant_type(node, enum_name, variant_name)) |t| {
+                            return t;
                         }
                     }
 
@@ -6637,8 +6780,13 @@ pub const TranspileProcess = struct {
             defer self.allocator.free(mangled);
             try self.write(mangled);
         } else {
-            if (!(try self.write_dynamic_int_type(data_type.type_str.items))) {
-                const c_type = map_type_to_c(data_type.type_str.items);
+            const type_name = if ((data_type.type == null or data_type.type == .Unknown) and data_type.type_str.items.len > 0)
+                self.c_type_name_for_user_type(data_type.type_str.items)
+            else
+                data_type.type_str.items;
+
+            if (!(try self.write_dynamic_int_type(type_name))) {
+                const c_type = map_type_to_c(type_name);
                 try self.write(c_type);
             }
         }
@@ -6743,6 +6891,32 @@ pub const TranspileProcess = struct {
         const root = self.get_root();
         if (root.type_registry) |*reg| return reg;
         return null;
+    }
+
+    fn c_type_name_for_user_type(self: *Self, name: []const u8) []const u8 {
+        const reg = self.root_registry() orelse return name;
+
+        if (reg.enums_by_name.get(name)) |enode| {
+            if (enode.node_variant != null) {
+                return enode.node_variant.?.enum_decl.name.items;
+            }
+        }
+
+        if (reg.compounds_by_name.get(name)) |cnode| {
+            if (cnode.node_variant != null) {
+                return cnode.node_variant.?.compound.name.items;
+            }
+        }
+
+        if (reg.quirk_sig_by_name.get(name)) |sig| {
+            if (reg.quirks_by_sig.get(sig)) |qnode| {
+                if (qnode.node_variant != null) {
+                    return qnode.node_variant.?.quirk.name.items;
+                }
+            }
+        }
+
+        return name;
     }
 
     fn is_quirk_name(self: *Self, name: []const u8) bool {
@@ -6952,10 +7126,17 @@ pub const TranspileProcess = struct {
             }
         }.lessThan);
 
+        var emitted_enum_names = std.StringHashMap(bool).init(self.allocator);
+        defer emitted_enum_names.deinit();
+
         for (enum_nodes.items) |enode| {
             if (enode.node_variant == null) continue;
             if (self.is_std_c_signature_node(enode)) continue;
             const e = enode.node_variant.?.enum_decl;
+            if (emitted_enum_names.contains(e.name.items)) continue;
+            emitted_enum_names.put(e.name.items, true) catch {
+                return TranspileError.MemoryAllocationFailed;
+            };
             try self.write("typedef enum ");
             try self.write(e.name.items);
             try self.write(" {\n");
@@ -8949,6 +9130,19 @@ pub const TranspileProcess = struct {
                                             try self.transpile_node(var_node);
                                         }
                                         try self.write("; ");
+
+                                        if (self.resolve_display_call_for_expr(node, var_node)) |disp| {
+                                            var dbuf: [64]u8 = undefined;
+                                            const dname = std.fmt.bufPrint(&dbuf, "__fun_disp_{d}", .{v}) catch unreachable;
+                                            try self.write("char* ");
+                                            try self.write(dname);
+                                            try self.write(" = ");
+                                            try self.write(disp.fn_name);
+                                            try self.write("(");
+                                            if (disp.pass_by_ref) try self.write("&");
+                                            try self.write(tname);
+                                            try self.write("); ");
+                                        }
                                     }
 
                                     try self.write(fname);
@@ -8966,9 +9160,14 @@ pub const TranspileProcess = struct {
                                         if (v > 0) try self.write(", ");
                                         var tbuf2: [64]u8 = undefined;
                                         const tname2 = std.fmt.bufPrint(&tbuf2, "__fun_va_{d}", .{v}) catch unreachable;
-                                        try self.write("__fun_tag(");
-                                        try self.write(tname2);
-                                        try self.write(")");
+                                        const var_node = args_nodes.items[fixed_len + v].*;
+                                        if (self.resolve_display_call_for_expr(node, var_node) != null) {
+                                            try self.write("'s'");
+                                        } else {
+                                            try self.write("__fun_tag(");
+                                            try self.write(tname2);
+                                            try self.write(")");
+                                        }
                                     }
                                     if (var_len > 0) try self.write(", ");
                                     try self.write("0}");
@@ -8976,9 +9175,16 @@ pub const TranspileProcess = struct {
                                     v = 0;
                                     while (v < var_len) : (v += 1) {
                                         try self.write(", ");
-                                        var tbuf3: [64]u8 = undefined;
-                                        const tname3 = std.fmt.bufPrint(&tbuf3, "__fun_va_{d}", .{v}) catch unreachable;
-                                        try self.write(tname3);
+                                        const var_node = args_nodes.items[fixed_len + v].*;
+                                        if (self.resolve_display_call_for_expr(node, var_node) != null) {
+                                            var dbuf3: [64]u8 = undefined;
+                                            const dname3 = std.fmt.bufPrint(&dbuf3, "__fun_disp_{d}", .{v}) catch unreachable;
+                                            try self.write(dname3);
+                                        } else {
+                                            var tbuf3: [64]u8 = undefined;
+                                            const tname3 = std.fmt.bufPrint(&tbuf3, "__fun_va_{d}", .{v}) catch unreachable;
+                                            try self.write(tname3);
+                                        }
                                     }
                                     try self.write("); })");
                                     return;
@@ -9027,6 +9233,25 @@ pub const TranspileProcess = struct {
                     const left = exp.left orelse return;
                     const right = exp.right orelse return;
 
+                    // Aliased enum variant constant:
+                    // `alias.Enum.Variant` -> `alias__Enum_Variant` in C.
+                    if (extract_alias_enum_variant_parts(left, right)) |parts| {
+                        if (self.import_aliases.contains(parts.alias_name)) {
+                            const qualified_enum = try self.make_alias_qualified_symbol_name(parts.alias_name, parts.enum_name);
+                            defer self.allocator.free(qualified_enum);
+                            if (self.root_registry()) |reg| {
+                                if (reg.enums_by_name.get(qualified_enum)) |enode| {
+                                    if (enode.node_variant == null) return;
+                                    const emit_enum_name = enode.node_variant.?.enum_decl.name.items;
+                                    try self.write(emit_enum_name);
+                                    try self.write("_");
+                                    try self.write(parts.variant_name);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+
                     // Module alias symbol access: `alias.symbol` -> `alias__symbol`.
                     if (left.*.type == .Identifier and left.*.data != null and right.*.type == .Identifier and right.*.data != null) {
                         const alias_name = left.*.data.?.sval.items;
@@ -9052,8 +9277,10 @@ pub const TranspileProcess = struct {
 
                         if (!is_shadowed_by_variable) {
                             if (self.root_registry()) |reg| {
-                                if (reg.enums_by_name.contains(enum_name)) {
-                                    try self.write(enum_name);
+                                if (reg.enums_by_name.get(enum_name)) |enode| {
+                                    if (enode.node_variant == null) return;
+                                    const emit_enum_name = enode.node_variant.?.enum_decl.name.items;
+                                    try self.write(emit_enum_name);
                                     try self.write("_");
                                     try self.write(variant_name);
                                     return;

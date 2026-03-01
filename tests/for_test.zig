@@ -46,7 +46,7 @@ test "for range transpiles" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "for (int64_t i = 0; i < 3; i++)") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    fs.cwd().deleteFile(ifilepath) catch {};
 }
 
 test "for array item transpiles" {
@@ -69,7 +69,7 @@ test "for array item transpiles" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "for (int64_t __fun_i = 0;") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t item = arr[__fun_i];") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    fs.cwd().deleteFile(ifilepath) catch {};
 }
 
 test "for array index and item transpiles" {
@@ -91,7 +91,7 @@ test "for array index and item transpiles" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "for (int64_t i = 0;") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t item = arr[i];") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    fs.cwd().deleteFile(ifilepath) catch {};
 }
 
 test "for condition transpiles to while" {
@@ -113,7 +113,7 @@ test "for condition transpiles to while" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "while (i < 3)") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    fs.cwd().deleteFile(ifilepath) catch {};
 }
 
 test "for infinite transpiles to while(1)" {
@@ -136,5 +136,5 @@ test "for infinite transpiles to while(1)" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "while (1)") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    fs.cwd().deleteFile(ifilepath) catch {};
 }
