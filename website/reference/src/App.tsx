@@ -312,14 +312,14 @@ export default function App() {
               parsed from source comments.
             </p>
             <input
-              className="search"
+              className="search search-sticky"
               placeholder="Search module, symbol, signature, docs..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
 
             {activeModule && (
-              <section className="detail-card detail-card-sticky">
+              <section className="detail-card">
                 <div className="detail-head">
                   <h2>std/{activeModule.module.replace(/\.fn$/, "")}</h2>
                   <button className="copy-link-btn" onClick={copyStdlibLink}>
