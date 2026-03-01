@@ -11,6 +11,8 @@ if [[ -z "${FUN_STDLIB_DIR:-}" ]]; then
   export FUN_STDLIB_DIR="$REPO_ROOT/stdlib"
 fi
 
+echo "Using FUN_STDLIB_DIR=$FUN_STDLIB_DIR"
+
 # Prefer Windows build output if present (WSL can execute .exe), otherwise use native binary.
 FUN_EXE=""
 if [[ -f "$REPO_ROOT/zig-out/bin/fun.exe" ]]; then
@@ -119,6 +121,7 @@ echo "Running ${#files[@]} example files..."
 failed=()
 unexpected_pass=()
 expected_fail_count=0
+declare -A fail_out
 
 idx=0
 for full in "${files[@]}"; do
@@ -171,6 +174,7 @@ for full in "${files[@]}"; do
 
   if [[ $ec -ne $expected_ec ]]; then
     failed+=("$rel (exit=$ec)")
+      fail_out["$rel"]="$out"
     continue
   fi
 
@@ -179,6 +183,7 @@ for full in "${files[@]}"; do
       [[ -z "$needle" ]] && continue
       if ! grep -Fq -- "$needle" <<<"$out"; then
         failed+=("$rel (missing: $needle)")
+        fail_out["$rel"]="$out"
         break
       fi
     done <<<"${expected[$rel]}"
@@ -192,6 +197,18 @@ if [[ ${#failed[@]} -gt 0 ]]; then
   echo
   echo "Failures:"
   printf '%s\n' "${failed[@]}" | sort -u | sed 's/^/FAIL: /'
+
+  echo
+  echo "Failure details:"
+  for item in "${failed[@]}"; do
+    rel="${item%% (*}"
+    echo "--- $rel ---"
+    if [[ -n "${fail_out[$rel]+x}" ]]; then
+      printf '%s\n' "${fail_out[$rel]}" | tail -n 40
+    else
+      echo "(no captured output)"
+    fi
+  done
 fi
 
 if [[ ${#unexpected_pass[@]} -gt 0 ]]; then

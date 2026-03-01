@@ -37,7 +37,7 @@ jobs:
         with:
           version: ${{ env.zig_version }}
       - run: zig build
-      - run: ./scripts/run_examples.sh
+      - run: FUN_STDLIB_DIR="$GITHUB_WORKSPACE/stdlib" ./scripts/run_examples.sh
   lint:
     runs-on: ubuntu-latest
     steps:
