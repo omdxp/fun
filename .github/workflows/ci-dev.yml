@@ -29,6 +29,8 @@ jobs:
       - run: zig build run -- -in examples/test.fn # usingnamespace is not supported for incremental compilation
   examples:
     runs-on: ubuntu-latest
+    env:
+      FUN_STDLIB_DIR: ${{ github.workspace }}/stdlib
     steps:
       - uses: actions/checkout@v2
       - uses: goto-bus-stop/setup-zig@v2
