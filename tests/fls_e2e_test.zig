@@ -1534,7 +1534,7 @@ test "fls e2e: alias namespace completion shows module publics" {
     try lspInitialize(allocator, &lsp, setup.root_uri);
 
     const doc_text =
-        "imp error.err as err;\n\n" ++
+        "imp std.error as err;\n\n" ++
         "fun main() {\n" ++
         "  err.\n" ++
         "}\n";
@@ -1566,7 +1566,7 @@ test "fls e2e: alias namespace completion shows module publics" {
     try std.testing.expect(comp_res.parsed.value == .object);
     const comp_result = try jsonResultFromResponseObj(comp_res.parsed.value.object);
 
-    try expectCompletionHasLabel(allocator, comp_result, "ErrorCode");
+    try expectCompletionHasLabel(allocator, comp_result, "Error");
 
     const shutdown_id = try lsp.request("shutdown", "{}");
     var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
