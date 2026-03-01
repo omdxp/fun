@@ -2668,9 +2668,14 @@ const LspServer = struct {
             for (items.items) |it| {
                 self.allocator.free(it.label);
                 if (it.detail) |d| self.allocator.free(d);
+                if (it.insertText) |ins| self.allocator.free(ins);
+                if (it.filterText) |ft| self.allocator.free(ft);
             }
             items.deinit();
         }
+
+        // Compound init field completion (e.g. `User{ na| }` / `.{ ag| }`).
+        if (try self.trySendCompoundInitFieldCompletions(id_val, uri, idx, doc.text, pos, prefix)) return;
 
         // Robust text-based member completion for `receiver.` before other fallbacks.
         const recv_name_opt = guessReceiverNameAtCursor(doc.text, pos) orelse guessReceiverNameBeforeCursor(doc.text, pos);
@@ -3221,7 +3226,391 @@ const LspServer = struct {
                 }
             }
         }
+
+        // Fallback: line-based parse (handles some incomplete-token states while typing).
+        if (self.docs.get(current_uri)) |doc| {
+            const text = doc.text;
+            var line_start: usize = 0;
+            while (line_start < text.len) {
+                var line_end = line_start;
+                while (line_end < text.len and text[line_end] != '\n') : (line_end += 1) {}
+
+                const line_raw = text[line_start..line_end];
+                const line = std.mem.trim(u8, line_raw, " \t\r");
+                if (line.len >= 4 and std.mem.startsWith(u8, line, "imp ")) {
+                    const after_imp = std.mem.trim(u8, line[4..], " \t\r");
+                    if (std.mem.indexOf(u8, after_imp, " as ")) |as_idx| {
+                        const spec = std.mem.trim(u8, after_imp[0..as_idx], " \t\r");
+                        var alias_part = std.mem.trim(u8, after_imp[as_idx + 4 ..], " \t\r");
+                        if (alias_part.len > 0 and alias_part[alias_part.len - 1] == ';') {
+                            alias_part = std.mem.trim(u8, alias_part[0 .. alias_part.len - 1], " \t\r");
+                        }
+                        if (std.mem.eql(u8, alias_part, alias_name)) {
+                            return (self.resolveImportUri(current_uri, spec) catch null);
+                        }
+                    }
+                }
+
+                line_start = if (line_end < text.len) line_end + 1 else line_end;
+            }
+        }
+
         return null;
+    }
+
+    fn appendCompoundInitFieldCompletionsForType(
+        self: *LspServer,
+        items: *std.ArrayList(CompletionItem),
+        seen: *std.StringHashMap(void),
+        preferred_uri: []const u8,
+        container_type: []const u8,
+        prefix: []const u8,
+    ) !void {
+        const container_base = baseTypeNameForLookup(container_type);
+        var it = self.docs.iterator();
+        while (it.next()) |entry| {
+            const uri = entry.value_ptr.uri;
+            const didx = entry.value_ptr.index orelse continue;
+            for (didx.symbols) |s| {
+                if (s.container_fn_range != null) continue;
+                if (s.container_type == null) continue;
+                if (!std.mem.eql(u8, baseTypeNameForLookup(s.container_type.?), container_base)) continue;
+                if (!(s.kind == .field or s.kind == .property)) continue;
+                if (prefix.len != 0 and !std.mem.startsWith(u8, s.name, prefix)) continue;
+                if (!self.isSymbolVisibleFromUri(preferred_uri, uri, s)) continue;
+
+                const key = try self.allocator.dupe(u8, s.name);
+                if (seen.contains(key)) {
+                    self.allocator.free(key);
+                    continue;
+                }
+                try seen.put(key, {});
+
+                const detail = if (s.value_type) |vt| try self.allocator.dupe(u8, vt) else null;
+
+                var insert_buf = std.ArrayList(u8).init(self.allocator);
+                defer insert_buf.deinit();
+                try insert_buf.writer().print("{s} = ", .{s.name});
+
+                try items.append(.{
+                    .label = try self.allocator.dupe(u8, s.name),
+                    .kind = 5, // CompletionItemKind.Field
+                    .detail = detail,
+                    .insertText = try self.allocator.dupe(u8, insert_buf.items),
+                });
+            }
+        }
+    }
+
+    fn appendCompoundInitFieldCompletionsFromTokens(
+        self: *LspServer,
+        items: *std.ArrayList(CompletionItem),
+        seen: *std.StringHashMap(void),
+        idx: *const Index,
+        container_type: []const u8,
+        prefix: []const u8,
+    ) !void {
+        const nextNonComment = struct {
+            fn call(tokens: []const TokenLite, start_index: usize) ?usize {
+                var i = start_index;
+                while (i < tokens.len) : (i += 1) {
+                    if (tokens[i].kind != .comment) return i;
+                }
+                return null;
+            }
+        }.call;
+
+        const isIdentLite = struct {
+            fn call(t: TokenLite) bool {
+                return t.kind == .identifier;
+            }
+        }.call;
+
+        const isSymbolLite = struct {
+            fn call(t: TokenLite, ch: u8) bool {
+                return (t.kind == .symbol or t.kind == .operator) and t.text.len == 1 and t.text[0] == ch;
+            }
+        }.call;
+
+        const isTypeLike = struct {
+            fn call(t: TokenLite) bool {
+                if (t.kind == .identifier) return true;
+                if (t.kind != .keyword) return false;
+                const s = t.text;
+                return std.mem.eql(u8, s, "num") or std.mem.eql(u8, s, "dec") or std.mem.eql(u8, s, "str") or std.mem.eql(u8, s, "bin") or std.mem.eql(u8, s, "chr") or std.mem.eql(u8, s, "raw") or std.mem.eql(u8, s, "void") or std.mem.eql(u8, s, "f32") or std.mem.eql(u8, s, "f64") or std.mem.eql(u8, s, "i8") or std.mem.eql(u8, s, "i16") or std.mem.eql(u8, s, "i32") or std.mem.eql(u8, s, "i64") or std.mem.eql(u8, s, "u8") or std.mem.eql(u8, s, "u16") or std.mem.eql(u8, s, "u32") or std.mem.eql(u8, s, "u64");
+            }
+        }.call;
+
+        var i: usize = 0;
+        while (i < idx.tokens.len) : (i += 1) {
+            if (idx.tokens[i].kind != .keyword or !std.mem.eql(u8, idx.tokens[i].text, "compound")) continue;
+
+            const name_i = nextNonComment(idx.tokens, i + 1) orelse continue;
+            if (!isIdentLite(idx.tokens[name_i])) continue;
+            if (!std.mem.eql(u8, idx.tokens[name_i].text, container_type)) continue;
+
+            var j_opt = nextNonComment(idx.tokens, name_i + 1);
+            while (j_opt) |j| {
+                if (!isSymbolLite(idx.tokens[j], '{')) {
+                    j_opt = nextNonComment(idx.tokens, j + 1);
+                    continue;
+                }
+
+                var depth: i64 = 1;
+                var k: usize = j + 1;
+                while (k < idx.tokens.len and depth > 0) : (k += 1) {
+                    const tk = idx.tokens[k];
+                    if (isSymbolLite(tk, '{')) depth += 1;
+                    if (isSymbolLite(tk, '}')) depth -= 1;
+                    if (depth != 1) continue;
+                    if (!isTypeLike(tk)) continue;
+
+                    const field_name_i = nextNonComment(idx.tokens, k + 1) orelse continue;
+                    if (!isIdentLite(idx.tokens[field_name_i])) continue;
+                    const after_name_i = nextNonComment(idx.tokens, field_name_i + 1) orelse continue;
+                    if (!isSymbolLite(idx.tokens[after_name_i], ';')) continue;
+
+                    const fname = idx.tokens[field_name_i].text;
+                    if (prefix.len != 0 and !std.mem.startsWith(u8, fname, prefix)) {
+                        k = after_name_i;
+                        continue;
+                    }
+
+                    const key = try self.allocator.dupe(u8, fname);
+                    if (seen.contains(key)) {
+                        self.allocator.free(key);
+                        k = after_name_i;
+                        continue;
+                    }
+                    try seen.put(key, {});
+
+                    var insert_buf = std.ArrayList(u8).init(self.allocator);
+                    defer insert_buf.deinit();
+                    try insert_buf.writer().print("{s} = ", .{fname});
+
+                    try items.append(.{
+                        .label = try self.allocator.dupe(u8, fname),
+                        .kind = 5,
+                        .detail = null,
+                        .insertText = try self.allocator.dupe(u8, insert_buf.items),
+                    });
+
+                    k = after_name_i;
+                }
+
+                break;
+            }
+        }
+    }
+
+    fn appendCompoundInitFieldCompletionsFromText(
+        self: *LspServer,
+        items: *std.ArrayList(CompletionItem),
+        seen: *std.StringHashMap(void),
+        text: []const u8,
+        container_type: []const u8,
+        prefix: []const u8,
+    ) !void {
+        var line_start: usize = 0;
+        var in_target = false;
+
+        while (line_start < text.len) {
+            var line_end = line_start;
+            while (line_end < text.len and text[line_end] != '\n') : (line_end += 1) {}
+
+            const raw = text[line_start..line_end];
+            var line = std.mem.trim(u8, raw, " \t\r");
+
+            if (!in_target) {
+                if (line.len >= "compound ".len and std.mem.startsWith(u8, line, "compound ")) {
+                    var rest = std.mem.trim(u8, line["compound ".len..], " \t\r");
+                    var name_end: usize = 0;
+                    while (name_end < rest.len) : (name_end += 1) {
+                        const ch = rest[name_end];
+                        const ok = (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_';
+                        if (!ok) break;
+                    }
+                    if (name_end > 0 and std.mem.eql(u8, rest[0..name_end], container_type)) {
+                        in_target = true;
+                    }
+                }
+            } else {
+                if (std.mem.indexOfScalar(u8, line, '}') != null) {
+                    in_target = false;
+                } else {
+                    if (line.len >= 4 and std.mem.startsWith(u8, line, "pub ")) {
+                        line = std.mem.trim(u8, line[4..], " \t\r");
+                    }
+
+                    const semi_idx = std.mem.indexOfScalar(u8, line, ';') orelse line.len;
+                    const decl = std.mem.trim(u8, line[0..semi_idx], " \t\r");
+
+                    const sp = std.mem.lastIndexOfScalar(u8, decl, ' ') orelse continue;
+                    const field_name = std.mem.trim(u8, decl[sp + 1 ..], " \t\r");
+                    if (field_name.len == 0) {
+                        line_start = if (line_end < text.len) line_end + 1 else line_end;
+                        continue;
+                    }
+
+                    if (prefix.len != 0 and !std.mem.startsWith(u8, field_name, prefix)) {
+                        line_start = if (line_end < text.len) line_end + 1 else line_end;
+                        continue;
+                    }
+
+                    const key = try self.allocator.dupe(u8, field_name);
+                    if (seen.contains(key)) {
+                        self.allocator.free(key);
+                        line_start = if (line_end < text.len) line_end + 1 else line_end;
+                        continue;
+                    }
+                    try seen.put(key, {});
+
+                    var insert_buf = std.ArrayList(u8).init(self.allocator);
+                    defer insert_buf.deinit();
+                    try insert_buf.writer().print("{s} = ", .{field_name});
+
+                    try items.append(.{
+                        .label = try self.allocator.dupe(u8, field_name),
+                        .kind = 5,
+                        .detail = null,
+                        .insertText = try self.allocator.dupe(u8, insert_buf.items),
+                    });
+                }
+            }
+
+            line_start = if (line_end < text.len) line_end + 1 else line_end;
+        }
+    }
+
+    fn detectCompoundInitTypeAtCursor(
+        self: *LspServer,
+        uri: []const u8,
+        idx: *const Index,
+        text: []const u8,
+        pos: Position,
+    ) ?[]const u8 {
+        const cursor = byteIndexForPosition(text, pos);
+
+        // Find nearest unmatched '{' before cursor.
+        var depth: i64 = 0;
+        var i: usize = cursor;
+        var open_i: ?usize = null;
+        while (i > 0) {
+            i -= 1;
+            const ch = text[i];
+            if (ch == '}') {
+                depth += 1;
+                continue;
+            }
+            if (ch == '{') {
+                if (depth == 0) {
+                    open_i = i;
+                    break;
+                }
+                depth -= 1;
+            }
+        }
+        if (open_i == null) return null;
+
+        // Examine token(s) before '{'.
+        var j: usize = open_i.?;
+        while (j > 0 and (text[j - 1] == ' ' or text[j - 1] == '\t' or text[j - 1] == '\r' or text[j - 1] == '\n')) : (j -= 1) {}
+        if (j == 0) return null;
+
+        // Shorthand compound init: `.{ ... }`
+        if (text[j - 1] == '.') {
+            // Infer expected type from simple assignment context: `x = .{ ... }`.
+            var k: usize = j - 1;
+            var eq_i: ?usize = null;
+            while (k > 0) {
+                k -= 1;
+                const ch = text[k];
+                if (ch == '=' and (k == 0 or text[k - 1] != '=')) {
+                    eq_i = k;
+                    break;
+                }
+                if (ch == ';' or ch == '\n' or ch == '{' or ch == '}') break;
+            }
+            if (eq_i) |eqp| {
+                var r: usize = eqp;
+                while (r > 0 and (text[r - 1] == ' ' or text[r - 1] == '\t' or text[r - 1] == '\r' or text[r - 1] == '\n')) : (r -= 1) {}
+
+                var start: usize = r;
+                while (start > 0) {
+                    const ch = text[start - 1];
+                    const ok = (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_';
+                    if (!ok) break;
+                    start -= 1;
+                }
+
+                if (start < r) {
+                    const lhs_name = text[start..r];
+                    if (self.guessVariableType(idx, uri, lhs_name, pos)) |tname| return tname;
+                    if (guessTypeFromTextFallback(text, lhs_name, pos)) |tname| return tname;
+                }
+            }
+            return null;
+        }
+
+        // Explicit init: `Type{ ... }` / `alias.Type{ ... }`.
+        const end_ident: usize = j;
+        var start_ident: usize = end_ident;
+        while (start_ident > 0) {
+            const ch = text[start_ident - 1];
+            const ok = (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_';
+            if (!ok) break;
+            start_ident -= 1;
+        }
+        if (start_ident == end_ident) return null;
+
+        const type_name = text[start_ident..end_ident];
+        return type_name;
+    }
+
+    fn trySendCompoundInitFieldCompletions(
+        self: *LspServer,
+        id_val: ?std.json.Value,
+        uri: []const u8,
+        idx: *const Index,
+        text: []const u8,
+        pos: Position,
+        prefix: []const u8,
+    ) !bool {
+        const container_type = self.detectCompoundInitTypeAtCursor(uri, idx, text, pos) orelse return false;
+
+        var items = std.ArrayList(CompletionItem).init(self.allocator);
+        defer {
+            for (items.items) |it| {
+                self.allocator.free(it.label);
+                if (it.detail) |d| self.allocator.free(d);
+                if (it.insertText) |ins| self.allocator.free(ins);
+            }
+            items.deinit();
+        }
+
+        var seen = std.StringHashMap(void).init(self.allocator);
+        defer {
+            var it = seen.iterator();
+            while (it.next()) |e| self.allocator.free(e.key_ptr.*);
+            seen.deinit();
+        }
+
+        try self.appendCompoundInitFieldCompletionsForType(&items, &seen, uri, container_type, prefix);
+        if (items.items.len == 0) {
+            try self.appendCompoundInitFieldCompletionsFromTokens(&items, &seen, idx, baseTypeNameForLookup(container_type), prefix);
+        }
+        if (items.items.len == 0) {
+            if (self.docs.get(uri)) |doc| {
+                try self.appendCompoundInitFieldCompletionsFromText(&items, &seen, doc.text, baseTypeNameForLookup(container_type), prefix);
+            }
+        }
+        if (items.items.len == 0) return false;
+
+        const list: CompletionList = .{ .items = items.items };
+        const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+        defer self.allocator.free(json);
+        try self.sendResponseJson(id_val, json);
+        return true;
     }
 
     fn trySendAliasNamespaceCompletions(self: *LspServer, id_val: ?std.json.Value, current_uri: []const u8, idx: *const Index, alias_name: []const u8, prefix: []const u8) !bool {
@@ -3237,6 +3626,8 @@ const LspServer = struct {
             for (items.items) |it| {
                 self.allocator.free(it.label);
                 if (it.detail) |d| self.allocator.free(d);
+                if (it.insertText) |ins| self.allocator.free(ins);
+                if (it.filterText) |ft| self.allocator.free(ft);
             }
             items.deinit();
         }
@@ -3273,11 +3664,123 @@ const LspServer = struct {
             }
             try seen.put(key, {});
 
+            const insert_text = try self.completionInsertTextForSymbol(s);
+
             try items.append(.{
                 .label = try self.allocator.dupe(u8, s.name),
                 .kind = ck,
                 .detail = if (s.detail) |d| try self.allocator.dupe(u8, d) else null,
+                .insertText = insert_text,
             });
+        }
+
+        if (items.items.len == 0) {
+            const target_path = uriToPath(self.allocator, target_uri) catch null;
+            if (target_path) |p| {
+                defer self.allocator.free(p);
+                const module_text = if (std.fs.path.isAbsolute(p))
+                    (std.fs.openFileAbsolute(p, .{}) catch null)
+                else
+                    (std.fs.cwd().openFile(p, .{}) catch null);
+
+                if (module_text) |f| {
+                    defer f.close();
+                    const text = f.readToEndAlloc(self.allocator, 512 * 1024) catch null;
+                    if (text) |src| {
+                        defer self.allocator.free(src);
+
+                        var line_start: usize = 0;
+                        while (line_start < src.len) {
+                            var line_end = line_start;
+                            while (line_end < src.len and src[line_end] != '\n') : (line_end += 1) {}
+
+                            const raw = src[line_start..line_end];
+                            const line = std.mem.trim(u8, raw, " \t\r");
+
+                            if (line.len >= 4 and std.mem.startsWith(u8, line, "pub ")) {
+                                const rest = std.mem.trim(u8, line[4..], " \t\r");
+                                var label: ?[]const u8 = null;
+                                var kind: i64 = 6;
+
+                                if (std.mem.startsWith(u8, rest, "fun ")) {
+                                    const sig = rest[4..];
+                                    const lp = std.mem.indexOfScalar(u8, sig, '(') orelse sig.len;
+                                    const name = std.mem.trim(u8, sig[0..lp], " \t\r");
+                                    if (name.len != 0) {
+                                        label = name;
+                                        kind = 3;
+                                    }
+                                } else if (std.mem.startsWith(u8, rest, "compound ")) {
+                                    const s = rest[9..];
+                                    var nend: usize = 0;
+                                    while (nend < s.len) : (nend += 1) {
+                                        const ch = s[nend];
+                                        const ok = (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_';
+                                        if (!ok) break;
+                                    }
+                                    if (nend > 0) {
+                                        label = s[0..nend];
+                                        kind = 7;
+                                    }
+                                } else if (std.mem.startsWith(u8, rest, "quirk ")) {
+                                    const s = rest[6..];
+                                    var nend: usize = 0;
+                                    while (nend < s.len) : (nend += 1) {
+                                        const ch = s[nend];
+                                        const ok = (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_';
+                                        if (!ok) break;
+                                    }
+                                    if (nend > 0) {
+                                        label = s[0..nend];
+                                        kind = 8;
+                                    }
+                                } else if (std.mem.startsWith(u8, rest, "enum ")) {
+                                    const s = rest[5..];
+                                    var nend: usize = 0;
+                                    while (nend < s.len) : (nend += 1) {
+                                        const ch = s[nend];
+                                        const ok = (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_';
+                                        if (!ok) break;
+                                    }
+                                    if (nend > 0) {
+                                        label = s[0..nend];
+                                        kind = 13;
+                                    }
+                                } else {
+                                    // pub <type> <name> [= ...];
+                                    if (std.mem.lastIndexOfScalar(u8, rest, ' ')) |sp| {
+                                        var name_raw = std.mem.trim(u8, rest[sp + 1 ..], " \t\r");
+                                        if (std.mem.indexOfScalar(u8, name_raw, '=')) |eqp| {
+                                            name_raw = std.mem.trim(u8, name_raw[0..eqp], " \t\r");
+                                        }
+                                        if (name_raw.len > 0 and name_raw[name_raw.len - 1] == ';') {
+                                            name_raw = std.mem.trim(u8, name_raw[0 .. name_raw.len - 1], " \t\r");
+                                        }
+                                        if (name_raw.len != 0) {
+                                            label = name_raw;
+                                            kind = 6;
+                                        }
+                                    }
+                                }
+
+                                if (label) |name| {
+                                    if (prefix.len == 0 or std.mem.startsWith(u8, name, prefix)) {
+                                        const key = try self.allocator.dupe(u8, name);
+                                        if (!seen.contains(key)) {
+                                            try seen.put(key, {});
+                                            try items.append(.{ .label = try self.allocator.dupe(u8, name), .kind = kind });
+                                        } else {
+                                            self.allocator.free(key);
+                                        }
+                                    }
+                                }
+                            }
+
+                            line_start = if (line_end < src.len) line_end + 1 else line_end;
+                        }
+                    }
+                }
+            }
         }
 
         const list: CompletionList = .{ .items = items.items };
@@ -3429,6 +3932,8 @@ const LspServer = struct {
             for (items.items) |ci| {
                 self.allocator.free(ci.label);
                 if (ci.detail) |d| self.allocator.free(d);
+                if (ci.insertText) |ins| self.allocator.free(ins);
+                if (ci.filterText) |ft| self.allocator.free(ft);
             }
             items.deinit();
         }
@@ -4225,6 +4730,8 @@ const LspServer = struct {
             for (items.items) |ci| {
                 self.allocator.free(ci.label);
                 if (ci.detail) |d| self.allocator.free(d);
+                if (ci.insertText) |ins| self.allocator.free(ins);
+                if (ci.filterText) |ft| self.allocator.free(ft);
             }
             items.deinit();
         }

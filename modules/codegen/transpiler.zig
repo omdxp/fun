@@ -151,7 +151,7 @@ pub const TypeRegistry = struct {
     /// Maps `<Type> + <QuirkSig>` to the impl definition node.
     impls_by_key: std.HashMap(ImplKey, *ast.Node, ImplKeyContext, 80),
 
-    /// Owned allocations for quirk signature keys.
+    /// Owned allocations for registry-internal keys (quirk signatures, alias-qualified names).
     owned_keys: std.ArrayList([]const u8),
 
     pub fn init(allocator: mem.Allocator) TypeRegistry {
@@ -627,6 +627,26 @@ pub const TranspileProcess = struct {
                     reg.enums_by_name.put(name, n) catch {
                         return TranspileError.MemoryAllocationFailed;
                     };
+
+                    if (proc.import_alias) |alias| {
+                        const alias_name = try self.make_alias_qualified_symbol_name(alias, name);
+                        if (reg.enums_by_name.get(alias_name)) |existing| {
+                            if (!self.same_node_file(n, existing)) {
+                                self.allocator.free(alias_name);
+                                return TranspileError.DuplicateSymbol;
+                            }
+                            self.allocator.free(alias_name);
+                        } else {
+                            reg.enums_by_name.put(alias_name, n) catch {
+                                self.allocator.free(alias_name);
+                                return TranspileError.MemoryAllocationFailed;
+                            };
+                            reg.owned_keys.append(alias_name) catch {
+                                self.allocator.free(alias_name);
+                                return TranspileError.MemoryAllocationFailed;
+                            };
+                        }
+                    }
                 },
                 .Compound => {
                     if (n.node_variant == null) continue;
@@ -638,6 +658,26 @@ pub const TranspileProcess = struct {
                     reg.compounds_by_name.put(name, n) catch {
                         return TranspileError.MemoryAllocationFailed;
                     };
+
+                    if (proc.import_alias) |alias| {
+                        const alias_name = try self.make_alias_qualified_symbol_name(alias, name);
+                        if (reg.compounds_by_name.get(alias_name)) |existing| {
+                            if (!self.same_node_file(n, existing)) {
+                                self.allocator.free(alias_name);
+                                return TranspileError.DuplicateSymbol;
+                            }
+                            self.allocator.free(alias_name);
+                        } else {
+                            reg.compounds_by_name.put(alias_name, n) catch {
+                                self.allocator.free(alias_name);
+                                return TranspileError.MemoryAllocationFailed;
+                            };
+                            reg.owned_keys.append(alias_name) catch {
+                                self.allocator.free(alias_name);
+                                return TranspileError.MemoryAllocationFailed;
+                            };
+                        }
+                    }
                 },
                 .Quirk => {
                     if (n.node_variant == null) continue;
@@ -683,11 +723,32 @@ pub const TranspileProcess = struct {
                         if (existing_node == null or !self.same_node_file(n, existing_node.?)) {
                             return TranspileError.DuplicateSymbol;
                         }
-                        continue;
+                    } else {
+                        reg.quirk_sig_by_name.put(name, sig_key) catch {
+                            return TranspileError.MemoryAllocationFailed;
+                        };
                     }
-                    reg.quirk_sig_by_name.put(name, sig_key) catch {
-                        return TranspileError.MemoryAllocationFailed;
-                    };
+
+                    if (proc.import_alias) |alias| {
+                        const alias_name = try self.make_alias_qualified_symbol_name(alias, name);
+                        if (reg.quirk_sig_by_name.get(alias_name)) |existing_sig| {
+                            const existing_node = reg.quirks_by_sig.get(existing_sig) orelse null;
+                            if (existing_node == null or !self.same_node_file(n, existing_node.?)) {
+                                self.allocator.free(alias_name);
+                                return TranspileError.DuplicateSymbol;
+                            }
+                            self.allocator.free(alias_name);
+                        } else {
+                            reg.quirk_sig_by_name.put(alias_name, sig_key) catch {
+                                self.allocator.free(alias_name);
+                                return TranspileError.MemoryAllocationFailed;
+                            };
+                            reg.owned_keys.append(alias_name) catch {
+                                self.allocator.free(alias_name);
+                                return TranspileError.MemoryAllocationFailed;
+                            };
+                        }
+                    }
                 },
                 .Impl => {
                     // Collected in a second pass after all quirks are known.
@@ -2822,36 +2883,48 @@ pub const TranspileProcess = struct {
             return TranspileError.SymbolNotDefined;
         };
 
-        if (reg.enums_by_name.get(base_name)) |enode| {
-            if (!self.can_access(&ref_node, enode)) {
-                self.report_type_error(ref_node, "type '{s}' is private", .{base_name});
-                return TranspileError.SymbolNotDefined;
-            }
-            return;
+        // Prefer the full name (supports alias-qualified types like `m__User`),
+        // then fall back to the base prefix for legacy mangled/derived lookups.
+        var names_buf: [2][]const u8 = undefined;
+        var names_len: usize = 1;
+        names_buf[0] = name;
+        if (!mem.eql(u8, name, base_name)) {
+            names_buf[1] = base_name;
+            names_len = 2;
         }
 
-        if (reg.compounds_by_name.get(base_name)) |cnode| {
-            if (!self.can_access(&ref_node, cnode)) {
-                self.report_type_error(ref_node, "type '{s}' is private", .{base_name});
-                return TranspileError.SymbolNotDefined;
+        for (names_buf[0..names_len]) |cand| {
+            if (reg.enums_by_name.get(cand)) |enode| {
+                if (!self.can_access(&ref_node, enode)) {
+                    self.report_type_error(ref_node, "type '{s}' is private", .{cand});
+                    return TranspileError.SymbolNotDefined;
+                }
+                return;
             }
-            return;
+
+            if (reg.compounds_by_name.get(cand)) |cnode| {
+                if (!self.can_access(&ref_node, cnode)) {
+                    self.report_type_error(ref_node, "type '{s}' is private", .{cand});
+                    return TranspileError.SymbolNotDefined;
+                }
+                return;
+            }
+
+            if (reg.quirk_sig_by_name.get(cand)) |sig| {
+                const qnode = reg.quirks_by_sig.get(sig) orelse null;
+                if (qnode == null or qnode.?.node_variant == null) {
+                    self.report_type_error(ref_node, "unknown type '{s}'", .{cand});
+                    return TranspileError.SymbolNotDefined;
+                }
+                if (!self.can_access(&ref_node, qnode.?)) {
+                    self.report_type_error(ref_node, "type '{s}' is private", .{cand});
+                    return TranspileError.SymbolNotDefined;
+                }
+                return;
+            }
         }
 
-        if (reg.quirk_sig_by_name.get(base_name)) |sig| {
-            const qnode = reg.quirks_by_sig.get(sig) orelse null;
-            if (qnode == null or qnode.?.node_variant == null) {
-                self.report_type_error(ref_node, "unknown type '{s}'", .{base_name});
-                return TranspileError.SymbolNotDefined;
-            }
-            if (!self.can_access(&ref_node, qnode.?)) {
-                self.report_type_error(ref_node, "type '{s}' is private", .{base_name});
-                return TranspileError.SymbolNotDefined;
-            }
-            return;
-        }
-
-        self.report_type_error(ref_node, "unknown type '{s}'", .{base_name});
+        self.report_type_error(ref_node, "unknown type '{s}'", .{name});
         return TranspileError.SymbolNotDefined;
     }
 
@@ -3015,15 +3088,16 @@ pub const TranspileProcess = struct {
 
         const tname = base.name.?;
         const base_name = if (mem.indexOf(u8, tname, "__")) |idx| tname[0..idx] else tname;
-        try self.ensure_named_type_visible(node, base_name);
+        try self.ensure_named_type_visible(node, tname);
 
         if (base.pointer_depth > 1) {
             self.report_type_error(node, "field access supports at most one pointer indirection", .{});
             return TranspileError.InvalidFieldAccess;
         }
 
-        const fdt = self.lookup_compound_field(base_name, field_name) orelse {
-            self.report_type_error(node, "type '{s}' has no field '{s}'", .{ base_name, field_name });
+        const fdt = self.lookup_compound_field(tname, field_name) orelse
+            (if (!mem.eql(u8, tname, base_name)) self.lookup_compound_field(base_name, field_name) else null) orelse {
+            self.report_type_error(node, "type '{s}' has no field '{s}'", .{ tname, field_name });
             return TranspileError.UnknownField;
         };
         return try self.type_from_dtype_with_mangled(fdt);
@@ -4202,9 +4276,7 @@ pub const TranspileProcess = struct {
                         const member_name = right.*.data.?.sval.items;
                         if (try self.resolve_alias_qualified_symbol_name(alias_name, member_name)) |qualified| {
                             defer self.allocator.free(qualified);
-                            if (self.global_symbols.get(qualified)) |g| {
-                                return if (g.is_function) .{ .base = .Unknown } else .{ .base = .Unknown };
-                            }
+                            return .{ .base = .Unknown };
                         }
                     }
 
@@ -5532,6 +5604,48 @@ pub const TranspileProcess = struct {
                 }
 
                 try self.register_symbol(s);
+            },
+            .compound => |compound| {
+                const is_public = node_is_public(&node);
+                if (is_public) {
+                    self.global_symbols.put(compound.name.items, .{
+                        .symbol_name = compound.name.items,
+                        .file_path = self.input_file_path,
+                        .is_function = false,
+                        .is_public = true,
+                    }) catch |e| {
+                        std.debug.print("Error registering symbol '{s}': {s}\n", .{ compound.name.items, @errorName(e) });
+                        return TranspileError.MemoryAllocationFailed;
+                    };
+                }
+            },
+            .enum_decl => |enum_decl| {
+                const is_public = node_is_public(&node);
+                if (is_public) {
+                    self.global_symbols.put(enum_decl.name.items, .{
+                        .symbol_name = enum_decl.name.items,
+                        .file_path = self.input_file_path,
+                        .is_function = false,
+                        .is_public = true,
+                    }) catch |e| {
+                        std.debug.print("Error registering symbol '{s}': {s}\n", .{ enum_decl.name.items, @errorName(e) });
+                        return TranspileError.MemoryAllocationFailed;
+                    };
+                }
+            },
+            .quirk => |quirk| {
+                const is_public = node_is_public(&node);
+                if (is_public) {
+                    self.global_symbols.put(quirk.name.items, .{
+                        .symbol_name = quirk.name.items,
+                        .file_path = self.input_file_path,
+                        .is_function = false,
+                        .is_public = true,
+                    }) catch |e| {
+                        std.debug.print("Error registering symbol '{s}': {s}\n", .{ quirk.name.items, @errorName(e) });
+                        return TranspileError.MemoryAllocationFailed;
+                    };
+                }
             },
             else => {},
         }
@@ -8919,10 +9033,8 @@ pub const TranspileProcess = struct {
                         const member_name = right.*.data.?.sval.items;
                         if (try self.resolve_alias_qualified_symbol_name(alias_name, member_name)) |qualified| {
                             defer self.allocator.free(qualified);
-                            if (self.global_symbols.get(qualified) != null) {
-                                try self.write(qualified);
-                                return;
-                            }
+                            try self.write(qualified);
+                            return;
                         }
                     }
 
@@ -9974,10 +10086,18 @@ pub const TranspileProcess = struct {
         if (import_alias) |alias| {
             try self.register_import_alias(alias, import_path);
         }
-        if (std.mem.startsWith(u8, import_path, "std.c.")) {
-            try self.process_std_import(node, import_path);
-        } else if (std.mem.startsWith(u8, import_path, "std.")) {
-            try self.process_std_module_import(node, import_path);
+        // Canonicalize legacy/local stdlib prefix `stdlib.std.*` to `std.*`
+        // so all stdlib imports resolve through the same stdlib root and avoid
+        // duplicate symbol loading from mixed roots.
+        const canonical_import_path = if (std.mem.startsWith(u8, import_path, "stdlib.std."))
+            import_path["stdlib.".len..]
+        else
+            import_path;
+
+        if (std.mem.startsWith(u8, canonical_import_path, "std.c.")) {
+            try self.process_std_import(node, canonical_import_path);
+        } else if (std.mem.startsWith(u8, canonical_import_path, "std.")) {
+            try self.process_std_module_import(node, canonical_import_path);
         } else {
             try self.process_local_import(node, import_path, import_alias);
         }

@@ -114,6 +114,9 @@ if x > 0 {
 - Range: `for i : 0..10 { ... }`
 - Array: `for item : arr { ... }`
 - Indexed: `for i, item :: arr { ... }`
+- While-style (condition): `for i < len { ... }`
+- Infinite loop: `for true { ... }`
+- This style is used in stdlib (for example `std/string.fn`, `std/net.fn`, and `std/fs.fn`).
 
 ### Fit (Pattern Matching)
 ```fun

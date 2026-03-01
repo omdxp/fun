@@ -960,6 +960,30 @@ pub const ParseProcess = struct {
             return ParseError.MemoryAllocationFailed;
         };
 
+        // Qualified user-defined types via module alias (e.g. `imp mod as m; m.Type`).
+        // Internally we mangle `a.b` as `a__b` to match symbol/type naming.
+        if (dt_token.?.type == .Identifier) {
+            while (self.next_token_is_operator(".") or self.next_token_is_symbol('.')) {
+                _ = self.token_next(); // consume '.'
+
+                const seg_tok = self.token_next();
+                if (seg_tok == null or seg_tok.?.type != .Identifier) {
+                    self.transpile_proc.err("expected identifier after '.' in qualified datatype", .{});
+                    return ParseError.InvalidDataType;
+                }
+
+                dt.*.type = .Unknown;
+                dt.*.type_str.appendSlice("__") catch |e| {
+                    std.debug.print("Error appending to type string: {s}", .{@errorName(e)});
+                    return ParseError.MemoryAllocationFailed;
+                };
+                dt.*.type_str.appendSlice(seg_tok.?.data.sval.items) catch |e| {
+                    std.debug.print("Error appending to type string: {s}", .{@errorName(e)});
+                    return ParseError.MemoryAllocationFailed;
+                };
+            }
+        }
+
         try self.parse_generic_type_args(dt);
 
         const ptr_depth = self.parse_get_pointer_depth();
@@ -2111,6 +2135,17 @@ pub const ParseProcess = struct {
                 const looks_like_decl = struct {
                     fn check(p: *Self) bool {
                         var off: usize = 1;
+
+                        // Optional qualified type segments after the leading identifier:
+                        // `alias.Type name;`
+                        while (true) {
+                            const dot_tok = p.token_peek_n(off) orelse break;
+                            if (!(dot_tok.type == .Operator and mem.eql(u8, dot_tok.data.sval.items, "."))) break;
+
+                            const seg_tok = p.token_peek_n(off + 1) orelse return false;
+                            if (seg_tok.type != .Identifier) return false;
+                            off += 2;
+                        }
 
                         // Optional generic args after the type name.
                         _ = p.skip_generic_args_tokens(&off);

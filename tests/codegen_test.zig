@@ -154,6 +154,42 @@ test "aliased import calls transpile to qualified symbols" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t two__pick()") != null);
 }
 
+test "aliased import supports public type and value access" {
+    const allocator = std.testing.allocator;
+    const mod_path = "codegen_alias_exports_mod.fn";
+    const main_path = "codegen_alias_exports_main.fn";
+    defer fs.cwd().deleteFile(mod_path) catch {};
+    defer fs.cwd().deleteFile(main_path) catch {};
+
+    {
+        const mod_file = try fs.cwd().createFile(mod_path, .{ .read = true });
+        defer mod_file.close();
+        try mod_file.writeAll(
+            "pub compound User {\n" ++
+                "  num id;\n" ++
+                "}\n" ++
+                "pub num answer = 7;\n" ++
+                "pub fun get_answer() num { ret answer; }\n",
+        );
+    }
+
+    const input =
+        "imp codegen_alias_exports_mod as m;\n" ++
+        "fun main() {\n" ++
+        "  m.User u;\n" ++
+        "  u.id = m.answer;\n" ++
+        "  num a = m.get_answer();\n" ++
+        "  _ = u.id + a;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, main_path, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "m__User") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "m__answer") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "m__get_answer(") != null);
+}
+
 test "defer emits in LIFO order before return" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_defer_lifo.fn";
