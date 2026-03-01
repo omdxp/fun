@@ -399,3 +399,24 @@ test "asm statement transpiles" {
 
     try fs.cwd().deleteFile(ifilepath);
 }
+
+test "transitive std.net import emits socket headers" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_transitive_std_net.fn";
+
+    const input =
+        "imp http.serve;\n" ++
+        "fun main() {\n" ++
+        "  ret;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <sys/socket.h>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <netinet/in.h>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <arpa/inet.h>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <unistd.h>") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}

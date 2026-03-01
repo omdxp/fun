@@ -3165,8 +3165,18 @@ pub const TranspileProcess = struct {
         return res;
     }
 
-    fn is_numeric_type(t: CheckedType) bool {
-        return !t.is_array and t.pointer_depth == 0 and (t.base == .Num or t.base == .Dec or t.base == .Chr);
+    fn is_enum_named_type(self: *Self, t: CheckedType) bool {
+        if (!is_user_named_type(t)) return false;
+        if (t.is_array or t.pointer_depth != 0) return false;
+        const root = self.get_root();
+        if (root.type_registry == null) return false;
+        return root.type_registry.?.enums_by_name.contains(t.name.?);
+    }
+
+    fn is_numeric_type(self: *Self, t: CheckedType) bool {
+        if (t.is_array or t.pointer_depth != 0) return false;
+        if (t.base == .Num or t.base == .Dec or t.base == .Chr) return true;
+        return self.is_enum_named_type(t);
     }
 
     fn is_pointer_type(t: CheckedType) bool {
@@ -3174,7 +3184,7 @@ pub const TranspileProcess = struct {
     }
 
     fn promote_numeric_type(a: CheckedType, b: CheckedType) dtype.DataTypeType {
-        // Assumes `is_numeric_type(a)` and `is_numeric_type(b)`.
+        // Assumes numeric-compatible operands.
         if (a.base == .Dec or b.base == .Dec) return .Dec;
         return .Num;
     }
@@ -3188,6 +3198,14 @@ pub const TranspileProcess = struct {
 
     fn can_implicit_coerce(self: *Self, expected: CheckedType, actual: CheckedType) TranspileError!bool {
         if (CheckedType.eql(expected, actual)) return true;
+
+        // Enums behave as numeric values for coercion with `num`.
+        if (self.is_enum_named_type(expected) and !actual.is_array and actual.pointer_depth == 0 and actual.base == .Num) {
+            return true;
+        }
+        if (!expected.is_array and expected.pointer_depth == 0 and expected.base == .Num and self.is_enum_named_type(actual)) {
+            return true;
+        }
 
         // Quirk coercion: allow `T*` -> `Quirk` if an `impl T Quirk { ... }` exists.
         if (self.is_quirk_named_type(expected) and is_user_named_type(actual) and actual.pointer_depth == 1 and !actual.is_array) {
@@ -3245,11 +3263,11 @@ pub const TranspileProcess = struct {
         return false;
     }
 
-    fn can_compare_or_match(a: CheckedType, b: CheckedType) bool {
+    fn can_compare_or_match(self: *Self, a: CheckedType, b: CheckedType) bool {
         if (CheckedType.eql(a, b)) return true;
 
         // Numeric comparisons/coercion.
-        if (is_numeric_type(a) and is_numeric_type(b)) return true;
+        if (self.is_numeric_type(a) and self.is_numeric_type(b)) return true;
 
         // Allow chr <-> num comparisons (C-style char/int coercions).
         if ((a.base == .Chr and b.base == .Num) or (a.base == .Num and b.base == .Chr)) return true;
@@ -3471,7 +3489,7 @@ pub const TranspileProcess = struct {
                 const a = try self.infer_expr_type(t.true.*, env, fns);
                 const b = try self.infer_expr_type(t.false.*, env, fns);
                 if (CheckedType.eql(a, b)) return a;
-                if (is_numeric_type(a) and is_numeric_type(b)) {
+                if (self.is_numeric_type(a) and self.is_numeric_type(b)) {
                     return .{ .base = promote_numeric_type(a, b) };
                 }
                 self.report_type_error(node, "tenary branches must have the same type", .{});
@@ -4230,7 +4248,7 @@ pub const TranspileProcess = struct {
                             return .{ .base = .Num };
                         }
 
-                        if (!is_numeric_type(lt) or !is_numeric_type(rt)) {
+                        if (!self.is_numeric_type(lt) or !self.is_numeric_type(rt)) {
                             self.report_type_error(node, "compound assignment '{s}' expects num/dec", .{op});
                             return TranspileError.TypeMismatch;
                         }
@@ -4293,7 +4311,7 @@ pub const TranspileProcess = struct {
                         }
                     }
 
-                    if (is_known_type(lt) and is_known_type(rt) and !can_compare_or_match(lt, rt)) {
+                    if (is_known_type(lt) and is_known_type(rt) and !self.can_compare_or_match(lt, rt)) {
                         self.report_type_error(node, "equality '{s}' expects both sides to have the same type", .{op});
                         return TranspileError.TypeMismatch;
                     }
@@ -4312,7 +4330,7 @@ pub const TranspileProcess = struct {
                         return .{ .base = .Num };
                     }
 
-                    if (!is_numeric_type(l) or !is_numeric_type(r)) {
+                    if (!self.is_numeric_type(l) or !self.is_numeric_type(r)) {
                         self.report_type_error(node, "operator '{s}' expects num/dec operands", .{op});
                         return TranspileError.TypeMismatch;
                     }
@@ -4320,7 +4338,7 @@ pub const TranspileProcess = struct {
                 }
 
                 if (mem.eql(u8, op, "<") or mem.eql(u8, op, "<=") or mem.eql(u8, op, ">") or mem.eql(u8, op, ">=")) {
-                    if (!is_numeric_type(l) or !is_numeric_type(r)) {
+                    if (!self.is_numeric_type(l) or !self.is_numeric_type(r)) {
                         self.report_type_error(node, "comparison '{s}' expects num/dec operands", .{op});
                         return TranspileError.TypeMismatch;
                     }
@@ -4466,7 +4484,7 @@ pub const TranspileProcess = struct {
                                 }
                             }
                             const ct = try self.infer_expr_type(cond.*, env, fns);
-                            if (is_known_type(target_t) and is_known_type(ct) and !can_compare_or_match(target_t, ct)) {
+                            if (is_known_type(target_t) and is_known_type(ct) and !self.can_compare_or_match(target_t, ct)) {
                                 self.report_type_error(stmt, "fit branch condition type must match fit expression type", .{});
                                 return TranspileError.TypeMismatch;
                             }
@@ -9843,16 +9861,18 @@ pub const TranspileProcess = struct {
             }
         }.call;
 
-        for (self.std_imports.items) |header| {
-            try add_header(self, &seen, header);
-        }
-
-        // Add imports from child processes as well
-        for (self.children.items) |child| {
-            for (child.std_imports.items) |header| {
-                try add_header(self, &seen, header);
+        const add_headers_recursive = struct {
+            fn call(tp: *Self, map: *std.StringHashMap(bool), proc: *Self) TranspileError!void {
+                for (proc.std_imports.items) |header| {
+                    try add_header(tp, map, header);
+                }
+                for (proc.children.items) |child| {
+                    try call(tp, map, child);
+                }
             }
-        }
+        }.call;
+
+        try add_headers_recursive(self, &seen, self);
 
         // Always include core headers once.
         try add_header(self, &seen, "stdio.h");

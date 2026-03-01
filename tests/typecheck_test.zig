@@ -550,3 +550,18 @@ test "typecheck let cannot infer quirk type" {
 
     try runTranspileExpectError(std.testing.allocator, "typecheck_let_infer_quirk_err.fn", input);
 }
+
+test "typecheck enums behave as numeric values across contexts" {
+    const input =
+        "enum Color { Red, Green, Blue }\n" ++
+        "fun main() {\n" ++
+        "  Color c = Color.Red;\n" ++
+        "  num n = Color.Blue;\n" ++
+        "  c = n;\n" ++
+        "  let inferred = Color.Green;\n" ++
+        "  let mixed = inferred + 1;\n" ++
+        "  if mixed > 1 { ret; }\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_enum_numeric_ok.fn", input);
+}
