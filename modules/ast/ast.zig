@@ -385,7 +385,7 @@ pub fn node_is_value_type(n: Node) bool {
     return node_is_expression_or_parenthesis(n) or
         n.type == .Identifier or n.type == .Number or
         n.type == .Unary or n.type == .Tenary or
-        n.type == .String or n.type == .CompoundInit;
+        n.type == .String or n.type == .Character or n.type == .CompoundInit;
 }
 
 /// Checks if the node is expressionable.
@@ -407,7 +407,7 @@ pub fn node_is_value_type(n: Node) bool {
 pub fn node_is_expressionable(n: Node) bool {
     return n.type == .Expression or n.type == .ExpressionParenthesis or
         n.type == .Unary or n.type == .Identifier or
-        n.type == .Number or n.type == .String or n.type == .Boolean or
+        n.type == .Number or n.type == .String or n.type == .Character or n.type == .Boolean or
         n.type == .CompoundInit;
 }
 

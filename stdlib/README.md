@@ -22,7 +22,7 @@ Note: `num`/`dec` are 64-bit by default (`int64_t`/`double`), and Fun also suppo
 - **std/io.fn**: File helpers (append, size, read bytes, read line, flush).
 - **std/json.fn**: JSON stringify/parse for string objects and arrays (with escaping, keys/has/remove).
 - **std/log.fn**: Logging with levels and typed log helpers.
-- **std/map.fn**: String-keyed hash map with keys and defaults.
+- **std/map.fn**: Generic map type `Map<K, V>` with typed keys/values and bytewise hashed lookups by default.
 - **std/math.fn**: Math helpers.
 - **std/net.fn**: Basic URL parsing, HTTP GET builder, and POSIX TCP/HTTP helpers.
 - **std/option.fn**: Generic `Option<T>` container with `some<T>`/`none<T>` helpers.
@@ -36,6 +36,8 @@ Note: `num`/`dec` are 64-bit by default (`int64_t`/`double`), and Fun also suppo
 - **std/vec.fn**: Dynamic vector helpers (reserve/insert/remove/pop/swap_remove/extend/resize/shrink_to_fit).
 - **std/error.fn**: Error value helpers (construct/check ok/err).
 - **std/result.fn**: Generic `Result<T>` container with `ok<T>`/`err<T>` helpers.
+- **std/quirks.fn**: Common quirks (`Sized`, `Display`) for generic APIs.
+- **std/serde.fn**: Serialization quirks (`Serialize`, `Deserialize`) and text conversion helpers.
 
 ### C signature modules (std/c/*)
 

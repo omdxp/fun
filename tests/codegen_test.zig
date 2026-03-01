@@ -438,3 +438,76 @@ test "main num return emits exit status" {
 
     try fs.cwd().deleteFile(ifilepath);
 }
+
+test "map compound key specialization symbols emit" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_map_compound_key.fn";
+
+    const input =
+        "imp stdlib.std.map;\n" ++
+        "compound UserKey { num id; num region; }\n" ++
+        "fun main() {\n" ++
+        "  Map<UserKey, str> by_user;\n" ++
+        "  by_user.init(8);\n" ++
+        "  UserKey a = UserKey{id = 7, region = 1};\n" ++
+        "  UserKey b = UserKey{id = 9, region = 2};\n" ++
+        "  by_user.put(a, \"alice\");\n" ++
+        "  by_user.put(b, \"bob\");\n" ++
+        "  str out = by_user.get(a);\n" ++
+        "  bin present = by_user.has(a);\n" ++
+        "  by_user.remove(b);\n" ++
+        "  if present == false { ret; }\n" ++
+        "  if out == \"alice\" { ret; }\n" ++
+        "  by_user.free();\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Map__UserKey__str") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Map__UserKey__str__init") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Map__UserKey__str__put") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Map__UserKey__str__get") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Map__UserKey__str__has") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Map__UserKey__str__remove") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
+test "stdlib hot path stress transpiles" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_stdlib_hot_stress.fn";
+
+    const input =
+        "imp stdlib.std.map;\n" ++
+        "fun main() {\n" ++
+        "  Map<num, str> m;\n" ++
+        "  m.init(256);\n" ++
+        "  num i = 0;\n" ++
+        "  for i < 2000 {\n" ++
+        "    m.put(i, \"v\");\n" ++
+        "    i = i + 1;\n" ++
+        "  }\n" ++
+        "  i = 0;\n" ++
+        "  for i < 1000 {\n" ++
+        "    if m.has(i) == false {\n" ++
+        "      ret;\n" ++
+        "    }\n" ++
+        "    i = i + 1;\n" ++
+        "  }\n" ++
+        "  m.remove(42);\n" ++
+        "  str out = m.get(7);\n" ++
+        "  if m.has(7) == true {\n" ++
+        "    if out == \"v\" { ret; }\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Map__num__str__put") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Map__num__str__has") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Map__num__str__remove") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}

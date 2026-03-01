@@ -139,12 +139,11 @@ impl Logger {
 
   // Log a boolean value.
   pub log_bin(LogLevel level, str label, bin value) {
-    if level_value(level) >= level_value(self.level) {
-      if value {
-        printf("[%s] %s=true\n", level_name(level), label);
-      } else {
-        printf("[%s] %s=false\n", level_name(level), label);
-      }
+    let enabled = level_value(level) >= level_value(self.level);
+    if enabled && value {
+      printf("[%s] %s=true\n", level_name(level), label);
+    } elif enabled {
+      printf("[%s] %s=false\n", level_name(level), label);
     }
   }
 }

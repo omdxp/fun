@@ -365,23 +365,24 @@ pub const TranspileProcess = struct {
 
         // 3) Dev-tree fallbacks (when running from repo root)
         {
-            const cand1 = "zig-out/share/fun";
-            if (dir_exists(cand1)) {
-                const abs = std.fs.cwd().realpathAlloc(backing, cand1) catch null;
+            const cand_workspace = "stdlib";
+            if (dir_exists(cand_workspace)) {
+                const abs = std.fs.cwd().realpathAlloc(backing, cand_workspace) catch null;
                 if (abs) |p| {
                     defer backing.free(p);
                     return try dupe_arena(a, p);
                 }
-                return try dupe_arena(a, cand1);
+                return try dupe_arena(a, cand_workspace);
             }
-            const cand2 = "stdlib";
-            if (dir_exists(cand2)) {
-                const abs = std.fs.cwd().realpathAlloc(backing, cand2) catch null;
+
+            const cand_install = "zig-out/share/fun";
+            if (dir_exists(cand_install)) {
+                const abs = std.fs.cwd().realpathAlloc(backing, cand_install) catch null;
                 if (abs) |p| {
                     defer backing.free(p);
                     return try dupe_arena(a, p);
                 }
-                return try dupe_arena(a, cand2);
+                return try dupe_arena(a, cand_install);
             }
         }
 
@@ -417,6 +418,59 @@ pub const TranspileProcess = struct {
         }
 
         return null;
+    }
+
+    fn discover_stdlib_dir_near_input(backing: mem.Allocator, a: mem.Allocator, ifilepath: []const u8) TranspileError!?[]const u8 {
+        const abs = if (std.fs.path.isAbsolute(ifilepath))
+            (backing.dupe(u8, ifilepath) catch return TranspileError.MemoryAllocationFailed)
+        else blk: {
+            const rp = std.fs.cwd().realpathAlloc(backing, ifilepath) catch return null;
+            break :blk rp;
+        };
+        defer backing.free(abs);
+
+        var cur_dir = std.fs.path.dirname(abs) orelse return null;
+        var depth: usize = 0;
+        while (depth < 12) : (depth += 1) {
+            const cand = try join_alloc(backing, &[_][]const u8{ cur_dir, "stdlib" });
+            defer backing.free(cand);
+            if (dir_exists(cand)) {
+                const resolved = std.fs.cwd().realpathAlloc(backing, cand) catch null;
+                if (resolved) |r| {
+                    defer backing.free(r);
+                    return try dupe_arena(a, r);
+                }
+                return try dupe_arena(a, cand);
+            }
+
+            const parent_opt = std.fs.path.dirname(cur_dir);
+            if (parent_opt == null) break;
+            const parent = parent_opt.?;
+            if (parent.len == cur_dir.len) break;
+            cur_dir = parent;
+        }
+
+        return null;
+    }
+
+    fn normalize_stdlib_dir(backing: mem.Allocator, a: mem.Allocator, candidate: []const u8) TranspileError![]const u8 {
+        const candidate_std = try join_alloc(backing, &[_][]const u8{ candidate, "std" });
+        defer backing.free(candidate_std);
+        if (dir_exists(candidate_std)) {
+            return try dupe_arena(a, candidate);
+        }
+
+        const base = std.fs.path.basename(candidate);
+        if (std.mem.eql(u8, base, "std")) {
+            const parent = std.fs.path.dirname(candidate) orelse candidate;
+            const parent_std = try join_alloc(backing, &[_][]const u8{ parent, "std" });
+            defer backing.free(parent_std);
+            if (dir_exists(parent_std)) {
+                return try dupe_arena(a, parent);
+            }
+        }
+
+        return try dupe_arena(a, candidate);
     }
 
     fn get_root(self: *Self) *Self {
@@ -1708,7 +1762,7 @@ pub const TranspileProcess = struct {
         };
         errdefer self.backing_allocator.destroy(import_proc);
 
-        import_proc.* = try TranspileProcess.init(self.backing_allocator, canon, "temp.c", .{ .outf = false });
+        import_proc.* = try TranspileProcess.init_with_stdlib_dir(self.backing_allocator, canon, "temp.c", .{ .outf = false }, self.stdlib_dir);
         import_proc.parent = self;
         import_proc.is_importing = true;
 
@@ -2012,7 +2066,7 @@ pub const TranspileProcess = struct {
             }
         }
 
-        var import_proc = try TranspileProcess.init(self.backing_allocator, canon, "temp.c", .{ .exec = false, .outf = false, .ast = false });
+        var import_proc = try TranspileProcess.init_with_stdlib_dir(self.backing_allocator, canon, "temp.c", .{ .exec = false, .outf = false, .ast = false }, self.stdlib_dir);
         defer import_proc.deinit();
 
         var lex_proc = lexer.LexProcess.init(&import_proc);
@@ -2204,10 +2258,17 @@ pub const TranspileProcess = struct {
             return TranspileError.MemoryAllocationFailed;
         };
 
-        const discovered_stdlib_dir: ?[]const u8 = if (stdlib_dir_override) |p|
-            (try dupe_arena(a, p))
+        const discovered_stdlib_dir_raw: ?[]const u8 = if (stdlib_dir_override) |p|
+            p
+        else blk: {
+            if (try discover_stdlib_dir(allocator, a)) |d| break :blk d;
+            break :blk try discover_stdlib_dir_near_input(allocator, a, ifilepath);
+        };
+
+        const discovered_stdlib_dir: ?[]const u8 = if (discovered_stdlib_dir_raw) |d|
+            (try normalize_stdlib_dir(allocator, a, d))
         else
-            (try discover_stdlib_dir(allocator, a));
+            null;
 
         return Self{
             .flags = flags,
@@ -2258,11 +2319,11 @@ pub const TranspileProcess = struct {
         const StdPathLayout = enum { c, pure };
 
         const Builder = struct {
-            fn build(self2: *Self, rel2: []const u8, layout: StdPathLayout) TranspileError![]const u8 {
+            fn build_with_root(self2: *Self, root: []const u8, rel2: []const u8, layout: StdPathLayout) TranspileError![]const u8 {
                 var tmp = std.ArrayList(u8).init(self2.backing_allocator);
                 defer tmp.deinit();
 
-                tmp.appendSlice(self2.stdlib_dir.?) catch return TranspileError.MemoryAllocationFailed;
+                tmp.appendSlice(root) catch return TranspileError.MemoryAllocationFailed;
                 tmp.append('/') catch return TranspileError.MemoryAllocationFailed;
                 tmp.appendSlice("std") catch return TranspileError.MemoryAllocationFailed;
                 tmp.append('/') catch return TranspileError.MemoryAllocationFailed;
@@ -2283,9 +2344,36 @@ pub const TranspileProcess = struct {
         };
 
         const layout: StdPathLayout = if (has_c_prefix) .c else .pure;
-        const full_path = try Builder.build(self, rel, layout);
+        const full_path = try Builder.build_with_root(self, self.stdlib_dir.?, rel, layout);
         std.fs.cwd().access(full_path, .{}) catch {
             self.backing_allocator.free(full_path);
+
+            if (try discover_stdlib_dir_near_input(self.backing_allocator, self.allocator, self.input_file_path)) |near| {
+                const near_norm = try normalize_stdlib_dir(self.backing_allocator, self.allocator, near);
+                if (!std.mem.eql(u8, near_norm, self.stdlib_dir.?)) {
+                    const near_path = try Builder.build_with_root(self, near_norm, rel, layout);
+                    if (std.fs.cwd().access(near_path, .{})) |_| {
+                        self.stdlib_dir = near_norm;
+                        return near_path;
+                    } else |_| {
+                        self.backing_allocator.free(near_path);
+                    }
+                }
+            }
+
+            if (try discover_stdlib_dir(self.backing_allocator, self.allocator)) |auto| {
+                const auto_norm = try normalize_stdlib_dir(self.backing_allocator, self.allocator, auto);
+                if (!std.mem.eql(u8, auto_norm, self.stdlib_dir.?)) {
+                    const auto_path = try Builder.build_with_root(self, auto_norm, rel, layout);
+                    if (std.fs.cwd().access(auto_path, .{})) |_| {
+                        self.stdlib_dir = auto_norm;
+                        return auto_path;
+                    } else |_| {
+                        self.backing_allocator.free(auto_path);
+                    }
+                }
+            }
+
             return null;
         };
         return full_path;
@@ -4624,11 +4712,13 @@ pub const TranspileProcess = struct {
                     if (dt.generic_args == null) continue;
                     const gargs = dt.generic_args.?.items();
                     if (gargs.len != params.count) continue;
+                    if (!self.generic_args_are_concrete(params, gargs)) continue;
                     if (self.dtype_contains_type_param(dt, params)) continue;
 
                     const mangled = try self.type_name_mangled(dt);
                     defer self.allocator.free(mangled);
                     if (self.mangled_contains_type_param(mangled, params)) continue;
+                    if (self.mangled_contains_unresolved_placeholder(mangled)) continue;
 
                     for (im.methods.items()) |m| {
                         if (m.type != .Function or m.node_variant == null) continue;
@@ -4736,11 +4826,16 @@ pub const TranspileProcess = struct {
 
         try self.collect_fn_sigs(self, &fns, &owned_args);
 
-        // Check this module and all imported modules.
-        try typecheck_module(self, &fns);
-        for (self.children.items) |child| {
-            try typecheck_module(child, &fns);
-        }
+        // Check this module and all imported modules recursively.
+        const Walker = struct {
+            fn walk(proc: *Self, fns_ref: *const std.StringHashMap(FnSig)) TranspileError!void {
+                try typecheck_module(proc, fns_ref);
+                for (proc.children.items) |child| {
+                    try walk(child, fns_ref);
+                }
+            }
+        };
+        try Walker.walk(self, &fns);
     }
 
     fn typecheck_module(proc: *Self, fns: *const std.StringHashMap(FnSig)) TranspileError!void {
@@ -6284,11 +6379,54 @@ pub const TranspileProcess = struct {
         return false;
     }
 
+    fn mangled_contains_unresolved_placeholder(_: *Self, mangled: []const u8) bool {
+        var i: usize = 0;
+        while (i + 2 <= mangled.len) {
+            const sep = mem.indexOfPos(u8, mangled, i, "__") orelse break;
+            const seg_start = sep + 2;
+            if (seg_start >= mangled.len) break;
+
+            const next_sep = mem.indexOfPos(u8, mangled, seg_start, "__") orelse mangled.len;
+            const seg = mangled[seg_start..next_sep];
+            if (seg.len == 1 and seg[0] >= 'A' and seg[0] <= 'Z') return true;
+            i = next_sep;
+        }
+        return false;
+    }
+
     fn generic_args_are_concrete(self: *Self, params: *const utils.Vector(std.ArrayList(u8)), gargs: []*dtype.DataType) bool {
         for (gargs) |ga| {
             if (self.dtype_contains_type_param(ga, params)) return false;
         }
         return true;
+    }
+
+    fn dtype_has_unresolved_placeholder(self: *Self, dt: *const dtype.DataType) bool {
+        if ((dt.type == null or dt.type == .Unknown) and dt.type_str.items.len == 1) {
+            const c = dt.type_str.items[0];
+            if (c >= 'A' and c <= 'Z') return true;
+        }
+        if (dt.generic_args) |gargs| {
+            for (gargs.items()) |ga| {
+                if (self.dtype_has_unresolved_placeholder(ga)) return true;
+            }
+        }
+        return false;
+    }
+
+    fn function_has_unresolved_placeholder(self: *Self, node: ast.Node) bool {
+        if (node.type != .Function or node.node_variant == null) return false;
+        const function = node.node_variant.?.function;
+        if (function.rtype) |rt| {
+            if (self.dtype_has_unresolved_placeholder(&rt)) return true;
+        }
+        if (function.args) |args| {
+            for (args.items()) |arg| {
+                if (arg.*.type != .Variable or arg.*.node_variant == null) continue;
+                if (self.dtype_has_unresolved_placeholder(arg.*.node_variant.?.variable.type)) return true;
+            }
+        }
+        return false;
     }
 
     /// Helper function to write data type to output (no substitutions).
@@ -6716,6 +6854,10 @@ pub const TranspileProcess = struct {
                     self.allocator.free(mangled);
                     continue;
                 }
+                if (self.mangled_contains_unresolved_placeholder(mangled)) {
+                    self.allocator.free(mangled);
+                    continue;
+                }
                 if (!spec_keys.contains(mangled)) {
                     spec_keys.put(mangled, true) catch return TranspileError.MemoryAllocationFailed;
                     specs.append(.{ .cnode = cnode, .dt = dt, .mangled = mangled }) catch {
@@ -7128,6 +7270,7 @@ pub const TranspileProcess = struct {
             const impl_node = entry.value_ptr.*;
             if (impl_node.node_variant == null) continue;
             const im = impl_node.node_variant.?.impl;
+            if (self.mangled_contains_unresolved_placeholder(im.type_name.items)) continue;
             const quirk_name = if (im.quirk_name) |qn| qn.items else continue;
             const sig = reg.quirk_sig_by_name.get(quirk_name) orelse continue;
             const sig_h = self.quirk_sig_hash_cached(sig);
@@ -7154,11 +7297,13 @@ pub const TranspileProcess = struct {
                     if (dt.generic_args == null) continue;
                     const gargs = dt.generic_args.?.items();
                     if (gargs.len != params.items().len) continue;
+                    if (!self.generic_args_are_concrete(params, gargs)) continue;
                     if (self.dtype_contains_type_param(dt, params)) continue;
 
                     const mangled = try self.type_name_mangled(dt);
                     defer self.allocator.free(mangled);
                     if (self.mangled_contains_type_param(mangled, params)) continue;
+                    if (self.mangled_contains_unresolved_placeholder(mangled)) continue;
                     try self.emit_quirk_impl_instance(impl_node, mangled, quirk_name, sig_h, q, params, gargs);
                 }
             } else {
@@ -7178,6 +7323,7 @@ pub const TranspileProcess = struct {
             if (n.type != .Impl or n.node_variant == null) continue;
             const im = n.node_variant.?.impl;
             if (im.quirk_name != null) continue;
+            if (self.mangled_contains_unresolved_placeholder(im.type_name.items)) continue;
 
             if (self.impl_type_params(n)) |params| {
                 var inst_keys = std.StringHashMap(bool).init(self.allocator);
@@ -7198,11 +7344,13 @@ pub const TranspileProcess = struct {
                     if (dt.generic_args == null) continue;
                     const gargs = dt.generic_args.?.items();
                     if (gargs.len != params.count) continue;
+                    if (!self.generic_args_are_concrete(params, gargs)) continue;
                     if (self.dtype_contains_type_param(dt, params)) continue;
 
                     const mangled = try self.type_name_mangled(dt);
                     defer self.allocator.free(mangled);
                     if (self.mangled_contains_type_param(mangled, params)) continue;
+                    if (self.mangled_contains_unresolved_placeholder(mangled)) continue;
 
                     for (im.methods.items()) |m| {
                         if (m.type != .Function or m.node_variant == null) continue;
@@ -7217,32 +7365,34 @@ pub const TranspileProcess = struct {
                         if (gop.found_existing) continue;
                         gop.value_ptr.* = true;
 
-                        const prev_params = self.type_subst_params;
-                        const prev_args = self.type_subst_args;
-                        self.type_subst_params = params;
-                        self.type_subst_args = gargs;
-                        defer {
-                            self.type_subst_params = prev_params;
-                            self.type_subst_args = prev_args;
-                        }
-
-                        if (fnv.rtype) |rt| {
-                            try self.write_type(rt);
-                        } else {
-                            try self.write("void");
-                        }
-                        try self.write(" ");
-                        try self.write(spec_name);
-                        try self.write("(");
-                        self.in_function_params = true;
-                        if (fnv.args) |args| {
-                            for (args.items(), 0..) |arg, i| {
-                                if (i > 0) try self.write(", ");
-                                try self.transpile_node(arg.*);
+                        {
+                            const prev_params = self.type_subst_params;
+                            const prev_args = self.type_subst_args;
+                            self.type_subst_params = params;
+                            self.type_subst_args = gargs;
+                            defer {
+                                self.type_subst_params = prev_params;
+                                self.type_subst_args = prev_args;
                             }
+
+                            if (fnv.rtype) |rt| {
+                                try self.write_type(rt);
+                            } else {
+                                try self.write("void");
+                            }
+                            try self.write(" ");
+                            try self.write(spec_name);
+                            try self.write("(");
+                            self.in_function_params = true;
+                            if (fnv.args) |args| {
+                                for (args.items(), 0..) |arg, i| {
+                                    if (i > 0) try self.write(", ");
+                                    try self.transpile_node(arg.*);
+                                }
+                            }
+                            self.in_function_params = false;
+                            try self.write(");\n");
                         }
-                        self.in_function_params = false;
-                        try self.write(");\n");
                     }
                 }
                 continue;
@@ -7307,11 +7457,13 @@ pub const TranspileProcess = struct {
             if (dt.generic_args == null) continue;
             const gargs = dt.generic_args.?.items();
             if (gargs.len != params.count) continue;
+            if (!self.generic_args_are_concrete(&params, gargs)) continue;
             if (self.dtype_contains_type_param(dt, &params)) continue;
 
             const mangled = try self.type_name_mangled(dt);
             defer self.allocator.free(mangled);
             if (self.mangled_contains_type_param(mangled, &params)) continue;
+            if (self.mangled_contains_unresolved_placeholder(mangled)) continue;
 
             try self.emit_generic_compound_specialization(cnode, dt);
         }
@@ -7471,6 +7623,7 @@ pub const TranspileProcess = struct {
     fn concrete_impl_is_instantiated(self: *Self, type_name: []const u8) TranspileError!bool {
         const idx_opt = mem.indexOf(u8, type_name, "__") orelse return true;
         const base = type_name[0..idx_opt];
+        if (self.mangled_contains_unresolved_placeholder(type_name)) return false;
 
         var inst_keys = std.StringHashMap(bool).init(self.allocator);
         defer {
@@ -7487,8 +7640,10 @@ pub const TranspileProcess = struct {
         try self.collect_generic_instantiations_recursive(self, base, &inst_keys, &inst_list);
 
         for (inst_list.items) |dt| {
+            if (self.dtype_has_unresolved_placeholder(dt)) continue;
             const mangled = try self.type_name_mangled(dt);
             defer self.allocator.free(mangled);
+            if (self.mangled_contains_unresolved_placeholder(mangled)) continue;
             if (mem.eql(u8, mangled, type_name)) return true;
         }
         return false;
@@ -7567,7 +7722,12 @@ pub const TranspileProcess = struct {
     fn collect_generic_instantiations_dtype(self: *Self, dt: *const dtype.DataType, name: []const u8, keys: *std.StringHashMap(bool), out: *std.ArrayList(*const dtype.DataType)) TranspileError!void {
         if (dt.type == .Unknown and mem.eql(u8, dt.type_str.items, name)) {
             if (dt.generic_args != null) {
+                if (self.dtype_has_unresolved_placeholder(dt)) return;
                 const key = try self.type_name_mangled(dt);
+                if (self.mangled_contains_unresolved_placeholder(key)) {
+                    self.allocator.free(key);
+                    return;
+                }
                 if (!keys.contains(key)) {
                     keys.put(key, true) catch return TranspileError.MemoryAllocationFailed;
                     out.append(dt) catch return TranspileError.MemoryAllocationFailed;
@@ -7584,11 +7744,118 @@ pub const TranspileProcess = struct {
         }
     }
 
+    fn clone_dtype_with_subst_for_inst(self: *Self, dt: *const dtype.DataType, params: *const utils.Vector(std.ArrayList(u8)), args: []*dtype.DataType) TranspileError!*dtype.DataType {
+        if ((dt.type == null or dt.type == .Unknown) and dt.type_str.items.len > 0) {
+            for (params.items(), 0..) |p, i| {
+                if (!mem.eql(u8, p.items, dt.type_str.items)) continue;
+                const out = try self.clone_dtype(args[i]);
+                if (dt.pointer_depth > 0) {
+                    var flags = out.flags orelse dtype.DataTypeFlags{};
+                    flags.is_pointer = true;
+                    out.flags = flags;
+                    out.pointer_depth += dt.pointer_depth;
+                }
+                if (dt.flags != null and dt.flags.?.is_array) {
+                    var flags = out.flags orelse dtype.DataTypeFlags{};
+                    flags.is_array = true;
+                    out.flags = flags;
+                }
+                return out;
+            }
+        }
+
+        if (dt.array != null) return TranspileError.TypeMismatch;
+
+        const out = self.allocator.create(dtype.DataType) catch return TranspileError.MemoryAllocationFailed;
+        out.* = dt.*;
+        out.type_str = std.ArrayList(u8).init(self.allocator);
+        out.type_str.appendSlice(dt.type_str.items) catch return TranspileError.MemoryAllocationFailed;
+        out.generic_args = null;
+
+        if (dt.generic_args) |gargs| {
+            var out_args = utils.Vector(*dtype.DataType).init(self.allocator);
+            for (gargs.items()) |ga| {
+                const ga_sub = try self.clone_dtype_with_subst_for_inst(ga, params, args);
+                out_args.push(ga_sub) catch return TranspileError.MemoryAllocationFailed;
+            }
+            out.generic_args = out_args;
+        }
+
+        return out;
+    }
+
+    fn seed_forced_generic_instantiations_from_impl_signatures_module(self: *Self, proc: *Self) TranspileError!void {
+        for (proc.owned_nodes.items) |n| {
+            if (n.type != .Impl or n.node_variant == null) continue;
+            const im = n.node_variant.?.impl;
+            const params = self.impl_type_params(n) orelse continue;
+
+            var inst_keys = std.StringHashMap(bool).init(self.allocator);
+            defer {
+                var it = inst_keys.iterator();
+                while (it.next()) |e| {
+                    self.allocator.free(e.key_ptr.*);
+                }
+                inst_keys.deinit();
+            }
+
+            var inst_list = std.ArrayList(*const dtype.DataType).init(self.allocator);
+            defer inst_list.deinit();
+            const base_name = if (mem.indexOf(u8, im.type_name.items, "__")) |idx| im.type_name.items[0..idx] else im.type_name.items;
+            try self.collect_generic_instantiations_recursive(self, base_name, &inst_keys, &inst_list);
+
+            for (inst_list.items) |dt| {
+                if (dt.generic_args == null) continue;
+                const gargs = dt.generic_args.?.items();
+                if (gargs.len != params.count) continue;
+                if (!self.generic_args_are_concrete(params, gargs)) continue;
+                if (self.dtype_contains_type_param(dt, params)) continue;
+
+                const mangled = try self.type_name_mangled(dt);
+                defer self.allocator.free(mangled);
+                if (self.mangled_contains_type_param(mangled, params)) continue;
+                if (self.mangled_contains_unresolved_placeholder(mangled)) continue;
+
+                for (im.methods.items()) |m| {
+                    if (m.type != .Function or m.node_variant == null) continue;
+                    const fnv = m.node_variant.?.function;
+
+                    if (fnv.rtype) |rt| {
+                        const rt_sub = try self.clone_dtype_with_subst_for_inst(&rt, params, gargs);
+                        if (rt_sub.generic_args != null and !self.dtype_has_unresolved_placeholder(rt_sub)) {
+                            try self.register_generic_instantiation(rt_sub);
+                        }
+                    }
+
+                    if (fnv.args) |args_nodes| {
+                        for (args_nodes.items()) |arg| {
+                            if (arg.type != .Variable or arg.node_variant == null) continue;
+                            const adt = arg.node_variant.?.variable.type;
+                            const adt_sub = try self.clone_dtype_with_subst_for_inst(adt, params, gargs);
+                            if (adt_sub.generic_args != null and !self.dtype_has_unresolved_placeholder(adt_sub)) {
+                                try self.register_generic_instantiation(adt_sub);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for (proc.children.items) |child| {
+            try self.seed_forced_generic_instantiations_from_impl_signatures_module(child);
+        }
+    }
+
+    fn seed_forced_generic_instantiations_from_impl_signatures(self: *Self) TranspileError!void {
+        try self.seed_forced_generic_instantiations_from_impl_signatures_module(self.get_root());
+    }
+
     fn emit_plain_impl_methods_module(self: *Self, proc: *Self, emitted: *std.StringHashMap(bool)) TranspileError!void {
         for (proc.owned_nodes.items) |n| {
             if (n.type != .Impl or n.node_variant == null) continue;
             const im = n.node_variant.?.impl;
             if (im.quirk_name != null) continue;
+            if (self.mangled_contains_unresolved_placeholder(im.type_name.items)) continue;
 
             if (self.impl_type_params(n)) |params| {
                 var inst_keys = std.StringHashMap(bool).init(self.allocator);
@@ -7629,19 +7896,21 @@ pub const TranspileProcess = struct {
                         if (gop.found_existing) continue;
                         gop.value_ptr.* = true;
 
-                        const prev_params = self.type_subst_params;
-                        const prev_args = self.type_subst_args;
-                        const prev_override = self.override_fn_name;
-                        self.type_subst_params = params;
-                        self.type_subst_args = gargs;
-                        self.override_fn_name = spec_name;
-                        defer {
-                            self.type_subst_params = prev_params;
-                            self.type_subst_args = prev_args;
-                            self.override_fn_name = prev_override;
-                        }
+                        {
+                            const prev_params = self.type_subst_params;
+                            const prev_args = self.type_subst_args;
+                            const prev_override = self.override_fn_name;
+                            self.type_subst_params = params;
+                            self.type_subst_args = gargs;
+                            self.override_fn_name = spec_name;
+                            defer {
+                                self.type_subst_params = prev_params;
+                                self.type_subst_args = prev_args;
+                                self.override_fn_name = prev_override;
+                            }
 
-                        try self.transpile_node(m.*);
+                            try self.transpile_node(m.*);
+                        }
                         try self.write("\n\n");
                     }
                 }
@@ -7676,22 +7945,25 @@ pub const TranspileProcess = struct {
         defer emitted.deinit();
 
         for (root.generic_fn_instantiations.items) |inst| {
+            if (self.mangled_contains_unresolved_placeholder(inst.name)) continue;
             if (emitted.contains(inst.name)) continue;
             emitted.put(inst.name, true) catch return TranspileError.MemoryAllocationFailed;
 
-            const prev_params = self.type_subst_params;
-            const prev_args = self.type_subst_args;
-            const prev_override = self.override_fn_name;
-            self.type_subst_params = inst.params;
-            self.type_subst_args = inst.args;
-            self.override_fn_name = inst.name;
-            defer {
-                self.type_subst_params = prev_params;
-                self.type_subst_args = prev_args;
-                self.override_fn_name = prev_override;
-            }
+            {
+                const prev_params = self.type_subst_params;
+                const prev_args = self.type_subst_args;
+                const prev_override = self.override_fn_name;
+                self.type_subst_params = inst.params;
+                self.type_subst_args = inst.args;
+                self.override_fn_name = inst.name;
+                defer {
+                    self.type_subst_params = prev_params;
+                    self.type_subst_args = prev_args;
+                    self.override_fn_name = prev_override;
+                }
 
-            try self.transpile_node(inst.fn_node.*);
+                try self.transpile_node(inst.fn_node.*);
+            }
             try self.write("\n\n");
         }
     }
@@ -7758,6 +8030,10 @@ pub const TranspileProcess = struct {
         // Type check after imports are parsed (so imported signatures are available).
         try self.typecheck_all();
 
+        // Seed additional generic instantiations that appear only after substituting
+        // generic impl method signatures (e.g. Map<K,V>::keys -> Vec<K>).
+        try self.seed_forced_generic_instantiations_from_impl_signatures();
+
         // Write standard library includes and prelude
         try self.transpile_prelude();
 
@@ -7799,6 +8075,10 @@ pub const TranspileProcess = struct {
                 if (node.type == .Function and node.node_variant != null) {
                     const function = node.node_variant.?.function;
                     if (function.type_params != null) continue;
+                    if (self.function_has_unresolved_placeholder(node)) continue;
+                    if (function.name) |fname| {
+                        if (self.mangled_contains_unresolved_placeholder(fname.items)) continue;
+                    }
                 }
                 try self.transpile_node(node);
                 try self.write("\n\n");
@@ -7824,9 +8104,11 @@ pub const TranspileProcess = struct {
             const function = node.node_variant.?.function;
             if (function.body == null) continue;
             if (function.type_params != null) continue;
+            if (self.function_has_unresolved_placeholder(node)) continue;
             if (function.name != null and mem.eql(u8, function.name.?.items, "main")) continue;
 
             if (function.name) |fname| {
+                if (self.mangled_contains_unresolved_placeholder(fname.items)) continue;
                 if (emitted.contains(fname.items)) continue;
                 emitted.put(fname.items, true) catch return TranspileError.MemoryAllocationFailed;
             }
@@ -7842,22 +8124,25 @@ pub const TranspileProcess = struct {
     fn emit_generic_function_prototypes(self: *Self, emitted: *std.StringHashMap(bool)) TranspileError!void {
         const root = self.get_root();
         for (root.generic_fn_instantiations.items) |inst| {
+            if (self.mangled_contains_unresolved_placeholder(inst.name)) continue;
             if (emitted.contains(inst.name)) continue;
             emitted.put(inst.name, true) catch return TranspileError.MemoryAllocationFailed;
 
-            const prev_params = self.type_subst_params;
-            const prev_args = self.type_subst_args;
-            const prev_override = self.override_fn_name;
-            self.type_subst_params = inst.params;
-            self.type_subst_args = inst.args;
-            self.override_fn_name = inst.name;
-            defer {
-                self.type_subst_params = prev_params;
-                self.type_subst_args = prev_args;
-                self.override_fn_name = prev_override;
-            }
+            {
+                const prev_params = self.type_subst_params;
+                const prev_args = self.type_subst_args;
+                const prev_override = self.override_fn_name;
+                self.type_subst_params = inst.params;
+                self.type_subst_args = inst.args;
+                self.override_fn_name = inst.name;
+                defer {
+                    self.type_subst_params = prev_params;
+                    self.type_subst_args = prev_args;
+                    self.override_fn_name = prev_override;
+                }
 
-            try self.write_function_prototype(inst.fn_node.*);
+                try self.write_function_prototype(inst.fn_node.*);
+            }
         }
     }
 
@@ -7865,6 +8150,11 @@ pub const TranspileProcess = struct {
         if (node.type != .Function or node.node_variant == null) return;
         const function = node.node_variant.?.function;
         if (function.body == null) return;
+
+        if (function.name) |name| {
+            const out_name = if (self.override_fn_name) |ov| ov else name.items;
+            if (self.mangled_contains_unresolved_placeholder(out_name)) return;
+        }
 
         if (function.rtype) |rtype| {
             try self.write_type(rtype);
@@ -7918,6 +8208,14 @@ pub const TranspileProcess = struct {
                         }
                         if (function.type_params != null) {
                             continue;
+                        }
+                        if (self.function_has_unresolved_placeholder(node)) {
+                            continue;
+                        }
+                        if (function.name) |fname| {
+                            if (self.mangled_contains_unresolved_placeholder(fname.items)) {
+                                continue;
+                            }
                         }
                     }
 
@@ -8517,6 +8815,12 @@ pub const TranspileProcess = struct {
                     // If assigning into a quirk-typed variable, coerce `T*` -> quirk when possible.
                     const left = exp.left orelse return;
                     const right = exp.right orelse return;
+                    if (left.type == .Identifier and left.data != null and mem.eql(u8, left.data.?.sval.items, "_")) {
+                        try self.write("(void)(");
+                        try self.transpile_node(right.*);
+                        try self.write(")");
+                        return;
+                    }
                     if (left.type == .Identifier and left.data != null) {
                         const lname = left.data.?.sval.items;
                         if (self.identifier_is_quirk_typed(lname)) {
@@ -8717,6 +9021,19 @@ pub const TranspileProcess = struct {
                 const function = node.node_variant.?.function;
 
                 if (function.type_params != null and self.override_fn_name == null) {
+                    return;
+                }
+
+                if (self.override_fn_name == null) {
+                    if (self.function_has_unresolved_placeholder(node)) {
+                        return;
+                    }
+                    if (function.name) |name| {
+                        if (self.mangled_contains_unresolved_placeholder(name.items)) {
+                            return;
+                        }
+                    }
+                } else if (self.mangled_contains_unresolved_placeholder(self.override_fn_name.?)) {
                     return;
                 }
 
@@ -9162,9 +9479,37 @@ pub const TranspileProcess = struct {
                                 try self.write("return 0;");
                             }
                         } else {
-                            try self.write("return ");
-                            try self.transpile_node(rn.*);
-                            try self.write(";");
+                            const ret_t = self.current_fn_return orelse CheckedType{ .base = .Void };
+                            if (self.is_quirk_named_type(ret_t)) {
+                                const reg = self.root_registry() orelse {
+                                    try self.write("return ");
+                                    try self.transpile_node(rn.*);
+                                    try self.write(";");
+                                    return;
+                                };
+                                const sig = reg.quirk_sig_by_name.get(ret_t.name.?) orelse null;
+                                const actual = self.expr_named_pointee_from_scope(rn.*);
+                                if (sig != null and actual != null and reg.impls_by_key.contains(.{ .type_name = actual.?, .quirk_sig = sig.? })) {
+                                    var type_stack4: [128]u8 = undefined;
+                                    const type_s = try self.c_ident_sanitize_temp(actual.?, &type_stack4);
+                                    defer if (type_s.owned) self.backing_allocator.free(type_s.slice);
+                                    var coerce_buf: [96]u8 = undefined;
+                                    const coerce_name = (std.fmt.bufPrint(&coerce_buf, "__fun_coerce_{s}_{x}", .{ type_s.slice, self.quirk_sig_hash_cached(sig.?) }) catch unreachable);
+                                    try self.write("return ");
+                                    try self.write(coerce_name);
+                                    try self.write("(");
+                                    try self.transpile_node(rn.*);
+                                    try self.write(");");
+                                } else {
+                                    try self.write("return ");
+                                    try self.transpile_node(rn.*);
+                                    try self.write(";");
+                                }
+                            } else {
+                                try self.write("return ");
+                                try self.transpile_node(rn.*);
+                                try self.write(";");
+                            }
                         }
                     },
                     .assert_stmt => |asrt| {
@@ -9741,7 +10086,7 @@ pub const TranspileProcess = struct {
         };
         errdefer self.backing_allocator.destroy(import_proc);
 
-        import_proc.* = try TranspileProcess.init(self.backing_allocator, canon, "temp.c", .{ .outf = false });
+        import_proc.* = try TranspileProcess.init_with_stdlib_dir(self.backing_allocator, canon, "temp.c", .{ .outf = false }, self.stdlib_dir);
 
         import_proc.parent = self;
         import_proc.is_importing = true;

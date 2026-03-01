@@ -1,97 +1,48 @@
-// String-keyed hash map with generic values.
+// Generic map with typed keys and values.
 // 
 // Usage:
 // ```
-// Map<num> m;
+// Map<num, str> m;
 // m.init(8);
-// m.set("a", 1);
+// m.put(1, "a");
 // ```
 
 imp std.c.mem;
 imp std.c.string;
 imp std.c.def;
-imp std.quirks;
-imp std.string;
 imp std.vec;
 
-// Internal map entry (key/value pointer + flags).
-// 
-// Fields:
-// - key: entry key
-// - value: heap-allocated value bytes
-// - used: slot has data
-// - tomb: slot is a tombstone
-pub compound MapEntry {
-  // key: entry key
-  str key;
-  // value: heap-allocated value bytes
-  raw* value;
-  // used: slot has data
-  bin used;
-  // tomb: slot is a tombstone
-  bin tomb;
-}
-
-// String-keyed hash map.
-// 
-// Fields:
-// - entries: backing storage
-// - len: number of live entries
-// - cap: allocated capacity
-// - value_size: size of stored values
-pub compound Map<T> {
-  // entries: backing storage
-  MapEntry* entries;
-  // len: number of live entries
+pub compound Map<K, V> {
+  K* key_slots;
+  V* value_slots;
+  bin* used;
+  bin* tomb;
   num len;
-  // cap: allocated capacity
   num cap;
-  // value_size: size of stored values
-  num value_size;
 }
 
-fun _hash_str(str s) num {
-  num h = 5381;
-  num i = 0;
-  for s[i] != 0 {
-    if h > 100000000 {
-      h = h % 100000000;
-    }
-    h = h + s[i];
-    i = i + 1;
-  }
-  if h < 0 {
-    h = -h;
-  }
-  ret h;
-}
-
-// (helpers are implemented as Map<T> methods)
-
-impl Map<T> Sized {
-  // Number of stored entries.
+impl Map<K, V> Sized {
   pub len() num {
     ret self.len;
   }
 
-  // True when no entries are stored.
   pub is_empty() bin {
     ret self.len == 0;
   }
 
-  // Current capacity.
   pub capacity() num {
     ret self.cap;
   }
 }
 
-impl Map<T> {
-  // Initialize with an initial capacity.
+impl Map<K, V> {
   pub init(num cap) {
-    self.entries = NULL;
+    self.key_slots = NULL;
+    self.value_slots = NULL;
+    self.used = NULL;
+    self.tomb = NULL;
     self.len = 0;
     self.cap = 0;
-    self.value_size = sizeof(T);
 
     if cap < 8 {
       cap = 8;
@@ -99,7 +50,6 @@ impl Map<T> {
     self.alloc(cap);
   }
 
-  // Ensure capacity is at least min_cap.
   pub reserve(num min_cap) {
     if min_cap < 8 {
       min_cap = 8;
@@ -113,184 +63,234 @@ impl Map<T> {
     }
   }
 
-  // Allocate backing storage.
   alloc(num cap) {
-    self.entries = malloc(cap * sizeof(MapEntry));
-    if self.entries != NULL {
-      memset(self.entries, 0, cap * sizeof(MapEntry));
+    self.key_slots = malloc(cap * sizeof(K));
+    self.value_slots = malloc(cap * sizeof(V));
+    self.used = malloc(cap * sizeof(bin));
+    self.tomb = malloc(cap * sizeof(bin));
+
+    if self.key_slots == NULL {
+      ret;
     }
+    if self.value_slots == NULL {
+      ret;
+    }
+    if self.used == NULL {
+      ret;
+    }
+    if self.tomb == NULL {
+      ret;
+    }
+
+    memset(self.key_slots, 0, cap * sizeof(K));
+    memset(self.value_slots, 0, cap * sizeof(V));
+    memset(self.used, 0, cap * sizeof(bin));
+    memset(self.tomb, 0, cap * sizeof(bin));
     self.cap = cap;
   }
 
-  // Rehash into a new capacity.
+  hash_key(K key) num {
+    raw* key_ptr = &key;
+    u8* bytes = key_ptr;
+    let key_size = sizeof(K);
+    num h = 2166136261;
+    num i = 0;
+    for i < key_size {
+      h = h ^ bytes[i];
+      h = h * 16777619;
+      i = i + 1;
+    }
+    if h < 0 {
+      h = -h;
+    }
+    ret h;
+  }
+
+  keys_equal(K a, K b) bin {
+    ret memcmp(&a, &b, sizeof(K)) == 0;
+  }
+
+  find_live_index(K key) num {
+    if self.cap == 0 {
+      ret -1;
+    }
+
+    num idx = self.hash_key(key) % self.cap;
+    num steps = 0;
+    for steps < self.cap {
+      if self.used[idx] == false {
+        ret -1;
+      }
+      if self.tomb[idx] == false && self.keys_equal(self.key_slots[idx], key) != false {
+        ret idx;
+      }
+      idx = idx + 1;
+      idx = idx % self.cap;
+      steps = steps + 1;
+    }
+    ret -1;
+  }
+
+  find_insert_index() num {
+    if self.cap == 0 {
+      ret -1;
+    }
+
+    num first_tomb = -1;
+    num i = 0;
+    for i < self.cap {
+      if self.used[i] == false && first_tomb != -1 {
+        ret first_tomb;
+      }
+      if self.used[i] == false {
+        ret i;
+      }
+      if self.tomb[i] != false && first_tomb == -1 {
+        first_tomb = i;
+      }
+      i = i + 1;
+    }
+
+    ret first_tomb;
+  }
+
+  find_insert_index_for(K key) num {
+    if self.cap == 0 {
+      ret -1;
+    }
+
+    num idx = self.hash_key(key) % self.cap;
+    num steps = 0;
+    num first_tomb = -1;
+
+    for steps < self.cap {
+      if self.used[idx] == false && first_tomb != -1 {
+        ret first_tomb;
+      }
+      if self.used[idx] == false {
+        ret idx;
+      }
+
+      if self.tomb[idx] != false && first_tomb == -1 {
+        first_tomb = idx;
+      }
+
+      idx = idx + 1;
+      idx = idx % self.cap;
+      steps = steps + 1;
+    }
+
+    ret first_tomb;
+  }
+
+  pub zero_value() V {
+    V out;
+    memset(&out, 0, sizeof(V));
+    ret out;
+  }
+
+  pub load_value_idx(num idx) V {
+    ret self.value_slots[idx];
+  }
+
+  pub store_value_idx(num idx, V value) {
+    self.value_slots[idx] = value;
+  }
+
   rehash(num new_cap) {
-    MapEntry* old_entries = self.entries;
+    K* old_keys = self.key_slots;
+    V* old_values = self.value_slots;
+    bin* old_used = self.used;
+    bin* old_tomb = self.tomb;
     num old_cap = self.cap;
 
-    self.alloc(new_cap);
+    self.key_slots = NULL;
+    self.value_slots = NULL;
+    self.used = NULL;
+    self.tomb = NULL;
+    self.cap = 0;
     self.len = 0;
 
-    if old_entries == NULL {
+    self.alloc(new_cap);
+
+    if old_keys == NULL {
       ret;
     }
 
     num i = 0;
     for i < old_cap {
-      MapEntry entry = old_entries[i];
-      if entry.used != false {
-        if entry.tomb == false {
-          str key = entry.key;
-          raw* value_ptr = entry.value;
-          // reinsert
-          num idx = _hash_str(key) % self.cap;
-          num steps = 0;
-          for steps < self.cap {
-            MapEntry dst = self.entries[idx];
-            if dst.used == false {
-              dst.key = key;
-              dst.value = value_ptr;
-              dst.used = true;
-              dst.tomb = false;
-              self.entries[idx] = dst;
-              self.len = self.len + 1;
-              break;
-            }
-            idx = (idx + 1) % self.cap;
-            steps = steps + 1;
-          }
+      if old_used[i] != false && old_tomb[i] == false {
+        let idx = self.find_insert_index_for(old_keys[i]);
+        if idx != -1 {
+          self.key_slots[idx] = old_keys[i];
+          self.value_slots[idx] = old_values[i];
+          self.used[idx] = true;
+          self.tomb[idx] = false;
+          self.len = self.len + 1;
         }
       }
       i = i + 1;
     }
 
-    free(old_entries);
+    free(old_keys);
+    free(old_values);
+    free(old_used);
+    free(old_tomb);
   }
 
-  pub zero_value() T {
-    T out;
-    memset(&out, 0, sizeof(T));
-    ret out;
-  }
-
-  pub load_value(MapEntry* entry) T {
-    if entry.value == NULL {
-      ret self.zero_value();
-    }
-    T out;
-    memset(&out, 0, sizeof(T));
-    memcpy(&out, entry.value, self.value_size);
-    ret out;
-  }
-
-  pub store_value(MapEntry* entry, T value) {
-    if entry.value == NULL {
-      entry.value = malloc(self.value_size);
-    }
-    if entry.value != NULL {
-      memcpy(entry.value, &value, self.value_size);
-    }
-  }
-
-  // Free internal storage.
   pub free() {
-    if self.entries != NULL {
-      self.clear();
-      free(self.entries);
+    self.clear();
+    if self.key_slots != NULL {
+      free(self.key_slots);
     }
-    self.entries = NULL;
+    if self.value_slots != NULL {
+      free(self.value_slots);
+    }
+    if self.used != NULL {
+      free(self.used);
+    }
+    if self.tomb != NULL {
+      free(self.tomb);
+    }
+
+    self.key_slots = NULL;
+    self.value_slots = NULL;
+    self.used = NULL;
+    self.tomb = NULL;
     self.len = 0;
     self.cap = 0;
   }
 
-  // Check if a key exists.
-  pub has(str key) bin {
-    if self.cap == 0 {
-      ret false;
-    }
-
-    num idx = _hash_str(key) % self.cap;
-    num steps = 0;
-    for steps < self.cap {
-      MapEntry entry = self.entries[idx];
-      if entry.used == false {
-        ret false;
-      }
-      if entry.tomb == false {
-        if equals(entry.key, key) != false {
-          ret true;
-        }
-      }
-      idx = idx + 1;
-      idx = idx % self.cap;
-      steps = steps + 1;
-    }
-    ret false;
+  pub has(K key) bin {
+    ret self.find_live_index(key) != -1;
   }
 
-  // Get a value by key (or zero).
-  pub get(str key) T {
-    if self.cap == 0 {
+  pub get(K key) V {
+    let idx = self.find_live_index(key);
+    if idx == -1 {
       ret self.zero_value();
     }
-
-    num idx = _hash_str(key) % self.cap;
-    num steps = 0;
-    for steps < self.cap {
-      MapEntry entry = self.entries[idx];
-      if entry.used == false {
-        ret self.zero_value();
-      }
-      if entry.tomb == false {
-        if equals(entry.key, key) != false {
-          ret self.load_value(&entry);
-        }
-      }
-      idx = idx + 1;
-      idx = idx % self.cap;
-      steps = steps + 1;
-    }
-    ret self.zero_value();
+    ret self.load_value_idx(idx);
   }
 
-  // Get a value by key or a fallback value if missing.
-  pub get_or(str key, T fallback) T {
-    if self.has(key) != false {
-      ret self.get(key);
+  pub get_or(K key, V fallback) V {
+    let idx = self.find_live_index(key);
+    if idx == -1 {
+      ret fallback;
     }
-    ret fallback;
+    ret self.load_value_idx(idx);
   }
 
-  // Try to get a value by key; writes to out and returns true on success.
-  pub try_get(str key, T* out) bin {
-    if self.cap == 0 {
+  pub try_get(K key, V* out) bin {
+    let idx = self.find_live_index(key);
+    if idx == -1 {
       ret false;
     }
-
-    num idx = _hash_str(key) % self.cap;
-    num steps = 0;
-    for steps < self.cap {
-      MapEntry entry = self.entries[idx];
-      if entry.used == false {
-        ret false;
-      }
-      if entry.tomb == false {
-        if equals(entry.key, key) != false {
-          if entry.value != NULL {
-            memcpy(out, entry.value, self.value_size);
-            ret true;
-          }
-          ret false;
-        }
-      }
-      idx = idx + 1;
-      idx = idx % self.cap;
-      steps = steps + 1;
-    }
-    ret false;
+    *out = self.value_slots[idx];
+    ret true;
   }
 
-  // Insert or update a value by key.
-  pub put(str key, T value) {
+  pub put(K key, V value) {
     if self.cap == 0 {
       self.alloc(8);
     }
@@ -299,125 +299,87 @@ impl Map<T> {
       self.rehash(self.cap * 2);
     }
 
-    num idx = _hash_str(key) % self.cap;
-    num steps = 0;
-    num first_tomb = -1;
-    for steps < self.cap {
-      MapEntry entry = self.entries[idx];
-      if entry.used == false {
-        if first_tomb != -1 {
-          idx = first_tomb;
-          entry = self.entries[idx];
-        }
-        entry.key = key;
-        self.store_value(&entry, value);
-        entry.used = true;
-        entry.tomb = false;
-        self.entries[idx] = entry;
-        self.len = self.len + 1;
+    let existing = self.find_live_index(key);
+    if existing != -1 {
+      self.store_value_idx(existing, value);
+      ret;
+    }
+
+    num idx = self.find_insert_index_for(key);
+    if idx == -1 {
+      self.rehash(self.cap * 2);
+      idx = self.find_insert_index_for(key);
+      if idx == -1 {
         ret;
       }
-
-      if entry.tomb == false {
-        if equals(entry.key, key) != false {
-          self.store_value(&entry, value);
-          self.entries[idx] = entry;
-          ret;
-        }
-      }
-
-      if entry.tomb != false {
-        if first_tomb == -1 {
-          first_tomb = idx;
-        }
-      }
-
-      idx = idx + 1;
-      idx = idx % self.cap;
-      steps = steps + 1;
     }
+
+    self.key_slots[idx] = key;
+    self.store_value_idx(idx, value);
+    self.used[idx] = true;
+    self.tomb[idx] = false;
+    self.len = self.len + 1;
   }
 
-  // Insert only if missing; returns true if inserted.
-  pub put_if_absent(str key, T value) bin {
-    if self.has(key) != false {
+  pub put_if_absent(K key, V value) bin {
+    let before_len = self.len;
+    self.put(key, value);
+    ret self.len > before_len;
+  }
+
+  pub remove(K key) bin {
+    let idx = self.find_live_index(key);
+    if idx == -1 {
       ret false;
     }
-    self.put(key, value);
+
+    self.value_slots[idx] = self.zero_value();
+    self.tomb[idx] = true;
+    self.len = self.len - 1;
     ret true;
   }
 
-  // Remove a key; returns true if removed.
-  pub remove(str key) bin {
-    if self.cap == 0 {
-      ret false;
-    }
-
-    num idx = _hash_str(key) % self.cap;
-    num steps = 0;
-    for steps < self.cap {
-      MapEntry entry = self.entries[idx];
-      if entry.used == false {
-        ret false;
-      }
-      if entry.tomb == false {
-        if equals(entry.key, key) != false {
-          if entry.value != NULL {
-            free(entry.value);
-            entry.value = NULL;
-          }
-          entry.tomb = true;
-          self.entries[idx] = entry;
-          self.len = self.len - 1;
-          ret true;
-        }
-      }
-      idx = idx + 1;
-      idx = idx % self.cap;
-      steps = steps + 1;
-    }
-    ret false;
-  }
-
-  // Clear all entries without freeing capacity.
   pub clear() {
-    if self.entries != NULL {
-      num i = 0;
-      for i < self.cap {
-        MapEntry entry = self.entries[i];
-        if entry.used != false {
-          if entry.tomb == false {
-            if entry.value != NULL {
-              free(entry.value);
-            }
-          }
-        }
-        i = i + 1;
-      }
-      memset(self.entries, 0, self.cap * sizeof(MapEntry));
+    if self.value_slots != NULL {
+      memset(self.key_slots, 0, self.cap * sizeof(K));
+      memset(self.value_slots, 0, self.cap * sizeof(V));
+      memset(self.used, 0, self.cap * sizeof(bin));
+      memset(self.tomb, 0, self.cap * sizeof(bin));
     }
     self.len = 0;
   }
 
-  // Return all keys as a Vec<str>.
-  pub keys() Vec<str> {
-    Vec<str> out;
+  pub keys() Vec<K> {
+    Vec<K> out;
     out.init(self.len);
-    if self.entries == NULL {
+    if self.key_slots == NULL {
       ret out;
     }
 
     num i = 0;
     for i < self.cap {
-      MapEntry entry = self.entries[i];
-      if entry.used != false {
-        if entry.tomb == false {
-          out.push(entry.key);
-        }
+      if self.used[i] != false && self.tomb[i] == false {
+        out.push(self.key_slots[i]);
       }
       i = i + 1;
     }
     ret out;
   }
 
+  pub values() Vec<V> {
+    Vec<V> out;
+    out.init(self.len);
+    if self.value_slots == NULL {
+      ret out;
+    }
+
+    num i = 0;
+    for i < self.cap {
+      if self.used[i] != false && self.tomb[i] == false {
+        out.push(self.load_value_idx(i));
+      }
+      i = i + 1;
+    }
+    ret out;
+  }
 }

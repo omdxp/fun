@@ -1,0 +1,18 @@
+// Generic map with numeric keys.
+
+imp std.c.io;
+imp std.map;
+
+fun main() {
+  Map<num, str> m;
+  m.init(8);
+
+  m.put(1, "one");
+  m.put(2, "two");
+  m.put(42, "forty-two");
+
+  printf("1=%s\n", m.get(1));
+  printf("42=%s\n", m.get(42));
+
+  m.free();
+}

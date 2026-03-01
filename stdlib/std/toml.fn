@@ -7,8 +7,41 @@
 // ```
 
 imp std.map;
+imp std.serde;
 imp std.string;
 imp std.vec;
+
+fun _parse_line_into(TomlDoc* out, str line) {
+  if len(line) <= 0 {
+    ret;
+  }
+
+  let eq_idx = index_of_char(line, '=');
+  if eq_idx == -1 {
+    ret;
+  }
+
+  let key = trim(substr(line, 0, eq_idx));
+  let val = trim(substr(line, eq_idx + 1, len(line) - (eq_idx + 1)));
+  out.set(key, val);
+}
+
+fun _toml_find_str_key_index(Map<str, str>* m, str key) num {
+  if m.key_slots == NULL {
+    ret -1;
+  }
+
+  num i = 0;
+  for i < m.cap {
+    if m.used[i] != false && m.tomb[i] == false {
+      if equals(m.key_slots[i], key) {
+        ret i;
+      }
+    }
+    i = i + 1;
+  }
+  ret -1;
+}
 
 // TOML document wrapper.
 // 
@@ -16,7 +49,7 @@ imp std.vec;
 // - values: key/value map
 pub compound TomlDoc {
   // values: key/value map
-  Map<str> values;
+  Map<str, str> values;
 }
 
 // Create a new TOML document.
@@ -32,11 +65,20 @@ pub fun toml_doc_init() TomlDoc {
 impl TomlDoc {
   // Get a value by key.
   pub get(str key) str {
-    ret self.values.get(key);
+    let idx = _toml_find_str_key_index(&self.values, key);
+    if idx == -1 {
+      ret NULL;
+    }
+    ret self.values.value_slots[idx];
   }
 
   // Set a value by key.
   pub set(str key, str value) {
+    let idx = _toml_find_str_key_index(&self.values, key);
+    if idx != -1 {
+      self.values.value_slots[idx] = value;
+      ret;
+    }
     self.values.put(key, value);
   }
 
@@ -47,24 +89,53 @@ impl TomlDoc {
 
   // Serialize the document to a string.
   pub stringify() str {
-    Vec<str> parts;
-    parts.init(self.values.len() * 2 + 4);
+    StringBuilder b = string_builder_init(self.values.len() * 8 + 8);
     num i = 0;
     for i < self.values.cap {
-      MapEntry entry = self.values.entries[i];
-      if entry.used != false {
-        if entry.tomb == false {
-          parts.push(entry.key);
-          parts.push(" = ");
-          parts.push(self.values.get(entry.key));
-          parts.push("\n");
-        }
+      if self.values.used[i] == false || self.values.tomb[i] != false {
+        i = i + 1;
+        continue;
+      }
+
+      str key = self.values.key_slots[i];
+      str value = self.values.value_slots[i];
+      b.append(key);
+      b.append(" = ");
+      b.append(value);
+      b.append("\n");
+      i = i + 1;
+    }
+
+    str out = b.build();
+    b.free();
+    ret out;
+  }
+}
+
+impl TomlDoc Serialize {
+  pub serialize() str {
+    ret self.stringify();
+  }
+}
+
+impl TomlDoc Deserialize {
+  pub deserialize(str input) {
+    TomlDoc parsed = parse(input);
+    defer parsed.free();
+    if self.values.cap == 0 {
+      self.values.init(8);
+    } else {
+      self.values.clear();
+    }
+
+    num i = 0;
+    for i < parsed.values.cap {
+      if parsed.values.used[i] != false && parsed.values.tomb[i] == false {
+        self.values.put(parsed.values.key_slots[i], parsed.values.value_slots[i]);
       }
       i = i + 1;
     }
-    str out = parts.join("");
-    parts.free();
-    ret out;
+
   }
 }
 
@@ -82,17 +153,9 @@ pub fun parse(str s) TomlDoc {
 
   for s[i] != 0 {
     if s[i] == '\n' {
-      num line_len = i - start;
-      if line_len > 0 {
-        str line = substr(s, start, line_len);
-        num eq_idx = index_of_char(line, '=');
-        if eq_idx != -1 {
-          num key_len = eq_idx;
-          str key = trim(substr(line, 0, key_len));
-          str val = trim(substr(line, eq_idx + 1, len(line) - (eq_idx + 1)));
-          out.set(key, val);
-        }
-      }
+      let line_len = i - start;
+      let line = substr(s, start, line_len);
+      _parse_line_into(&out, line);
       i = i + 1;
       start = i;
     } else {
@@ -101,15 +164,9 @@ pub fun parse(str s) TomlDoc {
   }
 
   if i > start {
-    num line_len = i - start;
-    str line = substr(s, start, line_len);
-    num eq_idx = index_of_char(line, '=');
-    if eq_idx != -1 {
-      num key_len = eq_idx;
-      str key = trim(substr(line, 0, key_len));
-      str val = trim(substr(line, eq_idx + 1, len(line) - (eq_idx + 1)));
-      out.set(key, val);
-    }
+    let line_len = i - start;
+    let line = substr(s, start, line_len);
+    _parse_line_into(&out, line);
   }
 
   ret out;

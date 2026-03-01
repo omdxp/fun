@@ -69,19 +69,15 @@ impl Path {
 // Returns:
 // - joined path
 pub fun path_join(str a, str b) str {
-  num alen = len(a);
-  num blen = len(b);
+  let alen = len(a);
+  let blen = len(b);
   bin a_slash = false;
   bin b_slash = false;
-  if alen > 0 {
-    if a[alen - 1] == '/' {
-      a_slash = true;
-    }
+  if alen > 0 && a[alen - 1] == '/' {
+    a_slash = true;
   }
-  if blen > 0 {
-    if b[0] == '/' {
-      b_slash = true;
-    }
+  if blen > 0 && b[0] == '/' {
+    b_slash = true;
   }
 
   num extra = 1;
@@ -165,7 +161,7 @@ pub fun is_abs(str path) bin {
 // Returns:
 // - last path segment
 pub fun basename(str path) str {
-  num path_len = len(path);
+  let path_len = len(path);
   if path_len == 0 {
     ret path;
   }
@@ -193,7 +189,7 @@ pub fun basename(str path) str {
 // Returns:
 // - directory portion
 pub fun dirname(str path) str {
-  num path_len = len(path);
+  let path_len = len(path);
   if path_len == 0 {
     ret substr(path, 0, 0);
   }
@@ -223,7 +219,7 @@ pub fun dirname(str path) str {
 // Returns:
 // - extension (including leading dot) or empty string
 pub fun extname(str path) str {
-  num path_len = len(path);
+  let path_len = len(path);
   num i = path_len;
   num last_slash = -1;
   num last_dot = -1;
@@ -240,10 +236,8 @@ pub fun extname(str path) str {
   if last_dot == -1 {
     ret "";
   }
-  if last_slash != -1 {
-    if last_dot < last_slash {
-      ret "";
-    }
+  if last_slash != -1 && last_dot < last_slash {
+    ret "";
   }
   ret substr(path, last_dot, path_len - last_dot);
 }
@@ -256,12 +250,12 @@ pub fun extname(str path) str {
 // Returns:
 // - path without extension
 pub fun strip_ext(str path) str {
-  str ext = extname(path);
+  let ext = extname(path);
   if len(ext) == 0 {
     ret substr(path, 0, len(path));
   }
-  num plen = len(path);
-  num elen = len(ext);
+  let plen = len(path);
+  let elen = len(ext);
   ret substr(path, 0, plen - elen);
 }
 
@@ -274,13 +268,13 @@ pub fun strip_ext(str path) str {
 // Returns:
 // - path with new extension
 pub fun change_ext(str path, str new_ext) str {
-  str base = strip_ext(path);
+  let base = strip_ext(path);
   if len(new_ext) == 0 {
     ret base;
   }
-  num base_len = len(base);
-  num ext_len = len(new_ext);
-  bin has_dot = new_ext[0] == '.';
+  let base_len = len(base);
+  let ext_len = len(new_ext);
+  let has_dot = new_ext[0] == '.';
   num extra = 0;
   if has_dot == false {
     extra = 1;

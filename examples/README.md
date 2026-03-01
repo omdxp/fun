@@ -66,6 +66,8 @@ zig-out/bin/fun -in examples/<example>.fn
 - stdlib/json_basic.fn
 - stdlib/log_levels.fn
 - stdlib/map_basic.fn
+- stdlib/map_custom_strategy.fn
+- stdlib/map_num_keys.fn
 - stdlib/math_distance.fn
 - stdlib/math_helpers.fn
 - stdlib/mem_env_random.fn
@@ -75,6 +77,7 @@ zig-out/bin/fun -in examples/<example>.fn
 - stdlib/rand_basic.fn
 - stdlib/result_basic.fn
 - stdlib/set_basic.fn
+- stdlib/serde_json_toml.fn
 - stdlib/string_helpers.fn
 - stdlib/string_parse_csv_line.fn
 - stdlib/time_format_now.fn
@@ -87,6 +90,8 @@ zig-out/bin/fun -in examples/<example>.fn
 - stdlib/json_basic.fn
 - stdlib/log_levels.fn
 - stdlib/map_basic.fn
+- stdlib/map_custom_strategy.fn
+- stdlib/map_num_keys.fn
 - stdlib/math_helpers.fn
 - stdlib/net_url_parse.fn
 - stdlib/path_ops.fn

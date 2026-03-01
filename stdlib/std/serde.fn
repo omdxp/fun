@@ -1,0 +1,27 @@
+// Serialization quirks and helpers.
+// 
+// Usage:
+// ```
+// Serialize s = &obj;
+// str text = to_string(s);
+// ```
+
+// Types that can serialize themselves to text.
+pub quirk Serialize {
+  serialize() str;
+}
+
+// Types that can deserialize themselves from text.
+pub quirk Deserialize {
+  deserialize(str input);
+}
+
+// Serialize any Serialize implementer to text.
+pub fun to_string(Serialize value) str {
+  ret value.serialize();
+}
+
+// Deserialize text into any Deserialize implementer.
+pub fun from_string(Deserialize value, str input) {
+  value.deserialize(input);
+}

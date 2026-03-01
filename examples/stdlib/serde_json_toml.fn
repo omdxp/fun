@@ -1,0 +1,38 @@
+// Serialize/Deserialize quirks with JSON and TOML.
+
+imp std.c.io;
+imp std.serde;
+imp std.json;
+imp std.toml;
+
+fun main() {
+  JsonObject j = json_object_init();
+  defer j.free();
+  j.set("name", "fun");
+  j.set("version", "1");
+
+  Serialize js = &j;
+  str json_text = to_string(js);
+  printf("json_text=%s\n", json_text);
+
+  JsonObject j2 = json_object_init();
+  defer j2.free();
+  Deserialize jd = &j2;
+  from_string(jd, json_text);
+  printf("json.name=%s json.version=%s\n", j2.get("name"), j2.get("version"));
+
+  TomlDoc t = toml_doc_init();
+  defer t.free();
+  t.set("name", "fun");
+  t.set("channel", "stable");
+
+  Serialize ts = &t;
+  str toml_text = to_string(ts);
+  printf("toml_text=\n%s", toml_text);
+
+  TomlDoc t2 = toml_doc_init();
+  defer t2.free();
+  Deserialize td = &t2;
+  from_string(td, toml_text);
+  printf("toml.name=%s toml.channel=%s\n", t2.get("name"), t2.get("channel"));
+}

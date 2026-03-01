@@ -84,6 +84,15 @@ is_expected_fail() {
   return 1
 }
 
+expected_run_exit_code() {
+  local rel="$1"
+  if [[ "$rel" == "examples/main_exit_status.fn" ]]; then
+    echo 7
+    return
+  fi
+  echo 0
+}
+
 run_with_timeout() {
   local -a cmd=("$@")
   if command -v timeout >/dev/null 2>&1; then
@@ -155,7 +164,12 @@ for full in "${files[@]}"; do
   ec=$?
   set -e
 
-  if [[ $ec -ne 0 ]]; then
+  expected_ec=0
+  if [[ $runnable -eq 1 ]]; then
+    expected_ec="$(expected_run_exit_code "$rel")"
+  fi
+
+  if [[ $ec -ne $expected_ec ]]; then
     failed+=("$rel (exit=$ec)")
     continue
   fi

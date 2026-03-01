@@ -356,6 +356,58 @@ test "typecheck logical operators require bin operands" {
     try runTranspileExpectOk(std.testing.allocator, "typecheck_if_logic_ok.fn", input);
 }
 
+test "typecheck chained logical comparisons parse and typecheck" {
+    const input =
+        "fun main() {\n" ++
+        "  str s = \"ab\";\n" ++
+        "  num i = 0;\n" ++
+        "  if s[i] == 'a' || s[i] == 'b' || s[i] == 'c' { ret; }\n" ++
+        "  if s[i] != 'z' && s[i] != 'y' { ret; }\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_if_logic_chain_cmp_ok.fn", input);
+}
+
+test "typecheck std serde quirks with json" {
+    const input =
+        "imp stdlib.std.serde;\n" ++
+        "imp stdlib.std.json;\n" ++
+        "fun main() {\n" ++
+        "  JsonObject j = json_object_init();\n" ++
+        "  j.set(\"name\", \"fun\");\n" ++
+        "  Serialize js = &j;\n" ++
+        "  str json_text = to_string(js);\n" ++
+        "\n" ++
+        "  JsonObject j2 = json_object_init();\n" ++
+        "  Deserialize jd = &j2;\n" ++
+        "  from_string(jd, json_text);\n" ++
+        "\n" ++
+        "  if j2.get(\"name\") == \"fun\" { ret; }\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_std_serde_json_ok.fn", input);
+}
+
+test "typecheck std serde quirks with toml" {
+    const input =
+        "imp stdlib.std.serde;\n" ++
+        "imp stdlib.std.toml;\n" ++
+        "fun main() {\n" ++
+        "  TomlDoc t = toml_doc_init();\n" ++
+        "  t.set(\"channel\", \"stable\");\n" ++
+        "  Serialize ts = &t;\n" ++
+        "  str toml_text = to_string(ts);\n" ++
+        "\n" ++
+        "  TomlDoc t2 = toml_doc_init();\n" ++
+        "  Deserialize td = &t2;\n" ++
+        "  from_string(td, toml_text);\n" ++
+        "\n" ++
+        "  if t2.get(\"channel\") == \"stable\" { ret; }\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_std_serde_toml_ok.fn", input);
+}
+
 test "typecheck heterogeneous array literal errors" {
     const input =
         "fun main() {\n" ++
@@ -564,4 +616,29 @@ test "typecheck enums behave as numeric values across contexts" {
         "}\n";
 
     try runTranspileExpectOk(std.testing.allocator, "typecheck_enum_numeric_ok.fn", input);
+}
+
+test "typecheck map supports compound key operations" {
+    const input =
+        "imp stdlib.std.map;\n" ++
+        "compound UserKey { num id; num region; }\n" ++
+        "fun main() {\n" ++
+        "  Map<UserKey, str> by_user;\n" ++
+        "  by_user.init(8);\n" ++
+        "  UserKey a = UserKey{id = 7, region = 1};\n" ++
+        "  UserKey b = UserKey{id = 9, region = 2};\n" ++
+        "  by_user.put(a, \"alice\");\n" ++
+        "  by_user.put(b, \"bob\");\n" ++
+        "  str va = by_user.get(a);\n" ++
+        "  str vb = by_user.get_or(UserKey{id = 99, region = 9}, \"missing\");\n" ++
+        "  if by_user.has(a) {\n" ++
+        "    by_user.remove(b);\n" ++
+        "  }\n" ++
+        "  if va == \"alice\" {\n" ++
+        "    if vb == \"missing\" { ret; }\n" ++
+        "  }\n" ++
+        "  by_user.free();\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_map_compound_key_ok.fn", input);
 }

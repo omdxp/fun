@@ -1,4 +1,4 @@
-// String set built on Map<num>.
+// String set built on Map<str, num>.
 // 
 // Usage:
 // ```
@@ -9,13 +9,13 @@
 imp std.map;
 imp std.quirks;
 
-// String set backed by Map<num>.
+// String set backed by Map<str, num>.
 // 
 // Fields:
 // - map: backing map
 pub compound StrSet {
   // map: backing map
-  Map<num> map;
+  Map<str, num> map;
 }
 
 // Create a string set with initial capacity.

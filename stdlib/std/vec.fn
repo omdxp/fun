@@ -283,7 +283,12 @@ impl Vec<str> {
     num sep_len = _str_len(sep);
     num count = self.len;
     if count == 0 {
-      ret "";
+      str out_empty = malloc(1);
+      if out_empty == NULL {
+        ret NULL;
+      }
+      out_empty[0] = '\0';
+      ret out_empty;
     }
 
     num total = 0;

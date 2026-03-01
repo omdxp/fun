@@ -1813,7 +1813,7 @@ pub const ParseProcess = struct {
         {
             return;
         }
-        if (node.*.node_variant != null and node.*.node_variant.?.exp.left.?.*.type != .Expression and node.*.node_variant.?.exp.right != null and
+        if (node.*.node_variant != null and node.*.node_variant.?.exp.right != null and
             node.*.node_variant.?.exp.right.?.*.type == .Expression)
         {
             const right_op = node.*.node_variant.?.exp.right.?.*.node_variant.?.exp.op;

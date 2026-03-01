@@ -1,0 +1,25 @@
+// Hashed map with custom compound keys via MapKeyStrategy.
+
+imp std.c.io;
+imp std.map;
+
+compound UserKey {
+  num id;
+  num region;
+}
+
+fun main() {
+  Map<UserKey, str> by_user;
+  by_user.init(8);
+
+  UserKey a = UserKey{id = 7, region = 1};
+  UserKey b = UserKey{id = 9, region = 2};
+
+  by_user.put(a, "alice");
+  by_user.put(b, "bob");
+
+  printf("a=%s\n", by_user.get(a));
+  printf("b=%s\n", by_user.get(b));
+
+  by_user.free();
+}

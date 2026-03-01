@@ -7,6 +7,7 @@
 // ```
 
 imp std.map;
+imp std.serde;
 imp std.string;
 imp std.vec;
 
@@ -16,7 +17,7 @@ imp std.vec;
 // - values: key/value map (string values)
 pub compound JsonObject {
   // values: key/value map (string values)
-  Map<str> values;
+  Map<str, str> values;
 }
 
 // JSON array of strings.
@@ -74,48 +75,63 @@ fun _append_escaped(StringBuilder* b, str s) {
   }
 }
 
+fun _json_find_str_key_index(Map<str, str>* m, str key) num {
+  if m.key_slots == NULL {
+    ret -1;
+  }
+
+  num i = 0;
+  for i < m.cap {
+    if m.used[i] != false && m.tomb[i] == false {
+      if equals(m.key_slots[i], key) {
+        ret i;
+      }
+    }
+    i = i + 1;
+  }
+  ret -1;
+}
+
 impl JsonObject {
   // Get a value by key.
   pub get(str key) str {
-    ret self.values.get(key);
+    let idx = _json_find_str_key_index(&self.values, key);
+    if idx == -1 {
+      ret NULL;
+    }
+    ret self.values.value_slots[idx];
   }
 
   // Check if a key exists.
   pub has(str key) bin {
-    ret self.values.has(key);
+    ret _json_find_str_key_index(&self.values, key) != -1;
   }
 
   // Set a string value by key.
   pub set(str key, str value) {
+    let idx = _json_find_str_key_index(&self.values, key);
+    if idx != -1 {
+      self.values.value_slots[idx] = value;
+      ret;
+    }
     self.values.put(key, value);
   }
 
   // Remove a key.
   pub remove(str key) bin {
-    ret self.values.remove(key);
+    let idx = _json_find_str_key_index(&self.values, key);
+    if idx == -1 {
+      ret false;
+    }
+    self.values.value_slots[idx] = self.values.zero_value();
+    self.values.tomb[idx] = true;
+    self.values.len = self.values.len - 1;
+    ret true;
   }
 
   // Return all keys.
   pub keys() Vec<str> {
-    Vec<str> out;
-    out.init(self.values.len());
-
-    MapEntry* entries = self.values.entries;
-    if entries == NULL {
-      ret out;
-    }
-
-    num i = 0;
-    for i < self.values.cap {
-      MapEntry item = entries[i];
-      if item.used {
-        if item.tomb == false {
-          out.push(item.key);
-        }
-      }
-      i = i + 1;
-    }
-    ret out;
+    ret self.values.keys();
   }
 
   // Free internal storage.
@@ -128,27 +144,28 @@ impl JsonObject {
     StringBuilder b = string_builder_init(self.values.len() * 2 + 4);
     b.append_char('{');
 
-    MapEntry* entries = self.values.entries;
-
     num i = 0;
     num added = 0;
     for i < self.values.cap {
-      MapEntry item = entries[i];
-      if item.used {
-        if item.tomb == false {
-          if added > 0 {
-            b.append(", ");
-          }
-          b.append_char('"');
-          _append_escaped(&b, item.key);
-          b.append_char('"');
-          b.append(": ");
-          b.append_char('"');
-          _append_escaped(&b, self.values.get(item.key));
-          b.append_char('"');
-          added = added + 1;
-        }
+      if self.values.used[i] == false || self.values.tomb[i] != false {
+        i = i + 1;
+        continue;
       }
+
+      if added > 0 {
+        b.append(", ");
+      }
+
+      str key = self.values.key_slots[i];
+      str value = self.values.value_slots[i];
+      b.append_char('"');
+      _append_escaped(&b, key);
+      b.append_char('"');
+      b.append(": ");
+      b.append_char('"');
+      _append_escaped(&b, value);
+      b.append_char('"');
+      added = added + 1;
       i = i + 1;
     }
 
@@ -156,6 +173,33 @@ impl JsonObject {
     str out = b.build();
     b.free();
     ret out;
+  }
+}
+
+impl JsonObject Serialize {
+  pub serialize() str {
+    ret self.stringify();
+  }
+}
+
+impl JsonObject Deserialize {
+  pub deserialize(str input) {
+    JsonObject parsed = parse_object(input);
+    defer parsed.free();
+    if self.values.cap == 0 {
+      self.values.init(8);
+    } else {
+      self.values.clear();
+    }
+
+    num i = 0;
+    for i < parsed.values.cap {
+      if parsed.values.used[i] != false && parsed.values.tomb[i] == false {
+        self.values.put(parsed.values.key_slots[i], parsed.values.value_slots[i]);
+      }
+      i = i + 1;
+    }
+
   }
 }
 
@@ -191,18 +235,39 @@ impl JsonArray {
   }
 }
 
+impl JsonArray Serialize {
+  pub serialize() str {
+    ret self.stringify();
+  }
+}
+
+impl JsonArray Deserialize {
+  pub deserialize(str input) {
+    JsonArray parsed = parse_array(input);
+    defer parsed.free();
+    if self.values.cap == 0 {
+      self.values.init(8);
+    } else {
+      self.values.clear();
+    }
+
+    num i = 0;
+    for i < parsed.values.len {
+      self.values.push(parsed.values.get(i));
+      i = i + 1;
+    }
+
+  }
+}
+
 fun _skip_ws(str s, num* i) {
   for s[*i] != 0 {
-    if s[*i] != ' ' {
-      if s[*i] != '\n' {
-        if s[*i] != '\t' {
-          if s[*i] != '\0' {
-            break;
-          }
-        }
-      }
+    let c = s[*i];
+    if c == ' ' || c == '\n' || c == '\t' || c == '\0' {
+      *i = *i + 1;
+      continue;
     }
-    *i = *i + 1;
+    break;
   }
 }
 
@@ -304,7 +369,7 @@ pub fun parse_array(str s) JsonArray {
     if s[i] == ']' {
       break;
     }
-    str value = _parse_value(s, &i);
+    let value = _parse_value(s, &i);
     out.push(value);
     _skip_ws(s, &i);
     if s[i] == ',' {

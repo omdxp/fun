@@ -164,7 +164,7 @@ Examples:
 - `std.array`: array helpers
 - `std.io`: file helpers + print utilities
 - `std.vec`: dynamic vectors
-- `std.map`: string-keyed maps
+- `std.map`: generic maps (`Map<K, V>`) with typed keys/values and bytewise hashed lookups by default
 - `std.set`: sets built on maps
 - `std.option`: generic `Option<T>` container
 - `std.result`: generic `Result<T>` container

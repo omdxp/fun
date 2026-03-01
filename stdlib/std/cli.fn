@@ -18,7 +18,7 @@ imp std.quirks;
 // - positionals: non-flag arguments
 pub compound CliArgs {
   // opts: parsed --key/--key=value flags
-  Map<str> opts;
+  Map<str, str> opts;
   // positionals: non-flag arguments
   Vec<str> positionals;
 }
@@ -37,22 +37,18 @@ pub fun cli_parse(str[] args) CliArgs {
 
   num i = 1;
   for args[i] != 0 {
-    str arg = args[i];
-    if arg[0] == '-' {
-      if arg[1] == '-' {
-        // --key or --key=value
-        num eq_idx = index_of_char(arg, '=');
-        if eq_idx == -1 {
-          str key = substr(arg, 2, len(arg) - 2);
-          out.opts.put(key, "1");
-        } else {
-          num key_len = eq_idx - 2;
-          str key = substr(arg, 2, key_len);
-          str val = substr(arg, eq_idx + 1, len(arg) - (eq_idx + 1));
-          out.opts.put(key, val);
-        }
+    let arg = args[i];
+    if arg[0] == '-' && arg[1] == '-' {
+      // --key or --key=value
+      let eq_idx = index_of_char(arg, '=');
+      if eq_idx == -1 {
+        let key = substr(arg, 2, len(arg) - 2);
+        out.opts.put(key, "1");
       } else {
-        out.positionals.push(arg);
+        let key_len = eq_idx - 2;
+        let key = substr(arg, 2, key_len);
+        let val = substr(arg, eq_idx + 1, len(arg) - (eq_idx + 1));
+        out.opts.put(key, val);
       }
     } else {
       out.positionals.push(arg);
@@ -76,7 +72,7 @@ pub fun cli_parse_ext(str[] args) CliArgs {
   num i = 1;
   bin end_opts = false;
   for args[i] != 0 {
-    str arg = args[i];
+    let arg = args[i];
 
     if end_opts {
       out.positionals.push(arg);
@@ -90,52 +86,46 @@ pub fun cli_parse_ext(str[] args) CliArgs {
       continue;
     }
 
-    if arg[0] == '-' {
-      if arg[1] == '-' {
-        // --key or --key=value or --key value
-        num eq_idx = index_of_char(arg, '=');
-        if eq_idx == -1 {
-          str key = substr(arg, 2, len(arg) - 2);
-          if args[i + 1] != 0 {
-            if args[i + 1][0] != '-' {
-              out.opts.put(key, args[i + 1]);
-              i = i + 2;
-              continue;
-            }
-          }
-          out.opts.put(key, "1");
-        } else {
-          num key_len = eq_idx - 2;
-          str key = substr(arg, 2, key_len);
-          str val = substr(arg, eq_idx + 1, len(arg) - (eq_idx + 1));
-          out.opts.put(key, val);
+    if arg[0] == '-' && arg[1] == '-' {
+      // --key or --key=value or --key value
+      let eq_idx = index_of_char(arg, '=');
+      if eq_idx == -1 {
+        let key = substr(arg, 2, len(arg) - 2);
+        let next_arg = args[i + 1];
+        if next_arg != 0 && next_arg[0] != '-' {
+          out.opts.put(key, next_arg);
+          i = i + 2;
+          continue;
         }
+        out.opts.put(key, "1");
       } else {
-        // -k or -k=value or -abc or -k value
-        num eq_idx = index_of_char(arg, '=');
-        if eq_idx != -1 {
-          str key = substr(arg, 1, eq_idx - 1);
-          str val = substr(arg, eq_idx + 1, len(arg) - (eq_idx + 1));
-          out.opts.put(key, val);
-        } else {
-          if len(arg) == 2 {
-            str key = substr(arg, 1, 1);
-            if args[i + 1] != 0 {
-              if args[i + 1][0] != '-' {
-                out.opts.put(key, args[i + 1]);
-                i = i + 2;
-                continue;
-              }
-            }
-            out.opts.put(key, "1");
-          } else {
-            num j = 1;
-            for j < len(arg) {
-              str key = substr(arg, j, 1);
-              out.opts.put(key, "1");
-              j = j + 1;
-            }
-          }
+        let key_len = eq_idx - 2;
+        let key = substr(arg, 2, key_len);
+        let val = substr(arg, eq_idx + 1, len(arg) - (eq_idx + 1));
+        out.opts.put(key, val);
+      }
+    } elif arg[0] == '-' {
+      // -k or -k=value or -abc or -k value
+      let eq_idx = index_of_char(arg, '=');
+      if eq_idx != -1 {
+        let key = substr(arg, 1, eq_idx - 1);
+        let val = substr(arg, eq_idx + 1, len(arg) - (eq_idx + 1));
+        out.opts.put(key, val);
+      } elif len(arg) == 2 {
+        let key = substr(arg, 1, 1);
+        let next_arg = args[i + 1];
+        if next_arg != 0 && next_arg[0] != '-' {
+          out.opts.put(key, next_arg);
+          i = i + 2;
+          continue;
+        }
+        out.opts.put(key, "1");
+      } else {
+        num j = 1;
+        for j < len(arg) {
+          let key = substr(arg, j, 1);
+          out.opts.put(key, "1");
+          j = j + 1;
         }
       }
     } else {
