@@ -4658,7 +4658,7 @@ pub const ParseProcess = struct {
             var depth: usize = 1;
             var prev_word = false;
             while (true) {
-                const t = self.token_next() orelse {
+                const t = self.transpile_proc.tokens.peek() orelse {
                     self.transpile_proc.err("unexpected end of file in asm block", .{});
                     return ParseError.InvalidStatement;
                 };

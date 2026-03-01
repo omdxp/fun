@@ -458,6 +458,27 @@ test "asm statement transpiles" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "asm block preserves newlines" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_asm_block.fn";
+
+    const input =
+        "fun main() {\n" ++
+        "  asm volatile arch aarch64 {\n" ++
+        "    mov x0, 0\n" ++
+        "    mov x8, 93\n" ++
+        "    svc 0\n" ++
+        "  };\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "mov x0,0\\nmov x8,93\\nsvc 0") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
 test "transitive std.net import emits socket headers" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_transitive_std_net.fn";
