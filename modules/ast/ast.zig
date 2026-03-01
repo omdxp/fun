@@ -114,6 +114,8 @@ pub const Node = struct {
         import: struct {
             /// The path of the import.
             path: []const u8,
+            /// Optional namespace alias (`imp foo.bar as baz;`).
+            alias: ?[]const u8 = null,
         },
         /// The boolean node.
         boolean: struct {

@@ -24,6 +24,13 @@ Fun is a statically-typed, C-transpiling language focused on performance and cla
 - `imp std.c.io;` imports a C header signature module.
 - `imp std.string;` imports Fun stdlib modules.
 - Relative imports are supported (e.g., `imp ..foo.bar;`).
+- Import aliases are supported: `imp mod1 as one;` then use `one.symbol`.
+- Aliases are the supported way to avoid duplicate exported symbol collisions across imported modules.
+  - Example:
+    - `imp mod1 as one;`
+    - `imp mod2 as two;`
+    - `num a = one.pick();`
+    - `num b = two.pick();`
 
 ## Types
 ### Built-in Types

@@ -2642,8 +2642,8 @@ const LspServer = struct {
             }
 
             const keywords = [_][]const u8{
-                "imp",  "pub", "fun", "compound", "quirk", "impl", "enum", "asm",  "volatile", "arch", "ret", "if", "elif", "else", "for", "fit", "break", "continue",
-                "void", "raw", "num", "dec",      "str",   "bin",  "chr",  "true", "false",
+                "imp",  "as",  "pub", "fun", "compound", "quirk", "impl", "enum", "asm",   "volatile", "arch", "ret", "if", "elif", "else", "for", "fit", "break", "continue",
+                "void", "raw", "num", "dec", "str",      "bin",   "chr",  "true", "false",
             };
             for (keywords) |kw| {
                 if (prefix.len == 0 or std.mem.startsWith(u8, kw, prefix)) {
@@ -2737,6 +2737,8 @@ const LspServer = struct {
                 const recv_name = if (start < j) doc.text[start..j] else "";
 
                 if (recv_name.len != 0) {
+                    if (try self.trySendAliasNamespaceCompletions(id_val, uri, idx, recv_name, prefix)) return;
+
                     var recv_type: ?[]const u8 = null;
                     if (std.mem.eql(u8, recv_name, "self")) {
                         recv_type = self.guessEnclosingImplType(idx, pos);
@@ -2785,6 +2787,8 @@ const LspServer = struct {
                 // Special-case: `std.<...>` behaves like a module namespace.
                 // This does not go through value-type inference.
                 if (try self.trySendStdNamespaceCompletions(id_val, uri, idx, pos, ri, prefix)) return;
+
+                if (try self.trySendAliasNamespaceCompletions(id_val, uri, idx, idx.tokens[ri].text, prefix)) return;
 
                 if (self.resolveTypeOfChainUpTo(idx, uri, pos, ri)) |recv_type| {
                     var seen = std.StringHashMap(void).init(self.allocator);
@@ -2854,8 +2858,8 @@ const LspServer = struct {
 
         // Keywords.
         const keywords = [_][]const u8{
-            "imp",  "pub", "fun", "compound", "quirk", "impl", "enum", "asm",  "volatile", "arch", "defer", "ret", "if", "elif", "else", "for", "fit", "break", "continue",
-            "void", "raw", "num", "dec",      "str",   "bin",  "chr",  "true", "false",
+            "imp",  "as",  "pub", "fun", "compound", "quirk", "impl", "enum", "asm",   "volatile", "arch", "defer", "ret", "if", "elif", "else", "for", "fit", "break", "continue",
+            "void", "raw", "num", "dec", "str",      "bin",   "chr",  "true", "false",
         };
         for (keywords) |kw| {
             if (prefix.len == 0 or std.mem.startsWith(u8, kw, prefix)) {
@@ -3191,6 +3195,96 @@ const LspServer = struct {
         const json = try std.json.stringifyAlloc(self.allocator, list, .{});
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
+    }
+
+    fn findAliasedImportUri(self: *LspServer, current_uri: []const u8, idx: *const Index, alias_name: []const u8) ?[]u8 {
+        for (idx.tokens, 0..) |t, i| {
+            if (t.kind != .keyword or !std.mem.eql(u8, t.text, "imp")) continue;
+
+            const spec = self.parseImportSpecFromTokens(idx, i) catch null orelse continue;
+            defer self.allocator.free(spec);
+
+            var j: usize = i + 1;
+            var saw_as = false;
+            while (j < idx.tokens.len) : (j += 1) {
+                const tk = idx.tokens[j];
+                if ((tk.kind == .symbol or tk.kind == .operator) and std.mem.eql(u8, tk.text, ";")) break;
+                if (!saw_as and tk.kind == .keyword and std.mem.eql(u8, tk.text, "as")) {
+                    saw_as = true;
+                    continue;
+                }
+                if (saw_as and tk.kind == .identifier) {
+                    if (std.mem.eql(u8, tk.text, alias_name)) {
+                        return (self.resolveImportUri(current_uri, spec) catch null);
+                    }
+                    saw_as = false;
+                }
+            }
+        }
+        return null;
+    }
+
+    fn trySendAliasNamespaceCompletions(self: *LspServer, id_val: ?std.json.Value, current_uri: []const u8, idx: *const Index, alias_name: []const u8, prefix: []const u8) !bool {
+        const target_uri = self.findAliasedImportUri(current_uri, idx, alias_name) orelse return false;
+        defer self.allocator.free(target_uri);
+
+        self.ensureDocIndexedFromDisk(target_uri) catch {};
+        const doc = self.docs.get(target_uri) orelse return false;
+        const didx = doc.index orelse return false;
+
+        var items = std.ArrayList(CompletionItem).init(self.allocator);
+        defer {
+            for (items.items) |it| {
+                self.allocator.free(it.label);
+                if (it.detail) |d| self.allocator.free(d);
+            }
+            items.deinit();
+        }
+
+        var seen = std.StringHashMap(void).init(self.allocator);
+        defer {
+            var it = seen.iterator();
+            while (it.next()) |e| self.allocator.free(e.key_ptr.*);
+            seen.deinit();
+        }
+
+        for (didx.symbols) |s| {
+            if (!s.is_public) continue;
+            if (s.container_fn_range != null) continue;
+            if (s.container_type != null) continue;
+            if (prefix.len != 0 and !std.mem.startsWith(u8, s.name, prefix)) continue;
+
+            const ck: i64 = switch (s.kind) {
+                .function => 3,
+                .variable => 6,
+                .constant => 21,
+                .enum_ => 13,
+                .struct_, .class, .interface, .typeParameter => 7,
+                else => 6,
+            };
+
+            var key_buf = std.ArrayList(u8).init(self.allocator);
+            defer key_buf.deinit();
+            try key_buf.writer().print("{s}:{d}", .{ s.name, ck });
+            const key = try self.allocator.dupe(u8, key_buf.items);
+            if (seen.contains(key)) {
+                self.allocator.free(key);
+                continue;
+            }
+            try seen.put(key, {});
+
+            try items.append(.{
+                .label = try self.allocator.dupe(u8, s.name),
+                .kind = ck,
+                .detail = if (s.detail) |d| try self.allocator.dupe(u8, d) else null,
+            });
+        }
+
+        const list: CompletionList = .{ .items = items.items };
+        const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+        defer self.allocator.free(json);
+        try self.sendResponseJson(id_val, json);
+        return true;
     }
 
     fn appendCMacroCompletionsForImports(self: *LspServer, items: *std.ArrayList(CompletionItem), idx: *const Index, prefix: []const u8) !void {
@@ -3981,6 +4075,7 @@ const LspServer = struct {
         while (i < idx.tokens.len) : (i += 1) {
             const t = idx.tokens[i];
             if ((t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, ";")) break;
+            if (t.kind == .keyword and std.mem.eql(u8, t.text, "as")) break;
             if (t.kind == .identifier) {
                 if (buf.items.len != 0) {
                     // ensure previous char is '.' if this is not the first segment

@@ -115,7 +115,6 @@ pub fn main() void {
 
     const stdout = std.io.getStdOut().writer();
     if (tp.flags.ast) {
-        stdout.print("\n=== AST Nodes ===\n", .{}) catch |err| print_error_and_exit(err);
         for (tp.nodes.items(), 0..) |node, i| {
             stdout.print("\nNode {d}:\n", .{i}) catch |err| print_error_and_exit(err);
             utils.print_node(node, stdout, 0) catch |err| print_error_and_exit(err);

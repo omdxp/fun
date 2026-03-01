@@ -6,7 +6,7 @@
 ### Syntax & Structure
 - **Statically-typed, C-inspired**: Variables and functions are statically typed; variables can be explicitly typed or inferred via `let`.
 - **Functions**: Defined with `fun name(args) type { ... }`.
-- **Imports**: Use `imp module;` to import standard or user modules.
+- **Imports**: Use `imp module;` to import standard or user modules. Use `imp module as alias;` to import with a namespace alias.
 - **Visibility**: Prefix declarations with `pub` to export them; declarations without `pub` are module-private.
 - **Compounds**: Custom types (like structs): `compound Point { num x; num y; }`.
 - **Quirks (Interfaces)**: Define required methods: `quirk Shape { area() num; }`.
@@ -96,6 +96,13 @@
 ### Imports & Modularity
 - **Standard Library**: `imp std.c.io;` maps to C standard headers.
 - **Relative Imports**: `imp relative.parent;` for user modules.
+- **Import Alias**: `imp mod1 as one;` then call symbols as `one.some_fn()`.
+- **Duplicate Export Collisions**: Import modules that export the same public symbol by aliasing each module and calling through the alias namespace.
+    - Example:
+        - `imp mod1 as one;`
+        - `imp mod2 as two;`
+        - `num a = one.pick();`
+        - `num b = two.pick();`
 - **Circular Dependency Detection**: Compiler detects and errors on circular imports.
 
 ### C Interop

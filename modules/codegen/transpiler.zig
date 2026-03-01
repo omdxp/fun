@@ -287,6 +287,12 @@ pub const TranspileProcess = struct {
     /// Track global symbols across all modules to detect duplicates
     global_symbols: std.StringHashMap(GlobalSymbolInfo),
 
+    /// Import aliases declared in this module (`alias` -> import path).
+    import_aliases: std.StringHashMap([]const u8),
+
+    /// If this process came from an aliased import, the alias namespace.
+    import_alias: ?[]const u8 = null,
+
     /// Registry for user-defined types (`compound`/`quirk`/`impl`).
     /// Stored only on the root process; children access it through `get_root()`.
     type_registry: ?TypeRegistry = null,
@@ -479,6 +485,35 @@ pub const TranspileProcess = struct {
             cur = p;
         }
         return cur;
+    }
+
+    fn make_alias_qualified_symbol_name(self: *Self, alias: []const u8, name: []const u8) TranspileError![]const u8 {
+        var buf = std.ArrayList(u8).init(self.allocator);
+        defer buf.deinit();
+        buf.appendSlice(alias) catch return TranspileError.MemoryAllocationFailed;
+        buf.appendSlice("__") catch return TranspileError.MemoryAllocationFailed;
+        buf.appendSlice(name) catch return TranspileError.MemoryAllocationFailed;
+        return buf.toOwnedSlice() catch TranspileError.MemoryAllocationFailed;
+    }
+
+    fn register_import_alias(self: *Self, alias: []const u8, import_path: []const u8) TranspileError!void {
+        if (self.import_aliases.get(alias)) |existing| {
+            if (!mem.eql(u8, existing, import_path)) {
+                self.err("Import alias '{s}' already used for '{s}'", .{ alias, existing });
+                return TranspileError.DuplicateSymbol;
+            }
+            return;
+        }
+        const alias_copy = self.allocator.dupe(u8, alias) catch return TranspileError.MemoryAllocationFailed;
+        errdefer self.allocator.free(alias_copy);
+        const path_copy = self.allocator.dupe(u8, import_path) catch return TranspileError.MemoryAllocationFailed;
+        errdefer self.allocator.free(path_copy);
+        self.import_aliases.put(alias_copy, path_copy) catch return TranspileError.MemoryAllocationFailed;
+    }
+
+    fn resolve_alias_qualified_symbol_name(self: *Self, alias: []const u8, name: []const u8) TranspileError!?[]const u8 {
+        if (!self.import_aliases.contains(alias)) return null;
+        return try self.make_alias_qualified_symbol_name(alias, name);
     }
 
     fn ensure_type_registry(self: *Self) *TypeRegistry {
@@ -809,8 +844,6 @@ pub const TranspileProcess = struct {
             );
             return TranspileError.WrongArgCount;
         }
-
-        // Return type: missing means void.
         var impl_rtype: dtype.DataType = .{ .type_str = std.ArrayList(u8).init(self.backing_allocator) };
         defer impl_rtype.type_str.deinit();
         if (impl_fn.rtype) |rt| {
@@ -1732,7 +1765,7 @@ pub const TranspileProcess = struct {
         return try self.backing_allocator.dupe(u8, matches.items[0]);
     }
 
-    fn process_local_import_full_path(self: *Self, full_path: []const u8) GeneralError!void {
+    fn process_local_import_full_path(self: *Self, full_path: []const u8, import_alias: ?[]const u8) GeneralError!void {
         // Minimal variant of `process_local_import()` that takes a resolved `.fn` path.
         // Used for auto-importing type definitions so entrypoint scripts can run unchanged.
 
@@ -1765,6 +1798,9 @@ pub const TranspileProcess = struct {
         import_proc.* = try TranspileProcess.init_with_stdlib_dir(self.backing_allocator, canon, "temp.c", .{ .outf = false }, self.stdlib_dir);
         import_proc.parent = self;
         import_proc.is_importing = true;
+        if (import_alias) |alias| {
+            import_proc.import_alias = import_proc.allocator.dupe(u8, alias) catch return TranspileError.MemoryAllocationFailed;
+        }
 
         // Copy imported files to child (prevents duplicate imports across branches).
         var it = self.imported_files.iterator();
@@ -1934,12 +1970,12 @@ pub const TranspileProcess = struct {
             // Prefer compounds; if not found, try quirks.
             if (self.find_fn_defining_decl("compound", name) catch null) |path| {
                 defer self.backing_allocator.free(path);
-                try self.process_local_import_full_path(path);
+                try self.process_local_import_full_path(path, null);
                 continue;
             }
             if (self.find_fn_defining_decl("quirk", name) catch null) |path| {
                 defer self.backing_allocator.free(path);
-                try self.process_local_import_full_path(path);
+                try self.process_local_import_full_path(path, null);
                 continue;
             }
         }
@@ -2017,7 +2053,7 @@ pub const TranspileProcess = struct {
     ///
     /// This enables identifier validation in the parser to recognize functions defined in
     /// locally imported modules.
-    pub fn preload_import_global_symbols(self: *Self, import_node: ast.Node, import_path: []const u8) GeneralError!void {
+    pub fn preload_import_global_symbols(self: *Self, import_node: ast.Node, import_path: []const u8, import_alias: ?[]const u8) GeneralError!void {
         if (!self.flags.preload_imports) return;
         if (std.mem.indexOf(u8, import_path, "std.") != null) return;
 
@@ -2102,18 +2138,18 @@ pub const TranspileProcess = struct {
             if (mem.eql(u8, name, "main")) continue;
             if (!is_public) continue;
 
-            if (self.global_symbols.get(name)) |existing| {
+            const key_name = if (import_alias) |alias|
+                (try self.make_alias_qualified_symbol_name(alias, name))
+            else
+                (self.allocator.dupe(u8, name) catch return TranspileError.MemoryAllocationFailed);
+            errdefer self.allocator.free(key_name);
+
+            if (self.global_symbols.get(key_name)) |existing| {
                 if (!mem.eql(u8, existing.file_path, canon) and !mem.eql(u8, existing.file_path, self.input_file_path)) {
-                    self.err("Symbol '{s}' already defined in module '{s}'", .{ name, existing.file_path });
+                    self.err("Symbol '{s}' already defined in module '{s}'", .{ key_name, existing.file_path });
                     return TranspileError.DuplicateSymbol;
                 }
             }
-
-            const name_copy = self.allocator.dupe(u8, name) catch |e| {
-                std.debug.print("Error duplicating symbol name '{any}': {s}\\n", .{ name, @errorName(e) });
-                return TranspileError.MemoryAllocationFailed;
-            };
-            errdefer self.allocator.free(name_copy);
 
             const path_copy = self.allocator.dupe(u8, canon) catch |e| {
                 std.debug.print("Error duplicating file path '{any}': {s}\\n", .{ canon, @errorName(e) });
@@ -2121,13 +2157,13 @@ pub const TranspileProcess = struct {
             };
             errdefer self.allocator.free(path_copy);
 
-            self.global_symbols.put(name_copy, .{
-                .symbol_name = name_copy,
+            self.global_symbols.put(key_name, .{
+                .symbol_name = key_name,
                 .file_path = path_copy,
                 .is_function = true,
                 .is_public = true,
             }) catch |e| {
-                std.debug.print("Error registering imported symbol '{any}': {s}\\n", .{ name_copy, @errorName(e) });
+                std.debug.print("Error registering imported symbol '{any}': {s}\\n", .{ key_name, @errorName(e) });
                 return TranspileError.MemoryAllocationFailed;
             };
         }
@@ -2293,6 +2329,7 @@ pub const TranspileProcess = struct {
             .imported_files = imported_files,
             .import_chain = import_chain,
             .global_symbols = std.StringHashMap(GlobalSymbolInfo).init(a),
+            .import_aliases = std.StringHashMap([]const u8).init(a),
             .children = std.ArrayList(*TranspileProcess).init(a),
             .std_imports = std.ArrayList([]const u8).init(a),
             .forced_generic_instantiations = std.ArrayList(*const dtype.DataType).init(a),
@@ -2383,7 +2420,7 @@ pub const TranspileProcess = struct {
     ///
     /// This is for tooling/identifier validation: it allows `imp std.c.*;` (and the `std.*` alias)
     /// source of truth when installed, without changing codegen behavior.
-    pub fn preload_std_import_global_symbols(self: *Self, import_node: ast.Node, import_path: []const u8) void {
+    pub fn preload_std_import_global_symbols(self: *Self, import_node: ast.Node, import_path: []const u8, import_alias: ?[]const u8) void {
         if (!self.flags.preload_std_imports) return;
         const full_path_opt = self.build_stdlib_module_path(import_path) catch return;
         if (full_path_opt == null) return;
@@ -2426,22 +2463,25 @@ pub const TranspileProcess = struct {
             const name = name_tok.data.sval.items;
             if (mem.eql(u8, name, "main")) continue;
 
-            if (self.global_symbols.get(name)) |existing| {
+            const key_name = if (import_alias) |alias|
+                (self.make_alias_qualified_symbol_name(alias, name) catch return)
+            else
+                (self.allocator.dupe(u8, name) catch return);
+            errdefer self.allocator.free(key_name);
+
+            if (self.global_symbols.get(key_name)) |existing| {
                 if (!mem.eql(u8, existing.file_path, full_path) and !mem.eql(u8, existing.file_path, self.input_file_path)) {
                     // Keep behavior consistent with local preloading.
-                    self.report_error(import_node, "Symbol '{s}' already defined in module '{s}'", .{ name, existing.file_path });
+                    self.report_error(import_node, "Symbol '{s}' already defined in module '{s}'", .{ key_name, existing.file_path });
                     return;
                 }
             }
 
-            const name_copy = self.allocator.dupe(u8, name) catch return;
-            errdefer self.allocator.free(name_copy);
-
             const path_copy = self.allocator.dupe(u8, canon) catch return;
             errdefer self.allocator.free(path_copy);
 
-            self.global_symbols.put(name_copy, .{
-                .symbol_name = name_copy,
+            self.global_symbols.put(key_name, .{
+                .symbol_name = key_name,
                 .file_path = path_copy,
                 .is_function = true,
                 .is_public = true,
@@ -3755,6 +3795,31 @@ pub const TranspileProcess = struct {
                             return TranspileError.NotCallable;
                         }
 
+                        // Module alias call: `alias.fn(...)`.
+                        if (recv.type == .Identifier and recv.data != null) {
+                            const alias_name = recv.data.?.sval.items;
+                            const member_name = member.data.?.sval.items;
+                            if (try self.resolve_alias_qualified_symbol_name(alias_name, member_name)) |qualified| {
+                                defer self.allocator.free(qualified);
+
+                                if (fns.get(qualified)) |sig| {
+                                    maybe_sig = sig;
+                                    call_rtype = sig.rtype;
+                                } else if (self.global_symbols.get(qualified) != null or is_known_extern_function_name(qualified)) {
+                                    skip_signature_typecheck = true;
+                                    call_rtype = .{ .base = .Unknown };
+                                } else {
+                                    self.report_type_error(node, "unknown function '{s}.{s}'", .{ alias_name, member_name });
+                                    return TranspileError.SymbolNotDefined;
+                                }
+
+                                for (args_nodes.items) |arg_node| {
+                                    _ = try self.infer_expr_type(arg_node.*, env, fns);
+                                }
+                                return call_rtype;
+                            }
+                        }
+
                         const recv_t = try self.infer_expr_type(recv.*, env, fns);
                         const mname = member.data.?.sval.items;
                         if (!is_user_named_type(recv_t)) {
@@ -4130,6 +4195,18 @@ pub const TranspileProcess = struct {
                 if (mem.eql(u8, op, ".")) {
                     const left = exp.left orelse return .{ .base = .Unknown };
                     const right = exp.right orelse return .{ .base = .Unknown };
+
+                    // Module alias symbol access (`alias.symbol`).
+                    if (left.*.type == .Identifier and left.*.data != null and right.*.type == .Identifier and right.*.data != null) {
+                        const alias_name = left.*.data.?.sval.items;
+                        const member_name = right.*.data.?.sval.items;
+                        if (try self.resolve_alias_qualified_symbol_name(alias_name, member_name)) |qualified| {
+                            defer self.allocator.free(qualified);
+                            if (self.global_symbols.get(qualified)) |g| {
+                                return if (g.is_function) .{ .base = .Unknown } else .{ .base = .Unknown };
+                            }
+                        }
+                    }
 
                     // Enum variant constant: `Enum.Variant`.
                     // Treat this form as enum access when `Enum` is a known enum type (even if declared later).
@@ -5693,6 +5770,7 @@ pub const TranspileProcess = struct {
                 .import => |imp| {
                     // Import paths are allocated by the parser (toOwnedSlice).
                     self.allocator.free(imp.path);
+                    if (imp.alias) |alias| self.allocator.free(alias);
                 },
                 .exp => |exp| {
                     if (exp.left) |left| {
@@ -6108,6 +6186,15 @@ pub const TranspileProcess = struct {
         self.imported_files.deinit();
         self.import_chain.deinit();
         self.global_symbols.deinit();
+
+        if (self.import_aliases.count() > 0) {
+            var ait = self.import_aliases.iterator();
+            while (ait.next()) |entry| {
+                self.allocator.free(entry.key_ptr.*);
+                self.allocator.free(entry.value_ptr.*);
+            }
+        }
+        self.import_aliases.deinit();
 
         // Deinit children TranspileProcesses
         for (self.children.items) |child| {
@@ -8091,13 +8178,23 @@ pub const TranspileProcess = struct {
         if (self.is_importing) return;
         try self.write("\n// Function prototypes (allow out-of-order definitions)\n");
         var emitted = std.StringHashMap(bool).init(self.backing_allocator);
-        defer emitted.deinit();
+        defer {
+            var it = emitted.iterator();
+            while (it.next()) |e| {
+                self.backing_allocator.free(e.key_ptr.*);
+            }
+            emitted.deinit();
+        }
         try self.emit_function_prototypes_module(self, &emitted);
         try self.emit_generic_function_prototypes(&emitted);
         try self.write("\n");
     }
 
     fn emit_function_prototypes_module(self: *Self, proc: *Self, emitted: *std.StringHashMap(bool)) TranspileError!void {
+        const prev_alias = self.import_alias;
+        self.import_alias = proc.import_alias;
+        defer self.import_alias = prev_alias;
+
         for (proc.nodes.items()) |node| {
             if (node.type != .Function or node.node_variant == null) continue;
             if (self.is_std_c_signature_node(&node)) continue;
@@ -8108,9 +8205,18 @@ pub const TranspileProcess = struct {
             if (function.name != null and mem.eql(u8, function.name.?.items, "main")) continue;
 
             if (function.name) |fname| {
-                if (self.mangled_contains_unresolved_placeholder(fname.items)) continue;
-                if (emitted.contains(fname.items)) continue;
-                emitted.put(fname.items, true) catch return TranspileError.MemoryAllocationFailed;
+                var effective_name: []const u8 = fname.items;
+                var effective_name_owned = false;
+                if (proc.import_alias) |alias| {
+                    effective_name = try self.make_alias_qualified_symbol_name(alias, fname.items);
+                    effective_name_owned = true;
+                }
+                defer if (effective_name_owned) self.allocator.free(effective_name);
+
+                if (self.mangled_contains_unresolved_placeholder(effective_name)) continue;
+                if (emitted.contains(effective_name)) continue;
+                const emitted_key = self.backing_allocator.dupe(u8, effective_name) catch return TranspileError.MemoryAllocationFailed;
+                emitted.put(emitted_key, true) catch return TranspileError.MemoryAllocationFailed;
             }
 
             try self.write_function_prototype(node);
@@ -8126,7 +8232,8 @@ pub const TranspileProcess = struct {
         for (root.generic_fn_instantiations.items) |inst| {
             if (self.mangled_contains_unresolved_placeholder(inst.name)) continue;
             if (emitted.contains(inst.name)) continue;
-            emitted.put(inst.name, true) catch return TranspileError.MemoryAllocationFailed;
+            const emitted_key = self.backing_allocator.dupe(u8, inst.name) catch return TranspileError.MemoryAllocationFailed;
+            emitted.put(emitted_key, true) catch return TranspileError.MemoryAllocationFailed;
 
             {
                 const prev_params = self.type_subst_params;
@@ -8144,6 +8251,25 @@ pub const TranspileProcess = struct {
                 try self.write_function_prototype(inst.fn_node.*);
             }
         }
+    }
+
+    fn write_effective_function_name(self: *Self, node: ast.Node, name: []const u8) TranspileError!void {
+        _ = node;
+        if (self.override_fn_name) |ov| {
+            try self.write(ov);
+            return;
+        }
+
+        if (self.import_alias) |alias| {
+            if (!mem.eql(u8, name, "main")) {
+                try self.write(alias);
+                try self.write("__");
+                try self.write(name);
+                return;
+            }
+        }
+
+        try self.write(name);
     }
 
     fn write_function_prototype(self: *Self, node: ast.Node) TranspileError!void {
@@ -8164,8 +8290,7 @@ pub const TranspileProcess = struct {
 
         try self.write(" ");
         if (function.name) |name| {
-            const out_name = if (self.override_fn_name) |ov| ov else name.items;
-            try self.write(out_name);
+            try self.write_effective_function_name(node, name.items);
         }
 
         try self.write("(");
@@ -8195,6 +8320,9 @@ pub const TranspileProcess = struct {
             // Recursively transpile the child's children first
             try self.transpile_children_recursive(child, seen);
 
+            const prev_alias = self.import_alias;
+            self.import_alias = child.import_alias;
+
             // Then, transpile the child's own nodes (excluding imports and main functions)
             for (child.nodes.items()) |node| {
                 if (node.type != .Import) {
@@ -8223,6 +8351,8 @@ pub const TranspileProcess = struct {
                     try self.write("\n\n");
                 }
             }
+
+            self.import_alias = prev_alias;
         }
     }
 
@@ -8783,6 +8913,19 @@ pub const TranspileProcess = struct {
                     const left = exp.left orelse return;
                     const right = exp.right orelse return;
 
+                    // Module alias symbol access: `alias.symbol` -> `alias__symbol`.
+                    if (left.*.type == .Identifier and left.*.data != null and right.*.type == .Identifier and right.*.data != null) {
+                        const alias_name = left.*.data.?.sval.items;
+                        const member_name = right.*.data.?.sval.items;
+                        if (try self.resolve_alias_qualified_symbol_name(alias_name, member_name)) |qualified| {
+                            defer self.allocator.free(qualified);
+                            if (self.global_symbols.get(qualified) != null) {
+                                try self.write(qualified);
+                                return;
+                            }
+                        }
+                    }
+
                     // Enum variant constant: `Enum.Variant` -> `Enum_Variant` in C.
                     if (left.*.type == .Identifier and left.*.data != null and right.*.type == .Identifier and right.*.data != null) {
                         const enum_name = left.*.data.?.sval.items;
@@ -8937,6 +9080,18 @@ pub const TranspileProcess = struct {
                 //     self.err("Symbol '{s}' not found", .{str});
                 //     return TranspileError.SymbolNotDefined;
                 // }
+                if (self.import_alias) |alias| {
+                    if (self.get_scope_entity(str) == null) {
+                        if (self.global_symbols.get(str)) |g| {
+                            if (g.is_function and g.is_public and mem.eql(u8, g.file_path, self.input_file_path) and !mem.eql(u8, str, "main")) {
+                                try self.write(alias);
+                                try self.write("__");
+                                try self.write(str);
+                                return;
+                            }
+                        }
+                    }
+                }
                 try self.write(str);
             },
             .Variable => {
@@ -9128,8 +9283,7 @@ pub const TranspileProcess = struct {
                     }
                     try self.write(" ");
                     if (function.name) |name| {
-                        const out_name = if (self.override_fn_name) |ov| ov else name.items;
-                        try self.write(out_name);
+                        try self.write_effective_function_name(node, name.items);
                     }
                     try self.write("(");
                     self.in_function_params = true;
@@ -9816,12 +9970,16 @@ pub const TranspileProcess = struct {
     /// - Returns an error if processing the import fails.
     fn process_import(self: *Self, node: ast.Node) GeneralError!void {
         const import_path = node.node_variant.?.import.path;
+        const import_alias = node.node_variant.?.import.alias;
+        if (import_alias) |alias| {
+            try self.register_import_alias(alias, import_path);
+        }
         if (std.mem.startsWith(u8, import_path, "std.c.")) {
             try self.process_std_import(node, import_path);
         } else if (std.mem.startsWith(u8, import_path, "std.")) {
             try self.process_std_module_import(node, import_path);
         } else {
-            try self.process_local_import(node, import_path);
+            try self.process_local_import(node, import_path, import_alias);
         }
     }
 
@@ -9932,7 +10090,7 @@ pub const TranspileProcess = struct {
         }
         const full_path = full_path_opt.?;
         defer self.backing_allocator.free(full_path);
-        try self.process_local_import_full_path(full_path);
+        try self.process_local_import_full_path(full_path, if (import_node.node_variant) |nv| nv.import.alias else null);
     }
 
     /// Process a local file import (e.g., "custom" or "folder.file")
@@ -9943,7 +10101,7 @@ pub const TranspileProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if processing the import fails.
-    fn process_local_import(self: *Self, import_node: ast.Node, import_path: []const u8) GeneralError!void {
+    fn process_local_import(self: *Self, import_node: ast.Node, import_path: []const u8, import_alias: ?[]const u8) GeneralError!void {
         // Get full path of the file to import
         // This is a temporary helper string; keep it off the arena.
         var file_path = std.ArrayList(u8).init(self.backing_allocator);
@@ -10088,6 +10246,10 @@ pub const TranspileProcess = struct {
 
         import_proc.* = try TranspileProcess.init_with_stdlib_dir(self.backing_allocator, canon, "temp.c", .{ .outf = false }, self.stdlib_dir);
 
+        if (import_alias) |alias| {
+            import_proc.import_alias = import_proc.allocator.dupe(u8, alias) catch return TranspileError.MemoryAllocationFailed;
+        }
+
         import_proc.parent = self;
         import_proc.is_importing = true;
 
@@ -10176,26 +10338,35 @@ pub const TranspileProcess = struct {
             if (mem.eql(u8, symbol_name, "main")) continue;
             if (!symbol_info.is_public) continue;
 
+            const exported_name = if (self.import_alias) |alias|
+                (try self.make_alias_qualified_symbol_name(alias, symbol_name))
+            else
+                symbol_name;
+
             // Check if this symbol is already defined in the parent
-            if (self.parent.?.global_symbols.get(symbol_name)) |existing| {
+            if (self.parent.?.global_symbols.get(exported_name)) |existing| {
                 // If we find a conflict from a different file, report it.
                 // Allow duplicates from the same file path (e.g. when symbols were
                 // preloaded earlier for parsing).
                 if (!mem.eql(u8, existing.file_path, symbol_info.file_path)) {
-                    self.err("Symbol '{s}' in module '{s}' conflicts with same symbol defined in module '{s}'", .{ symbol_name, symbol_info.file_path, existing.file_path });
+                    if (self.import_alias != null) self.allocator.free(exported_name);
+                    self.err("Symbol '{s}' in module '{s}' conflicts with same symbol defined in module '{s}'", .{ exported_name, symbol_info.file_path, existing.file_path });
                     return TranspileError.DuplicateSymbol;
                 }
+
+                if (self.import_alias != null) self.allocator.free(exported_name);
 
                 continue;
             }
 
             // Add this symbol to the parent's global registry
-            self.parent.?.global_symbols.put(symbol_name, .{
-                .symbol_name = symbol_name,
+            self.parent.?.global_symbols.put(exported_name, .{
+                .symbol_name = exported_name,
                 .file_path = symbol_info.file_path,
                 .is_function = symbol_info.is_function,
                 .is_public = symbol_info.is_public,
             }) catch |e| {
+                if (self.import_alias != null) self.allocator.free(exported_name);
                 std.debug.print("Failed to allocate memory for global symbol: {s}\\n", .{@errorName(e)});
                 return TranspileError.MemoryAllocationFailed;
             };

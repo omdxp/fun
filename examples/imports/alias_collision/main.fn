@@ -1,0 +1,15 @@
+imp std.c.io;
+imp mod1 as one;
+imp mod2 as two;
+
+fun main() {
+  num a = one.pick();
+  num b = two.pick();
+
+  if a == 1 && b == 2 {
+    printf("alias imports ok\n");
+    ret;
+  }
+
+  printf("alias imports failed: %d %d\n", a, b);
+}

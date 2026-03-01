@@ -339,6 +339,16 @@ fn parse_local_import_paths(allocator: mem.Allocator, input_file: []const u8) !s
                 j += 1;
             }
 
+            // Optional alias: `imp foo.bar as baz;`
+            while (j < tokens.len and (tokens[j].type == .NewLine or tokens[j].type == .Comment)) : (j += 1) {}
+            if (j < tokens.len and tokens[j].type == .Keyword and std.mem.eql(u8, tokens[j].data.sval.items, "as")) {
+                j += 1;
+                while (j < tokens.len and (tokens[j].type == .NewLine or tokens[j].type == .Comment)) : (j += 1) {}
+                if (j < tokens.len and tokens[j].type == .Identifier) {
+                    j += 1;
+                }
+            }
+
             const imp_path = try import_name.toOwnedSlice();
             if (!std.mem.startsWith(u8, imp_path, "std.")) {
                 try result.append(imp_path);

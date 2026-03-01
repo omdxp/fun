@@ -89,6 +89,7 @@ pub fn is_dynamic_int_datatype(str: []const u8) bool {
 /// - `bool`: `true` if the string is a keyword, otherwise `false`.
 pub fn is_keyword(str: []const u8) bool {
     return mem.eql(u8, "imp", str) or mem.eql(u8, "pub", str) or mem.eql(u8, "fun", str) or
+        mem.eql(u8, "as", str) or
         mem.eql(u8, "enum", str) or
         mem.eql(u8, "compound", str) or mem.eql(u8, "quirk", str) or mem.eql(u8, "impl", str) or
         mem.eql(u8, "let", str) or
@@ -428,6 +429,22 @@ pub fn print_node(node: ast.Node, writer: anytype, depth: usize) !void {
                 try print_indent(writer, depth + 1);
                 try writer.print("Name: {s}\n", .{name.items});
             }
+            if (node.node_variant.?.function.rtype) |rtype| {
+                try print_indent(writer, depth + 1);
+                try writer.print("Return Type: {s}\n", .{rtype.type_str.items});
+            }
+            if (node.node_variant.?.function.type_params) |tparams| {
+                try print_indent(writer, depth + 1);
+                try writer.print("Type params ({d}):\n", .{tparams.count});
+                for (tparams.items(), 0..) |tp, i| {
+                    try print_indent(writer, depth + 2);
+                    try writer.print("{d}: {s}\n", .{ i, tp.items });
+                }
+            }
+            if (node.node_variant.?.function.is_variadic) {
+                try print_indent(writer, depth + 1);
+                try writer.print("Variadic: true\n", .{});
+            }
             if (node.node_variant.?.function.args) |args| {
                 try print_indent(writer, depth + 1);
                 try writer.print("Arguments count: {d}\n", .{args.count});
@@ -474,11 +491,21 @@ pub fn print_node(node: ast.Node, writer: anytype, depth: usize) !void {
                 try writer.print("Value: \"{s}\"\n", .{data.sval.items});
             }
         },
+        .Character => {
+            if (node.data) |data| {
+                try print_indent(writer, depth + 1);
+                try writer.print("Value: '{c}'\n", .{data.cval});
+            }
+        },
         .Identifier => {
             if (node.data) |data| {
                 try print_indent(writer, depth + 1);
                 try writer.print("Name: {s}\n", .{data.sval.items});
             }
+        },
+        .VariableList => {
+            try print_indent(writer, depth + 1);
+            try writer.print("Variable list node\n", .{});
         },
         .Body => {
             if (node.node_variant != null and node.node_variant.?.body.statements.count > 0) {
@@ -495,6 +522,10 @@ pub fn print_node(node: ast.Node, writer: anytype, depth: usize) !void {
             if (node.node_variant != null and node.node_variant.?.import.path.len > 0) {
                 try print_indent(writer, depth + 1);
                 try writer.print("Path: {s}\n", .{node.node_variant.?.import.path});
+                if (node.node_variant.?.import.alias) |alias| {
+                    try print_indent(writer, depth + 1);
+                    try writer.print("Alias: {s}\n", .{alias});
+                }
             }
         },
         .Unary => {
@@ -569,11 +600,242 @@ pub fn print_node(node: ast.Node, writer: anytype, depth: usize) !void {
                 }
             }
         },
+        .StatementDefer => {
+            if (node.node_variant != null) {
+                try print_indent(writer, depth + 1);
+                try writer.print("Body:\n", .{});
+                try print_node(node.node_variant.?.statement.defer_stmt.body.*, writer, depth + 2);
+            }
+        },
+        .StatementAsm => {
+            if (node.node_variant != null) {
+                const asm_stmt = node.node_variant.?.statement.asm_stmt;
+                try print_indent(writer, depth + 1);
+                try writer.print("Template: {s}\n", .{asm_stmt.template.items});
+                try print_indent(writer, depth + 1);
+                try writer.print("Volatile: {s}\n", .{if (asm_stmt.is_volatile) "true" else "false"});
+                if (asm_stmt.arch) |arch| {
+                    try print_indent(writer, depth + 1);
+                    try writer.print("Arch: {s}\n", .{arch.items});
+                }
+
+                if (asm_stmt.outputs.count > 0) {
+                    try print_indent(writer, depth + 1);
+                    try writer.print("Outputs ({d}):\n", .{asm_stmt.outputs.count});
+                    for (asm_stmt.outputs.items(), 0..) |op, i| {
+                        try print_indent(writer, depth + 2);
+                        try writer.print("{d}: {s} [{s}]\n", .{ i, op.name.items, op.constraint.items });
+                        try print_node(op.expr.*, writer, depth + 3);
+                    }
+                }
+                if (asm_stmt.inputs.count > 0) {
+                    try print_indent(writer, depth + 1);
+                    try writer.print("Inputs ({d}):\n", .{asm_stmt.inputs.count});
+                    for (asm_stmt.inputs.items(), 0..) |op, i| {
+                        try print_indent(writer, depth + 2);
+                        try writer.print("{d}: {s} [{s}]\n", .{ i, op.name.items, op.constraint.items });
+                        try print_node(op.expr.*, writer, depth + 3);
+                    }
+                }
+                if (asm_stmt.clobbers.count > 0) {
+                    try print_indent(writer, depth + 1);
+                    try writer.print("Clobbers ({d}):\n", .{asm_stmt.clobbers.count});
+                    for (asm_stmt.clobbers.items(), 0..) |cl, i| {
+                        try print_indent(writer, depth + 2);
+                        try writer.print("{d}: {s}\n", .{ i, cl.items });
+                    }
+                }
+            }
+        },
+        .StatementFor => {
+            if (node.node_variant != null) {
+                const f = node.node_variant.?.statement.for_stmt;
+                switch (f) {
+                    .cond => |c| {
+                        if (c.condition) |cond| {
+                            try print_indent(writer, depth + 1);
+                            try writer.print("Condition:\n", .{});
+                            try print_node(cond.*, writer, depth + 2);
+                        } else {
+                            try print_indent(writer, depth + 1);
+                            try writer.print("Infinite loop\n", .{});
+                        }
+                        try print_indent(writer, depth + 1);
+                        try writer.print("Body:\n", .{});
+                        try print_node(c.body.*, writer, depth + 2);
+                    },
+                    .range => |r| {
+                        try print_indent(writer, depth + 1);
+                        try writer.print("Index: {s}\n", .{r.index_name});
+                        try print_indent(writer, depth + 1);
+                        try writer.print("Range:\n", .{});
+                        try print_node(r.range.*, writer, depth + 2);
+                        try print_indent(writer, depth + 1);
+                        try writer.print("Body:\n", .{});
+                        try print_node(r.body.*, writer, depth + 2);
+                    },
+                    .iter => |it| {
+                        if (it.index_name) |idx_name| {
+                            try print_indent(writer, depth + 1);
+                            try writer.print("Index: {s}\n", .{idx_name});
+                        }
+                        try print_indent(writer, depth + 1);
+                        try writer.print("Item: {s}\n", .{it.item_name});
+                        try print_indent(writer, depth + 1);
+                        try writer.print("Iterable:\n", .{});
+                        try print_node(it.iterable.*, writer, depth + 2);
+                        try print_indent(writer, depth + 1);
+                        try writer.print("Body:\n", .{});
+                        try print_node(it.body.*, writer, depth + 2);
+                    },
+                }
+            }
+        },
+        .StatementBreak => {
+            try print_indent(writer, depth + 1);
+            try writer.print("break\n", .{});
+        },
+        .StatementContinue => {
+            try print_indent(writer, depth + 1);
+            try writer.print("continue\n", .{});
+        },
+        .StatementAssert => {
+            if (node.node_variant != null) {
+                try print_indent(writer, depth + 1);
+                try writer.print("Condition:\n", .{});
+                try print_node(node.node_variant.?.statement.assert_stmt.condition.*, writer, depth + 2);
+                if (node.node_variant.?.statement.assert_stmt.message) |msg| {
+                    try print_indent(writer, depth + 1);
+                    try writer.print("Message:\n", .{});
+                    try print_node(msg.*, writer, depth + 2);
+                }
+            }
+        },
+        .StatementCase => {
+            try print_indent(writer, depth + 1);
+            try writer.print("case\n", .{});
+        },
+        .StatementDefault => {
+            try print_indent(writer, depth + 1);
+            try writer.print("default\n", .{});
+        },
         .Bracket => {
             if (node.node_variant != null) {
                 try print_indent(writer, depth + 1);
                 try writer.print("Index:\n", .{});
                 try print_node(node.node_variant.?.bracket.inner.*, writer, depth + 2);
+            }
+        },
+        .Tenary => {
+            if (node.node_variant != null) {
+                try print_indent(writer, depth + 1);
+                try writer.print("Condition:\n", .{});
+                try print_node(node.node_variant.?.tenary.condition.*, writer, depth + 2);
+                try print_indent(writer, depth + 1);
+                try writer.print("True:\n", .{});
+                try print_node(node.node_variant.?.tenary.true.*, writer, depth + 2);
+                try print_indent(writer, depth + 1);
+                try writer.print("False:\n", .{});
+                try print_node(node.node_variant.?.tenary.false.*, writer, depth + 2);
+            }
+        },
+        .CompoundInit => {
+            if (node.node_variant != null) {
+                const ci = node.node_variant.?.compound_init;
+                if (ci.dtype) |dt| {
+                    try print_indent(writer, depth + 1);
+                    try writer.print("Type: {s}\n", .{dt.type_str.items});
+                }
+                try print_indent(writer, depth + 1);
+                try writer.print("Fields ({d}):\n", .{ci.fields.count});
+                for (ci.fields.items(), 0..) |f, i| {
+                    try print_indent(writer, depth + 2);
+                    try writer.print("{d}: {s}\n", .{ i, f.name.items });
+                    try print_node(f.value.*, writer, depth + 3);
+                }
+            }
+        },
+        .Compound => {
+            if (node.node_variant != null) {
+                const c = node.node_variant.?.compound;
+                try print_indent(writer, depth + 1);
+                try writer.print("Name: {s}\n", .{c.name.items});
+                if (c.type_params) |tparams| {
+                    try print_indent(writer, depth + 1);
+                    try writer.print("Type params ({d}):\n", .{tparams.count});
+                    for (tparams.items(), 0..) |tp, i| {
+                        try print_indent(writer, depth + 2);
+                        try writer.print("{d}: {s}\n", .{ i, tp.items });
+                    }
+                }
+                try print_indent(writer, depth + 1);
+                try writer.print("Fields ({d}):\n", .{c.fields.count});
+                for (c.fields.items(), 0..) |f, i| {
+                    try print_indent(writer, depth + 2);
+                    try writer.print("{d}: {s} : {s}\n", .{ i, f.name.items, f.dtype.type_str.items });
+                }
+            }
+        },
+        .Quirk => {
+            if (node.node_variant != null) {
+                const q = node.node_variant.?.quirk;
+                try print_indent(writer, depth + 1);
+                try writer.print("Name: {s}\n", .{q.name.items});
+                try print_indent(writer, depth + 1);
+                try writer.print("Methods ({d}):\n", .{q.methods.count});
+                for (q.methods.items(), 0..) |m, i| {
+                    try print_indent(writer, depth + 2);
+                    try writer.print("{d}: {s} -> {s}\n", .{ i, m.name.items, m.rtype.type_str.items });
+                    if (m.args.count > 0) {
+                        for (m.args.items(), 0..) |arg, ai| {
+                            try print_indent(writer, depth + 3);
+                            try writer.print("arg {d}: {s} : {s}\n", .{ ai, arg.name.items, arg.dtype.type_str.items });
+                        }
+                    }
+                }
+            }
+        },
+        .Enum => {
+            if (node.node_variant != null) {
+                const e = node.node_variant.?.enum_decl;
+                try print_indent(writer, depth + 1);
+                try writer.print("Name: {s}\n", .{e.name.items});
+                try print_indent(writer, depth + 1);
+                try writer.print("Variants ({d}):\n", .{e.variants.count});
+                for (e.variants.items(), 0..) |v, i| {
+                    try print_indent(writer, depth + 2);
+                    if (v.value) |vv| {
+                        try writer.print("{d}: {s} = {d}\n", .{ i, v.name.items, vv });
+                    } else {
+                        try writer.print("{d}: {s}\n", .{ i, v.name.items });
+                    }
+                }
+            }
+        },
+        .Impl => {
+            if (node.node_variant != null) {
+                const imp = node.node_variant.?.impl;
+                try print_indent(writer, depth + 1);
+                try writer.print("Type: {s}\n", .{imp.type_name.items});
+                if (imp.quirk_name) |qname| {
+                    try print_indent(writer, depth + 1);
+                    try writer.print("Quirk: {s}\n", .{qname.items});
+                }
+                if (imp.type_params) |tparams| {
+                    try print_indent(writer, depth + 1);
+                    try writer.print("Type params ({d}):\n", .{tparams.count});
+                    for (tparams.items(), 0..) |tp, i| {
+                        try print_indent(writer, depth + 2);
+                        try writer.print("{d}: {s}\n", .{ i, tp.items });
+                    }
+                }
+                try print_indent(writer, depth + 1);
+                try writer.print("Methods ({d}):\n", .{imp.methods.count});
+                for (imp.methods.items(), 0..) |m, i| {
+                    try print_indent(writer, depth + 2);
+                    try writer.print("Method {d}:\n", .{i});
+                    try print_node(m.*, writer, depth + 3);
+                }
             }
         },
         .ExpressionParenthesis => {
@@ -590,10 +852,9 @@ pub fn print_node(node: ast.Node, writer: anytype, depth: usize) !void {
                 try print_node(node.node_variant.?.statement.return_stmt.*, writer, depth + 2);
             }
         },
-        else => {
-            // Print the node type for unhandled node types
+        .Blank => {
             try print_indent(writer, depth + 1);
-            try writer.print("(Unhandled node type details)\n", .{});
+            try writer.print("blank\n", .{});
         },
     }
 }

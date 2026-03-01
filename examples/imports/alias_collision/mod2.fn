@@ -1,0 +1,3 @@
+pub fun pick() num {
+  ret 2;
+}

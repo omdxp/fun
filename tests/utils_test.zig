@@ -272,3 +272,35 @@ test "print_node writes something" {
     try std.testing.expect(out.len > 0);
     try std.testing.expect(std.mem.indexOf(u8, out, "Node Type") != null);
 }
+
+test "print_node handles newly covered node kinds" {
+    const ast = @import("ast");
+
+    var blank_node = ast.Node{ .type = .Blank };
+    var number_node = ast.Node{ .type = .Number };
+
+    const nodes = [_]ast.Node{
+        .{ .type = .VariableList },
+        .{ .type = .StatementBreak },
+        .{ .type = .StatementContinue },
+        .{ .type = .StatementCase },
+        .{ .type = .StatementDefault },
+        .{ .type = .StatementDefer, .node_variant = .{ .statement = .{ .defer_stmt = .{ .body = &blank_node } } } },
+        .{ .type = .StatementAssert, .node_variant = .{ .statement = .{ .assert_stmt = .{ .condition = &number_node, .message = null } } } },
+        .{ .type = .StatementFor, .node_variant = .{ .statement = .{ .for_stmt = .{ .cond = .{ .condition = null, .body = &blank_node } } } } },
+        .{ .type = .Tenary, .node_variant = .{ .tenary = .{ .condition = &number_node, .true = &number_node, .false = &number_node } } },
+        .{ .type = .Blank },
+    };
+
+    for (nodes) |n| {
+        var buf: [1024]u8 = undefined;
+        var fbs = std.io.fixedBufferStream(&buf);
+        try utils.print_node(n, fbs.writer(), 0);
+        const out = fbs.getWritten();
+        try std.testing.expect(out.len > 0);
+        try std.testing.expect(std.mem.indexOf(u8, out, "Unhandled node type details") == null);
+        const expected = try std.fmt.allocPrint(std.testing.allocator, "Node Type: {s}", .{@tagName(n.type)});
+        defer std.testing.allocator.free(expected);
+        try std.testing.expect(std.mem.indexOf(u8, out, expected) != null);
+    }
+}

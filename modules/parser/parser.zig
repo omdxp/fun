@@ -3870,6 +3870,23 @@ pub const ParseProcess = struct {
             };
         }
 
+        var import_alias: ?[]const u8 = null;
+        const maybe_as = self.token_peek_next();
+        if (maybe_as != null and maybe_as.?.type == .Keyword and mem.eql(u8, maybe_as.?.data.sval.items, "as")) {
+            _ = self.token_next(); // consume `as`
+            const alias_tok = self.token_next();
+            if (alias_tok == null or alias_tok.?.type != .Identifier) {
+                self.transpile_proc.err("expected alias identifier after 'as'", .{});
+                return ParseError.InvalidIdentifier;
+            }
+            const alias_copy = self.transpile_proc.allocator.dupe(u8, alias_tok.?.data.sval.items) catch |e| {
+                std.debug.print("Error duplicating import alias: {s}\n", .{@errorName(e)});
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer self.transpile_proc.allocator.free(alias_copy);
+            import_alias = alias_copy;
+        }
+
         try self.expect_sym(';');
         const path = import_name.toOwnedSlice() catch |e| {
             std.debug.print("Error converting import_name to OwnedSlice: {s}\n", .{@errorName(e)});
@@ -3880,15 +3897,15 @@ pub const ParseProcess = struct {
         const import_node = ast.Node{
             .type = .Import,
             .pos = import_pos,
-            .node_variant = .{ .import = .{ .path = path } },
+            .node_variant = .{ .import = .{ .path = path, .alias = import_alias } },
         };
 
         // Preload imported function names so identifier validation during parsing works.
         // Standard library imports are handled specially.
         if (std.mem.startsWith(u8, path, "std.")) {
-            self.transpile_proc.preload_std_import_global_symbols(import_node, path);
+            self.transpile_proc.preload_std_import_global_symbols(import_node, path, import_alias);
         } else {
-            try self.transpile_proc.preload_import_global_symbols(import_node, path);
+            try self.transpile_proc.preload_import_global_symbols(import_node, path, import_alias);
         }
 
         self.transpile_proc.nodes.push(import_node) catch |e| {

@@ -131,6 +131,29 @@ test "function definitions can be out of order (prototypes emitted)" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "aliased import calls transpile to qualified symbols" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "examples/imports/alias_collision/main_codegen_alias.fn";
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+
+    const input =
+        "imp mod1 as one;\n" ++
+        "imp mod2 as two;\n" ++
+        "fun main() {\n" ++
+        "  num a = one.pick();\n" ++
+        "  num b = two.pick();\n" ++
+        "  _ = a + b;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "one__pick(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "two__pick(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t one__pick()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t two__pick()") != null);
+}
+
 test "defer emits in LIFO order before return" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_defer_lifo.fn";
