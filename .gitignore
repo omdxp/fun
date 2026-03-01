@@ -2,3 +2,7 @@
 .fun-cache
 zig-out
 zig-cache
+node_modules/
+website/reference/dist/
+website/reference/dist-server/
+website/reference/src/generated/content.json

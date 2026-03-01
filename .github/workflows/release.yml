@@ -13,6 +13,8 @@ name: Release
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 # Workflow triggers:
 # - Manually via GitHub UI (workflow_dispatch)
@@ -234,7 +236,8 @@ jobs:
     name: Upload release assets
     needs: [build-unix-bundles, build-windows-msi]
     runs-on: ubuntu-latest
-    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+    # Keep this release-only: workflow_dispatch may not have a published Release to attach assets to.
+    if: github.event_name == 'release'
     steps:
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
@@ -262,3 +265,51 @@ jobs:
             artifacts/**/fun-*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-reference-site:
+    name: Build reference website
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: website/reference/package-lock.json
+
+      - name: Install web dependencies
+        run: npm --prefix website/reference ci
+
+      - name: Build reference site for GitHub Pages
+        run: |
+          npm --prefix website/reference run sync:version
+          npm --prefix website/reference run generate:content
+          npm --prefix website/reference run build:web
+        env:
+          VITE_BASE_PATH: /fun/
+          FUN_VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || github.event.inputs.tag || github.ref_name }}
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: website/reference/dist
+
+  deploy-reference-site:
+    name: Deploy reference website
+    runs-on: ubuntu-latest
+    needs: [build-reference-site]
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
