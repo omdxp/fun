@@ -464,7 +464,7 @@ test "asm block preserves newlines" {
 
     const input =
         "fun main() {\n" ++
-        "  asm volatile arch aarch64 {\n" ++
+        "  asm volatile {\n" ++
         "    mov x0, 0\n" ++
         "    mov x8, 93\n" ++
         "    svc 0\n" ++
