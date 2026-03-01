@@ -5,18 +5,29 @@
 // - This module targets POSIX-style sockets.
 
 // Socket API
+// Create a socket descriptor.
 pub fun socket(num domain, num type, num protocol) num;
+// Bind a socket to a local address.
 pub fun bind(num sockfd, raw* addr, num addrlen) num;
+// Mark a socket as listening.
 pub fun listen(num sockfd, num backlog) num;
+// Accept a connection from a listening socket.
 pub fun accept(num sockfd, raw* addr, raw* addrlen) num;
+// Receive bytes from a socket.
 pub fun recv(num sockfd, raw* buf, num len, num flags) num;
+// Send bytes to a socket.
 pub fun send(num sockfd, raw* buf, num len, num flags) num;
+// Close a file/socket descriptor.
 pub fun close(num fd) num;
 
 // Byte order helpers
+// Host-to-network short.
 pub fun htons(num hostshort) num;
+// Host-to-network long.
 pub fun htonl(num hostlong) num;
+// Network-to-host short.
 pub fun ntohs(num netshort) num;
+// Network-to-host long.
 pub fun ntohl(num netlong) num;
 
 // Address parsing

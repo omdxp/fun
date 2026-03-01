@@ -12,6 +12,7 @@ imp std.c.string;
 imp std.c.def;
 imp std.vec;
 
+// Generic open-addressing hash map.
 pub compound Map<K, V> {
   K* key_slots;
   V* value_slots;

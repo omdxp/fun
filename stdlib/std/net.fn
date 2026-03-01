@@ -106,6 +106,8 @@ pub fun build_http_get(Url* url) str {
 pub fun af_inet() num {
   ret 2;
 }
+
+// Return SOCK_STREAM constant value (best-effort default).
 pub fun sock_stream() num {
   ret 1;
 }
