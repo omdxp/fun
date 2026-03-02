@@ -31,7 +31,10 @@ fn print_error_and_exit(err: anyerror) noreturn {
             _ = stderr.writeAll("Error: C compilation failed.\n") catch {};
         },
         cli.CliError.MissingCCompiler => {
-            _ = stderr.writeAll("Error: C compiler not found (requires `zig` on PATH for `zig cc`).\n") catch {};
+            stderr.print(
+                "Error: C compiler not found. Tried defaults for this platform: {s}. Set FUN_CC/FUN_CC_ARGS to override.\n",
+                .{cli.default_compiler_hint()},
+            ) catch {};
         },
         cli.CliError.ExecutionFailed => {
             _ = stderr.writeAll("Error: Execution of compiled code failed.\n") catch {};

@@ -17,6 +17,7 @@
   - [GitHub Actions](#github-actions)
   - [CLI Usage](#cli-usage)
     - [C Compiler Selection](#c-compiler-selection)
+      - [Windows notes](#windows-notes)
   - [Quickstart](#quickstart)
   - [Examples](#examples)
   - [Documentation](#documentation)
@@ -116,7 +117,12 @@ Arguments:
 
 ### C Compiler Selection
 
-By default, `fun` uses `zig cc` unless `FUN_CC` is set. Release installers on macOS/Linux set `FUN_CC=gcc` by default. The Windows MSI sets `FUN_CC` to use `cl` with a template command. You can override the C compiler with environment variables:
+By default, `fun` tries platform compiler defaults unless `FUN_CC` is set:
+
+- Windows: `zig cc`, `clang`, `gcc`, `cl`
+- macOS/Linux: `zig cc`, `clang`, `gcc`, `cc`
+
+Release installers on macOS/Linux set `FUN_CC=gcc` by default. The Windows MSI sets `FUN_CC` to use `cl` with a template command. You can override the C compiler with environment variables:
 
 - `FUN_CC`: compiler command. If it includes `{src}` and `{out}`, it is treated as a full template.
 - `FUN_CC_ARGS`: extra arguments appended after the base command.
@@ -129,6 +135,26 @@ Examples:
   - `FUN_CC=zig` and `FUN_CC_ARGS="cc"`
 - Use a template with explicit placeholders:
   - `FUN_CC="clang -O2 {src} -o {out}"`
+
+#### Windows notes
+
+If you use `cl`, run `fun` from **Developer PowerShell for Visual Studio** (or after `VsDevCmd.bat`) so MSVC environment variables are initialized.
+
+Recommended stable setup on Windows:
+
+```powershell
+$env:FUN_CC = "zig"
+$env:FUN_CC_ARGS = "cc"
+```
+
+Use `cl` explicitly only when your VS toolchain shell is active:
+
+```powershell
+$env:FUN_CC = "cl /nologo /Fe{out} {src}"
+$env:FUN_CC_ARGS = ""
+```
+
+If `cl` compiles but runtime output looks wrong on your system/toolset, switch back to `zig cc`.
 
 ## Quickstart
 

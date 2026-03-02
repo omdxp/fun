@@ -56,7 +56,7 @@
           Action="set"
           Permanent="no"
           System="yes"
-          Value="cl /nologo /Fe{out} {src}" />
+          Value="zig" />
         <Environment
           Id="SetFunCcArgs"
           Name="FUN_CC_ARGS"

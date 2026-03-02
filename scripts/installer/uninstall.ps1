@@ -43,6 +43,22 @@ if ($null -ne $curStdlib -and $curStdlib -eq $destStdlibRoot) {
   [Environment]::SetEnvironmentVariable('FUN_STDLIB_DIR', $null, $pathScope)
 }
 
+$curFunCc = [Environment]::GetEnvironmentVariable('FUN_CC', $pathScope)
+if ($null -ne $curFunCc) {
+  $c = $curFunCc.Trim('"')
+  if ($c -eq 'cl /nologo /Fe{out} {src}' -or $c -eq 'zig') {
+    [Environment]::SetEnvironmentVariable('FUN_CC', $null, $pathScope)
+  }
+}
+
+$curFunCcArgs = [Environment]::GetEnvironmentVariable('FUN_CC_ARGS', $pathScope)
+if ($null -ne $curFunCcArgs) {
+  $a = $curFunCcArgs.Trim('"')
+  if ($a -eq '' -or $a -eq 'cc') {
+    [Environment]::SetEnvironmentVariable('FUN_CC_ARGS', $null, $pathScope)
+  }
+}
+
 # Also clean up stale User-scoped values that may override Machine scope.
 $userStdlib = [Environment]::GetEnvironmentVariable('FUN_STDLIB_DIR', 'User')
 if ($null -ne $userStdlib) {
@@ -50,6 +66,22 @@ if ($null -ne $userStdlib) {
   $legacy = Join-Path $destStdlibRoot 'stdlib'
   if ($u -eq $destStdlibRoot -or $u -eq $legacy) {
     [Environment]::SetEnvironmentVariable('FUN_STDLIB_DIR', $null, 'User')
+  }
+}
+
+$userFunCc = [Environment]::GetEnvironmentVariable('FUN_CC', 'User')
+if ($null -ne $userFunCc) {
+  $uc = $userFunCc.Trim('"')
+  if ($uc -eq 'cl /nologo /Fe{out} {src}' -or $uc -eq 'zig') {
+    [Environment]::SetEnvironmentVariable('FUN_CC', $null, 'User')
+  }
+}
+
+$userFunCcArgs = [Environment]::GetEnvironmentVariable('FUN_CC_ARGS', 'User')
+if ($null -ne $userFunCcArgs) {
+  $ua = $userFunCcArgs.Trim('"')
+  if ($ua -eq '' -or $ua -eq 'cc') {
+    [Environment]::SetEnvironmentVariable('FUN_CC_ARGS', $null, 'User')
   }
 }
 
