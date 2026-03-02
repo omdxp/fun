@@ -140,7 +140,10 @@ asm volatile (out y: "=r" = y; in x: "r" = x; clobber "memory") {
 };
 ```
 - `asm arch x86_64 { ... };` guards by target architecture.
-- Block contents are preserved by the formatter.
+- Block contents are preserved as raw text (including whitespace/comments).
+- Fun does not validate asm syntax inside the block; final validity is determined by the selected C toolchain assembler/dialect.
+- Example: `jmp $` can fail under clang/GAS inline asm, while local-label form (`1: ... jmp 1b`) is often accepted in that dialect.
+- Pass computed values through operands, e.g. `num x = 21 + 21; num y = 0; asm volatile (out y: "=r" = y; in x: "r" = x) { mov %[x], %[y] };`.
 - Use string form for explicit escaping: `asm "...";`.
 
 ## C Interop

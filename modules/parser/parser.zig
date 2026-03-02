@@ -4654,57 +4654,11 @@ pub const ParseProcess = struct {
             template_buf.appendSlice(next_tok.data.sval.items) catch return ParseError.MemoryAllocationFailed;
             is_string_literal = true;
         } else if (next_tok.type == .Symbol and next_tok.data.cval == '{') {
-            _ = self.token_next(); // skip '{'
-            var depth: usize = 1;
-            var prev_word = false;
-            while (true) {
-                const t = self.transpile_proc.tokens.peek() orelse {
-                    self.transpile_proc.err("unexpected end of file in asm block", .{});
-                    return ParseError.InvalidStatement;
-                };
-                if (t.type == .NewLine) {
-                    template_buf.append('\n') catch return ParseError.MemoryAllocationFailed;
-                    prev_word = false;
-                    continue;
-                }
-                if (t.type == .Comment) continue;
-                if (t.type == .Symbol and t.data.cval == '{') {
-                    depth += 1;
-                } else if (t.type == .Symbol and t.data.cval == '}') {
-                    depth -= 1;
-                    if (depth == 0) break;
-                }
-
-                const is_word = t.type == .Identifier or t.type == .Keyword or t.type == .Number or t.type == .String or t.type == .Boolean;
-                if (is_word and prev_word) {
-                    template_buf.append(' ') catch return ParseError.MemoryAllocationFailed;
-                }
-
-                switch (t.type) {
-                    .Identifier, .Keyword, .Operator, .String => {
-                        template_buf.appendSlice(t.data.sval.items) catch return ParseError.MemoryAllocationFailed;
-                    },
-                    .Number => {
-                        switch (t.data) {
-                            .llnum => |v| template_buf.writer().print("{d}", .{v}) catch return ParseError.MemoryAllocationFailed,
-                            .lnum => |v| template_buf.writer().print("{d}", .{v}) catch return ParseError.MemoryAllocationFailed,
-                            .inum => |v| template_buf.writer().print("{d}", .{v}) catch return ParseError.MemoryAllocationFailed,
-                            .dnum => |v| template_buf.writer().print("{e}", .{v}) catch return ParseError.MemoryAllocationFailed,
-                            .cval => |v| template_buf.writer().print("{d}", .{v}) catch return ParseError.MemoryAllocationFailed,
-                            else => {},
-                        }
-                    },
-                    .Symbol => {
-                        template_buf.append(t.data.cval) catch return ParseError.MemoryAllocationFailed;
-                    },
-                    .Boolean => {
-                        const bval = t.data.bval;
-                        template_buf.appendSlice(if (bval) "true" else "false") catch return ParseError.MemoryAllocationFailed;
-                    },
-                    else => {},
-                }
-                prev_word = is_word;
-            }
+            const open_brace_tok = self.token_next() orelse {
+                self.transpile_proc.err("expected '{{' to start asm block", .{});
+                return ParseError.InvalidStatement;
+            };
+            try self.append_raw_asm_block_template(&template_buf, open_brace_tok);
         } else {
             self.transpile_proc.err("expected asm body (string or block)", .{});
             return ParseError.InvalidStatement;
@@ -4727,6 +4681,72 @@ pub const ParseProcess = struct {
             std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});
             return ParseError.MemoryAllocationFailed;
         };
+    }
+
+    fn source_index_from_line_col(self: *Self, line: u32, col: u32) ?usize {
+        if (line == 0 or col == 0) return null;
+
+        const src = self.transpile_proc.input_source;
+        var current_line: u32 = 1;
+        var line_start: usize = 0;
+        var i: usize = 0;
+
+        while (i < src.len and current_line < line) : (i += 1) {
+            if (src[i] == '\n') {
+                current_line += 1;
+                line_start = i + 1;
+            }
+        }
+
+        if (current_line != line) return null;
+
+        const offset: usize = @intCast(col - 1);
+        const idx = line_start + offset;
+        if (idx > src.len) return null;
+        return idx;
+    }
+
+    fn append_raw_asm_block_template(self: *Self, template_buf: *std.ArrayList(u8), open_brace_tok: token.Token) ParseError!void {
+        var depth: usize = 1;
+        var close_brace_tok: ?token.Token = null;
+
+        while (true) {
+            const t = self.transpile_proc.tokens.peek() orelse {
+                self.transpile_proc.err("unexpected end of file in asm block", .{});
+                return ParseError.InvalidStatement;
+            };
+
+            if (t.type == .Symbol and t.data.cval == '{') {
+                depth += 1;
+            } else if (t.type == .Symbol and t.data.cval == '}') {
+                depth -= 1;
+                if (depth == 0) {
+                    close_brace_tok = t;
+                    break;
+                }
+            }
+        }
+
+        const close_tok = close_brace_tok orelse {
+            self.transpile_proc.err("unexpected end of file in asm block", .{});
+            return ParseError.InvalidStatement;
+        };
+
+        const start_idx = self.source_index_from_line_col(open_brace_tok.pos.end_line, open_brace_tok.pos.end_col) orelse {
+            self.transpile_proc.err("internal parser error: invalid asm block start", .{});
+            return ParseError.InvalidStatement;
+        };
+        const end_idx = self.source_index_from_line_col(close_tok.pos.line, close_tok.pos.start_col) orelse {
+            self.transpile_proc.err("internal parser error: invalid asm block end", .{});
+            return ParseError.InvalidStatement;
+        };
+
+        if (end_idx < start_idx or end_idx > self.transpile_proc.input_source.len) {
+            self.transpile_proc.err("internal parser error: malformed asm block span", .{});
+            return ParseError.InvalidStatement;
+        }
+
+        template_buf.appendSlice(self.transpile_proc.input_source[start_idx..end_idx]) catch return ParseError.MemoryAllocationFailed;
     }
 
     fn alloc_node_copy_shallow(self: *Self, node: ast.Node) ParseError!*ast.Node {

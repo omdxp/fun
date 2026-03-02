@@ -474,7 +474,9 @@ test "asm block preserves newlines" {
     const out_owned = try runTranspile(allocator, ifilepath, input);
     defer allocator.free(out_owned);
 
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "mov x0,0\\nmov x8,93\\nsvc 0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "mov x0, 0\\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "mov x8, 93\\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "svc 0\\n") != null);
 
     try fs.cwd().deleteFile(ifilepath);
 }

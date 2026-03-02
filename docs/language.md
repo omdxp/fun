@@ -79,8 +79,15 @@
       - `asm volatile (out dst: "=r" = result; in src: "r" = value; clobber "rax", "memory") { ... };`
     - Reference named operands in templates using `%[name]`.
     - Outputs are first, then inputs, then clobbers (GCC-style extended asm).
+        - Example (pass computed value):
+            - `num x = 21 + 21;`
+            - `num y = 0;`
+            - `asm volatile (out y: "=r" = y; in x: "r" = x) { mov %[x], %[y] };`
 - **Notes**:
-    - The formatter preserves asm block contents as raw text; use the string form when you need explicit escape control.
+    - Asm block contents are preserved as raw text (including spaces, tabs, newlines, and comments).
+    - Fun does not validate assembly syntax inside asm blocks; correctness is decided by the downstream assembler/dialect (for example clang/GAS vs NASM differences).
+    - Use the string form when you need explicit escape control.
+    - Example (x86-style): `jmp $` may fail under clang/GAS inline asm; label form like `1: ... jmp 1b` is typically more portable in that pipeline.
     - Supported arch names: `x86_64`/`amd64`, `x86`/`i386`, `aarch64`/`arm64`, `arm`.
 
 ### Functions

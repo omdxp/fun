@@ -20,6 +20,12 @@ pub const LexError = error{
 
 /// `LexProcess` represents the state and configuration of a lexical analysis process.
 pub const LexProcess = struct {
+    const AsmLexState = enum {
+        none,
+        scanning,
+        raw_body_pending,
+    };
+
     /// `transpile_proc` is a pointer to the associated transpilation process.
     transpile_proc: *codegen.TranspileProcess,
     /// `curr_exp_count` is the current expression count.
@@ -28,6 +34,11 @@ pub const LexProcess = struct {
     parenthesis_buf: ?std.ArrayList(u8) = null,
     /// `arg_str_buf` is a buffer for storing argument strings.
     arg_str_buf: ?std.ArrayList(u8) = null,
+
+    /// Tracks whether we're currently scanning an `asm` statement.
+    asm_state: AsmLexState = .none,
+    /// Optional queued token used by raw asm block lexing (typically the closing `}`).
+    queued_token: ?token.Token = null,
 
     const Self = @This();
 
@@ -46,6 +57,94 @@ pub const LexProcess = struct {
         return Self{
             .transpile_proc = transpile_proc,
             .curr_exp_count = 0,
+            .asm_state = .none,
+            .queued_token = null,
+        };
+    }
+
+    fn update_asm_state(self: *Self, t: token.Token) void {
+        switch (self.asm_state) {
+            .none => {
+                if (t.type == .Keyword and mem.eql(u8, t.data.sval.items, "asm")) {
+                    self.asm_state = .scanning;
+                }
+            },
+            .scanning => {
+                if (t.type == .Symbol and t.data.cval == '{') {
+                    self.asm_state = .raw_body_pending;
+                } else if (t.type == .Symbol and t.data.cval == ';') {
+                    self.asm_state = .none;
+                }
+            },
+            .raw_body_pending => {},
+        }
+    }
+
+    fn token_make_asm_raw_body(self: *Self) LexError!token.Token {
+        const start_line = self.transpile_proc.pos.line;
+        const start_col = self.transpile_proc.pos.col;
+
+        var buffer = std.ArrayList(u8).init(self.transpile_proc.allocator);
+        var depth: usize = 1;
+        var close_pos: ?token.Pos = null;
+
+        while (true) {
+            const char_line = self.transpile_proc.pos.line;
+            const char_col = self.transpile_proc.pos.col;
+            const c = try self.next_char();
+            if (c == null) {
+                self.transpile_proc.err("unexpected end of file in asm block", .{});
+                return LexError.InvalidCharacter;
+            }
+
+            if (c.? == '{') {
+                depth += 1;
+                buffer.append(c.?) catch return LexError.MemoryAllocationFailed;
+                continue;
+            }
+
+            if (c.? == '}') {
+                depth -= 1;
+                if (depth == 0) {
+                    close_pos = .{
+                        .line = char_line,
+                        .col = char_col,
+                        .start_col = char_col,
+                        .end_col = char_col + 1,
+                        .end_line = char_line,
+                        .filename = self.transpile_proc.pos.filename,
+                    };
+                    break;
+                }
+                buffer.append(c.?) catch return LexError.MemoryAllocationFailed;
+                continue;
+            }
+
+            buffer.append(c.?) catch return LexError.MemoryAllocationFailed;
+        }
+
+        const close_tok_pos = close_pos orelse {
+            self.transpile_proc.err("unexpected end of file in asm block", .{});
+            return LexError.InvalidCharacter;
+        };
+
+        self.queued_token = token.Token{
+            .type = .Symbol,
+            .data = .{ .cval = '}' },
+            .pos = close_tok_pos,
+        };
+
+        return token.Token{
+            .type = .String,
+            .data = .{ .sval = buffer },
+            .pos = .{
+                .line = start_line,
+                .col = start_col,
+                .start_col = start_col,
+                .end_col = close_tok_pos.start_col,
+                .end_line = close_tok_pos.line,
+                .filename = self.transpile_proc.pos.filename,
+            },
         };
     }
 
@@ -1009,6 +1108,20 @@ pub const LexProcess = struct {
     /// Errors:
     /// - Returns an error if reading the next token fails.
     fn read_next_token(self: *Self) LexError!?token.Token {
+        if (self.queued_token) |qt| {
+            self.queued_token = null;
+            self.transpile_proc.current_token = qt;
+            self.update_asm_state(qt);
+            return qt;
+        }
+
+        if (self.asm_state == .raw_body_pending) {
+            const raw_tok = try self.token_make_asm_raw_body();
+            self.asm_state = .none;
+            self.transpile_proc.current_token = raw_tok;
+            return raw_tok;
+        }
+
         const start_line = self.transpile_proc.pos.line;
         const start_col = self.transpile_proc.pos.col;
 
@@ -1030,7 +1143,7 @@ pub const LexProcess = struct {
         switch (c.?) {
             '"' => t = try self.token_make_string(),
             '\'' => t = try self.token_make_character(),
-            '+', '-', '*', '>', '<', '^', '%', '!', '=', '~', '|', '&', '(', '[', ',', '.', ':', '#' => t = try self.token_make_operator(),
+            '+', '-', '*', '>', '<', '^', '%', '!', '=', '~', '|', '&', '(', '[', ',', '.', ':', '#', '$' => t = try self.token_make_operator(),
             '{', '}', ';', ')', ']' => t = try self.token_make_symbol(),
             '0'...'9' => t = try self.token_make_number(),
             'b', 'x' => t = try self.token_make_special_number(),
@@ -1051,6 +1164,7 @@ pub const LexProcess = struct {
             t.?.pos.start_col = start_col;
             t.?.pos.end_line = self.transpile_proc.pos.line;
             t.?.pos.end_col = self.transpile_proc.pos.col;
+            self.update_asm_state(t.?);
         }
 
         self.transpile_proc.current_token = t;

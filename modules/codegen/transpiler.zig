@@ -309,6 +309,10 @@ pub const TranspileProcess = struct {
     /// The input file path (used for relative path resolution)
     input_file_path: []const u8,
 
+    /// Full source contents of the input file.
+    /// Used for exact span-preserving features (e.g. raw asm blocks).
+    input_source: []const u8,
+
     /// Standard library root directory (expected to contain `std/`), if discovered.
     /// Typical installed layout is: `<prefix>/share/fun/std/*.fn`.
     stdlib_dir: ?[]const u8 = null,
@@ -2360,6 +2364,24 @@ pub const TranspileProcess = struct {
         };
         errdefer a.free(input_file_path);
 
+        const input_source = blk: {
+            const stat = ifile.stat() catch |e| {
+                std.debug.print("Error stat'ing input file '{s}': {s}\\n", .{ ifilepath, @errorName(e) });
+                return TranspileError.FileReadError;
+            };
+            const max_bytes_u64: u64 = if (stat.size == 0) 1 else stat.size;
+            const max_bytes: usize = @intCast(max_bytes_u64);
+            const src = ifile.readToEndAlloc(a, max_bytes) catch |e| {
+                std.debug.print("Error reading input file '{s}': {s}\\n", .{ ifilepath, @errorName(e) });
+                return TranspileError.FileReadError;
+            };
+            ifile.seekTo(0) catch |e| {
+                std.debug.print("Error rewinding input file '{s}': {s}\\n", .{ ifilepath, @errorName(e) });
+                return TranspileError.FileSeekError;
+            };
+            break :blk src;
+        };
+
         imported_files.put(input_file_path, true) catch |e| {
             std.debug.print("Error adding file '{s}' to imported files: {s}\\n", .{ input_file_path, @errorName(e) });
             return TranspileError.MemoryAllocationFailed;
@@ -2414,6 +2436,7 @@ pub const TranspileProcess = struct {
             .generic_fn_instantiation_keys = std.StringHashMap(bool).init(a),
             .generic_call_overrides = std.StringHashMap([]const u8).init(a),
             .input_file_path = input_file_path,
+            .input_source = input_source,
             .stdlib_dir = discovered_stdlib_dir,
         };
     }

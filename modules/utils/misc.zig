@@ -149,7 +149,7 @@ pub fn is_single_operator(op: u8) bool {
     return op == '+' or op == '-' or op == '/' or op == '*' or op == '=' or
         op == '>' or op == '<' or op == '|' or op == '&' or op == '^' or
         op == '%' or op == '~' or op == '!' or op == '(' or op == '[' or
-        op == ',' or op == '.' or op == ':' or op == '#';
+        op == ',' or op == '.' or op == ':' or op == '#' or op == '$';
 }
 
 /// Checks if an operator is valid.
@@ -173,7 +173,7 @@ pub fn op_valid(op: []const u8) bool {
         mem.eql(u8, "==", op) or mem.eql(u8, "(", op) or mem.eql(u8, "[", op) or
         mem.eql(u8, ",", op) or mem.eql(u8, ".", op) or mem.eql(u8, "..", op) or mem.eql(u8, "...", op) or
         mem.eql(u8, ":", op) or mem.eql(u8, "::", op) or mem.eql(u8, "~", op) or
-        mem.eql(u8, "%", op) or mem.eql(u8, "->", op) or mem.eql(u8, "#", op);
+        mem.eql(u8, "%", op) or mem.eql(u8, "->", op) or mem.eql(u8, "#", op) or mem.eql(u8, "$", op);
 }
 
 /// Checks if a character is a hexadecimal digit.
