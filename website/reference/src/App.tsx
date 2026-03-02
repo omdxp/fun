@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import data from "./generated/content.json";
+
 import MarkdownWithPlayground from "./components/MarkdownWithPlayground";
 import RunCodeBlock from "./components/RunCodeBlock";
+import data from "./generated/content.json";
 
 type DocsSections = {
   params: string[];
@@ -25,6 +26,7 @@ type StdSymbol = {
   name: string;
   signature: string;
   line: number;
+  owner?: string;
   docs: DocsMeta;
   docsMarkdown: string;
 };
@@ -134,6 +136,7 @@ export default function App() {
   );
   const [selectedSymbolKey, setSelectedSymbolKey] = useState(initial.symbolKey);
   const [copyStatus, setCopyStatus] = useState<"idle" | "ok" | "err">("idle");
+  const releaseUrl = `https://github.com/omdxp/fun/releases/tag/v${content.funVersion}`;
 
   const filteredModules = useMemo(() => {
     const q = search.toLowerCase().trim();
@@ -172,6 +175,60 @@ export default function App() {
     }
     return activeModule.symbols[0];
   }, [activeModule, selectedSymbolKey]);
+
+  const activeModuleSymbolGroups = useMemo(() => {
+    if (!activeModule) {
+      return {
+        nonMethodSymbols: [] as StdSymbol[],
+        methodGroups: [] as Array<{ owner: string; symbols: StdSymbol[] }>,
+      };
+    }
+
+    const nonMethodSymbols = activeModule.symbols.filter(
+      (s) => s.kind !== "method",
+    );
+
+    const byOwner = new Map<string, StdSymbol[]>();
+    for (const symbol of activeModule.symbols) {
+      if (symbol.kind !== "method") continue;
+      const owner = symbol.owner ?? "(unknown)";
+      const bucket = byOwner.get(owner);
+      if (bucket) {
+        bucket.push(symbol);
+      } else {
+        byOwner.set(owner, [symbol]);
+      }
+    }
+
+    const methodGroups = Array.from(byOwner.entries()).map(([owner, symbols]) => ({
+      owner,
+      symbols,
+    }));
+
+    return {
+      nonMethodSymbols,
+      methodGroups,
+    };
+  }, [activeModule]);
+
+  const renderSymbolPill = (modulePath: string, s: StdSymbol) => {
+    const key = `${s.name}:${s.line}`;
+    return (
+      <a
+        key={key}
+        className={`symbol-pill ${
+          activeSymbol && activeSymbol.name === s.name && activeSymbol.line === s.line
+            ? "active"
+            : ""
+        }`}
+        href={buildStdlibHash(modulePath, key)}
+        onClick={() => setSelectedSymbolKey(key)}
+      >
+        <span className="badge">{s.kind}</span>
+        <span>{s.name}</span>
+      </a>
+    );
+  };
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -270,7 +327,11 @@ export default function App() {
             </button>
           ))}
         </nav>
-        <div className="meta muted">Fun v{content.funVersion}</div>
+        <div className="meta muted">
+          <a href={releaseUrl} target="_blank" rel="noreferrer">
+            Fun v{content.funVersion}
+          </a>
+        </div>
         <div className="meta muted">
           Generated {new Date(content.generatedAt).toLocaleString()}
         </div>
@@ -342,28 +403,41 @@ export default function App() {
                   <p className="muted">No module-level docs found.</p>
                 )}
 
-                <div className="symbol-pills">
-                  {activeModule.symbols.map((s) => {
-                    const key = `${s.name}:${s.line}`;
-                    return (
-                      <a
-                        key={key}
-                        className={`symbol-pill ${
-                          activeSymbol &&
-                          activeSymbol.name === s.name &&
-                          activeSymbol.line === s.line
-                            ? "active"
-                            : ""
-                        }`}
-                        href={buildStdlibHash(activeModule.module, key)}
-                        onClick={() => setSelectedSymbolKey(key)}
-                      >
-                        <span className="badge">{s.kind}</span>
-                        <span>{s.name}</span>
-                      </a>
-                    );
-                  })}
-                </div>
+                {activeModuleSymbolGroups.nonMethodSymbols.length > 0 && (
+                  <div className="symbol-group">
+                    <div className="symbol-group-title muted small">
+                      Public declarations
+                    </div>
+                    <div className="symbol-pills">
+                      {activeModuleSymbolGroups.nonMethodSymbols.map((s) =>
+                        renderSymbolPill(activeModule.module, s),
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {activeModuleSymbolGroups.methodGroups.map((group) => {
+                  const shouldOpen =
+                    activeSymbol?.kind === "method" &&
+                    (activeSymbol.owner ?? "") === group.owner;
+
+                  return (
+                    <details
+                      className="symbol-group symbol-group-collapsible"
+                      key={`methods:${group.owner}`}
+                      open={shouldOpen}
+                    >
+                      <summary className="symbol-group-title muted small">
+                        Methods · {group.owner}
+                      </summary>
+                      <div className="symbol-pills">
+                        {group.symbols.map((s) =>
+                          renderSymbolPill(activeModule.module, s),
+                        )}
+                      </div>
+                    </details>
+                  );
+                })}
 
                 {activeSymbol && (
                   <article className="symbol-detail">
@@ -412,6 +486,10 @@ export default function App() {
                   <div className="module-summary">
                     {m.summary || "No summary found."}
                   </div>
+                  <div className="muted small">
+                    {m.symbols.filter((s) => s.kind !== "method").length} declarations ·{" "}
+                    {m.symbols.filter((s) => s.kind === "method").length} methods
+                  </div>
                   <ul>
                     {m.symbols.length === 0 ? (
                       <li className="muted">No public declarations</li>
@@ -438,6 +516,9 @@ export default function App() {
                           >
                             <span className="badge">{s.kind}</span>
                             <code>{s.signature}</code>
+                            {s.kind === "method" && s.owner && (
+                              <span className="muted">@ {s.owner}</span>
+                            )}
                           </a>
                         </li>
                       ))

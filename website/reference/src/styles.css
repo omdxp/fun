@@ -293,6 +293,37 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
   margin-bottom: 12px;
 }
 
+.symbol-group {
+  margin-top: 10px;
+}
+
+.symbol-group-title {
+  margin-bottom: 6px;
+  letter-spacing: 0.02em;
+}
+
+.symbol-group-collapsible {
+  border: 1px solid #263d74;
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: #0c1737;
+}
+
+.symbol-group-collapsible > summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.symbol-group-collapsible > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+.symbol-group-collapsible[open] {
+  border-color: #3a57a1;
+}
+
 .symbol-pill {
   border: 1px solid #2d4279;
   background: #101c3f;

@@ -1,6 +1,6 @@
+import { fileURLToPath } from "node:url";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -54,8 +54,43 @@ function parseStdFile(filePath, source) {
   const moduleDocs = parseCommentBlock(topComment);
 
   const symbols = [];
+  let implTarget = "";
+  let implDepth = 0;
+
   for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i].trim();
+    const rawLine = lines[i];
+    const line = rawLine.trim();
+
+    if (!implTarget) {
+      const implMatch = line.match(/^impl\s+(.+?)\s*\{\s*$/);
+      if (implMatch) {
+        implTarget = implMatch[1].trim();
+        implDepth = countChar(rawLine, "{") - countChar(rawLine, "}");
+      }
+    } else {
+      const methodMatch = line.match(/^pub\s+([^\s(<{]+)\s*\(/);
+      if (methodMatch) {
+        const symbolComment = collectCommentAbove(lines, i);
+        const symbolDocs = parseCommentBlock(symbolComment);
+        const symbolMarkdown = buildDocsMarkdown(symbolDocs);
+        symbols.push({
+          kind: "method",
+          name: methodMatch[1],
+          signature: line,
+          line: i + 1,
+          owner: implTarget,
+          docs: symbolDocs,
+          docsMarkdown: symbolMarkdown,
+        });
+      }
+
+      implDepth += countChar(rawLine, "{") - countChar(rawLine, "}");
+      if (implDepth <= 0) {
+        implTarget = "";
+        implDepth = 0;
+      }
+    }
+
     const m = line.match(/^pub\s+(fun|compound|quirk|enum)\s+([^\s(<{]+)/);
     if (m) {
       const symbolComment = collectCommentAbove(lines, i);
@@ -72,6 +107,23 @@ function parseStdFile(filePath, source) {
     }
   }
 
+  const nonMethodSymbols = symbols.filter((s) => s.kind !== "method");
+  const methodSymbols = symbols
+    .filter((s) => s.kind === "method")
+    .sort((a, b) => {
+      const ownerCmp = (a.owner ?? "").localeCompare(b.owner ?? "", undefined, {
+        sensitivity: "base",
+      });
+      if (ownerCmp !== 0) return ownerCmp;
+
+      const nameCmp = a.name.localeCompare(b.name, undefined, {
+        sensitivity: "base",
+      });
+      if (nameCmp !== 0) return nameCmp;
+
+      return a.line - b.line;
+    });
+
   const moduleMarkdown = buildDocsMarkdown(moduleDocs);
 
   return {
@@ -79,8 +131,16 @@ function parseStdFile(filePath, source) {
     summary: moduleDocs.summary,
     docs: moduleDocs,
     docsMarkdown: moduleMarkdown,
-    symbols,
+    symbols: [...nonMethodSymbols, ...methodSymbols],
   };
+}
+
+function countChar(text, ch) {
+  let n = 0;
+  for (const c of text) {
+    if (c === ch) n += 1;
+  }
+  return n;
 }
 
 function collectTopComment(lines) {
