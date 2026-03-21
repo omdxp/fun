@@ -7146,6 +7146,11 @@ fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path_opt
         };
     }
 
+    if (parse_ok) {
+        // Let inference updates AST variable types so LSP can expose concrete types.
+        tp.infer_let_types_best_effort();
+    }
+
     var symbols_out = std.ArrayList(SymbolLite).init(tmp_alloc);
 
     // Always do lexer-driven indexing first (robust while typing), then optionally
@@ -7566,6 +7571,77 @@ test "fls index: generic locals are indexed" {
         break;
     }
     try std.testing.expect(found);
+}
+
+test "fls index: let locals infer types" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const text =
+        "fun main() {\n" ++
+        "  let x = 1;\n" ++
+        "  let s = \"hi\";\n" ++
+        "  x = x + 1;\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found_x = false;
+    var found_s = false;
+
+    for (idx.symbols) |s| {
+        if (s.kind != .variable) continue;
+        if (std.mem.eql(u8, s.name, "x")) {
+            found_x = true;
+            try std.testing.expect(s.value_type != null);
+            try std.testing.expect(std.mem.eql(u8, s.value_type.?, "num"));
+        }
+        if (std.mem.eql(u8, s.name, "s")) {
+            found_s = true;
+            try std.testing.expect(s.value_type != null);
+            try std.testing.expect(std.mem.eql(u8, s.value_type.?, "str"));
+        }
+    }
+
+    try std.testing.expect(found_x);
+    try std.testing.expect(found_s);
+}
+
+test "fls index: let locals inferred in token-only index" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Missing closing brace forces parser failure; token indexing should still pick up let types.
+    const text =
+        "fun main() {\n" ++
+        "  let x = 1;\n" ++
+        "  let s = \"hi\";\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found_x = false;
+    var found_s = false;
+
+    for (idx.symbols) |s| {
+        if (s.kind != .variable) continue;
+        if (std.mem.eql(u8, s.name, "x")) {
+            found_x = true;
+            try std.testing.expect(s.value_type != null);
+            try std.testing.expect(std.mem.eql(u8, s.value_type.?, "num"));
+        }
+        if (std.mem.eql(u8, s.name, "s")) {
+            found_s = true;
+            try std.testing.expect(s.value_type != null);
+            try std.testing.expect(std.mem.eql(u8, s.value_type.?, "str"));
+        }
+    }
+
+    try std.testing.expect(found_x);
+    try std.testing.expect(found_s);
 }
 
 test "fls index: generic function signature includes params" {
@@ -7999,6 +8075,44 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
     const isEllipsisToken = struct {
         fn call(t: token.Token) bool {
             return t.type == .Operator and std.mem.eql(u8, tokenString(t), "...");
+        }
+    }.call;
+
+    const isLetToken = struct {
+        fn call(t: token.Token) bool {
+            return t.type == .Keyword and std.mem.eql(u8, tokenString(t), "let");
+        }
+    }.call;
+
+    const inferLetTypeFromTokens = struct {
+        fn call(allocator_: Allocator, tokens_: []const token.Token, start_i: usize) ?[]const u8 {
+            var i: usize = start_i;
+            while (i < tokens_.len) : (i += 1) {
+                const t = tokens_[i];
+                if (t.type == .NewLine or t.type == .Comment) continue;
+                switch (t.type) {
+                    .Number => {
+                        return switch (t.data) {
+                            .dnum => allocator_.dupe(u8, "dec") catch "dec",
+                            else => allocator_.dupe(u8, "num") catch "num",
+                        };
+                    },
+                    .String => return allocator_.dupe(u8, "str") catch "str",
+                    .Boolean => return allocator_.dupe(u8, "bin") catch "bin",
+                    .Identifier => {
+                        // Handle `Type{...}` / `Type<...>{...}` initializers.
+                        var j = nextNonTrivialToken(tokens_, i + 1) orelse return null;
+                        j = skipGenericArgsForward(tokens_, j);
+                        if (j < tokens_.len and isSymbolChar(tokens_[j], '{')) {
+                            const tname = tokenString(t);
+                            return allocator_.dupe(u8, tname) catch tname;
+                        }
+                        return null;
+                    },
+                    else => return null,
+                }
+            }
+            return null;
         }
     }.call;
 
@@ -8521,10 +8635,43 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
         }
 
         // Best-effort local variable indexing (token-based):
+        // - `let name = <expr>;` (simple literal or `Type{...}` initializer)
         // - `Type name;` / `Type name = ...;`
         // - `Type* name;` / `Type * name = ...;`
         // - `Type& name;` / `Type & name = ...;`
         // Attach locals to the enclosing `fun { ... }` body.
+        if (in_body and isLetToken(t)) {
+            const name_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
+            if (!isIdent(tokens[name_i])) continue;
+
+            const after_name_i = nextNonTrivialToken(tokens, name_i + 1) orelse continue;
+            if (!isPunctChar(tokens[after_name_i], '=')) continue;
+
+            const vname_raw = tokenString(tokens[name_i]);
+            const vname = allocator.dupe(u8, vname_raw) catch vname_raw;
+            const r = rangeFromTokenPos(tokens[name_i].pos);
+
+            const inferred = inferLetTypeFromTokens(allocator, tokens, after_name_i + 1);
+            const value_type = if (inferred) |tname| (allocator.dupe(u8, tname) catch tname) else null;
+            const detail = if (inferred) |tname| blk: {
+                var det_buf = std.ArrayList(u8).init(allocator);
+                defer det_buf.deinit();
+                try det_buf.writer().print("{s} {s}", .{ tname, vname });
+                break :blk try allocator.dupe(u8, det_buf.items);
+            } else null;
+
+            try out.append(.{
+                .name = try allocator.dupe(u8, vname),
+                .kind = .variable,
+                .decl_range = r,
+                .selection_range = r,
+                .container_fn_range = body_range.?,
+                .container_type = null,
+                .value_type = value_type,
+                .detail = detail,
+            });
+            continue;
+        }
         if (in_body and isTypeToken(t)) {
             // Avoid `compound X`, `quirk X`, `impl X`, `fun name`.
             if (i > 0 and tokens[i - 1].type == .Keyword) {

@@ -5556,6 +5556,48 @@ pub const TranspileProcess = struct {
         try Walker.walk(self, &fns);
     }
 
+    // Best-effort helper for LSP indexing: infer let types without failing the caller.
+    // This avoids full transpilation while still updating AST variable types so
+    // the index can expose concrete types for hover/completion.
+    pub fn infer_let_types_best_effort(self: *Self) void {
+        var fns = std.StringHashMap(FnSig).init(self.allocator);
+        defer fns.deinit();
+        var owned_args = std.ArrayList([]CheckedType).init(self.allocator);
+        defer {
+            for (owned_args.items) |slice| self.allocator.free(slice);
+            owned_args.deinit();
+        }
+
+        self.collect_fn_sigs(self, &fns, &owned_args) catch return;
+
+        var global_env = TypeEnv.init(self.allocator);
+        defer global_env.deinit();
+        global_env.push() catch return;
+
+        // Infer let types for globals and seed the env where possible.
+        for (self.nodes.items()) |*gn| {
+            if (gn.type != .Variable or gn.node_variant == null) continue;
+            self.infer_let_variable_dtype(gn, &global_env, &fns) catch {};
+
+            const v = gn.node_variant.?.variable;
+            const vtype = self.type_from_dtype_with_mangled(v.type) catch continue;
+            global_env.put_current(v.name.items, vtype) catch {};
+        }
+
+        // Infer let types inside function bodies (best-effort typechecking).
+        for (self.nodes.items()) |node| {
+            if (node.type != .Function or node.node_variant == null) continue;
+            const fnv = node.node_variant.?.function;
+            const fn_rtype: CheckedType = if (fnv.rtype) |rt|
+                (self.type_from_dtype_with_mangled(&rt) catch CheckedType{ .base = .Unknown })
+            else
+                CheckedType{ .base = .Void };
+            if (fnv.body) |b| {
+                self.check_body(b, &global_env, &fns, fn_rtype) catch {};
+            }
+        }
+    }
+
     fn typecheck_module(proc: *Self, fns: *const std.StringHashMap(FnSig)) TranspileError!void {
         var global_env = TypeEnv.init(proc.allocator);
         defer global_env.deinit();
