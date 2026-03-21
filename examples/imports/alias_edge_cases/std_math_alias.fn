@@ -1,0 +1,17 @@
+imp std.io;
+imp std.math as m;
+
+fun main() {
+  m.Vec2 a;
+  a.x = 0.0;
+  a.y = 0.0;
+
+  m.Vec2 b;
+  b.x = 3.0;
+  b.y = 4.0;
+
+  dec d = m.distance(a, b);
+  num p = m.pow_int(3, 2);
+
+  println_fmt("d={dec} p={num}", d, p);
+}

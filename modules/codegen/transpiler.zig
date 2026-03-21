@@ -3170,6 +3170,15 @@ pub const TranspileProcess = struct {
         return null;
     }
 
+    fn canonical_compound_name(self: *Self, name: []const u8) []const u8 {
+        const root = self.get_root();
+        if (root.type_registry == null) return name;
+        const reg = &root.type_registry.?;
+        const cnode = reg.compounds_by_name.get(name) orelse return name;
+        if (cnode.node_variant == null) return name;
+        return cnode.node_variant.?.compound.name.items;
+    }
+
     fn lookup_quirk_method(self: *Self, ref_node: ast.Node, quirk_name: []const u8, method_name: []const u8) ?ast.QuirkMethodSig {
         const root = self.get_root();
         if (root.type_registry == null) return null;
@@ -3489,7 +3498,8 @@ pub const TranspileProcess = struct {
             if (dt.type != .Unknown) return null;
 
             const type_name = dt.type_str.items;
-            const res = self.resolve_quirk_impl_method_for_concrete(ref_node, type_name, "to_string");
+            const type_name_canon = self.canonical_compound_name(type_name);
+            const res = self.resolve_quirk_impl_method_for_concrete(ref_node, type_name_canon, "to_string");
             if (res.fn_name == null or res.quirk_name == null or res.ambiguous) return null;
             if (!mem.eql(u8, res.quirk_name.?, "Display")) return null;
 
@@ -3509,7 +3519,8 @@ pub const TranspileProcess = struct {
                 if (dt.type != .Unknown) return null;
 
                 const type_name = dt.type_str.items;
-                const res = self.resolve_quirk_impl_method_for_concrete(ref_node, type_name, "to_string");
+                const type_name_canon = self.canonical_compound_name(type_name);
+                const res = self.resolve_quirk_impl_method_for_concrete(ref_node, type_name_canon, "to_string");
                 if (res.fn_name == null or res.quirk_name == null or res.ambiguous) return null;
                 if (!mem.eql(u8, res.quirk_name.?, "Display")) return null;
 
@@ -4090,6 +4101,7 @@ pub const TranspileProcess = struct {
                             return TranspileError.NotCallable;
                         };
                         const recv_name_owned = if (self.lookup_receiver_dtype(recv.*)) |dt| dt.generic_args != null else false;
+                        const recv_name_canon = self.canonical_compound_name(recv_name);
 
                         // If the receiver is a quirk type, typecheck against the quirk signature.
                         // Otherwise, treat as a plain impl method call and typecheck against the
@@ -4111,7 +4123,7 @@ pub const TranspileProcess = struct {
 
                             const recv_dt = if (recv_t.dtype_ref) |dt| dt else self.lookup_receiver_dtype(recv.*) orelse null;
                             if (recv_dt != null and recv_dt.?.generic_args != null) {
-                                if (self.synthesize_generic_plain_method_sig(recv_dt.?, recv_name, mname)) |sig| {
+                                if (self.synthesize_generic_plain_method_sig(recv_dt.?, recv_name_canon, mname)) |sig| {
                                     plain_method_sig = sig;
                                     plain_method_name = mname;
                                     call_rtype = sig.rtype;
@@ -4119,15 +4131,15 @@ pub const TranspileProcess = struct {
                             }
 
                             if (plain_method_sig == null) {
-                                if (self.lookup_plain_impl_method_fn(&node, recv_name, mname)) |fn_name| {
+                                if (self.lookup_plain_impl_method_fn(&node, recv_name_canon, mname)) |fn_name| {
                                     plain_method_sig = fns.get(fn_name) orelse blk: {
                                         const recv_dt2 = if (recv_t.dtype_ref) |dt| dt else self.lookup_receiver_dtype(recv.*) orelse null;
                                         if (recv_dt2 != null) {
-                                            if (self.synthesize_generic_plain_method_sig(recv_dt2.?, recv_name, mname)) |sig| {
+                                            if (self.synthesize_generic_plain_method_sig(recv_dt2.?, recv_name_canon, mname)) |sig| {
                                                 break :blk sig;
                                             }
                                         }
-                                        self.report_type_error(node, "type '{s}' has no method '{s}'", .{ recv_name, mname });
+                                        self.report_type_error(node, "type '{s}' has no method '{s}'", .{ recv_name_canon, mname });
                                         return TranspileError.NotCallable;
                                     };
                                     plain_method_name = mname;
@@ -4164,7 +4176,7 @@ pub const TranspileProcess = struct {
                                                 }
                                             }
                                             if (alt_owned) self.allocator.free(@constCast(alt));
-                                            self.report_type_error(node, "type '{s}' has no method '{s}'", .{ recv_name, mname });
+                                            self.report_type_error(node, "type '{s}' has no method '{s}'", .{ recv_name_canon, mname });
                                             return TranspileError.NotCallable;
                                         };
                                         plain_method_name = mname;
@@ -4172,20 +4184,20 @@ pub const TranspileProcess = struct {
                                         if (alt_owned) self.allocator.free(@constCast(alt));
                                     } else {
                                         if (alt_owned) self.allocator.free(@constCast(alt));
-                                        const qres = self.resolve_quirk_impl_method_for_concrete(node, recv_name, mname);
+                                        const qres = self.resolve_quirk_impl_method_for_concrete(node, recv_name_canon, mname);
                                         if (qres.ambiguous) {
                                             self.report_type_error(node, "type '{s}' method '{s}' is ambiguous (quirks: '{s}', '{s}')", .{ recv_t.name.?, mname, qres.quirk_name orelse "<unknown>", qres.other_quirk_name orelse "<unknown>" });
                                             return TranspileError.NotCallable;
                                         }
                                         if (qres.fn_name) |qfn| {
                                             plain_method_sig = fns.get(qfn) orelse {
-                                                self.report_type_error(node, "type '{s}' has no method '{s}'", .{ recv_name, mname });
+                                                self.report_type_error(node, "type '{s}' has no method '{s}'", .{ recv_name_canon, mname });
                                                 return TranspileError.NotCallable;
                                             };
                                             plain_method_name = mname;
                                             call_rtype = plain_method_sig.?.rtype;
                                         } else {
-                                            self.report_type_error(node, "type '{s}' has no method '{s}'", .{ recv_name, mname });
+                                            self.report_type_error(node, "type '{s}' has no method '{s}'", .{ recv_name_canon, mname });
                                             return TranspileError.NotCallable;
                                         }
                                     }
@@ -4193,20 +4205,20 @@ pub const TranspileProcess = struct {
                                     // Also allow calling quirk-impl methods directly on concrete types.
                                     // If the type implements exactly one quirk that defines this method name,
                                     // lower/typecheck as a direct call to the generated impl function.
-                                    const qres = self.resolve_quirk_impl_method_for_concrete(node, recv_name, mname);
+                                    const qres = self.resolve_quirk_impl_method_for_concrete(node, recv_name_canon, mname);
                                     if (qres.ambiguous) {
                                         self.report_type_error(node, "type '{s}' method '{s}' is ambiguous (quirks: '{s}', '{s}')", .{ recv_t.name.?, mname, qres.quirk_name orelse "<unknown>", qres.other_quirk_name orelse "<unknown>" });
                                         return TranspileError.NotCallable;
                                     }
                                     if (qres.fn_name) |qfn| {
                                         plain_method_sig = fns.get(qfn) orelse {
-                                            self.report_type_error(node, "type '{s}' has no method '{s}'", .{ recv_name, mname });
+                                            self.report_type_error(node, "type '{s}' has no method '{s}'", .{ recv_name_canon, mname });
                                             return TranspileError.NotCallable;
                                         };
                                         plain_method_name = mname;
                                         call_rtype = plain_method_sig.?.rtype;
                                     } else {
-                                        self.report_type_error(node, "type '{s}' has no method '{s}'", .{ recv_name, mname });
+                                        self.report_type_error(node, "type '{s}' has no method '{s}'", .{ recv_name_canon, mname });
                                         return TranspileError.NotCallable;
                                     }
                                 }
@@ -7133,10 +7145,18 @@ pub const TranspileProcess = struct {
         var enum_nodes = std.ArrayList(*ast.Node).init(self.allocator);
         defer enum_nodes.deinit();
 
+        var seen_enum_names = std.StringHashMap(bool).init(self.allocator);
+        defer seen_enum_names.deinit();
+
         var e_it = reg.enums_by_name.iterator();
         while (e_it.next()) |entry| {
             const enode = entry.value_ptr.*;
             if (enode.node_variant == null) continue;
+            const e = enode.node_variant.?.enum_decl;
+            if (seen_enum_names.contains(e.name.items)) continue;
+            seen_enum_names.put(e.name.items, true) catch {
+                return TranspileError.MemoryAllocationFailed;
+            };
             enum_nodes.append(enode) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
@@ -7187,10 +7207,18 @@ pub const TranspileProcess = struct {
         var compound_nodes = std.ArrayList(*ast.Node).init(self.allocator);
         defer compound_nodes.deinit();
 
+        var seen_compound_names = std.StringHashMap(bool).init(self.allocator);
+        defer seen_compound_names.deinit();
+
         var c_it = reg.compounds_by_name.iterator();
         while (c_it.next()) |entry| {
             const cnode = entry.value_ptr.*;
             if (cnode.node_variant == null) continue;
+            const c = cnode.node_variant.?.compound;
+            if (seen_compound_names.contains(c.name.items)) continue;
+            seen_compound_names.put(c.name.items, true) catch {
+                return TranspileError.MemoryAllocationFailed;
+            };
             compound_nodes.append(cnode) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
@@ -8833,8 +8861,9 @@ pub const TranspileProcess = struct {
                                                         type_name = try self.type_name_mangled_for_emit(fdt);
                                                         owned_name = true;
                                                     }
+                                                    const type_name_canon = self.canonical_compound_name(type_name);
                                                     const mname = member.?.data.?.sval.items;
-                                                    if (self.lookup_plain_impl_method_fn(&node, type_name, mname)) |fn_name| {
+                                                    if (self.lookup_plain_impl_method_fn(&node, type_name_canon, mname)) |fn_name| {
                                                         try self.write("(");
                                                         try self.write(fn_name);
                                                         try self.write("(");
@@ -8864,7 +8893,7 @@ pub const TranspileProcess = struct {
                                                         return;
                                                     }
 
-                                                    const qres = self.resolve_quirk_impl_method_for_concrete(node, type_name, mname);
+                                                    const qres = self.resolve_quirk_impl_method_for_concrete(node, type_name_canon, mname);
                                                     if (owned_name) self.allocator.free(@constCast(type_name));
                                                     if (!qres.ambiguous) {
                                                         if (qres.fn_name) |qfn_name| {
@@ -8912,8 +8941,9 @@ pub const TranspileProcess = struct {
                                             type_name = try self.type_name_mangled_for_emit(dt.?);
                                             owned_name = true;
                                         }
+                                        const type_name_canon = self.canonical_compound_name(type_name);
                                         const mname = member.?.data.?.sval.items;
-                                        if (self.lookup_plain_impl_method_fn(&node, type_name, mname)) |fn_name| {
+                                        if (self.lookup_plain_impl_method_fn(&node, type_name_canon, mname)) |fn_name| {
                                             try self.write("(");
                                             try self.write(fn_name);
                                             try self.write("(");
@@ -8943,7 +8973,7 @@ pub const TranspileProcess = struct {
                                         }
 
                                         // Also allow calling quirk-impl methods directly on concrete types.
-                                        const qres = self.resolve_quirk_impl_method_for_concrete(node, type_name, mname);
+                                        const qres = self.resolve_quirk_impl_method_for_concrete(node, type_name_canon, mname);
                                         if (owned_name) self.allocator.free(@constCast(type_name));
                                         if (!qres.ambiguous) {
                                             if (qres.fn_name) |qfn_name| {
@@ -8979,7 +9009,7 @@ pub const TranspileProcess = struct {
                                         // `self.method()` is not a struct member call in C; emit a direct call to
                                         // the generated impl function when we can resolve it.
                                         if (mem.eql(u8, rname, "self")) {
-                                            if (self.lookup_quirk_impl_method_fn_for_self(type_name, mname)) |qfn_name| {
+                                            if (self.lookup_quirk_impl_method_fn_for_self(type_name_canon, mname)) |qfn_name| {
                                                 try self.write("(");
                                                 try self.write(qfn_name);
                                                 try self.write("(");

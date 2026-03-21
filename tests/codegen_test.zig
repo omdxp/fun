@@ -190,6 +190,45 @@ test "aliased import supports public type and value access" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "m__get_answer(") != null);
 }
 
+test "aliased compound method calls use canonical impl" {
+    const allocator = std.testing.allocator;
+    const mod_path = "codegen_alias_compound_mod.fn";
+    const main_path = "codegen_alias_compound_main.fn";
+    defer fs.cwd().deleteFile(mod_path) catch {};
+    defer fs.cwd().deleteFile(main_path) catch {};
+
+    {
+        const mod_file = try fs.cwd().createFile(mod_path, .{ .read = true });
+        defer mod_file.close();
+        try mod_file.writeAll(
+            "pub compound Vec2 {\n" ++
+                "  dec x;\n" ++
+                "  dec y;\n" ++
+                "}\n" ++
+                "impl Vec2 {\n" ++
+                "  pub len() dec { ret self.x + self.y; }\n" ++
+                "}\n",
+        );
+    }
+
+    const input =
+        "imp codegen_alias_compound_mod as g;\n" ++
+        "fun main() {\n" ++
+        "  g.Vec2 v;\n" ++
+        "  v.x = 1.0;\n" ++
+        "  v.y = 2.0;\n" ++
+        "  dec s = v.len();\n" ++
+        "  _ = s;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, main_path, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "typedef struct Vec2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Vec2__len(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "g__Vec2__len(") == null);
+}
+
 test "defer emits in LIFO order before return" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_defer_lifo.fn";

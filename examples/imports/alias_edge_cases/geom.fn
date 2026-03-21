@@ -1,0 +1,17 @@
+pub compound Vec2 {
+  dec x;
+  dec y;
+}
+
+impl Vec2 {
+  pub len() dec {
+    ret self.x + self.y;
+  }
+}
+
+pub fun make(dec x, dec y) Vec2 {
+  Vec2 v;
+  v.x = x;
+  v.y = y;
+  ret v;
+}

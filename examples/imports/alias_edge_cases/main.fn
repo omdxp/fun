@@ -1,0 +1,16 @@
+imp std.io;
+imp geom as g;
+imp colors as c;
+
+fun main() {
+  g.Vec2 v = g.make(1, 2);
+  dec sum = v.len();
+  c.Color col = c.Color.Red;
+
+  if col == c.Color.Red {
+    print_fmt("sum={dec}", sum);
+    println("");
+  } else {
+    println("wrong");
+  }
+}

@@ -1172,6 +1172,9 @@ const LspServer = struct {
         // Prefer definition in current doc; else search direct imports.
         const def_local = findBestDefinition(idx.symbols, tok.text, pos) orelse null;
         const def_import = if (def_local == null) self.findAnyGlobalDefinitionInDirectImports(uri, tok.text) else null;
+        if (def_local == null and def_import == null) {
+            if (try self.trySendAliasHover(id_val, uri, idx, tok.text, tok.range)) return;
+        }
         var buf = std.ArrayList(u8).init(self.allocator);
         defer buf.deinit();
 
@@ -1504,6 +1507,11 @@ const LspServer = struct {
             return;
         }
 
+        // Alias definition: `imp foo.bar as m;` => `m`.
+        if (try self.trySendAliasDefinition(id_val, uri, idx, tok_i)) {
+            return;
+        }
+
         // Member chain definition: `a.b.c` or `obj.method(...)`
         // We resolve by:
         // 1) inferring the base type (self / local var / known type),
@@ -1790,6 +1798,33 @@ const LspServer = struct {
         const json = try std.json.stringifyAlloc(self.allocator, locs_list.items, .{});
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
+        return true;
+    }
+
+    fn trySendAliasDefinition(self: *LspServer, id_val: ?std.json.Value, current_uri: []const u8, idx: *const Index, tok_i: usize) !bool {
+        if (idx.tokens[tok_i].kind != .identifier) return false;
+
+        const alias_name = idx.tokens[tok_i].text;
+        const info = self.findAliasedImportSpecAndRange(idx, alias_name) orelse return false;
+        defer self.allocator.free(info.spec);
+
+        var locs = std.ArrayList(Location).init(self.allocator);
+        defer locs.deinit();
+
+        try locs.append(.{ .uri = current_uri, .range = info.range });
+
+        var resolved_uri: ?[]u8 = null;
+        if (self.resolveImportUri(current_uri, info.spec) catch null) |target_uri| {
+            resolved_uri = target_uri;
+            self.ensureDocIndexedFromDisk(target_uri) catch {};
+            try locs.append(.{ .uri = target_uri, .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 0 } } });
+        }
+
+        const json = try std.json.stringifyAlloc(self.allocator, locs.items, .{});
+        defer self.allocator.free(json);
+        try self.sendResponseJson(id_val, json);
+
+        if (resolved_uri) |u| self.allocator.free(u);
         return true;
     }
 
@@ -3214,6 +3249,31 @@ const LspServer = struct {
         try self.sendResponseJson(id_val, json);
     }
 
+    fn trySendAliasHover(self: *LspServer, id_val: ?std.json.Value, current_uri: []const u8, idx: *const Index, alias_name: []const u8, range: Range) !bool {
+        const info = self.findAliasedImportSpecAndRange(idx, alias_name) orelse return false;
+        defer self.allocator.free(info.spec);
+
+        var buf = std.ArrayList(u8).init(self.allocator);
+        defer buf.deinit();
+
+        try buf.writer().print("**{s}**\n\n", .{alias_name});
+        try buf.writer().print("_alias for `{s}`_\n", .{info.spec});
+
+        if (self.resolveImportUri(current_uri, info.spec) catch null) |target_uri| {
+            defer self.allocator.free(target_uri);
+            if (uriToPath(self.allocator, target_uri) catch null) |target_path| {
+                defer self.allocator.free(target_path);
+                try buf.writer().print("\n`{s}`\n", .{target_path});
+            }
+        }
+
+        const hover: Hover = .{ .contents = .{ .value = buf.items }, .range = range };
+        const json = try std.json.stringifyAlloc(self.allocator, hover, .{});
+        defer self.allocator.free(json);
+        try self.sendResponseJson(id_val, json);
+        return true;
+    }
+
     fn findAliasedImportUri(self: *LspServer, current_uri: []const u8, idx: *const Index, alias_name: []const u8) ?[]u8 {
         for (idx.tokens, 0..) |t, i| {
             if (t.kind != .keyword or !std.mem.eql(u8, t.text, "imp")) continue;
@@ -3265,6 +3325,42 @@ const LspServer = struct {
 
                 line_start = if (line_end < text.len) line_end + 1 else line_end;
             }
+        }
+
+        return null;
+    }
+
+    fn findAliasedImportSpecAndRange(self: *LspServer, idx: *const Index, alias_name: []const u8) ?struct { spec: []u8, range: Range } {
+        for (idx.tokens, 0..) |t, i| {
+            if (t.kind != .keyword or !std.mem.eql(u8, t.text, "imp")) continue;
+
+            const spec = self.parseImportSpecFromTokens(idx, i) catch null orelse continue;
+
+            var j: usize = i + 1;
+            var saw_as = false;
+            var matched = false;
+            var matched_range: Range = undefined;
+            while (j < idx.tokens.len) : (j += 1) {
+                const tk = idx.tokens[j];
+                if ((tk.kind == .symbol or tk.kind == .operator) and std.mem.eql(u8, tk.text, ";")) break;
+                if (!saw_as and tk.kind == .keyword and std.mem.eql(u8, tk.text, "as")) {
+                    saw_as = true;
+                    continue;
+                }
+                if (saw_as and tk.kind == .identifier) {
+                    if (std.mem.eql(u8, tk.text, alias_name)) {
+                        matched = true;
+                        matched_range = tk.range;
+                        break;
+                    }
+                    saw_as = false;
+                }
+            }
+
+            if (matched) {
+                return .{ .spec = spec, .range = matched_range };
+            }
+            self.allocator.free(spec);
         }
 
         return null;

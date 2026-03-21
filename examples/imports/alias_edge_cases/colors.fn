@@ -1,0 +1,8 @@
+pub enum Color {
+  Red,
+  Green,
+}
+
+pub fun pick() Color {
+  ret Color.Green;
+}
