@@ -10,6 +10,8 @@ imp std.map;
 imp std.serde;
 imp std.string;
 imp std.vec;
+imp std.result;
+imp std.error;
 
 fun _parse_line_into(TomlDoc* out, str line) {
   if len(line) <= 0 {
@@ -110,6 +112,18 @@ impl TomlDoc {
     b.free();
     ret out;
   }
+
+  // Serialize the document to a string with Result.
+  pub try_stringify() Result<str> {
+    Result<str> r;
+    str out = self.stringify();
+    if out == NULL {
+      r.set_err(1, "toml stringify failed", "");
+      ret r;
+    }
+    r.set_ok(out);
+    ret r;
+  }
 }
 
 impl TomlDoc Serialize {
@@ -172,6 +186,14 @@ pub fun parse(str s) TomlDoc {
   ret out;
 }
 
+// Parse a TOML document with Result.
+pub fun try_parse(str s) Result<TomlDoc> {
+  Result<TomlDoc> r;
+  TomlDoc out = parse(s);
+  r.set_ok(out);
+  ret r;
+}
+
 // Serialize a TOML document.
 // 
 // Params:
@@ -181,4 +203,16 @@ pub fun parse(str s) TomlDoc {
 // - TOML string
 pub fun stringify(TomlDoc* obj) str {
   ret obj.stringify();
+}
+
+// Serialize a TOML document with Result.
+pub fun try_stringify(TomlDoc* obj) Result<str> {
+  Result<str> r;
+  str out = obj.stringify();
+  if out == NULL {
+    r.set_err(1, "toml stringify failed", "");
+    ret r;
+  }
+  r.set_ok(out);
+  ret r;
 }

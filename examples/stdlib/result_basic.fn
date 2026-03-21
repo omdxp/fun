@@ -10,7 +10,7 @@ fun main() {
   Result<num> n2 = err(1, "bad", 0);
   printf("n2 ok=%d val=%d def=%d\n", n2.is_ok(), n2.value, n2.unwrap_or(99));
   if n2.is_err() {
-    printf("n2 err=%d %s\n", n2.err_code, n2.err_message);
+    printf("n2 err=%d %s\n", n2.err.code, n2.err.message);
   }
 
   Result<str> s = ok("hi");

@@ -1,0 +1,10 @@
+imp std.c.io;
+imp std.error;
+
+fun main() {
+  Error e = error_new_kind(.Io, 2, "open failed");
+  e.with_context("/tmp/data.txt");
+  e.with_cause("permission denied");
+
+  printf("err ok=%d kind=%d code=%d msg=%s ctx=%s cause=%s\n", e.is_ok(), e.kind, e.code, e.message, e.context, e.cause);
+}

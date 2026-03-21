@@ -1,0 +1,11 @@
+imp std.c.io;
+imp std.path;
+imp std.result;
+
+fun main() {
+  Result<str> j = try_path_join("/tmp", "file.txt");
+  printf("join ok=%d val=%s\n", j.is_ok(), j.value);
+
+  Result<str> c = try_change_ext("/tmp/file.txt", ".log");
+  printf("chg ok=%d val=%s\n", c.is_ok(), c.value);
+}

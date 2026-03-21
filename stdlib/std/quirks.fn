@@ -15,3 +15,8 @@ pub quirk Sized {
 pub quirk Display {
   to_string() str;
 }
+
+// Types that can clear internal state.
+pub quirk Clearable {
+  clear() void;
+}

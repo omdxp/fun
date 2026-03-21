@@ -12,6 +12,8 @@ imp std.c.def;
 imp std.string;
 imp std.vec;
 imp std.quirks;
+imp std.result;
+imp std.error;
 
 // Print a string to stdout (no newline).
 // 
@@ -71,6 +73,14 @@ fun _dup_str(str s) str {
   }
   out[n] = '\0';
   ret out;
+}
+
+fun _io_err(str message, str context) Error {
+  Error e = error_new_simple(.Io, message);
+  if context != NULL {
+    e.with_context(context);
+  }
+  ret e;
 }
 
 // Format a number into a new string buffer.
@@ -237,6 +247,18 @@ pub fun open_read(str path) File {
   ret f;
 }
 
+// Open file for reading (binary) with Result.
+pub fun try_open_read(str path) Result<File> {
+  File f = open_read(path);
+  Result<File> r;
+  if f.handle == NULL {
+    r.set_err(1, "open_read failed", f);
+    ret r;
+  }
+  r.set_ok(f);
+  ret r;
+}
+
 // Open file for writing (binary).
 // 
 // Params:
@@ -250,6 +272,18 @@ pub fun open_write(str path) File {
   ret f;
 }
 
+// Open file for writing (binary) with Result.
+pub fun try_open_write(str path) Result<File> {
+  File f = open_write(path);
+  Result<File> r;
+  if f.handle == NULL {
+    r.set_err(1, "open_write failed", f);
+    ret r;
+  }
+  r.set_ok(f);
+  ret r;
+}
+
 // Open file for appending (binary).
 // 
 // Params:
@@ -261,6 +295,18 @@ pub fun open_append(str path) File {
   File f;
   f.handle = fopen(path, "ab");
   ret f;
+}
+
+// Open file for appending (binary) with Result.
+pub fun try_open_append(str path) Result<File> {
+  File f = open_append(path);
+  Result<File> r;
+  if f.handle == NULL {
+    r.set_err(1, "open_append failed", f);
+    ret r;
+  }
+  r.set_ok(f);
+  ret r;
 }
 
 impl File {
@@ -296,6 +342,22 @@ impl File {
     ret buf;
   }
 
+  // Read entire file into a new string with Result.
+  pub try_read_all() Result<str> {
+    Result<str> r;
+    if self.handle == NULL {
+      r.set_err(1, "read_all on closed file", "");
+      ret r;
+    }
+    str out = self.read_all();
+    if out == NULL {
+      r.set_err(1, "read_all failed", "");
+      ret r;
+    }
+    r.set_ok(out);
+    ret r;
+  }
+
   // Read up to max_len bytes (binary-safe). Returns allocated buffer (NUL-terminated).
   pub read_bytes(num max_len) str {
     if self.handle == NULL || max_len <= 0 {
@@ -308,6 +370,22 @@ impl File {
     num read = fread(buf, 1, max_len, self.handle);
     buf[read] = '\0';
     ret buf;
+  }
+
+  // Read up to max_len bytes with Result.
+  pub try_read_bytes(num max_len) Result<str> {
+    Result<str> r;
+    if self.handle == NULL || max_len <= 0 {
+      r.set_err(1, "read_bytes invalid", "");
+      ret r;
+    }
+    str out = self.read_bytes(max_len);
+    if out == NULL {
+      r.set_err(1, "read_bytes failed", "");
+      ret r;
+    }
+    r.set_ok(out);
+    ret r;
   }
 
   // Read a line up to max_len (including newline if present).
@@ -327,10 +405,27 @@ impl File {
     ret buf;
   }
 
+  // Read a line up to max_len with Result.
+  pub try_read_line_max(num max_len) Result<str> {
+    Result<str> r;
+    if self.handle == NULL || max_len <= 1 {
+      r.set_err(1, "read_line_max invalid", "");
+      ret r;
+    }
+    str out = self.read_line_max(max_len);
+    if out == NULL {
+      r.set_err(1, "read_line_max failed", "");
+      ret r;
+    }
+    r.set_ok(out);
+    ret r;
+  }
+
   // Read all lines (up to max_len per line).
   pub read_lines(num max_len) Vec<str> {
     Vec<str> out;
-    out.init(8);
+    out.len = 0;
+    out.cap = 0;
     if self.handle == NULL {
       ret out;
     }
@@ -344,6 +439,21 @@ impl File {
     ret out;
   }
 
+  // Read all lines (up to max_len per line) with Result.
+  pub try_read_lines(num max_len) Result<Vec<str >> {
+    Result<Vec<str >> r;
+    if self.handle == NULL {
+      Vec<str> empty;
+      empty.len = 0;
+      empty.cap = 0;
+      r.set_err(1, "read_lines on closed file", empty);
+      ret r;
+    }
+    Vec<str> out = self.read_lines(max_len);
+    r.set_ok(out);
+    ret r;
+  }
+
   // Write raw bytes to the file.
   pub write_bytes(raw* data, num len) bin {
     if self.handle == NULL || data == NULL {
@@ -351,6 +461,22 @@ impl File {
     }
     num wrote = fwrite(data, 1, len, self.handle);
     ret wrote == len;
+  }
+
+  // Write raw bytes to the file with Result.
+  pub try_write_bytes(raw* data, num len) Result<bin> {
+    Result<bin> r;
+    if self.handle == NULL || data == NULL {
+      r.set_err(1, "write_bytes invalid", false);
+      ret r;
+    }
+    bin ok_write = self.write_bytes(data, len);
+    if ok_write == false {
+      r.set_err(1, "write_bytes failed", false);
+      ret r;
+    }
+    r.set_ok(true);
+    ret r;
   }
 
   // Read raw bytes into a buffer; returns bytes read.
@@ -361,6 +487,18 @@ impl File {
     ret fread(dst, 1, len, self.handle);
   }
 
+  // Read raw bytes into a buffer with Result.
+  pub try_read_into(raw* dst, num len) Result<num> {
+    Result<num> r;
+    if self.handle == NULL || dst == NULL {
+      r.set_err(1, "read_into invalid", 0);
+      ret r;
+    }
+    num n = self.read_into(dst, len);
+    r.set_ok(n);
+    ret r;
+  }
+
   // Seek within the file (whence: 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END).
   pub seek(num offset, num whence) bin {
     if self.handle == NULL {
@@ -369,12 +507,44 @@ impl File {
     ret fseek(self.handle, offset, whence) == 0;
   }
 
+  // Seek within the file with Result.
+  pub try_seek(num offset, num whence) Result<bin> {
+    Result<bin> r;
+    if self.handle == NULL {
+      r.set_err(1, "seek on closed file", false);
+      ret r;
+    }
+    bin ok_seek = self.seek(offset, whence);
+    if ok_seek == false {
+      r.set_err(1, "seek failed", false);
+      ret r;
+    }
+    r.set_ok(true);
+    ret r;
+  }
+
   // Tell current file position.
   pub tell() num {
     if self.handle == NULL {
       ret -1;
     }
     ret ftell(self.handle);
+  }
+
+  // Tell current file position with Result.
+  pub try_tell() Result<num> {
+    Result<num> r;
+    if self.handle == NULL {
+      r.set_err(1, "tell on closed file", -1);
+      ret r;
+    }
+    num pos = self.tell();
+    if pos<0 {
+      r.set_err(1, "tell failed", -1);
+      ret r;
+    }
+    r.set_ok(pos);
+    ret r;
   }
 
   // Rewind to start of file.
@@ -393,13 +563,29 @@ impl File {
     ret fflush(self.handle) == 0;
   }
 
+  // Flush buffered output with Result.
+  pub try_flush() Result<bin> {
+    Result<bin> r;
+    if self.handle == NULL {
+      r.set_err(1, "flush on closed file", false);
+      ret r;
+    }
+    bin ok_flush = self.flush();
+    if ok_flush == false {
+      r.set_err(1, "flush failed", false);
+      ret r;
+    }
+    r.set_ok(true);
+    ret r;
+  }
+
   // Get file size (best-effort; returns -1 on failure).
   pub size() num {
     if self.handle == NULL {
       ret -1;
     }
     let cur = ftell(self.handle);
-    if cur < 0 {
+    if cur<0 {
       ret -1;
     }
     if fseek(self.handle, 0, 2) != 0 {

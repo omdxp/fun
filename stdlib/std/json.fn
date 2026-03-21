@@ -10,6 +10,8 @@ imp std.map;
 imp std.serde;
 imp std.string;
 imp std.vec;
+imp std.result;
+imp std.error;
 
 // JSON object with string values.
 // 
@@ -174,6 +176,18 @@ impl JsonObject {
     b.free();
     ret out;
   }
+
+  // Serialize object to JSON with Result.
+  pub try_stringify() Result<str> {
+    Result<str> r;
+    str out = self.stringify();
+    if out == NULL {
+      r.set_err(1, "json stringify failed", "");
+      ret r;
+    }
+    r.set_ok(out);
+    ret r;
+  }
 }
 
 impl JsonObject Serialize {
@@ -232,6 +246,18 @@ impl JsonArray {
     str out = b.build();
     b.free();
     ret out;
+  }
+
+  // Serialize array to JSON with Result.
+  pub try_stringify() Result<str> {
+    Result<str> r;
+    str out = self.stringify();
+    if out == NULL {
+      r.set_err(1, "json stringify failed", "");
+      ret r;
+    }
+    r.set_ok(out);
+    ret r;
   }
 }
 
@@ -349,6 +375,14 @@ pub fun parse_object(str s) JsonObject {
   ret out;
 }
 
+// Parse a JSON object with Result.
+pub fun try_parse_object(str s) Result<JsonObject> {
+  Result<JsonObject> r;
+  JsonObject out = parse_object(s);
+  r.set_ok(out);
+  ret r;
+}
+
 // Parse a JSON array of string values.
 // 
 // Params:
@@ -380,6 +414,14 @@ pub fun parse_array(str s) JsonArray {
   ret out;
 }
 
+// Parse a JSON array with Result.
+pub fun try_parse_array(str s) Result<JsonArray> {
+  Result<JsonArray> r;
+  JsonArray out = parse_array(s);
+  r.set_ok(out);
+  ret r;
+}
+
 // Serialize a JSON object.
 // 
 // Params:
@@ -391,6 +433,18 @@ pub fun stringify_object(JsonObject* obj) str {
   ret obj.stringify();
 }
 
+// Serialize a JSON object with Result.
+pub fun try_stringify_object(JsonObject* obj) Result<str> {
+  Result<str> r;
+  str out = obj.stringify();
+  if out == NULL {
+    r.set_err(1, "json stringify failed", "");
+    ret r;
+  }
+  r.set_ok(out);
+  ret r;
+}
+
 // Serialize a JSON array.
 // 
 // Params:
@@ -400,4 +454,16 @@ pub fun stringify_object(JsonObject* obj) str {
 // - JSON string
 pub fun stringify_array(JsonArray* arr) str {
   ret arr.stringify();
+}
+
+// Serialize a JSON array with Result.
+pub fun try_stringify_array(JsonArray* arr) Result<str> {
+  Result<str> r;
+  str out = arr.stringify();
+  if out == NULL {
+    r.set_err(1, "json stringify failed", "");
+    ret r;
+  }
+  r.set_ok(out);
+  ret r;
 }

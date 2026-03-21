@@ -15,3 +15,17 @@ pub quirk Collection {
 
 // Bridge to std.quirks.Sized (same methods).
 // Users can accept either quirk as needed.
+// 
+// Helper functions for common quirks.
+pub fun len_of(Sized s) num {
+  ret s.len();
+}
+
+pub fun is_empty_of(Sized s) bin {
+  ret s.is_empty();
+}
+
+// Clear a collection-like value via the Clearable quirk.
+pub fun clear_of(Clearable c) {
+  c.clear();
+}

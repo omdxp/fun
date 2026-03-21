@@ -11,6 +11,8 @@ imp std.c.io;
 imp std.c.mem;
 imp std.c.string;
 imp std.c.def;
+imp std.result;
+imp std.error;
 
 // Timestamp wrapper (epoch seconds).
 // 
@@ -168,6 +170,18 @@ pub fun format_local(num epoch, str buf, num buf_len, str format) num {
   ret t.format_local(buf, buf_len, format);
 }
 
+// Format an epoch value with a custom format (Result).
+pub fun try_format_local(num epoch, str buf, num buf_len, str format) Result<num> {
+  Result<num> r;
+  num n = format_local(epoch, buf, buf_len, format);
+  if n <= 0 {
+    r.set_err(1, "format_local failed", 0);
+    ret r;
+  }
+  r.set_ok(n);
+  ret r;
+}
+
 // Format an epoch value with a custom format (UTC).
 // 
 // Params:
@@ -182,6 +196,18 @@ pub fun format_utc(num epoch, str buf, num buf_len, str format) num {
   Timestamp t;
   t.epoch = epoch;
   ret t.format_utc(buf, buf_len, format);
+}
+
+// Format an epoch value with a custom format (UTC) with Result.
+pub fun try_format_utc(num epoch, str buf, num buf_len, str format) Result<num> {
+  Result<num> r;
+  num n = format_utc(epoch, buf, buf_len, format);
+  if n <= 0 {
+    r.set_err(1, "format_utc failed", 0);
+    ret r;
+  }
+  r.set_ok(n);
+  ret r;
 }
 
 // Format an epoch value using C's human-readable format (ctime).
@@ -241,6 +267,18 @@ pub fun now_string(str buf, num buf_len) num {
   ret snprintf(buf, buf_len, "%d", t.epoch);
 }
 
+// Format current time with default format (Result).
+pub fun try_now_string(str buf, num buf_len) Result<num> {
+  Result<num> r;
+  num n = now_string(buf, buf_len);
+  if n <= 0 {
+    r.set_err(1, "now_string failed", 0);
+    ret r;
+  }
+  r.set_ok(n);
+  ret r;
+}
+
 // Format current time with default format (UTC).
 // 
 // Params:
@@ -256,6 +294,18 @@ pub fun now_string_utc(str buf, num buf_len) num {
     ret n;
   }
   ret snprintf(buf, buf_len, "%d", t.epoch);
+}
+
+// Format current time with default format (UTC) with Result.
+pub fun try_now_string_utc(str buf, num buf_len) Result<num> {
+  Result<num> r;
+  num n = now_string_utc(buf, buf_len);
+  if n <= 0 {
+    r.set_err(1, "now_string_utc failed", 0);
+    ret r;
+  }
+  r.set_ok(n);
+  ret r;
 }
 
 // Format current time using C's human-readable format (ctime).

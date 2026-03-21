@@ -11,6 +11,8 @@ imp std.vec;
 imp std.c.io;
 imp std.c.mem;
 imp std.c.net;
+imp std.result;
+imp std.error;
 
 // Parsed URL components.
 // 
@@ -168,6 +170,18 @@ pub fun tcp_listen(num port) num {
   ret fd;
 }
 
+// Create a TCP listening socket with Result.
+pub fun try_tcp_listen(num port) Result<num> {
+  Result<num> r;
+  num fd = tcp_listen(port);
+  if fd < 0 {
+    r.set_err(1, "tcp_listen failed", -1);
+    ret r;
+  }
+  r.set_ok(fd);
+  ret r;
+}
+
 // Accept a client connection.
 // 
 // Returns:
@@ -176,14 +190,50 @@ pub fun tcp_accept(num server_fd) num {
   ret accept(server_fd, NULL, NULL);
 }
 
+// Accept a client connection with Result.
+pub fun try_tcp_accept(num server_fd) Result<num> {
+  Result<num> r;
+  num fd = tcp_accept(server_fd);
+  if fd < 0 {
+    r.set_err(1, "tcp_accept failed", -1);
+    ret r;
+  }
+  r.set_ok(fd);
+  ret r;
+}
+
 // Read from a socket.
 pub fun tcp_read(num fd, str buf, num len) num {
   ret recv(fd, buf, len, 0);
 }
 
+// Read from a socket with Result.
+pub fun try_tcp_read(num fd, str buf, num len) Result<num> {
+  Result<num> r;
+  num n = tcp_read(fd, buf, len);
+  if n < 0 {
+    r.set_err(1, "tcp_read failed", -1);
+    ret r;
+  }
+  r.set_ok(n);
+  ret r;
+}
+
 // Write to a socket.
 pub fun tcp_write(num fd, str buf, num len) num {
   ret send(fd, buf, len, 0);
+}
+
+// Write to a socket with Result.
+pub fun try_tcp_write(num fd, str buf, num len) Result<num> {
+  Result<num> r;
+  num n = tcp_write(fd, buf, len);
+  if n < 0 {
+    r.set_err(1, "tcp_write failed", -1);
+    ret r;
+  }
+  r.set_ok(n);
+  ret r;
 }
 
 // Close a socket.
@@ -217,6 +267,18 @@ pub fun http_serve_once(num port, str body) num {
   ret 0;
 }
 
+// Serve a single HTTP request with Result.
+pub fun try_http_serve_once(num port, str body) Result<num> {
+  Result<num> r;
+  num rc = http_serve_once(port, body);
+  if rc != 0 {
+    r.set_err(1, "http_serve_once failed", rc);
+    ret r;
+  }
+  r.set_ok(rc);
+  ret r;
+}
+
 // Serve HTTP requests forever (blocking loop).
 pub fun http_serve_forever(num port, str body) num {
   num server = tcp_listen(port);
@@ -243,4 +305,16 @@ pub fun http_serve_forever(num port, str body) num {
     tcp_close(client);
   }
   ret 0;
+}
+
+// Serve HTTP requests forever with Result.
+pub fun try_http_serve_forever(num port, str body) Result<num> {
+  Result<num> r;
+  num rc = http_serve_forever(port, body);
+  if rc != 0 {
+    r.set_err(1, "http_serve_forever failed", rc);
+    ret r;
+  }
+  r.set_ok(rc);
+  ret r;
 }

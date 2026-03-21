@@ -1,21 +1,20 @@
 // Result compounds for stdlib operations.
 
+imp std.error;
+
 // Generic result container for stdlib operations.
 // 
 // Fields:
 // - ok: success flag
 // - value: return value
-// - err_code: error code
-// - err_message: error message
+// - err: error details
 pub compound Result<T> {
   // ok: success flag
   bin ok;
   // value: return value
   T value;
-  // err_code: error code
-  num err_code;
-  // err_message: error message
-  str err_message;
+  // err: error details
+  Error err;
 }
 
 impl Result<T> {
@@ -37,21 +36,69 @@ impl Result<T> {
     ret default_value;
   }
 
+  // Returns the stored value (even if error).
+  pub unwrap() T {
+    ret self.value;
+  }
+
+  // Returns the stored error.
+  pub unwrap_err() Error {
+    ret self.err;
+  }
+
   // Set the result to ok and clear error fields.
   pub set_ok(T value) {
     self.ok = true;
     self.value = value;
-    self.err_code = 0;
-    self.err_message = "";
+    self.err = error_ok();
   }
 
   // Set the result to error and store error fields.
   pub set_err(num code, str message, T default_value) {
     self.ok = false;
     self.value = default_value;
-    self.err_code = code;
-    self.err_message = message;
+    self.err = error_new(code, message);
   }
+
+  // Set the result to error using a provided Error.
+  pub set_err_error(Error err, T default_value) {
+    self.ok = false;
+    self.value = default_value;
+    self.err = err;
+  }
+
+  // Return other if ok; otherwise keep this error.
+  pub and(Result<T> other) Result<T> {
+    if self.ok {
+      Result<T> out;
+      out.ok = other.ok;
+      out.value = other.value;
+      out.err = other.err;
+      ret out;
+    }
+    Result<T> out;
+    out.ok = self.ok;
+    out.value = self.value;
+    out.err = self.err;
+    ret out;
+  }
+
+  // Return this if ok; otherwise return other.
+  pub or(Result<T> other) Result<T> {
+    if self.ok {
+      Result<T> out;
+      out.ok = self.ok;
+      out.value = self.value;
+      out.err = self.err;
+      ret out;
+    }
+    Result<T> out;
+    out.ok = other.ok;
+    out.value = other.value;
+    out.err = other.err;
+    ret out;
+  }
+
 }
 
 // Construct a successful generic result.
@@ -61,9 +108,16 @@ pub fun ok<T>(T value) Result<T> {
   ret r;
 }
 
-// Construct an error generic result.
+// Construct an error generic result (backwards-compatible).
 pub fun err<T>(num code, str message, T default_value) Result<T> {
   Result<T> r;
   r.set_err(code, message, default_value);
+  ret r;
+}
+
+// Construct an error generic result from an Error.
+pub fun err_error<T>(Error err, T default_value) Result<T> {
+  Result<T> r;
+  r.set_err_error(err, default_value);
   ret r;
 }

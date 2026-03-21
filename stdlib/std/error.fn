@@ -1,45 +1,124 @@
-// Simple error compound for stdlib results.
+// Error values for stdlib operations.
 // 
 // Usage:
 // ```
-// Error e = error_new(1, "oops");
+// Error e = error_new_kind(.Io, 2, "open failed");
 // if error_is_err(&e) { ... }
 // ```
 
-// Simple error representation (code + message).
+// Broad error categories.
+pub enum ErrorKind {
+  None,
+  Io,
+  Parse,
+  NotFound,
+  Invalid,
+  OutOfMemory,
+  System,
+  Unexpected
+}
+
+// Error representation used across stdlib.
 // 
 // Fields:
-// - code: numeric error code
+// - kind: error category
+// - code: numeric error code (when available)
 // - message: human-readable message
+// - context: optional context string (e.g., path)
+// - cause: optional cause detail
 pub compound Error {
+  // kind: error category
+  ErrorKind kind;
   // code: numeric error code
   num code;
   // message: human-readable message
   str message;
+  // context: optional context string
+  str context;
+  // cause: optional cause detail
+  str cause;
 }
 
-// Create a new error value.
-pub fun error_new(num code, str message) Error {
+impl Error {
+  // Set context string.
+  pub set_context(str context) {
+    self.context = context;
+  }
+
+  // Attach context (method-style).
+  pub with_context(str context) {
+    self.context = context;
+  }
+
+  // Set cause string.
+  pub set_cause(str cause) {
+    self.cause = cause;
+  }
+
+  // Attach cause (method-style).
+  pub with_cause(str cause) {
+    self.cause = cause;
+  }
+
+  // True when no error is present.
+  pub is_ok() bin {
+    ret self.kind == .None;
+  }
+
+  // True when an error is present.
+  pub is_err() bin {
+    ret self.kind != .None;
+  }
+}
+
+// Create a new error value with kind + code.
+pub fun error_new_kind(ErrorKind kind, num code, str message) Error {
   Error e;
+  e.kind = kind;
   e.code = code;
   e.message = message;
+  e.context = "";
+  e.cause = "";
   ret e;
+}
+
+// Create a new error value with kind (code defaults to 0).
+pub fun error_new_simple(ErrorKind kind, str message) Error {
+  ret error_new_kind(kind, 0, message);
+}
+
+// Backwards-compatible constructor (kind = System).
+pub fun error_new(num code, str message) Error {
+  ret error_new_kind(.System, code, message);
 }
 
 // Create an OK (no-error) value.
 pub fun error_ok() Error {
   Error e;
+  e.kind = .None;
   e.code = 0;
   e.message = "";
+  e.context = "";
+  e.cause = "";
   ret e;
 }
 
-// True when error code is zero.
-pub fun error_is_ok(Error* e) bin {
-  ret e.code == 0;
+// Attach context to an error (best-effort).
+pub fun error_with_context(Error* e, str context) {
+  e.with_context(context);
 }
 
-// True when error code is non-zero.
+// Attach cause to an error (best-effort).
+pub fun error_with_cause(Error* e, str cause) {
+  e.with_cause(cause);
+}
+
+// True when no error is present.
+pub fun error_is_ok(Error* e) bin {
+  ret e.kind == .None;
+}
+
+// True when an error is present.
 pub fun error_is_err(Error* e) bin {
-  ret e.code != 0;
+  ret e.kind != .None;
 }

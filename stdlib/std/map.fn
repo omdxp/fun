@@ -11,6 +11,7 @@ imp std.c.mem;
 imp std.c.string;
 imp std.c.def;
 imp std.vec;
+imp std.quirks;
 
 // Generic open-addressing hash map.
 pub compound Map<K, V> {
@@ -389,5 +390,17 @@ impl Map<K, V> {
       i = i + 1;
     }
     ret out;
+  }
+}
+
+impl Map<K, V> Clearable {
+  pub clear() {
+    if self.value_slots != NULL {
+      memset(self.key_slots, 0, self.cap * sizeof(K));
+      memset(self.value_slots, 0, self.cap * sizeof(V));
+      memset(self.used, 0, self.cap * sizeof(bin));
+      memset(self.tomb, 0, self.cap * sizeof(bin));
+    }
+    self.len = 0;
   }
 }

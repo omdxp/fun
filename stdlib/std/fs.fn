@@ -11,6 +11,8 @@ imp std.c.io;
 imp std.c.mem;
 imp std.c.def;
 imp std.vec;
+imp std.result;
+imp std.error;
 
 // File system helper container.
 pub compound Fs {
@@ -23,6 +25,14 @@ pub compound Fs {
 pub fun fs() Fs {
   Fs f;
   ret f;
+}
+
+fun _fs_err(str message, str context) Error {
+  Error e = error_new_simple(.Io, message);
+  if context != NULL {
+    e.with_context(context);
+  }
+  ret e;
 }
 
 impl Fs {
@@ -39,6 +49,18 @@ impl Fs {
   // Read an entire file into a string.
   pub read_to_string(str path) str {
     ret read_all(path);
+  }
+
+  // Read an entire file into a string with Result.
+  pub try_read_to_string(str path) Result<str> {
+    Result<str> r;
+    str out = read_all(path);
+    if out == NULL {
+      r.set_err(1, "read_to_string failed", "");
+      ret r;
+    }
+    r.set_ok(out);
+    ret r;
   }
 
   // Read up to max_len bytes into a string.
@@ -60,9 +82,33 @@ impl Fs {
     ret buf;
   }
 
+  // Read up to max_len bytes into a string with Result.
+  pub try_read_bytes(str path, num max_len) Result<str> {
+    Result<str> r;
+    str out = self.read_bytes(path, max_len);
+    if out == NULL {
+      r.set_err(1, "read_bytes failed", "");
+      ret r;
+    }
+    r.set_ok(out);
+    ret r;
+  }
+
   // Write a string to a file.
   pub write_string(str path, str data) bin {
     ret write_all(path, data);
+  }
+
+  // Write a string to a file with Result.
+  pub try_write_string(str path, str data) Result<bin> {
+    Result<bin> r;
+    bin ok_write = write_all(path, data);
+    if ok_write == false {
+      r.set_err(1, "write_string failed", false);
+      ret r;
+    }
+    r.set_ok(true);
+    ret r;
   }
 
   // Append a string to a file.
@@ -77,6 +123,18 @@ impl Fs {
     ret wrote == n;
   }
 
+  // Append a string to a file with Result.
+  pub try_append_string(str path, str data) Result<bin> {
+    Result<bin> r;
+    bin ok_append = self.append_string(path, data);
+    if ok_append == false {
+      r.set_err(1, "append_string failed", false);
+      ret r;
+    }
+    r.set_ok(true);
+    ret r;
+  }
+
   // Copy a file by reading into memory and writing out.
   pub copy_file(str src, str dst) bin {
     str data = read_all(src);
@@ -84,6 +142,22 @@ impl Fs {
       ret false;
     }
     ret write_all(dst, data);
+  }
+
+  // Copy a file by reading into memory and writing out with Result.
+  pub try_copy_file(str src, str dst) Result<bin> {
+    Result<bin> r;
+    str data = read_all(src);
+    if data == NULL {
+      r.set_err(1, "copy_file read failed", false);
+      ret r;
+    }
+    if write_all(dst, data) == false {
+      r.set_err(1, "copy_file write failed", false);
+      ret r;
+    }
+    r.set_ok(true);
+    ret r;
   }
 
   // Get file size (bytes), or -1.
@@ -101,6 +175,18 @@ impl Fs {
       ret -1;
     }
     ret end;
+  }
+
+  // Get file size with Result.
+  pub try_size(str path) Result<num> {
+    Result<num> r;
+    num out = self.size(path);
+    if out < 0 {
+      r.set_err(1, "size failed", -1);
+      ret r;
+    }
+    r.set_ok(out);
+    ret r;
   }
 
   // Read all lines into a Vec<str>.
@@ -128,6 +214,21 @@ impl Fs {
       out.push(buf);
     }
     ret out;
+  }
+
+  // Read all lines into a Vec<str> with Result.
+  pub try_read_lines(str path, num max_len) Result<Vec<str >> {
+    Result<Vec<str >> r;
+    Vec<str> out = self.read_lines(path, max_len);
+    if out.len == 0 {
+      // Best-effort: treat empty as ok unless file can't be opened.
+      if self.exists(path) == false {
+        r.set_err(1, "read_lines failed", out);
+        ret r;
+      }
+    }
+    r.set_ok(out);
+    ret r;
   }
 }
 

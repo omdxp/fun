@@ -6,6 +6,9 @@
 // Option<num> w = none(0);
 // if v.is_some() { ... }
 // ```
+imp std.result;
+imp std.error;
+
 pub compound Option<T> {
   // Whether a value is present.
   bin has;
@@ -32,6 +35,11 @@ impl Option<T> {
     ret default_value;
   }
 
+  // Returns the stored value (uses internal default when empty).
+  pub unwrap() T {
+    ret self.value;
+  }
+
   // Set the option to a value.
   pub set_some(T value) {
     self.has = true;
@@ -42,6 +50,64 @@ impl Option<T> {
   pub set_none(T default_value) {
     self.has = false;
     self.value = default_value;
+  }
+
+  // Convert to a Result with the provided error if empty.
+  pub ok_or(num code, str message) Result<T> {
+    Result<T> r;
+    if self.has {
+      r.ok = true;
+      r.value = self.value;
+      r.err = error_ok();
+      ret r;
+    }
+    r.ok = false;
+    r.value = self.value;
+    r.err = error_new(code, message);
+    ret r;
+  }
+
+  // Convert to a Result with a provided Error if empty.
+  pub ok_or_error(Error err) Result<T> {
+    Result<T> r;
+    if self.has {
+      r.ok = true;
+      r.value = self.value;
+      r.err = error_ok();
+      ret r;
+    }
+    r.ok = false;
+    r.value = self.value;
+    r.err = err;
+    ret r;
+  }
+
+  // Return other if empty; otherwise keep this value.
+  pub or(Option<T> other) Option<T> {
+    if self.has {
+      Option<T> out;
+      out.has = self.has;
+      out.value = self.value;
+      ret out;
+    }
+    Option<T> out;
+    out.has = other.has;
+    out.value = other.value;
+    ret out;
+  }
+
+  // Return other if present; otherwise return none.
+  pub and(Option<T> other) Option<T> {
+    if self.has {
+      Option<T> out;
+      out.has = other.has;
+      out.value = other.value;
+      ret out;
+    }
+    Option<T> out;
+    out.has = self.has;
+    out.value = self.value;
+    ret out;
   }
 }
 

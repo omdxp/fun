@@ -4,7 +4,7 @@ imp std.c.io;
 imp std.set;
 
 fun main() {
-  StrSet s = set_init(8);
+  Set<str> s = set_init("", 8);
   s.add("alpha");
   s.add("beta");
 

@@ -1,0 +1,36 @@
+imp std.c.io;
+imp std.quirks;
+imp std.vec;
+imp std.map;
+
+compound Scratch {
+  num value;
+}
+
+impl Scratch Clearable {
+  pub clear() {
+    self.value = 0;
+  }
+}
+
+fun main() {
+  Scratch s = Scratch{value = 9};
+  Clearable c = &s;
+  c.clear();
+  printf("scratch=%d\n", s.value);
+
+  Vec<num> v;
+  v.init(0);
+  v.push(1);
+  v.push(2);
+  v.clear();
+  printf("vec len=%d\n", v.len());
+
+  Map<str, num> m;
+  m.init(8);
+  m.put("a", 1);
+  m.put("b", 2);
+
+  m.clear();
+  printf("map len=%d\n", m.len());
+}

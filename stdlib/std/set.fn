@@ -1,66 +1,68 @@
-// String set built on Map<str, num>.
+// Generic set built on Map<T, bin>.
 // 
 // Usage:
 // ```
-// StrSet s = set_init(8);
+// Set<str> s = set_init("", 8);
 // s.add("a");
 // ```
 
 imp std.map;
+imp std.vec;
 imp std.quirks;
 
-// String set backed by Map<str, num>.
+// Generic set backed by Map<T, bin>.
 // 
 // Fields:
 // - map: backing map
-pub compound StrSet {
+pub compound Set<T> {
   // map: backing map
-  Map<str, num> map;
+  Map<T, bin> map;
 }
 
-// Create a string set with initial capacity.
+// Create a set with initial capacity.
 // 
 // Params:
 // - cap: initial capacity
 // 
 // Returns:
-// - initialized StrSet
-pub fun set_init(num cap) StrSet {
-  StrSet s;
+// - initialized Set<T>
+pub fun set_init<T>(T sample, num cap) Set<T> {
+  Set<T> s;
+  _ = sample;
   s.map.init(cap);
   ret s;
 }
 
-impl StrSet Sized {
+impl Set<T> Sized {
   // Number of elements.
   pub len() num {
-    ret self.map.len();
+    ret self.map.len;
   }
 
   // True when empty.
   pub is_empty() bin {
-    ret self.map.len() == 0;
+    ret self.map.len == 0;
   }
 }
 
-impl StrSet {
+impl Set<T> {
   // Free internal storage.
   pub free() {
     self.map.free();
   }
 
   // Check if a key exists.
-  pub has(str key) bin {
+  pub has(T key) bin {
     ret self.map.has(key);
   }
 
   // Add a key.
-  pub add(str key) {
-    self.map.put(key, 1);
+  pub add(T key) {
+    self.map.put(key, true);
   }
 
   // Remove a key; returns true if removed.
-  pub remove(str key) bin {
+  pub remove(T key) bin {
     ret self.map.remove(key);
   }
 
@@ -68,29 +70,9 @@ impl StrSet {
   pub clear() {
     self.map.clear();
   }
-}
 
-// C-style wrapper for free.
-pub fun set_free(StrSet* s) {
-  s.free();
-}
-
-// C-style wrapper for length.
-pub fun set_len(StrSet* s) num {
-  ret s.len();
-}
-
-// C-style wrapper for has.
-pub fun set_has(StrSet* s, str key) bin {
-  ret s.has(key);
-}
-
-// C-style wrapper for add.
-pub fun set_add(StrSet* s, str key) {
-  s.add(key);
-}
-
-// C-style wrapper for remove.
-pub fun set_remove(StrSet* s, str key) bin {
-  ret s.remove(key);
+  // Return all values as a Vec<T>.
+  pub values() Vec<T> {
+    ret self.map.keys();
+  }
 }

@@ -119,6 +119,12 @@ const ImplKey = struct {
     quirk_sig: []const u8,
 };
 
+const GenericSpec = struct {
+    cnode: *ast.Node,
+    dt: *const dtype.DataType,
+    mangled: []const u8,
+};
+
 const ImplKeyContext = struct {
     pub fn hash(_: @This(), key: ImplKey) u64 {
         const a = std.hash.Wyhash.hash(0, key.type_name);
@@ -273,6 +279,9 @@ pub const TranspileProcess = struct {
     /// Forced generic instantiations discovered during typecheck.
     forced_generic_instantiations: std.ArrayList(*const dtype.DataType),
     forced_generic_instantiation_keys: std.StringHashMap(bool),
+
+    /// Mangled names of emitted generic compound specializations.
+    emitted_generic_spec_keys: std.StringHashMap(bool),
 
     /// Forced generic function instantiations discovered during typecheck.
     generic_fn_instantiations: std.ArrayList(GenericFnInstantiation),
@@ -1010,14 +1019,352 @@ pub const TranspileProcess = struct {
 
     fn register_generic_instantiation(self: *Self, dt: *const dtype.DataType) TranspileError!void {
         if (dt.generic_args == null) return;
+        if (dt.type_str.items.len == 0) return;
+        if (@intFromPtr(dt.type_str.items.ptr) == 0) return;
+        if (self.dtype_has_unresolved_placeholder(dt)) return;
         const root = self.get_root();
         const key = try self.type_name_mangled(dt);
         if (root.forced_generic_instantiation_keys.contains(key)) {
             self.allocator.free(key);
             return;
         }
+        const clone = try self.clone_dtype(dt);
         root.forced_generic_instantiation_keys.put(key, true) catch return TranspileError.MemoryAllocationFailed;
-        root.forced_generic_instantiations.append(dt) catch return TranspileError.MemoryAllocationFailed;
+        root.forced_generic_instantiations.append(clone) catch return TranspileError.MemoryAllocationFailed;
+    }
+
+    fn register_generic_instantiations_from_dtype(self: *Self, dt: *const dtype.DataType) TranspileError!void {
+        if (dt.generic_args == null) {
+            if (dt.type_str.items.len > 0 and mem.indexOf(u8, dt.type_str.items, "__") != null) {
+                if (try self.dtype_from_mangled_type(dt.type_str.items)) |synthetic| {
+                    try self.register_generic_instantiations_from_dtype(synthetic);
+                }
+            }
+            return;
+        }
+        if (dt.type_str.items.len > 0 and @intFromPtr(dt.type_str.items.ptr) != 0 and !self.dtype_has_unresolved_placeholder(dt)) {
+            try self.register_generic_instantiation(dt);
+        }
+        if (dt.generic_args) |gargs| {
+            for (gargs.items()) |ga| {
+                try self.register_generic_instantiations_from_dtype(ga);
+            }
+        }
+    }
+
+    fn register_generic_instantiation_from_checked_type(self: *Self, ct: CheckedType) TranspileError!void {
+        const name = ct.mangled_name orelse ct.name orelse return;
+        if (mem.indexOf(u8, name, "__") == null) return;
+        if (try self.dtype_from_mangled_type(name)) |synthetic| {
+            try self.register_generic_instantiations_from_dtype(synthetic);
+        }
+    }
+
+    fn dtype_from_mangled_type(self: *Self, type_name: []const u8) TranspileError!?*dtype.DataType {
+        if (mem.indexOf(u8, type_name, "__") == null) return null;
+        const reg = self.root_registry() orelse return null;
+
+        var segments = std.ArrayList([]const u8).init(self.allocator);
+        defer segments.deinit();
+        var it = mem.splitSequence(u8, type_name, "__");
+        while (it.next()) |seg| {
+            if (seg.len == 0) continue;
+            segments.append(seg) catch return TranspileError.MemoryAllocationFailed;
+        }
+        if (segments.items.len == 0) return null;
+
+        var idx: usize = 0;
+        return self.dtype_from_mangled_segments(reg, segments.items, &idx);
+    }
+
+    fn dtype_from_mangled_segments(self: *Self, reg: *TypeRegistry, segments: [][]const u8, idx: *usize) TranspileError!?*dtype.DataType {
+        if (idx.* >= segments.len) return null;
+        const name = segments[idx.*];
+        idx.* += 1;
+
+        const out = self.allocator.create(dtype.DataType) catch {
+            return TranspileError.MemoryAllocationFailed;
+        };
+        out.* = .{
+            .flags = null,
+            .type = .Unknown,
+            .type_str = std.ArrayList(u8).init(self.allocator),
+            .pointer_depth = 0,
+            .array = null,
+            .generic_args = null,
+        };
+        out.type_str.appendSlice(name) catch return TranspileError.MemoryAllocationFailed;
+
+        if (reg.compounds_by_name.get(name)) |cnode| {
+            if (cnode.node_variant != null) {
+                const c = cnode.node_variant.?.compound;
+                if (c.type_params) |params| {
+                    if (params.count > 0) {
+                        var args = utils.Vector(*dtype.DataType).init(self.allocator);
+                        errdefer {
+                            for (args.items()) |ga| {
+                                ga.type_str.deinit();
+                                self.allocator.destroy(ga);
+                            }
+                            args.deinit();
+                        }
+                        var i: usize = 0;
+                        while (i < params.count) : (i += 1) {
+                            const arg_dt = try self.dtype_from_mangled_segments(reg, segments, idx) orelse return null;
+                            args.push(arg_dt) catch return TranspileError.MemoryAllocationFailed;
+                        }
+                        out.generic_args = args;
+                    }
+                }
+            }
+        }
+
+        return out;
+    }
+
+    fn add_spec_from_dtype(self: *Self, registry: *TypeRegistry, dt: *const dtype.DataType, spec_keys: *std.StringHashMap(bool), specs: *std.ArrayList(GenericSpec)) TranspileError!void {
+        var use_dt: *const dtype.DataType = dt;
+        if (use_dt.generic_args == null and use_dt.type_str.items.len > 0 and mem.indexOf(u8, use_dt.type_str.items, "__") != null) {
+            if (try self.dtype_from_mangled_type(use_dt.type_str.items)) |synthetic| {
+                use_dt = synthetic;
+            }
+        }
+        if (use_dt.generic_args == null) return;
+        if (self.dtype_has_unresolved_placeholder(use_dt)) return;
+
+        const dep_base = if (mem.indexOf(u8, use_dt.type_str.items, "__")) |idx| use_dt.type_str.items[0..idx] else use_dt.type_str.items;
+        const dep_cnode = registry.compounds_by_name.get(dep_base) orelse return;
+        if (dep_cnode.node_variant == null) return;
+        const dep_params = dep_cnode.node_variant.?.compound.type_params orelse return;
+        if (use_dt.generic_args == null) return;
+        if (use_dt.generic_args.?.items().len != dep_params.count) return;
+
+        const dep_mangled = try self.type_name_mangled(use_dt);
+        if (self.mangled_contains_unresolved_placeholder(dep_mangled)) {
+            self.allocator.free(dep_mangled);
+            return;
+        }
+        const spec_dt = (try self.dtype_from_mangled_type(dep_mangled)) orelse use_dt;
+        if (!spec_keys.contains(dep_mangled)) {
+            spec_keys.put(dep_mangled, true) catch return TranspileError.MemoryAllocationFailed;
+            specs.append(.{ .cnode = dep_cnode, .dt = spec_dt, .mangled = dep_mangled }) catch {
+                return TranspileError.MemoryAllocationFailed;
+            };
+        } else {
+            self.allocator.free(dep_mangled);
+        }
+    }
+
+    fn add_specs_from_dtype(self: *Self, registry: *TypeRegistry, dt: *const dtype.DataType, spec_keys: *std.StringHashMap(bool), specs: *std.ArrayList(GenericSpec)) TranspileError!void {
+        try self.add_spec_from_dtype(registry, dt, spec_keys, specs);
+        if (dt.generic_args) |gargs| {
+            for (gargs.items()) |ga| {
+                try self.add_specs_from_dtype(registry, ga, spec_keys, specs);
+            }
+        }
+    }
+
+    fn add_specs_from_body(self: *Self, registry: *TypeRegistry, body: *const ast.Node, spec_keys: *std.StringHashMap(bool), specs: *std.ArrayList(GenericSpec)) TranspileError!void {
+        if (body.type != .Body or body.node_variant == null) return;
+        const stmts = body.node_variant.?.body.statements;
+        for (stmts.items()) |stmt_ptr| {
+            const stmt = stmt_ptr.*;
+            switch (stmt.type) {
+                .Variable => {
+                    const v = stmt.node_variant.?.variable;
+                    try self.add_specs_from_dtype(registry, v.type, spec_keys, specs);
+                },
+                .StatementIf => {
+                    const ifs = stmt.node_variant.?.statement.if_stmt;
+                    try self.add_specs_from_body(registry, ifs.body, spec_keys, specs);
+                },
+                .StatementElseIf => {
+                    const elif = stmt.node_variant.?.statement.elif_stmt;
+                    try self.add_specs_from_body(registry, elif.body, spec_keys, specs);
+                },
+                .StatementElse => {
+                    const els = stmt.node_variant.?.statement.else_stmt;
+                    try self.add_specs_from_body(registry, els.body, spec_keys, specs);
+                },
+                .StatementFit => {
+                    const fit = stmt.node_variant.?.statement.fit_stmt;
+                    for (fit.branches.items()) |br| {
+                        try self.add_specs_from_body(registry, br.body, spec_keys, specs);
+                    }
+                },
+                .StatementFor => {
+                    const f = stmt.node_variant.?.statement.for_stmt;
+                    switch (f) {
+                        .cond => |fc| try self.add_specs_from_body(registry, fc.body, spec_keys, specs),
+                        .iter => |fi| try self.add_specs_from_body(registry, fi.body, spec_keys, specs),
+                        .range => |fr| try self.add_specs_from_body(registry, fr.body, spec_keys, specs),
+                    }
+                },
+                else => {},
+            }
+        }
+    }
+
+    fn add_specs_from_node(self: *Self, registry: *TypeRegistry, node: *ast.Node, spec_keys: *std.StringHashMap(bool), specs: *std.ArrayList(GenericSpec)) TranspileError!void {
+        switch (node.type) {
+            .Function => if (node.node_variant) |f| {
+                if (f.function.rtype) |*rt| try self.add_specs_from_dtype(registry, rt, spec_keys, specs);
+                if (f.function.args) |args| {
+                    for (args.items()) |a| {
+                        if (a.node_variant) |av| {
+                            try self.add_specs_from_dtype(registry, av.variable.type, spec_keys, specs);
+                        }
+                    }
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn add_specs_from_nodes_recursive(self: *Self, proc: *Self, registry: *TypeRegistry, spec_keys: *std.StringHashMap(bool), specs: *std.ArrayList(GenericSpec)) TranspileError!void {
+        for (proc.nodes.items()) |*node| {
+            try self.add_specs_from_node(registry, node, spec_keys, specs);
+        }
+        for (proc.owned_nodes.items) |node_ptr| {
+            try self.add_specs_from_node(registry, node_ptr, spec_keys, specs);
+        }
+        for (proc.children.items) |child| {
+            try self.add_specs_from_nodes_recursive(child, registry, spec_keys, specs);
+        }
+    }
+
+    fn register_generic_instantiations_in_body(self: *Self, body: *const ast.Node) TranspileError!void {
+        if (body.type != .Body or body.node_variant == null) return;
+        const stmts = body.node_variant.?.body.statements;
+        for (stmts.items()) |stmt_ptr| {
+            const stmt = stmt_ptr.*;
+            switch (stmt.type) {
+                .Variable => if (stmt.node_variant) |v| {
+                    try self.register_generic_instantiations_from_dtype(v.variable.type);
+                },
+                .StatementIf => if (stmt.node_variant) |sv| {
+                    try self.register_generic_instantiations_in_body(sv.statement.if_stmt.body);
+                },
+                .StatementElseIf => if (stmt.node_variant) |sv| {
+                    try self.register_generic_instantiations_in_body(sv.statement.elif_stmt.body);
+                },
+                .StatementElse => if (stmt.node_variant) |sv| {
+                    try self.register_generic_instantiations_in_body(sv.statement.else_stmt.body);
+                },
+                .StatementFit => if (stmt.node_variant) |sv| {
+                    const fit = sv.statement.fit_stmt;
+                    for (fit.branches.items()) |br| {
+                        try self.register_generic_instantiations_in_body(br.body);
+                    }
+                },
+                .StatementFor => if (stmt.node_variant) |sv| {
+                    const f = sv.statement.for_stmt;
+                    switch (f) {
+                        .cond => |fc| try self.register_generic_instantiations_in_body(fc.body),
+                        .iter => |fi| try self.register_generic_instantiations_in_body(fi.body),
+                        .range => |fr| try self.register_generic_instantiations_in_body(fr.body),
+                    }
+                },
+                else => {},
+            }
+        }
+    }
+
+    fn seed_forced_generic_instantiations_from_signatures_module(self: *Self, proc: *Self) TranspileError!void {
+        for (proc.nodes.items()) |node| {
+            switch (node.type) {
+                .Variable => if (node.node_variant) |v| try self.register_generic_instantiations_from_dtype(v.variable.type),
+                .Compound => if (node.node_variant) |c| {
+                    for (c.compound.fields.items()) |f| {
+                        try self.register_generic_instantiations_from_dtype(f.dtype);
+                    }
+                },
+                .Function => if (node.node_variant) |f| {
+                    if (f.function.rtype) |*rt| try self.register_generic_instantiations_from_dtype(rt);
+                    if (f.function.args) |args| {
+                        for (args.items()) |a| {
+                            if (a.node_variant) |av| {
+                                try self.register_generic_instantiations_from_dtype(av.variable.type);
+                            }
+                        }
+                    }
+                    if (f.function.body) |body| {
+                        try self.register_generic_instantiations_in_body(body);
+                    }
+                },
+                .Impl => if (node.node_variant) |iv| {
+                    const im = iv.impl;
+                    for (im.methods.items()) |m| {
+                        if (m.type != .Function or m.node_variant == null) continue;
+                        const fnv = m.node_variant.?.function;
+                        if (fnv.rtype) |*rt| try self.register_generic_instantiations_from_dtype(rt);
+                        if (fnv.args) |args| {
+                            for (args.items()) |a| {
+                                if (a.node_variant) |av| {
+                                    try self.register_generic_instantiations_from_dtype(av.variable.type);
+                                }
+                            }
+                        }
+                        if (fnv.body) |body| {
+                            try self.register_generic_instantiations_in_body(body);
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+
+        for (proc.owned_nodes.items) |node_ptr| {
+            const node = node_ptr.*;
+            switch (node.type) {
+                .Variable => if (node.node_variant) |v| try self.register_generic_instantiations_from_dtype(v.variable.type),
+                .Compound => if (node.node_variant) |c| {
+                    for (c.compound.fields.items()) |f| {
+                        try self.register_generic_instantiations_from_dtype(f.dtype);
+                    }
+                },
+                .Function => if (node.node_variant) |f| {
+                    if (f.function.rtype) |*rt| try self.register_generic_instantiations_from_dtype(rt);
+                    if (f.function.args) |args| {
+                        for (args.items()) |a| {
+                            if (a.node_variant) |av| {
+                                try self.register_generic_instantiations_from_dtype(av.variable.type);
+                            }
+                        }
+                    }
+                    if (f.function.body) |body| {
+                        try self.register_generic_instantiations_in_body(body);
+                    }
+                },
+                .Impl => if (node.node_variant) |iv| {
+                    const im = iv.impl;
+                    for (im.methods.items()) |m| {
+                        if (m.type != .Function or m.node_variant == null) continue;
+                        const fnv = m.node_variant.?.function;
+                        if (fnv.rtype) |*rt| try self.register_generic_instantiations_from_dtype(rt);
+                        if (fnv.args) |args| {
+                            for (args.items()) |a| {
+                                if (a.node_variant) |av| {
+                                    try self.register_generic_instantiations_from_dtype(av.variable.type);
+                                }
+                            }
+                        }
+                        if (fnv.body) |body| {
+                            try self.register_generic_instantiations_in_body(body);
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+
+        for (proc.children.items) |child| {
+            try self.seed_forced_generic_instantiations_from_signatures_module(child);
+        }
+    }
+
+    fn seed_forced_generic_instantiations_from_signatures(self: *Self) TranspileError!void {
+        try self.seed_forced_generic_instantiations_from_signatures_module(self.get_root());
     }
 
     fn call_pos_key_alloc(self: *Self, p: token.Pos) TranspileError![]const u8 {
@@ -1469,6 +1816,22 @@ pub const TranspileProcess = struct {
             flags.is_array = true;
             out.flags = flags;
         }
+        out.type_str.appendSlice(name) catch return TranspileError.MemoryAllocationFailed;
+        return out;
+    }
+
+    fn alloc_simple_dtype(self: *Self, name: []const u8) TranspileError!*dtype.DataType {
+        const out = self.allocator.create(dtype.DataType) catch {
+            return TranspileError.MemoryAllocationFailed;
+        };
+        out.* = .{
+            .flags = null,
+            .type = .Unknown,
+            .type_str = std.ArrayList(u8).init(self.allocator),
+            .pointer_depth = 0,
+            .array = null,
+            .generic_args = null,
+        };
         out.type_str.appendSlice(name) catch return TranspileError.MemoryAllocationFailed;
         return out;
     }
@@ -2432,6 +2795,7 @@ pub const TranspileProcess = struct {
             .std_imports = std.ArrayList([]const u8).init(a),
             .forced_generic_instantiations = std.ArrayList(*const dtype.DataType).init(a),
             .forced_generic_instantiation_keys = std.StringHashMap(bool).init(a),
+            .emitted_generic_spec_keys = std.StringHashMap(bool).init(a),
             .generic_fn_instantiations = std.ArrayList(GenericFnInstantiation).init(a),
             .generic_fn_instantiation_keys = std.StringHashMap(bool).init(a),
             .generic_call_overrides = std.StringHashMap([]const u8).init(a),
@@ -4103,6 +4467,12 @@ pub const TranspileProcess = struct {
                         const recv_name_owned = if (self.lookup_receiver_dtype(recv.*)) |dt| dt.generic_args != null else false;
                         const recv_name_canon = self.canonical_compound_name(recv_name);
 
+                        if (mem.indexOf(u8, recv_name, "__") != null) {
+                            if (try self.dtype_from_mangled_type(recv_name)) |recv_dt_mangled| {
+                                try self.register_generic_instantiations_from_dtype(recv_dt_mangled);
+                            }
+                        }
+
                         // If the receiver is a quirk type, typecheck against the quirk signature.
                         // Otherwise, treat as a plain impl method call and typecheck against the
                         // generated `Type__method` function signature.
@@ -4995,18 +5365,25 @@ pub const TranspileProcess = struct {
             for (args_items) |arg_ptr| {
                 const arg = arg_ptr.*;
                 if (arg.type == .Variable and arg.node_variant != null) {
+                    try self.register_generic_instantiations_from_dtype(arg.node_variant.?.variable.type);
                     args_slice[i] = try self.type_from_dtype_with_mangled(arg.node_variant.?.variable.type);
                 } else {
                     args_slice[i] = .{ .base = .Unknown };
                 }
+                try self.register_generic_instantiation_from_checked_type(args_slice[i]);
                 i += 1;
             }
 
             owned_args.append(args_slice) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
+            const fn_rtype: CheckedType = if (fnv.rtype) |*rt| blk: {
+                try self.register_generic_instantiations_from_dtype(rt);
+                break :blk try self.type_from_dtype_with_mangled(rt);
+            } else .{ .base = .Void };
+            try self.register_generic_instantiation_from_checked_type(fn_rtype);
             fns.put(name, .{
-                .rtype = if (fnv.rtype) |rt| try self.type_from_dtype_with_mangled(&rt) else .{ .base = .Void },
+                .rtype = fn_rtype,
                 .args = args_slice,
                 .is_variadic = fnv.is_variadic,
                 .type_params = if (fnv.type_params) |*params| params else null,
@@ -5074,18 +5451,25 @@ pub const TranspileProcess = struct {
                         for (args_items) |arg_ptr| {
                             const arg = arg_ptr.*;
                             if (arg.type == .Variable and arg.node_variant != null) {
+                                try self.register_generic_instantiations_from_dtype(arg.node_variant.?.variable.type);
                                 args_slice[i] = try self.type_from_dtype_with_subst(arg.node_variant.?.variable.type, params.*, gargs);
                             } else {
                                 args_slice[i] = .{ .base = .Unknown };
                             }
+                            try self.register_generic_instantiation_from_checked_type(args_slice[i]);
                             i += 1;
                         }
 
                         owned_args.append(args_slice) catch {
                             return TranspileError.MemoryAllocationFailed;
                         };
+                        const fn_rtype: CheckedType = if (fnv.rtype) |*rt| blk: {
+                            try self.register_generic_instantiations_from_dtype(rt);
+                            break :blk try self.type_from_dtype_with_subst(rt, params.*, gargs);
+                        } else .{ .base = .Void };
+                        try self.register_generic_instantiation_from_checked_type(fn_rtype);
                         fns.put(spec_name, .{
-                            .rtype = if (fnv.rtype) |rt| try self.type_from_dtype_with_subst(&rt, params.*, gargs) else .{ .base = .Void },
+                            .rtype = fn_rtype,
                             .args = args_slice,
                             .is_variadic = fnv.is_variadic,
                             .type_params = null,
@@ -5116,18 +5500,25 @@ pub const TranspileProcess = struct {
                 for (args_items) |arg_ptr| {
                     const arg = arg_ptr.*;
                     if (arg.type == .Variable and arg.node_variant != null) {
+                        try self.register_generic_instantiations_from_dtype(arg.node_variant.?.variable.type);
                         args_slice[i] = try self.type_from_dtype_with_mangled(arg.node_variant.?.variable.type);
                     } else {
                         args_slice[i] = .{ .base = .Unknown };
                     }
+                    try self.register_generic_instantiation_from_checked_type(args_slice[i]);
                     i += 1;
                 }
 
                 owned_args.append(args_slice) catch {
                     return TranspileError.MemoryAllocationFailed;
                 };
+                const fn_rtype: CheckedType = if (fnv.rtype) |*rt| blk: {
+                    try self.register_generic_instantiations_from_dtype(rt);
+                    break :blk try self.type_from_dtype_with_mangled(rt);
+                } else .{ .base = .Void };
+                try self.register_generic_instantiation_from_checked_type(fn_rtype);
                 fns.put(name, .{
-                    .rtype = if (fnv.rtype) |rt| try self.type_from_dtype_with_mangled(&rt) else .{ .base = .Void },
+                    .rtype = fn_rtype,
                     .args = args_slice,
                     .is_variadic = fnv.is_variadic,
                     .type_params = null,
@@ -6497,6 +6888,14 @@ pub const TranspileProcess = struct {
 
         self.std_imports.deinit();
 
+        if (self.emitted_generic_spec_keys.count() > 0) {
+            var esit = self.emitted_generic_spec_keys.iterator();
+            while (esit.next()) |e| {
+                self.allocator.free(e.key_ptr.*);
+            }
+        }
+        self.emitted_generic_spec_keys.deinit();
+
         // Generic function instantiation tracking.
         if (self.generic_fn_instantiation_keys.count() > 0) {
             var it = self.generic_fn_instantiation_keys.iterator();
@@ -6631,6 +7030,9 @@ pub const TranspileProcess = struct {
     }
 
     fn append_mangled_type(self: *Self, buf: *std.ArrayList(u8), dt: *const dtype.DataType) TranspileError!void {
+        if (dt.type_str.items.len > 0 and @intFromPtr(dt.type_str.items.ptr) == 0) {
+            return TranspileError.TypeMismatch;
+        }
         buf.appendSlice(dt.type_str.items) catch return TranspileError.MemoryAllocationFailed;
         if (dt.generic_args) |gargs| {
             for (gargs.items()) |ga| {
@@ -7137,7 +7539,7 @@ pub const TranspileProcess = struct {
         if (self.did_emit_user_types) return;
         self.did_emit_user_types = true;
 
-        const reg = self.root_registry() orelse return;
+        const registry = self.root_registry() orelse return;
 
         try self.write("// --- User types ---\n\n");
 
@@ -7148,7 +7550,7 @@ pub const TranspileProcess = struct {
         var seen_enum_names = std.StringHashMap(bool).init(self.allocator);
         defer seen_enum_names.deinit();
 
-        var e_it = reg.enums_by_name.iterator();
+        var e_it = registry.enums_by_name.iterator();
         while (e_it.next()) |entry| {
             const enode = entry.value_ptr.*;
             if (enode.node_variant == null) continue;
@@ -7210,7 +7612,7 @@ pub const TranspileProcess = struct {
         var seen_compound_names = std.StringHashMap(bool).init(self.allocator);
         defer seen_compound_names.deinit();
 
-        var c_it = reg.compounds_by_name.iterator();
+        var c_it = registry.compounds_by_name.iterator();
         while (c_it.next()) |entry| {
             const cnode = entry.value_ptr.*;
             if (cnode.node_variant == null) continue;
@@ -7238,12 +7640,6 @@ pub const TranspileProcess = struct {
         defer remaining.deinit();
         remaining.appendSlice(compound_nodes.items) catch {
             return TranspileError.MemoryAllocationFailed;
-        };
-
-        const GenericSpec = struct {
-            cnode: *ast.Node,
-            dt: *const dtype.DataType,
-            mangled: []const u8,
         };
 
         var spec_keys = std.StringHashMap(bool).init(self.allocator);
@@ -7282,6 +7678,13 @@ pub const TranspileProcess = struct {
                 if (gargs.len != params.count) continue;
                 if (self.dtype_contains_type_param(dt, &params)) continue;
 
+                // Ensure field-level generic dependencies are registered with concrete args.
+                for (c.fields.items()) |f| {
+                    if (f.dtype.generic_args == null) continue;
+                    const dep = try self.clone_dtype_with_subst_for_inst(f.dtype, &params, gargs);
+                    try self.register_generic_instantiations_from_dtype(dep);
+                }
+
                 const mangled = try self.type_name_mangled(dt);
                 if (self.mangled_contains_type_param(mangled, &params)) {
                     self.allocator.free(mangled);
@@ -7300,6 +7703,172 @@ pub const TranspileProcess = struct {
                     self.allocator.free(mangled);
                 }
             }
+
+            // Include forced generic instantiations for this compound.
+            const root = self.get_root();
+            for (root.forced_generic_instantiations.items) |dt| {
+                if (dt.generic_args == null) continue;
+                const dt_base = if (mem.indexOf(u8, dt.type_str.items, "__")) |idx| dt.type_str.items[0..idx] else dt.type_str.items;
+                if (!mem.eql(u8, dt_base, c.name.items)) continue;
+                const gargs = dt.generic_args.?.items();
+                if (gargs.len != params.count) continue;
+                if (self.dtype_contains_type_param(dt, &params)) continue;
+                const mangled = try self.type_name_mangled(dt);
+                if (self.mangled_contains_type_param(mangled, &params)) {
+                    self.allocator.free(mangled);
+                    continue;
+                }
+                if (self.mangled_contains_unresolved_placeholder(mangled)) {
+                    self.allocator.free(mangled);
+                    continue;
+                }
+                if (!spec_keys.contains(mangled)) {
+                    spec_keys.put(mangled, true) catch return TranspileError.MemoryAllocationFailed;
+                    specs.append(.{ .cnode = cnode, .dt = dt, .mangled = mangled }) catch {
+                        return TranspileError.MemoryAllocationFailed;
+                    };
+                } else {
+                    self.allocator.free(mangled);
+                }
+            }
+        }
+
+        // Expand specs with field-level generic dependencies (e.g. Set<str> -> Map<str, bin>).
+        var si_expand: usize = 0;
+        while (si_expand < specs.items.len) {
+            const s = specs.items[si_expand];
+            si_expand += 1;
+            if (s.cnode.node_variant == null) continue;
+            const c = s.cnode.node_variant.?.compound;
+            const params = c.type_params orelse continue;
+            const gargs_vec = s.dt.generic_args orelse continue;
+            const gargs = gargs_vec.items();
+
+            for (c.fields.items()) |f| {
+                if (f.dtype.generic_args == null) continue;
+                const dep_dt = try self.clone_dtype_with_subst_for_inst(f.dtype, &params, gargs);
+                if (dep_dt.generic_args == null) continue;
+                if (self.dtype_has_unresolved_placeholder(dep_dt)) continue;
+
+                const dep_base = if (mem.indexOf(u8, dep_dt.type_str.items, "__")) |idx| dep_dt.type_str.items[0..idx] else dep_dt.type_str.items;
+                const dep_cnode = registry.compounds_by_name.get(dep_base) orelse continue;
+                if (dep_cnode.node_variant == null) continue;
+                if (dep_cnode.node_variant.?.compound.type_params == null) continue;
+
+                const dep_mangled = try self.type_name_mangled(dep_dt);
+                if (self.mangled_contains_unresolved_placeholder(dep_mangled)) {
+                    self.allocator.free(dep_mangled);
+                    continue;
+                }
+                if (!spec_keys.contains(dep_mangled)) {
+                    spec_keys.put(dep_mangled, true) catch return TranspileError.MemoryAllocationFailed;
+                    specs.append(.{ .cnode = dep_cnode, .dt = dep_dt, .mangled = dep_mangled }) catch {
+                        return TranspileError.MemoryAllocationFailed;
+                    };
+                } else {
+                    self.allocator.free(dep_mangled);
+                }
+            }
+        }
+
+        // Expand specs with impl signature dependencies (e.g. Map<K,V>::values -> Vec<V>).
+        var si_impl: usize = 0;
+        while (si_impl < specs.items.len) {
+            const s = specs.items[si_impl];
+            si_impl += 1;
+            if (s.cnode.node_variant == null) continue;
+            const c = s.cnode.node_variant.?.compound;
+            const params = c.type_params orelse continue;
+            const gargs_vec = s.dt.generic_args orelse continue;
+            const gargs = gargs_vec.items();
+
+            var proc_stack = std.ArrayList(*Self).init(self.allocator);
+            defer proc_stack.deinit();
+            const root_proc = self.get_root();
+            proc_stack.append(root_proc) catch return TranspileError.MemoryAllocationFailed;
+
+            while (proc_stack.items.len > 0) {
+                const proc_opt = proc_stack.pop();
+                const proc = proc_opt orelse continue;
+                for (proc.nodes.items()) |node| {
+                    var node_copy = node;
+                    const node_ptr = &node_copy;
+                    if (node_ptr.type != .Impl or node_ptr.node_variant == null) continue;
+                    const im = node_ptr.node_variant.?.impl;
+                    if (im.quirk_name != null) continue;
+                    const base_name = if (mem.indexOf(u8, im.type_name.items, "__")) |idx| im.type_name.items[0..idx] else im.type_name.items;
+                    if (!mem.eql(u8, base_name, c.name.items)) continue;
+                    const impl_params = self.impl_type_params(node_ptr) orelse continue;
+                    if (impl_params.count != params.count) continue;
+                    if (gargs.len != impl_params.count) continue;
+
+                    for (im.methods.items()) |m| {
+                        if (m.type != .Function or m.node_variant == null) continue;
+                        const fnv = m.node_variant.?.function;
+                        if (fnv.rtype) |rt| {
+                            const rt_sub = try self.clone_dtype_with_subst_for_inst(&rt, impl_params, gargs);
+                            if (!self.dtype_has_unresolved_placeholder(rt_sub)) {
+                                try self.register_generic_instantiations_from_dtype(rt_sub);
+                                try self.add_spec_from_dtype(registry, rt_sub, &spec_keys, &specs);
+                            }
+                        }
+                        if (fnv.args) |args_nodes| {
+                            for (args_nodes.items()) |arg| {
+                                if (arg.type != .Variable or arg.node_variant == null) continue;
+                                const adt = arg.node_variant.?.variable.type;
+                                const adt_sub = try self.clone_dtype_with_subst_for_inst(adt, impl_params, gargs);
+                                if (!self.dtype_has_unresolved_placeholder(adt_sub)) {
+                                    try self.register_generic_instantiations_from_dtype(adt_sub);
+                                    try self.add_spec_from_dtype(registry, adt_sub, &spec_keys, &specs);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                for (proc.owned_nodes.items) |n| {
+                    if (n.type != .Impl or n.node_variant == null) continue;
+                    const im = n.node_variant.?.impl;
+                    if (im.quirk_name != null) continue;
+                    const base_name = if (mem.indexOf(u8, im.type_name.items, "__")) |idx| im.type_name.items[0..idx] else im.type_name.items;
+                    if (!mem.eql(u8, base_name, c.name.items)) continue;
+                    const impl_params = self.impl_type_params(n) orelse continue;
+                    if (impl_params.count != params.count) continue;
+                    if (gargs.len != impl_params.count) continue;
+
+                    for (im.methods.items()) |m| {
+                        if (m.type != .Function or m.node_variant == null) continue;
+                        const fnv = m.node_variant.?.function;
+                        if (fnv.rtype) |rt| {
+                            const rt_sub = try self.clone_dtype_with_subst_for_inst(&rt, impl_params, gargs);
+                            if (!self.dtype_has_unresolved_placeholder(rt_sub)) {
+                                try self.register_generic_instantiations_from_dtype(rt_sub);
+                                try self.add_spec_from_dtype(registry, rt_sub, &spec_keys, &specs);
+                            }
+                        }
+                        if (fnv.args) |args_nodes| {
+                            for (args_nodes.items()) |arg| {
+                                if (arg.type != .Variable or arg.node_variant == null) continue;
+                                const adt = arg.node_variant.?.variable.type;
+                                const adt_sub = try self.clone_dtype_with_subst_for_inst(adt, impl_params, gargs);
+                                if (!self.dtype_has_unresolved_placeholder(adt_sub)) {
+                                    try self.register_generic_instantiations_from_dtype(adt_sub);
+                                    try self.add_spec_from_dtype(registry, adt_sub, &spec_keys, &specs);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                for (proc.children.items) |child| {
+                    proc_stack.append(child) catch return TranspileError.MemoryAllocationFailed;
+                }
+            }
+        }
+
+        // Ensure impl emission sees all emitted generic specializations.
+        for (specs.items) |s| {
+            try self.register_generic_instantiations_from_dtype(s.dt);
         }
 
         // Forward typedefs allow pointer fields (including self-pointers) to refer to
@@ -7339,6 +7908,15 @@ pub const TranspileProcess = struct {
                 emitted_compounds.put(s.mangled, true) catch {
                     return TranspileError.MemoryAllocationFailed;
                 };
+                const root = self.get_root();
+                if (!root.emitted_generic_spec_keys.contains(s.mangled)) {
+                    const key = root.allocator.dupe(u8, s.mangled) catch {
+                        return TranspileError.MemoryAllocationFailed;
+                    };
+                    root.emitted_generic_spec_keys.put(key, true) catch {
+                        return TranspileError.MemoryAllocationFailed;
+                    };
+                }
                 _ = remaining_specs.swapRemove(si);
                 progress = true;
             }
@@ -7373,7 +7951,7 @@ pub const TranspileProcess = struct {
                         }
                     } else {
                         const dep = f.dtype.type_str.items;
-                        if (!reg.compounds_by_name.contains(dep)) continue;
+                        if (!registry.compounds_by_name.contains(dep)) continue;
                         if (!emitted_compounds.contains(dep)) {
                             deps_satisfied = false;
                             break;
@@ -7422,7 +8000,7 @@ pub const TranspileProcess = struct {
         }
 
         // Quirk canonical structs per signature
-        var q_it = reg.quirks_by_sig.iterator();
+        var q_it = registry.quirks_by_sig.iterator();
         while (q_it.next()) |entry| {
             const sig = entry.key_ptr.*;
             const qnode = entry.value_ptr.*;
@@ -7469,7 +8047,7 @@ pub const TranspileProcess = struct {
         }
 
         // Quirk name aliases
-        var qn_it = reg.quirk_sig_by_name.iterator();
+        var qn_it = registry.quirk_sig_by_name.iterator();
         while (qn_it.next()) |entry| {
             const qname = entry.key_ptr.*;
             const sig = entry.value_ptr.*;
@@ -7693,6 +8271,7 @@ pub const TranspileProcess = struct {
         // duplicate identical prototypes are OK in C.
         var plain_emitted = std.StringHashMap(bool).init(self.backing_allocator);
         defer plain_emitted.deinit();
+        try self.emit_plain_impl_method_prototypes_registry(&plain_emitted);
         try self.emit_plain_impl_method_prototypes_module(self, &plain_emitted);
         try self.write("\n");
 
@@ -7748,123 +8327,209 @@ pub const TranspileProcess = struct {
         try self.write("// --- Plain impl methods ---\n\n");
         var emitted = std.StringHashMap(bool).init(self.backing_allocator);
         defer emitted.deinit();
+        try self.emit_plain_impl_methods_registry(&emitted);
         try self.emit_plain_impl_methods_module(self, &emitted);
     }
 
-    fn emit_plain_impl_method_prototypes_module(self: *Self, proc: *Self, emitted: *std.StringHashMap(bool)) TranspileError!void {
-        for (proc.owned_nodes.items) |n| {
-            if (n.type != .Impl or n.node_variant == null) continue;
-            const im = n.node_variant.?.impl;
-            if (im.quirk_name != null) continue;
-            if (self.mangled_contains_unresolved_placeholder(im.type_name.items)) continue;
+    fn emit_plain_impl_method_prototypes_registry(self: *Self, emitted: *std.StringHashMap(bool)) TranspileError!void {
+        const reg = self.root_registry() orelse return;
+        var it = reg.impls_by_key.iterator();
+        while (it.next()) |entry| {
+            const impl_node = entry.value_ptr.*;
+            try self.emit_plain_impl_method_prototypes_from_node(impl_node, emitted);
+        }
+    }
 
-            if (self.impl_type_params(n)) |params| {
-                var inst_keys = std.StringHashMap(bool).init(self.allocator);
-                defer {
-                    var it = inst_keys.iterator();
-                    while (it.next()) |e| {
-                        self.allocator.free(e.key_ptr.*);
-                    }
-                    inst_keys.deinit();
+    fn emit_plain_impl_method_prototypes_from_node(self: *Self, n: *ast.Node, emitted: *std.StringHashMap(bool)) TranspileError!void {
+        if (n.type != .Impl or n.node_variant == null) return;
+        const im = n.node_variant.?.impl;
+        if (im.quirk_name != null) return;
+        if (self.mangled_contains_unresolved_placeholder(im.type_name.items)) return;
+
+        if (self.impl_type_params(n)) |params| {
+            var inst_keys = std.StringHashMap(bool).init(self.allocator);
+            defer {
+                var it = inst_keys.iterator();
+                while (it.next()) |e| {
+                    self.allocator.free(e.key_ptr.*);
                 }
+                inst_keys.deinit();
+            }
 
-                var inst_list = std.ArrayList(*const dtype.DataType).init(self.allocator);
-                defer inst_list.deinit();
-                const base_name = if (mem.indexOf(u8, im.type_name.items, "__")) |idx| im.type_name.items[0..idx] else im.type_name.items;
-                try self.collect_generic_instantiations_recursive(self, base_name, &inst_keys, &inst_list);
+            var inst_list = std.ArrayList(*const dtype.DataType).init(self.allocator);
+            defer inst_list.deinit();
+            const base_name = if (mem.indexOf(u8, im.type_name.items, "__")) |idx| im.type_name.items[0..idx] else im.type_name.items;
+            try self.collect_generic_instantiations_recursive(self, base_name, &inst_keys, &inst_list);
 
-                for (inst_list.items) |dt| {
-                    if (dt.generic_args == null) continue;
-                    const gargs = dt.generic_args.?.items();
-                    if (gargs.len != params.count) continue;
-                    if (!self.generic_args_are_concrete(params, gargs)) continue;
-                    if (self.dtype_contains_type_param(dt, params)) continue;
+            for (inst_list.items) |dt| {
+                if (dt.generic_args == null) continue;
+                const gargs = dt.generic_args.?.items();
+                if (gargs.len != params.count) continue;
+                if (!self.generic_args_are_concrete(params, gargs)) continue;
+                if (self.dtype_contains_type_param(dt, params)) continue;
 
-                    const mangled = try self.type_name_mangled(dt);
-                    defer self.allocator.free(mangled);
-                    if (self.mangled_contains_type_param(mangled, params)) continue;
-                    if (self.mangled_contains_unresolved_placeholder(mangled)) continue;
+                const mangled = try self.type_name_mangled(dt);
+                defer self.allocator.free(mangled);
+                if (self.mangled_contains_type_param(mangled, params)) continue;
+                if (self.mangled_contains_unresolved_placeholder(mangled)) continue;
 
-                    for (im.methods.items()) |m| {
-                        if (m.type != .Function or m.node_variant == null) continue;
-                        const fnv = m.node_variant.?.function;
-                        if (fnv.name == null) continue;
-                        const base = base_method_name_from_generated(fnv.name.?.items) orelse continue;
-                        const spec_name = std.fmt.allocPrint(self.allocator, "{s}__{s}", .{ mangled, base }) catch {
-                            return TranspileError.MemoryAllocationFailed;
-                        };
+                for (im.methods.items()) |m| {
+                    if (m.type != .Function or m.node_variant == null) continue;
+                    const fnv = m.node_variant.?.function;
+                    if (fnv.name == null) continue;
+                    const base = base_method_name_from_generated(fnv.name.?.items) orelse continue;
+                    const spec_name = std.fmt.allocPrint(self.allocator, "{s}__{s}", .{ mangled, base }) catch {
+                        return TranspileError.MemoryAllocationFailed;
+                    };
 
-                        const gop = emitted.getOrPut(spec_name) catch return TranspileError.MemoryAllocationFailed;
-                        if (gop.found_existing) continue;
-                        gop.value_ptr.* = true;
+                    const gop = emitted.getOrPut(spec_name) catch return TranspileError.MemoryAllocationFailed;
+                    if (gop.found_existing) continue;
+                    gop.value_ptr.* = true;
 
-                        {
-                            const prev_params = self.type_subst_params;
-                            const prev_args = self.type_subst_args;
-                            self.type_subst_params = params;
-                            self.type_subst_args = gargs;
-                            defer {
-                                self.type_subst_params = prev_params;
-                                self.type_subst_args = prev_args;
-                            }
-
-                            if (fnv.rtype) |rt| {
-                                try self.write_type(rt);
-                            } else {
-                                try self.write("void");
-                            }
-                            try self.write(" ");
-                            try self.write(spec_name);
-                            try self.write("(");
-                            self.in_function_params = true;
-                            if (fnv.args) |args| {
-                                for (args.items(), 0..) |arg, i| {
-                                    if (i > 0) try self.write(", ");
-                                    try self.transpile_node(arg.*);
-                                }
-                            }
-                            self.in_function_params = false;
-                            try self.write(");\n");
+                    {
+                        const prev_params = self.type_subst_params;
+                        const prev_args = self.type_subst_args;
+                        self.type_subst_params = params;
+                        self.type_subst_args = gargs;
+                        defer {
+                            self.type_subst_params = prev_params;
+                            self.type_subst_args = prev_args;
                         }
+
+                        if (fnv.rtype) |rt| {
+                            try self.write_type(rt);
+                        } else {
+                            try self.write("void");
+                        }
+                        try self.write(" ");
+                        try self.write(spec_name);
+                        try self.write("(");
+                        self.in_function_params = true;
+                        if (fnv.args) |args| {
+                            for (args.items(), 0..) |arg, i| {
+                                if (i > 0) try self.write(", ");
+                                try self.transpile_node(arg.*);
+                            }
+                        }
+                        self.in_function_params = false;
+                        try self.write(");\n");
                     }
                 }
-                continue;
             }
 
-            if (mem.indexOf(u8, im.type_name.items, "__") != null) {
-                if (!(try self.concrete_impl_is_instantiated(im.type_name.items))) continue;
-            }
+            const root = self.get_root();
+            var spec_it = root.emitted_generic_spec_keys.iterator();
+            while (spec_it.next()) |entry| {
+                const mangled_name = entry.key_ptr.*;
+                const idx = mem.indexOf(u8, mangled_name, "__") orelse continue;
+                const spec_base = mangled_name[0..idx];
+                if (!mem.eql(u8, spec_base, base_name)) continue;
+                if (self.mangled_contains_unresolved_placeholder(mangled_name)) continue;
+                if (self.mangled_contains_type_param(mangled_name, params)) continue;
+                const dt = (try self.dtype_from_mangled_type(mangled_name)) orelse continue;
+                if (dt.generic_args == null) continue;
+                const gargs = dt.generic_args.?.items();
+                if (gargs.len != params.count) continue;
+                if (!self.generic_args_are_concrete(params, gargs)) continue;
+                if (self.dtype_contains_type_param(dt, params)) continue;
 
-            for (im.methods.items()) |m| {
-                if (m.type != .Function or m.node_variant == null) continue;
-                const fnv = m.node_variant.?.function;
-                if (fnv.name == null) continue;
-                const fname = fnv.name.?.items;
-                if (emitted.contains(fname)) continue;
-                emitted.put(fname, true) catch return TranspileError.MemoryAllocationFailed;
+                for (im.methods.items()) |m| {
+                    if (m.type != .Function or m.node_variant == null) continue;
+                    const fnv = m.node_variant.?.function;
+                    if (fnv.name == null) continue;
+                    const base = base_method_name_from_generated(fnv.name.?.items) orelse continue;
+                    const spec_name = std.fmt.allocPrint(self.allocator, "{s}__{s}", .{ mangled_name, base }) catch {
+                        return TranspileError.MemoryAllocationFailed;
+                    };
 
-                if (fnv.rtype) |rt| {
-                    try self.write_type(rt);
-                } else {
-                    try self.write("void");
-                }
-                try self.write(" ");
-                try self.write(fname);
-                try self.write("(");
-                self.in_function_params = true;
-                if (fnv.args) |args| {
-                    for (args.items(), 0..) |arg, i| {
-                        if (i > 0) try self.write(", ");
-                        try self.transpile_node(arg.*);
+                    const gop = emitted.getOrPut(spec_name) catch return TranspileError.MemoryAllocationFailed;
+                    if (gop.found_existing) continue;
+                    gop.value_ptr.* = true;
+
+                    {
+                        const prev_params = self.type_subst_params;
+                        const prev_args = self.type_subst_args;
+                        self.type_subst_params = params;
+                        self.type_subst_args = gargs;
+                        defer {
+                            self.type_subst_params = prev_params;
+                            self.type_subst_args = prev_args;
+                        }
+
+                        if (fnv.rtype) |rt| {
+                            try self.write_type(rt);
+                        } else {
+                            try self.write("void");
+                        }
+                        try self.write(" ");
+                        try self.write(spec_name);
+                        try self.write("(");
+                        self.in_function_params = true;
+                        if (fnv.args) |args| {
+                            for (args.items(), 0..) |arg, i| {
+                                if (i > 0) try self.write(", ");
+                                try self.transpile_node(arg.*);
+                            }
+                        }
+                        self.in_function_params = false;
+                        try self.write(");\n");
                     }
                 }
-                self.in_function_params = false;
-                try self.write(");\n");
             }
+            return;
+        }
+
+        if (mem.indexOf(u8, im.type_name.items, "__") != null) {
+            if (!(try self.concrete_impl_is_instantiated(im.type_name.items))) return;
+        }
+
+        for (im.methods.items()) |m| {
+            if (m.type != .Function or m.node_variant == null) continue;
+            const fnv = m.node_variant.?.function;
+            if (fnv.name == null) continue;
+            const fname = fnv.name.?.items;
+            if (emitted.contains(fname)) continue;
+            emitted.put(fname, true) catch return TranspileError.MemoryAllocationFailed;
+
+            if (fnv.rtype) |rt| {
+                try self.write_type(rt);
+            } else {
+                try self.write("void");
+            }
+            try self.write(" ");
+            try self.write(fname);
+            try self.write("(");
+            self.in_function_params = true;
+            if (fnv.args) |args| {
+                for (args.items(), 0..) |arg, i| {
+                    if (i > 0) try self.write(", ");
+                    try self.transpile_node(arg.*);
+                }
+            }
+            self.in_function_params = false;
+            try self.write(");\n");
+        }
+    }
+
+    fn emit_plain_impl_method_prototypes_module(self: *Self, proc: *Self, emitted: *std.StringHashMap(bool)) TranspileError!void {
+        for (proc.nodes.items()) |*n| {
+            try self.emit_plain_impl_method_prototypes_from_node(n, emitted);
+        }
+        for (proc.owned_nodes.items) |n| {
+            try self.emit_plain_impl_method_prototypes_from_node(n, emitted);
         }
 
         for (proc.children.items) |child| {
             try self.emit_plain_impl_method_prototypes_module(child, emitted);
+        }
+    }
+
+    fn emit_plain_impl_methods_registry(self: *Self, emitted: *std.StringHashMap(bool)) TranspileError!void {
+        const reg = self.root_registry() orelse return;
+        var it = reg.impls_by_key.iterator();
+        while (it.next()) |entry| {
+            const impl_node = entry.value_ptr.*;
+            try self.emit_plain_impl_methods_from_node(impl_node, emitted);
         }
     }
 
@@ -7974,6 +8639,9 @@ pub const TranspileProcess = struct {
 
             if (dep_name) |dep| {
                 defer if (needs_free) self.allocator.free(dep);
+                const reg = self.root_registry() orelse return true;
+                const dep_base = if (mem.indexOf(u8, dep, "__")) |idx| dep[0..idx] else dep;
+                if (!reg.compounds_by_name.contains(dep_base)) continue;
                 if (!emitted.contains(dep)) return false;
             }
         }
@@ -8041,9 +8709,17 @@ pub const TranspileProcess = struct {
 
         const root = self.get_root();
         for (root.forced_generic_instantiations.items) |dt| {
-            if (dt.type != .Unknown or dt.type_str.items.len == 0) continue;
-            if (!mem.eql(u8, dt.type_str.items, name)) continue;
+            if (dt.type_str.items.len == 0) continue;
+            if (@intFromPtr(dt.type_str.items.ptr) == 0) continue;
+            const dt_base = if (mem.indexOf(u8, dt.type_str.items, "__")) |idx| dt.type_str.items[0..idx] else dt.type_str.items;
+            if (!mem.eql(u8, dt_base, name)) continue;
+            if (self.dtype_has_unresolved_placeholder(dt)) continue;
+
             const key = try self.type_name_mangled(dt);
+            if (self.mangled_contains_unresolved_placeholder(key)) {
+                self.allocator.free(key);
+                continue;
+            }
             if (!keys.contains(key)) {
                 keys.put(key, true) catch return TranspileError.MemoryAllocationFailed;
                 out.append(dt) catch return TranspileError.MemoryAllocationFailed;
@@ -8153,7 +8829,19 @@ pub const TranspileProcess = struct {
     }
 
     fn collect_generic_instantiations_dtype(self: *Self, dt: *const dtype.DataType, name: []const u8, keys: *std.StringHashMap(bool), out: *std.ArrayList(*const dtype.DataType)) TranspileError!void {
-        if (dt.type == .Unknown and mem.eql(u8, dt.type_str.items, name)) {
+        if (dt.type_str.items.len > 0 and @intFromPtr(dt.type_str.items.ptr) == 0) return;
+        if (dt.type_str.items.len > 0) {
+            const dt_base = if (mem.indexOf(u8, dt.type_str.items, "__")) |idx| dt.type_str.items[0..idx] else dt.type_str.items;
+            if (!mem.eql(u8, dt_base, name)) {
+                if (dt.generic_args) |gargs| {
+                    for (gargs.items()) |ga| {
+                        try self.collect_generic_instantiations_dtype(ga, name, keys, out);
+                    }
+                }
+                return;
+            }
+        }
+        if (dt.type_str.items.len > 0) {
             if (dt.generic_args != null) {
                 if (self.dtype_has_unresolved_placeholder(dt)) return;
                 const key = try self.type_name_mangled(dt);
@@ -8166,6 +8854,18 @@ pub const TranspileProcess = struct {
                     out.append(dt) catch return TranspileError.MemoryAllocationFailed;
                 } else {
                     self.allocator.free(key);
+                }
+            } else if (mem.indexOf(u8, dt.type_str.items, "__") != null) {
+                if (try self.dtype_from_mangled_type(dt.type_str.items)) |synthetic| {
+                    if (!self.dtype_has_unresolved_placeholder(synthetic)) {
+                        const key = try self.type_name_mangled(synthetic);
+                        if (!keys.contains(key)) {
+                            keys.put(key, true) catch return TranspileError.MemoryAllocationFailed;
+                            out.append(synthetic) catch return TranspileError.MemoryAllocationFailed;
+                        } else {
+                            self.allocator.free(key);
+                        }
+                    }
                 }
             }
         }
@@ -8217,12 +8917,86 @@ pub const TranspileProcess = struct {
         return out;
     }
 
-    fn seed_forced_generic_instantiations_from_impl_signatures_module(self: *Self, proc: *Self) TranspileError!void {
-        for (proc.owned_nodes.items) |n| {
-            if (n.type != .Impl or n.node_variant == null) continue;
-            const im = n.node_variant.?.impl;
-            const params = self.impl_type_params(n) orelse continue;
+    fn seed_forced_generic_instantiations_from_impl_signatures_node(self: *Self, n: *ast.Node) TranspileError!void {
+        if (n.type != .Impl or n.node_variant == null) return;
+        const im = n.node_variant.?.impl;
+        const params = self.impl_type_params(n) orelse return;
 
+        var inst_keys = std.StringHashMap(bool).init(self.allocator);
+        defer {
+            var it = inst_keys.iterator();
+            while (it.next()) |e| {
+                self.allocator.free(e.key_ptr.*);
+            }
+            inst_keys.deinit();
+        }
+
+        var inst_list = std.ArrayList(*const dtype.DataType).init(self.allocator);
+        defer inst_list.deinit();
+        const base_name = if (mem.indexOf(u8, im.type_name.items, "__")) |idx| im.type_name.items[0..idx] else im.type_name.items;
+        try self.collect_generic_instantiations_recursive(self, base_name, &inst_keys, &inst_list);
+
+        for (inst_list.items) |dt| {
+            if (dt.generic_args == null) continue;
+            const gargs = dt.generic_args.?.items();
+            if (gargs.len != params.count) continue;
+            if (!self.generic_args_are_concrete(params, gargs)) continue;
+            if (self.dtype_contains_type_param(dt, params)) continue;
+
+            const mangled = try self.type_name_mangled(dt);
+            defer self.allocator.free(mangled);
+            if (self.mangled_contains_type_param(mangled, params)) continue;
+            if (self.mangled_contains_unresolved_placeholder(mangled)) continue;
+
+            for (im.methods.items()) |m| {
+                if (m.type != .Function or m.node_variant == null) continue;
+                const fnv = m.node_variant.?.function;
+
+                if (fnv.rtype) |rt| {
+                    const rt_sub = try self.clone_dtype_with_subst_for_inst(&rt, params, gargs);
+                    if (!self.dtype_has_unresolved_placeholder(rt_sub)) {
+                        try self.register_generic_instantiations_from_dtype(rt_sub);
+                    }
+                }
+
+                if (fnv.args) |args_nodes| {
+                    for (args_nodes.items()) |arg| {
+                        if (arg.type != .Variable or arg.node_variant == null) continue;
+                        const adt = arg.node_variant.?.variable.type;
+                        const adt_sub = try self.clone_dtype_with_subst_for_inst(adt, params, gargs);
+                        if (!self.dtype_has_unresolved_placeholder(adt_sub)) {
+                            try self.register_generic_instantiations_from_dtype(adt_sub);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn seed_forced_generic_instantiations_from_impl_signatures_module(self: *Self, proc: *Self) TranspileError!void {
+        for (proc.nodes.items()) |*n| {
+            try self.seed_forced_generic_instantiations_from_impl_signatures_node(n);
+        }
+        for (proc.owned_nodes.items) |n| {
+            try self.seed_forced_generic_instantiations_from_impl_signatures_node(n);
+        }
+
+        for (proc.children.items) |child| {
+            try self.seed_forced_generic_instantiations_from_impl_signatures_module(child);
+        }
+    }
+
+    fn seed_forced_generic_instantiations_from_impl_signatures(self: *Self) TranspileError!void {
+        try self.seed_forced_generic_instantiations_from_impl_signatures_module(self.get_root());
+    }
+
+    fn emit_plain_impl_methods_from_node(self: *Self, n: *ast.Node, emitted: *std.StringHashMap(bool)) TranspileError!void {
+        if (n.type != .Impl or n.node_variant == null) return;
+        const im = n.node_variant.?.impl;
+        if (im.quirk_name != null) return;
+        if (self.mangled_contains_unresolved_placeholder(im.type_name.items)) return;
+
+        if (self.impl_type_params(n)) |params| {
             var inst_keys = std.StringHashMap(bool).init(self.allocator);
             defer {
                 var it = inst_keys.iterator();
@@ -8241,130 +9015,118 @@ pub const TranspileProcess = struct {
                 if (dt.generic_args == null) continue;
                 const gargs = dt.generic_args.?.items();
                 if (gargs.len != params.count) continue;
-                if (!self.generic_args_are_concrete(params, gargs)) continue;
                 if (self.dtype_contains_type_param(dt, params)) continue;
 
                 const mangled = try self.type_name_mangled(dt);
                 defer self.allocator.free(mangled);
                 if (self.mangled_contains_type_param(mangled, params)) continue;
-                if (self.mangled_contains_unresolved_placeholder(mangled)) continue;
 
                 for (im.methods.items()) |m| {
                     if (m.type != .Function or m.node_variant == null) continue;
                     const fnv = m.node_variant.?.function;
+                    if (fnv.body == null) continue;
+                    if (fnv.name == null) continue;
+                    const base = base_method_name_from_generated(fnv.name.?.items) orelse continue;
+                    const spec_name = std.fmt.allocPrint(self.allocator, "{s}__{s}", .{ mangled, base }) catch {
+                        return TranspileError.MemoryAllocationFailed;
+                    };
 
-                    if (fnv.rtype) |rt| {
-                        const rt_sub = try self.clone_dtype_with_subst_for_inst(&rt, params, gargs);
-                        if (rt_sub.generic_args != null and !self.dtype_has_unresolved_placeholder(rt_sub)) {
-                            try self.register_generic_instantiation(rt_sub);
-                        }
-                    }
+                    const gop = emitted.getOrPut(spec_name) catch return TranspileError.MemoryAllocationFailed;
+                    if (gop.found_existing) continue;
+                    gop.value_ptr.* = true;
 
-                    if (fnv.args) |args_nodes| {
-                        for (args_nodes.items()) |arg| {
-                            if (arg.type != .Variable or arg.node_variant == null) continue;
-                            const adt = arg.node_variant.?.variable.type;
-                            const adt_sub = try self.clone_dtype_with_subst_for_inst(adt, params, gargs);
-                            if (adt_sub.generic_args != null and !self.dtype_has_unresolved_placeholder(adt_sub)) {
-                                try self.register_generic_instantiation(adt_sub);
-                            }
+                    {
+                        const prev_params = self.type_subst_params;
+                        const prev_args = self.type_subst_args;
+                        const prev_override = self.override_fn_name;
+                        self.type_subst_params = params;
+                        self.type_subst_args = gargs;
+                        self.override_fn_name = spec_name;
+                        defer {
+                            self.type_subst_params = prev_params;
+                            self.type_subst_args = prev_args;
+                            self.override_fn_name = prev_override;
                         }
+
+                        try self.transpile_node(m.*);
                     }
+                    try self.write("\n\n");
                 }
             }
+
+            const root = self.get_root();
+            var spec_it = root.emitted_generic_spec_keys.iterator();
+            while (spec_it.next()) |entry| {
+                const mangled_name = entry.key_ptr.*;
+                const idx = mem.indexOf(u8, mangled_name, "__") orelse continue;
+                const spec_base = mangled_name[0..idx];
+                if (!mem.eql(u8, spec_base, base_name)) continue;
+                if (self.mangled_contains_unresolved_placeholder(mangled_name)) continue;
+                if (self.mangled_contains_type_param(mangled_name, params)) continue;
+                const dt = (try self.dtype_from_mangled_type(mangled_name)) orelse continue;
+                if (dt.generic_args == null) continue;
+                const gargs = dt.generic_args.?.items();
+                if (gargs.len != params.count) continue;
+                if (self.dtype_contains_type_param(dt, params)) continue;
+
+                for (im.methods.items()) |m| {
+                    if (m.type != .Function or m.node_variant == null) continue;
+                    const fnv = m.node_variant.?.function;
+                    if (fnv.body == null) continue;
+                    if (fnv.name == null) continue;
+                    const base = base_method_name_from_generated(fnv.name.?.items) orelse continue;
+                    const spec_name = std.fmt.allocPrint(self.allocator, "{s}__{s}", .{ mangled_name, base }) catch {
+                        return TranspileError.MemoryAllocationFailed;
+                    };
+
+                    const gop = emitted.getOrPut(spec_name) catch return TranspileError.MemoryAllocationFailed;
+                    if (gop.found_existing) continue;
+                    gop.value_ptr.* = true;
+
+                    {
+                        const prev_params = self.type_subst_params;
+                        const prev_args = self.type_subst_args;
+                        const prev_override = self.override_fn_name;
+                        self.type_subst_params = params;
+                        self.type_subst_args = gargs;
+                        self.override_fn_name = spec_name;
+                        defer {
+                            self.type_subst_params = prev_params;
+                            self.type_subst_args = prev_args;
+                            self.override_fn_name = prev_override;
+                        }
+
+                        try self.transpile_node(m.*);
+                    }
+                    try self.write("\n\n");
+                }
+            }
+            return;
         }
 
-        for (proc.children.items) |child| {
-            try self.seed_forced_generic_instantiations_from_impl_signatures_module(child);
+        if (mem.indexOf(u8, im.type_name.items, "__") != null) {
+            if (!(try self.concrete_impl_is_instantiated(im.type_name.items))) return;
         }
-    }
 
-    fn seed_forced_generic_instantiations_from_impl_signatures(self: *Self) TranspileError!void {
-        try self.seed_forced_generic_instantiations_from_impl_signatures_module(self.get_root());
+        for (im.methods.items()) |m| {
+            if (m.type != .Function or m.node_variant == null) continue;
+            const fnv = m.node_variant.?.function;
+            if (fnv.body == null) continue;
+            if (fnv.name == null) continue;
+            const fname = fnv.name.?.items;
+            if (emitted.contains(fname)) continue;
+            emitted.put(fname, true) catch return TranspileError.MemoryAllocationFailed;
+            try self.transpile_node(m.*);
+            try self.write("\n\n");
+        }
     }
 
     fn emit_plain_impl_methods_module(self: *Self, proc: *Self, emitted: *std.StringHashMap(bool)) TranspileError!void {
+        for (proc.nodes.items()) |*n| {
+            try self.emit_plain_impl_methods_from_node(n, emitted);
+        }
         for (proc.owned_nodes.items) |n| {
-            if (n.type != .Impl or n.node_variant == null) continue;
-            const im = n.node_variant.?.impl;
-            if (im.quirk_name != null) continue;
-            if (self.mangled_contains_unresolved_placeholder(im.type_name.items)) continue;
-
-            if (self.impl_type_params(n)) |params| {
-                var inst_keys = std.StringHashMap(bool).init(self.allocator);
-                defer {
-                    var it = inst_keys.iterator();
-                    while (it.next()) |e| {
-                        self.allocator.free(e.key_ptr.*);
-                    }
-                    inst_keys.deinit();
-                }
-
-                var inst_list = std.ArrayList(*const dtype.DataType).init(self.allocator);
-                defer inst_list.deinit();
-                const base_name = if (mem.indexOf(u8, im.type_name.items, "__")) |idx| im.type_name.items[0..idx] else im.type_name.items;
-                try self.collect_generic_instantiations_recursive(self, base_name, &inst_keys, &inst_list);
-
-                for (inst_list.items) |dt| {
-                    if (dt.generic_args == null) continue;
-                    const gargs = dt.generic_args.?.items();
-                    if (gargs.len != params.count) continue;
-                    if (self.dtype_contains_type_param(dt, params)) continue;
-
-                    const mangled = try self.type_name_mangled(dt);
-                    defer self.allocator.free(mangled);
-                    if (self.mangled_contains_type_param(mangled, params)) continue;
-
-                    for (im.methods.items()) |m| {
-                        if (m.type != .Function or m.node_variant == null) continue;
-                        const fnv = m.node_variant.?.function;
-                        if (fnv.body == null) continue;
-                        if (fnv.name == null) continue;
-                        const base = base_method_name_from_generated(fnv.name.?.items) orelse continue;
-                        const spec_name = std.fmt.allocPrint(self.allocator, "{s}__{s}", .{ mangled, base }) catch {
-                            return TranspileError.MemoryAllocationFailed;
-                        };
-
-                        const gop = emitted.getOrPut(spec_name) catch return TranspileError.MemoryAllocationFailed;
-                        if (gop.found_existing) continue;
-                        gop.value_ptr.* = true;
-
-                        {
-                            const prev_params = self.type_subst_params;
-                            const prev_args = self.type_subst_args;
-                            const prev_override = self.override_fn_name;
-                            self.type_subst_params = params;
-                            self.type_subst_args = gargs;
-                            self.override_fn_name = spec_name;
-                            defer {
-                                self.type_subst_params = prev_params;
-                                self.type_subst_args = prev_args;
-                                self.override_fn_name = prev_override;
-                            }
-
-                            try self.transpile_node(m.*);
-                        }
-                        try self.write("\n\n");
-                    }
-                }
-                continue;
-            }
-
-            if (mem.indexOf(u8, im.type_name.items, "__") != null) {
-                if (!(try self.concrete_impl_is_instantiated(im.type_name.items))) continue;
-            }
-
-            for (im.methods.items()) |m| {
-                if (m.type != .Function or m.node_variant == null) continue;
-                const fnv = m.node_variant.?.function;
-                if (fnv.body == null) continue;
-                if (fnv.name == null) continue;
-                const fname = fnv.name.?.items;
-                if (emitted.contains(fname)) continue;
-                emitted.put(fname, true) catch return TranspileError.MemoryAllocationFailed;
-                try self.transpile_node(m.*);
-                try self.write("\n\n");
-            }
+            try self.emit_plain_impl_methods_from_node(n, emitted);
         }
 
         for (proc.children.items) |child| {
@@ -8463,6 +9225,9 @@ pub const TranspileProcess = struct {
         // Type check after imports are parsed (so imported signatures are available).
         try self.typecheck_all();
 
+        // Seed generic instantiations from signatures/locals across all modules.
+        try self.seed_forced_generic_instantiations_from_signatures();
+
         // Seed additional generic instantiations that appear only after substituting
         // generic impl method signatures (e.g. Map<K,V>::keys -> Vec<K>).
         try self.seed_forced_generic_instantiations_from_impl_signatures();
@@ -8477,6 +9242,10 @@ pub const TranspileProcess = struct {
         if (!self.is_importing) {
             try self.emit_user_types();
         }
+
+        // Re-seed impl signature instantiations after emitting user types so
+        // field-driven generic specializations are visible to impl emission.
+        try self.seed_forced_generic_instantiations_from_impl_signatures();
 
         // Emit forward declarations for all functions so calls work even when
         // function bodies are declared later in the file.

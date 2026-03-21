@@ -277,6 +277,12 @@ impl Vec<T> {
   }
 }
 
+impl Vec<T> Clearable {
+  pub clear() {
+    self.len = 0;
+  }
+}
+
 impl Vec<str> {
   // Join elements with a separator.
   pub join(str sep) str {
