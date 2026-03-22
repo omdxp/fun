@@ -1,0 +1,14 @@
+// Expect: compiler error that let cannot infer enum for dot shorthand when variants are ambiguous.
+
+enum A {
+  Same
+}
+
+enum B {
+  Same
+}
+
+fun main() {
+  let v = .Same;
+  _ = v;
+}

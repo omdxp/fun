@@ -588,6 +588,53 @@ test "typecheck let inference covers compounds methods function returns and gene
     try runTranspileExpectOk(std.testing.allocator, "typecheck_let_infer_full_ok.fn", input);
 }
 
+test "typecheck let inference edge cases ok" {
+    const input =
+        "compound Point { num x; num y; }\n" ++
+        "fun make_point(num x, num y) Point { ret Point{x = x, y = y}; }\n" ++
+        "fun min_num(num a, num b) num { if a < b { ret a; } ret b; }\n" ++
+        "fun max_num(num a, num b) num { if a > b { ret a; } ret b; }\n" ++
+        "fun abs_dec(dec x) dec { if x < 0 { ret -x; } ret x; }\n" ++
+        "fun lerp_dec(num a, num b, dec t) dec { ret (a + b) + t; }\n" ++
+        "fun main() {\n" ++
+        "  let n = 42;\n" ++
+        "  let d = 3.5;\n" ++
+        "  let p = Point{x = 1, y = 2};\n" ++
+        "  let p2 = make_point(3, 4);\n" ++
+        "  let arr = [1, 2, 3];\n" ++
+        "  let points = [Point{x = 0, y = 1}, Point{x = 2, y = 3}];\n" ++
+        "  let mix_point = make_point(min_num(n, 10), max_num(n, 20));\n" ++
+        "  let mix_points = [make_point(n, n + 1), make_point(n + 2, n + 3)];\n" ++
+        "  let dec_mix = lerp_dec(n, n + 2, d) + abs_dec(d / 2);\n" ++
+        "  let dec_mix2 = lerp_dec(n, n + 2, d + 1) / 2;\n" ++
+        "  num n2 = n;\n" ++
+        "  dec d2 = d;\n" ++
+        "  Point p3 = p2;\n" ++
+        "  let arr2 = arr;\n" ++
+        "  Point p4 = mix_point;\n" ++
+        "  dec d3 = dec_mix;\n" ++
+        "  dec d4 = dec_mix2;\n" ++
+        "  Point p5 = points[0];\n" ++
+        "  Point p6 = mix_points[0];\n" ++
+        "  num n3 = arr2[0];\n" ++
+        "  num s = n2 + n3;\n" ++
+        "  if s > 0 { ret; }\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_let_infer_edge_ok.fn", input);
+}
+
+test "typecheck let inference dec narrowing errors" {
+    const input =
+        "fun lerp_dec(num a, num b, dec t) dec { ret (a + b) + t; }\n" ++
+        "fun main() {\n" ++
+        "  let dec_mix2 = lerp_dec(1, 2, 0.5) / 2;\n" ++
+        "  num bad = dec_mix2;\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_let_infer_dec_narrow_err.fn", input);
+}
+
 test "typecheck let cannot infer quirk type" {
     const input =
         "compound Point { num x; num y; }\n" ++

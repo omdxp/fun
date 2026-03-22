@@ -1750,6 +1750,156 @@ test "fls e2e: locals, dot completion, member signatureHelp" {
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: let inference hover types" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "enum Color { Red, Green, Blue }\n" ++
+        "enum Status { Ok, Err }\n" ++
+        "compound Point {\n" ++
+        "  num x;\n" ++
+        "  num y;\n" ++
+        "}\n" ++
+        "fun make_point(num x, num y) Point { ret Point{x = x, y = y}; }\n" ++
+        "fun min_num(num left, num right) num { if left < right { ret left; } ret right; }\n" ++
+        "fun max_num(num left, num right) num { if left > right { ret left; } ret right; }\n" ++
+        "fun abs_dec(dec x) dec { if x < 0 { ret -x; } ret x; }\n" ++
+        "fun lerp_dec(num a, num b, dec t) dec { ret (a + b) + t; }\n" ++
+        "fun main() {\n" ++
+        "  let n = 42;\n" ++
+        "  let d = 3.5;\n" ++
+        "  let s = \"hello\";\n" ++
+        "  let c = 'Z';\n" ++
+        "  let b = true;\n" ++
+        "  let arr = [1, 2, 3];\n" ++
+        "  let p = Point{x = 1, y = 2};\n" ++
+        "  let p2 = make_point(3, 4);\n" ++
+        "  let pptr = &p;\n" ++
+        "  let color = Color.Red;\n" ++
+        "  let color2 = Color.Green;\n" ++
+        "  let status = Status.Ok;\n" ++
+        "  let points = [Point{x = 0, y = 1}, Point{x = 2, y = 3}];\n" ++
+        "  let n2 = (n + 5) * (n - 3);\n" ++
+        "  let arr2 = [n, n + 1, n + 2];\n" ++
+        "  let idx = (n - 40) / 2;\n" ++
+        "  let pick = arr2[idx];\n" ++
+        "  let p3 = Point{x = n + 1, y = (n - 2) * 3};\n" ++
+        "  let psum = (p.x + p.y) * 2;\n" ++
+        "  let neg = -(n - 5);\n" ++
+        "  let dec_expr = (d * d) + (d / 2);\n" ++
+        "  let nested = make_point(n + 1, n - 1);\n" ++
+        "  let nested_sum = (nested.x + nested.y) / 2;\n" ++
+        "  let dec_mix = lerp_dec(n, n + 2, d) + abs_dec(d / 2);\n" ++
+        "  let dec_mix2 = lerp_dec(n2, n2 + n, (d + 1)) / 2;\n" ++
+        "  let mix_point = make_point(min_num(n, n2), max_num(n, n2));\n" ++
+        "  let mix_points = [make_point(n, n + 1), make_point(n2, n2 + 1)];\n" ++
+        "  let mp_x = mix_points[0].x;\n" ++
+        "  let mix_sum = lerp_dec(n, n + 10, d) + (abs_dec(d) / 3);\n" ++
+        "  let mix_idx = (min_num(n, n2) - 40) / 2;\n" ++
+        "  let mix_pick = arr2[mix_idx];\n" ++
+        "  let mixed = lerp_dec(n, n + 10, d);\n" ++
+        "  let mixed2 = lerp_dec(n2, n2 + 5, d / 2);\n" ++
+        "  let num_from_dec = min_num(n, (n + 2));\n" ++
+        "  let dec_from_num = lerp_dec(n, n + 2, 0.5);\n" ++
+        "  let dec_mix3 = lerp_dec(n, n + 2, d) + (d / 2);\n" ++
+        "  let p_from_call = make_point(n + 7, n - 7);\n" ++
+        "  let points2 = [make_point(n, n + 1), make_point(n + 2, n + 3)];\n" ++
+        "  mix_points[0].\n" ++
+        "  _ = points2;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-let-infer.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const Case = struct { name: []const u8, expect: []const u8 };
+    const cases = [_]Case{
+        .{ .name = "n", .expect = "num n" },
+        .{ .name = "d", .expect = "dec d" },
+        .{ .name = "s", .expect = "str s" },
+        .{ .name = "c", .expect = "chr c" },
+        .{ .name = "b", .expect = "bin b" },
+        .{ .name = "arr", .expect = "num[] arr" },
+        .{ .name = "p", .expect = "Point p" },
+        .{ .name = "p2", .expect = "Point p2" },
+        .{ .name = "pptr", .expect = "Point* pptr" },
+        .{ .name = "color", .expect = "Color color" },
+        .{ .name = "color2", .expect = "Color color2" },
+        .{ .name = "status", .expect = "Status status" },
+        .{ .name = "points", .expect = "Point[] points" },
+        .{ .name = "n2", .expect = "num n2" },
+        .{ .name = "arr2", .expect = "num[] arr2" },
+        .{ .name = "idx", .expect = "num idx" },
+        .{ .name = "pick", .expect = "num pick" },
+        .{ .name = "p3", .expect = "Point p3" },
+        .{ .name = "psum", .expect = "num psum" },
+        .{ .name = "neg", .expect = "num neg" },
+        .{ .name = "dec_expr", .expect = "dec dec_expr" },
+        .{ .name = "nested", .expect = "Point nested" },
+        .{ .name = "nested_sum", .expect = "num nested_sum" },
+        .{ .name = "dec_mix", .expect = "dec dec_mix" },
+        .{ .name = "dec_mix2", .expect = "dec dec_mix2" },
+        .{ .name = "mix_point", .expect = "Point mix_point" },
+        .{ .name = "mix_points", .expect = "Point[] mix_points" },
+        .{ .name = "mp_x", .expect = "num mp_x" },
+        .{ .name = "mix_sum", .expect = "dec mix_sum" },
+        .{ .name = "mix_idx", .expect = "num mix_idx" },
+        .{ .name = "mix_pick", .expect = "num mix_pick" },
+        .{ .name = "mixed", .expect = "dec mixed" },
+        .{ .name = "mixed2", .expect = "dec mixed2" },
+        .{ .name = "num_from_dec", .expect = "num num_from_dec" },
+        .{ .name = "dec_from_num", .expect = "dec dec_from_num" },
+        .{ .name = "dec_mix3", .expect = "dec dec_mix3" },
+        .{ .name = "p_from_call", .expect = "Point p_from_call" },
+        .{ .name = "points2", .expect = "Point[] points2" },
+    };
+
+    for (cases) |cinfo| {
+        const needle = try std.fmt.allocPrint(allocator, "let {s}", .{cinfo.name});
+        defer allocator.free(needle);
+        const pos = try findPosition(doc_text, needle, 0);
+        const hover_params = try std.fmt.allocPrint(
+            allocator,
+            "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+            .{ doc_uri, pos.line, pos.col + 4 },
+        );
+        defer allocator.free(hover_params);
+        const hover_id = try lsp.request("textDocument/hover", hover_params);
+        var hover_res = try lsp.waitResponse(hover_id, 15000);
+        defer hover_res.deinit();
+        const hover_val = try jsonResultFromResponseObj(hover_res.parsed.value.object);
+        try expectHoverContains(allocator, hover_val, cinfo.expect);
+    }
+
+    const member_pos = try findPosition(doc_text, "mix_points[0].", 0);
+    const comp_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, member_pos.line, member_pos.col + @as(i64, @intCast("mix_points[0].".len)) },
+    );
+    defer allocator.free(comp_params);
+    const comp_id = try lsp.request("textDocument/completion", comp_params);
+    var comp_res = try lsp.waitResponse(comp_id, 15000);
+    defer comp_res.deinit();
+    const comp_val = try jsonResultFromResponseObj(comp_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, comp_val, "x");
+    try expectCompletionHasLabel(allocator, comp_val, "y");
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: signatureHelp for plain function call" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();

@@ -142,6 +142,42 @@ fun main() {
 }
 ```
 
+### Type Inference (let)
+- `let` requires an initializer; the type is inferred from the expression.
+- Literal inference:
+  - `1` -> `num`, `1.5` -> `dec`, `"text"` -> `str`, `'a'` -> `chr`, `true` -> `bin`.
+- Array literals infer element type and become `T[]`:
+  - `[1, 2, 3]` -> `num[]`
+  - `[Point{x = 1, y = 2}]` -> `Point[]`
+- Function calls infer the return type:
+  - `let p = make_point(1, 2);` -> `Point`
+- Member access uses the receiver's type:
+  - `let x = p.x;` -> `num`
+- Indexing an array yields its element type:
+  - `let v = nums[i];` -> `num` when `nums` is `num[]`
+  - `let x = points[0].x;` -> `num` when `points` is `Point[]`
+- Numeric expressions prefer `dec` when any operand is `dec` (otherwise `num`).
+
+```fun
+compound Point { num x; num y; }
+
+fun make_point(num x, num y) Point {
+  ret Point{x = x, y = y};
+}
+
+fun main() {
+  let n = 42;                // num
+  let d = 3.5;               // dec
+  let s = "hello";           // str
+  let c = 'Z';               // chr
+  let b = true;              // bin
+  let nums = [1, 2, 3];      // num[]
+  let p = make_point(1, 2);  // Point
+  let x = p.x;               // num
+  let px = nums[0];          // num
+}
+```
+
 ## Functions
 ```fun
 fun add(num a, num b) num {

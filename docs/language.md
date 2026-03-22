@@ -33,6 +33,17 @@
 - **Pointers**: `Node* next;` (self-referential and forward-declared types supported)
 - **Type Inference**: Supported for variables via `let name = expr;` (initializer required).
 
+#### Type Inference (let)
+- `let` always requires an initializer; the compiler infers the declared type from the expression.
+- Inference follows common literals and expressions:
+    - Numeric literals infer `num` or `dec` depending on literal form.
+    - `"text"` infers `str`, `'c'` infers `chr`, `true/false` infers `bin`.
+    - Array literals infer `T[]` from elements (for example `[1, 2]` -> `num[]`).
+    - Function calls infer the function's return type.
+    - Member access uses the receiver type (for example `Point p; let x = p.x;` -> `num`).
+    - Indexing an array uses the element type (for example `let v = nums[i];` -> `num`).
+- If the expression mixes numeric types, inference prefers the wider category (`dec` over `num`).
+
 ### Enums
 - **Declaration**: `enum Color { Red, Green, Blue }`
 - **Longhand access**: `Color.Red` (works even if the enum is declared later in the file).

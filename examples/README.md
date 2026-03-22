@@ -20,6 +20,7 @@ zig-out/bin/fun -in examples/<example>.fn
 - enum_showcase.fn
 - enums.fn
 - let_and_lowlevel_types.fn
+- let_inference_edge_cases.fn
 - let_quirk_explicit_ok.fn
 - main_exit_status.fn
 - plain_impl.fn
@@ -111,6 +112,7 @@ zig-out/bin/fun -in examples/<example>.fn
 - error_cases/already_declared_variable.fn
 - error_cases/duplicate_symbols.fn
 - error_cases/functions_cannot_be_declared_inside_functions.fn
+- error_cases/let_infer_enum_dot_ambiguous.fn
 - error_cases/let_infer_quirk_invalid.fn
 - error_cases/missing_import.fn
 - error_cases/quirk_impl_missing_methods.fn

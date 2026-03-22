@@ -1,0 +1,118 @@
+imp std.io;
+imp std.math as m;
+
+enum Color {
+  Red,
+  Green,
+  Blue
+}
+
+enum Status {
+  Ok,
+  Err
+}
+
+compound Point {
+  num x;
+  num y;
+}
+
+quirk HasX {
+  get_x() num;
+}
+
+impl Point HasX {
+  get_x() num {
+    ret self.x;
+  }
+}
+
+fun make_point(num x, num y) Point {
+  ret Point{x = x, y = y};
+}
+
+fun as_hasx(Point* p) HasX {
+  ret p;
+}
+
+fun main() {
+  let n = 42;
+  let d = 3.5;
+  let s = "hello";
+  let c = 'Z';
+  let b = true;
+  let arr = [1, 2, 3];
+  let p = Point{x = 1, y = 2};
+  let p2 = make_point(3, 4);
+  let pptr = &p;
+  let color = .Red;
+  let color2 = Color.Green;
+  let status = Status.Ok;
+  let points = [Point{x = 0, y = 1}, Point{x = 2, y = 3}];
+  let n2 = (n + 5) * (n - 3);
+  let arr2 = [n, n + 1, n + 2];
+  let idx = (n - 40) / 2;
+  let pick = arr2[idx];
+  let p3 = Point{x = n + 1, y = (n - 2) * 3};
+  let psum = (p.x + p.y) * 2;
+  let neg = -(n - 5);
+  let dec_expr = (d * d) + (d / 2);
+  let nested = make_point(n + 1, n - 1);
+  let nested_sum = (nested.x + nested.y) / 2;
+  let dec_mix = m.lerp_dec(n, n + 2, d) + m.abs_dec(d / 2);
+  let dec_mix2 = m.lerp_dec(n2, n2 + n, (d + 1)) / 2;
+  let mix_point = make_point(m.min_num(n, n2), m.max_num(n, n2));
+  let mix_points = [make_point(n, n + 1), make_point(n2, n2 + 1)];
+  let mix_sum = m.lerp_dec(n, n + 10, d) + (m.abs_dec(d) / 3);
+  let mix_idx = (m.min_num(n, n2) - 40) / 2;
+  let mix_pick = arr2[mix_idx];
+  let mixed = m.lerp_dec(n, n + 10, d);
+  let mixed2 = m.lerp_dec(n2, n2 + 5, d / 2);
+  let num_from_dec = m.min_num(n, (n + 2));
+  let dec_from_num = m.lerp_dec(n, n + 2, 0.5);
+  let dec_mix3 = m.lerp_dec(n, n + 2, d) + (d / 2);
+  let p_from_call = make_point(n + 7, n - 7);
+  let points2 = [make_point(n, n + 1), make_point(n + 2, n + 3)];
+
+  _ = n;
+  _ = d;
+  _ = s;
+  _ = c;
+  _ = b;
+  _ = arr;
+  _ = p;
+  _ = p2;
+  _ = pptr;
+  _ = color;
+  _ = color2;
+  _ = status;
+  _ = points;
+  _ = n2;
+  _ = arr2;
+  _ = idx;
+  _ = pick;
+  _ = p3;
+  _ = psum;
+  _ = neg;
+  _ = dec_expr;
+  _ = nested;
+  _ = nested_sum;
+  _ = dec_mix3;
+  _ = dec_mix2;
+  _ = mix_point;
+  _ = mix_points;
+  _ = mix_sum;
+  _ = mix_idx;
+  _ = mix_pick;
+  _ = mixed;
+  _ = mixed2;
+  _ = num_from_dec;
+  _ = dec_from_num;
+  _ = dec_mix;
+  _ = p_from_call;
+  _ = points2;
+
+  // Quirk inference remains explicit by design.
+  HasX hx = as_hasx(&p);
+  _ = hx;
+}

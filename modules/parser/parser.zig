@@ -1181,7 +1181,10 @@ pub const ParseProcess = struct {
         }
         var exp_node = ast.Node{ .type = .Blank };
         if (!self.next_token_is_symbol(')')) {
-            try self.parse_expressionable_root(hist);
+            var hist_inner = utils.History.down(self.transpile_proc.allocator, hist, hist.flags);
+            defer hist_inner.deinit();
+            hist_inner.flags.expression_is_unary = false;
+            try self.parse_expressionable_root(&hist_inner);
             exp_node = self.node_pop().?;
         }
         try self.expect_sym(')');
@@ -1980,7 +1983,7 @@ pub const ParseProcess = struct {
     /// - Logs an error message if any expected token is not found.
     fn parse_expression(self: *Self, hist: *utils.History) ParseError!bool {
         const t = self.token_peek_next();
-        if (hist.flags.expression_is_unary and !utils.is_unary_operand_compatible(t.?)) {
+        if (hist.flags.expression_is_unary and t.?.type == .Operator and !utils.is_unary_operand_compatible(t.?)) {
             return false;
         }
         if (mem.eql(u8, "(", t.?.data.sval.items)) {

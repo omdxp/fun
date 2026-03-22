@@ -1170,31 +1170,115 @@ const LspServer = struct {
         }
 
         // Prefer definition in current doc; else search direct imports.
-        const def_local = findBestDefinition(idx.symbols, tok.text, pos) orelse null;
-        const def_import = if (def_local == null) self.findAnyGlobalDefinitionInDirectImports(uri, tok.text) else null;
-        if (def_local == null and def_import == null) {
+        var def_local_opt: ?SymbolLite = findBestDefinition(idx.symbols, tok.text, pos) orelse null;
+        const def_import = if (def_local_opt == null) self.findAnyGlobalDefinitionInDirectImports(uri, tok.text) else null;
+        if (def_local_opt == null and def_import == null) {
             if (try self.trySendAliasHover(id_val, uri, idx, tok.text, tok.range)) return;
         }
         var buf = std.ArrayList(u8).init(self.allocator);
         defer buf.deinit();
 
-        if (def_local) |d| {
+        const pickBestLocal = struct {
+            fn call(symbols: []const SymbolLite, name: []const u8, at: Position) ?SymbolLite {
+                var best: ?SymbolLite = null;
+                var best_non_builtin: ?SymbolLite = null;
+                var best_rank: u8 = 0;
+                for (symbols) |s| {
+                    if (s.kind != .variable) continue;
+                    if (!std.mem.eql(u8, s.name, name)) continue;
+                    if (s.container_fn_range) |cr| {
+                        if (!posInRange(at, cr)) continue;
+                    } else {
+                        continue;
+                    }
+                    if (!rangeStartLessOrEqual(s.selection_range, at)) continue;
+
+                    if (best == null or rangeStartGreater(s.selection_range, best.?.selection_range) or
+                        (rangeStartEqual(s.selection_range, best.?.selection_range) and preferDetailedSymbol(s, best.?)))
+                    {
+                        best = s;
+                    }
+
+                    if (s.value_type) |vt| {
+                        const rank = numericBuiltinRank(vt);
+                        if (rank > best_rank) {
+                            best_rank = rank;
+                            best = s;
+                        }
+                    }
+
+                    if (hasNonBuiltinValueType(s)) {
+                        if (best_non_builtin == null or rangeStartGreater(s.selection_range, best_non_builtin.?.selection_range) or
+                            (rangeStartEqual(s.selection_range, best_non_builtin.?.selection_range) and preferDetailedSymbol(s, best_non_builtin.?)))
+                        {
+                            best_non_builtin = s;
+                        }
+                    }
+                }
+                return best_non_builtin orelse best;
+            }
+        }.call;
+
+        if (def_local_opt) |d| {
+            if (d.kind == .variable) {
+                if (pickBestLocal(idx.symbols, tok.text, pos)) |picked| {
+                    def_local_opt = picked;
+                }
+
+                var best_non_builtin: ?SymbolLite = null;
+                for (idx.symbols) |cand| {
+                    if (cand.kind != .variable) continue;
+                    if (!std.mem.eql(u8, cand.name, tok.text)) continue;
+                    if (!hasNonBuiltinValueType(cand)) continue;
+                    if (best_non_builtin == null or preferDetailedSymbol(cand, best_non_builtin.?)) {
+                        best_non_builtin = cand;
+                    }
+                }
+                if (best_non_builtin) |bn| {
+                    def_local_opt = bn;
+                }
+            }
+        }
+
+        if (self.debug_definitions and def_local_opt != null and def_local_opt.?.kind == .variable) {
+            const d = def_local_opt.?;
+            dbg(true, "defs", "hover pick name={s} detail={s} value_type={s} decl=({d},{d}) sel=({d},{d})", .{
+                d.name,
+                d.detail orelse "",
+                d.value_type orelse "",
+                d.decl_range.start.line,
+                d.decl_range.start.character,
+                d.selection_range.start.line,
+                d.selection_range.start.character,
+            });
+        }
+
+        if (def_local_opt) |d| {
             try buf.writer().print("**{s}**\n\n", .{tok.text});
+            const let_infer_detail = d.kind == .variable and ((d.value_type != null and isLetInferTypeName(d.value_type.?)) or
+                (d.detail != null and std.mem.startsWith(u8, d.detail.?, "__let_infer__")));
             if (d.detail) |det| {
-                if (d.kind == .function and d.value_type != null) {
-                    const det_trim = std.mem.trimRight(u8, det, " \t\r\n");
-                    if (det_trim.len != 0 and det_trim[det_trim.len - 1] == ')') {
-                        try buf.writer().print("```\n{s} {s}\n```\n", .{ det_trim, d.value_type.? });
+                if (let_infer_detail) {
+                    // Skip placeholder let inference details; fall back to value_type/guess.
+                } else {
+                    if (d.kind == .function and d.value_type != null) {
+                        const det_trim = std.mem.trimRight(u8, det, " \t\r\n");
+                        if (det_trim.len != 0 and det_trim[det_trim.len - 1] == ')') {
+                            try buf.writer().print("```\n{s} {s}\n```\n", .{ det_trim, d.value_type.? });
+                        } else {
+                            try buf.writer().print("```\n{s}\n```\n", .{det});
+                        }
                     } else {
                         try buf.writer().print("```\n{s}\n```\n", .{det});
                     }
-                } else {
-                    try buf.writer().print("```\n{s}\n```\n", .{det});
                 }
-            } else if (d.kind == .variable) {
+            }
+            if (d.kind == .variable and (d.detail == null or let_infer_detail)) {
                 const vt = d.value_type orelse self.guessVariableType(idx, uri, tok.text, pos);
                 if (vt) |vts| {
-                    try buf.writer().print("```\n{s} {s}\n```\n", .{ vts, tok.text });
+                    if (!isLetInferTypeName(vts)) {
+                        try buf.writer().print("```\n{s} {s}\n```\n", .{ vts, tok.text });
+                    }
                 } else {
                     try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
                 }
@@ -1396,6 +1480,108 @@ const LspServer = struct {
                     .kind = kind,
                     .detail = detail,
                 });
+            }
+        }
+    }
+
+    fn appendMemberFieldCompletionsFromTokens(
+        self: *LspServer,
+        items: *std.ArrayList(CompletionItem),
+        seen: *std.StringHashMap(void),
+        idx: *const Index,
+        container_type: []const u8,
+        prefix: []const u8,
+    ) !void {
+        const nextNonComment = struct {
+            fn call(tokens: []const TokenLite, start_index: usize) ?usize {
+                var i = start_index;
+                while (i < tokens.len) : (i += 1) {
+                    if (tokens[i].kind != .comment) return i;
+                }
+                return null;
+            }
+        }.call;
+
+        const isIdentLite = struct {
+            fn call(t: TokenLite) bool {
+                return t.kind == .identifier;
+            }
+        }.call;
+
+        const isSymbolLite = struct {
+            fn call(t: TokenLite, ch: u8) bool {
+                return (t.kind == .symbol or t.kind == .operator) and t.text.len == 1 and t.text[0] == ch;
+            }
+        }.call;
+
+        const isTypeLike = struct {
+            fn call(t: TokenLite) bool {
+                if (t.kind == .identifier) return true;
+                if (t.kind != .keyword) return false;
+                const s = t.text;
+                return std.mem.eql(u8, s, "num") or std.mem.eql(u8, s, "dec") or std.mem.eql(u8, s, "str") or std.mem.eql(u8, s, "bin") or std.mem.eql(u8, s, "chr") or std.mem.eql(u8, s, "raw") or std.mem.eql(u8, s, "void") or std.mem.eql(u8, s, "f32") or std.mem.eql(u8, s, "f64") or std.mem.eql(u8, s, "i8") or std.mem.eql(u8, s, "i16") or std.mem.eql(u8, s, "i32") or std.mem.eql(u8, s, "i64") or std.mem.eql(u8, s, "u8") or std.mem.eql(u8, s, "u16") or std.mem.eql(u8, s, "u32") or std.mem.eql(u8, s, "u64");
+            }
+        }.call;
+
+        const target_type = baseTypeNameForLookup(container_type);
+
+        var i: usize = 0;
+        while (i < idx.tokens.len) : (i += 1) {
+            if (idx.tokens[i].kind != .keyword or !std.mem.eql(u8, idx.tokens[i].text, "compound")) continue;
+
+            const name_i = nextNonComment(idx.tokens, i + 1) orelse continue;
+            if (!isIdentLite(idx.tokens[name_i])) continue;
+            if (!std.mem.eql(u8, idx.tokens[name_i].text, target_type)) continue;
+
+            var j_opt = nextNonComment(idx.tokens, name_i + 1);
+            while (j_opt) |j| {
+                if (!isSymbolLite(idx.tokens[j], '{')) {
+                    j_opt = nextNonComment(idx.tokens, j + 1);
+                    continue;
+                }
+
+                var depth: i64 = 1;
+                var k: usize = j + 1;
+                while (k < idx.tokens.len and depth > 0) : (k += 1) {
+                    const tk = idx.tokens[k];
+                    if (isSymbolLite(tk, '{')) depth += 1;
+                    if (isSymbolLite(tk, '}')) depth -= 1;
+                    if (depth != 1) continue;
+                    if (!isTypeLike(tk)) continue;
+
+                    const field_name_i = nextNonComment(idx.tokens, k + 1) orelse continue;
+                    if (!isIdentLite(idx.tokens[field_name_i])) continue;
+                    const after_name_i = nextNonComment(idx.tokens, field_name_i + 1) orelse continue;
+                    if (!isSymbolLite(idx.tokens[after_name_i], ';')) continue;
+
+                    const fname = idx.tokens[field_name_i].text;
+                    if (prefix.len != 0 and !std.mem.startsWith(u8, fname, prefix)) {
+                        k = after_name_i;
+                        continue;
+                    }
+
+                    var key_buf = std.ArrayList(u8).init(self.allocator);
+                    defer key_buf.deinit();
+                    try key_buf.writer().print("field:{s}", .{fname});
+                    const key = try self.allocator.dupe(u8, key_buf.items);
+                    if (seen.contains(key)) {
+                        self.allocator.free(key);
+                        k = after_name_i;
+                        continue;
+                    }
+                    try seen.put(key, {});
+
+                    const detail = try self.allocator.dupe(u8, tk.text);
+                    try items.append(.{
+                        .label = try self.allocator.dupe(u8, fname),
+                        .kind = 5,
+                        .detail = detail,
+                    });
+
+                    k = after_name_i;
+                }
+
+                break;
             }
         }
     }
@@ -2280,7 +2466,9 @@ const LspServer = struct {
         // Prefer symbol table (locals + globals) when available.
         if (findBestDefinition(idx.symbols, var_name, at)) |d| {
             if (d.kind == .variable) {
-                if (d.value_type) |vt| return vt;
+                if (d.value_type) |vt| {
+                    if (!isLetInferTypeName(vt)) return vt;
+                }
             }
         }
 
@@ -2713,8 +2901,14 @@ const LspServer = struct {
         if (try self.trySendCompoundInitFieldCompletions(id_val, uri, idx, doc.text, pos, prefix)) return;
 
         // Robust text-based member completion for `receiver.` before other fallbacks.
-        const recv_name_opt = guessReceiverNameAtCursor(doc.text, pos) orelse guessReceiverNameBeforeCursor(doc.text, pos);
-        if (recv_name_opt) |recv_name| {
+        const recv_info_opt: ?ReceiverGuess = guessReceiverAtCursorWithIndex(doc.text, pos) orelse blk: {
+            if (guessReceiverNameAtCursor(doc.text, pos) orelse guessReceiverNameBeforeCursor(doc.text, pos)) |name| {
+                break :blk .{ .name = name, .indexed = false };
+            }
+            break :blk null;
+        };
+        if (recv_info_opt) |recv_info| {
+            const recv_name = recv_info.name;
             if (try self.trySendAliasNamespaceCompletions(id_val, uri, idx, recv_name, prefix)) return;
 
             var recv_type: ?[]const u8 = null;
@@ -2729,7 +2923,11 @@ const LspServer = struct {
                 recv_type = guessTypeFromTextFallback(doc.text, recv_name, pos);
             }
 
-            if (recv_type) |rt| {
+            if (recv_type) |rt0| {
+                var rt = rt0;
+                if (recv_info.indexed and isArrayTypeName(rt)) {
+                    rt = rt[0 .. rt.len - 2];
+                }
                 var seen = std.StringHashMap(void).init(self.allocator);
                 defer {
                     var it = seen.iterator();
@@ -2737,6 +2935,7 @@ const LspServer = struct {
                     seen.deinit();
                 }
                 try self.appendMemberCompletionsForType(&items, &seen, uri, rt, prefix);
+                try self.appendMemberFieldCompletionsFromTokens(&items, &seen, idx, rt, prefix);
                 if (items.items.len != 0) {
                     const list: CompletionList = .{ .items = items.items };
                     const json = try std.json.stringifyAlloc(self.allocator, list, .{});
@@ -2805,6 +3004,7 @@ const LspServer = struct {
                         }
 
                         try self.appendMemberCompletionsForType(&items, &seen, uri, rt, prefix);
+                        try self.appendMemberFieldCompletionsFromTokens(&items, &seen, idx, rt, prefix);
                         if (items.items.len != 0) {
                             const list: CompletionList = .{ .items = items.items };
                             const json = try std.json.stringifyAlloc(self.allocator, list, .{});
@@ -2822,11 +3022,76 @@ const LspServer = struct {
         if (tok_i_opt) |tok_i| {
             const t = idx.tokens[tok_i];
             var receiver_last_ident_i: ?usize = null;
+            var dot_i_opt: ?usize = null;
 
             if (isDotToken(t)) {
+                dot_i_opt = tok_i;
                 if (tok_i >= 1 and idx.tokens[tok_i - 1].kind == .identifier) receiver_last_ident_i = tok_i - 1;
             } else if (t.kind == .identifier and tok_i >= 1 and isDotToken(idx.tokens[tok_i - 1])) {
+                dot_i_opt = tok_i - 1;
                 if (tok_i >= 2 and idx.tokens[tok_i - 2].kind == .identifier) receiver_last_ident_i = tok_i - 2;
+            }
+
+            if (receiver_last_ident_i == null) {
+                if (dot_i_opt) |dot_i| {
+                    if (dot_i >= 1 and idx.tokens[dot_i - 1].text.len == 1 and idx.tokens[dot_i - 1].text[0] == ']') {
+                        var depth: i64 = 0;
+                        var k: isize = @intCast(dot_i);
+                        var ident_i_opt: ?usize = null;
+                        while (k > 0) : (k -= 1) {
+                            const tk = idx.tokens[@intCast(k - 1)];
+                            if (tk.text.len == 1 and tk.text[0] == ']') depth += 1;
+                            if (tk.text.len == 1 and tk.text[0] == '[') {
+                                depth -= 1;
+                                if (depth == 0) {
+                                    if (k >= 2 and idx.tokens[@intCast(k - 2)].kind == .identifier) {
+                                        ident_i_opt = @intCast(k - 2);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (ident_i_opt) |ii| {
+                            const recv_name = idx.tokens[ii].text;
+                            if (try self.trySendAliasNamespaceCompletions(id_val, uri, idx, recv_name, prefix)) return;
+
+                            var recv_type: ?[]const u8 = null;
+                            if (std.mem.eql(u8, recv_name, "self")) {
+                                recv_type = self.guessEnclosingImplType(idx, pos);
+                            } else if (self.isKnownTypeName(uri, recv_name)) {
+                                recv_type = recv_name;
+                            } else {
+                                recv_type = self.guessVariableType(idx, uri, recv_name, pos);
+                            }
+                            if (recv_type == null) {
+                                recv_type = guessTypeFromTextFallback(doc.text, recv_name, pos);
+                            }
+
+                            if (recv_type) |rt0| {
+                                var rt = rt0;
+                                if (isArrayTypeName(rt)) {
+                                    rt = rt[0 .. rt.len - 2];
+                                }
+                                var seen = std.StringHashMap(void).init(self.allocator);
+                                defer {
+                                    var it = seen.iterator();
+                                    while (it.next()) |e| self.allocator.free(e.key_ptr.*);
+                                    seen.deinit();
+                                }
+                                try self.appendMemberCompletionsForType(&items, &seen, uri, rt, prefix);
+                                try self.appendMemberFieldCompletionsFromTokens(&items, &seen, idx, rt, prefix);
+                                if (items.items.len != 0) {
+                                    const list: CompletionList = .{ .items = items.items };
+                                    const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+                                    defer self.allocator.free(json);
+                                    try self.sendResponseJson(id_val, json);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             if (receiver_last_ident_i) |ri| {
@@ -2844,6 +3109,7 @@ const LspServer = struct {
                         seen.deinit();
                     }
                     try self.appendMemberCompletionsForType(&items, &seen, uri, recv_type, prefix);
+                    try self.appendMemberFieldCompletionsFromTokens(&items, &seen, idx, recv_type, prefix);
                     if (items.items.len != 0) {
                         const list: CompletionList = .{ .items = items.items };
                         const json = try std.json.stringifyAlloc(self.allocator, list, .{});
@@ -2861,6 +3127,7 @@ const LspServer = struct {
                             seen.deinit();
                         }
                         try self.appendMemberCompletionsForType(&items, &seen, uri, rt, prefix);
+                        try self.appendMemberFieldCompletionsFromTokens(&items, &seen, idx, rt, prefix);
                         if (items.items.len != 0) {
                             const list: CompletionList = .{ .items = items.items };
                             const json = try std.json.stringifyAlloc(self.allocator, list, .{});
@@ -2896,6 +3163,7 @@ const LspServer = struct {
                             seen.deinit();
                         }
                         try self.appendMemberCompletionsForType(&items, &seen, uri, rt, prefix);
+                        try self.appendMemberFieldCompletionsFromTokens(&items, &seen, idx, rt, prefix);
                         if (items.items.len != 0) {
                             const list: CompletionList = .{ .items = items.items };
                             const json = try std.json.stringifyAlloc(self.allocator, list, .{});
@@ -3234,7 +3502,9 @@ const LspServer = struct {
                     .detail = blk: {
                         if (s.detail) |d| break :blk try self.allocator.dupe(u8, d);
                         if (s.kind == .variable) {
-                            if (s.value_type) |vt| break :blk try self.allocator.dupe(u8, vt);
+                            if (s.value_type) |vt| {
+                                if (!isLetInferTypeName(vt)) break :blk try self.allocator.dupe(u8, vt);
+                            }
                         }
                         break :blk null;
                     },
@@ -6609,6 +6879,53 @@ fn rangeStartGreater(a: Range, b: Range) bool {
     return a.start.character > b.start.character;
 }
 
+fn rangeStartEqual(a: Range, b: Range) bool {
+    return a.start.line == b.start.line and a.start.character == b.start.character;
+}
+
+fn rangeEqual(a: Range, b: Range) bool {
+    return a.start.line == b.start.line and a.start.character == b.start.character and
+        a.end.line == b.end.line and a.end.character == b.end.character;
+}
+
+fn isBuiltinTypeName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "void") or std.mem.eql(u8, name, "raw") or std.mem.eql(u8, name, "num") or
+        std.mem.eql(u8, name, "dec") or std.mem.eql(u8, name, "str") or std.mem.eql(u8, name, "bin") or
+        std.mem.eql(u8, name, "chr") or std.mem.eql(u8, name, "f32") or std.mem.eql(u8, name, "f64") or
+        std.mem.eql(u8, name, "i8") or std.mem.eql(u8, name, "i16") or std.mem.eql(u8, name, "i32") or
+        std.mem.eql(u8, name, "i64") or std.mem.eql(u8, name, "u8") or std.mem.eql(u8, name, "u16") or
+        std.mem.eql(u8, name, "u32") or std.mem.eql(u8, name, "u64");
+}
+
+fn isLetInferTypeName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "__let_infer__");
+}
+
+fn preferDetailedSymbol(a: SymbolLite, b: SymbolLite) bool {
+    if (a.detail != null and b.detail == null) return true;
+    if (a.detail != null and b.detail != null and a.detail.?.len > b.detail.?.len) return true;
+    if (a.value_type != null and b.value_type == null) return true;
+    if (a.value_type != null and b.value_type != null) {
+        const av = a.value_type.?;
+        const bv = b.value_type.?;
+        if (!isBuiltinTypeName(av) and isBuiltinTypeName(bv)) return true;
+    }
+    return false;
+}
+
+fn hasNonBuiltinValueType(s: SymbolLite) bool {
+    if (s.value_type == null) return false;
+    const vt = s.value_type.?;
+    if (isLetInferTypeName(vt)) return false;
+    return !isBuiltinTypeName(vt);
+}
+
+fn numericBuiltinRank(name: []const u8) u8 {
+    if (std.mem.eql(u8, name, "dec")) return 2;
+    if (std.mem.eql(u8, name, "num")) return 1;
+    return 0;
+}
+
 fn findBestDefinition(symbols: []const SymbolLite, name: []const u8, at: Position) ?SymbolLite {
     var best_local: ?SymbolLite = null;
     var best_global: ?SymbolLite = null;
@@ -6619,13 +6936,47 @@ fn findBestDefinition(symbols: []const SymbolLite, name: []const u8, at: Positio
         if (s.container_fn_range) |cr| {
             if (!posInRange(at, cr)) continue;
             if (!rangeStartLessOrEqual(s.selection_range, at)) continue;
-            if (best_local == null or rangeStartGreater(s.selection_range, best_local.?.selection_range)) {
+            if (best_local == null or rangeStartGreater(s.selection_range, best_local.?.selection_range) or
+                (rangeStartEqual(s.selection_range, best_local.?.selection_range) and preferDetailedSymbol(s, best_local.?)))
+            {
                 best_local = s;
             }
         } else {
             if (best_global == null) best_global = s;
         }
     }
+
+    if (best_local) |bl| {
+        var best = bl;
+        var preferred_non_builtin: ?SymbolLite = null;
+
+        for (symbols) |s| {
+            if (!std.mem.eql(u8, s.name, name)) continue;
+            if (s.container_fn_range) |cr| {
+                if (!posInRange(at, cr)) continue;
+            } else {
+                continue;
+            }
+            if (!rangeStartLessOrEqual(s.selection_range, at)) continue;
+
+            if (preferDetailedSymbol(s, best)) {
+                best = s;
+            }
+
+            if (hasNonBuiltinValueType(s)) {
+                if (preferred_non_builtin == null or preferDetailedSymbol(s, preferred_non_builtin.?)) {
+                    preferred_non_builtin = s;
+                }
+            }
+        }
+
+        if (preferred_non_builtin) |p| {
+            best_local = p;
+        } else {
+            best_local = best;
+        }
+    }
+
     return best_local orelse best_global;
 }
 
@@ -6827,6 +7178,83 @@ fn guessReceiverNameAtCursor(text: []const u8, p: Position) ?[]const u8 {
     }
     if (start >= j) return null;
     return text[start..j];
+}
+
+const ReceiverGuess = struct {
+    name: []const u8,
+    indexed: bool,
+};
+
+fn guessReceiverAtCursorWithIndex(text: []const u8, p: Position) ?ReceiverGuess {
+    const idx = byteIndexForPosition(text, p);
+    if (idx == 0) return null;
+
+    var dot_i_opt: ?usize = null;
+    var i: usize = idx;
+    while (i > 0) {
+        const ch = text[i - 1];
+        if (ch == '\n' or ch == '\r') break;
+        if (ch == '.') {
+            dot_i_opt = i - 1;
+            break;
+        }
+        i -= 1;
+    }
+    const dot_i = dot_i_opt orelse return null;
+
+    const is_ident_char = struct {
+        fn call(ch: u8) bool {
+            return (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_';
+        }
+    }.call;
+
+    var j: usize = dot_i;
+    while (j > 0) {
+        const ch = text[j - 1];
+        if (ch == ' ' or ch == '\t' or ch == '\r' or ch == '\n') {
+            j -= 1;
+            continue;
+        }
+        break;
+    }
+
+    var indexed = false;
+    if (j > 0 and text[j - 1] == ']') {
+        var depth: i64 = 0;
+        var k: usize = j;
+        var found = false;
+        while (k > 0) {
+            const ch = text[k - 1];
+            if (ch == ']') depth += 1;
+            if (ch == '[') {
+                depth -= 1;
+                if (depth == 0) {
+                    j = k - 1;
+                    found = true;
+                    break;
+                }
+            }
+            k -= 1;
+        }
+        if (!found) return null;
+        indexed = true;
+
+        while (j > 0) {
+            const ch = text[j - 1];
+            if (ch == ' ' or ch == '\t' or ch == '\r' or ch == '\n') {
+                j -= 1;
+                continue;
+            }
+            break;
+        }
+    }
+
+    var start: usize = j;
+    while (start > 0 and is_ident_char(text[start - 1])) {
+        start -= 1;
+    }
+    if (start >= j) return null;
+    return .{ .name = text[start..j], .indexed = indexed };
 }
 
 const ParsedTextDocPosition = struct { uri: []const u8, pos: Position };
@@ -7206,6 +7634,10 @@ fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path_opt
         symbols_out = symbols_token;
     }
 
+    if (parse_ok) {
+        fixAstVariableRanges(tokens_out.items, &symbols_out);
+    }
+
     // If we successfully parsed in-process, enrich token-derived member symbols with
     // AST types/signatures (best-effort; ignore failures).
     if (parse_ok) {
@@ -7220,6 +7652,34 @@ fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path_opt
         .symbols = try symbols_out.toOwnedSlice(),
     };
     return idx;
+}
+
+fn fixAstVariableRanges(tokens: []const TokenLite, symbols: *std.ArrayList(SymbolLite)) void {
+    for (symbols.items) |*s| {
+        if (s.kind != .variable) continue;
+
+        var best: ?Range = null;
+        for (tokens) |t| {
+            if (t.kind != .identifier) continue;
+            if (!std.mem.eql(u8, t.text, s.name)) continue;
+
+            if (s.container_fn_range) |cr| {
+                if (!posInRange(t.range.start, cr)) continue;
+            }
+
+            if (t.range.start.line < s.decl_range.start.line) continue;
+            if (t.range.start.line == s.decl_range.start.line and t.range.start.character < s.decl_range.start.character) continue;
+
+            if (best == null or rangeStartGreater(best.?, t.range)) {
+                best = t.range;
+            }
+        }
+
+        if (best) |r| {
+            s.selection_range = r;
+            s.decl_range = r;
+        }
+    }
 }
 
 const AstEnrichment = struct {
@@ -7240,6 +7700,42 @@ const AstEnrichment = struct {
     }
 };
 
+fn appendDTypeFull(buf: *std.ArrayList(u8), dt: anytype) !void {
+    const dtype = if (@typeInfo(@TypeOf(dt)) == .pointer) dt.* else dt;
+    try buf.appendSlice(dtype.type_str.items);
+    if (@hasField(@TypeOf(dtype), "generic_args")) {
+        if (dtype.generic_args) |gargs| {
+            try buf.append('<');
+            for (gargs.items(), 0..) |ga, i| {
+                if (i != 0) try buf.appendSlice(", ");
+                try appendDTypeFull(buf, ga.*);
+            }
+            try buf.append('>');
+        }
+    }
+    var i: usize = 0;
+    while (i < dtype.pointer_depth) : (i += 1) {
+        try buf.append('*');
+    }
+    if (@hasField(@TypeOf(dtype), "flags")) {
+        if (dtype.flags) |flags| {
+            if (flags.is_array) {
+                if (@hasField(@TypeOf(dtype), "array")) {
+                    if (dtype.array) |arr| {
+                        const count: usize = if (arr.brackets.is_empty()) 1 else arr.brackets.count;
+                        var j: usize = 0;
+                        while (j < count) : (j += 1) {
+                            try buf.appendSlice("[]");
+                        }
+                        return;
+                    }
+                }
+                try buf.appendSlice("[]");
+            }
+        }
+    }
+}
+
 fn enrichSymbolsFromAst(allocator: Allocator, symbols: *std.ArrayList(SymbolLite), tp: *codegen.TranspileProcess) !void {
     var enrich = AstEnrichment.init(allocator);
 
@@ -7247,11 +7743,7 @@ fn enrichSymbolsFromAst(allocator: Allocator, symbols: *std.ArrayList(SymbolLite
         fn build(a: Allocator, dt: anytype) ![]u8 {
             var buf = std.ArrayList(u8).init(a);
             errdefer buf.deinit();
-            try buf.appendSlice(dt.type_str.items);
-            var i: usize = 0;
-            while (i < dt.pointer_depth) : (i += 1) {
-                try buf.append('*');
-            }
+            try appendDTypeFull(&buf, dt);
             return try buf.toOwnedSlice();
         }
     };
@@ -7285,7 +7777,8 @@ fn enrichSymbolsFromAst(allocator: Allocator, symbols: *std.ArrayList(SymbolLite
                     const field_name = f.name.items;
                     const key = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ type_name, field_name });
                     if (!enrich.field_type_by_key.contains(key)) {
-                        try enrich.field_type_by_key.put(key, f.dtype.type_str.items);
+                        const fts = try dtypeStringOwned.build(allocator, f.dtype.*);
+                        try enrich.field_type_by_key.put(key, fts);
                     }
                 }
             },
@@ -7385,16 +7878,6 @@ fn buildSignatureFromAst(
     fnv: anytype,
     include_fun_prefix: bool,
 ) ![]const u8 {
-    const appendDType = struct {
-        fn call(buf: *std.ArrayList(u8), dt: anytype) !void {
-            try buf.appendSlice(dt.type_str.items);
-            var i: usize = 0;
-            while (i < dt.pointer_depth) : (i += 1) {
-                try buf.append('*');
-            }
-        }
-    }.call;
-
     var buf = std.ArrayList(u8).init(allocator);
     errdefer buf.deinit();
 
@@ -7423,7 +7906,7 @@ fn buildSignatureFromAst(
             const av = a.node_variant.?.variable;
             if (!first) try buf.appendSlice(", ");
             first = false;
-            try appendDType(&buf, av.type);
+            try appendDTypeFull(&buf, av.type);
             try buf.writer().print(" {s}", .{av.name.items});
         }
     }
@@ -7431,22 +7914,12 @@ fn buildSignatureFromAst(
     try buf.append(')');
     if (fnv.rtype) |rt| {
         try buf.append(' ');
-        try appendDType(&buf, rt);
+        try appendDTypeFull(&buf, rt);
     }
     return try buf.toOwnedSlice();
 }
 
 fn buildQuirkMethodSignatureFromAst(allocator: Allocator, m: ast.QuirkMethodSig) ![]const u8 {
-    const appendDType = struct {
-        fn call(buf: *std.ArrayList(u8), dt: anytype) !void {
-            try buf.appendSlice(dt.type_str.items);
-            var i: usize = 0;
-            while (i < dt.pointer_depth) : (i += 1) {
-                try buf.append('*');
-            }
-        }
-    }.call;
-
     var buf = std.ArrayList(u8).init(allocator);
     errdefer buf.deinit();
 
@@ -7455,12 +7928,12 @@ fn buildQuirkMethodSignatureFromAst(allocator: Allocator, m: ast.QuirkMethodSig)
     for (m.args.items()) |a| {
         if (!first) try buf.appendSlice(", ");
         first = false;
-        try appendDType(&buf, a.dtype);
+        try appendDTypeFull(&buf, a.dtype);
         try buf.writer().print(" {s}", .{a.name.items});
     }
     try buf.append(')');
     try buf.append(' ');
-    try appendDType(&buf, m.rtype);
+    try appendDTypeFull(&buf, m.rtype);
     return try buf.toOwnedSlice();
 }
 
@@ -7876,6 +8349,10 @@ fn isPrimitiveTypeKeywordName(s: []const u8) bool {
         std.mem.eql(u8, s, "str") or std.mem.eql(u8, s, "bin") or std.mem.eql(u8, s, "chr");
 }
 
+fn isArrayTypeName(name: []const u8) bool {
+    return name.len >= 2 and name[name.len - 2] == '[' and name[name.len - 1] == ']';
+}
+
 fn isTypeToken(t: token.Token) bool {
     if (t.type == .Identifier) return true;
     if (t.type == .Keyword and isPrimitiveTypeKeywordName(tokenString(t))) return true;
@@ -8109,6 +8586,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
     var in_body: bool = false;
     var body_brace_depth: i64 = 0;
     var body_range: ?Range = null;
+    var body_symbol_start: usize = 0;
 
     // Track `impl Type { ... }` so we can recognize method declarations.
     var pending_impl_block: bool = false;
@@ -8148,6 +8626,19 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
     const isLetToken = struct {
         fn call(t: token.Token) bool {
             return t.type == .Keyword and std.mem.eql(u8, tokenString(t), "let");
+        }
+    }.call;
+
+    const prevNonTrivialToken = struct {
+        fn call(tokens_: []const token.Token, start_index: usize) ?usize {
+            if (start_index == 0) return null;
+            var i: isize = @intCast(start_index);
+            while (i > 0) : (i -= 1) {
+                const t = tokens_[@intCast(i - 1)];
+                if (t.type == .NewLine or t.type == .Comment) continue;
+                return @intCast(i - 1);
+            }
+            return null;
         }
     }.call;
 
@@ -8206,6 +8697,31 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 }
             }.callSyms;
 
+            const findEnumMemberType = struct {
+                fn callSyms(container_type: []const u8, member: []const u8, syms: []const SymbolLite) ?[]const u8 {
+                    for (syms) |s| {
+                        if (s.container_type == null) continue;
+                        if (!std.mem.eql(u8, s.container_type.?, container_type)) continue;
+                        if (!std.mem.eql(u8, s.name, member)) continue;
+                        if (s.kind != .enumMember) continue;
+                        return s.container_type orelse container_type;
+                    }
+                    return null;
+                }
+            }.callSyms;
+
+            const findTypeName = struct {
+                fn callSyms(name: []const u8, syms: []const SymbolLite) ?[]const u8 {
+                    for (syms) |s| {
+                        if (!std.mem.eql(u8, s.name, name)) continue;
+                        if (s.kind == .struct_ or s.kind == .enum_ or s.kind == .interface) {
+                            return s.name;
+                        }
+                    }
+                    return null;
+                }
+            }.callSyms;
+
             const resolveIdentType = struct {
                 fn callSyms(name: []const u8, lt: *const std.StringHashMap([]const u8), gt: *const std.StringHashMap([]const u8)) ?[]const u8 {
                     if (lt.get(name)) |t| return t;
@@ -8216,9 +8732,51 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
 
             var saw_str = false;
             var saw_bin = false;
+            var saw_chr = false;
             var saw_dec = false;
             var saw_num = false;
+            var saw_array_literal = false;
             var candidate: ?[]const u8 = null;
+            var candidate_rank: u8 = 0;
+
+            const arrayElementType = struct {
+                fn call(name: []const u8) []const u8 {
+                    if (isArrayTypeName(name)) return name[0 .. name.len - 2];
+                    return name;
+                }
+            }.call;
+
+            const rankType = struct {
+                fn call(name: []const u8) u8 {
+                    if (isLetInferTypeName(name)) return 0;
+                    if (!isBuiltinTypeName(name)) return 3;
+                    if (std.mem.eql(u8, name, "str") or std.mem.eql(u8, name, "bin")) return 2;
+                    if (std.mem.eql(u8, name, "dec")) return 2;
+                    if (std.mem.eql(u8, name, "num")) return 1;
+                    return 1;
+                }
+            }.call;
+
+            const updateCandidate = struct {
+                fn call(best: *?[]const u8, best_rank: *u8, name: []const u8) void {
+                    const rank = rankType(name);
+                    if (rank == 0) return;
+                    if (best.* == null or rank > best_rank.*) {
+                        best.* = name;
+                        best_rank.* = rank;
+                    }
+                }
+            }.call;
+
+            const first_i_opt = nextNonTrivialToken(tokens_, start_i);
+            if (first_i_opt) |fi| {
+                if (isPunctChar(tokens_[fi], '(')) {
+                    const next_after = nextNonTrivialToken(tokens_, fi + 1) orelse fi;
+                    if (isPunctChar(tokens_[next_after], '[')) saw_array_literal = true;
+                } else if (isPunctChar(tokens_[fi], '[')) {
+                    saw_array_literal = true;
+                }
+            }
 
             var i: usize = start_i;
             while (i < end_i) : (i += 1) {
@@ -8234,8 +8792,13 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                         continue;
                     },
                     .Number => {
+                        if (t.num == null and t.data == .cval) {
+                            saw_chr = true;
+                            continue;
+                        }
                         switch (t.data) {
                             .dnum => saw_dec = true,
+                            .cval => saw_chr = true,
                             else => saw_num = true,
                         }
                         continue;
@@ -8244,24 +8807,95 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                         const name = tokenString(t);
                         const next_i_opt = nextNonTrivialToken(tokens_, i + 1);
                         if (next_i_opt == null) {
-                            if (resolveIdentType(name, locals_map, globals_map)) |tname| candidate = tname;
+                            if (resolveIdentType(name, locals_map, globals_map)) |tname| {
+                                updateCandidate(&candidate, &candidate_rank, tname);
+                            }
                             continue;
                         }
                         var next_i = next_i_opt.?;
+
+                        // Unary address-of: `&name` -> `Type*`.
+                        if (i > start_i) {
+                            const prev_i = prevNonTrivialToken(tokens_, i) orelse null;
+                            if (prev_i != null and isPunctChar(tokens_[prev_i.?], '&')) {
+                                if (resolveIdentType(name, locals_map, globals_map)) |tname| {
+                                    if (!isArrayTypeName(tname)) {
+                                        const ptr_name = std.mem.concat(allocator_, u8, &[_][]const u8{ tname, "*" }) catch tname;
+                                        updateCandidate(&candidate, &candidate_rank, ptr_name);
+                                    }
+                                }
+                                continue;
+                            }
+                        }
+
+                        // Indexing: `arr[i]` -> element type if array.
+                        // If followed by `.member`, resolve member type on the element.
+                        if (isPunctChar(tokens_[next_i], '[')) {
+                            if (resolveIdentType(name, locals_map, globals_map)) |tname| {
+                                const elem = arrayElementType(tname);
+                                var member_resolved = false;
+                                var saw_member_access = false;
+
+                                var depth: i64 = 0;
+                                var j: usize = next_i;
+                                while (j < end_i) : (j += 1) {
+                                    const tj = tokens_[j];
+                                    if (tj.type == .NewLine or tj.type == .Comment) continue;
+                                    if (isPunctChar(tj, '[')) depth += 1;
+                                    if (isPunctChar(tj, ']')) {
+                                        depth -= 1;
+                                        if (depth == 0) {
+                                            const after_idx = nextNonTrivialToken(tokens_, j + 1) orelse end_i;
+                                            if (after_idx < end_i and isDotTokenAny(tokens_[after_idx])) {
+                                                saw_member_access = true;
+                                                const member_i = nextNonTrivialToken(tokens_, after_idx + 1) orelse end_i;
+                                                if (member_i < end_i and isIdent(tokens_[member_i])) {
+                                                    const member_name = tokenString(tokens_[member_i]);
+                                                    const after_member = nextNonTrivialToken(tokens_, member_i + 1) orelse end_i;
+                                                    if (after_member < end_i and isPunctChar(tokens_[after_member], '(')) {
+                                                        if (findMemberReturnType(elem, member_name, symbols)) |rt| {
+                                                            updateCandidate(&candidate, &candidate_rank, rt);
+                                                            member_resolved = true;
+                                                            break;
+                                                        }
+                                                    }
+                                                    if (findMemberFieldType(elem, member_name, symbols)) |ft| {
+                                                        updateCandidate(&candidate, &candidate_rank, ft);
+                                                        member_resolved = true;
+                                                        break;
+                                                    }
+                                                    if (findEnumMemberType(elem, member_name, symbols)) |et| {
+                                                        updateCandidate(&candidate, &candidate_rank, et);
+                                                        member_resolved = true;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                if (!member_resolved and !saw_member_access) {
+                                    updateCandidate(&candidate, &candidate_rank, elem);
+                                }
+                            }
+                            continue;
+                        }
 
                         // Compound init: `Type{...}` or `Type<...>{...}`
                         if (isPunctChar(tokens_[next_i], '<')) {
                             next_i = skipGenericArgsForward(tokens_, next_i);
                         }
                         if (next_i < end_i and isSymbolChar(tokens_[next_i], '{')) {
-                            candidate = allocator_.dupe(u8, name) catch name;
+                            updateCandidate(&candidate, &candidate_rank, allocator_.dupe(u8, name) catch name);
                             continue;
                         }
 
                         // Function call: `name(...)`
                         if (isPunctChar(tokens_[next_i], '(')) {
                             if (findFunctionReturnType(name, symbols)) |rt| {
-                                candidate = rt;
+                                updateCandidate(&candidate, &candidate_rank, rt);
                             }
                             continue;
                         }
@@ -8269,6 +8903,9 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                         // Member access chain.
                         if (isDotTokenAny(tokens_[next_i])) {
                             var recv_type = resolveIdentType(name, locals_map, globals_map);
+                            if (recv_type == null) {
+                                recv_type = findTypeName(name, symbols);
+                            }
                             var j = next_i;
                             while (recv_type != null and j < end_i and isDotTokenAny(tokens_[j])) {
                                 const member_i = nextNonTrivialToken(tokens_, j + 1) orelse break;
@@ -8279,15 +8916,23 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                                     recv_type = findMemberReturnType(recv_type.?, member_name, symbols);
                                     break;
                                 }
-                                recv_type = findMemberFieldType(recv_type.?, member_name, symbols);
+                                if (findMemberFieldType(recv_type.?, member_name, symbols)) |ft| {
+                                    recv_type = ft;
+                                } else if (findEnumMemberType(recv_type.?, member_name, symbols)) |et| {
+                                    recv_type = et;
+                                } else {
+                                    recv_type = null;
+                                }
                                 j = after_member;
                             }
-                            if (recv_type) |rt| candidate = rt;
+                            if (recv_type) |rt| {
+                                updateCandidate(&candidate, &candidate_rank, rt);
+                            }
                             continue;
                         }
 
                         if (resolveIdentType(name, locals_map, globals_map)) |tname| {
-                            candidate = tname;
+                            updateCandidate(&candidate, &candidate_rank, tname);
                         }
                         continue;
                     },
@@ -8295,22 +8940,35 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 }
             }
 
+            if (candidate) |cand| {
+                if (!isLetInferTypeName(cand) and !isBuiltinTypeName(cand)) {
+                    if (saw_array_literal and !isArrayTypeName(cand)) {
+                        const arr_name = std.mem.concat(allocator_, u8, &[_][]const u8{ cand, "[]" }) catch cand;
+                        return arr_name;
+                    }
+                    return allocator_.dupe(u8, cand) catch cand;
+                }
+            }
             if (saw_str) return allocator_.dupe(u8, "str") catch "str";
             if (saw_bin) return allocator_.dupe(u8, "bin") catch "bin";
-            if (saw_dec) return allocator_.dupe(u8, "dec") catch "dec";
-            if (saw_num) return allocator_.dupe(u8, "num") catch "num";
-            return candidate;
-        }
-    }.call;
-
-    const prevNonTrivialToken = struct {
-        fn call(tokens_: []const token.Token, start_index: usize) ?usize {
-            if (start_index == 0) return null;
-            var i: isize = @intCast(start_index);
-            while (i > 0) : (i -= 1) {
-                const t = tokens_[@intCast(i - 1)];
-                if (t.type == .NewLine or t.type == .Comment) continue;
-                return @intCast(i - 1);
+            if (saw_chr) return allocator_.dupe(u8, "chr") catch "chr";
+            if (saw_dec or (candidate != null and std.mem.eql(u8, candidate.?, "dec"))) {
+                const base = "dec";
+                if (saw_array_literal) return std.mem.concat(allocator_, u8, &[_][]const u8{ base, "[]" }) catch base;
+                return allocator_.dupe(u8, base) catch base;
+            }
+            if (saw_num or (candidate != null and std.mem.eql(u8, candidate.?, "num"))) {
+                const base = "num";
+                if (saw_array_literal) return std.mem.concat(allocator_, u8, &[_][]const u8{ base, "[]" }) catch base;
+                return allocator_.dupe(u8, base) catch base;
+            }
+            if (candidate) |cand2| {
+                if (!isLetInferTypeName(cand2)) {
+                    if (saw_array_literal and !isArrayTypeName(cand2)) {
+                        return std.mem.concat(allocator_, u8, &[_][]const u8{ cand2, "[]" }) catch cand2;
+                    }
+                    return allocator_.dupe(u8, cand2) catch cand2;
+                }
             }
             return null;
         }
@@ -8425,6 +9083,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 .start = br.start,
                 .end = .{ .line = std.math.maxInt(i64), .character = std.math.maxInt(i64) },
             };
+            body_symbol_start = out.items.len;
             locals_type_map.clearRetainingCapacity();
 
             // Add implicit `self` inside impl method bodies.
@@ -8486,6 +9145,19 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
             resetPendingBody(&pending_body, &pending_params, &pending_impl_owner, &pending_is_variadic);
         }
         if (in_body and isSymbolChar(t, '}') and brace_depth < body_brace_depth) {
+            const end_range = rangeFromTokenPos(t.pos);
+            if (body_range) |br| {
+                const fixed_range = Range{ .start = br.start, .end = end_range.end };
+                for (out.items[body_symbol_start..]) |*sym| {
+                    if (sym.container_fn_range) |cr| {
+                        if (cr.start.line == br.start.line and cr.start.character == br.start.character and
+                            cr.end.line == std.math.maxInt(i64))
+                        {
+                            sym.container_fn_range = fixed_range;
+                        }
+                    }
+                }
+            }
             in_body = false;
             body_range = null;
             locals_type_map.clearRetainingCapacity();
@@ -9007,7 +9679,8 @@ fn collectSymbolsFromTopLevel(allocator: Allocator, out: *std.ArrayList(SymbolLi
 
             var detail_buf = std.ArrayList(u8).init(allocator);
             errdefer detail_buf.deinit();
-            try detail_buf.writer().print("{s} {s}", .{ v.type.type_str.items, name });
+            try appendDTypeFull(&detail_buf, v.type);
+            try detail_buf.writer().print(" {s}", .{name});
 
             try out.append(.{
                 .name = try allocator.dupe(u8, name),
@@ -9016,6 +9689,7 @@ fn collectSymbolsFromTopLevel(allocator: Allocator, out: *std.ArrayList(SymbolLi
                 .selection_range = r,
                 .is_public = if (n.flags) |f| f.is_public else false,
                 .container_type = null,
+                // Keep base type for member completion matching.
                 .value_type = try allocator.dupe(u8, v.type.type_str.items),
                 .detail = try detail_buf.toOwnedSlice(),
             });
@@ -9114,24 +9788,6 @@ fn formatFunctionSignature(allocator: Allocator, name: []const u8, fnv: anytype)
 
     try buf.append('(');
 
-    const appendDType = struct {
-        fn call(out_buf: *std.ArrayList(u8), dt: anytype) !void {
-            try out_buf.appendSlice(dt.type_str.items);
-            if (dt.generic_args) |gargs| {
-                try out_buf.append('<');
-                for (gargs.items(), 0..) |ga, i| {
-                    if (i != 0) try out_buf.appendSlice(", ");
-                    try call(out_buf, ga.*);
-                }
-                try out_buf.append('>');
-            }
-            var i: usize = 0;
-            while (i < dt.pointer_depth) : (i += 1) {
-                try out_buf.append('*');
-            }
-        }
-    }.call;
-
     if (fnv.args) |args| {
         var first = true;
         for (args.items()) |a| {
@@ -9141,7 +9797,7 @@ fn formatFunctionSignature(allocator: Allocator, name: []const u8, fnv: anytype)
             const dt = vv.type.*;
             if (!first) try buf.appendSlice(", ");
             first = false;
-            try appendDType(&buf, dt);
+            try appendDTypeFull(&buf, dt);
             try buf.writer().print(" {s}", .{arg_name});
         }
     }
@@ -9152,7 +9808,7 @@ fn formatFunctionSignature(allocator: Allocator, name: []const u8, fnv: anytype)
     try buf.append(')');
     if (fnv.rtype) |rt| {
         try buf.append(' ');
-        try appendDType(&buf, rt);
+        try appendDTypeFull(&buf, rt);
     }
     return buf.toOwnedSlice();
 }
@@ -9166,7 +9822,8 @@ fn collectLocalVars(allocator: Allocator, out: *std.ArrayList(SymbolLite), n: *a
             const r = if (n.pos) |p| rangeFromTokenPos(p) else return;
             var detail_buf = std.ArrayList(u8).init(allocator);
             errdefer detail_buf.deinit();
-            try detail_buf.writer().print("{s} {s}", .{ v.type.type_str.items, name });
+            try appendDTypeFull(&detail_buf, v.type);
+            try detail_buf.writer().print(" {s}", .{name});
             const det = try detail_buf.toOwnedSlice();
             try out.append(.{
                 .name = try allocator.dupe(u8, name),
@@ -9175,6 +9832,7 @@ fn collectLocalVars(allocator: Allocator, out: *std.ArrayList(SymbolLite), n: *a
                 .selection_range = r,
                 .container_fn_range = container_fn_range,
                 .container_type = null,
+                // Keep base type for member completion matching.
                 .value_type = try allocator.dupe(u8, v.type.type_str.items),
                 .detail = det,
             });

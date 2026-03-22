@@ -3521,6 +3521,44 @@ pub const TranspileProcess = struct {
         return .{ .base = .Unknown, .name = enum_name };
     }
 
+    fn infer_let_enum_dot_shorthand(self: *Self, node: *ast.Node) TranspileError!?CheckedType {
+        const variant_name = dot_shorthand_variant_name(node) orelse return null;
+        const reg = self.root_registry() orelse return null;
+
+        var found_enum: ?[]const u8 = null;
+
+        var it = reg.enums_by_name.iterator();
+        while (it.next()) |entry| {
+            const enum_name = entry.key_ptr.*;
+            const enode = entry.value_ptr.*;
+            if (!self.can_access(node, enode)) continue;
+            if (enode.node_variant == null) continue;
+
+            var has_variant = false;
+            for (enode.node_variant.?.enum_decl.variants.items()) |v| {
+                if (mem.eql(u8, v.name.items, variant_name)) {
+                    has_variant = true;
+                    break;
+                }
+            }
+            if (!has_variant) continue;
+
+            if (found_enum != null) {
+                self.report_type_error(node.*, "cannot infer enum for '.{s}'; variant exists in both '{s}' and '{s}'", .{ variant_name, found_enum.?, enum_name });
+                return TranspileError.TypeMismatch;
+            }
+
+            found_enum = enum_name;
+        }
+
+        if (found_enum == null) {
+            self.report_type_error(node.*, "cannot infer enum for '.{s}'; no matching enum in scope", .{variant_name});
+            return TranspileError.TypeMismatch;
+        }
+
+        return try self.resolve_dot_shorthand_enum_variant(node, found_enum.?);
+    }
+
     fn lookup_compound_field(self: *Self, compound_name: []const u8, field_name: []const u8) ?*const dtype.DataType {
         const root = self.get_root();
         if (root.type_registry == null) return null;
@@ -3906,6 +3944,13 @@ pub const TranspileProcess = struct {
         return root.type_registry.?.enums_by_name.contains(t.name.?);
     }
 
+    fn is_compound_named_type(self: *Self, t: CheckedType) bool {
+        if (!is_user_named_type(t)) return false;
+        const root = self.get_root();
+        if (root.type_registry == null) return false;
+        return root.type_registry.?.compounds_by_name.contains(t.name.?);
+    }
+
     fn are_same_enum_type(self: *Self, a: CheckedType, b: CheckedType) bool {
         if (!self.is_enum_named_type(a) or !self.is_enum_named_type(b)) return false;
         const root = self.get_root();
@@ -3915,6 +3960,19 @@ pub const TranspileProcess = struct {
         const bn = b.name orelse return false;
         const a_node = reg.enums_by_name.get(an) orelse return false;
         const b_node = reg.enums_by_name.get(bn) orelse return false;
+        return a_node == b_node;
+    }
+
+    fn are_same_compound_type(self: *Self, a: CheckedType, b: CheckedType) bool {
+        if (!self.is_compound_named_type(a) or !self.is_compound_named_type(b)) return false;
+        if (a.is_array != b.is_array or a.pointer_depth != b.pointer_depth) return false;
+        const root = self.get_root();
+        if (root.type_registry == null) return false;
+        const reg = &root.type_registry.?;
+        const an = a.name orelse return false;
+        const bn = b.name orelse return false;
+        const a_node = reg.compounds_by_name.get(an) orelse return false;
+        const b_node = reg.compounds_by_name.get(bn) orelse return false;
         return a_node == b_node;
     }
 
@@ -3947,6 +4005,10 @@ pub const TranspileProcess = struct {
         // Allow equivalent enum types referenced through different visible names
         // (e.g. `ErrorCode` and `err__ErrorCode`).
         if (self.are_same_enum_type(expected, actual)) return true;
+
+        // Allow equivalent compound types referenced through different visible names
+        // (e.g. `Vec2` and `geom__Vec2`).
+        if (self.are_same_compound_type(expected, actual)) return true;
 
         // Enums behave as numeric values for coercion with `num`.
         if (self.is_enum_named_type(expected) and !actual.is_array and actual.pointer_depth == 0 and actual.base == .Num) {
@@ -4049,7 +4111,14 @@ pub const TranspileProcess = struct {
             self.report_type_error(stmt.*, "'let' variable '{s}' requires an initializer", .{v.name.items});
             return TranspileError.TypeMismatch;
         };
-        const inferred_t = try self.infer_expr_type(val.*, env, fns);
+        const inferred_t = blk: {
+            if (dot_shorthand_variant_name(val)) |_| {
+                if (try self.infer_let_enum_dot_shorthand(val)) |t| {
+                    break :blk t;
+                }
+            }
+            break :blk try self.infer_expr_type(val.*, env, fns);
+        };
         if (!is_known_type(inferred_t)) {
             self.report_type_error(stmt.*, "cannot infer type for let variable '{s}'", .{v.name.items});
             return TranspileError.TypeMismatch;
@@ -4117,11 +4186,17 @@ pub const TranspileProcess = struct {
                     }
                 }
 
-                return .{
+                var out: CheckedType = .{
                     .base = if (elem_type) |et| et.base else .Unknown,
                     .is_array = true,
                     .pointer_depth = 0,
                 };
+                if (elem_type) |et| {
+                    out.name = et.name;
+                    out.mangled_name = et.mangled_name;
+                    out.dtype_ref = et.dtype_ref;
+                }
+                return out;
             },
             .Number => {
                 if (node.data) |d| {
@@ -5390,6 +5465,86 @@ pub const TranspileProcess = struct {
             }) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
+
+            if (proc.import_alias) |alias| {
+                const alias_name = try self.make_alias_qualified_symbol_name(alias, name);
+                if (!fns.contains(alias_name)) {
+                    fns.put(alias_name, .{
+                        .rtype = fn_rtype,
+                        .args = args_slice,
+                        .is_variadic = fnv.is_variadic,
+                        .type_params = if (fnv.type_params) |*params| params else null,
+                    }) catch {
+                        return TranspileError.MemoryAllocationFailed;
+                    };
+                } else {
+                    self.allocator.free(alias_name);
+                }
+            }
+        }
+
+        // Some modules keep function nodes only in `owned_nodes`.
+        for (proc.owned_nodes.items) |node_ptr| {
+            const node = node_ptr.*;
+            if (node.type != .Function or node.node_variant == null) continue;
+            const fnv = node.node_variant.?.function;
+            if (fnv.name == null) continue;
+            const name = fnv.name.?.items;
+
+            if (fns.contains(name)) continue;
+
+            const args_vec = fnv.args orelse utils.Vector(*ast.Node).init(proc.allocator);
+            const args_items = args_vec.items();
+            var args_slice = proc.allocator.alloc(CheckedType, args_items.len) catch {
+                return TranspileError.MemoryAllocationFailed;
+            };
+            errdefer proc.allocator.free(args_slice);
+
+            var i: usize = 0;
+            for (args_items) |arg_ptr| {
+                const arg = arg_ptr.*;
+                if (arg.type == .Variable and arg.node_variant != null) {
+                    try self.register_generic_instantiations_from_dtype(arg.node_variant.?.variable.type);
+                    args_slice[i] = try self.type_from_dtype_with_mangled(arg.node_variant.?.variable.type);
+                } else {
+                    args_slice[i] = .{ .base = .Unknown };
+                }
+                try self.register_generic_instantiation_from_checked_type(args_slice[i]);
+                i += 1;
+            }
+
+            owned_args.append(args_slice) catch {
+                return TranspileError.MemoryAllocationFailed;
+            };
+            const fn_rtype: CheckedType = if (fnv.rtype) |*rt| blk: {
+                try self.register_generic_instantiations_from_dtype(rt);
+                break :blk try self.type_from_dtype_with_mangled(rt);
+            } else .{ .base = .Void };
+            try self.register_generic_instantiation_from_checked_type(fn_rtype);
+            fns.put(name, .{
+                .rtype = fn_rtype,
+                .args = args_slice,
+                .is_variadic = fnv.is_variadic,
+                .type_params = if (fnv.type_params) |*params| params else null,
+            }) catch {
+                return TranspileError.MemoryAllocationFailed;
+            };
+
+            if (proc.import_alias) |alias| {
+                const alias_name = try self.make_alias_qualified_symbol_name(alias, name);
+                if (!fns.contains(alias_name)) {
+                    fns.put(alias_name, .{
+                        .rtype = fn_rtype,
+                        .args = args_slice,
+                        .is_variadic = fnv.is_variadic,
+                        .type_params = if (fnv.type_params) |*params| params else null,
+                    }) catch {
+                        return TranspileError.MemoryAllocationFailed;
+                    };
+                } else {
+                    self.allocator.free(alias_name);
+                }
+            }
         }
 
         // Impl methods are nested under `.Impl` nodes, not in `proc.nodes`.
@@ -5595,8 +5750,97 @@ pub const TranspileProcess = struct {
                 (self.type_from_dtype_with_mangled(&rt) catch CheckedType{ .base = .Unknown })
             else
                 CheckedType{ .base = .Void };
+
+            var fn_env = TypeEnv.init(self.allocator);
+            defer fn_env.deinit();
+            fn_env.push() catch {};
+
+            // Seed globals into function scope for better inference.
+            for (self.nodes.items()) |gn| {
+                if (gn.type == .Variable and gn.node_variant != null and gn.binded == null) {
+                    const v = gn.node_variant.?.variable;
+                    const vtype = self.type_from_dtype_with_mangled(v.type) catch continue;
+                    fn_env.put_current(v.name.items, vtype) catch {};
+                }
+            }
+
+            // Seed args.
+            if (fnv.args) |args| {
+                for (args.items()) |arg_ptr| {
+                    const arg = arg_ptr.*;
+                    if (arg.type != .Variable or arg.node_variant == null) continue;
+                    const v = arg.node_variant.?.variable;
+                    const vtype = self.type_from_dtype_with_mangled(v.type) catch continue;
+                    fn_env.put_current(v.name.items, vtype) catch {};
+                }
+            }
+
+            if (fnv.is_variadic) {
+                const vdt = self.make_vec_str_dtype() catch null;
+                if (vdt) |dt| {
+                    const vtype = self.type_from_dtype_with_mangled(dt) catch null;
+                    if (vtype) |vt| fn_env.put_current("vargs", vt) catch {};
+                }
+            }
+
             if (fnv.body) |b| {
-                self.check_body(b, &global_env, &fns, fn_rtype) catch {};
+                self.check_body(b, &fn_env, &fns, fn_rtype) catch {};
+            }
+        }
+
+        // Best-effort inference inside impl methods too.
+        for (self.owned_nodes.items) |n| {
+            if (n.type != .Impl or n.node_variant == null) continue;
+            const im = n.node_variant.?.impl;
+            const self_base = if (mem.indexOf(u8, im.type_name.items, "__")) |idx| im.type_name.items[0..idx] else im.type_name.items;
+            const self_type: CheckedType = .{ .base = .Unknown, .name = self_base, .mangled_name = im.type_name.items, .pointer_depth = 1 };
+
+            for (im.methods.items()) |m| {
+                if (m.type != .Function or m.node_variant == null) continue;
+                const fnv = m.node_variant.?.function;
+                const fn_rtype: CheckedType = if (fnv.rtype) |rt|
+                    (self.type_from_dtype_with_mangled(&rt) catch CheckedType{ .base = .Unknown })
+                else
+                    CheckedType{ .base = .Void };
+
+                var fn_env = TypeEnv.init(self.allocator);
+                defer fn_env.deinit();
+                fn_env.push() catch {};
+
+                // Seed globals.
+                for (self.nodes.items()) |gn| {
+                    if (gn.type == .Variable and gn.node_variant != null and gn.binded == null) {
+                        const v = gn.node_variant.?.variable;
+                        const vtype = self.type_from_dtype_with_mangled(v.type) catch continue;
+                        fn_env.put_current(v.name.items, vtype) catch {};
+                    }
+                }
+
+                // Seed implicit self.
+                fn_env.put_current("self", self_type) catch {};
+
+                // Seed args.
+                if (fnv.args) |args| {
+                    for (args.items()) |arg_ptr| {
+                        const arg = arg_ptr.*;
+                        if (arg.type != .Variable or arg.node_variant == null) continue;
+                        const v = arg.node_variant.?.variable;
+                        const vtype = self.type_from_dtype_with_mangled(v.type) catch continue;
+                        fn_env.put_current(v.name.items, vtype) catch {};
+                    }
+                }
+
+                if (fnv.is_variadic) {
+                    const vdt = self.make_vec_str_dtype() catch null;
+                    if (vdt) |dt| {
+                        const vtype = self.type_from_dtype_with_mangled(dt) catch null;
+                        if (vtype) |vt| fn_env.put_current("vargs", vt) catch {};
+                    }
+                }
+
+                if (fnv.body) |b| {
+                    self.check_body(b, &fn_env, &fns, fn_rtype) catch {};
+                }
             }
         }
     }
@@ -10230,7 +10474,16 @@ pub const TranspileProcess = struct {
             },
             .ExpressionParenthesis => {
                 const exp = node.node_variant.?.paren.exp;
-                try self.transpile_node(exp.*);
+                if (exp.*.type == .Blank) {
+                    return;
+                }
+                if (exp.*.type == .Expression and exp.*.node_variant != null and mem.eql(u8, exp.*.node_variant.?.exp.op, ",")) {
+                    try self.transpile_node(exp.*);
+                } else {
+                    try self.write("(");
+                    try self.transpile_node(exp.*);
+                    try self.write(")");
+                }
             },
             .Number => {
                 const d = node.data orelse {
