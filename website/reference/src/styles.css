@@ -108,16 +108,55 @@ h1 { margin-top: 0; }
 .run-actions button.ghost { background: #0f1a38; }
 .run-actions button:disabled { opacity: 0.6; cursor: not-allowed; }
 
-textarea {
+.run-editor {
+  position: relative;
+  width: 100%;
+  min-height: 210px;
+  border-bottom: 1px solid #22315f;
+  background: #0a1228;
+}
+
+.run-editor pre {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  font: 500 13px/1.5 var(--mono);
+  color: #e9eeff;
+  white-space: pre;
+  pointer-events: none;
+}
+
+.run-editor textarea {
+  position: relative;
   width: 100%;
   min-height: 210px;
   border: none;
-  border-bottom: 1px solid #22315f;
-  background: #0a1228;
-  color: #e9eeff;
+  background: transparent;
+  color: transparent;
+  caret-color: #e9eeff;
+  -webkit-text-fill-color: transparent;
   font: 500 13px/1.5 var(--mono);
   padding: 12px;
   resize: vertical;
+}
+
+.run-editor textarea::selection {
+  background: rgba(106, 164, 255, 0.35);
+}
+
+.tok-comment { color: #7f8db8; }
+.tok-string { color: #f1c38f; }
+.tok-number { color: #9de0ff; }
+.tok-keyword { color: #7aa2ff; font-weight: 600; }
+.tok-type { color: #9bdc8a; }
+.tok-support-type { color: #7fe0c1; }
+.tok-boolean { color: #ffb3c0; }
+
+.fun-inline-code,
+.fun-block code {
+  font-family: var(--mono);
 }
 
 .output-grid {

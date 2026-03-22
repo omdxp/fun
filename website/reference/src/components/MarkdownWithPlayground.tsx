@@ -1,6 +1,7 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import RunCodeBlock from "./RunCodeBlock";
+import { highlightFun } from "../utils/funHighlight";
 
 type Props = {
   markdown: string;
@@ -98,7 +99,10 @@ export default function MarkdownWithPlayground({
             );
           }
 
-          return <code className="md-inline-code">{children}</code>;
+          const inlineText = String(children);
+          return (
+            <code className="md-inline-code">{highlightFun(inlineText)}</code>
+          );
         },
       }}
     >

@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useMemo, useRef, useState } from "react";
+
+import { highlightFun } from "../utils/funHighlight";
 
 type Props = {
   initialCode: string;
@@ -17,6 +19,8 @@ export default function RunCodeBlock({ initialCode, title }: Props) {
   const [stdout, setStdout] = useState("");
   const [stderr, setStderr] = useState("");
   const [isRunning, setIsRunning] = useState(false);
+  const editorRef = useRef<HTMLTextAreaElement | null>(null);
+  const previewRef = useRef<HTMLPreElement | null>(null);
   const configuredApiBase = (import.meta.env.VITE_RUN_API_BASE ?? "")
     .trim()
     .replace(/\/+$/, "");
@@ -56,6 +60,13 @@ export default function RunCodeBlock({ initialCode, title }: Props) {
     }
   };
 
+  const highlighted = useMemo(() => highlightFun(code), [code]);
+  const syncScroll = () => {
+    if (!editorRef.current || !previewRef.current) return;
+    previewRef.current.scrollTop = editorRef.current.scrollTop;
+    previewRef.current.scrollLeft = editorRef.current.scrollLeft;
+  };
+
   return (
     <div className="run-block">
       <div className="run-block-header">
@@ -72,11 +83,18 @@ export default function RunCodeBlock({ initialCode, title }: Props) {
           </button>
         </div>
       </div>
-      <textarea
-        value={code}
-        onChange={(e) => setCode(e.target.value)}
-        spellCheck={false}
-      />
+      <div className="run-editor">
+        <pre ref={previewRef} aria-hidden>
+          <code>{highlighted}</code>
+        </pre>
+        <textarea
+          ref={editorRef}
+          value={code}
+          onChange={(e) => setCode(e.target.value)}
+          onScroll={syncScroll}
+          spellCheck={false}
+        />
+      </div>
       <div className="output-grid">
         <div>
           <div className="output-title">stdout</div>

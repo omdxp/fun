@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import MarkdownWithPlayground from "./components/MarkdownWithPlayground";
 import RunCodeBlock from "./components/RunCodeBlock";
+import { highlightFun } from "./utils/funHighlight";
 import data from "./generated/content.json";
 
 type DocsSections = {
@@ -462,7 +463,9 @@ export default function App() {
                             }
                           >
                             <span className="badge">{s.kind}</span>
-                            <code>{s.signature}</code>
+                            <code className="fun-inline-code">
+                              {highlightFun(s.signature)}
+                            </code>
                             {s.kind === "method" && s.owner && (
                               <span className="muted">@ {s.owner}</span>
                             )}
@@ -577,8 +580,8 @@ export default function App() {
                               (line {activeSymbol.line})
                             </span>
                           </h3>
-                          <pre>
-                            <code>{activeSymbol.signature}</code>
+                          <pre className="fun-block">
+                            <code>{highlightFun(activeSymbol.signature)}</code>
                           </pre>
                           {activeSymbol.docsMarkdown ? (
                             <MarkdownWithPlayground
