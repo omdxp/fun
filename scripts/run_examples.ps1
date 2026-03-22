@@ -2,7 +2,8 @@
 param(
   [string]$RepoRoot = "",
   [int]$PerFileTimeoutSec = 120,
-  [int]$ProgressEvery = 5
+  [int]$ProgressEvery = 5,
+  [int]$CleanupFunCache = 1
 )
 
 Set-StrictMode -Version Latest
@@ -111,6 +112,38 @@ function Invoke-Fun([string]$funExe, [string[]]$argumentList, [string]$workingDi
 
 Set-Location -LiteralPath $RepoRoot
 
+function Cleanup-Leftovers {
+  param([string]$Root, [int]$Enabled)
+  if ($Enabled -ne 1) { return }
+  try {
+    Get-ChildItem -LiteralPath (Join-Path $Root 'examples') -Recurse -Directory -Filter '.fun-cache' -ErrorAction SilentlyContinue |
+      ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+
+    $rootFiles = @(
+      'out.txt',
+      'out_copy.txt',
+      'tmp_fun_io.txt',
+      '_fun_c_file_io_demo.txt',
+      '_tmp_fs_try.txt'
+    )
+    foreach ($name in $rootFiles) {
+      $p = Join-Path $Root $name
+      if (Test-Path -LiteralPath $p) {
+        Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+      }
+    }
+
+    Get-ChildItem -LiteralPath $Root -Filter 'temp_*.c' -ErrorAction SilentlyContinue |
+      ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+    Get-ChildItem -LiteralPath $Root -Filter 'main_exit_status_*' -ErrorAction SilentlyContinue |
+      ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+  } catch {
+    # Ignore cleanup errors to avoid hiding example failures.
+  }
+}
+
+try {
+
 $funExe = Join-Path $RepoRoot 'zig-out\bin\fun.exe'
 if (-not (Test-Path -LiteralPath $funExe)) {
   throw "Missing $funExe. Run 'zig build' first."
@@ -194,3 +227,6 @@ if ($failed.Count -gt 0 -or $unexpectedPass.Count -gt 0) {
 }
 
 exit 0
+} finally {
+  Cleanup-Leftovers -Root $RepoRoot -Enabled $CleanupFunCache
+}

@@ -5570,6 +5570,9 @@ pub const TranspileProcess = struct {
 
         self.collect_fn_sigs(self, &fns, &owned_args) catch return;
 
+        // Ensure the type registry is populated so local type checks can resolve named types.
+        self.collect_type_registry_all() catch return;
+
         var global_env = TypeEnv.init(self.allocator);
         defer global_env.deinit();
         global_env.push() catch return;

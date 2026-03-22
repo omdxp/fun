@@ -4,6 +4,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PER_FILE_TIMEOUT_SEC="${PER_FILE_TIMEOUT_SEC:-120}"
 PROGRESS_EVERY="${PROGRESS_EVERY:-6}"
+CLEANUP_FUN_CACHE="${CLEANUP_FUN_CACHE:-1}"
 
 cd "$REPO_ROOT"
 
@@ -12,6 +13,27 @@ if [[ -z "${FUN_STDLIB_DIR:-}" ]]; then
 fi
 
 echo "Using FUN_STDLIB_DIR=$FUN_STDLIB_DIR"
+
+cleanup_leftovers() {
+  if [[ "$CLEANUP_FUN_CACHE" -ne 1 ]]; then
+    return
+  fi
+
+  # Remove compiler cache directories created next to example sources.
+  find "$REPO_ROOT/examples" -type d -name ".fun-cache" -prune -exec rm -rf {} + 2>/dev/null || true
+
+  # Remove known example output files created in repo root.
+  rm -f \
+    "$REPO_ROOT"/temp_*.c \
+    "$REPO_ROOT"/main_exit_status_* \
+    "$REPO_ROOT"/out.txt \
+    "$REPO_ROOT"/out_copy.txt \
+    "$REPO_ROOT"/tmp_fun_io.txt \
+    "$REPO_ROOT"/_fun_c_file_io_demo.txt \
+    "$REPO_ROOT"/_tmp_fs_try.txt 2>/dev/null || true
+}
+
+trap cleanup_leftovers EXIT
 
 # Prefer Windows build output if present (WSL can execute .exe), otherwise use native binary.
 FUN_EXE=""

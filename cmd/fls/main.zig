@@ -7644,6 +7644,59 @@ test "fls index: let locals inferred in token-only index" {
     try std.testing.expect(found_s);
 }
 
+test "fls index: let uses prior let in expression" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const text =
+        "fun main() {\n" ++
+        "  let a = 1;\n" ++
+        "  let b = a + 2;\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found_b = false;
+    for (idx.symbols) |s| {
+        if (s.kind != .variable) continue;
+        if (!std.mem.eql(u8, s.name, "b")) continue;
+        found_b = true;
+        try std.testing.expect(s.value_type != null);
+        try std.testing.expect(std.mem.eql(u8, s.value_type.?, "num"));
+    }
+    try std.testing.expect(found_b);
+}
+
+test "fls index: let from member access" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const text =
+        "compound User {\n" ++
+        "  num age;\n" ++
+        "}\n" ++
+        "fun main() {\n" ++
+        "  User u;\n" ++
+        "  let a = u.age;\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found_a = false;
+    for (idx.symbols) |s| {
+        if (s.kind != .variable) continue;
+        if (!std.mem.eql(u8, s.name, "a")) continue;
+        found_a = true;
+        try std.testing.expect(s.value_type != null);
+        try std.testing.expect(std.mem.eql(u8, s.value_type.?, "num"));
+    }
+    try std.testing.expect(found_a);
+}
+
 test "fls index: generic function signature includes params" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -8063,6 +8116,20 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
     var impl_brace_depth: i64 = 0;
     var impl_owner_name: ?[]const u8 = null;
 
+    var locals_type_map = std.StringHashMap([]const u8).init(allocator);
+    defer locals_type_map.deinit();
+    var globals_type_map = std.StringHashMap([]const u8).init(allocator);
+    defer globals_type_map.deinit();
+
+    const putType = struct {
+        fn call(map: *std.StringHashMap([]const u8), name: []const u8, tname: ?[]const u8, allocator_: Allocator) void {
+            if (tname == null) return;
+            const key = allocator_.dupe(u8, name) catch name;
+            const val = allocator_.dupe(u8, tname.?) catch tname.?;
+            map.put(key, val) catch {};
+        }
+    }.call;
+
     const resetPendingBody = struct {
         fn call(kind: *PendingBodyKind, params: *std.ArrayList(ParamLite), owner: *?[]const u8, is_variadic: *bool) void {
             kind.* = .none;
@@ -8084,35 +8151,155 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
         }
     }.call;
 
-    const inferLetTypeFromTokens = struct {
-        fn call(allocator_: Allocator, tokens_: []const token.Token, start_i: usize) ?[]const u8 {
+    const isDotTokenAny = struct {
+        fn call(t: token.Token) bool {
+            if (t.type == .Symbol and t.data == .cval and t.data.cval == '.') return true;
+            if (t.type == .Operator and t.data == .sval and std.mem.eql(u8, t.data.sval.items, ".")) return true;
+            return false;
+        }
+    }.call;
+
+    const inferExprTypeFromTokens = struct {
+        fn call(
+            allocator_: Allocator,
+            tokens_: []const token.Token,
+            start_i: usize,
+            end_i: usize,
+            locals_map: *const std.StringHashMap([]const u8),
+            globals_map: *const std.StringHashMap([]const u8),
+            symbols: []const SymbolLite,
+        ) ?[]const u8 {
+            const findFunctionReturnType = struct {
+                fn callSyms(name: []const u8, syms: []const SymbolLite) ?[]const u8 {
+                    for (syms) |s| {
+                        if (s.kind != .function) continue;
+                        if (!std.mem.eql(u8, s.name, name)) continue;
+                        return s.value_type orelse null;
+                    }
+                    return null;
+                }
+            }.callSyms;
+
+            const findMemberReturnType = struct {
+                fn callSyms(container_type: []const u8, member: []const u8, syms: []const SymbolLite) ?[]const u8 {
+                    for (syms) |s| {
+                        if (s.container_type == null) continue;
+                        if (!std.mem.eql(u8, s.container_type.?, container_type)) continue;
+                        if (!std.mem.eql(u8, s.name, member)) continue;
+                        if (s.kind != .method and s.kind != .function) continue;
+                        return s.value_type orelse null;
+                    }
+                    return null;
+                }
+            }.callSyms;
+
+            const findMemberFieldType = struct {
+                fn callSyms(container_type: []const u8, member: []const u8, syms: []const SymbolLite) ?[]const u8 {
+                    for (syms) |s| {
+                        if (s.container_type == null) continue;
+                        if (!std.mem.eql(u8, s.container_type.?, container_type)) continue;
+                        if (!std.mem.eql(u8, s.name, member)) continue;
+                        if (s.kind != .field and s.kind != .property) continue;
+                        return s.value_type orelse null;
+                    }
+                    return null;
+                }
+            }.callSyms;
+
+            const resolveIdentType = struct {
+                fn callSyms(name: []const u8, lt: *const std.StringHashMap([]const u8), gt: *const std.StringHashMap([]const u8)) ?[]const u8 {
+                    if (lt.get(name)) |t| return t;
+                    if (gt.get(name)) |t| return t;
+                    return null;
+                }
+            }.callSyms;
+
+            var saw_str = false;
+            var saw_bin = false;
+            var saw_dec = false;
+            var saw_num = false;
+            var candidate: ?[]const u8 = null;
+
             var i: usize = start_i;
-            while (i < tokens_.len) : (i += 1) {
+            while (i < end_i) : (i += 1) {
                 const t = tokens_[i];
                 if (t.type == .NewLine or t.type == .Comment) continue;
                 switch (t.type) {
+                    .String => {
+                        saw_str = true;
+                        continue;
+                    },
+                    .Boolean => {
+                        saw_bin = true;
+                        continue;
+                    },
                     .Number => {
-                        return switch (t.data) {
-                            .dnum => allocator_.dupe(u8, "dec") catch "dec",
-                            else => allocator_.dupe(u8, "num") catch "num",
-                        };
-                    },
-                    .String => return allocator_.dupe(u8, "str") catch "str",
-                    .Boolean => return allocator_.dupe(u8, "bin") catch "bin",
-                    .Identifier => {
-                        // Handle `Type{...}` / `Type<...>{...}` initializers.
-                        var j = nextNonTrivialToken(tokens_, i + 1) orelse return null;
-                        j = skipGenericArgsForward(tokens_, j);
-                        if (j < tokens_.len and isSymbolChar(tokens_[j], '{')) {
-                            const tname = tokenString(t);
-                            return allocator_.dupe(u8, tname) catch tname;
+                        switch (t.data) {
+                            .dnum => saw_dec = true,
+                            else => saw_num = true,
                         }
-                        return null;
+                        continue;
                     },
-                    else => return null,
+                    .Identifier => {
+                        const name = tokenString(t);
+                        const next_i_opt = nextNonTrivialToken(tokens_, i + 1);
+                        if (next_i_opt == null) {
+                            if (resolveIdentType(name, locals_map, globals_map)) |tname| candidate = tname;
+                            continue;
+                        }
+                        var next_i = next_i_opt.?;
+
+                        // Compound init: `Type{...}` or `Type<...>{...}`
+                        if (isPunctChar(tokens_[next_i], '<')) {
+                            next_i = skipGenericArgsForward(tokens_, next_i);
+                        }
+                        if (next_i < end_i and isSymbolChar(tokens_[next_i], '{')) {
+                            candidate = allocator_.dupe(u8, name) catch name;
+                            continue;
+                        }
+
+                        // Function call: `name(...)`
+                        if (isPunctChar(tokens_[next_i], '(')) {
+                            if (findFunctionReturnType(name, symbols)) |rt| {
+                                candidate = rt;
+                            }
+                            continue;
+                        }
+
+                        // Member access chain.
+                        if (isDotTokenAny(tokens_[next_i])) {
+                            var recv_type = resolveIdentType(name, locals_map, globals_map);
+                            var j = next_i;
+                            while (recv_type != null and j < end_i and isDotTokenAny(tokens_[j])) {
+                                const member_i = nextNonTrivialToken(tokens_, j + 1) orelse break;
+                                if (!isIdent(tokens_[member_i])) break;
+                                const member_name = tokenString(tokens_[member_i]);
+                                const after_member = nextNonTrivialToken(tokens_, member_i + 1) orelse end_i;
+                                if (after_member < end_i and isPunctChar(tokens_[after_member], '(')) {
+                                    recv_type = findMemberReturnType(recv_type.?, member_name, symbols);
+                                    break;
+                                }
+                                recv_type = findMemberFieldType(recv_type.?, member_name, symbols);
+                                j = after_member;
+                            }
+                            if (recv_type) |rt| candidate = rt;
+                            continue;
+                        }
+
+                        if (resolveIdentType(name, locals_map, globals_map)) |tname| {
+                            candidate = tname;
+                        }
+                        continue;
+                    },
+                    else => continue,
                 }
             }
-            return null;
+
+            if (saw_str) return allocator_.dupe(u8, "str") catch "str";
+            if (saw_bin) return allocator_.dupe(u8, "bin") catch "bin";
+            if (saw_dec) return allocator_.dupe(u8, "dec") catch "dec";
+            if (saw_num) return allocator_.dupe(u8, "num") catch "num";
+            return candidate;
         }
     }.call;
 
@@ -8238,6 +8425,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 .start = br.start,
                 .end = .{ .line = std.math.maxInt(i64), .character = std.math.maxInt(i64) },
             };
+            locals_type_map.clearRetainingCapacity();
 
             // Add implicit `self` inside impl method bodies.
             if (pending_body == .impl_method) {
@@ -8252,6 +8440,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                         .value_type = try allocator.dupe(u8, owner),
                         .detail = try allocator.dupe(u8, owner),
                     });
+                    putType(&locals_type_map, "self", owner, allocator);
                 }
             }
 
@@ -8267,6 +8456,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                     .value_type = try allocator.dupe(u8, "Vec<str>"),
                     .detail = try allocator.dupe(u8, "Vec<str> vargs"),
                 });
+                putType(&locals_type_map, "vargs", "Vec<str>", allocator);
             }
 
             // Add params as locals within the body.
@@ -8286,6 +8476,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                         break :blk try allocator.dupe(u8, det_buf.items);
                     },
                 });
+                putType(&locals_type_map, pinfo.name, pinfo.dtype_base, allocator);
             }
 
             resetPendingBody(&pending_body, &pending_params, &pending_impl_owner, &pending_is_variadic);
@@ -8297,6 +8488,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
         if (in_body and isSymbolChar(t, '}') and brace_depth < body_brace_depth) {
             in_body = false;
             body_range = null;
+            locals_type_map.clearRetainingCapacity();
         }
 
         if (isKeyword(t, "fun")) {
@@ -8635,7 +8827,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
         }
 
         // Best-effort local variable indexing (token-based):
-        // - `let name = <expr>;` (simple literal or `Type{...}` initializer)
+        // - `let name = <expr>;` (expression-based inference)
         // - `Type name;` / `Type name = ...;`
         // - `Type* name;` / `Type * name = ...;`
         // - `Type& name;` / `Type & name = ...;`
@@ -8647,11 +8839,21 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
             const after_name_i = nextNonTrivialToken(tokens, name_i + 1) orelse continue;
             if (!isPunctChar(tokens[after_name_i], '=')) continue;
 
+            var end_i = after_name_i + 1;
+            var depth: i64 = 0;
+            while (end_i < tokens.len) : (end_i += 1) {
+                const tk = tokens[end_i];
+                if (tk.type == .NewLine or tk.type == .Comment) continue;
+                if (isPunctChar(tk, '(') or isPunctChar(tk, '[') or isSymbolChar(tk, '{')) depth += 1;
+                if (isPunctChar(tk, ')') or isPunctChar(tk, ']') or isSymbolChar(tk, '}')) depth -= 1;
+                if (depth <= 0 and (isPunctChar(tk, ';') or isPunctChar(tk, ','))) break;
+            }
+
             const vname_raw = tokenString(tokens[name_i]);
             const vname = allocator.dupe(u8, vname_raw) catch vname_raw;
             const r = rangeFromTokenPos(tokens[name_i].pos);
 
-            const inferred = inferLetTypeFromTokens(allocator, tokens, after_name_i + 1);
+            const inferred = inferExprTypeFromTokens(allocator, tokens, after_name_i + 1, end_i, &locals_type_map, &globals_type_map, out.items);
             const value_type = if (inferred) |tname| (allocator.dupe(u8, tname) catch tname) else null;
             const detail = if (inferred) |tname| blk: {
                 var det_buf = std.ArrayList(u8).init(allocator);
@@ -8670,6 +8872,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 .value_type = value_type,
                 .detail = detail,
             });
+            putType(&locals_type_map, vname, value_type, allocator);
             continue;
         }
         if (in_body and isTypeToken(t)) {
@@ -8731,6 +8934,8 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                     .detail = try allocator.dupe(u8, det_buf.items),
                 });
 
+                putType(&locals_type_map, vname, vtype_base, allocator);
+
                 const after_i = nextNonTrivialToken(tokens, cur_name_i + 1) orelse break;
                 if (isPunctChar(tokens[after_i], ',')) {
                     const next_name_i = nextNonTrivialToken(tokens, after_i + 1) orelse break;
@@ -8786,6 +8991,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                     break :blk isPubToken(tokens[prev]);
                 },
             });
+            putType(&globals_type_map, vname, vtype, allocator);
             continue;
         }
     }
