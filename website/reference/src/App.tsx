@@ -135,6 +135,9 @@ export default function App() {
     initial.modulePath,
   );
   const [selectedSymbolKey, setSelectedSymbolKey] = useState(initial.symbolKey);
+  const [isStdlibModalOpen, setIsStdlibModalOpen] = useState(
+    Boolean(initial.modulePath || initial.symbolKey),
+  );
   const [copyStatus, setCopyStatus] = useState<"idle" | "ok" | "err">("idle");
   const releaseUrl = `https://github.com/omdxp/fun/releases/tag/v${content.funVersion}`;
 
@@ -155,15 +158,9 @@ export default function App() {
   }, [search]);
 
   const activeModule = useMemo(() => {
-    if (filteredModules.length === 0) return null;
-    if (selectedModulePath) {
-      const found = filteredModules.find(
-        (m) => m.module === selectedModulePath,
-      );
-      if (found) return found;
-    }
-    return filteredModules[0];
-  }, [filteredModules, selectedModulePath]);
+    if (!selectedModulePath) return null;
+    return content.stdlib.find((m) => m.module === selectedModulePath) ?? null;
+  }, [selectedModulePath]);
 
   const activeSymbol = useMemo(() => {
     if (!activeModule || activeModule.symbols.length === 0) return null;
@@ -200,10 +197,12 @@ export default function App() {
       }
     }
 
-    const methodGroups = Array.from(byOwner.entries()).map(([owner, symbols]) => ({
-      owner,
-      symbols,
-    }));
+    const methodGroups = Array.from(byOwner.entries()).map(
+      ([owner, symbols]) => ({
+        owner,
+        symbols,
+      }),
+    );
 
     return {
       nonMethodSymbols,
@@ -214,20 +213,38 @@ export default function App() {
   const renderSymbolPill = (modulePath: string, s: StdSymbol) => {
     const key = `${s.name}:${s.line}`;
     return (
-      <a
+      <button
         key={key}
+        type="button"
         className={`symbol-pill ${
-          activeSymbol && activeSymbol.name === s.name && activeSymbol.line === s.line
+          activeSymbol &&
+          activeSymbol.name === s.name &&
+          activeSymbol.line === s.line
             ? "active"
             : ""
         }`}
-        href={buildStdlibHash(modulePath, key)}
-        onClick={() => setSelectedSymbolKey(key)}
+        onClick={() => {
+          setSelectedModulePath(modulePath);
+          setSelectedSymbolKey(key);
+          setIsStdlibModalOpen(true);
+        }}
       >
         <span className="badge">{s.kind}</span>
         <span>{s.name}</span>
-      </a>
+      </button>
     );
+  };
+
+  const openStdlibModule = (modulePath: string, symbolKey = "") => {
+    setSelectedModulePath(modulePath);
+    setSelectedSymbolKey(symbolKey);
+    setIsStdlibModalOpen(true);
+  };
+
+  const closeStdlibModal = () => {
+    setIsStdlibModalOpen(false);
+    setSelectedModulePath("");
+    setSelectedSymbolKey("");
   };
 
   useEffect(() => {
@@ -246,6 +263,7 @@ export default function App() {
       setSearch("");
       setSelectedModulePath(parsed.modulePath);
       setSelectedSymbolKey(parsed.symbolKey);
+      setIsStdlibModalOpen(Boolean(parsed.modulePath || parsed.symbolKey));
     };
 
     applyHash();
@@ -276,6 +294,19 @@ export default function App() {
       window.history.replaceState(null, "", nextUrl);
     }
   }, [tab, activeModule, activeSymbol]);
+
+  useEffect(() => {
+    if (!isStdlibModalOpen) return;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        closeStdlibModal();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isStdlibModalOpen]);
 
   const copyStdlibLink = async () => {
     if (typeof window === "undefined") return;
@@ -366,102 +397,23 @@ export default function App() {
         )}
 
         {tab === "stdlib" && (
-          <section className="panel">
+          <section className="panel stdlib-panel">
             <h1>Standard Library Explorer</h1>
             <p className="lead">
-              Click a module, then click a symbol to inspect docs and examples
-              parsed from source comments.
+              Browse modules, then open one for an immersive, focused deep dive.
             </p>
-            <input
-              className="search search-sticky"
-              placeholder="Search module, symbol, signature, docs..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
 
-            {activeModule && (
-              <section className="detail-card">
-                <div className="detail-head">
-                  <h2>std/{activeModule.module.replace(/\.fn$/, "")}</h2>
-                  <button className="copy-link-btn" onClick={copyStdlibLink}>
-                    {copyStatus === "ok"
-                      ? "Copied"
-                      : copyStatus === "err"
-                        ? "Copy failed"
-                        : "Copy link"}
-                  </button>
-                </div>
-                <p className="muted">
-                  Click a symbol below to view signature docs and examples.
-                </p>
-                {activeModule.docsMarkdown ? (
-                  <MarkdownWithPlayground
-                    markdown={activeModule.docsMarkdown}
-                    sourcePath={`stdlib/std/${activeModule.module}`}
-                  />
-                ) : (
-                  <p className="muted">No module-level docs found.</p>
-                )}
-
-                {activeModuleSymbolGroups.nonMethodSymbols.length > 0 && (
-                  <div className="symbol-group">
-                    <div className="symbol-group-title muted small">
-                      Public declarations
-                    </div>
-                    <div className="symbol-pills">
-                      {activeModuleSymbolGroups.nonMethodSymbols.map((s) =>
-                        renderSymbolPill(activeModule.module, s),
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {activeModuleSymbolGroups.methodGroups.map((group) => {
-                  const shouldOpen =
-                    activeSymbol?.kind === "method" &&
-                    (activeSymbol.owner ?? "") === group.owner;
-
-                  return (
-                    <details
-                      className="symbol-group symbol-group-collapsible"
-                      key={`methods:${group.owner}`}
-                      open={shouldOpen}
-                    >
-                      <summary className="symbol-group-title muted small">
-                        Methods · {group.owner}
-                      </summary>
-                      <div className="symbol-pills">
-                        {group.symbols.map((s) =>
-                          renderSymbolPill(activeModule.module, s),
-                        )}
-                      </div>
-                    </details>
-                  );
-                })}
-
-                {activeSymbol && (
-                  <article className="symbol-detail">
-                    <h3>
-                      {activeSymbol.name}{" "}
-                      <span className="muted">(line {activeSymbol.line})</span>
-                    </h3>
-                    <pre>
-                      <code>{activeSymbol.signature}</code>
-                    </pre>
-                    {activeSymbol.docsMarkdown ? (
-                      <MarkdownWithPlayground
-                        markdown={activeSymbol.docsMarkdown}
-                        sourcePath={`stdlib/std/${activeModule.module}`}
-                      />
-                    ) : (
-                      <p className="muted">
-                        No comment docs found above this declaration.
-                      </p>
-                    )}
-                  </article>
-                )}
-              </section>
-            )}
+            <div className="stdlib-toolbar">
+              <input
+                className="search"
+                placeholder="Search module, symbol, signature, docs..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+              <div className="stdlib-count muted">
+                {filteredModules.length} modules
+              </div>
+            </div>
 
             <div className="stdlib-grid">
               {filteredModules.map((m) => (
@@ -471,32 +423,31 @@ export default function App() {
                     activeModule?.module === m.module ? "active" : ""
                   }`}
                 >
-                  <a
+                  <button
                     className="module-select"
-                    href={buildStdlibHash(m.module, "")}
-                    onClick={() => {
-                      setSelectedModulePath(m.module);
-                      setSelectedSymbolKey("");
-                    }}
+                    type="button"
+                    onClick={() => openStdlibModule(m.module)}
                   >
                     <div className="module-title">
                       std/{m.module.replace(/\.fn$/, "")}
                     </div>
-                  </a>
-                  <div className="module-summary">
-                    {m.summary || "No summary found."}
-                  </div>
-                  <div className="muted small">
-                    {m.symbols.filter((s) => s.kind !== "method").length} declarations ·{" "}
-                    {m.symbols.filter((s) => s.kind === "method").length} methods
-                  </div>
+                    <div className="module-summary">
+                      {m.summary || "No summary found."}
+                    </div>
+                    <div className="module-meta muted small">
+                      {m.symbols.filter((s) => s.kind !== "method").length}{" "}
+                      declarations ·{" "}
+                      {m.symbols.filter((s) => s.kind === "method").length}{" "}
+                      methods
+                    </div>
+                  </button>
                   <ul>
                     {m.symbols.length === 0 ? (
                       <li className="muted">No public declarations</li>
                     ) : (
-                      m.symbols.slice(0, 6).map((s) => (
+                      m.symbols.slice(0, 4).map((s) => (
                         <li key={`${m.module}:${s.name}:${s.line}`}>
-                          <a
+                          <button
                             className={`symbol-row ${
                               activeModule?.module === m.module &&
                               activeSymbol &&
@@ -505,33 +456,147 @@ export default function App() {
                                 ? "active"
                                 : ""
                             }`}
-                            href={buildStdlibHash(
-                              m.module,
-                              `${s.name}:${s.line}`,
-                            )}
-                            onClick={() => {
-                              setSelectedModulePath(m.module);
-                              setSelectedSymbolKey(`${s.name}:${s.line}`);
-                            }}
+                            type="button"
+                            onClick={() =>
+                              openStdlibModule(m.module, `${s.name}:${s.line}`)
+                            }
                           >
                             <span className="badge">{s.kind}</span>
                             <code>{s.signature}</code>
                             {s.kind === "method" && s.owner && (
                               <span className="muted">@ {s.owner}</span>
                             )}
-                          </a>
+                          </button>
                         </li>
                       ))
                     )}
                   </ul>
-                  {m.symbols.length > 6 && (
+                  {m.symbols.length > 4 && (
                     <div className="muted small">
-                      +{m.symbols.length - 6} more symbols
+                      +{m.symbols.length - 4} more symbols
                     </div>
                   )}
                 </article>
               ))}
             </div>
+
+            {isStdlibModalOpen && activeModule && (
+              <div
+                className="modal-backdrop"
+                onClick={(event) => {
+                  if (event.target === event.currentTarget) {
+                    closeStdlibModal();
+                  }
+                }}
+              >
+                <div className="modal-card" role="dialog" aria-modal="true">
+                  <div className="modal-head">
+                    <div>
+                      <div className="modal-eyebrow">Std Module</div>
+                      <h2>std/{activeModule.module.replace(/\.fn$/, "")}</h2>
+                      <p className="muted">
+                        {activeModule.summary || "No summary found."}
+                      </p>
+                    </div>
+                    <div className="modal-actions">
+                      <button
+                        className="copy-link-btn"
+                        onClick={copyStdlibLink}
+                      >
+                        {copyStatus === "ok"
+                          ? "Copied"
+                          : copyStatus === "err"
+                            ? "Copy failed"
+                            : "Copy link"}
+                      </button>
+                      <button
+                        className="modal-close"
+                        type="button"
+                        onClick={closeStdlibModal}
+                      >
+                        Close
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="modal-body">
+                    <div className="modal-sidebar">
+                      <div className="modal-section-title">Symbols</div>
+                      {activeModuleSymbolGroups.nonMethodSymbols.length > 0 && (
+                        <div className="symbol-group">
+                          <div className="symbol-group-title muted small">
+                            Public declarations
+                          </div>
+                          <div className="symbol-pills">
+                            {activeModuleSymbolGroups.nonMethodSymbols.map(
+                              (s) => renderSymbolPill(activeModule.module, s),
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      {activeModuleSymbolGroups.methodGroups.map((group) => {
+                        const shouldOpen =
+                          activeSymbol?.kind === "method" &&
+                          (activeSymbol.owner ?? "") === group.owner;
+
+                        return (
+                          <details
+                            className="symbol-group symbol-group-collapsible"
+                            key={`methods:${group.owner}`}
+                            open={shouldOpen}
+                          >
+                            <summary className="symbol-group-title muted small">
+                              Methods · {group.owner}
+                            </summary>
+                            <div className="symbol-pills">
+                              {group.symbols.map((s) =>
+                                renderSymbolPill(activeModule.module, s),
+                              )}
+                            </div>
+                          </details>
+                        );
+                      })}
+                    </div>
+
+                    <div className="modal-content">
+                      {activeModule.docsMarkdown ? (
+                        <MarkdownWithPlayground
+                          markdown={activeModule.docsMarkdown}
+                          sourcePath={`stdlib/std/${activeModule.module}`}
+                        />
+                      ) : (
+                        <p className="muted">No module-level docs found.</p>
+                      )}
+
+                      {activeSymbol && (
+                        <article className="symbol-detail">
+                          <h3>
+                            {activeSymbol.name}{" "}
+                            <span className="muted">
+                              (line {activeSymbol.line})
+                            </span>
+                          </h3>
+                          <pre>
+                            <code>{activeSymbol.signature}</code>
+                          </pre>
+                          {activeSymbol.docsMarkdown ? (
+                            <MarkdownWithPlayground
+                              markdown={activeSymbol.docsMarkdown}
+                              sourcePath={`stdlib/std/${activeModule.module}`}
+                            />
+                          ) : (
+                            <p className="muted">
+                              No comment docs found above this declaration.
+                            </p>
+                          )}
+                        </article>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
           </section>
         )}
 
