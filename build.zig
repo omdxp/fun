@@ -204,6 +204,8 @@ pub fn build(b: *std.Build) void {
     stage_test_bins.dependOn(&install_test_fls.step);
     run_main_tests.*.step.dependOn(stage_test_bins);
     run_main_tests.setEnvironmentVariable("FLS_E2E_EXE_DIR", test_exe_dir);
+    // Ensure stdlib resolution uses the repo stdlib during tests.
+    run_main_tests.setEnvironmentVariable("FUN_STDLIB_DIR", "stdlib");
 
     // --- Define fls (language server) Unit Tests ---
     // We keep fls tests close to the implementation (cmd/fls/main.zig) and wire them into `zig build test`.
@@ -222,9 +224,9 @@ pub fn build(b: *std.Build) void {
     const fls_tests = b.addTest(.{ .root_module = fls_test_module });
     const run_fls_tests = b.addRunArtifact(fls_tests);
     run_fls_tests.cwd = b.path(".");
-    // Ensure fls unit tests don't depend on the developer machine's stdlib install.
-    // Some tests create a temporary `stdlib/` and expect resolution to fall back to workspace/cwd.
-    run_fls_tests.setEnvironmentVariable("FUN_STDLIB_DIR", "");
+    // Ensure fls unit tests use the repo stdlib and avoid any global installs.
+    // This keeps stdlib resolution stable even when tests index temp documents.
+    run_fls_tests.setEnvironmentVariable("FUN_STDLIB_DIR", "stdlib");
 
     const test_step = b.step("test", "Run unit tests");
     // Ensure compiler + language server binaries exist for tests that spawn them.

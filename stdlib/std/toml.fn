@@ -46,9 +46,6 @@ fun _toml_find_str_key_index(Map<str, str>* m, str key) num {
 }
 
 // TOML document wrapper.
-// 
-// Fields:
-// - values: key/value map
 pub compound TomlDoc {
   // values: key/value map
   Map<str, str> values;

@@ -7,13 +7,9 @@
 // dec d = a.distance(b);
 // ```
 
-imp std.c.math;
+imp std.c.math as cmath;
 
 // 2D vector for simple math utilities.
-// 
-// Fields:
-// - x: x component
-// - y: y component
 pub compound Vec2 {
   // x: x component
   dec x;
@@ -26,8 +22,269 @@ impl Vec2 {
   pub distance(Vec2 other) dec {
     dec dx = self.x - other.x;
     dec dy = self.y - other.y;
-    ret sqrt(dx * dx + dy * dy);
+    ret cmath.sqrt(dx * dx + dy * dy);
   }
+
+  // Vector length.
+  pub length() dec {
+    ret cmath.sqrt(self.x * self.x + self.y * self.y);
+  }
+
+  // Dot product with another vector.
+  pub dot(Vec2 other) dec {
+    ret self.x * other.x + self.y * other.y;
+  }
+
+  // Normalized vector (zero stays zero).
+  pub normalize() Vec2 {
+    Vec2 out;
+    dec len = self.length();
+    if len == 0 {
+      out.x = 0;
+      out.y = 0;
+      ret out;
+    }
+    out.x = self.x / len;
+    out.y = self.y / len;
+    ret out;
+  }
+}
+
+// Trigonometry and core math helpers (decimal).
+// Compute sine of an angle.
+// 
+// Params:
+// - x: angle in radians
+// 
+// Returns:
+// - sine of x
+pub fun sin_dec(dec x) dec {
+  ret cmath.sin(x);
+}
+
+// Compute cosine of an angle.
+// 
+// Params:
+// - x: angle in radians
+// 
+// Returns:
+// - cosine of x
+pub fun cos_dec(dec x) dec {
+  ret cmath.cos(x);
+}
+
+// Compute tangent of an angle.
+// 
+// Params:
+// - x: angle in radians
+// 
+// Returns:
+// - tangent of x
+pub fun tan_dec(dec x) dec {
+  ret cmath.tan(x);
+}
+
+// Compute arcsine.
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - arcsine of x
+pub fun asin_dec(dec x) dec {
+  ret cmath.asin(x);
+}
+
+// Compute arccosine.
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - arccosine of x
+pub fun acos_dec(dec x) dec {
+  ret cmath.acos(x);
+}
+
+// Compute arctangent.
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - arctangent of x
+pub fun atan_dec(dec x) dec {
+  ret cmath.atan(x);
+}
+
+// Compute arctangent with quadrant correction.
+// 
+// Params:
+// - y: y component
+// - x: x component
+// 
+// Returns:
+// - arctangent in correct quadrant
+pub fun atan2_dec(dec y, dec x) dec {
+  ret cmath.atan2(y, x);
+}
+
+// Compute square root.
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - square root of x
+pub fun sqrt_dec(dec x) dec {
+  ret cmath.sqrt(x);
+}
+
+// Compute cube root.
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - cube root of x
+pub fun cbrt_dec(dec x) dec {
+  ret cmath.cbrt(x);
+}
+
+// Raise x to the power y.
+// 
+// Params:
+// - x: base
+// - y: exponent
+// 
+// Returns:
+// - x raised to y
+pub fun pow_dec(dec x, dec y) dec {
+  ret cmath.pow(x, y);
+}
+
+// Compute e raised to x.
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - e raised to x
+pub fun exp_dec(dec x) dec {
+  ret cmath.exp(x);
+}
+
+// Compute natural log.
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - natural log of x
+pub fun log_dec(dec x) dec {
+  ret cmath.log(x);
+}
+
+// Compute log base 10.
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - log10 of x
+pub fun log10_dec(dec x) dec {
+  ret cmath.log10(x);
+}
+
+// Compute log base 2.
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - log2 of x
+pub fun log2_dec(dec x) dec {
+  ret cmath.log2(x);
+}
+
+// Floor a decimal value.
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - floor of x
+pub fun floor_dec(dec x) dec {
+  ret cmath.floor(x);
+}
+
+// Ceil a decimal value.
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - ceil of x
+pub fun ceil_dec(dec x) dec {
+  ret cmath.ceil(x);
+}
+
+// Round to nearest integer value.
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - rounded value
+pub fun round_dec(dec x) dec {
+  ret cmath.round(x);
+}
+
+// Truncate toward zero.
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - truncated value
+pub fun trunc_dec(dec x) dec {
+  ret cmath.trunc(x);
+}
+
+// Remainder of x divided by y.
+// 
+// Params:
+// - x: value
+// - y: divisor
+// 
+// Returns:
+// - remainder of x/y
+pub fun fmod_dec(dec x, dec y) dec {
+  ret cmath.fmod(x, y);
+}
+
+// Compute hypotenuse length.
+// 
+// Params:
+// - x: x component
+// - y: y component
+// 
+// Returns:
+// - hypotenuse length
+pub fun hypot_dec(dec x, dec y) dec {
+  ret cmath.hypot(x, y);
+}
+
+// Copy sign from y to x.
+// 
+// Params:
+// - x: magnitude source
+// - y: sign source
+// 
+// Returns:
+// - value with magnitude of x and sign of y
+pub fun copysign_dec(dec x, dec y) dec {
+  ret cmath.copysign(x, y);
 }
 
 // Absolute value (num).
@@ -56,6 +313,40 @@ pub fun abs_dec(dec x) dec {
     ret -x;
   }
   ret x;
+}
+
+// Sign of a number (-1, 0, 1).
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - -1, 0, or 1
+pub fun sign_num(num x) num {
+  if x < 0 {
+    ret -1;
+  }
+  if x > 0 {
+    ret 1;
+  }
+  ret 0;
+}
+
+// Sign of a decimal (-1, 0, 1).
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - -1, 0, or 1
+pub fun sign_dec(dec x) dec {
+  if x < 0 {
+    ret -1;
+  }
+  if x > 0 {
+    ret 1;
+  }
+  ret 0;
 }
 
 // Minimum of two numbers.
@@ -88,6 +379,36 @@ pub fun max_num(num a, num b) num {
   ret b;
 }
 
+// Minimum of two decimals.
+// 
+// Params:
+// - a: first value
+// - b: second value
+// 
+// Returns:
+// - smaller value
+pub fun min_dec(dec a, dec b) dec {
+  if a < b {
+    ret a;
+  }
+  ret b;
+}
+
+// Maximum of two decimals.
+// 
+// Params:
+// - a: first value
+// - b: second value
+// 
+// Returns:
+// - larger value
+pub fun max_dec(dec a, dec b) dec {
+  if a > b {
+    ret a;
+  }
+  ret b;
+}
+
 // Clamp a number to [lo, hi].
 // 
 // Params:
@@ -98,6 +419,25 @@ pub fun max_num(num a, num b) num {
 // Returns:
 // - clamped value
 pub fun clamp_num(num x, num lo, num hi) num {
+  if x < lo {
+    ret lo;
+  }
+  if x > hi {
+    ret hi;
+  }
+  ret x;
+}
+
+// Clamp a decimal to [lo, hi].
+// 
+// Params:
+// - x: value
+// - lo: lower bound
+// - hi: upper bound
+// 
+// Returns:
+// - clamped value
+pub fun clamp_dec(dec x, dec lo, dec hi) dec {
   if x < lo {
     ret lo;
   }
@@ -118,6 +458,28 @@ pub fun clamp_num(num x, num lo, num hi) num {
 // - interpolated value
 pub fun lerp_dec(dec a, dec b, dec t) dec {
   ret a + (b - a) * t;
+}
+
+// Convert degrees to radians.
+// 
+// Params:
+// - degrees: angle in degrees
+// 
+// Returns:
+// - angle in radians
+pub fun deg_to_rad(dec degrees) dec {
+  ret degrees * (3.141592653589793 / 180);
+}
+
+// Convert radians to degrees.
+// 
+// Params:
+// - radians: angle in radians
+// 
+// Returns:
+// - angle in degrees
+pub fun rad_to_deg(dec radians) dec {
+  ret radians * (180 / 3.141592653589793);
 }
 
 // Integer power (non-negative exp).
@@ -148,4 +510,27 @@ pub fun pow_int(num base, num exp) num {
 // - distance between a and b
 pub fun distance(Vec2 a, Vec2 b) dec {
   ret a.distance(b);
+}
+
+// Convenience function for Vec2 length.
+// 
+// Params:
+// - v: vector
+// 
+// Returns:
+// - vector length
+pub fun length(Vec2 v) dec {
+  ret v.length();
+}
+
+// Convenience function for Vec2 dot product.
+// 
+// Params:
+// - a: first vector
+// - b: second vector
+// 
+// Returns:
+// - dot product
+pub fun dot(Vec2 a, Vec2 b) dec {
+  ret a.dot(b);
 }

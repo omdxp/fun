@@ -11,9 +11,6 @@ imp std.vec;
 imp std.quirks;
 
 // Generic set backed by Map<T, bin>.
-// 
-// Fields:
-// - map: backing map
 pub compound Set<T> {
   // map: backing map
   Map<T, bin> map;

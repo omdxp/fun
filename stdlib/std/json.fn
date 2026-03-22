@@ -14,18 +14,12 @@ imp std.result;
 imp std.error;
 
 // JSON object with string values.
-// 
-// Fields:
-// - values: key/value map (string values)
 pub compound JsonObject {
   // values: key/value map (string values)
   Map<str, str> values;
 }
 
 // JSON array of strings.
-// 
-// Fields:
-// - values: vector of string values
 pub compound JsonArray {
   // values: vector of string values
   Vec<str> values;

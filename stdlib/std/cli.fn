@@ -12,10 +12,6 @@ imp std.string;
 imp std.quirks;
 
 // Parsed command-line arguments.
-// 
-// Fields:
-// - opts: parsed --key/--key=value flags
-// - positionals: non-flag arguments
 pub compound CliArgs {
   // opts: parsed --key/--key=value flags
   Map<str, str> opts;
@@ -29,7 +25,7 @@ pub compound CliArgs {
 // - args: argv-style array (args[0] is program name)
 // 
 // Returns:
-// - parsed CliArgs
+// - parsed CliArgs with options and positionals
 pub fun cli_parse(str[] args) CliArgs {
   CliArgs out;
   out.opts.init(8);

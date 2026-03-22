@@ -299,6 +299,9 @@ pub const TranspileProcess = struct {
     /// Import aliases declared in this module (`alias` -> import path).
     import_aliases: std.StringHashMap([]const u8),
 
+    /// Optional override for import alias resolution (used while emitting child modules).
+    import_aliases_override: ?*std.StringHashMap([]const u8) = null,
+
     /// If this process came from an aliased import, the alias namespace.
     import_alias: ?[]const u8 = null,
 
@@ -500,6 +503,24 @@ pub const TranspileProcess = struct {
         return cur;
     }
 
+    fn find_process_for_file(self: *Self, filename: []const u8) ?*TranspileProcess {
+        if (std.mem.eql(u8, self.input_file_path, filename)) return self;
+        const fname_base = std.fs.path.basename(filename);
+        if (std.mem.eql(u8, std.fs.path.basename(self.input_file_path), fname_base)) return self;
+        for (self.children.items) |child| {
+            if (child.find_process_for_file(filename)) |found| return found;
+        }
+        return null;
+    }
+
+    fn find_import_alias_path(self: *Self, alias: []const u8) ?[]const u8 {
+        if (self.import_aliases.get(alias)) |p| return p;
+        for (self.children.items) |child| {
+            if (child.find_import_alias_path(alias)) |p| return p;
+        }
+        return null;
+    }
+
     fn make_alias_qualified_symbol_name(self: *Self, alias: []const u8, name: []const u8) TranspileError![]const u8 {
         var buf = std.ArrayList(u8).init(self.allocator);
         defer buf.deinit();
@@ -525,7 +546,17 @@ pub const TranspileProcess = struct {
     }
 
     fn resolve_alias_qualified_symbol_name(self: *Self, alias: []const u8, name: []const u8) TranspileError!?[]const u8 {
-        if (!self.import_aliases.contains(alias)) return null;
+        const alias_map = if (self.import_aliases_override) |m| m else &self.import_aliases;
+        var import_path = alias_map.get(alias);
+        if (import_path == null) {
+            const root = self.get_root();
+            import_path = root.find_import_alias_path(alias);
+        }
+        if (import_path == null) return null;
+        const import_path_unwrapped = import_path.?;
+        if (std.mem.startsWith(u8, import_path_unwrapped, "std.c.")) {
+            return self.allocator.dupe(u8, name) catch TranspileError.MemoryAllocationFailed;
+        }
         return try self.make_alias_qualified_symbol_name(alias, name);
     }
 
@@ -8818,6 +8849,14 @@ pub const TranspileProcess = struct {
         var it = reg.impls_by_key.iterator();
         while (it.next()) |entry| {
             const impl_node = entry.value_ptr.*;
+            const prev_aliases_override = self.import_aliases_override;
+            if (impl_node.pos) |p| {
+                const root = self.get_root();
+                if (root.find_process_for_file(p.filename)) |proc| {
+                    self.import_aliases_override = &proc.import_aliases;
+                }
+            }
+            defer self.import_aliases_override = prev_aliases_override;
             try self.emit_plain_impl_methods_from_node(impl_node, emitted);
         }
     }
@@ -9725,7 +9764,9 @@ pub const TranspileProcess = struct {
             try self.transpile_children_recursive(child, seen);
 
             const prev_alias = self.import_alias;
+            const prev_aliases_override = self.import_aliases_override;
             self.import_alias = child.import_alias;
+            self.import_aliases_override = &child.import_aliases;
 
             // Then, transpile the child's own nodes (excluding imports and main functions)
             for (child.nodes.items()) |node| {
@@ -9757,6 +9798,7 @@ pub const TranspileProcess = struct {
             }
 
             self.import_alias = prev_alias;
+            self.import_aliases_override = prev_aliases_override;
         }
     }
 

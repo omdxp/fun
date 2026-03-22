@@ -1,0 +1,26 @@
+// Math operations showcase.
+
+imp std.c.io;
+imp std.math;
+
+fun main() {
+  dec angle = deg_to_rad(45);
+  printf("sin(45deg)=%f cos(45deg)=%f\n", sin_dec(angle), cos_dec(angle));
+
+  dec v = 9.75;
+  printf("floor=%f ceil=%f round=%f trunc=%f\n", floor_dec(v), ceil_dec(v), round_dec(v), trunc_dec(v));
+
+  printf("exp(1)=%f log(e)=%f\n", exp_dec(1), log_dec(2.718281828459045));
+
+  dec hx = hypot_dec(3, 4);
+  printf("hypot(3,4)=%f\n", hx);
+
+  Vec2 a;
+  a.x = 3;
+  a.y = 4;
+  Vec2 n = a.normalize();
+  printf("len=%f norm=(%f,%f)\n", a.length(), n.x, n.y);
+
+  printf("clamp_dec(1.5,0,1)=%f\n", clamp_dec(1.5, 0, 1));
+  printf("pow_int(2,8)=%d pow_dec(2,8)=%f\n", pow_int(2, 8), pow_dec(2, 8));
+}

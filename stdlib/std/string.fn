@@ -13,10 +13,6 @@ imp std.vec;
 imp std.quirks;
 
 // String builder for efficient concatenation.
-// 
-// Fields:
-// - parts: vector of string fragments
-// - total_len: total length of fragments
 pub compound StringBuilder {
   // parts: vector of string fragments
   Vec<str> parts;

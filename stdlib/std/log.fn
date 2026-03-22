@@ -10,9 +10,13 @@ imp std.c.io;
 
 // Log severity levels.
 pub enum LogLevel {
+  // Debug: verbose diagnostic logging
   Debug,
+  // Info: general informational messages
   Info,
+  // Warn: warning conditions
   Warn,
+  // Error: error conditions
   Error
 }
 

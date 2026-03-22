@@ -9,10 +9,6 @@
 // ```
 
 // View over a generic array.
-// 
-// Fields:
-// - data: backing storage
-// - len: number of elements
 pub compound Array<T> {
   // data: backing storage
   T[] data;

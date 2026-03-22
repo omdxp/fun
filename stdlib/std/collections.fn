@@ -2,8 +2,6 @@
 
 imp std.quirks;
 
-// A minimal collection quirk aligned with std.quirks.Sized.
-// Kept here for discoverability when browsing stdlib.
 // Collection quirk for len/is_empty.
 // 
 // Example:
@@ -13,19 +11,32 @@ pub quirk Collection {
   is_empty() bin;
 }
 
-// Bridge to std.quirks.Sized (same methods).
-// Users can accept either quirk as needed.
-// 
 // Helper functions for common quirks.
+// 
+// Params:
+// - s: sized value
+// 
+// Returns:
+// - number of elements
 pub fun len_of(Sized s) num {
   ret s.len();
 }
 
+// Check whether a Sized value is empty.
+// 
+// Params:
+// - s: sized value
+// 
+// Returns:
+// - true if size is zero
 pub fun is_empty_of(Sized s) bin {
   ret s.is_empty();
 }
 
 // Clear a collection-like value via the Clearable quirk.
+// 
+// Params:
+// - c: clearable value
 pub fun clear_of(Clearable c) {
   c.clear();
 }

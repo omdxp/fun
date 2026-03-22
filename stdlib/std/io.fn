@@ -138,6 +138,13 @@ pub fun fmt_raw(raw* p) str {
 }
 
 // Format using a pre-built Vec<str>.
+// 
+// Params:
+// - fmt: format string
+// - args: string arguments
+// 
+// Returns:
+// - formatted string
 pub fun format_impl(str fmt, Vec<str>* args) str {
   StringBuilder b = string_builder_init(8);
   num i = 0;
@@ -226,9 +233,6 @@ pub fun println_fmt(str fmt, ...) {
 }
 
 // File handle wrapper.
-// 
-// Fields:
-// - handle: C FILE pointer (null if unopened)
 pub compound File {
   // handle: C FILE pointer (null if unopened)
   FILE* handle;

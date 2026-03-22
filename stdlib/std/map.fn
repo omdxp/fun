@@ -24,20 +24,24 @@ pub compound Map<K, V> {
 }
 
 impl Map<K, V> Sized {
+  // Number of entries.
   pub len() num {
     ret self.len;
   }
 
+  // True when empty.
   pub is_empty() bin {
     ret self.len == 0;
   }
 
+  // Current capacity.
   pub capacity() num {
     ret self.cap;
   }
 }
 
 impl Map<K, V> {
+  // Initialize the map with a capacity.
   pub init(num cap) {
     self.key_slots = NULL;
     self.value_slots = NULL;
@@ -52,6 +56,7 @@ impl Map<K, V> {
     self.alloc(cap);
   }
 
+  // Ensure capacity is at least min_cap.
   pub reserve(num min_cap) {
     if min_cap < 8 {
       min_cap = 8;
@@ -247,6 +252,7 @@ impl Map<K, V> {
     free(old_tomb);
   }
 
+  // Free internal storage.
   pub free() {
     self.clear();
     if self.key_slots != NULL {
@@ -270,10 +276,12 @@ impl Map<K, V> {
     self.cap = 0;
   }
 
+  // Check if a key exists.
   pub has(K key) bin {
     ret self.find_live_index(key) != -1;
   }
 
+  // Get a value by key (zero value if missing).
   pub get(K key) V {
     let idx = self.find_live_index(key);
     if idx == -1 {
@@ -282,6 +290,7 @@ impl Map<K, V> {
     ret self.load_value_idx(idx);
   }
 
+  // Get a value by key or fallback if missing.
   pub get_or(K key, V fallback) V {
     let idx = self.find_live_index(key);
     if idx == -1 {
@@ -290,6 +299,7 @@ impl Map<K, V> {
     ret self.load_value_idx(idx);
   }
 
+  // Try to read a value into out; returns true on success.
   pub try_get(K key, V* out) bin {
     let idx = self.find_live_index(key);
     if idx == -1 {
@@ -299,6 +309,7 @@ impl Map<K, V> {
     ret true;
   }
 
+  // Insert or update a value.
   pub put(K key, V value) {
     if self.cap == 0 {
       self.alloc(8);
@@ -330,12 +341,14 @@ impl Map<K, V> {
     self.len = self.len + 1;
   }
 
+  // Insert only if absent; returns true when inserted.
   pub put_if_absent(K key, V value) bin {
     let before_len = self.len;
     self.put(key, value);
     ret self.len > before_len;
   }
 
+  // Remove a key; returns true when removed.
   pub remove(K key) bin {
     let idx = self.find_live_index(key);
     if idx == -1 {
@@ -348,6 +361,7 @@ impl Map<K, V> {
     ret true;
   }
 
+  // Clear all entries (keeps capacity).
   pub clear() {
     if self.value_slots != NULL {
       memset(self.key_slots, 0, self.cap * sizeof(K));
@@ -358,6 +372,7 @@ impl Map<K, V> {
     self.len = 0;
   }
 
+  // Return keys as a vector.
   pub keys() Vec<K> {
     Vec<K> out;
     out.init(self.len);
@@ -375,6 +390,7 @@ impl Map<K, V> {
     ret out;
   }
 
+  // Return values as a vector.
   pub values() Vec<V> {
     Vec<V> out;
     out.init(self.len);
@@ -394,6 +410,7 @@ impl Map<K, V> {
 }
 
 impl Map<K, V> Clearable {
+  // Clear all entries (keeps capacity).
   pub clear() {
     if self.value_slots != NULL {
       memset(self.key_slots, 0, self.cap * sizeof(K));

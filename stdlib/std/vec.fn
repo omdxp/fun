@@ -14,11 +14,6 @@ imp std.c.def;
 imp std.quirks;
 
 // Dynamic vector.
-// 
-// Fields:
-// - data: backing storage
-// - len: number of elements
-// - cap: allocated capacity
 pub compound Vec<T> {
   // data: backing storage
   T[] data;

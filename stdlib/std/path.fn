@@ -14,9 +14,6 @@ imp std.result;
 imp std.error;
 
 // Path wrapper.
-// 
-// Fields:
-// - value: path string
 pub compound Path {
   // value: path string
   str value;

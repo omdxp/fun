@@ -9,9 +9,6 @@
 imp std.vec;
 
 // Pseudo-random number generator.
-// 
-// Fields:
-// - state: internal PRNG state
 pub compound Rand {
   // state: internal PRNG state
   num state;

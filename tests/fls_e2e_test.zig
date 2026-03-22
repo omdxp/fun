@@ -180,6 +180,8 @@ const LspProc = struct {
         var env_map = try std.process.getEnvMap(allocator);
         errdefer env_map.deinit();
         try env_map.put("FLS_FUN_PATH", fun_abs_path);
+        // Ensure stdlib resolution uses the repo stdlib when tests index temp docs.
+        try env_map.put("FUN_STDLIB_DIR", "stdlib");
         child.env_map = &env_map;
 
         try child.spawn();

@@ -8,24 +8,25 @@
 
 // Broad error categories.
 pub enum ErrorKind {
+  // None: no error
   None,
+  // Io: input/output failures
   Io,
+  // Parse: parsing/format errors
   Parse,
+  // NotFound: missing resource
   NotFound,
+  // Invalid: invalid input or state
   Invalid,
+  // OutOfMemory: allocation failure
   OutOfMemory,
+  // System: OS/system error
   System,
+  // Unexpected: unexpected failure
   Unexpected
 }
 
 // Error representation used across stdlib.
-// 
-// Fields:
-// - kind: error category
-// - code: numeric error code (when available)
-// - message: human-readable message
-// - context: optional context string (e.g., path)
-// - cause: optional cause detail
 pub compound Error {
   // kind: error category
   ErrorKind kind;
@@ -40,22 +41,22 @@ pub compound Error {
 }
 
 impl Error {
-  // Set context string.
+  // Set context string (overwrites).
   pub set_context(str context) {
     self.context = context;
   }
 
-  // Attach context (method-style).
+  // Attach context (fluent).
   pub with_context(str context) {
     self.context = context;
   }
 
-  // Set cause string.
+  // Set cause string (overwrites).
   pub set_cause(str cause) {
     self.cause = cause;
   }
 
-  // Attach cause (method-style).
+  // Attach cause (fluent).
   pub with_cause(str cause) {
     self.cause = cause;
   }

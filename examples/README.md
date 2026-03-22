@@ -72,6 +72,7 @@ zig-out/bin/fun -in examples/<example>.fn
 - stdlib/map_num_keys.fn
 - stdlib/math_distance.fn
 - stdlib/math_helpers.fn
+- stdlib/math_ops.fn
 - stdlib/mem_env_random.fn
 - stdlib/net_url_parse.fn
 - stdlib/option_basic.fn
@@ -95,6 +96,7 @@ zig-out/bin/fun -in examples/<example>.fn
 - stdlib/map_custom_strategy.fn
 - stdlib/map_num_keys.fn
 - stdlib/math_helpers.fn
+- stdlib/math_ops.fn
 - stdlib/net_url_parse.fn
 - stdlib/path_ops.fn
 - stdlib/rand_basic.fn

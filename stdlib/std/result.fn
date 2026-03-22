@@ -3,11 +3,6 @@
 imp std.error;
 
 // Generic result container for stdlib operations.
-// 
-// Fields:
-// - ok: success flag
-// - value: return value
-// - err: error details
 pub compound Result<T> {
   // ok: success flag
   bin ok;

@@ -15,12 +15,6 @@ imp std.result;
 imp std.error;
 
 // Parsed URL components.
-// 
-// Fields:
-// - scheme: protocol (http/https)
-// - host: hostname
-// - port: port number
-// - path: request path
 pub compound Url {
   // scheme: protocol (http/https)
   str scheme;
@@ -96,7 +90,7 @@ pub fun parse_url(str s) Url {
 // Build a simple HTTP GET request from a Url.
 // 
 // Params:
-// - url: URL instance
+// - url: URL instance to build a request for
 // 
 // Returns:
 // - request string
@@ -105,11 +99,17 @@ pub fun build_http_get(Url* url) str {
 }
 
 // POSIX socket constants (best-effort defaults).
+// 
+// Returns:
+// - AF_INET constant
 pub fun af_inet() num {
   ret 2;
 }
 
 // Return SOCK_STREAM constant value (best-effort default).
+// 
+// Returns:
+// - SOCK_STREAM constant
 pub fun sock_stream() num {
   ret 1;
 }
@@ -118,7 +118,9 @@ pub fun sock_stream() num {
 // word0 packs: family (bytes 0-1), port (2-3), addr (4-7)
 // word1 packs: zero (8-15)
 pub compound SockAddrInPacked {
+  // word0: family/port/address packed
   num word0;
+  // word1: trailing zero bytes
   num word1;
 }
 
@@ -203,6 +205,14 @@ pub fun try_tcp_accept(num server_fd) Result<num> {
 }
 
 // Read from a socket.
+// 
+// Params:
+// - fd: socket fd
+// - buf: destination buffer
+// - len: bytes to read
+// 
+// Returns:
+// - bytes read or negative on error
 pub fun tcp_read(num fd, str buf, num len) num {
   ret recv(fd, buf, len, 0);
 }
@@ -220,6 +230,14 @@ pub fun try_tcp_read(num fd, str buf, num len) Result<num> {
 }
 
 // Write to a socket.
+// 
+// Params:
+// - fd: socket fd
+// - buf: source buffer
+// - len: bytes to write
+// 
+// Returns:
+// - bytes written or negative on error
 pub fun tcp_write(num fd, str buf, num len) num {
   ret send(fd, buf, len, 0);
 }
@@ -237,6 +255,9 @@ pub fun try_tcp_write(num fd, str buf, num len) Result<num> {
 }
 
 // Close a socket.
+// 
+// Params:
+// - fd: socket fd
 pub fun tcp_close(num fd) {
   close(fd);
 }

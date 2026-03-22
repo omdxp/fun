@@ -77,6 +77,15 @@ pub fun atan2(dec y, dec x) dec;
 // - square root of x (C semantics)
 pub fun sqrt(dec x) dec;
 
+// Computes cube root.
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - cube root of x (C semantics)
+pub fun cbrt(dec x) dec;
+
 // Computes x raised to the power y.
 // 
 // Params:
@@ -86,6 +95,42 @@ pub fun sqrt(dec x) dec;
 // Returns:
 // - x raised to the power y (C semantics)
 pub fun pow(dec x, dec y) dec;
+
+// Computes e^x.
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - e raised to x (C semantics)
+pub fun exp(dec x) dec;
+
+// Computes natural logarithm.
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - natural log of x (C semantics)
+pub fun log(dec x) dec;
+
+// Computes base-10 logarithm.
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - log10 of x (C semantics)
+pub fun log10(dec x) dec;
+
+// Computes base-2 logarithm.
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - log2 of x (C semantics)
+pub fun log2(dec x) dec;
 
 // Rounds down to the nearest integer value.
 // 
@@ -105,6 +150,24 @@ pub fun floor(dec x) dec;
 // - smallest integer value not less than x (C semantics)
 pub fun ceil(dec x) dec;
 
+// Rounds to nearest integer value.
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - nearest integer value (C semantics)
+pub fun round(dec x) dec;
+
+// Truncates toward zero.
+// 
+// Params:
+// - x: value
+// 
+// Returns:
+// - truncated value (C semantics)
+pub fun trunc(dec x) dec;
+
 // Computes absolute value.
 // 
 // Params:
@@ -113,3 +176,33 @@ pub fun ceil(dec x) dec;
 // Returns:
 // - absolute value of x (C semantics)
 pub fun fabs(dec x) dec;
+
+// Floating-point remainder of x/y.
+// 
+// Params:
+// - x: value
+// - y: divisor
+// 
+// Returns:
+// - remainder (C semantics)
+pub fun fmod(dec x, dec y) dec;
+
+// Hypotenuse sqrt(x*x + y*y).
+// 
+// Params:
+// - x: x component
+// - y: y component
+// 
+// Returns:
+// - hypotenuse length (C semantics)
+pub fun hypot(dec x, dec y) dec;
+
+// Returns x with the sign of y.
+// 
+// Params:
+// - x: magnitude source
+// - y: sign source
+// 
+// Returns:
+// - value with magnitude of x and sign of y (C semantics)
+pub fun copysign(dec x, dec y) dec;

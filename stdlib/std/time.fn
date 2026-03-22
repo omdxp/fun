@@ -15,9 +15,6 @@ imp std.result;
 imp std.error;
 
 // Timestamp wrapper (epoch seconds).
-// 
-// Fields:
-// - epoch: seconds since Unix epoch
 pub compound Timestamp {
   // epoch: seconds since Unix epoch
   num epoch;
@@ -233,7 +230,7 @@ pub fun format_human(num epoch, str buf, num buf_len) num {
   ret n;
 }
 
-// Return a human-readable time string for an epoch (ctime).
+// Format an epoch value using C's human-readable format (ctime) as a C string.
 // 
 // Params:
 // - epoch: seconds since epoch
