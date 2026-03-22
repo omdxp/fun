@@ -1,4 +1,102 @@
-## [unreleased]
+## [0.25.0] - 2026-03-22
+
+### Chore
+
+- *(deps-dev)* Bump undici
+- *(deps-dev)* Bump undici from 7.16.0 to 7.24.1 in /editors/vscode in the npm_and_yarn group across 1 directory (#76)
+
+### Feat
+
+- Implement alias handling for compound types and enhance transpiler with canonical name resolution
+- Introduce Result type and enhance error handling across stdlib
+- Implement best-effort type inference for let variables in LSP indexing
+- Add cleanup functionality to example scripts and enhance cache management
+- Enhance multi-file snippet support and improve markdown rendering
+- Enhance stdlib module exploration with modal support and improved styling
+
+## [0.24.1] - 2026-03-02
+
+### Feat
+
+- Enhance Windows compiler configuration and cleanup in uninstall script
+- Enhance symbol grouping in documentation with collapsible sections and styling
+
+## [0.24.0] - 2026-03-02
+
+### Feat
+
+- Enhance asm block handling to support computed operands and preserve formatting
+
+## [0.23.1] - 2026-03-01
+
+### Feat
+
+- Update asm block handling to preserve newlines and add corresponding test case
+
+### Fix
+
+- Update asm block in test to remove architecture specification
+
+## [0.23.0] - 2026-03-01
+
+### Fix
+
+- Update import alias in e2e test and adjust expected completion label
+
+## [0.22.5] - 2026-03-01
+
+### Feat
+
+- Enhance parser to support qualified user-defined types and improve type segment parsing
+
+## [0.22.3] - 2026-03-01
+
+### Feat
+
+- Update search input to be sticky and remove sticky styling from detail card for improved layout
+
+## [0.22.2] - 2026-03-01
+
+### Feat
+
+- Enhance MarkdownWithPlayground component with sourcePath prop and improve link handling; update styles for better accessibility and responsiveness
+
+## [0.22.1] - 2026-03-01
+
+### Feat
+
+- Remove environment configuration from GitHub Pages deployment step
+
+## [0.22.0] - 2026-03-01
+
+### Chore
+
+- *(deps-dev)* Bump qs
+- *(deps-dev)* Bump qs from 6.14.1 to 6.14.2 in /editors/vscode in the npm_and_yarn group across 1 directory (#74)
+- *(deps)* Bump the npm_and_yarn group across 1 directory with 1 update
+- *(deps)* Bump the npm_and_yarn group across 1 directory with 1 update (#75)
+
+### Feat
+
+- Enhance Fun language with new features and type inference
+- Enhance type checking for enums as numeric values and improve transpiler logic
+- Add example for explicit main exit status and enhance transpiler logic for return values
+- Add support for import aliases in transpiler
+- Enhance socket and network functionality with additional API methods
+- Add content generation and synchronization scripts for Fun language reference
+- Add environment variable for FUN_STDLIB_DIR in examples job
+- Update run_examples.sh to use FUN_STDLIB_DIR environment variable and capture failure details
+- Improve hash function in Map implementation with modular arithmetic
+
+### Fix
+
+- Correct command for running examples in README
+
+## [0.21.2] - 2026-02-05
+
+### Chore
+
+- Enable conventional commits in cliff.toml
 
 ### Feat
 
