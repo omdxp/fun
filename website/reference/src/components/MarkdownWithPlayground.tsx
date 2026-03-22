@@ -58,6 +58,7 @@ export default function MarkdownWithPlayground({
 }: Props) {
   return (
     <ReactMarkdown
+      className="md-content"
       remarkPlugins={[remarkGfm]}
       components={{
         a(props) {

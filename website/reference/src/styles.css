@@ -55,9 +55,11 @@ nav button.active {
   color: white;
 }
 
-main { padding: 28px; }
+main { padding: 28px; min-width: 0; }
 .panel {
   max-width: 1100px;
+  width: 100%;
+  min-width: 0;
   margin: 0 auto;
   background: linear-gradient(180deg, rgba(20,31,61,0.85) 0%, rgba(14,24,49,0.92) 100%);
   border: 1px solid #273869;
@@ -139,6 +141,40 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
   border-radius: 6px;
   padding: 1px 6px;
   background: rgba(21, 37, 78, 0.7);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.md-content {
+  min-width: 0;
+}
+
+.md-content pre {
+  overflow-x: auto;
+}
+
+.md-content code {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.md-content img,
+.md-content video,
+.md-content svg,
+.md-content table {
+  max-width: 100%;
+}
+
+.md-content table {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.md-content th,
+.md-content td {
+  border: 1px solid #26345f;
+  padding: 6px 8px;
 }
 
 .md-external-link {

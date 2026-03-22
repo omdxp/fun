@@ -50,6 +50,12 @@ compound Point {
   num x;
   num y;
 }
+
+fun main() {
+  Point p;
+  p.x = 1;
+  p.y = 2;
+}
 ```
 
 ### Quirks (Interfaces)
@@ -57,10 +63,39 @@ compound Point {
 quirk Shape {
   area() num;
 }
+
+compound Square {
+  num side;
+}
+
+impl Square Shape {
+  area() num { ret self.side * self.side; }
+}
+
+fun main() {
+  Square s;
+  s.side = 4;
+  num area = s.area();
+  _ = area;
+}
 ```
 
 ### Implementations
 ```fun
+quirk Shape {
+  area() num;
+}
+
+compound Point {
+  num x;
+  num y;
+}
+
+compound Rectangle {
+  num w;
+  num h;
+}
+
 impl Point {
   translate(num dx, num dy) {
     self.x += dx;
@@ -71,6 +106,19 @@ impl Point {
 impl Rectangle Shape {
   area() num { ret self.w * self.h; }
 }
+
+fun main() {
+  Point p;
+  p.x = 1;
+  p.y = 2;
+  p.translate(3, 4);
+
+  Rectangle r;
+  r.w = 3;
+  r.h = 4;
+  num area = r.area();
+  _ = area;
+}
 ```
 
 ### Generics
@@ -80,9 +128,18 @@ impl Rectangle Shape {
 ## Variables
 - Variables can be explicitly typed or inferred with `let`.
 ```fun
-num x = 1;
-str name = "fun";
-let count = add(1, 2);
+fun add(num a, num b) num {
+  ret a + b;
+}
+
+fun main() {
+  num x = 1;
+  str name = "fun";
+  let count = add(1, 2);
+  _ = x;
+  _ = name;
+  _ = count;
+}
 ```
 
 ## Functions
@@ -90,23 +147,36 @@ let count = add(1, 2);
 fun add(num a, num b) num {
   ret a + b;
 }
+
+fun main() {
+  num total = add(1, 2);
+  _ = total;
+}
 ```
 - No nested function declarations.
 - Use `ret` for return.
 - Generic functions are supported:
 ```fun
 fun id<T>(T x) T { ret x; }
+
+fun main() {
+  num v = id(1);
+  _ = v;
+}
 ```
 
 ## Control Flow
 ### If / Elif / Else
 ```fun
-if x > 0 {
-  ...
-} elif x == 0 {
-  ...
-} else {
-  ...
+fun main() {
+  num x = 1;
+  if x > 0 {
+    _ = x;
+  } elif x == 0 {
+    _ = x;
+  } else {
+    _ = x;
+  }
 }
 ```
 
@@ -120,10 +190,15 @@ if x > 0 {
 
 ### Fit (Pattern Matching)
 ```fun
-fit c {
-  .Red -> { ... },
-  .Green -> { ... },
-  _ -> { ... }
+enum Color { Red, Green, Blue }
+
+fun main() {
+  Color c = .Red;
+  fit c {
+    .Red -> { _ = c; },
+    .Green -> { _ = c; },
+    _ -> { _ = c; }
+  }
 }
 ```
 - Missing variants may produce warnings unless `_` is present.
@@ -135,11 +210,35 @@ fit c {
 
 ## Inline Assembly
 ```fun
-asm volatile (out y: "=r" = y; in x: "r" = x; clobber "memory") {
-  mov x0, x0
-};
+fun main() {
+  num x = 21 + 21;
+  num y = 0;
+
+  asm arch x86_64 volatile (out y: "=r" = y; in x: "r" = x; clobber "memory") {
+    movq %[x], %[y]
+  };
+
+  asm arch aarch64 volatile (out y: "=r" = y; in x: "r" = x; clobber "memory") {
+    mov %[y], %[x]
+  };
+
+  _ = y;
+}
 ```
 - `asm arch x86_64 { ... };` guards by target architecture.
+- Use arch guards when the inline assembly differs by ISA (x86_64 vs aarch64).
+- Operand names use the `%[name]` syntax inside templates.
+- Outputs come first, then inputs, then clobbers (GCC-style extended asm).
+- `volatile` prevents the compiler from removing or reordering the asm.
+- Prefer the string form when you need precise escaping or newlines: `asm "...";`.
+- Always list `"memory"` in clobbers when the asm reads/writes memory not mentioned in operands.
+
+### Inline Assembly Pitfalls
+- **ISA mismatch**: AArch64 register names (`x0`) will not assemble on x86_64. Guard by arch.
+- **Operand order**: x86_64 uses `movq src, dst` (AT&T syntax) while AArch64 uses `mov dst, src`.
+- **Missing size suffix**: x86_64 `mov` needs a size suffix (`movb/movw/movl/movq`).
+- **Implicit clobbers**: If the asm touches memory not listed in operands, include `"memory"`.
+- **Named receiver errors**: If you move values into locals via asm, ensure `out` targets are assigned to named locals.
 - Block contents are preserved as raw text (including whitespace/comments).
 - Fun does not validate asm syntax inside the block; final validity is determined by the selected C toolchain assembler/dialect.
 - Example: `jmp $` can fail under clang/GAS inline asm, while local-label form (`1: ... jmp 1b`) is often accepted in that dialect.

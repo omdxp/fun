@@ -59,6 +59,26 @@ The browser posts code to `/api/run`, the server writes a temp `.fn` file, and i
 
 The process runs with `FUN_STDLIB_DIR` pointed at repo `stdlib/` so std imports resolve consistently.
 
+## Multi-file snippets
+
+Runnable `fun` code blocks can define multiple files using markers:
+
+```fun
+// file: main.fn
+imp mod1 as one;
+
+fun main() {
+  num v = one.pick();
+  _ = v;
+}
+
+// file: mod1.fn
+pub fun pick() num { ret 7; }
+```
+
+- Each marker starts a new file at the given path (relative, must end in `.fn`).
+- The runner executes `main.fn` if present; otherwise it uses the first file.
+
 ## Remote runtime API (optional)
 
 By default, the frontend calls `/api/run` (works with local `npm run dev` proxy/server).

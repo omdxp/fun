@@ -20,19 +20,92 @@ const funBinary = path.join(repoRoot, "zig-out/bin/fun");
 const stdlibDir = path.join(repoRoot, "stdlib");
 const webDist = path.resolve(__dirname, "../dist");
 
+const FILE_MARKER = /^\s*\/\/\s*file:\s*(.+?)\s*$/i;
+
+type SnippetFile = {
+  path: string;
+  contents: string;
+};
+
+type ParsedSnippet = {
+  files: SnippetFile[];
+  entryFile: string;
+};
+
+type ParsedSnippetResult = ParsedSnippet | { error: string } | null;
+
+function normalizeSnippetPath(rawPath: string) {
+  const trimmed = rawPath.trim().replaceAll("\\", "/");
+  if (!trimmed) return null;
+  if (path.isAbsolute(trimmed)) return null;
+  const normalized = path.normalize(trimmed).replaceAll("\\", "/");
+  if (normalized.startsWith("..") || normalized.includes("/..")) return null;
+  if (!normalized.endsWith(".fn")) return null;
+  return normalized;
+}
+
+function parseSnippetFiles(code: string): ParsedSnippetResult {
+  const lines = code.split(/\r?\n/);
+  const files: SnippetFile[] = [];
+  let currentPath = "snippet.fn";
+  let currentLines: string[] = [];
+  let sawMarker = false;
+
+  const flush = () => {
+    if (currentLines.length === 0) return;
+    files.push({
+      path: currentPath,
+      contents: `${currentLines.join("\n")}\n`,
+    });
+  };
+
+  for (const line of lines) {
+    const marker = line.match(FILE_MARKER);
+    if (marker) {
+      flush();
+      const nextPath = normalizeSnippetPath(marker[1] ?? "");
+      if (!nextPath) {
+        return {
+          error:
+            "Invalid file marker. Use // file: path/to/name.fn (no absolute paths or ..).",
+        };
+      }
+      currentPath = nextPath;
+      currentLines = [];
+      sawMarker = true;
+      continue;
+    }
+    currentLines.push(line);
+  }
+
+  flush();
+
+  if (!sawMarker) return null;
+  if (files.length === 0) {
+    return { error: "No file contents found after file markers." };
+  }
+
+  const entry =
+    files.find(
+      (file) => file.path === "main.fn" || file.path.endsWith("/main.fn"),
+    )?.path ?? files[0].path;
+
+  return { files, entryFile: entry };
+}
+
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, compiler: funBinary });
 });
 
 app.post("/api/run", async (req, res) => {
-  const code = String(req.body?.code ?? "").trim();
-  if (!code) {
+  const rawCode = String(req.body?.code ?? "");
+  if (!rawCode.trim()) {
     res.status(400).json({ ok: false, error: "No code provided." });
     return;
   }
 
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "fun-ref-"));
-  const srcPath = path.join(tempDir, "snippet.fn");
+  let srcPath = path.join(tempDir, "snippet.fn");
 
   try {
     await fs.access(funBinary);
@@ -47,7 +120,22 @@ app.post("/api/run", async (req, res) => {
   }
 
   try {
-    await fs.writeFile(srcPath, `${code}\n`, "utf8");
+    const parsed = parseSnippetFiles(rawCode);
+    if (parsed && "error" in parsed) {
+      res.status(400).json({ ok: false, error: parsed.error });
+      return;
+    }
+
+    if (parsed && "files" in parsed) {
+      for (const file of parsed.files) {
+        const fullPath = path.join(tempDir, file.path);
+        await fs.mkdir(path.dirname(fullPath), { recursive: true });
+        await fs.writeFile(fullPath, file.contents, "utf8");
+      }
+      srcPath = path.join(tempDir, parsed.entryFile);
+    } else {
+      await fs.writeFile(srcPath, `${rawCode.trimEnd()}\n`, "utf8");
+    }
 
     const { stdout, stderr } = await execFileAsync(
       funBinary,

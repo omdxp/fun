@@ -331,13 +331,24 @@ fun main() {
   },
   {
     title: "Alias Imports",
-    code: `imp mod1 as one;
+    code: `// file: main.fn
+imp mod1 as one;
 imp mod2 as two;
 
 fun main() {
   num a = one.pick();
   num b = two.pick();
   _ = a + b;
+}
+
+// file: mod1.fn
+pub fun pick() num {
+  ret 10;
+}
+
+// file: mod2.fn
+pub fun pick() num {
+  ret 32;
 }
 `,
   },
