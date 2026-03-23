@@ -36,7 +36,7 @@ export default function RunCodeBlock({ initialCode, title }: Props) {
     if (runtimeDisabled) {
       setStdout("");
       setStderr(
-        "Runtime execution is disabled on GitHub Pages unless VITE_RUN_API_BASE is configured. Run locally with `npm run dev`, or set VITE_RUN_API_BASE to a hosted runner API.",
+        "Runtime execution is disabled on GitHub Pages because there is no backend API available to run code. To use the Run button, run the site locally or set up a remote runner API (see project README).",
       );
       return;
     }
@@ -75,10 +75,30 @@ export default function RunCodeBlock({ initialCode, title }: Props) {
           <button
             onClick={() => setCode(initialCode.trimEnd())}
             className="ghost"
+            disabled={runtimeDisabled}
+            title={
+              runtimeDisabled
+                ? "Reset is disabled on GitHub Pages because code execution is not available."
+                : undefined
+            }
+            style={
+              runtimeDisabled ? { opacity: 0.6, cursor: "not-allowed" } : {}
+            }
           >
             Reset
           </button>
-          <button onClick={run} disabled={isRunning}>
+          <button
+            onClick={run}
+            disabled={isRunning || runtimeDisabled}
+            title={
+              runtimeDisabled
+                ? "Run is disabled on GitHub Pages because there is no backend API available to run code. To use the Run button, run the site locally or set up a remote runner API (see project README)."
+                : undefined
+            }
+            style={
+              runtimeDisabled ? { opacity: 0.6, cursor: "not-allowed" } : {}
+            }
+          >
             {isRunning ? "Running..." : "Run"}
           </button>
         </div>

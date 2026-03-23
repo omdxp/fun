@@ -56,11 +56,26 @@ const content = data as ReferenceContent;
 
 type TabKey = "language" | "reference" | "stdlib" | "playground";
 
-const TABS: Array<{ key: TabKey; label: string }> = [
+const isGithubPages =
+  typeof window !== "undefined" &&
+  window.location.hostname.endsWith("github.io");
+const TABS: Array<{
+  key: TabKey;
+  label: string;
+  disabled?: boolean;
+  tooltip?: string;
+}> = [
   { key: "language", label: "Language Guide" },
   { key: "reference", label: "Reference" },
   { key: "stdlib", label: "Std Library" },
-  { key: "playground", label: "Playground" },
+  {
+    key: "playground",
+    label: "Playground",
+    disabled: isGithubPages,
+    tooltip: isGithubPages
+      ? "Playground is disabled on GitHub Pages because there is no backend API available to run code. To use the Playground, run the site locally or set up a remote runner API."
+      : undefined,
+  },
 ];
 
 function parseStdlibHash(hash: string) {
@@ -352,8 +367,19 @@ export default function App() {
           {TABS.map((t) => (
             <button
               key={t.key}
-              onClick={() => setTab(t.key)}
-              className={tab === t.key ? "active" : ""}
+              onClick={() => {
+                if (!t.disabled) setTab(t.key);
+              }}
+              className={
+                tab === t.key
+                  ? "active" + (t.disabled ? " disabled" : "")
+                  : t.disabled
+                    ? "disabled"
+                    : ""
+              }
+              disabled={!!t.disabled}
+              title={t.tooltip}
+              style={t.disabled ? { opacity: 0.6, cursor: "not-allowed" } : {}}
             >
               {t.label}
             </button>
@@ -609,24 +635,38 @@ export default function App() {
             <p className="lead">
               Edit and run snippets locally with your real Fun compiler.
             </p>
-            <div className="hint">
-              Requires zig-out/bin/fun. If missing, run zig build in repo root
-              first.
-            </div>
-            {content.samples.map((s) => (
-              <RunCodeBlock
-                key={s.title}
-                title={s.title}
-                initialCode={s.code}
-              />
-            ))}
-            <details>
-              <summary>Raw stdlib docs source</summary>
-              <MarkdownWithPlayground
-                markdown={content.docs.stdlibReadme}
-                sourcePath="stdlib/README.md"
-              />
-            </details>
+            {isGithubPages && (
+              <div
+                className="hint"
+                style={{ color: "#ff7f9f", borderColor: "#ff7f9f" }}
+              >
+                Playground is disabled on GitHub Pages because there is no
+                backend API available to run code. To use the Playground, run
+                the site locally or set up a remote runner API.
+              </div>
+            )}
+            {!isGithubPages && (
+              <>
+                <div className="hint">
+                  Requires zig-out/bin/fun. If missing, run zig build in repo
+                  root first.
+                </div>
+                {content.samples.map((s) => (
+                  <RunCodeBlock
+                    key={s.title}
+                    title={s.title}
+                    initialCode={s.code}
+                  />
+                ))}
+                <details>
+                  <summary>Raw stdlib docs source</summary>
+                  <MarkdownWithPlayground
+                    markdown={content.docs.stdlibReadme}
+                    sourcePath="stdlib/README.md"
+                  />
+                </details>
+              </>
+            )}
           </section>
         )}
       </main>
