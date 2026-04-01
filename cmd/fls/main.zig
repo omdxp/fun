@@ -3309,6 +3309,9 @@ const LspServer = struct {
 
         const prefix = guessIdentifierPrefix(doc.text, pos);
 
+        // Warning id completion: `allow <id>, "reason";` / `expect <id>, "reason";`
+        if (try self.trySendWarningIdCompletions(id_val, doc.text, pos, prefix)) return;
+
         // If indexing failed (common while typing / for incomplete files), still return keyword completions.
         const idx = doc.index orelse {
             var items = std.ArrayList(CompletionItem).init(self.allocator);
@@ -5663,6 +5666,64 @@ const LspServer = struct {
                         }
                     }
                 }
+            }
+        }
+
+        const list: CompletionList = .{ .items = items.items };
+        const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+        defer self.allocator.free(json);
+        try self.sendResponseJson(id_val, json);
+        return true;
+    }
+
+    fn trySendWarningIdCompletions(self: *LspServer, id_val: ?std.json.Value, text: []const u8, pos: Position, prefix: []const u8) !bool {
+        const cursor = byteIndexForPosition(text, pos);
+        var line_start: usize = cursor;
+        while (line_start > 0 and text[line_start - 1] != '\n') : (line_start -= 1) {}
+
+        var line = text[line_start..cursor];
+        while (line.len != 0 and (line[0] == ' ' or line[0] == '\t' or line[0] == '\r')) line = line[1..];
+
+        var after_kw: []const u8 = undefined;
+        if (std.mem.startsWith(u8, line, "allow") and (line.len == "allow".len or line["allow".len] == ' ' or line["allow".len] == '\t')) {
+            after_kw = line["allow".len..];
+        } else if (std.mem.startsWith(u8, line, "expect") and (line.len == "expect".len or line["expect".len] == ' ' or line["expect".len] == '\t')) {
+            after_kw = line["expect".len..];
+        } else {
+            return false;
+        }
+
+        while (after_kw.len != 0 and (after_kw[0] == ' ' or after_kw[0] == '\t')) after_kw = after_kw[1..];
+
+        // Warning id completion is only for the first argument (before comma/reason).
+        if (std.mem.indexOfScalar(u8, after_kw, ',') != null) return false;
+        if (std.mem.indexOfScalar(u8, after_kw, ';') != null) return false;
+        if (std.mem.indexOfScalar(u8, after_kw, '"') != null) return false;
+
+        const is_ident_char = struct {
+            fn call(ch: u8) bool {
+                return (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_';
+            }
+        }.call;
+
+        for (after_kw) |ch| {
+            if (ch == ' ' or ch == '\t') continue;
+            if (!is_ident_char(ch)) return false;
+        }
+
+        var items = std.ArrayList(CompletionItem).init(self.allocator);
+        defer {
+            for (items.items) |it| self.allocator.free(it.label);
+            items.deinit();
+        }
+
+        const warning_ids = [_][]const u8{
+            "return_local_ptr",
+            "fit_non_exhaustive",
+        };
+        for (warning_ids) |wid| {
+            if (prefix.len == 0 or std.mem.startsWith(u8, wid, prefix)) {
+                try items.append(.{ .label = try self.allocator.dupe(u8, wid), .kind = 21 }); // CompletionItemKind.Constant
             }
         }
 

@@ -2363,6 +2363,60 @@ test "fls e2e: warning control keywords completion" {
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: warning ids completion for allow and expect" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "fun main() {\n" ++
+        "  allow f\n" ++
+        "  expect r\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-warning-ids.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const allow_pos = try findPosition(doc_text, "allow f", 0);
+    const allow_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, allow_pos.line, allow_pos.col + @as(i64, @intCast("allow f".len)) },
+    );
+    defer allocator.free(allow_params);
+    const allow_id = try lsp.request("textDocument/completion", allow_params);
+    var allow_res = try lsp.waitResponse(allow_id, 15000);
+    defer allow_res.deinit();
+    const allow_val = try jsonResultFromResponseObj(allow_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, allow_val, "fit_non_exhaustive");
+
+    const expect_pos = try findPosition(doc_text, "expect r", 0);
+    const expect_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, expect_pos.line, expect_pos.col + @as(i64, @intCast("expect r".len)) },
+    );
+    defer allocator.free(expect_params);
+    const expect_id = try lsp.request("textDocument/completion", expect_params);
+    var expect_res = try lsp.waitResponse(expect_id, 15000);
+    defer expect_res.deinit();
+    const expect_val = try jsonResultFromResponseObj(expect_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, expect_val, "return_local_ptr");
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: publishDiagnostics includes warning from ID-tagged warning output" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
