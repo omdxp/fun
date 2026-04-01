@@ -23,6 +23,8 @@ const FUN_KEYWORDS = [
   "continue",
   "defer",
   "assert",
+  "allow",
+  "expect",
 ];
 
 const FUN_BUILTIN_TYPES = [

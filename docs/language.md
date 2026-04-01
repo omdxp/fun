@@ -179,6 +179,12 @@ fun partial(bin x) {
         true -> { }
     }
 }
+
+fun main() {
+    partial(true);
+    num* p = bad();
+    _ = p;
+}
 ```
 
 See also:

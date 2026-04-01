@@ -375,7 +375,8 @@ Rules:
 
 Example:
 ```fun
-fun demo(bin x) {
+fun main() {
+  bin x = true;
   allow fit_non_exhaustive, "temporary while migrating branches";
   fit x {
     true -> { }
@@ -385,7 +386,8 @@ fun demo(bin x) {
 
 Expect example:
 ```fun
-fun demo_expect(bin x) {
+fun main() {
+  bin x = true;
   expect fit_non_exhaustive, "guard intentional partial fit during migration";
   fit x {
     true -> { }
