@@ -1910,6 +1910,68 @@ test "fls e2e: let inference hover types" {
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: let inference in incomplete file" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    // Intentionally malformed/incomplete body (including a dangling operator)
+    // to exercise token-only fallback paths without crashing the server.
+    const doc_text =
+        "compound Point {\n" ++
+        "  num x;\n" ++
+        "}\n" ++
+        "fun make_point(num x) Point { ret Point{x = x}; }\n" ++
+        "fun main() {\n" ++
+        "  let n = 42;\n" ++
+        "  let chars = ['a', 'b', 'c'];\n" ++
+        "  let arr = [1, 2, 3];\n" ++
+        "  let p2 = make_point(n + 1);\n" ++
+        "  let m = p2.x +\n" ++
+        "\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-let-infer-incomplete.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const Case = struct { name: []const u8, expect: []const u8 };
+    const cases = [_]Case{
+        .{ .name = "n", .expect = "num n" },
+        .{ .name = "chars", .expect = "chr[] chars" },
+        .{ .name = "arr", .expect = "num[] arr" },
+        .{ .name = "p2", .expect = "Point p2" },
+    };
+
+    for (cases) |cinfo| {
+        const needle = try std.fmt.allocPrint(allocator, "let {s}", .{cinfo.name});
+        defer allocator.free(needle);
+        const pos = try findPosition(doc_text, needle, 0);
+        const hover_params = try std.fmt.allocPrint(
+            allocator,
+            "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+            .{ doc_uri, pos.line, pos.col + 4 },
+        );
+        defer allocator.free(hover_params);
+        const hover_id = try lsp.request("textDocument/hover", hover_params);
+        var hover_res = try lsp.waitResponse(hover_id, 15000);
+        defer hover_res.deinit();
+        const hover_val = try jsonResultFromResponseObj(hover_res.parsed.value.object);
+        try expectHoverContains(allocator, hover_val, cinfo.expect);
+    }
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: signatureHelp for plain function call" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();

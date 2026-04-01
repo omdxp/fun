@@ -1933,6 +1933,10 @@ pub const ParseProcess = struct {
         }
         node_left.?.flags = .{ .inside_expression = true };
         t = self.token_peek_next();
+        if (t == null) {
+            self.transpile_proc.err("expected expressionable for '{s}' operator", .{op});
+            return ParseError.InvalidOperand;
+        }
         if (t.?.type == .Operator) {
             if (mem.eql(u8, t.?.data.sval.items, "(")) {
                 var hist_down = utils.History.down(self.transpile_proc.allocator, hist, hist.flags);
@@ -1983,6 +1987,7 @@ pub const ParseProcess = struct {
     /// - Logs an error message if any expected token is not found.
     fn parse_expression(self: *Self, hist: *utils.History) ParseError!bool {
         const t = self.token_peek_next();
+        if (t == null) return false;
         if (hist.flags.expression_is_unary and t.?.type == .Operator and !utils.is_unary_operand_compatible(t.?)) {
             return false;
         }

@@ -8898,6 +8898,12 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                         if (isPunctChar(tokens_[next_i], '<')) {
                             next_i = skipGenericArgsForward(tokens_, next_i);
                         }
+                        if (next_i >= end_i or next_i >= tokens_.len) {
+                            if (resolveIdentType(name, locals_map, globals_map)) |tname| {
+                                updateCandidate(&candidate, &candidate_rank, tname);
+                            }
+                            continue;
+                        }
                         if (next_i < end_i and isSymbolChar(tokens_[next_i], '{')) {
                             updateCandidate(&candidate, &candidate_rank, allocator_.dupe(u8, name) catch name);
                             continue;
