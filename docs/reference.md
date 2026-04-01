@@ -80,6 +80,11 @@ fun main() {
 }
 ```
 
+Notes:
+- Quirk methods obey visibility: private methods are callable inside the same module only.
+- `print_fmt("{}", value)` uses `Display.to_string()` when that method is accessible at the call site.
+- If `Display.to_string()` exists but is private from the caller module, `{}` falls back to pointer-style formatting.
+
 ### Implementations
 ```fun
 quirk Shape {

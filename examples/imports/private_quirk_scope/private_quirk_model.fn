@@ -1,0 +1,41 @@
+imp std.io;
+imp std.quirks;
+
+pub compound Boxed {
+  num v;
+}
+
+quirk ReadV {
+  get_v() num;
+}
+
+impl Boxed {
+  pub new(num v) {
+    self.v = v;
+  }
+}
+
+impl Boxed Display {
+  to_string() str {
+    ret format("Boxed({num})", self.v);
+  }
+}
+
+impl Boxed ReadV {
+  get_v() num {
+    ret self.v;
+  }
+}
+
+pub fun local_checks() {
+  Boxed b;
+  b.new(11);
+  println_fmt("local-display {}", b);
+  println_fmt("local-quirk {num}", b.get_v());
+}
+
+pub fun make_boxed(num v) Boxed {
+  Boxed b;
+  b.new(v);
+  ret b;
+}

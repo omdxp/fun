@@ -1,0 +1,8 @@
+imp std.io;
+imp private_quirk_model as m;
+
+fun main() {
+  m.local_checks();
+  m.Boxed b = m.make_boxed(22);
+  println_fmt("cross-display {}", b);
+}

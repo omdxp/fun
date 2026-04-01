@@ -1,0 +1,7 @@
+imp std.io;
+imp ..imports.private_quirk_scope.private_quirk_model as m;
+
+fun main() {
+  m.Boxed b = m.make_boxed(22);
+  println_fmt("cross-quirk {num}", b.get_v());
+}

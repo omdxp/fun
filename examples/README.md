@@ -52,6 +52,7 @@ zig-out/bin/fun -in examples/<example>.fn
 - imports/relative/parent.fn
 - imports/parent_traversal_2up/nested/level1/main.fn
 - imports/impl_across_files/main.fn
+- imports/private_quirk_scope/main.fn
 - imports/quirk_across_folders/main.fn
 - imports/quirk_in_subfolder/main.fn
 
@@ -118,6 +119,7 @@ zig-out/bin/fun -in examples/<example>.fn
 - error_cases/let_infer_enum_dot_ambiguous.fn
 - error_cases/let_infer_quirk_invalid.fn
 - error_cases/missing_import.fn
+- error_cases/private_quirk_method_access.fn
 - error_cases/quirk_impl_missing_methods.fn
 - error_cases/type_mismatch.fn
 - error_cases/undeclared_symbols.fn

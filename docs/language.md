@@ -113,6 +113,8 @@
 - **Quirks**: Like interfaces/traits, define required methods.
 - **Impl**: Attach methods to compounds or implement quirks for compounds.
 - **Method Dispatch**: Quirk values can be used for dynamic dispatch (like trait objects).
+- **Quirk Method Visibility**: Quirk methods follow normal visibility rules. Non-`pub` methods are callable inside the declaring module, but are not callable from importing modules.
+- **Display Formatting (`{}`)**: Formatting uses `Display.to_string()` only when that method is accessible at the call site. If `to_string()` is private in another module, formatting falls back to pointer-style output for that value.
 
 ### Imports & Modularity
 - **Standard Library**: `imp std.c.io;` maps to C standard headers.
