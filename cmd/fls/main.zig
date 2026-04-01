@@ -3318,8 +3318,8 @@ const LspServer = struct {
             }
 
             const keywords = [_][]const u8{
-                "imp",  "as",  "pub", "fun", "compound", "quirk", "impl", "enum", "asm",   "volatile", "arch", "ret", "if", "elif", "else", "for", "fit", "break", "continue",
-                "void", "raw", "num", "dec", "str",      "bin",   "chr",  "true", "false",
+                "imp",  "as",  "pub", "fun", "compound", "quirk", "impl", "enum", "asm",   "volatile", "arch",   "ret", "if", "elif", "else", "for", "fit", "break", "continue",
+                "void", "raw", "num", "dec", "str",      "bin",   "chr",  "true", "false", "allow",    "expect",
             };
             for (keywords) |kw| {
                 if (prefix.len == 0 or std.mem.startsWith(u8, kw, prefix)) {
@@ -3637,8 +3637,8 @@ const LspServer = struct {
 
         // Keywords.
         const keywords = [_][]const u8{
-            "imp",  "as",  "pub", "fun", "compound", "quirk", "impl", "enum", "asm",   "volatile", "arch", "defer", "ret", "if", "elif", "else", "for", "fit", "break", "continue",
-            "void", "raw", "num", "dec", "str",      "bin",   "chr",  "true", "false",
+            "imp",  "as",  "pub", "fun", "compound", "quirk", "impl", "enum", "asm",   "volatile", "arch",   "defer", "ret", "if", "elif", "else", "for", "fit", "break", "continue",
+            "void", "raw", "num", "dec", "str",      "bin",   "chr",  "true", "false", "allow",    "expect",
         };
         for (keywords) |kw| {
             if (prefix.len == 0 or std.mem.startsWith(u8, kw, prefix)) {
@@ -6463,13 +6463,13 @@ fn parseFunDiagnosticsByUri(allocator: Allocator, stderr_text: []const u8, curre
         const line = std.mem.trim(u8, raw_line, "\r\n");
         if (line.len == 0) continue;
 
-        if (std.mem.startsWith(u8, line, "[Warning]")) {
+        if (std.mem.startsWith(u8, line, "[Warning]") or std.mem.startsWith(u8, line, "[Warning:")) {
             pending_severity = 2;
             if (pending_message) |*m| m.deinit();
             pending_message = null;
             continue;
         }
-        if (std.mem.startsWith(u8, line, "[Error]") or std.mem.startsWith(u8, line, "[TypeError]")) {
+        if (std.mem.startsWith(u8, line, "[Error]") or std.mem.startsWith(u8, line, "[Error:") or std.mem.startsWith(u8, line, "[TypeError]") or std.mem.startsWith(u8, line, "[TypeError:")) {
             pending_severity = 1;
             if (pending_message) |*m| m.deinit();
             pending_message = null;
@@ -6803,6 +6803,42 @@ test "fls: parseFunDiagnosticsByUri maps tmp file to current uri" {
     try std.testing.expect(std.mem.eql(u8, diags[0].uri, current_uri));
     try std.testing.expect(std.mem.eql(u8, diags[0].diag.message, "boom"));
     try std.testing.expectEqual(@as(i64, 1), diags[0].diag.severity);
+    try std.testing.expectEqual(@as(i64, 1), diags[0].diag.range.start.line);
+    try std.testing.expectEqual(@as(i64, 0), diags[0].diag.range.start.character);
+}
+
+test "fls: parseFunDiagnosticsByUri supports warning IDs" {
+    if (_skip_lsp_tests_in_ci) return;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("src");
+    {
+        var f = try tmp.dir.createFile("src/main.fn", .{ .read = true, .truncate = true });
+        defer f.close();
+        try f.writeAll("// file\n");
+    }
+
+    const current_abs = try tmp.dir.realpathAlloc(allocator, "src/main.fn");
+    defer allocator.free(current_abs);
+    const current_uri = try pathToUri(allocator, current_abs);
+    defer allocator.free(current_uri);
+
+    const stderr_text = "[Warning:return_local_ptr]\nboom\nLocation: _fls_tmp.fn:2:1-2\n";
+    const diags = try parseFunDiagnosticsByUri(allocator, stderr_text, current_uri, "_fls_tmp.fn");
+    defer {
+        for (diags) |d| {
+            allocator.free(d.uri);
+            allocator.free(d.diag.message);
+        }
+        allocator.free(diags);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), diags.len);
+    try std.testing.expect(std.mem.eql(u8, diags[0].uri, current_uri));
+    try std.testing.expect(std.mem.eql(u8, diags[0].diag.message, "boom"));
+    try std.testing.expectEqual(@as(i64, 2), diags[0].diag.severity);
     try std.testing.expectEqual(@as(i64, 1), diags[0].diag.range.start.line);
     try std.testing.expectEqual(@as(i64, 0), diags[0].diag.range.start.character);
 }

@@ -42,6 +42,9 @@ zig-out/bin/fun -in examples/<example>.fn
 - advanced/asm_basic.fn
 - advanced/asm_operands.fn
 - advanced/asm_arch_specific.fn
+- advanced/warning_allow.fn
+- advanced/warning_expect.fn
+- advanced/return_local_ptr_allow.fn
 - advanced/quirks.fn
 
 ## Imports
@@ -89,24 +92,6 @@ zig-out/bin/fun -in examples/<example>.fn
 - stdlib/time_helpers.fn
 - stdlib/toml_basic.fn
 - stdlib/vec_basic.fn
-- stdlib/array_helpers.fn
-- stdlib/cli_parse.fn
-- stdlib/io_read_write.fn
-- stdlib/json_basic.fn
-- stdlib/log_levels.fn
-- stdlib/map_basic.fn
-- stdlib/map_custom_strategy.fn
-- stdlib/map_num_keys.fn
-- stdlib/math_helpers.fn
-- stdlib/math_ops.fn
-- stdlib/net_url_parse.fn
-- stdlib/path_ops.fn
-- stdlib/rand_basic.fn
-- stdlib/set_basic.fn
-- stdlib/string_helpers.fn
-- stdlib/time_helpers.fn
-- stdlib/toml_basic.fn
-- stdlib/vec_basic.fn
 
 ## Visibility (pub)
 - pub_visibility/main.fn
@@ -126,6 +111,7 @@ zig-out/bin/fun -in examples/<example>.fn
 - error_cases/undeclared_symbols_arguments.fn
 - error_cases/undeclared_symbols_in_specific_scopes.fn
 - error_cases/undeclared_symbols_recursive.fn
+- error_cases/warning_expect_unmet.fn
 - error_cases/circular_dependency/circular1.fn
 - error_cases/circular_dependency/circular2.fn
 - error_cases/duplicate_symbols/mod1.fn

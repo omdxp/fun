@@ -1,0 +1,8 @@
+// Demonstrates allowing the return_local_ptr warning.
+// This file has no main() and is compile-only in example sweeps.
+
+fun make_local_ptr() num* {
+  allow return_local_ptr, "legacy API expects pointer return until refactor";
+  num x = 42;
+  ret &x;
+}

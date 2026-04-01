@@ -2309,6 +2309,126 @@ test "fls e2e: builtin sizeof completion + hover + signatureHelp" {
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: warning control keywords completion" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "fun main() {\n" ++
+        "  al;\n" ++
+        "  ex;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-warning-keywords.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const al_pos = try findPosition(doc_text, "al;", 0);
+    const al_comp_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, al_pos.line, al_pos.col + 2 },
+    );
+    defer allocator.free(al_comp_params);
+    const al_comp_id = try lsp.request("textDocument/completion", al_comp_params);
+    var al_comp_res = try lsp.waitResponse(al_comp_id, 15000);
+    defer al_comp_res.deinit();
+    const al_comp_val = try jsonResultFromResponseObj(al_comp_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, al_comp_val, "allow");
+
+    const ex_pos = try findPosition(doc_text, "ex;", 0);
+    const ex_comp_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, ex_pos.line, ex_pos.col + 2 },
+    );
+    defer allocator.free(ex_comp_params);
+    const ex_comp_id = try lsp.request("textDocument/completion", ex_comp_params);
+    var ex_comp_res = try lsp.waitResponse(ex_comp_id, 15000);
+    defer ex_comp_res.deinit();
+    const ex_comp_val = try jsonResultFromResponseObj(ex_comp_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, ex_comp_val, "expect");
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: publishDiagnostics includes warning from ID-tagged warning output" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "fun bad() num* {\n" ++
+        "  num x = 1;\n" ++
+        "  ret &x;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-warning-id-diagnostics.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const deadline_ms = std.time.milliTimestamp() + 15000;
+    var saw_expected_warning = false;
+
+    while (std.time.milliTimestamp() < deadline_ms and !saw_expected_warning) {
+        var notif = lsp.waitNotification("textDocument/publishDiagnostics", 1000) catch |err| {
+            if (err == error.Timeout) continue;
+            return err;
+        };
+        defer notif.deinit();
+
+        if (notif.parsed.value != .object) continue;
+        const root = notif.parsed.value.object;
+        const params_val = root.get("params") orelse continue;
+        if (params_val != .object) continue;
+        const params_obj = params_val.object;
+
+        const uri_val = params_obj.get("uri") orelse continue;
+        if (uri_val != .string or !std.mem.eql(u8, uri_val.string, doc_uri)) continue;
+
+        const diags_val = params_obj.get("diagnostics") orelse continue;
+        if (diags_val != .array) continue;
+
+        for (diags_val.array.items) |dv| {
+            if (dv != .object) continue;
+            const sev = dv.object.get("severity") orelse continue;
+            const msg = dv.object.get("message") orelse continue;
+            if (sev != .integer or msg != .string) continue;
+            if (sev.integer != 2) continue;
+
+            if (std.mem.indexOf(u8, msg.string, "returning address of local variable") != null) {
+                saw_expected_warning = true;
+                break;
+            }
+        }
+    }
+
+    try std.testing.expect(saw_expected_warning);
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: enum variant dot completion + hover" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();

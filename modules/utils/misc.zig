@@ -105,6 +105,8 @@ pub fn is_keyword(str: []const u8) bool {
         mem.eql(u8, "for", str) or
         mem.eql(u8, "break", str) or
         mem.eql(u8, "continue", str) or
+        mem.eql(u8, "allow", str) or
+        mem.eql(u8, "expect", str) or
         mem.eql(u8, "assert", str);
 }
 
@@ -709,6 +711,17 @@ pub fn print_node(node: ast.Node, writer: anytype, depth: usize) !void {
                     try writer.print("Message:\n", .{});
                     try print_node(msg.*, writer, depth + 2);
                 }
+            }
+        },
+        .StatementWarningControl => {
+            if (node.node_variant != null) {
+                const ctrl = node.node_variant.?.statement.warning_ctrl;
+                try print_indent(writer, depth + 1);
+                try writer.print("Action: {s}\n", .{@tagName(ctrl.action)});
+                try print_indent(writer, depth + 1);
+                try writer.print("Warning ID: {s}\n", .{ast.warning_id_to_string(ctrl.id)});
+                try print_indent(writer, depth + 1);
+                try writer.print("Reason: \"{s}\"\n", .{ctrl.reason});
             }
         },
         .StatementCase => {

@@ -61,6 +61,82 @@ test "fit bin missing false warns" {
     fs.cwd().deleteFile(ifilepath) catch {};
 }
 
+test "fit allow fit_non_exhaustive suppresses warning" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "fit_bin_allow_warning.fn";
+
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  bin x = true;\n" ++
+        "  allow fit_non_exhaustive, \"partial migration, keep behavior explicit\";\n" ++
+        "  fit x {\n" ++
+        "    true -> { printf(\"T\\n\"); }\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(res.warnings == null);
+    fs.cwd().deleteFile(ifilepath) catch {};
+}
+
+test "fit expect fit_non_exhaustive suppresses warning" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "fit_bin_expect_warning.fn";
+
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  bin x = true;\n" ++
+        "  expect fit_non_exhaustive, \"tracked non-exhaustive branch\";\n" ++
+        "  fit x {\n" ++
+        "    true -> { printf(\"T\\n\"); }\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(res.warnings == null);
+    fs.cwd().deleteFile(ifilepath) catch {};
+}
+
+test "fit unmet expect fit_non_exhaustive fails" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "fit_bin_expect_unmet.fn";
+
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  bin x = true;\n" ++
+        "  expect fit_non_exhaustive, \"must fail if fit becomes exhaustive\";\n" ++
+        "  fit x {\n" ++
+        "    true -> { printf(\"T\\n\"); },\n" ++
+        "    false -> { printf(\"F\\n\"); }\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const res = runTranspileWithWarnings(allocator, ifilepath, input) catch |err| {
+        try std.testing.expectEqual(codegen.TranspileError.UnmetWarningExpectation, err);
+        fs.cwd().deleteFile(ifilepath) catch {};
+        return;
+    };
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(false);
+}
+
 test "fit bin exhausted via default no warning" {
     const allocator = std.testing.allocator;
     const ifilepath = "fit_bin_default.fn";

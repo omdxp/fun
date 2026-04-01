@@ -555,7 +555,10 @@ pub const ParseProcess = struct {
                     return ParseError.InvalidKeyword;
                 }
             }
-            last_stmt_type = stmt.type;
+            // Warning controls are no-op directives and should not break `if/elif/else` chaining.
+            if (stmt.type != .StatementWarningControl) {
+                last_stmt_type = stmt.type;
+            }
             stmts.push(stmt) catch |e| {
                 std.debug.print("Error adding node to vector: {s}", .{@errorName(e)});
                 return ParseError.MemoryAllocationFailed;
@@ -4258,6 +4261,10 @@ pub const ParseProcess = struct {
             return try self.parse_asm_statement(hist);
         } else if (mem.eql(u8, "ret", sval)) {
             return try self.parse_return(hist);
+        } else if (mem.eql(u8, "allow", sval)) {
+            return try self.parse_warning_control(.allow);
+        } else if (mem.eql(u8, "expect", sval)) {
+            return try self.parse_warning_control(.expect);
         } else if (mem.eql(u8, "assert", sval)) {
             return try self.parse_assert(hist);
         } else if (mem.eql(u8, "break", sval)) {
@@ -4299,6 +4306,58 @@ pub const ParseProcess = struct {
         }
 
         self.transpile_proc.err("invalid keyword", .{});
+    }
+
+    /// Parses a warning control statement.
+    ///
+    /// Syntax:
+    /// - `allow <warning_id>, "reason";`
+    /// - `expect <warning_id>, "reason";`
+    fn parse_warning_control(self: *Self, action: ast.WarningControlAction) ParseError!void {
+        const ctrl_token = self.token_peek_next();
+        _ = self.token_next(); // skip allow/expect
+
+        if (self.parser_current_function == null) {
+            self.transpile_proc.err("warning controls are only valid inside functions", .{});
+            return ParseError.InvalidStatement;
+        }
+
+        const id_tok = self.token_next();
+        if (id_tok == null or id_tok.?.type != .Identifier) {
+            self.transpile_proc.err("expected warning id after '{s}'", .{@tagName(action)});
+            return ParseError.InvalidIdentifier;
+        }
+
+        const warning_id = ast.warning_id_from_string(id_tok.?.data.sval.items) orelse {
+            self.transpile_proc.err(
+                "unknown warning id '{s}' (expected one of: return_local_ptr, fit_non_exhaustive)",
+                .{id_tok.?.data.sval.items},
+            );
+            return ParseError.InvalidIdentifier;
+        };
+
+        try self.expect_op(",");
+
+        const reason_tok = self.token_next();
+        if (reason_tok == null or reason_tok.?.type != .String) {
+            self.transpile_proc.err("expected string reason after warning id", .{});
+            return ParseError.InvalidString;
+        }
+
+        self.transpile_proc.nodes.push(ast.Node{
+            .type = .StatementWarningControl,
+            .pos = if (ctrl_token) |t| t.pos else null,
+            .node_variant = .{ .statement = .{ .warning_ctrl = .{
+                .action = action,
+                .id = warning_id,
+                .reason = reason_tok.?.data.sval.items,
+            } } },
+        }) catch |e| {
+            std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});
+            return ParseError.MemoryAllocationFailed;
+        };
+
+        try self.expect_sym(';');
     }
 
     /// Parses an assert statement.

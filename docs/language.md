@@ -151,6 +151,42 @@
 - **Missing Imports**: Errors for importing non-existent modules.
 - **Incomplete Quirk Implementations**: Errors if not all quirk methods are implemented.
 
+### Warning Controls
+- **Stable warning IDs**:
+        - `return_local_ptr`
+        - `fit_non_exhaustive`
+- **Suppress next warning intentionally**:
+        - `allow <warning_id>, "reason";`
+- **Require next warning to appear**:
+        - `expect <warning_id>, "reason";`
+- **Scope**: `allow`/`expect` are statement directives and are valid inside function bodies.
+- **Reason is required**: the intent string documents why the warning is being allowed/expected.
+- **Behavior**:
+        - `allow` consumes and suppresses the next emitted warning with that ID.
+        - `expect` also suppresses the next warning with that ID, but compilation fails if no such warning is emitted later.
+
+Example:
+```fun
+fun bad() num* {
+    expect return_local_ptr, "tracked until allocator refactor";
+    num x = 1;
+    ret &x;
+}
+
+fun partial(bin x) {
+    allow fit_non_exhaustive, "legacy branch set, cleanup pending";
+    fit x {
+        true -> { }
+    }
+}
+```
+
+See also:
+- examples/advanced/warning_allow.fn
+- examples/advanced/warning_expect.fn
+- examples/advanced/return_local_ptr_allow.fn
+- examples/error_cases/warning_expect_unmet.fn
+
 ### Example
 ```fun
 imp std.c.io;

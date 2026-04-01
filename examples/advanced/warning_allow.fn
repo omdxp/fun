@@ -1,0 +1,19 @@
+// Demonstrates allowing one intentional warning instance.
+// 
+// Run:
+// fun -in .\examples\advanced\warning_allow.fn
+
+imp std.c.io;
+
+fun main() {
+  bin x = true;
+
+  // This suppresses the next fit_non_exhaustive warning.
+  allow fit_non_exhaustive, "temporary partial branch set during migration";
+
+  fit x {
+    true -> {
+      printf("only true branch handled\n");
+    }
+  }
+}

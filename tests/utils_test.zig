@@ -223,6 +223,8 @@ test "misc keyword and operator helpers" {
 
     try std.testing.expect(utils.is_keyword("fun"));
     try std.testing.expect(utils.is_keyword("if"));
+    try std.testing.expect(utils.is_keyword("allow"));
+    try std.testing.expect(utils.is_keyword("expect"));
     try std.testing.expect(!utils.is_keyword("nope"));
 
     try std.testing.expect(utils.is_boolean_keyword("true"));

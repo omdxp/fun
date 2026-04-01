@@ -358,3 +358,43 @@ fun -in <input_file> [-out <output_file>] [-no-exec] [-outf] [-ast] [-help]
 ## Errors and Warnings
 - Type mismatches, unknown symbols, and incomplete quirk implementations are errors.
 - Fit exhaustiveness and pointer-return warnings are emitted as warnings.
+
+### Warning IDs
+- `return_local_ptr`
+- `fit_non_exhaustive`
+
+### Warning Control Statements
+- `allow <warning_id>, "reason";`
+- `expect <warning_id>, "reason";`
+
+Rules:
+- Valid only inside function bodies.
+- `reason` must be a string literal.
+- `allow` suppresses the next warning emitted with the given ID.
+- `expect` suppresses the next warning emitted with the given ID and fails compilation if that warning is never emitted.
+
+Example:
+```fun
+fun demo(bin x) {
+  allow fit_non_exhaustive, "temporary while migrating branches";
+  fit x {
+    true -> { }
+  }
+}
+```
+
+Expect example:
+```fun
+fun demo_expect(bin x) {
+  expect fit_non_exhaustive, "guard intentional partial fit during migration";
+  fit x {
+    true -> { }
+  }
+}
+```
+
+Additional examples:
+- examples/advanced/warning_allow.fn
+- examples/advanced/warning_expect.fn
+- examples/advanced/return_local_ptr_allow.fn
+- examples/error_cases/warning_expect_unmet.fn (expected compile failure)

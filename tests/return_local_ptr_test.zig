@@ -78,3 +78,69 @@ test "diagnostic: returning pointer local does not warn" {
 
     try fs.cwd().deleteFile(ifilepath);
 }
+
+test "diagnostic: allow return_local_ptr suppresses warning" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "return_local_ptr_allow.fn";
+
+    const input =
+        "fun bad() num* {\n" ++
+        "  allow return_local_ptr, \"intentional local pointer escape for migration\";\n" ++
+        "  num x = 1;\n" ++
+        "  ret &x;\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(res.warnings == null);
+    fs.cwd().deleteFile(ifilepath) catch {};
+}
+
+test "diagnostic: expect return_local_ptr suppresses warning" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "return_local_ptr_expect.fn";
+
+    const input =
+        "fun bad() num* {\n" ++
+        "  expect return_local_ptr, \"known edge-case while refactoring\";\n" ++
+        "  num x = 1;\n" ++
+        "  ret &x;\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(res.warnings == null);
+    fs.cwd().deleteFile(ifilepath) catch {};
+}
+
+test "diagnostic: unmet expect return_local_ptr fails" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "return_local_ptr_expect_unmet.fn";
+
+    const input =
+        "fun ok() num* {\n" ++
+        "  expect return_local_ptr, \"should fail when warning disappears\";\n" ++
+        "  num* p = 0;\n" ++
+        "  ret p;\n" ++
+        "}\n";
+
+    const res = runTranspileWithWarnings(allocator, ifilepath, input) catch |err| {
+        try std.testing.expectEqual(codegen.TranspileError.UnmetWarningExpectation, err);
+        fs.cwd().deleteFile(ifilepath) catch {};
+        return;
+    };
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(false);
+}

@@ -73,6 +73,9 @@ pub const TranspileError = error{
     CyclicCompoundDependency,
     /// Error indicating an index operation is applied to a non-array.
     IndexNonArray,
+
+    /// Error indicating an expected warning annotation was not fulfilled.
+    UnmetWarningExpectation,
 };
 
 /// General errors that can occur during the transpilation process.
@@ -203,6 +206,8 @@ pub const TranspileProcess = struct {
     tokens: utils.Vector(token.Token),
     nodes: utils.Vector(ast.Node),
     warnings: std.ArrayList(u8),
+    pending_warning_allows: std.ArrayList(PendingWarningControl),
+    pending_warning_expects: std.ArrayList(PendingWarningControl),
     owned_nodes: std.ArrayList(*ast.Node),
     owned_scope_entities: std.ArrayList(*scope.ScopeEntity),
     defer_stack: std.ArrayList(*ast.Node),
@@ -2830,6 +2835,8 @@ pub const TranspileProcess = struct {
             .tokens = utils.Vector(token.Token).init(a),
             .nodes = utils.Vector(ast.Node).init(a),
             .warnings = std.ArrayList(u8).init(a),
+            .pending_warning_allows = std.ArrayList(PendingWarningControl).init(a),
+            .pending_warning_expects = std.ArrayList(PendingWarningControl).init(a),
             .owned_nodes = std.ArrayList(*ast.Node).init(a),
             .owned_scope_entities = std.ArrayList(*scope.ScopeEntity).init(a),
             .defer_stack = std.ArrayList(*ast.Node).init(a),
@@ -3077,6 +3084,66 @@ pub const TranspileProcess = struct {
         }
     }
 
+    fn queue_warning_control(self: *Self, action: ast.WarningControlAction, id: ast.WarningId, reason: []const u8, pos: ?token.Pos) TranspileError!void {
+        const pending: PendingWarningControl = .{
+            .id = id,
+            .reason = reason,
+            .pos = pos,
+        };
+        switch (action) {
+            .allow => self.pending_warning_allows.append(pending) catch return TranspileError.MemoryAllocationFailed,
+            .expect => self.pending_warning_expects.append(pending) catch return TranspileError.MemoryAllocationFailed,
+        }
+    }
+
+    fn consume_warning_control(self: *Self, id: ast.WarningId) bool {
+        for (self.pending_warning_expects.items) |*pending| {
+            if (pending.id == id and !pending.matched) {
+                pending.matched = true;
+                return true;
+            }
+        }
+        for (self.pending_warning_allows.items) |*pending| {
+            if (pending.id == id and !pending.matched) {
+                pending.matched = true;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn report_warning_expectation_error(self: *Self, pending: PendingWarningControl) void {
+        if (!self.flags.emit_stderr) return;
+        const stderr = std.io.getStdErr().writer();
+        stderr.print("\n[Error]\n", .{}) catch unreachable;
+        stderr.print(
+            "expected warning '{s}' was not emitted; reason: \"{s}\"",
+            .{ ast.warning_id_to_string(pending.id), pending.reason },
+        ) catch unreachable;
+
+        if (pending.pos) |p| {
+            const end_line = if (p.end_line == 0) p.line else p.end_line;
+            if (end_line == p.line) {
+                stderr.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col }) catch unreachable;
+            } else {
+                stderr.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col }) catch unreachable;
+            }
+            return;
+        }
+
+        stderr.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch unreachable;
+    }
+
+    fn finalize_warning_expectations(self: *Self) TranspileError!void {
+        var has_unmet = false;
+        for (self.pending_warning_expects.items) |pending| {
+            if (pending.matched) continue;
+            has_unmet = true;
+            self.report_warning_expectation_error(pending);
+        }
+        if (has_unmet) return TranspileError.UnmetWarningExpectation;
+    }
+
     fn infer_simple_dtype(self: *Self, node: ast.Node) ?dtype.DataTypeType {
         return switch (node.type) {
             .Boolean => .Bin,
@@ -3117,7 +3184,7 @@ pub const TranspileProcess = struct {
         // excluding the global/root scope.
         _ = self.get_scope_entity(name) orelse return;
 
-        self.report_warning(operand, "returning address of local variable '{s}' from a pointer-returning function; this pointer will dangle after return", .{name});
+        self.report_warning(.return_local_ptr, operand, "returning address of local variable '{s}' from a pointer-returning function; this pointer will dangle after return", .{name});
     }
 
     const CheckedType = struct {
@@ -3157,6 +3224,13 @@ pub const TranspileProcess = struct {
         params: *const utils.Vector(std.ArrayList(u8)),
         args: []*dtype.DataType,
         name: []const u8,
+    };
+
+    const PendingWarningControl = struct {
+        id: ast.WarningId,
+        reason: []const u8,
+        pos: ?token.Pos,
+        matched: bool = false,
     };
 
     const TypeEnv = struct {
@@ -3246,14 +3320,16 @@ pub const TranspileProcess = struct {
         stderr.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch unreachable;
     }
 
-    fn report_warning(self: *Self, node: ?ast.Node, comptime fmt: []const u8, args: anytype) void {
+    fn report_warning(self: *Self, id: ast.WarningId, node: ?ast.Node, comptime fmt: []const u8, args: anytype) void {
+        if (self.consume_warning_control(id)) return;
+
         const stderr = std.io.getStdErr().writer();
         if (self.flags.emit_stderr) {
-            stderr.print("\n[Warning]\n", .{}) catch unreachable;
+            stderr.print("\n[Warning:{s}]\n", .{ast.warning_id_to_string(id)}) catch unreachable;
             stderr.print(fmt, args) catch unreachable;
         }
 
-        self.warnings.writer().print("\n[Warning]\n", .{}) catch unreachable;
+        self.warnings.writer().print("\n[Warning:{s}]\n", .{ast.warning_id_to_string(id)}) catch unreachable;
         self.warnings.writer().print(fmt, args) catch unreachable;
 
         if (node) |n| {
@@ -6213,6 +6289,7 @@ pub const TranspileProcess = struct {
                         if (missing_count == 0) return;
 
                         self.report_warning(
+                            .fit_non_exhaustive,
                             fit_stmt,
                             "fit statement is not exhausted for enum '{s}' condition (missing: {s}; add catch-all '_' branch to silence)",
                             .{ enum_name, missing.items },
@@ -6224,22 +6301,22 @@ pub const TranspileProcess = struct {
         }
 
         const cond_type = self.infer_simple_dtype(condition.*) orelse {
-            self.report_warning(fit_stmt, "fit statement is not exhausted for unknown condition (missing catch-all '_' branch)", .{});
+            self.report_warning(.fit_non_exhaustive, fit_stmt, "fit statement is not exhausted for unknown condition (missing catch-all '_' branch)", .{});
             return;
         };
 
         if (cond_type != .Bin) {
-            self.report_warning(fit_stmt, "fit statement is not exhausted for {s} condition (missing catch-all '_' branch)", .{@tagName(cond_type)});
+            self.report_warning(.fit_non_exhaustive, fit_stmt, "fit statement is not exhausted for {s} condition (missing catch-all '_' branch)", .{@tagName(cond_type)});
             return;
         }
 
         if (!(has_true and has_false)) {
             if (!has_true and !has_false) {
-                self.report_warning(fit_stmt, "fit statement is not exhausted for bin condition (missing true and false branches)", .{});
+                self.report_warning(.fit_non_exhaustive, fit_stmt, "fit statement is not exhausted for bin condition (missing true and false branches)", .{});
             } else if (!has_true) {
-                self.report_warning(fit_stmt, "fit statement is not exhausted for bin condition (missing true branch)", .{});
+                self.report_warning(.fit_non_exhaustive, fit_stmt, "fit statement is not exhausted for bin condition (missing true branch)", .{});
             } else {
-                self.report_warning(fit_stmt, "fit statement is not exhausted for bin condition (missing false branch)", .{});
+                self.report_warning(.fit_non_exhaustive, fit_stmt, "fit statement is not exhausted for bin condition (missing false branch)", .{});
             }
         }
     }
@@ -7154,6 +7231,9 @@ pub const TranspileProcess = struct {
                                 allocator.destroy(msg);
                             }
                         },
+                        .warning_ctrl => |_| {
+                            // reason points into token memory and is not owned by AST nodes.
+                        },
                     }
                 },
                 else => {},
@@ -7198,6 +7278,8 @@ pub const TranspileProcess = struct {
         self.nodes.deinit();
 
         self.warnings.deinit();
+        self.pending_warning_allows.deinit();
+        self.pending_warning_expects.deinit();
 
         // Most allocations in a `TranspileProcess` are arena-backed; deinit the
         // containers, then release the arena at the end.
@@ -9640,6 +9722,8 @@ pub const TranspileProcess = struct {
                 try self.write("\n\n");
             }
         }
+
+        try self.finalize_warning_expectations();
     }
 
     fn emit_function_prototypes_all(self: *Self) TranspileError!void {
@@ -11041,7 +11125,7 @@ pub const TranspileProcess = struct {
                 try self.write_indent();
                 try self.write("}");
             },
-            .StatementReturn, .StatementDefer, .StatementAsm, .StatementIf, .StatementElseIf, .StatementElse, .StatementFit, .StatementFor, .StatementAssert => {
+            .StatementReturn, .StatementDefer, .StatementAsm, .StatementIf, .StatementElseIf, .StatementElse, .StatementFit, .StatementFor, .StatementAssert, .StatementWarningControl => {
                 // `ret;` is represented as StatementReturn with no node_variant.
                 if (node.type == .StatementReturn and node.node_variant == null) {
                     try self.emit_defers();
@@ -11308,6 +11392,14 @@ pub const TranspileProcess = struct {
                             try self.write("); ");
                         }
                         try self.write("abort(); }");
+                    },
+                    .warning_ctrl => |ctrl| {
+                        try self.queue_warning_control(ctrl.action, ctrl.id, ctrl.reason, node.pos);
+                        try self.write("/* ");
+                        try self.write(@tagName(ctrl.action));
+                        try self.write(" ");
+                        try self.write(ast.warning_id_to_string(ctrl.id));
+                        try self.write(" */");
                     },
                     .for_stmt => |for_s| {
                         switch (for_s) {

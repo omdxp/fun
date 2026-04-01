@@ -16,6 +16,31 @@ pub const NodeFlags = packed struct {
     is_public: bool = false,
 };
 
+/// Stable warning identifiers used by diagnostics and warning controls.
+pub const WarningId = enum {
+    return_local_ptr,
+    fit_non_exhaustive,
+};
+
+/// Intent controls for warning diagnostics.
+pub const WarningControlAction = enum {
+    allow,
+    expect,
+};
+
+pub fn warning_id_from_string(name: []const u8) ?WarningId {
+    if (mem.eql(u8, name, "return_local_ptr")) return .return_local_ptr;
+    if (mem.eql(u8, name, "fit_non_exhaustive")) return .fit_non_exhaustive;
+    return null;
+}
+
+pub fn warning_id_to_string(id: WarningId) []const u8 {
+    return switch (id) {
+        .return_local_ptr => "return_local_ptr",
+        .fit_non_exhaustive => "fit_non_exhaustive",
+    };
+}
+
 /// Types of nodes.
 pub const NodeType = enum {
     /// Represents an expression node.
@@ -60,6 +85,8 @@ pub const NodeType = enum {
     StatementContinue,
     /// Represents an assert statement node.
     StatementAssert,
+    /// Represents warning control statements (`allow` / `expect`).
+    StatementWarningControl,
     /// Represents a fit statement node.
     StatementFit,
     /// Represents a case statement node.
@@ -307,6 +334,13 @@ pub const Node = struct {
                 condition: *Node,
                 /// Optional message expression (should be str).
                 message: ?*Node = null,
+            },
+            /// Warning control statement.
+            warning_ctrl: struct {
+                action: WarningControlAction,
+                id: WarningId,
+                /// Intent rationale from source string literal.
+                reason: []const u8,
             },
         },
     } = null,

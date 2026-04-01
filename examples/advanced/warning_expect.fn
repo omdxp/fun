@@ -1,0 +1,20 @@
+// Demonstrates expecting a warning and failing if it disappears.
+// 
+// Run:
+// fun -in .\examples\advanced\warning_expect.fn
+
+imp std.c.io;
+
+fun main() {
+  bin x = true;
+
+  // This consumes the next fit_non_exhaustive warning.
+  // If the warning stops happening, compilation fails.
+  expect fit_non_exhaustive, "tracked intentional non-exhaustive fit";
+
+  fit x {
+    true -> {
+      printf("intentional non-exhaustive fit\n");
+    }
+  }
+}
