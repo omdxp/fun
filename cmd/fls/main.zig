@@ -8779,6 +8779,13 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 }
             }.call;
 
+            const isLikelyTypeIdentifier = struct {
+                fn call(name: []const u8) bool {
+                    if (name.len == 0) return false;
+                    return std.ascii.isUpper(name[0]);
+                }
+            }.call;
+
             const first_i_opt = nextNonTrivialToken(tokens_, start_i);
             if (first_i_opt) |fi| {
                 if (isPunctChar(tokens_[fi], '(')) {
@@ -8920,8 +8927,13 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                         // Member access chain.
                         if (isDotTokenAny(tokens_[next_i])) {
                             var recv_type = resolveIdentType(name, locals_map, globals_map);
+                            var recv_type_is_heuristic = false;
                             if (recv_type == null) {
                                 recv_type = findTypeName(name, symbols);
+                            }
+                            if (recv_type == null and isLikelyTypeIdentifier(name)) {
+                                recv_type = name;
+                                recv_type_is_heuristic = true;
                             }
                             var j = next_i;
                             while (recv_type != null and j < end_i and isDotTokenAny(tokens_[j])) {
@@ -8937,6 +8949,13 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                                     recv_type = ft;
                                 } else if (findEnumMemberType(recv_type.?, member_name, symbols)) |et| {
                                     recv_type = et;
+                                } else if (recv_type_is_heuristic) {
+                                    // For imported enum members, token-only indexing may not include enum metadata.
+                                    // Keep the receiver type for terminal qualified constants like `Direction.SOUTH`.
+                                    const next_dot = nextNonTrivialToken(tokens_, after_member) orelse end_i;
+                                    if (next_dot < end_i and isDotTokenAny(tokens_[next_dot])) {
+                                        recv_type = null;
+                                    }
                                 } else {
                                     recv_type = null;
                                 }
