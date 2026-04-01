@@ -1783,6 +1783,10 @@ test "fls e2e: let inference hover types" {
         "  let c = 'Z';\n" ++
         "  let b = true;\n" ++
         "  let arr = [1, 2, 3];\n" ++
+        "  let chars = ['a', 'b', 'c'];\n" ++
+        "  let decs = [1.25, 2.5, 3.75];\n" ++
+        "  let flags = [true, false, true];\n" ++
+        "  let words = [\"hello\", \"world\"];\n" ++
         "  let p = Point{x = 1, y = 2};\n" ++
         "  let p2 = make_point(3, 4);\n" ++
         "  let pptr = &p;\n" ++
@@ -1831,6 +1835,10 @@ test "fls e2e: let inference hover types" {
         .{ .name = "c", .expect = "chr c" },
         .{ .name = "b", .expect = "bin b" },
         .{ .name = "arr", .expect = "num[] arr" },
+        .{ .name = "chars", .expect = "chr[] chars" },
+        .{ .name = "decs", .expect = "dec[] decs" },
+        .{ .name = "flags", .expect = "bin[] flags" },
+        .{ .name = "words", .expect = "str[] words" },
         .{ .name = "p", .expect = "Point p" },
         .{ .name = "p2", .expect = "Point p2" },
         .{ .name = "pptr", .expect = "Point* pptr" },

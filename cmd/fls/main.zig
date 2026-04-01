@@ -8730,6 +8730,17 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 }
             }.callSyms;
 
+            const tokenHasChar = struct {
+                fn callTok(t: token.Token, ch: u8) bool {
+                    const s = tokenString(t);
+                    var i: usize = 0;
+                    while (i < s.len) : (i += 1) {
+                        if (s[i] == ch) return true;
+                    }
+                    return false;
+                }
+            }.callTok;
+
             var saw_str = false;
             var saw_bin = false;
             var saw_chr = false;
@@ -8772,8 +8783,8 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
             if (first_i_opt) |fi| {
                 if (isPunctChar(tokens_[fi], '(')) {
                     const next_after = nextNonTrivialToken(tokens_, fi + 1) orelse fi;
-                    if (isPunctChar(tokens_[next_after], '[')) saw_array_literal = true;
-                } else if (isPunctChar(tokens_[fi], '[')) {
+                    if (tokenHasChar(tokens_[next_after], '[')) saw_array_literal = true;
+                } else if (tokenHasChar(tokens_[fi], '[')) {
                     saw_array_literal = true;
                 }
             }
@@ -8949,9 +8960,21 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                     return allocator_.dupe(u8, cand) catch cand;
                 }
             }
-            if (saw_str) return allocator_.dupe(u8, "str") catch "str";
-            if (saw_bin) return allocator_.dupe(u8, "bin") catch "bin";
-            if (saw_chr) return allocator_.dupe(u8, "chr") catch "chr";
+            if (saw_str) {
+                const base = "str";
+                if (saw_array_literal) return std.mem.concat(allocator_, u8, &[_][]const u8{ base, "[]" }) catch base;
+                return allocator_.dupe(u8, base) catch base;
+            }
+            if (saw_bin) {
+                const base = "bin";
+                if (saw_array_literal) return std.mem.concat(allocator_, u8, &[_][]const u8{ base, "[]" }) catch base;
+                return allocator_.dupe(u8, base) catch base;
+            }
+            if (saw_chr) {
+                const base = "chr";
+                if (saw_array_literal) return std.mem.concat(allocator_, u8, &[_][]const u8{ base, "[]" }) catch base;
+                return allocator_.dupe(u8, base) catch base;
+            }
             if (saw_dec or (candidate != null and std.mem.eql(u8, candidate.?, "dec"))) {
                 const base = "dec";
                 if (saw_array_literal) return std.mem.concat(allocator_, u8, &[_][]const u8{ base, "[]" }) catch base;
