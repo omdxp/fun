@@ -20,6 +20,28 @@ Fun is a statically-typed, C-transpiling language focused on performance and cla
 - **Blocks** are delimited with `{}`.
 - **Comments**: `//` single-line.
 
+### Documentation Comments
+- The website reference uses regular `//` comments that appear immediately above declarations.
+- This applies to module summaries, public symbols, compound fields, and quirk members.
+- For best results, keep comments short and declaration-specific.
+- Example:
+
+```fun
+// Optional value container.
+pub compound Option<T> {
+  // True when a value is present.
+  bin has;
+  // Stored value.
+  T value;
+}
+
+// Value that can render itself as text.
+pub quirk Display {
+  // Produce a textual representation.
+  to_string() str;
+}
+```
+
 ## Imports
 - `imp std.c.io;` imports a C header signature module.
 - `imp std.string;` imports Fun stdlib modules.

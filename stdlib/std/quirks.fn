@@ -7,16 +7,20 @@
 
 // Basic size/introspection for collections.
 pub quirk Sized {
+  // Return the number of elements/items.
   len() num;
+  // Return true when there are no elements/items.
   is_empty() bin;
 }
 
 // Types that can render themselves as a string.
 pub quirk Display {
+  // Render the value as text.
   to_string() str;
 }
 
 // Types that can clear internal state.
 pub quirk Clearable {
+  // Reset the value to an empty/cleared state.
   clear() void;
 }

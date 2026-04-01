@@ -4,6 +4,7 @@
 // - Values follow C `time.h` semantics and platform libc behavior.
 // - Some functions return pointers to static storage (C semantics).
 
+// Broken-down local or UTC time components.
 pub compound tm {
   // Seconds after the minute (0..60).
   num tm_sec;

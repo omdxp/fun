@@ -273,6 +273,7 @@ impl Vec<T> {
 }
 
 impl Vec<T> as Clearable {
+  // Clear without freeing capacity.
   pub clear() {
     self.len = 0;
   }

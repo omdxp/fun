@@ -73,7 +73,13 @@ function parseStdFile(filePath, source) {
       const methodMatch = line.match(/^pub\s+([^\s(<{]+)\s*\(/);
       if (methodMatch) {
         const symbolComment = collectCommentAbove(lines, i);
-        const symbolDocs = parseCommentBlock(symbolComment);
+        const parsedDocs = parseCommentBlock(symbolComment);
+        const symbolDocs = ensureDocs(
+          parsedDocs,
+          line,
+          "method",
+          methodMatch[1],
+        );
         const symbolMarkdown = buildDocsMarkdown(symbolDocs);
         symbols.push({
           kind: "method",
@@ -96,7 +102,8 @@ function parseStdFile(filePath, source) {
     const m = line.match(/^pub\s+(fun|compound|quirk|enum)\s+([^\s(<{]+)/);
     if (m) {
       const symbolComment = collectCommentAbove(lines, i);
-      const symbolDocs = parseCommentBlock(symbolComment);
+      const parsedDocs = parseCommentBlock(symbolComment);
+      const symbolDocs = ensureDocs(parsedDocs, line, m[1], m[2]);
       const symbolMarkdown = buildDocsMarkdown(symbolDocs);
       const fields = m[1] === "compound" ? extractCompoundFields(lines, i) : [];
       const members = m[1] === "quirk" ? extractQuirkMembers(lines, i) : [];
@@ -165,11 +172,17 @@ function extractCompoundFields(lines, declLineIdx) {
       );
       if (fieldMatch) {
         const fieldCommentLines = collectCommentAbove(lines, i);
-        const fieldDocs = parseCommentBlock(fieldCommentLines);
-        const inlineDoc = parseFieldInlineDoc(fieldCommentLines);
-
         const typeText = fieldMatch[1].trim();
         const nameText = fieldMatch[2].trim();
+        const cleanCommentLines = stripNamedPrefix(fieldCommentLines, nameText);
+        const parsedDocs = parseCommentBlock(cleanCommentLines);
+        const fieldDocs = ensureDocs(
+          parsedDocs,
+          `${typeText} ${nameText};`,
+          "field",
+          nameText,
+        );
+        const inlineDoc = parseFieldInlineDoc(fieldCommentLines, nameText);
 
         fields.push({
           name: nameText,
@@ -218,11 +231,15 @@ function extractQuirkMembers(lines, declLineIdx) {
       );
       if (memberMatch) {
         const memberCommentLines = collectCommentAbove(lines, i);
-        const memberDocs = parseCommentBlock(memberCommentLines);
-        const inlineDoc = parseFieldInlineDoc(memberCommentLines);
-
         const nameText = memberMatch[1].trim();
         const retText = (memberMatch[3] ?? "").trim();
+        const cleanCommentLines = stripNamedPrefix(
+          memberCommentLines,
+          nameText,
+        );
+        const parsedDocs = parseCommentBlock(cleanCommentLines);
+        const memberDocs = ensureDocs(parsedDocs, trimmed, "member", nameText);
+        const inlineDoc = parseFieldInlineDoc(memberCommentLines, nameText);
 
         members.push({
           name: nameText,
@@ -247,8 +264,19 @@ function extractQuirkMembers(lines, declLineIdx) {
   return members;
 }
 
-function parseFieldInlineDoc(commentLines) {
+function parseFieldInlineDoc(commentLines, expectedName = "") {
   if (!commentLines || commentLines.length === 0) return "";
+
+  const expected = String(expectedName).trim();
+
+  if (expected) {
+    const rx = new RegExp(`^${escapeRegExp(expected)}\\s*:\\s*(.+)$`, "i");
+    for (let i = commentLines.length - 1; i >= 0; i -= 1) {
+      const trimmed = commentLines[i].trim();
+      const m = trimmed.match(rx);
+      if (m) return m[1].trim();
+    }
+  }
 
   for (let i = commentLines.length - 1; i >= 0; i -= 1) {
     const trimmed = commentLines[i].trim();
@@ -259,6 +287,54 @@ function parseFieldInlineDoc(commentLines) {
   }
 
   return "";
+}
+
+function stripNamedPrefix(lines, name) {
+  if (!lines || lines.length === 0) return [];
+  const expected = String(name ?? "").trim();
+  if (!expected) return [...lines];
+
+  const out = [...lines];
+  const rx = new RegExp(`^${escapeRegExp(expected)}\\s*:\\s*(.*)$`, "i");
+
+  for (let i = 0; i < out.length; i += 1) {
+    const trimmed = out[i].trim();
+    if (!trimmed) continue;
+    const m = trimmed.match(rx);
+    if (m) {
+      out[i] = m[1].trim();
+    }
+    break;
+  }
+
+  return out;
+}
+
+function escapeRegExp(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function ensureDocs(docs, signature, kind, name) {
+  if (docs.raw && docs.raw.trim()) return docs;
+
+  const summary = `Auto-generated docs for ${kind} '${name}'.`;
+  const description = [
+    summary,
+    "",
+    "No source comment docs were found for this declaration.",
+    "",
+    "### Signature",
+    "```fun",
+    signature,
+    "```",
+  ].join("\n");
+
+  return {
+    ...docs,
+    summary,
+    description,
+    raw: description,
+  };
 }
 
 function countChar(text, ch) {

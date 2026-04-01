@@ -8,11 +8,13 @@
 
 // Types that can serialize themselves to text.
 pub quirk Serialize {
+  // Encode the value as a string.
   serialize() str;
 }
 
 // Types that can deserialize themselves from text.
 pub quirk Deserialize {
+  // Decode and apply state from input text.
   deserialize(str input);
 }
 

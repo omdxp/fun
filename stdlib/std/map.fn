@@ -15,11 +15,17 @@ imp std.quirks;
 
 // Generic open-addressing hash map.
 pub compound Map<K, V> {
+  // Key storage array.
   K* key_slots;
+  // Value storage array.
   V* value_slots;
+  // Occupied-slot flags.
   bin* used;
+  // Tombstone flags for deleted slots.
   bin* tomb;
+  // Number of live entries.
   num len;
+  // Allocated slot capacity.
   num cap;
 }
 
@@ -197,16 +203,19 @@ impl Map<K, V> {
     ret first_tomb;
   }
 
+  // Return a zero-initialized V.
   pub zero_value() V {
     V out;
     memset(&out, 0, sizeof(V));
     ret out;
   }
 
+  // Read a value at a live slot index.
   pub load_value_idx(num idx) V {
     ret self.value_slots[idx];
   }
 
+  // Write a value at a slot index.
   pub store_value_idx(num idx, V value) {
     self.value_slots[idx] = value;
   }

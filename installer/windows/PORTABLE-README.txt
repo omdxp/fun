@@ -23,4 +23,13 @@ Compiler configuration
   $env:FUN_CC = "zig"
   $env:FUN_CC_ARGS = "cc"
 
+Language Server (fls)
+- The package also includes the Fun language server: .\bin\fls.exe
+- This is used by editor integrations for diagnostics/completion/formatting.
+- If your editor asks for the server path, point it to:
+  <extracted-folder>\bin\fls.exe
+
+Optional: add fls to PATH for this shell session
+$env:Path = "$PWD\\bin;" + $env:Path
+
 If you use MSVC cl.exe, run from Developer PowerShell for Visual Studio.

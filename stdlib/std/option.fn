@@ -9,6 +9,7 @@
 imp std.result;
 imp std.error;
 
+// Generic optional value container.
 pub compound Option<T> {
   // Whether a value is present.
   bin has;

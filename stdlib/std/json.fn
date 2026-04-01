@@ -185,12 +185,14 @@ impl JsonObject {
 }
 
 impl JsonObject as Serialize {
+  // Encode this object as JSON text.
   pub serialize() str {
     ret self.stringify();
   }
 }
 
 impl JsonObject as Deserialize {
+  // Parse JSON text into this object.
   pub deserialize(str input) {
     JsonObject parsed = parse_object(input);
     defer parsed.free();
@@ -256,12 +258,14 @@ impl JsonArray {
 }
 
 impl JsonArray as Serialize {
+  // Encode this array as JSON text.
   pub serialize() str {
     ret self.stringify();
   }
 }
 
 impl JsonArray as Deserialize {
+  // Parse JSON text into this array.
   pub deserialize(str input) {
     JsonArray parsed = parse_array(input);
     defer parsed.free();

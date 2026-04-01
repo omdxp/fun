@@ -124,12 +124,14 @@ impl TomlDoc {
 }
 
 impl TomlDoc as Serialize {
+  // Encode this document as TOML text.
   pub serialize() str {
     ret self.stringify();
   }
 }
 
 impl TomlDoc as Deserialize {
+  // Parse TOML text into this document.
   pub deserialize(str input) {
     TomlDoc parsed = parse(input);
     defer parsed.free();

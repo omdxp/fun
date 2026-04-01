@@ -803,6 +803,7 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
   padding: 12px;
   background: rgba(9, 17, 40, 0.8);
   overflow-y: auto;
+  overscroll-behavior: contain;
   max-height: 60vh;
 }
 
@@ -813,6 +814,7 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
 
 .modal-content {
   overflow-y: auto;
+  overscroll-behavior: contain;
   max-height: 60vh;
   padding-right: 6px;
 }

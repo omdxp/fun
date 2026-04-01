@@ -3,6 +3,30 @@
 
 This directory contains standard library modules for the Fun language.
 
+## Documentation Comments
+
+Reference docs for stdlib modules are generated from source comments in `stdlib/std/*.fn`.
+
+- Use `//` comments immediately above public declarations.
+- Add comments for compound fields and quirk members, not just top-level symbols.
+- Keep comments focused on behavior/intent.
+- Prefer concise one-line summaries unless extra context is needed.
+
+Example:
+
+```fun
+// Generic map with typed keys and values.
+pub compound Map<K, V> {
+	// Key storage array.
+	K* key_slots;
+}
+
+pub quirk Serialize {
+	// Encode the value as text.
+	serialize() str;
+}
+```
+
 ## Structure
 
 - **std/**: Standard library namespace

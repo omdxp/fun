@@ -7,7 +7,9 @@ imp std.quirks;
 // Example:
 // fun takes(Collection c) { if c.is_empty() { ... } }
 pub quirk Collection {
+  // Return element count.
   len() num;
+  // Return true when empty.
   is_empty() bin;
 }
 
