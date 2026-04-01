@@ -47,6 +47,7 @@ zig-out/bin/fun -in examples/<example>.fn
 ## Imports
 - imports/main.fn
 - imports/alias_collision/main.fn
+- imports/alias_module_scope.fn
 - imports/nested/deep_import.fn
 - imports/relative/parent.fn
 - imports/parent_traversal_2up/nested/level1/main.fn

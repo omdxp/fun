@@ -1,0 +1,7 @@
+imp std.io;
+imp alias_module_scope_error as e;
+
+fun main() {
+  let some_err = e.ErrorCode.FailedToStartServer;
+  println_fmt("Error code: {num}", some_err);
+}

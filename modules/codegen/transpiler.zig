@@ -545,13 +545,22 @@ pub const TranspileProcess = struct {
         self.import_aliases.put(alias_copy, path_copy) catch return TranspileError.MemoryAllocationFailed;
     }
 
-    fn resolve_alias_qualified_symbol_name(self: *Self, alias: []const u8, name: []const u8) TranspileError!?[]const u8 {
-        const alias_map = if (self.import_aliases_override) |m| m else &self.import_aliases;
-        var import_path = alias_map.get(alias);
-        if (import_path == null) {
-            const root = self.get_root();
-            import_path = root.find_import_alias_path(alias);
+    fn alias_map_for_node(self: *Self, ref_node: ?*const ast.Node) *const std.StringHashMap([]const u8) {
+        if (self.import_aliases_override) |m| return m;
+        if (ref_node) |n| {
+            if (n.pos) |p| {
+                const root = self.get_root();
+                if (root.find_process_for_file(p.filename)) |proc| {
+                    return &proc.import_aliases;
+                }
+            }
         }
+        return &self.import_aliases;
+    }
+
+    fn resolve_alias_qualified_symbol_name(self: *Self, ref_node: ?*const ast.Node, alias: []const u8, name: []const u8) TranspileError!?[]const u8 {
+        const alias_map = self.alias_map_for_node(ref_node);
+        const import_path = alias_map.get(alias);
         if (import_path == null) return null;
         const import_path_unwrapped = import_path.?;
         if (std.mem.startsWith(u8, import_path_unwrapped, "std.c.")) {
@@ -4528,7 +4537,7 @@ pub const TranspileProcess = struct {
                         if (recv.type == .Identifier and recv.data != null) {
                             const alias_name = recv.data.?.sval.items;
                             const member_name = member.data.?.sval.items;
-                            if (try self.resolve_alias_qualified_symbol_name(alias_name, member_name)) |qualified| {
+                            if (try self.resolve_alias_qualified_symbol_name(&node, alias_name, member_name)) |qualified| {
                                 defer self.allocator.free(qualified);
 
                                 if (fns.get(qualified)) |sig| {
@@ -4935,7 +4944,7 @@ pub const TranspileProcess = struct {
                     // Aliased enum variant constant:
                     // `alias.Enum.Variant` (supports both parse associativities).
                     if (extract_alias_enum_variant_parts(left, right)) |parts| {
-                        if (self.import_aliases.contains(parts.alias_name)) {
+                        if (self.alias_map_for_node(&node).contains(parts.alias_name)) {
                             const qualified_enum = try self.make_alias_qualified_symbol_name(parts.alias_name, parts.enum_name);
                             if (try self.resolve_enum_variant_constant_type(node, qualified_enum, parts.variant_name)) |_| {
                                 self.allocator.free(qualified_enum);
@@ -4949,7 +4958,7 @@ pub const TranspileProcess = struct {
                     if (left.*.type == .Identifier and left.*.data != null and right.*.type == .Identifier and right.*.data != null) {
                         const alias_name = left.*.data.?.sval.items;
                         const member_name = right.*.data.?.sval.items;
-                        if (try self.resolve_alias_qualified_symbol_name(alias_name, member_name)) |qualified| {
+                        if (try self.resolve_alias_qualified_symbol_name(&node, alias_name, member_name)) |qualified| {
                             defer self.allocator.free(qualified);
                             return .{ .base = .Unknown };
                         }
@@ -10389,7 +10398,7 @@ pub const TranspileProcess = struct {
                     // Aliased enum variant constant:
                     // `alias.Enum.Variant` -> `alias__Enum_Variant` in C.
                     if (extract_alias_enum_variant_parts(left, right)) |parts| {
-                        if (self.import_aliases.contains(parts.alias_name)) {
+                        if (self.alias_map_for_node(&node).contains(parts.alias_name)) {
                             const qualified_enum = try self.make_alias_qualified_symbol_name(parts.alias_name, parts.enum_name);
                             defer self.allocator.free(qualified_enum);
                             if (self.root_registry()) |reg| {
@@ -10409,7 +10418,7 @@ pub const TranspileProcess = struct {
                     if (left.*.type == .Identifier and left.*.data != null and right.*.type == .Identifier and right.*.data != null) {
                         const alias_name = left.*.data.?.sval.items;
                         const member_name = right.*.data.?.sval.items;
-                        if (try self.resolve_alias_qualified_symbol_name(alias_name, member_name)) |qualified| {
+                        if (try self.resolve_alias_qualified_symbol_name(&node, alias_name, member_name)) |qualified| {
                             defer self.allocator.free(qualified);
                             try self.write(qualified);
                             return;
