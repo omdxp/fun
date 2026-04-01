@@ -9774,7 +9774,7 @@ pub const TranspileProcess = struct {
         }
         if (function.is_variadic) {
             if (wrote_any_param) try self.write(", ");
-            try self.write("char* __fun_vtags");
+            try self.write("const char* __fun_vtags");
             try self.write(", ...");
         }
         self.in_function_params = false;
@@ -10916,7 +10916,7 @@ pub const TranspileProcess = struct {
                     }
                     if (function.is_variadic) {
                         if (wrote_any_param) try self.write(", ");
-                        try self.write("char* __fun_vtags");
+                        try self.write("const char* __fun_vtags");
                         try self.write(", ...");
                     }
                     self.in_function_params = false;

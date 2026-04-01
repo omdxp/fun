@@ -714,6 +714,10 @@ fn append_default_compile_args(allocator: mem.Allocator, argv_list: *std.ArrayLi
             try argv_list.append(try allocator.dupe(u8, c_path));
             try argv_list.append(try allocator.dupe(u8, "-o"));
             try argv_list.append(try allocator.dupe(u8, exe_file));
+            // GCC/Clang-style Linux links libm separately.
+            if (builtin.target.os.tag != .windows) {
+                try argv_list.append(try allocator.dupe(u8, "-lm"));
+            }
         },
     }
 }

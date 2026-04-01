@@ -156,9 +156,11 @@ pub fun tcp_listen(num port) num {
   }
 
   SockAddrInPacked addr = _pack_sockaddr_in_linux(port);
-  if bind(fd, &addr, 16) != 0 {
+  raw* addr_ptr = &addr;
+  if bind(fd, addr_ptr, 16) != 0 {
     addr = _pack_sockaddr_in_bsd(port);
-    if bind(fd, &addr, 16) != 0 {
+    addr_ptr = &addr;
+    if bind(fd, addr_ptr, 16) != 0 {
       close(fd);
       ret -1;
     }
