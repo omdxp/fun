@@ -78,7 +78,9 @@ Notes:
 
 Release assets are packaged as install bundles (binary + `share/fun/` + an installer script).
 
-On Windows, release assets are provided as `.msi` installers.
+On Windows, release assets are provided as both `.msi` installers and portable `.zip` archives.
+The portable archive contains the same `fun-<target>/` layout (`bin/` + `share/fun/`) so you can unzip and run without installation.
+Each portable archive also includes `README-portable.txt` with Windows-specific quickstart notes.
 
 The compiler discovers the standard library at runtime using, in order:
 - `FUN_STDLIB_DIR` (explicit override)
@@ -122,7 +124,7 @@ By default, `fun` tries platform compiler defaults unless `FUN_CC` is set:
 - Windows: `zig cc`, `clang`, `gcc`, `cl`
 - macOS/Linux: `zig cc`, `clang`, `gcc`, `cc`
 
-Release installers on macOS/Linux set `FUN_CC=gcc` by default. The Windows MSI sets `FUN_CC` to use `cl` with a template command. You can override the C compiler with environment variables:
+Release installers on macOS/Linux set `FUN_CC=gcc` by default. The Windows MSI sets `FUN_CC` to use `cl` with a template command. The Windows portable `.zip` does not modify your environment. You can override the C compiler with environment variables:
 
 - `FUN_CC`: compiler command. If it includes `{src}` and `{out}`, it is treated as a full template.
 - `FUN_CC_ARGS`: extra arguments appended after the base command.

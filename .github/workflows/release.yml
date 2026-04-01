@@ -89,7 +89,7 @@ jobs:
           path: artifacts/fun-${{ matrix.target }}.tar.gz
 
   build-windows-msi:
-    name: Build MSI (Windows)
+    name: Build MSI + portable zip (Windows)
     runs-on: windows-latest
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'release'
     strategy:
@@ -110,7 +110,7 @@ jobs:
       - name: Install WiX Toolset (v3)
         run: choco install wixtoolset -y
 
-      - name: Build MSI for ${{ matrix.target }}
+      - name: Build MSI + portable zip for ${{ matrix.target }}
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
@@ -157,6 +157,12 @@ jobs:
               throw "Expected version '$tag' not found in $exePath"
             }
           }
+
+          Copy-Item "installer\windows\PORTABLE-README.txt" "dist\fun-${{ matrix.target }}\README-portable.txt"
+
+          # Build portable zip that can be unzipped and run without installing.
+          $portableZip = "artifacts\fun-${{ matrix.target }}-$tag.zip"
+          Compress-Archive -Path "dist\fun-${{ matrix.target }}" -DestinationPath $portableZip -Force
 
           # WiX Product/@Version requires x.x.x.x with each x in [0, 65534].
           # Accept tags like 1.2.3 or 1.2.3-beta and normalize.
@@ -223,7 +229,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fun-${{ matrix.target }}
-          path: artifacts/*.msi
+          path: |
+            artifacts/*.msi
+            artifacts/*.zip
 
 
 # =============================================================
