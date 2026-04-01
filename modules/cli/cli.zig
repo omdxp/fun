@@ -444,7 +444,7 @@ pub fn format_file_and_imports_in_place(allocator: mem.Allocator, input_file: []
     try format_file_and_imports_recursive(allocator, input_file, &visiting, &visited);
 }
 
-fn token_text(allocator: mem.Allocator, t: token.Token) ![]const u8 {
+fn token_text(allocator: mem.Allocator, t: token.Token, source: []const u8, line_starts: []const usize) ![]const u8 {
     return switch (t.type) {
         .Identifier, .Keyword, .Operator => allocator.dupe(u8, t.data.sval.items),
         .Symbol => blk: {
@@ -452,6 +452,16 @@ fn token_text(allocator: mem.Allocator, t: token.Token) ![]const u8 {
             break :blk allocator.dupe(u8, buf[0..]);
         },
         .Number => {
+            // Preserve the original numeric lexeme exactly as written (e.g. `3.0`, `2.00`, suffixes)
+            // so formatting does not change inferred literal intent.
+            const start = pos_to_index(line_starts, t.pos, false);
+            const end_excl = pos_to_index(line_starts, t.pos, true);
+            if (start <= end_excl and end_excl <= source.len and end_excl > start) {
+                const raw = source[start..end_excl];
+                const lit = std.mem.trim(u8, raw, " \t\r\n");
+                if (lit.len > 0) return allocator.dupe(u8, lit);
+            }
+
             // Note: char literals are currently tokenized as Number with `cval`.
             if (t.data == .cval) {
                 const c = t.data.cval;
@@ -1055,7 +1065,7 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
             if (state.at_line_start.*) {
                 try state.out.appendNTimes(' ', state.indent.* * fmt_indent_width);
             }
-            const s2 = try token_text(state.allocator, t2);
+            const s2 = try token_text(state.allocator, t2, source, line_starts);
             defer state.allocator.free(s2);
             try state.out.appendSlice(s2);
             try state.out.append('\n');
@@ -1521,14 +1531,14 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
         }
 
         if (t2.type == .Operator and (std.mem.eql(u8, t2.data.sval.items, "(") or std.mem.eql(u8, t2.data.sval.items, "["))) {
-            const s2 = try token_text(state.allocator, t2);
+            const s2 = try token_text(state.allocator, t2, source, line_starts);
             defer state.allocator.free(s2);
             try state.out.appendSlice(s2);
             state.prev_token.* = t2;
             continue;
         }
 
-        const s2 = try token_text(state.allocator, t2);
+        const s2 = try token_text(state.allocator, t2, source, line_starts);
         defer state.allocator.free(s2);
         try state.out.appendSlice(s2);
 

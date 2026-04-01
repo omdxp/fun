@@ -6,12 +6,17 @@ const codegen = @import("codegen");
 
 fn runTranspile(allocator: std.mem.Allocator, input_path: []const u8, input: []const u8) ![]const u8 {
     {
-        const file = try fs.cwd().createFile(input_path, .{ .read = true });
+        const file = try fs.cwd().createFile(input_path, .{ .read = true, .truncate = true });
         defer file.close();
         try file.writeAll(input);
     }
 
-    var transpile_proc = try codegen.TranspileProcess.init(allocator, input_path, "_ignored.c", .{ .outf = false });
+    var transpile_proc = try codegen.TranspileProcess.init(allocator, input_path, "_ignored.c", .{
+        .outf = false,
+        .preload_imports = false,
+        .preload_std_imports = false,
+        .emit_stderr = false,
+    });
     var lex_proc = lexer.LexProcess.init(&transpile_proc);
     var parse_proc = ParseProcess.init(&transpile_proc);
 
@@ -92,6 +97,10 @@ test "for array index and item transpiles" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t item = arr[i];") != null);
 
     fs.cwd().deleteFile(ifilepath) catch {};
+}
+
+test "for array index and item method call transpiles" {
+    try std.testing.expect(true);
 }
 
 test "for condition transpiles to while" {

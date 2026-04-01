@@ -225,6 +225,31 @@ test "pub allows access across modules" {
     try runTranspileExpectOk(std.testing.allocator, "typecheck_pub_access.fn", input);
 }
 
+test "pub compound from import works in compound init expression" {
+    const lib_input =
+        "pub compound User {\n" ++
+        "  num id;\n" ++
+        "  str name;\n" ++
+        "}\n";
+
+    const lib_path = "typecheck_pub_compound_lib.fn";
+    {
+        const file = try fs.cwd().createFile(lib_path, .{ .read = true });
+        defer file.close();
+        try file.writeAll(lib_input);
+    }
+    defer fs.cwd().deleteFile(lib_path) catch {};
+
+    const input =
+        "imp typecheck_pub_compound_lib;\n" ++
+        "fun main() {\n" ++
+        "  User u = User{id = 1, name = \"Alice\"};\n" ++
+        "  if u.id == 1 { ret; }\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_pub_compound_init.fn", input);
+}
+
 test "private declarations are not visible across modules" {
     const lib_input =
         "compound PrivType { num x; }\n" ++

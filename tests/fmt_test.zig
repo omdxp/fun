@@ -473,6 +473,59 @@ test "-fmt never introduces scientific notation" {
     try std.testing.expect(std.mem.indexOf(u8, got, "3.14159E") == null);
 }
 
+test "-fmt preserves explicit decimal literal spelling" {
+    const allocator = std.testing.allocator;
+
+    const ugly =
+        "fun main() {\n" ++
+        "\tlet a = [1.0, 2.00, 3.0];\n" ++
+        "\tlet b = 42.0;\n" ++
+        "}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_dec_spell", ugly);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, path);
+    try expectFileParses(allocator, path);
+
+    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    defer allocator.free(got);
+
+    try std.testing.expect(std.mem.indexOf(u8, got, "[1.0, 2.00, 3.0]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "42.0") != null);
+}
+
+test "-fmt preserves explicit decimal literal spelling broadly" {
+    const allocator = std.testing.allocator;
+
+    const ugly =
+        "fun main() dec {\n" ++
+        "\tlet x = 3.0 + 4.00;\n" ++
+        "\tlet y = (10.0/2.00) * 1.50;\n" ++
+        "\tret x + y + 0.0;\n" ++
+        "}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_dec_spell_broad", ugly);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, path);
+    try expectFileParses(allocator, path);
+
+    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    defer allocator.free(got);
+
+    try std.testing.expect(std.mem.indexOf(u8, got, "3.0 + 4.00") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "10.0 / 2.00") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "* 1.50") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "+ 0.0") != null);
+}
+
 test "-fmt-all has cycle protection" {
     const allocator = std.testing.allocator;
 

@@ -3,15 +3,21 @@ const fs = std.fs;
 const lexer = @import("lexer");
 const ParseProcess = @import("parser").ParseProcess;
 const codegen = @import("codegen");
+const cli = @import("cli");
 
 fn runTranspile(allocator: std.mem.Allocator, input_path: []const u8, input: []const u8) ![]const u8 {
     {
-        const file = try fs.cwd().createFile(input_path, .{ .read = true });
+        const file = try fs.cwd().createFile(input_path, .{ .read = true, .truncate = true });
         defer file.close();
         try file.writeAll(input);
     }
 
-    var transpile_proc = try codegen.TranspileProcess.init(allocator, input_path, "_ignored.c", .{ .outf = false });
+    var transpile_proc = try codegen.TranspileProcess.init(allocator, input_path, "_ignored.c", .{
+        .outf = false,
+        .preload_imports = false,
+        .preload_std_imports = false,
+        .emit_stderr = false,
+    });
     var lex_proc = lexer.LexProcess.init(&transpile_proc);
     var parse_proc = ParseProcess.init(&transpile_proc);
 
@@ -227,6 +233,38 @@ test "aliased compound method calls use canonical impl" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "typedef struct Vec2") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Vec2__len(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "g__Vec2__len(") == null);
+}
+
+test "aliased io.format with bare placeholder renders values" {
+    const allocator = std.testing.allocator;
+    const input_path = "codegen_alias_io_format_main.fn";
+    const c_path = "codegen_alias_io_format_main.c";
+    const out_path = "codegen_alias_io_format_out.txt";
+    defer fs.cwd().deleteFile(input_path) catch {};
+    defer fs.cwd().deleteFile(c_path) catch {};
+    defer fs.cwd().deleteFile(out_path) catch {};
+
+    const input =
+        "imp std.io as io;\n" ++
+        "fun main() {\n" ++
+        "  str msg = io.format(\"Hello, {}!\", \"Alice\");\n" ++
+        "  _ = io.write_all(\"codegen_alias_io_format_out.txt\", msg);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, input_path, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try fs.cwd().createFile(c_path, .{});
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try cli.compile_and_run(allocator, c_path, true, input_path, &.{});
+
+    const got = try fs.cwd().readFileAlloc(allocator, out_path, 1024 * 1024);
+    defer allocator.free(got);
+    try std.testing.expectEqualStrings("Hello, Alice!", got);
 }
 
 test "defer emits in LIFO order before return" {

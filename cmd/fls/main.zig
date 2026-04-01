@@ -1411,7 +1411,78 @@ const LspServer = struct {
     }
 
     fn baseTypeNameForLookup(name: []const u8) []const u8 {
-        return if (std.mem.indexOfScalar(u8, name, '<')) |idx| name[0..idx] else name;
+        var base = if (std.mem.indexOfScalar(u8, name, '<')) |idx| name[0..idx] else name;
+        base = std.mem.trim(u8, base, " \t\r\n");
+
+        // Drop trailing array/pointer/reference suffixes used in type strings.
+        while (base.len >= 2 and std.mem.eql(u8, base[base.len - 2 ..], "[]")) {
+            base = std.mem.trim(u8, base[0 .. base.len - 2], " \t\r\n");
+        }
+        while (base.len != 0) {
+            const ch = base[base.len - 1];
+            if (ch == '*' or ch == '&') {
+                base = std.mem.trim(u8, base[0 .. base.len - 1], " \t\r\n");
+                continue;
+            }
+            break;
+        }
+
+        // Normalize qualified names like `a.b.Type` to `Type`.
+        if (std.mem.lastIndexOfScalar(u8, base, '.')) |dot| {
+            base = base[dot + 1 ..];
+        }
+
+        return base;
+    }
+
+    fn hasTypeDeclarationInDoc(self: *LspServer, uri: []const u8, type_name: []const u8) bool {
+        const doc = self.docs.get(uri) orelse return false;
+        if (doc.index) |idx| {
+            if (hasTypeDeclarationInTokens(idx, type_name)) return true;
+        }
+        return hasTypeDeclarationInText(doc.text, type_name);
+    }
+
+    fn hasTypeDeclarationInTokens(idx: *const Index, type_name: []const u8) bool {
+        var i: usize = 0;
+        while (i < idx.tokens.len) : (i += 1) {
+            const t = idx.tokens[i];
+            if (t.kind != .keyword) continue;
+            if (!(std.mem.eql(u8, t.text, "compound") or std.mem.eql(u8, t.text, "quirk") or std.mem.eql(u8, t.text, "enum"))) continue;
+
+            var j = i + 1;
+            while (j < idx.tokens.len and idx.tokens[j].kind == .comment) : (j += 1) {}
+            if (j >= idx.tokens.len) continue;
+            if (idx.tokens[j].kind != .identifier) continue;
+            if (std.mem.eql(u8, idx.tokens[j].text, type_name)) return true;
+        }
+        return false;
+    }
+
+    fn hasTypeDeclarationInText(text: []const u8, type_name: []const u8) bool {
+        const kws = [_][]const u8{ "compound", "quirk", "enum" };
+
+        const isIdentChar = struct {
+            fn call(ch: u8) bool {
+                return (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_';
+            }
+        }.call;
+
+        for (kws) |kw| {
+            var pat_buf: [128]u8 = undefined;
+            const pat = std.fmt.bufPrint(&pat_buf, "{s} {s}", .{ kw, type_name }) catch continue;
+
+            var from: usize = 0;
+            while (std.mem.indexOfPos(u8, text, from, pat)) |at| {
+                const before_ok = at == 0 or !isIdentChar(text[at - 1]);
+                const end = at + pat.len;
+                const after_ok = end >= text.len or !isIdentChar(text[end]);
+                if (before_ok and after_ok) return true;
+                from = at + 1;
+            }
+        }
+
+        return false;
     }
 
     fn appendMemberCompletionsForType(
@@ -1423,64 +1494,136 @@ const LspServer = struct {
         prefix: []const u8,
     ) !void {
         const container_base = baseTypeNameForLookup(container_type);
+
+        // If this document declares the type, do not merge same-name members
+        // from other docs.
+        if (self.hasTypeDeclarationInDoc(preferred_uri, container_base)) {
+            try self.appendMemberCompletionsFromUriForType(items, seen, preferred_uri, preferred_uri, container_base, container_type, prefix);
+            return;
+        }
+
+        // Use the resolved type declaration first so same-name types in other
+        // indexed docs do not pollute member completion.
+        if (self.findTypeDefinitionAnyDoc(preferred_uri, container_type)) |type_def| {
+            try self.appendMemberCompletionsFromUriForType(items, seen, preferred_uri, type_def.uri, container_base, container_type, prefix);
+
+            // Methods can live in separate `impl` files; merge visible methods
+            // from all docs after priming fields/properties from the type-def doc.
+            var it_methods = self.docs.iterator();
+            while (it_methods.next()) |entry| {
+                const sym_uri = entry.value_ptr.uri;
+                const doc = self.docs.get(sym_uri) orelse continue;
+                const didx = doc.index orelse continue;
+
+                for (didx.symbols) |s| {
+                    if (s.container_fn_range != null) continue;
+                    if (s.container_type == null) continue;
+                    if (!std.mem.eql(u8, baseTypeNameForLookup(s.container_type.?), container_base)) continue;
+                    if (s.kind != .method) continue;
+                    if (prefix.len != 0 and !std.mem.startsWith(u8, s.name, prefix)) continue;
+                    if (!self.isSymbolVisibleFromUri(preferred_uri, sym_uri, s)) continue;
+
+                    var key_buf = std.ArrayList(u8).init(self.allocator);
+                    defer key_buf.deinit();
+                    try key_buf.writer().print("method:{s}", .{s.name});
+                    const key = try self.allocator.dupe(u8, key_buf.items);
+                    if (seen.contains(key)) {
+                        self.allocator.free(key);
+                        continue;
+                    }
+                    try seen.put(key, {});
+
+                    const detail: ?[]u8 = if (s.detail) |d|
+                        try self.allocator.dupe(u8, d)
+                    else blk: {
+                        var db = std.ArrayList(u8).init(self.allocator);
+                        defer db.deinit();
+                        try db.writer().print("{s}.{s}", .{ container_type, s.name });
+                        break :blk try self.allocator.dupe(u8, db.items);
+                    };
+
+                    try items.append(.{
+                        .label = try self.allocator.dupe(u8, s.name),
+                        .kind = 2,
+                        .detail = detail,
+                    });
+                }
+            }
+            return;
+        }
+
         var it = self.docs.iterator();
         while (it.next()) |entry| {
-            const uri = entry.value_ptr.uri;
-            const didx = entry.value_ptr.index orelse continue;
-            for (didx.symbols) |s| {
-                if (s.container_fn_range != null) continue;
-                if (s.container_type == null) continue;
-                if (!std.mem.eql(u8, baseTypeNameForLookup(s.container_type.?), container_base)) continue;
-                if (!(s.kind == .field or s.kind == .property or s.kind == .method or s.kind == .enumMember)) continue;
-                if (prefix.len != 0 and !std.mem.startsWith(u8, s.name, prefix)) continue;
-                if (!self.isSymbolVisibleFromUri(preferred_uri, uri, s)) continue;
+            try self.appendMemberCompletionsFromUriForType(items, seen, preferred_uri, entry.value_ptr.uri, container_base, container_type, prefix);
+        }
+    }
 
-                const kind: i64 = switch (s.kind) {
-                    .method => 2,
-                    .field, .property => 5,
-                    .enumMember => 20,
-                    else => 6,
-                };
+    fn appendMemberCompletionsFromUriForType(
+        self: *LspServer,
+        items: *std.ArrayList(CompletionItem),
+        seen: *std.StringHashMap(void),
+        preferred_uri: []const u8,
+        sym_uri: []const u8,
+        container_base: []const u8,
+        container_type: []const u8,
+        prefix: []const u8,
+    ) !void {
+        const doc = self.docs.get(sym_uri) orelse return;
+        const didx = doc.index orelse return;
 
-                // Dedup members by name+kind.
-                var key_buf = std.ArrayList(u8).init(self.allocator);
-                defer key_buf.deinit();
-                try key_buf.writer().print("{s}:{s}", .{ @tagName(s.kind), s.name });
-                const key = try self.allocator.dupe(u8, key_buf.items);
-                if (seen.contains(key)) {
-                    self.allocator.free(key);
-                    continue;
-                }
-                try seen.put(key, {});
+        for (didx.symbols) |s| {
+            if (s.container_fn_range != null) continue;
+            if (s.container_type == null) continue;
+            if (!std.mem.eql(u8, baseTypeNameForLookup(s.container_type.?), container_base)) continue;
+            if (!(s.kind == .field or s.kind == .property or s.kind == .method or s.kind == .enumMember)) continue;
+            if (prefix.len != 0 and !std.mem.startsWith(u8, s.name, prefix)) continue;
+            if (!self.isSymbolVisibleFromUri(preferred_uri, sym_uri, s)) continue;
 
-                const detail: ?[]u8 = blk: {
-                    if (s.kind == .field or s.kind == .property) {
-                        if (s.value_type) |vt| {
-                            break :blk try self.allocator.dupe(u8, vt);
-                        }
-                    }
-                    if (s.kind == .enumMember) {
-                        var db = std.ArrayList(u8).init(self.allocator);
-                        defer db.deinit();
-                        try db.writer().print("{s}.{s}", .{ container_type, s.name });
-                        break :blk try self.allocator.dupe(u8, db.items);
-                    }
-                    if (s.kind == .method) {
-                        if (s.detail) |d| break :blk try self.allocator.dupe(u8, d);
-                        var db = std.ArrayList(u8).init(self.allocator);
-                        defer db.deinit();
-                        try db.writer().print("{s}.{s}", .{ container_type, s.name });
-                        break :blk try self.allocator.dupe(u8, db.items);
-                    }
-                    break :blk null;
-                };
+            const kind: i64 = switch (s.kind) {
+                .method => 2,
+                .field, .property => 5,
+                .enumMember => 20,
+                else => 6,
+            };
 
-                try items.append(.{
-                    .label = try self.allocator.dupe(u8, s.name),
-                    .kind = kind,
-                    .detail = detail,
-                });
+            // Dedup members by name+kind.
+            var key_buf = std.ArrayList(u8).init(self.allocator);
+            defer key_buf.deinit();
+            try key_buf.writer().print("{s}:{s}", .{ @tagName(s.kind), s.name });
+            const key = try self.allocator.dupe(u8, key_buf.items);
+            if (seen.contains(key)) {
+                self.allocator.free(key);
+                continue;
             }
+            try seen.put(key, {});
+
+            const detail: ?[]u8 = blk: {
+                if (s.kind == .field or s.kind == .property) {
+                    if (s.value_type) |vt| {
+                        break :blk try self.allocator.dupe(u8, vt);
+                    }
+                }
+                if (s.kind == .enumMember) {
+                    var db = std.ArrayList(u8).init(self.allocator);
+                    defer db.deinit();
+                    try db.writer().print("{s}.{s}", .{ container_type, s.name });
+                    break :blk try self.allocator.dupe(u8, db.items);
+                }
+                if (s.kind == .method) {
+                    if (s.detail) |d| break :blk try self.allocator.dupe(u8, d);
+                    var db = std.ArrayList(u8).init(self.allocator);
+                    defer db.deinit();
+                    try db.writer().print("{s}.{s}", .{ container_type, s.name });
+                    break :blk try self.allocator.dupe(u8, db.items);
+                }
+                break :blk null;
+            };
+
+            try items.append(.{
+                .label = try self.allocator.dupe(u8, s.name),
+                .kind = kind,
+                .detail = detail,
+            });
         }
     }
 
@@ -1583,6 +1726,287 @@ const LspServer = struct {
 
                 break;
             }
+        }
+
+        // Add local enum variants from `enum Type { ... }` blocks.
+        i = 0;
+        while (i < idx.tokens.len) : (i += 1) {
+            if (idx.tokens[i].kind != .keyword or !std.mem.eql(u8, idx.tokens[i].text, "enum")) continue;
+
+            const name_i = nextNonComment(idx.tokens, i + 1) orelse continue;
+            if (!isIdentLite(idx.tokens[name_i])) continue;
+            if (!std.mem.eql(u8, idx.tokens[name_i].text, target_type)) continue;
+
+            var j_opt = nextNonComment(idx.tokens, name_i + 1);
+            while (j_opt) |j| {
+                if (!isSymbolLite(idx.tokens[j], '{')) {
+                    j_opt = nextNonComment(idx.tokens, j + 1);
+                    continue;
+                }
+
+                var depth: i64 = 1;
+                var k: usize = j + 1;
+                while (k < idx.tokens.len and depth > 0) : (k += 1) {
+                    const tk = idx.tokens[k];
+                    if (isSymbolLite(tk, '{')) {
+                        depth += 1;
+                        continue;
+                    }
+                    if (isSymbolLite(tk, '}')) {
+                        depth -= 1;
+                        continue;
+                    }
+                    if (depth != 1 or !isIdentLite(tk)) continue;
+
+                    const vname = tk.text;
+                    if (prefix.len != 0 and !std.mem.startsWith(u8, vname, prefix)) continue;
+
+                    var key_buf = std.ArrayList(u8).init(self.allocator);
+                    defer key_buf.deinit();
+                    try key_buf.writer().print("enumMember:{s}", .{vname});
+                    const key = try self.allocator.dupe(u8, key_buf.items);
+                    if (seen.contains(key)) {
+                        self.allocator.free(key);
+                        continue;
+                    }
+                    try seen.put(key, {});
+
+                    var db = std.ArrayList(u8).init(self.allocator);
+                    defer db.deinit();
+                    try db.writer().print("{s}.{s}", .{ container_type, vname });
+
+                    try items.append(.{
+                        .label = try self.allocator.dupe(u8, vname),
+                        .kind = 20,
+                        .detail = try self.allocator.dupe(u8, db.items),
+                    });
+                }
+                break;
+            }
+        }
+
+        // Add local methods from `impl Type { ... }` blocks in the same doc.
+        i = 0;
+        while (i < idx.tokens.len) : (i += 1) {
+            if (idx.tokens[i].kind != .keyword or !std.mem.eql(u8, idx.tokens[i].text, "impl")) continue;
+
+            const type_i = nextNonComment(idx.tokens, i + 1) orelse continue;
+            if (!isIdentLite(idx.tokens[type_i])) continue;
+            if (!std.mem.eql(u8, idx.tokens[type_i].text, target_type)) continue;
+
+            var j_opt = nextNonComment(idx.tokens, type_i + 1);
+            while (j_opt) |j| {
+                if (!isSymbolLite(idx.tokens[j], '{')) {
+                    j_opt = nextNonComment(idx.tokens, j + 1);
+                    continue;
+                }
+
+                var depth: i64 = 1;
+                var k: usize = j + 1;
+                while (k < idx.tokens.len and depth > 0) : (k += 1) {
+                    const tk = idx.tokens[k];
+                    if (isSymbolLite(tk, '{')) {
+                        depth += 1;
+                        continue;
+                    }
+                    if (isSymbolLite(tk, '}')) {
+                        depth -= 1;
+                        continue;
+                    }
+                    if (depth != 1) continue;
+                    if (!isIdentLite(tk)) continue;
+
+                    const after_name_i = nextNonComment(idx.tokens, k + 1) orelse continue;
+                    if (!isSymbolLite(idx.tokens[after_name_i], '(')) continue;
+
+                    const mname = tk.text;
+                    if (prefix.len != 0 and !std.mem.startsWith(u8, mname, prefix)) continue;
+
+                    var key_buf = std.ArrayList(u8).init(self.allocator);
+                    defer key_buf.deinit();
+                    try key_buf.writer().print("method:{s}", .{mname});
+                    const key = try self.allocator.dupe(u8, key_buf.items);
+                    if (seen.contains(key)) {
+                        self.allocator.free(key);
+                        continue;
+                    }
+                    try seen.put(key, {});
+
+                    var db = std.ArrayList(u8).init(self.allocator);
+                    defer db.deinit();
+                    try db.writer().print("{s}.{s}", .{ container_type, mname });
+
+                    try items.append(.{
+                        .label = try self.allocator.dupe(u8, mname),
+                        .kind = 2,
+                        .detail = try self.allocator.dupe(u8, db.items),
+                    });
+                }
+                break;
+            }
+        }
+    }
+
+    fn filterMemberCompletionItemsToLocalType(
+        self: *LspServer,
+        items: *std.ArrayList(CompletionItem),
+        idx: *const Index,
+        doc_text: []const u8,
+        container_type: []const u8,
+    ) !void {
+        const target_type = baseTypeNameForLookup(container_type);
+        if (!hasTypeDeclarationInTokens(idx, target_type) and !hasTypeDeclarationInText(doc_text, target_type)) return;
+
+        var allowed = std.StringHashMap(void).init(self.allocator);
+        defer {
+            var it = allowed.iterator();
+            while (it.next()) |e| self.allocator.free(e.key_ptr.*);
+            allowed.deinit();
+        }
+
+        const nextNonComment = struct {
+            fn call(tokens: []const TokenLite, start_index: usize) ?usize {
+                var i = start_index;
+                while (i < tokens.len) : (i += 1) {
+                    if (tokens[i].kind != .comment) return i;
+                }
+                return null;
+            }
+        }.call;
+        const isIdentLite = struct {
+            fn call(t: TokenLite) bool {
+                return t.kind == .identifier;
+            }
+        }.call;
+        const isSymbolLite = struct {
+            fn call(t: TokenLite, ch: u8) bool {
+                return (t.kind == .symbol or t.kind == .operator) and t.text.len == 1 and t.text[0] == ch;
+            }
+        }.call;
+
+        var i: usize = 0;
+        while (i < idx.tokens.len) : (i += 1) {
+            if (idx.tokens[i].kind != .keyword or !std.mem.eql(u8, idx.tokens[i].text, "compound")) continue;
+
+            const name_i = nextNonComment(idx.tokens, i + 1) orelse continue;
+            if (!isIdentLite(idx.tokens[name_i])) continue;
+            if (!std.mem.eql(u8, idx.tokens[name_i].text, target_type)) continue;
+
+            var j_opt = nextNonComment(idx.tokens, name_i + 1);
+            while (j_opt) |j| {
+                if (!isSymbolLite(idx.tokens[j], '{')) {
+                    j_opt = nextNonComment(idx.tokens, j + 1);
+                    continue;
+                }
+
+                var depth: i64 = 1;
+                var k: usize = j + 1;
+                while (k < idx.tokens.len and depth > 0) : (k += 1) {
+                    const tk = idx.tokens[k];
+                    if (isSymbolLite(tk, '{')) depth += 1;
+                    if (isSymbolLite(tk, '}')) depth -= 1;
+                    if (depth != 1) continue;
+                    if (tk.kind != .identifier and tk.kind != .keyword) continue;
+
+                    const field_name_i = nextNonComment(idx.tokens, k + 1) orelse continue;
+                    if (!isIdentLite(idx.tokens[field_name_i])) continue;
+                    const after_name_i = nextNonComment(idx.tokens, field_name_i + 1) orelse continue;
+                    if (!isSymbolLite(idx.tokens[after_name_i], ';')) continue;
+
+                    const key = try self.allocator.dupe(u8, idx.tokens[field_name_i].text);
+                    try allowed.put(key, {});
+                    k = after_name_i;
+                }
+                break;
+            }
+        }
+
+        i = 0;
+        while (i < idx.tokens.len) : (i += 1) {
+            if (idx.tokens[i].kind != .keyword or !std.mem.eql(u8, idx.tokens[i].text, "enum")) continue;
+
+            const name_i = nextNonComment(idx.tokens, i + 1) orelse continue;
+            if (!isIdentLite(idx.tokens[name_i])) continue;
+            if (!std.mem.eql(u8, idx.tokens[name_i].text, target_type)) continue;
+
+            var j_opt = nextNonComment(idx.tokens, name_i + 1);
+            while (j_opt) |j| {
+                if (!isSymbolLite(idx.tokens[j], '{')) {
+                    j_opt = nextNonComment(idx.tokens, j + 1);
+                    continue;
+                }
+
+                var depth: i64 = 1;
+                var k: usize = j + 1;
+                while (k < idx.tokens.len and depth > 0) : (k += 1) {
+                    const tk = idx.tokens[k];
+                    if (isSymbolLite(tk, '{')) {
+                        depth += 1;
+                        continue;
+                    }
+                    if (isSymbolLite(tk, '}')) {
+                        depth -= 1;
+                        continue;
+                    }
+                    if (depth != 1 or !isIdentLite(tk)) continue;
+
+                    const key = try self.allocator.dupe(u8, tk.text);
+                    try allowed.put(key, {});
+                }
+                break;
+            }
+        }
+
+        i = 0;
+        while (i < idx.tokens.len) : (i += 1) {
+            if (idx.tokens[i].kind != .keyword or !std.mem.eql(u8, idx.tokens[i].text, "impl")) continue;
+
+            const type_i = nextNonComment(idx.tokens, i + 1) orelse continue;
+            if (!isIdentLite(idx.tokens[type_i])) continue;
+            if (!std.mem.eql(u8, idx.tokens[type_i].text, target_type)) continue;
+
+            var j_opt = nextNonComment(idx.tokens, type_i + 1);
+            while (j_opt) |j| {
+                if (!isSymbolLite(idx.tokens[j], '{')) {
+                    j_opt = nextNonComment(idx.tokens, j + 1);
+                    continue;
+                }
+
+                var depth: i64 = 1;
+                var k: usize = j + 1;
+                while (k < idx.tokens.len and depth > 0) : (k += 1) {
+                    const tk = idx.tokens[k];
+                    if (isSymbolLite(tk, '{')) {
+                        depth += 1;
+                        continue;
+                    }
+                    if (isSymbolLite(tk, '}')) {
+                        depth -= 1;
+                        continue;
+                    }
+                    if (depth != 1 or !isIdentLite(tk)) continue;
+
+                    const after_name_i = nextNonComment(idx.tokens, k + 1) orelse continue;
+                    if (!isSymbolLite(idx.tokens[after_name_i], '(')) continue;
+
+                    const key = try self.allocator.dupe(u8, tk.text);
+                    try allowed.put(key, {});
+                }
+                break;
+            }
+        }
+
+        var ri: usize = items.items.len;
+        while (ri > 0) {
+            ri -= 1;
+            const it = items.items[ri];
+            if (allowed.contains(it.label)) continue;
+
+            self.allocator.free(it.label);
+            if (it.detail) |d| self.allocator.free(d);
+            if (it.insertText) |ins| self.allocator.free(ins);
+            if (it.filterText) |ft| self.allocator.free(ft);
+            _ = items.orderedRemove(ri);
         }
     }
 
@@ -2361,6 +2785,21 @@ const LspServer = struct {
 
     fn findMemberByContainer(self: *LspServer, preferred_uri: []const u8, container_type: []const u8, name: []const u8, kind: SymbolKind) ?MemberHit {
         const container_base = baseTypeNameForLookup(container_type);
+
+        if (self.hasTypeDeclarationInDoc(preferred_uri, container_base)) {
+            if (self.findMemberByContainerInUri(preferred_uri, container_base, name, kind)) |s| {
+                return .{ .uri = preferred_uri, .sym = s };
+            }
+            return null;
+        }
+
+        if (self.findTypeDefinitionAnyDoc(preferred_uri, container_type)) |type_def| {
+            if (self.findMemberByContainerInUri(type_def.uri, container_base, name, kind)) |s| {
+                return .{ .uri = type_def.uri, .sym = s };
+            }
+            return null;
+        }
+
         // Prefer current document first.
         if (self.docs.get(preferred_uri)) |doc| {
             if (doc.index) |idx| {
@@ -2389,6 +2828,20 @@ const LspServer = struct {
                 if (!self.isSymbolVisibleFromUri(preferred_uri, uri, s)) continue;
                 return .{ .uri = uri, .sym = s };
             }
+        }
+        return null;
+    }
+
+    fn findMemberByContainerInUri(self: *LspServer, uri: []const u8, container_base: []const u8, name: []const u8, kind: SymbolKind) ?SymbolLite {
+        const doc = self.docs.get(uri) orelse return null;
+        const idx = doc.index orelse return null;
+        for (idx.symbols) |s| {
+            if (s.container_fn_range != null) continue;
+            if (s.kind != kind) continue;
+            if (s.container_type == null) continue;
+            if (!std.mem.eql(u8, baseTypeNameForLookup(s.container_type.?), container_base)) continue;
+            if (!std.mem.eql(u8, s.name, name)) continue;
+            return s;
         }
         return null;
     }
@@ -2936,6 +3389,7 @@ const LspServer = struct {
                 }
                 try self.appendMemberCompletionsForType(&items, &seen, uri, rt, prefix);
                 try self.appendMemberFieldCompletionsFromTokens(&items, &seen, idx, rt, prefix);
+                try self.filterMemberCompletionItemsToLocalType(&items, idx, doc.text, rt);
                 if (items.items.len != 0) {
                     const list: CompletionList = .{ .items = items.items };
                     const json = try std.json.stringifyAlloc(self.allocator, list, .{});
@@ -3005,6 +3459,7 @@ const LspServer = struct {
 
                         try self.appendMemberCompletionsForType(&items, &seen, uri, rt, prefix);
                         try self.appendMemberFieldCompletionsFromTokens(&items, &seen, idx, rt, prefix);
+                        try self.filterMemberCompletionItemsToLocalType(&items, idx, doc.text, rt);
                         if (items.items.len != 0) {
                             const list: CompletionList = .{ .items = items.items };
                             const json = try std.json.stringifyAlloc(self.allocator, list, .{});
@@ -3081,6 +3536,7 @@ const LspServer = struct {
                                 }
                                 try self.appendMemberCompletionsForType(&items, &seen, uri, rt, prefix);
                                 try self.appendMemberFieldCompletionsFromTokens(&items, &seen, idx, rt, prefix);
+                                try self.filterMemberCompletionItemsToLocalType(&items, idx, doc.text, rt);
                                 if (items.items.len != 0) {
                                     const list: CompletionList = .{ .items = items.items };
                                     const json = try std.json.stringifyAlloc(self.allocator, list, .{});
@@ -3110,6 +3566,7 @@ const LspServer = struct {
                     }
                     try self.appendMemberCompletionsForType(&items, &seen, uri, recv_type, prefix);
                     try self.appendMemberFieldCompletionsFromTokens(&items, &seen, idx, recv_type, prefix);
+                    try self.filterMemberCompletionItemsToLocalType(&items, idx, doc.text, recv_type);
                     if (items.items.len != 0) {
                         const list: CompletionList = .{ .items = items.items };
                         const json = try std.json.stringifyAlloc(self.allocator, list, .{});
@@ -3128,6 +3585,7 @@ const LspServer = struct {
                         }
                         try self.appendMemberCompletionsForType(&items, &seen, uri, rt, prefix);
                         try self.appendMemberFieldCompletionsFromTokens(&items, &seen, idx, rt, prefix);
+                        try self.filterMemberCompletionItemsToLocalType(&items, idx, doc.text, rt);
                         if (items.items.len != 0) {
                             const list: CompletionList = .{ .items = items.items };
                             const json = try std.json.stringifyAlloc(self.allocator, list, .{});
@@ -3164,6 +3622,7 @@ const LspServer = struct {
                         }
                         try self.appendMemberCompletionsForType(&items, &seen, uri, rt, prefix);
                         try self.appendMemberFieldCompletionsFromTokens(&items, &seen, idx, rt, prefix);
+                        try self.filterMemberCompletionItemsToLocalType(&items, idx, doc.text, rt);
                         if (items.items.len != 0) {
                             const list: CompletionList = .{ .items = items.items };
                             const json = try std.json.stringifyAlloc(self.allocator, list, .{});
@@ -9544,6 +10003,123 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 pending_impl_owner = impl_owner_name;
                 parseParamsAfterLParen(allocator, tokens, after_name_i.?, &pending_params, &pending_is_variadic);
             }
+        }
+
+        // Best-effort for-range local indexing:
+        // - `for item : iterable { ... }`
+        // - `for index, item :: iterable { ... }`
+        if (in_body and isKeyword(t, "for")) {
+            const first_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
+            if (!isIdent(tokens[first_i])) continue;
+
+            var index_name_i: ?usize = null;
+            var item_name_i: usize = first_i;
+            var expr_start_i: ?usize = null;
+
+            const after_first_i = nextNonTrivialToken(tokens, first_i + 1) orelse continue;
+
+            if (isPunctChar(tokens[after_first_i], ',')) {
+                // `for index, item :: expr`
+                const second_i = nextNonTrivialToken(tokens, after_first_i + 1) orelse continue;
+                if (!isIdent(tokens[second_i])) continue;
+                index_name_i = first_i;
+                item_name_i = second_i;
+
+                const delim_i = nextNonTrivialToken(tokens, second_i + 1) orelse continue;
+                if (tokens[delim_i].type == .Operator and std.mem.eql(u8, tokenString(tokens[delim_i]), "::")) {
+                    expr_start_i = nextNonTrivialToken(tokens, delim_i + 1);
+                } else if (isPunctChar(tokens[delim_i], ':')) {
+                    const delim2_i = nextNonTrivialToken(tokens, delim_i + 1) orelse continue;
+                    if (!isPunctChar(tokens[delim2_i], ':')) continue;
+                    expr_start_i = nextNonTrivialToken(tokens, delim2_i + 1);
+                } else {
+                    continue;
+                }
+            } else if (isPunctChar(tokens[after_first_i], ':')) {
+                // `for item : expr`
+                item_name_i = first_i;
+                expr_start_i = nextNonTrivialToken(tokens, after_first_i + 1);
+            } else {
+                continue;
+            }
+
+            if (expr_start_i == null) continue;
+
+            // Find a conservative end bound for iterable expression (before loop body `{`).
+            var expr_end_i: usize = expr_start_i.?;
+            var p_depth: i64 = 0;
+            var b_depth: i64 = 0;
+            var c_depth: i64 = 0;
+            while (expr_end_i < tokens.len) : (expr_end_i += 1) {
+                const ek = tokens[expr_end_i];
+                if (ek.type == .NewLine or ek.type == .Comment) continue;
+                if (isPunctChar(ek, '(')) p_depth += 1;
+                if (isPunctChar(ek, ')')) p_depth -= 1;
+                if (isPunctChar(ek, '[')) b_depth += 1;
+                if (isPunctChar(ek, ']')) b_depth -= 1;
+                if (isSymbolChar(ek, '{')) {
+                    if (p_depth <= 0 and b_depth <= 0 and c_depth <= 0) break;
+                    c_depth += 1;
+                    continue;
+                }
+                if (isSymbolChar(ek, '}')) {
+                    if (c_depth > 0) c_depth -= 1;
+                    continue;
+                }
+            }
+
+            const iterable_type = inferExprTypeFromTokens(allocator, tokens, expr_start_i.?, expr_end_i, &locals_type_map, &globals_type_map, out.items);
+            const item_type = if (iterable_type) |it|
+                (if (isArrayTypeName(it)) it[0 .. it.len - 2] else it)
+            else
+                null;
+
+            // Indexed loop counter is always numeric.
+            if (index_name_i) |idx_i| {
+                const idx_name_raw = tokenString(tokens[idx_i]);
+                const idx_name = allocator.dupe(u8, idx_name_raw) catch idx_name_raw;
+                const idx_r = rangeFromTokenPos(tokens[idx_i].pos);
+                try out.append(.{
+                    .name = try allocator.dupe(u8, idx_name),
+                    .kind = .variable,
+                    .decl_range = idx_r,
+                    .selection_range = idx_r,
+                    .container_fn_range = body_range.?,
+                    .container_type = null,
+                    .value_type = try allocator.dupe(u8, "num"),
+                    .detail = blk: {
+                        var det_buf = std.ArrayList(u8).init(allocator);
+                        defer det_buf.deinit();
+                        try det_buf.writer().print("num {s}", .{idx_name});
+                        break :blk try allocator.dupe(u8, det_buf.items);
+                    },
+                });
+                putType(&locals_type_map, idx_name, "num", allocator);
+            }
+
+            const item_name_raw = tokenString(tokens[item_name_i]);
+            const item_name = allocator.dupe(u8, item_name_raw) catch item_name_raw;
+            const item_r = rangeFromTokenPos(tokens[item_name_i].pos);
+            const item_vt = if (item_type) |it| (allocator.dupe(u8, it) catch it) else null;
+            const item_detail = if (item_type) |it| blk: {
+                var det_buf = std.ArrayList(u8).init(allocator);
+                defer det_buf.deinit();
+                try det_buf.writer().print("{s} {s}", .{ it, item_name });
+                break :blk try allocator.dupe(u8, det_buf.items);
+            } else null;
+
+            try out.append(.{
+                .name = try allocator.dupe(u8, item_name),
+                .kind = .variable,
+                .decl_range = item_r,
+                .selection_range = item_r,
+                .container_fn_range = body_range.?,
+                .container_type = null,
+                .value_type = item_vt,
+                .detail = item_detail,
+            });
+            putType(&locals_type_map, item_name, item_type, allocator);
+            continue;
         }
 
         // Best-effort local variable indexing (token-based):
