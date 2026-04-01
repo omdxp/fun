@@ -561,3 +561,50 @@ test "-fmt-all has cycle protection" {
     defer allocator.free(got_b);
     try std.testing.expect(std.mem.indexOf(u8, got_b, "fun b() num") != null);
 }
+
+test "-fmt keeps space after ret before unary reference" {
+    const allocator = std.testing.allocator;
+
+    const ugly =
+        "fun bad() num*{num x=123;ret&x;}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_ret_ref", ugly);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, path);
+
+    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    defer allocator.free(got);
+
+    const expected =
+        "fun bad() num* {\n" ++
+        "  num x = 123;\n" ++
+        "  ret &x;\n" ++
+        "}\n";
+
+    try std.testing.expectEqualStrings(expected, got);
+}
+
+test "-fmt nested generics keep closing brackets tight" {
+    const allocator = std.testing.allocator;
+
+    const ugly =
+        "fun f() Result<Vec<str>>{Result<Vec<str>> r;ret r;}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_generic_close", ugly);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, path);
+
+    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    defer allocator.free(got);
+
+    try std.testing.expect(std.mem.indexOf(u8, got, "Result<Vec<str>>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "Result<Vec<str >>") == null);
+}

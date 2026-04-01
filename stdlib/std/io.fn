@@ -444,8 +444,8 @@ impl File {
   }
 
   // Read all lines (up to max_len per line) with Result.
-  pub try_read_lines(num max_len) Result<Vec<str >> {
-    Result<Vec<str >> r;
+  pub try_read_lines(num max_len) Result<Vec<str>> {
+    Result<Vec<str>> r;
     if self.handle == NULL {
       Vec<str> empty;
       empty.len = 0;
@@ -543,7 +543,7 @@ impl File {
       ret r;
     }
     num pos = self.tell();
-    if pos<0 {
+    if pos < 0 {
       r.set_err(1, "tell failed", -1);
       ret r;
     }
@@ -589,7 +589,7 @@ impl File {
       ret -1;
     }
     let cur = ftell(self.handle);
-    if cur<0 {
+    if cur < 0 {
       ret -1;
     }
     if fseek(self.handle, 0, 2) != 0 {

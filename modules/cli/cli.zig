@@ -885,6 +885,17 @@ fn is_generic_angle_open(toks: []const token.Token, idx: usize, in_decl_only_ctx
     return false;
 }
 
+fn generic_close_count(t: token.Token) usize {
+    if (t.type == .Symbol and t.data.cval == '>') return 1;
+    if (t.type != .Operator) return 0;
+    const op = t.data.sval.items;
+    if (op.len == 0) return 0;
+    for (op) |ch| {
+        if (ch != '>') return 0;
+    }
+    return op.len;
+}
+
 fn find_asm_body_block(toks: []const token.Token, asm_idx: usize) ?AsmRawRange {
     var paren_depth: isize = 0;
     var i: usize = asm_idx + 1;
@@ -1309,10 +1320,10 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                     break :blk true;
                 }
                 if (pt2.type == .Keyword and std.mem.eql(u8, pt2.data.sval.items, "ret")) {
-                    if (t2.type == .Operator and (std.mem.eql(u8, t2.data.sval.items, "+") or std.mem.eql(u8, t2.data.sval.items, "-"))) {
+                    if (t2.type == .Operator and (std.mem.eql(u8, t2.data.sval.items, "+") or std.mem.eql(u8, t2.data.sval.items, "-") or std.mem.eql(u8, t2.data.sval.items, "&") or std.mem.eql(u8, t2.data.sval.items, "*"))) {
                         break :blk true;
                     }
-                    if (t2.type == .Symbol and (t2.data.cval == '+' or t2.data.cval == '-')) {
+                    if (t2.type == .Symbol and (t2.data.cval == '+' or t2.data.cval == '-' or t2.data.cval == '&' or t2.data.cval == '*')) {
                         break :blk true;
                     }
                 }
@@ -1430,7 +1441,13 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                 if (t2.type == .Operator and std.mem.eql(u8, t2.data.sval.items, ">") and generic_angle_depth > 0) {
                     break :blk false;
                 }
+                if (t2.type == .Operator and generic_close_count(t2) > 0 and generic_angle_depth > 0) {
+                    break :blk false;
+                }
                 if (pt2.type == .Operator and std.mem.eql(u8, pt2.data.sval.items, "<") and generic_angle_depth > 0) {
+                    break :blk false;
+                }
+                if (pt2.type == .Operator and generic_close_count(pt2) > 0 and generic_angle_depth > 0) {
                     break :blk false;
                 }
                 if (t2.type == .Operator) {
@@ -1564,10 +1581,15 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
         }
         if (generic_open) {
             generic_angle_depth += 1;
-        } else if (((t2.type == .Operator and std.mem.eql(u8, t2.data.sval.items, ">")) or
-            (t2.type == .Symbol and t2.data.cval == '>')) and generic_angle_depth > 0)
-        {
-            generic_angle_depth -= 1;
+        } else {
+            const closes = generic_close_count(t2);
+            if (closes > 0 and generic_angle_depth > 0) {
+                if (closes >= generic_angle_depth) {
+                    generic_angle_depth = 0;
+                } else {
+                    generic_angle_depth -= closes;
+                }
+            }
         }
         state.prev_token.* = t2;
     }

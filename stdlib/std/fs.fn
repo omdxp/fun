@@ -317,8 +317,8 @@ impl Fs {
   // 
   // Returns:
   // - Result<Vec<str>> with lines or error
-  pub try_read_lines(str path, num max_len) Result<Vec<str >> {
-    Result<Vec<str >> r;
+  pub try_read_lines(str path, num max_len) Result<Vec<str>> {
+    Result<Vec<str>> r;
     Vec<str> out = self.read_lines(path, max_len);
     if out.len == 0 {
       // Best-effort: treat empty as ok unless file can't be opened.

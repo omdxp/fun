@@ -36,7 +36,7 @@ impl Rectangle Shape {
     num h = self.b.y - self.a.y;
     if (w < 0) w = -w;
     if (h < 0) h = -h;
-    ret w* h;
+    ret w * h;
   }
 
   translate(num dx, num dy) {
