@@ -414,7 +414,7 @@ test "compounds + quirks + impl vtables transpile" {
     const input =
         "compound Point { num x; num y; }\n" ++
         "quirk HasX { getX() num; }\n" ++
-        "impl Point HasX {\n" ++
+        "impl Point as HasX {\n" ++
         "  getX() num { ret self.x; }\n" ++
         "}\n" ++
         "fun main() {\n" ++
@@ -482,7 +482,7 @@ test "structural quirks share canonical C type" {
         "compound Point { num x; }\n" ++
         "quirk Q1 { getX() num; }\n" ++
         "quirk Q2 { getX() num; }\n" ++
-        "impl Point Q1 { getX() num { ret self.x; } }\n" ++
+        "impl Point as Q1 { getX() num { ret self.x; } }\n" ++
         "fun main() {\n" ++
         "  Point p;\n" ++
         "  Q1 a = &p;\n" ++

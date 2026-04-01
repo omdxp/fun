@@ -30,7 +30,7 @@ pub fun set_init<T>(T sample, num cap) Set<T> {
   ret s;
 }
 
-impl Set<T> Sized {
+impl Set<T> as Sized {
   // Number of elements.
   pub len() num {
     ret self.map.len;

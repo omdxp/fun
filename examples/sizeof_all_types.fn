@@ -27,10 +27,10 @@ compound UserImpl {
 
 // Implementing a quirk should not change the in-memory layout of the compound.
 // (The compound is still a plain struct; the quirk value is a separate wrapper.)
-impl UserImpl Empty {
+impl UserImpl as Empty {
 }
 
-impl UserImpl Greeter {
+impl UserImpl as Greeter {
   greet() void {
     // no-op
   }

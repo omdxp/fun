@@ -184,13 +184,13 @@ impl JsonObject {
   }
 }
 
-impl JsonObject Serialize {
+impl JsonObject as Serialize {
   pub serialize() str {
     ret self.stringify();
   }
 }
 
-impl JsonObject Deserialize {
+impl JsonObject as Deserialize {
   pub deserialize(str input) {
     JsonObject parsed = parse_object(input);
     defer parsed.free();
@@ -255,13 +255,13 @@ impl JsonArray {
   }
 }
 
-impl JsonArray Serialize {
+impl JsonArray as Serialize {
   pub serialize() str {
     ret self.stringify();
   }
 }
 
-impl JsonArray Deserialize {
+impl JsonArray as Deserialize {
   pub deserialize(str input) {
     JsonArray parsed = parse_array(input);
     defer parsed.free();

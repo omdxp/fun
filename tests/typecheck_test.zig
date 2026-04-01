@@ -303,7 +303,7 @@ test "typecheck missing field errors in quirk impl body" {
         "compound Data {\n" ++
         "  num id;\n" ++
         "}\n" ++
-        "impl Data Display {\n" ++
+        "impl Data as Display {\n" ++
         "  show() {\n" ++
         "    num x = self.missing;\n" ++
         "    ret;\n" ++
@@ -528,7 +528,7 @@ test "typecheck quirk coercion from impl ok" {
         "quirk HasX {\n" ++
         "  getX() num;\n" ++
         "}\n" ++
-        "impl Point HasX {\n" ++
+        "impl Point as HasX {\n" ++
         "  getX() num {\n" ++
         "    ret self.x;\n" ++
         "  }\n" ++
@@ -550,7 +550,7 @@ test "typecheck concrete can call quirk impl method" {
         "quirk HasX {\n" ++
         "  getX() num;\n" ++
         "}\n" ++
-        "impl Point HasX {\n" ++
+        "impl Point as HasX {\n" ++
         "  getX() num {\n" ++
         "    ret self.x;\n" ++
         "  }\n" ++
@@ -584,7 +584,7 @@ test "typecheck quirk impl missing methods errors" {
         "  a() num;\n" ++
         "  b(num x) num;\n" ++
         "}\n" ++
-        "impl Point Q {\n" ++
+        "impl Point as Q {\n" ++
         "  a() num { ret 1; }\n" ++
         "}\n";
     try runTranspileExpectError(std.testing.allocator, "typecheck_quirk_impl_missing_methods.fn", input);
@@ -664,7 +664,7 @@ test "typecheck let cannot infer quirk type" {
     const input =
         "compound Point { num x; num y; }\n" ++
         "quirk HasX { get_x() num; }\n" ++
-        "impl Point HasX { get_x() num { ret self.x; } }\n" ++
+        "impl Point as HasX { get_x() num { ret self.x; } }\n" ++
         "fun as_hasx(Point* p) HasX { ret p; }\n" ++
         "fun main() {\n" ++
         "  Point p = Point{x = 1, y = 2};\n" ++

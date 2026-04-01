@@ -2660,7 +2660,7 @@ pub const ParseProcess = struct {
 
         var type_params: ?utils.Vector(std.ArrayList(u8)) = null;
 
-        // `impl Type Quirk { ... }` (quirk impl) OR `impl Type { ... }` (plain impl).
+        // `impl Type as Quirk { ... }` (quirk impl) OR `impl Type { ... }` (plain impl).
         var peek_after_type = self.token_peek_next();
         var quirk_tok: ?token.Token = null;
         var type_name_override: ?std.ArrayList(u8) = null;
@@ -2693,10 +2693,19 @@ pub const ParseProcess = struct {
             type_params = try self.parse_generic_type_params();
             peek_after_type = self.token_peek_next();
         }
-        if (peek_after_type != null and peek_after_type.?.type == .Identifier) {
-            quirk_tok = self.token_next();
+        if (peek_after_type != null and peek_after_type.?.type == .Keyword and mem.eql(u8, peek_after_type.?.data.sval.items, "as")) {
+            _ = self.token_next(); // consume `as`
+            const maybe_quirk = self.token_next();
+            if (maybe_quirk == null or maybe_quirk.?.type != .Identifier) {
+                self.transpile_proc.err("expected quirk name after 'as'", .{});
+                return ParseError.InvalidIdentifier;
+            }
+            quirk_tok = maybe_quirk;
+        } else if (peek_after_type != null and peek_after_type.?.type == .Identifier) {
+            self.transpile_proc.err("expected 'as' before quirk name in impl header", .{});
+            return ParseError.InvalidIdentifier;
         } else if (peek_after_type == null or peek_after_type.?.type != .Symbol or peek_after_type.?.data.cval != '{') {
-            self.transpile_proc.err("expected quirk name or '{{' after type name", .{});
+            self.transpile_proc.err("expected 'as <Quirk>' or '{{' after type name", .{});
             return ParseError.InvalidIdentifier;
         }
 

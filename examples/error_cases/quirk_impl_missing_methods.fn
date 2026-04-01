@@ -9,7 +9,7 @@ quirk Q {
 }
 
 // Missing method `b(num x) num`
-impl Point Q {
+impl Point as Q {
   a() num {
     ret 1;
   }

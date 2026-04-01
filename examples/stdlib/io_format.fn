@@ -10,7 +10,7 @@ compound Point {
   num y;
 }
 
-impl Point Display {
+impl Point as Display {
   pub to_string() str {
     str sx = fmt_num(self.x);
     str sy = fmt_num(self.y);

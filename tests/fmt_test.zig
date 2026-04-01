@@ -163,7 +163,7 @@ test "-fmt preserves blank lines between top-level constructs" {
         "\n" ++
         "quirk Q{f() num;}\n" ++
         "\n" ++
-        "impl A Q{f() num{ret self.x;}}\n" ++
+        "impl A as Q {f() num{ret self.x;}}\n" ++
         "\n" ++
         "fun main(){}\n";
 
@@ -187,7 +187,7 @@ test "-fmt preserves blank lines between top-level constructs" {
         "  f() num;\n" ++
         "}\n" ++
         "\n" ++
-        "impl A Q {\n" ++
+        "impl A as Q {\n" ++
         "  f() num {\n" ++
         "    ret self.x;\n" ++
         "  }\n" ++
@@ -381,7 +381,7 @@ test "-fmt output still parses (quirks/ops)" {
         "compound Point{num x;num y;}\n" ++
         "quirk Shape{area() num;translate(num dx,num dy);}\n" ++
         "compound Rectangle{Point a;Point b;}\n" ++
-        "impl Rectangle Shape{area() num{num w=self.b.x-self.a.x;num h=self.b.y-self.a.y;ret w*h;}translate(num dx,num dy){self.a.x+=dx;self.a.y+=dy;}}\n" ++
+        "impl Rectangle as Shape {area() num{num w=self.b.x-self.a.x;num h=self.b.y-self.a.y;ret w*h;}translate(num dx,num dy){self.a.x+=dx;self.a.y+=dy;}}\n" ++
         "fun main(){Rectangle r;Shape s=&r;printf(\"%d\\n\",s.area());}\n";
 
     const path = try writeTempFnFile(allocator, "fmt_parse", ugly);

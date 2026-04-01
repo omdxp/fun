@@ -23,7 +23,7 @@ pub compound Map<K, V> {
   num cap;
 }
 
-impl Map<K, V> Sized {
+impl Map<K, V> as Sized {
   // Number of entries.
   pub len() num {
     ret self.len;
@@ -409,7 +409,7 @@ impl Map<K, V> {
   }
 }
 
-impl Map<K, V> Clearable {
+impl Map<K, V> as Clearable {
   // Clear all entries (keeps capacity).
   pub clear() {
     if self.value_slots != NULL {

@@ -4073,7 +4073,7 @@ pub const TranspileProcess = struct {
             return true;
         }
 
-        // Quirk coercion: allow `T*` -> `Quirk` if an `impl T Quirk { ... }` exists.
+        // Quirk coercion: allow `T*` -> `Quirk` if an `impl T as Quirk { ... }` exists.
         if (self.is_quirk_named_type(expected) and is_user_named_type(actual) and actual.pointer_depth == 1 and !actual.is_array) {
             const root = self.get_root();
             if (root.type_registry == null) return false;
@@ -10174,7 +10174,7 @@ pub const TranspileProcess = struct {
                                             }
                                         }
 
-                                        // Quirk impl method call on `self` inside `impl Type Quirk { ... }`.
+                                        // Quirk impl method call on `self` inside `impl Type as Quirk { ... }`.
                                         // `self.method()` is not a struct member call in C; emit a direct call to
                                         // the generated impl function when we can resolve it.
                                         if (mem.eql(u8, rname, "self")) {

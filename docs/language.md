@@ -11,7 +11,7 @@
 - **Compounds**: Custom types (like structs): `compound Point { num x; num y; }`.
 - **Quirks (Interfaces)**: Define required methods: `quirk Shape { area() num; }`.
 - **Implementations**:
-    - Quirk implementation: `impl Rectangle Shape { ... }`
+    - Quirk implementation: `impl Rectangle as Shape { ... }`
     - Plain compound methods: `impl Point { ... }`
 - **Pattern Matching**: `fit x { ... }` for value-based branching.
 - **Comments**: Use `//` for single-line comments.

@@ -68,7 +68,7 @@ compound Square {
   num side;
 }
 
-impl Square Shape {
+impl Square as Shape {
   area() num { ret self.side * self.side; }
 }
 
@@ -108,7 +108,7 @@ impl Point {
   }
 }
 
-impl Rectangle Shape {
+impl Rectangle as Shape {
   area() num { ret self.w * self.h; }
 }
 

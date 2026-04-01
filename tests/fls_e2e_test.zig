@@ -2499,7 +2499,7 @@ test "fls e2e: quirks across folders complete + missing methods diagnose" {
             "imp std.c.io;\n" ++
                 "imp ..defs.user;\n" ++
                 "imp ..defs.greeter;\n\n" ++
-                "impl User Greeter {\n" ++
+                "impl User as Greeter {\n" ++
                 "  pub greet(str prefix) void {\n" ++
                 "    printf(\"%s %s\\n\", prefix, self.name);\n" ++
                 "  }\n\n" ++
@@ -2513,7 +2513,7 @@ test "fls e2e: quirks across folders complete + missing methods diagnose" {
         "imp std.c.io;\n" ++
         "imp ..defs.user;\n" ++
         "imp ..defs.greeter;\n\n" ++
-        "impl User Greeter {\n" ++
+        "impl User as Greeter {\n" ++
         "  pub greet(str prefix) void {\n" ++
         "    printf(\"%s %s\\n\", prefix, self.name);\n" ++
         "  }\n" ++

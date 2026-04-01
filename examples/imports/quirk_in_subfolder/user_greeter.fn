@@ -2,7 +2,7 @@ imp std.c.io;
 imp user;
 imp defs.greeter;
 
-pub impl User Greeter {
+pub impl User as Greeter {
   greet(str prefix) void {
     printf("%s %s\n", prefix, self.name);
   }

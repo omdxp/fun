@@ -2,7 +2,7 @@ Minimal repro for LSP autocomplete + diagnostics with quirks split across files.
 
 - `defs/greeter.fn` declares `quirk Greeter`.
 - `user.fn` declares `compound User`.
-- `user_greeter.fn` implements `impl User Greeter { ... }`.
+- `user_greeter.fn` implements `impl User as Greeter { ... }`.
 - `main.fn` imports everything and should autocomplete:
   - `User` and `Greeter` names
   - `u.` members (`greet`, `bye`)

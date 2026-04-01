@@ -34,7 +34,7 @@ pub fun string_builder_init(num cap) StringBuilder {
   ret b;
 }
 
-impl StringBuilder Sized {
+impl StringBuilder as Sized {
   // Total length of appended content.
   pub len() num {
     ret self.total_len;

@@ -20,7 +20,7 @@ impl Point {
   }
 }
 
-impl Point HasX {
+impl Point as HasX {
   get_x() num {
     ret self.x;
   }

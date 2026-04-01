@@ -31,7 +31,7 @@ fun _str_len(str s) num {
   ret i;
 }
 
-impl Vec<T> Sized {
+impl Vec<T> as Sized {
   // Number of elements.
   pub len() num {
     ret self.len;
@@ -272,7 +272,7 @@ impl Vec<T> {
   }
 }
 
-impl Vec<T> Clearable {
+impl Vec<T> as Clearable {
   pub clear() {
     self.len = 0;
   }

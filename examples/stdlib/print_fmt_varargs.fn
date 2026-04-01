@@ -9,7 +9,7 @@ compound Point {
   num y;
 }
 
-impl Point Display {
+impl Point as Display {
   pub to_string() str {
     ret format("Point({}, {})", self.x, self.y);
   }

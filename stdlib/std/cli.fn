@@ -133,7 +133,7 @@ pub fun cli_parse_ext(str[] args) CliArgs {
   ret out;
 }
 
-impl CliArgs Sized {
+impl CliArgs as Sized {
   // Number of positional arguments.
   pub len() num {
     ret self.positionals.len;

@@ -15,13 +15,13 @@ impl Boxed {
   }
 }
 
-impl Boxed Display {
+impl Boxed as Display {
   to_string() str {
     ret format("Boxed({num})", self.v);
   }
 }
 
-impl Boxed ReadV {
+impl Boxed as ReadV {
   get_v() num {
     ret self.v;
   }

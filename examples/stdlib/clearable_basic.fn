@@ -7,7 +7,7 @@ compound Scratch {
   num value;
 }
 
-impl Scratch Clearable {
+impl Scratch as Clearable {
   pub clear() {
     self.value = 0;
   }

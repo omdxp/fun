@@ -9,7 +9,7 @@ quirk HasX {
   getX() num;
 }
 
-impl Point HasX {
+impl Point as HasX {
   getX() num {
     ret self.x;
   }
@@ -30,7 +30,7 @@ compound Circle {
   num r;
 }
 
-impl Rectangle Shape {
+impl Rectangle as Shape {
   area() num {
     num w = self.b.x - self.a.x;
     num h = self.b.y - self.a.y;
@@ -47,7 +47,7 @@ impl Rectangle Shape {
   }
 }
 
-impl Circle Shape {
+impl Circle as Shape {
   area() num {
     ret 3 * self.r * self.r;
   }
@@ -58,13 +58,13 @@ impl Circle Shape {
   }
 }
 
-impl Rectangle HasX {
+impl Rectangle as HasX {
   getX() num {
     ret self.a.x;
   }
 }
 
-impl Circle HasX {
+impl Circle as HasX {
   getX() num {
     ret self.center.x;
   }
