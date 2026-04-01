@@ -160,6 +160,8 @@ jobs:
 
           Copy-Item "installer\windows\PORTABLE-README.txt" "dist\fun-${{ matrix.target }}\README-portable.txt"
 
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+
           # Build portable zip that can be unzipped and run without installing.
           $portableZip = "artifacts\fun-${{ matrix.target }}-$tag.zip"
           Compress-Archive -Path "dist\fun-${{ matrix.target }}" -DestinationPath $portableZip -Force
@@ -190,8 +192,6 @@ jobs:
           $wixVersion = "$($p[0]).$($p[1]).$($p[2]).$($p[3])"
           Write-Host "Tag: $tag"
           Write-Host "WiX Version: $wixVersion"
-
-          New-Item -ItemType Directory -Force artifacts | Out-Null
 
           $src = "dist\fun-${{ matrix.target }}"
           $harvest = "dist\Harvest.wxs"
