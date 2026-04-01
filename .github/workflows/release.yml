@@ -281,6 +281,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -291,6 +293,85 @@ jobs:
 
       - name: Install web dependencies
         run: npm --prefix website/reference ci
+
+      - name: Generate historical docs snapshots from tags
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf website/reference/public/versions
+          mkdir -p website/reference/public/versions
+
+          mapfile -t tags < <(git tag --list 'v*' --sort=version:refname)
+          if [ "${#tags[@]}" -eq 0 ]; then
+            echo "No matching tags found (pattern v*); skipping historical snapshots."
+            exit 0
+          fi
+
+          tmp_root=".tmp-reference-worktrees"
+          mkdir -p "$tmp_root"
+
+          generated_count=0
+          failed_tags=()
+
+          cleanup() {
+            if [ -d "$tmp_root" ]; then
+              find "$tmp_root" -mindepth 1 -maxdepth 1 -type d -print0 | while IFS= read -r -d '' d; do
+                git worktree remove --force "$d" || true
+              done
+            fi
+          }
+          trap cleanup EXIT
+
+          for tag in "${tags[@]}"; do
+            safe_tag="${tag//[^A-Za-z0-9_.-]/_}"
+            wt="$tmp_root/$safe_tag"
+            echo "Generating docs snapshot for $tag"
+
+            if ! git worktree add --detach "$wt" "$tag"; then
+              echo "Failed to create worktree for $tag; skipping"
+              failed_tags+=("$tag")
+              continue
+            fi
+
+            if [ ! -d "$wt/website/reference" ]; then
+              echo "Tag $tag does not include website/reference; skipping"
+              git worktree remove --force "$wt"
+              continue
+            fi
+
+            if ! npm --prefix "$wt/website/reference" ci; then
+              echo "npm ci failed for $tag; skipping"
+              failed_tags+=("$tag")
+              git worktree remove --force "$wt"
+              continue
+            fi
+
+            if ! FUN_VERSION="$tag" npm --prefix "$wt/website/reference" run generate:content; then
+              echo "content generation failed for $tag; skipping"
+              failed_tags+=("$tag")
+              git worktree remove --force "$wt"
+              continue
+            fi
+
+            version="${tag#v}"
+            src="$wt/website/reference/public/versions/$version/content.json"
+            if [ -f "$src" ]; then
+              mkdir -p "website/reference/public/versions/$version"
+              cp "$src" "website/reference/public/versions/$version/content.json"
+              generated_count=$((generated_count + 1))
+            else
+              echo "No content generated for $tag at expected path: $src"
+              failed_tags+=("$tag")
+            fi
+
+            git worktree remove --force "$wt"
+          done
+
+          echo "Historical snapshots generated: $generated_count"
+          if [ "${#failed_tags[@]}" -gt 0 ]; then
+            echo "Tags skipped due to errors (${#failed_tags[@]}): ${failed_tags[*]}"
+          fi
 
       - name: Build reference site for GitHub Pages
         run: |

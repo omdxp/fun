@@ -19,6 +19,8 @@ const funVersion = rawFunVersion.startsWith("v")
   ? rawFunVersion.slice(1)
   : rawFunVersion;
 
+const publicVersionsRoot = path.join(siteRoot, "public", "versions");
+
 const docs = {
   language: await fs.readFile(path.join(repoRoot, "docs/language.md"), "utf8"),
   reference: await fs.readFile(
@@ -96,6 +98,8 @@ function parseStdFile(filePath, source) {
       const symbolComment = collectCommentAbove(lines, i);
       const symbolDocs = parseCommentBlock(symbolComment);
       const symbolMarkdown = buildDocsMarkdown(symbolDocs);
+      const fields = m[1] === "compound" ? extractCompoundFields(lines, i) : [];
+      const members = m[1] === "quirk" ? extractQuirkMembers(lines, i) : [];
       symbols.push({
         kind: m[1],
         name: m[2],
@@ -103,6 +107,8 @@ function parseStdFile(filePath, source) {
         line: i + 1,
         docs: symbolDocs,
         docsMarkdown: symbolMarkdown,
+        fields,
+        members,
       });
     }
   }
@@ -133,6 +139,126 @@ function parseStdFile(filePath, source) {
     docsMarkdown: moduleMarkdown,
     symbols: [...nonMethodSymbols, ...methodSymbols],
   };
+}
+
+function extractCompoundFields(lines, declLineIdx) {
+  const fields = [];
+
+  let depth = 0;
+  let enteredBody = false;
+
+  for (let i = declLineIdx; i < lines.length; i += 1) {
+    const rawLine = lines[i];
+    const trimmed = rawLine.trim();
+
+    if (!enteredBody) {
+      if (rawLine.includes("{")) {
+        enteredBody = true;
+      }
+      depth += countChar(rawLine, "{") - countChar(rawLine, "}");
+      continue;
+    }
+
+    if (depth === 1 && trimmed && !trimmed.startsWith("//")) {
+      const fieldMatch = trimmed.match(
+        /^(.+?)\s+([A-Za-z_][A-Za-z0-9_]*)\s*;\s*$/,
+      );
+      if (fieldMatch) {
+        const fieldCommentLines = collectCommentAbove(lines, i);
+        const fieldDocs = parseCommentBlock(fieldCommentLines);
+        const inlineDoc = parseFieldInlineDoc(fieldCommentLines);
+
+        const typeText = fieldMatch[1].trim();
+        const nameText = fieldMatch[2].trim();
+
+        fields.push({
+          name: nameText,
+          type: typeText,
+          signature: `${typeText} ${nameText};`,
+          line: i + 1,
+          docs: fieldDocs,
+          docsMarkdown: fieldDocs.raw
+            ? buildDocsMarkdown(fieldDocs)
+            : inlineDoc,
+          inlineDoc,
+        });
+      }
+    }
+
+    depth += countChar(rawLine, "{") - countChar(rawLine, "}");
+    if (enteredBody && depth <= 0) {
+      break;
+    }
+  }
+
+  return fields;
+}
+
+function extractQuirkMembers(lines, declLineIdx) {
+  const members = [];
+
+  let depth = 0;
+  let enteredBody = false;
+
+  for (let i = declLineIdx; i < lines.length; i += 1) {
+    const rawLine = lines[i];
+    const trimmed = rawLine.trim();
+
+    if (!enteredBody) {
+      if (rawLine.includes("{")) {
+        enteredBody = true;
+      }
+      depth += countChar(rawLine, "{") - countChar(rawLine, "}");
+      continue;
+    }
+
+    if (depth === 1 && trimmed && !trimmed.startsWith("//")) {
+      const memberMatch = trimmed.match(
+        /^([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*([^;{]*)\s*;\s*$/,
+      );
+      if (memberMatch) {
+        const memberCommentLines = collectCommentAbove(lines, i);
+        const memberDocs = parseCommentBlock(memberCommentLines);
+        const inlineDoc = parseFieldInlineDoc(memberCommentLines);
+
+        const nameText = memberMatch[1].trim();
+        const retText = (memberMatch[3] ?? "").trim();
+
+        members.push({
+          name: nameText,
+          type: retText,
+          signature: trimmed,
+          line: i + 1,
+          docs: memberDocs,
+          docsMarkdown: memberDocs.raw
+            ? buildDocsMarkdown(memberDocs)
+            : inlineDoc,
+          inlineDoc,
+        });
+      }
+    }
+
+    depth += countChar(rawLine, "{") - countChar(rawLine, "}");
+    if (enteredBody && depth <= 0) {
+      break;
+    }
+  }
+
+  return members;
+}
+
+function parseFieldInlineDoc(commentLines) {
+  if (!commentLines || commentLines.length === 0) return "";
+
+  for (let i = commentLines.length - 1; i >= 0; i -= 1) {
+    const trimmed = commentLines[i].trim();
+    const match = trimmed.match(/^[A-Za-z_][A-Za-z0-9_]*\s*:\s*(.+)$/);
+    if (match) {
+      return match[1].trim();
+    }
+  }
+
+  return "";
 }
 
 function countChar(text, ch) {
@@ -381,6 +507,10 @@ fun main() {
 const generated = {
   generatedAt: new Date().toISOString(),
   funVersion,
+  versions: {
+    latest: funVersion,
+    available: [funVersion],
+  },
   docs,
   stdlib,
   samples,
@@ -393,4 +523,60 @@ await fs.writeFile(
   "utf8",
 );
 
+await fs.mkdir(path.join(publicVersionsRoot, funVersion), { recursive: true });
+await fs.writeFile(
+  path.join(publicVersionsRoot, funVersion, "content.json"),
+  `${JSON.stringify(generated, null, 2)}\n`,
+  "utf8",
+);
+
+let availableVersions = [];
+try {
+  const entries = await fs.readdir(publicVersionsRoot, { withFileTypes: true });
+  availableVersions = entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort((a, b) => compareVersionDescending(a, b));
+} catch {
+  availableVersions = [funVersion];
+}
+
+const versionsIndex = {
+  latest: availableVersions[0] ?? funVersion,
+  available: availableVersions,
+};
+
+await fs.writeFile(
+  path.join(publicVersionsRoot, "index.json"),
+  `${JSON.stringify(versionsIndex, null, 2)}\n`,
+  "utf8",
+);
+
 console.log(`Generated reference content for ${stdlib.length} std modules.`);
+
+function compareVersionDescending(a, b) {
+  return compareVersionAscending(b, a);
+}
+
+function compareVersionAscending(a, b) {
+  const pa = normalizeVersion(a);
+  const pb = normalizeVersion(b);
+  const maxLen = Math.max(pa.length, pb.length);
+
+  for (let i = 0; i < maxLen; i += 1) {
+    const av = pa[i] ?? 0;
+    const bv = pb[i] ?? 0;
+    if (av !== bv) return av - bv;
+  }
+
+  return a.localeCompare(b, undefined, { sensitivity: "base" });
+}
+
+function normalizeVersion(raw) {
+  return String(raw)
+    .replace(/^v/i, "")
+    .split(/[-+]/)[0]
+    .split(".")
+    .map((part) => Number.parseInt(part, 10))
+    .map((n) => (Number.isFinite(n) ? n : 0));
+}

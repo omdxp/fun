@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import MarkdownWithPlayground from "./components/MarkdownWithPlayground";
 import RunCodeBlock from "./components/RunCodeBlock";
 import { highlightFun } from "./utils/funHighlight";
-import data from "./generated/content.json";
+import bundledContent from "./generated/content.json";
 
 type DocsSections = {
   params: string[];
@@ -22,12 +22,24 @@ type DocsMeta = {
   example: string;
 };
 
+type StdField = {
+  name: string;
+  type: string;
+  signature: string;
+  line: number;
+  docs: DocsMeta;
+  docsMarkdown: string;
+  inlineDoc?: string;
+};
+
 type StdSymbol = {
   kind: string;
   name: string;
   signature: string;
   line: number;
   owner?: string;
+  fields?: StdField[];
+  members?: StdField[];
   docs: DocsMeta;
   docsMarkdown: string;
 };
@@ -43,6 +55,10 @@ type StdModule = {
 type ReferenceContent = {
   generatedAt: string;
   funVersion: string;
+  versions?: {
+    latest: string;
+    available: string[];
+  };
   docs: {
     language: string;
     reference: string;
@@ -52,7 +68,38 @@ type ReferenceContent = {
   samples: Array<{ title: string; code: string }>;
 };
 
-const content = data as ReferenceContent;
+type VersionsIndex = {
+  latest: string;
+  available: string[];
+};
+
+type GlobalSearchResult = {
+  id: string;
+  title: string;
+  subtitle: string;
+  group: "docs" | "stdlib" | "samples";
+  tab: TabKey;
+  modulePath?: string;
+  symbolKey?: string;
+  detailKey?: string;
+  docAnchorKey?: string;
+};
+
+type DocSection = {
+  id: string;
+  title: string;
+  level: number;
+  content: string;
+  tab: Extract<TabKey, "language" | "reference">;
+};
+
+type TocHeading = {
+  id: string;
+  title: string;
+  level: number;
+};
+
+const initialContent = bundledContent as ReferenceContent;
 
 type TabKey = "language" | "reference" | "stdlib" | "playground";
 
@@ -88,13 +135,19 @@ function parseStdlibHash(hash: string) {
   return {
     modulePath: params.get("module") ?? "",
     symbolKey: params.get("symbol") ?? "",
+    detailKey: params.get("detail") ?? "",
   };
 }
 
-function buildStdlibHash(modulePath: string, symbolKey: string) {
+function buildStdlibHash(
+  modulePath: string,
+  symbolKey: string,
+  detailKey = "",
+) {
   const params = new URLSearchParams();
   if (modulePath) params.set("module", modulePath);
   if (symbolKey) params.set("symbol", symbolKey);
+  if (detailKey) params.set("detail", detailKey);
   const query = params.toString();
   return query ? `#stdlib?${query}` : "#stdlib";
 }
@@ -115,8 +168,16 @@ function getInitialHashState() {
       tab: "language" as TabKey,
       modulePath: "",
       symbolKey: "",
+      detailKey: "",
+      docAnchorKey: "",
     };
   }
+
+  const value = window.location.hash.startsWith("#")
+    ? window.location.hash.slice(1)
+    : window.location.hash;
+  const [_route, query = ""] = value.split("?");
+  const params = new URLSearchParams(query);
 
   const tabFromHash = parseTabHash(window.location.hash);
   if (tabFromHash && tabFromHash !== "stdlib") {
@@ -124,6 +185,8 @@ function getInitialHashState() {
       tab: tabFromHash,
       modulePath: "",
       symbolKey: "",
+      detailKey: "",
+      docAnchorKey: params.get("anchor") ?? "",
     };
   }
 
@@ -133,6 +196,8 @@ function getInitialHashState() {
       tab: "stdlib" as TabKey,
       modulePath: parsed.modulePath,
       symbolKey: parsed.symbolKey,
+      detailKey: parsed.detailKey,
+      docAnchorKey: "",
     };
   }
 
@@ -140,22 +205,331 @@ function getInitialHashState() {
     tab: "language" as TabKey,
     modulePath: "",
     symbolKey: "",
+    detailKey: "",
+    docAnchorKey: params.get("anchor") ?? "",
   };
+}
+
+function getInitialVersion() {
+  if (typeof window === "undefined") {
+    return initialContent.funVersion;
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  return params.get("v") || initialContent.funVersion;
+}
+
+function formatSnippet(text: string, q: string) {
+  const lower = text.toLowerCase();
+  const idx = lower.indexOf(q.toLowerCase());
+  if (idx < 0) return text.slice(0, 120);
+  const start = Math.max(0, idx - 36);
+  const end = Math.min(text.length, idx + q.length + 56);
+  return text.slice(start, end).replace(/\s+/g, " ").trim();
+}
+
+function slugifyHeading(text: string) {
+  const base = text
+    .toLowerCase()
+    .replace(/[`*_~[\]().,!?:;"'<>]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return base || "section";
+}
+
+function cleanHeadingText(raw: string) {
+  return raw
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/[*_~]/g, "")
+    .trim();
+}
+
+function extractDocSections(
+  markdown: string,
+  tab: Extract<TabKey, "language" | "reference">,
+) {
+  const lines = markdown.split(/\r?\n/);
+  const counts = new Map<string, number>();
+  const sections: DocSection[] = [];
+  let current: DocSection | null = null;
+  let inCodeFence = false;
+
+  for (const line of lines) {
+    if (/^```/.test(line.trim())) {
+      inCodeFence = !inCodeFence;
+      if (current) {
+        current.content += `\n${line}`;
+      }
+      continue;
+    }
+
+    if (inCodeFence) {
+      if (current) {
+        current.content += `\n${line}`;
+      }
+      continue;
+    }
+
+    const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      const title = cleanHeadingText(headingMatch[2]);
+      const slug = `${tab}-${slugifyHeading(title)}`;
+      const seen = counts.get(slug) ?? 0;
+      counts.set(slug, seen + 1);
+      const id = seen === 0 ? slug : `${slug}-${seen + 1}`;
+
+      current = {
+        id,
+        title,
+        level,
+        content: title,
+        tab,
+      };
+      sections.push(current);
+      continue;
+    }
+
+    if (current) {
+      current.content += `\n${line}`;
+    }
+  }
+
+  return sections;
+}
+
+async function tryLoadVersionContent(version: string) {
+  const res = await fetch(`./versions/${version}/content.json`, {
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to load version ${version}`);
+  }
+  return (await res.json()) as ReferenceContent;
 }
 
 export default function App() {
   const initial = getInitialHashState();
+  const [content, setContent] = useState<ReferenceContent>(initialContent);
+  const [versionList, setVersionList] = useState<string[]>(
+    initialContent.versions?.available?.length
+      ? initialContent.versions.available
+      : [initialContent.funVersion],
+  );
+  const [selectedVersion, setSelectedVersion] = useState(getInitialVersion());
   const [tab, setTab] = useState<TabKey>(initial.tab);
   const [search, setSearch] = useState("");
+  const [globalSearch, setGlobalSearch] = useState("");
+  const [activeGlobalResultIndex, setActiveGlobalResultIndex] = useState(-1);
   const [selectedModulePath, setSelectedModulePath] = useState(
     initial.modulePath,
   );
   const [selectedSymbolKey, setSelectedSymbolKey] = useState(initial.symbolKey);
+  const [selectedDetailKey, setSelectedDetailKey] = useState(initial.detailKey);
+  const [selectedDocAnchorKey, setSelectedDocAnchorKey] = useState(
+    initial.docAnchorKey,
+  );
+  const [activeDocAnchorKey, setActiveDocAnchorKey] = useState("");
+  const [languageTocHeadings, setLanguageTocHeadings] = useState<TocHeading[]>(
+    [],
+  );
+  const [referenceTocHeadings, setReferenceTocHeadings] = useState<
+    TocHeading[]
+  >([]);
   const [isStdlibModalOpen, setIsStdlibModalOpen] = useState(
     Boolean(initial.modulePath || initial.symbolKey),
   );
+  const [isVersionLoading, setIsVersionLoading] = useState(false);
   const [copyStatus, setCopyStatus] = useState<"idle" | "ok" | "err">("idle");
+  const [detailCopyKey, setDetailCopyKey] = useState("");
   const releaseUrl = `https://github.com/omdxp/fun/releases/tag/v${content.funVersion}`;
+
+  const scrollToDocAnchor = (
+    anchor: string,
+    behavior: ScrollBehavior = "smooth",
+    headingTitle = "",
+  ) => {
+    if (!anchor) return;
+    if (typeof window === "undefined") return;
+
+    const normalize = (text: string) => text.trim().replace(/\s+/g, " ");
+
+    const resolveAnchor = () => {
+      if (document.getElementById(anchor)) return anchor;
+
+      const headings = Array.from(
+        document.querySelectorAll<HTMLElement>("[data-doc-heading='true']"),
+      );
+
+      if (headingTitle) {
+        const target = normalize(headingTitle);
+        const byTitle = headings.find((el) => {
+          const label =
+            el.querySelector<HTMLElement>(".md-heading-inner")?.textContent ??
+            el.textContent ??
+            "";
+          return normalize(label) === target;
+        });
+        if (byTitle?.id) return byTitle.id;
+      }
+
+      const prefix = anchor.replace(/-\d+$/, "");
+      const byPrefix = headings.find((el) => el.id.startsWith(prefix));
+      if (byPrefix?.id) return byPrefix.id;
+
+      return "";
+    };
+
+    const tryScroll = (attempt: number) => {
+      const resolved = resolveAnchor();
+      const el = resolved ? document.getElementById(resolved) : null;
+      if (el) {
+        el.scrollIntoView({ behavior, block: "start" });
+        setActiveDocAnchorKey(el.id);
+        if (selectedDocAnchorKey !== el.id) {
+          setSelectedDocAnchorKey(el.id);
+        }
+        return;
+      }
+
+      if (attempt < 8) {
+        window.setTimeout(() => tryScroll(attempt + 1), 40);
+      }
+    };
+
+    tryScroll(0);
+  };
+
+  const languageSections = useMemo(
+    () => extractDocSections(content.docs.language, "language"),
+    [content.docs.language],
+  );
+
+  const referenceSections = useMemo(
+    () => extractDocSections(content.docs.reference, "reference"),
+    [content.docs.reference],
+  );
+
+  const activeDocSections = useMemo(() => {
+    if (tab === "language") return languageTocHeadings;
+    if (tab === "reference") return referenceTocHeadings;
+    return [] as TocHeading[];
+  }, [tab, languageTocHeadings, referenceTocHeadings]);
+
+  const globalResults = useMemo(() => {
+    const q = globalSearch.trim().toLowerCase();
+    if (!q) return [] as GlobalSearchResult[];
+
+    const out: GlobalSearchResult[] = [];
+
+    for (const section of languageSections) {
+      if (!section.content.toLowerCase().includes(q)) continue;
+      out.push({
+        id: `doc:language:${section.id}`,
+        title: `Language Guide: ${section.title}`,
+        subtitle: formatSnippet(section.content, q),
+        group: "docs",
+        tab: "language",
+        docAnchorKey: section.id,
+      });
+    }
+
+    for (const section of referenceSections) {
+      if (!section.content.toLowerCase().includes(q)) continue;
+      out.push({
+        id: `doc:reference:${section.id}`,
+        title: `Reference: ${section.title}`,
+        subtitle: formatSnippet(section.content, q),
+        group: "docs",
+        tab: "reference",
+        docAnchorKey: section.id,
+      });
+    }
+
+    for (const sample of content.samples) {
+      const hay = `${sample.title}\n${sample.code}`;
+      if (!hay.toLowerCase().includes(q)) continue;
+      out.push({
+        id: `sample:${sample.title}`,
+        title: `Playground sample: ${sample.title}`,
+        subtitle: formatSnippet(hay, q),
+        group: "samples",
+        tab: "playground",
+      });
+    }
+
+    for (const moduleItem of content.stdlib) {
+      const moduleHay = `${moduleItem.module}\n${moduleItem.summary}\n${moduleItem.docsMarkdown}`;
+      if (moduleHay.toLowerCase().includes(q)) {
+        out.push({
+          id: `module:${moduleItem.module}`,
+          title: `Std module: std/${moduleItem.module.replace(/\.fn$/, "")}`,
+          subtitle: formatSnippet(moduleHay, q),
+          group: "stdlib",
+          tab: "stdlib",
+          modulePath: moduleItem.module,
+        });
+      }
+
+      for (const symbol of moduleItem.symbols) {
+        const symbolKey = `${symbol.name}:${symbol.line}`;
+        const symbolHay = `${symbol.name}\n${symbol.signature}\n${symbol.docsMarkdown}`;
+        if (symbolHay.toLowerCase().includes(q)) {
+          out.push({
+            id: `symbol:${moduleItem.module}:${symbolKey}`,
+            title: `Std symbol: ${symbol.name}`,
+            subtitle: `std/${moduleItem.module.replace(/\.fn$/, "")} · ${formatSnippet(symbolHay, q)}`,
+            group: "stdlib",
+            tab: "stdlib",
+            modulePath: moduleItem.module,
+            symbolKey,
+          });
+        }
+
+        for (const field of symbol.fields ?? []) {
+          const fieldHay = `${field.name}\n${field.signature}\n${field.docsMarkdown}\n${field.inlineDoc ?? ""}`;
+          if (!fieldHay.toLowerCase().includes(q)) continue;
+          out.push({
+            id: `field:${moduleItem.module}:${symbolKey}:${field.name}:${field.line}`,
+            title: `Field: ${symbol.name}.${field.name}`,
+            subtitle: `std/${moduleItem.module.replace(/\.fn$/, "")} · ${formatSnippet(fieldHay, q)}`,
+            group: "stdlib",
+            tab: "stdlib",
+            modulePath: moduleItem.module,
+            symbolKey,
+            detailKey: `field:${field.name}:${field.line}`,
+          });
+        }
+
+        for (const member of symbol.members ?? []) {
+          const memberHay = `${member.name}\n${member.signature}\n${member.docsMarkdown}\n${member.inlineDoc ?? ""}`;
+          if (!memberHay.toLowerCase().includes(q)) continue;
+          out.push({
+            id: `member:${moduleItem.module}:${symbolKey}:${member.name}:${member.line}`,
+            title: `Member: ${symbol.name}.${member.name}`,
+            subtitle: `std/${moduleItem.module.replace(/\.fn$/, "")} · ${formatSnippet(memberHay, q)}`,
+            group: "stdlib",
+            tab: "stdlib",
+            modulePath: moduleItem.module,
+            symbolKey,
+            detailKey: `member:${member.name}:${member.line}`,
+          });
+        }
+      }
+    }
+
+    return out.slice(0, 40);
+  }, [globalSearch, content, languageSections, referenceSections]);
+
+  const groupedGlobalResults = useMemo(() => {
+    return {
+      docs: globalResults.filter((r) => r.group === "docs"),
+      stdlib: globalResults.filter((r) => r.group === "stdlib"),
+      samples: globalResults.filter((r) => r.group === "samples"),
+    };
+  }, [globalResults]);
 
   const filteredModules = useMemo(() => {
     const q = search.toLowerCase().trim();
@@ -168,15 +542,29 @@ export default function App() {
         (s) =>
           s.name.toLowerCase().includes(q) ||
           s.signature.toLowerCase().includes(q) ||
-          (s.docsMarkdown ?? "").toLowerCase().includes(q),
+          (s.docsMarkdown ?? "").toLowerCase().includes(q) ||
+          (s.fields ?? []).some(
+            (f) =>
+              f.name.toLowerCase().includes(q) ||
+              f.signature.toLowerCase().includes(q) ||
+              (f.docsMarkdown ?? "").toLowerCase().includes(q) ||
+              (f.inlineDoc ?? "").toLowerCase().includes(q),
+          ) ||
+          (s.members ?? []).some(
+            (m) =>
+              m.name.toLowerCase().includes(q) ||
+              m.signature.toLowerCase().includes(q) ||
+              (m.docsMarkdown ?? "").toLowerCase().includes(q) ||
+              (m.inlineDoc ?? "").toLowerCase().includes(q),
+          ),
       );
     });
-  }, [search]);
+  }, [search, content]);
 
   const activeModule = useMemo(() => {
     if (!selectedModulePath) return null;
     return content.stdlib.find((m) => m.module === selectedModulePath) ?? null;
-  }, [selectedModulePath]);
+  }, [selectedModulePath, content]);
 
   const activeSymbol = useMemo(() => {
     if (!activeModule || activeModule.symbols.length === 0) return null;
@@ -242,6 +630,7 @@ export default function App() {
         onClick={() => {
           setSelectedModulePath(modulePath);
           setSelectedSymbolKey(key);
+          setSelectedDetailKey("");
           setIsStdlibModalOpen(true);
         }}
       >
@@ -251,9 +640,14 @@ export default function App() {
     );
   };
 
-  const openStdlibModule = (modulePath: string, symbolKey = "") => {
+  const openStdlibModule = (
+    modulePath: string,
+    symbolKey = "",
+    detailKey = "",
+  ) => {
     setSelectedModulePath(modulePath);
     setSelectedSymbolKey(symbolKey);
+    setSelectedDetailKey(detailKey);
     setIsStdlibModalOpen(true);
   };
 
@@ -261,15 +655,121 @@ export default function App() {
     setIsStdlibModalOpen(false);
     setSelectedModulePath("");
     setSelectedSymbolKey("");
+    setSelectedDetailKey("");
+  };
+
+  const activateGlobalResult = (result: GlobalSearchResult) => {
+    setTab(result.tab);
+    if (
+      (result.tab === "language" || result.tab === "reference") &&
+      result.docAnchorKey
+    ) {
+      setSelectedDocAnchorKey(result.docAnchorKey);
+      window.setTimeout(() => {
+        const headingTitle = result.title.includes(":")
+          ? result.title.split(":").slice(1).join(":").trim()
+          : result.title;
+        scrollToDocAnchor(result.docAnchorKey ?? "", "smooth", headingTitle);
+      }, 0);
+    } else {
+      setSelectedDocAnchorKey("");
+    }
+    if (result.tab === "stdlib" && result.modulePath) {
+      setSearch("");
+      openStdlibModule(
+        result.modulePath,
+        result.symbolKey ?? "",
+        result.detailKey ?? "",
+      );
+    }
+    setGlobalSearch("");
+    setActiveGlobalResultIndex(-1);
   };
 
   useEffect(() => {
     if (typeof window === "undefined") return;
 
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const inEditable =
+        target?.tagName === "INPUT" ||
+        target?.tagName === "TEXTAREA" ||
+        target?.isContentEditable;
+
+      if (event.key === "/" && !inEditable) {
+        event.preventDefault();
+        const el = document.getElementById("global-search-input");
+        el?.focus();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  useEffect(() => {
+    setActiveGlobalResultIndex(globalResults.length > 0 ? 0 : -1);
+  }, [globalSearch, globalResults.length]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const load = async () => {
+      try {
+        const res = await fetch("./versions/index.json", { cache: "no-store" });
+        if (!res.ok) return;
+        const index = (await res.json()) as VersionsIndex;
+        if (!index.available || index.available.length === 0) return;
+
+        setVersionList(index.available);
+
+        const params = new URLSearchParams(window.location.search);
+        const requested = params.get("v");
+        const nextVersion =
+          requested && index.available.includes(requested)
+            ? requested
+            : index.latest;
+        setSelectedVersion(nextVersion);
+      } catch {
+        // Fall back to bundled content when versions index is unavailable.
+      }
+    };
+
+    void load();
+  }, []);
+
+  useEffect(() => {
+    if (!selectedVersion) return;
+
+    const run = async () => {
+      setIsVersionLoading(true);
+      try {
+        const nextContent = await tryLoadVersionContent(selectedVersion);
+        setContent(nextContent);
+      } catch {
+        setContent(initialContent);
+      } finally {
+        setIsVersionLoading(false);
+      }
+    };
+
+    void run();
+  }, [selectedVersion]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
     const applyHash = () => {
+      const value = window.location.hash.startsWith("#")
+        ? window.location.hash.slice(1)
+        : window.location.hash;
+      const [route, query = ""] = value.split("?");
+      const params = new URLSearchParams(query);
+
       const tabFromHash = parseTabHash(window.location.hash);
       if (tabFromHash && tabFromHash !== "stdlib") {
         setTab(tabFromHash);
+        setSelectedDocAnchorKey(params.get("anchor") ?? "");
         return;
       }
 
@@ -279,6 +779,8 @@ export default function App() {
       setSearch("");
       setSelectedModulePath(parsed.modulePath);
       setSelectedSymbolKey(parsed.symbolKey);
+      setSelectedDetailKey(parsed.detailKey);
+      setSelectedDocAnchorKey("");
       setIsStdlibModalOpen(Boolean(parsed.modulePath || parsed.symbolKey));
     };
 
@@ -291,7 +793,12 @@ export default function App() {
     if (typeof window === "undefined") return;
 
     if (tab !== "stdlib") {
-      const nextHash = `#${tab}`;
+      const params = new URLSearchParams();
+      if ((tab === "language" || tab === "reference") && selectedDocAnchorKey) {
+        params.set("anchor", selectedDocAnchorKey);
+      }
+      const q = params.toString();
+      const nextHash = q ? `#${tab}?${q}` : `#${tab}`;
       if (window.location.hash !== nextHash) {
         const nextUrl = `${window.location.pathname}${window.location.search}${nextHash}`;
         window.history.replaceState(null, "", nextUrl);
@@ -303,13 +810,167 @@ export default function App() {
     const symbolKey = activeSymbol
       ? `${activeSymbol.name}:${activeSymbol.line}`
       : "";
-    const nextHash = buildStdlibHash(modulePath, symbolKey);
+    const nextHash = buildStdlibHash(modulePath, symbolKey, selectedDetailKey);
 
     if (window.location.hash !== nextHash) {
       const nextUrl = `${window.location.pathname}${window.location.search}${nextHash}`;
       window.history.replaceState(null, "", nextUrl);
     }
-  }, [tab, activeModule, activeSymbol]);
+  }, [
+    tab,
+    activeModule,
+    activeSymbol,
+    selectedDetailKey,
+    selectedDocAnchorKey,
+  ]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (tab !== "language" && tab !== "reference") return;
+
+    const id = window.setTimeout(() => {
+      const nodes = Array.from(
+        document.querySelectorAll<HTMLElement>("[data-doc-heading='true']"),
+      );
+
+      const next: TocHeading[] = nodes.map((el) => {
+        const title =
+          el.querySelector<HTMLElement>(".md-heading-inner")?.textContent ??
+          el.textContent ??
+          "";
+        const level = Number.parseInt(el.tagName.slice(1), 10);
+        return {
+          id: el.id,
+          title: title.trim(),
+          level: Number.isFinite(level) ? level : 2,
+        };
+      });
+
+      if (tab === "language") {
+        setLanguageTocHeadings(next);
+      } else {
+        setReferenceTocHeadings(next);
+      }
+    }, 0);
+
+    return () => window.clearTimeout(id);
+  }, [tab, content]);
+
+  useEffect(() => {
+    if (tab !== "language" && tab !== "reference") return;
+    if (!selectedDocAnchorKey) return;
+    scrollToDocAnchor(selectedDocAnchorKey, "smooth");
+  }, [tab, selectedDocAnchorKey, content]);
+
+  useEffect(() => {
+    if (tab !== "language" && tab !== "reference") return;
+    if (typeof window === "undefined") return;
+
+    const ids = activeDocSections.map((h) => h.id);
+    const targets = ids
+      .map((id) => document.getElementById(id))
+      .filter((el): el is HTMLElement => Boolean(el));
+
+    if (targets.length === 0) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
+
+        if (visible.length > 0) {
+          const topMost = visible[0].target as HTMLElement;
+          setActiveDocAnchorKey(topMost.id);
+        }
+      },
+      {
+        root: null,
+        rootMargin: "-15% 0px -70% 0px",
+        threshold: [0, 1],
+      },
+    );
+
+    for (const el of targets) observer.observe(el);
+    return () => observer.disconnect();
+  }, [tab, activeDocSections, content]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!selectedVersion) return;
+
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("v") === selectedVersion) return;
+    params.set("v", selectedVersion);
+
+    const nextUrl = `${window.location.pathname}?${params.toString()}${window.location.hash}`;
+    window.history.replaceState(null, "", nextUrl);
+  }, [selectedVersion]);
+
+  useEffect(() => {
+    if (!activeModule) {
+      setIsStdlibModalOpen(false);
+      return;
+    }
+
+    if (selectedSymbolKey) {
+      const found = activeModule.symbols.some(
+        (s) => `${s.name}:${s.line}` === selectedSymbolKey,
+      );
+      if (!found) {
+        setSelectedSymbolKey("");
+        setSelectedDetailKey("");
+      }
+    }
+  }, [activeModule, selectedSymbolKey]);
+
+  useEffect(() => {
+    if (!activeSymbol) {
+      setSelectedDetailKey("");
+      return;
+    }
+
+    if (!selectedDetailKey) return;
+
+    const [kind, name, lineStr] = selectedDetailKey.split(":");
+    const line = Number.parseInt(lineStr ?? "", 10);
+    if (!Number.isFinite(line)) {
+      setSelectedDetailKey("");
+      return;
+    }
+
+    if (kind === "field") {
+      const exists = (activeSymbol.fields ?? []).some(
+        (f) => f.name === name && f.line === line,
+      );
+      if (!exists) setSelectedDetailKey("");
+      return;
+    }
+
+    if (kind === "member") {
+      const exists = (activeSymbol.members ?? []).some(
+        (m) => m.name === name && m.line === line,
+      );
+      if (!exists) setSelectedDetailKey("");
+      return;
+    }
+
+    setSelectedDetailKey("");
+  }, [activeSymbol, selectedDetailKey]);
+
+  useEffect(() => {
+    if (!selectedDetailKey) return;
+    if (typeof window === "undefined") return;
+
+    const id = window.setTimeout(() => {
+      const el = document.getElementById(`detail-${selectedDetailKey}`);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }
+    }, 0);
+
+    return () => window.clearTimeout(id);
+  }, [selectedDetailKey, activeSymbol]);
 
   useEffect(() => {
     if (!isStdlibModalOpen) return;
@@ -331,7 +992,11 @@ export default function App() {
     const symbolKey = activeSymbol
       ? `${activeSymbol.name}:${activeSymbol.line}`
       : "";
-    const hash = buildStdlibHash(activeModule.module, symbolKey);
+    const hash = buildStdlibHash(
+      activeModule.module,
+      symbolKey,
+      selectedDetailKey,
+    );
     const url = `${window.location.origin}${window.location.pathname}${window.location.search}${hash}`;
 
     try {
@@ -358,17 +1023,199 @@ export default function App() {
     }, 1500);
   };
 
+  const copyStdlibDetailLink = async (detailKey: string) => {
+    if (typeof window === "undefined") return;
+    if (!activeModule) return;
+    if (!activeSymbol) return;
+
+    const symbolKey = `${activeSymbol.name}:${activeSymbol.line}`;
+    const hash = buildStdlibHash(activeModule.module, symbolKey, detailKey);
+    const url = `${window.location.origin}${window.location.pathname}${window.location.search}${hash}`;
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(url);
+      } else {
+        const textArea = document.createElement("textarea");
+        textArea.value = url;
+        textArea.setAttribute("readonly", "true");
+        textArea.style.position = "absolute";
+        textArea.style.left = "-9999px";
+        document.body.appendChild(textArea);
+        textArea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textArea);
+      }
+      setDetailCopyKey(detailKey);
+      window.setTimeout(() => {
+        setDetailCopyKey((prev) => (prev === detailKey ? "" : prev));
+      }, 1500);
+    } catch {
+      setDetailCopyKey("");
+    }
+  };
+
   return (
     <div className="app-shell">
       <aside>
         <div className="brand">Fun Language Reference</div>
         <p className="muted">Interactive docs + local runner</p>
+        <div className="global-search-wrap">
+          <input
+            id="global-search-input"
+            className="search global-search"
+            placeholder="Search everything (/ to focus)"
+            value={globalSearch}
+            onChange={(e) => setGlobalSearch(e.target.value)}
+            onKeyDown={(event) => {
+              if (!globalSearch.trim()) return;
+
+              if (event.key === "ArrowDown") {
+                event.preventDefault();
+                setActiveGlobalResultIndex((prev) => {
+                  if (globalResults.length === 0) return -1;
+                  return (
+                    (prev + 1 + globalResults.length) % globalResults.length
+                  );
+                });
+                return;
+              }
+
+              if (event.key === "ArrowUp") {
+                event.preventDefault();
+                setActiveGlobalResultIndex((prev) => {
+                  if (globalResults.length === 0) return -1;
+                  return (
+                    (prev - 1 + globalResults.length) % globalResults.length
+                  );
+                });
+                return;
+              }
+
+              if (event.key === "Enter") {
+                if (activeGlobalResultIndex < 0) return;
+                event.preventDefault();
+                const selected = globalResults[activeGlobalResultIndex];
+                if (selected) {
+                  activateGlobalResult(selected);
+                }
+                return;
+              }
+
+              if (event.key === "Escape") {
+                event.preventDefault();
+                setGlobalSearch("");
+                setActiveGlobalResultIndex(-1);
+              }
+            }}
+          />
+          {globalSearch.trim() && (
+            <div className="global-results">
+              {globalResults.length === 0 ? (
+                <div className="muted small">No results</div>
+              ) : (
+                (
+                  [
+                    {
+                      key: "docs",
+                      label: "Docs",
+                      items: groupedGlobalResults.docs,
+                    },
+                    {
+                      key: "stdlib",
+                      label: "Standard Library",
+                      items: groupedGlobalResults.stdlib,
+                    },
+                    {
+                      key: "samples",
+                      label: "Playground Samples",
+                      items: groupedGlobalResults.samples,
+                    },
+                  ] as const
+                ).map((section) => {
+                  if (section.items.length === 0) return null;
+
+                  return (
+                    <section key={section.key} className="global-result-group">
+                      <div className="global-result-group-title muted small">
+                        {section.label}
+                      </div>
+                      {section.items.map((result) => {
+                        const absoluteIndex = globalResults.findIndex(
+                          (item) => item.id === result.id,
+                        );
+
+                        return (
+                          <button
+                            key={result.id}
+                            type="button"
+                            className={`global-result-item ${
+                              absoluteIndex === activeGlobalResultIndex
+                                ? "active"
+                                : ""
+                            }`}
+                            onMouseEnter={() => {
+                              setActiveGlobalResultIndex(absoluteIndex);
+                            }}
+                            onClick={() => {
+                              activateGlobalResult(result);
+                            }}
+                          >
+                            <div className="global-result-title">
+                              {result.title}
+                            </div>
+                            <div className="global-result-subtitle muted small">
+                              {result.subtitle}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </section>
+                  );
+                })
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="version-controls">
+          <label htmlFor="version-select" className="muted small">
+            Docs version
+          </label>
+          <select
+            id="version-select"
+            value={selectedVersion}
+            onChange={(event) => {
+              setSelectedVersion(event.target.value);
+              setSearch("");
+              setSelectedModulePath("");
+              setSelectedSymbolKey("");
+              setIsStdlibModalOpen(false);
+            }}
+          >
+            {versionList.map((version) => (
+              <option key={version} value={version}>
+                v{version}
+                {version === (versionList[0] ?? version) ? " (latest)" : ""}
+              </option>
+            ))}
+          </select>
+          {isVersionLoading && (
+            <div className="muted small">Loading version...</div>
+          )}
+        </div>
+
         <nav>
           {TABS.map((t) => (
             <button
               key={t.key}
               onClick={() => {
-                if (!t.disabled) setTab(t.key);
+                if (!t.disabled) {
+                  setTab(t.key);
+                  if (t.key !== "language" && t.key !== "reference") {
+                    setSelectedDocAnchorKey("");
+                  }
+                }
               }}
               className={
                 tab === t.key
@@ -403,10 +1250,41 @@ export default function App() {
               This page is sourced from docs/language.md and includes runnable
               Fun code blocks.
             </p>
-            <MarkdownWithPlayground
-              markdown={content.docs.language}
-              sourcePath="docs/language.md"
-            />
+            <div className="doc-layout">
+              <div className="doc-main">
+                <MarkdownWithPlayground
+                  markdown={content.docs.language}
+                  sourcePath="docs/language.md"
+                  headingPrefix="language"
+                />
+              </div>
+              {languageTocHeadings.length > 0 && (
+                <aside
+                  className="doc-toc"
+                  aria-label="Language guide table of contents"
+                >
+                  <div className="doc-toc-title">On this page</div>
+                  {languageTocHeadings
+                    .filter((h) => h.level <= 3)
+                    .map((heading) => (
+                      <button
+                        key={heading.id}
+                        type="button"
+                        className={`doc-toc-item level-${Math.min(heading.level, 3)} ${
+                          activeDocAnchorKey === heading.id ? "active" : ""
+                        }`}
+                        onClick={() => {
+                          setSelectedDocAnchorKey(heading.id);
+                          scrollToDocAnchor(heading.id, "smooth");
+                        }}
+                      >
+                        {heading.title}
+                      </button>
+                    ))}
+                </aside>
+              )}
+              scrollToDocAnchor(heading.id, "smooth", heading.title);
+            </div>
           </section>
         )}
 
@@ -416,10 +1294,41 @@ export default function App() {
             <p className="lead">
               Syntax, semantics, runtime behavior, and interop details.
             </p>
-            <MarkdownWithPlayground
-              markdown={content.docs.reference}
-              sourcePath="docs/reference.md"
-            />
+            <div className="doc-layout">
+              <div className="doc-main">
+                <MarkdownWithPlayground
+                  markdown={content.docs.reference}
+                  sourcePath="docs/reference.md"
+                  headingPrefix="reference"
+                />
+              </div>
+              {referenceTocHeadings.length > 0 && (
+                <aside
+                  className="doc-toc"
+                  aria-label="Reference table of contents"
+                >
+                  <div className="doc-toc-title">On this page</div>
+                  {referenceTocHeadings
+                    .filter((h) => h.level <= 3)
+                    .map((heading) => (
+                      <button
+                        key={heading.id}
+                        type="button"
+                        className={`doc-toc-item level-${Math.min(heading.level, 3)} ${
+                          activeDocAnchorKey === heading.id ? "active" : ""
+                        }`}
+                        onClick={() => {
+                          setSelectedDocAnchorKey(heading.id);
+                          scrollToDocAnchor(heading.id, "smooth");
+                        }}
+                      >
+                        {heading.title}
+                      </button>
+                    ))}
+                </aside>
+              )}
+              scrollToDocAnchor(heading.id, "smooth", heading.title);
+            </div>
           </section>
         )}
 
@@ -485,7 +1394,11 @@ export default function App() {
                             }`}
                             type="button"
                             onClick={() =>
-                              openStdlibModule(m.module, `${s.name}:${s.line}`)
+                              openStdlibModule(
+                                m.module,
+                                `${s.name}:${s.line}`,
+                                "",
+                              )
                             }
                           >
                             <span className="badge">{s.kind}</span>
@@ -619,6 +1532,146 @@ export default function App() {
                               No comment docs found above this declaration.
                             </p>
                           )}
+
+                          {activeSymbol.kind === "compound" &&
+                            (activeSymbol.fields?.length ?? 0) > 0 && (
+                              <section className="compound-fields">
+                                <h4>Fields</h4>
+                                <div className="compound-fields-list">
+                                  {(activeSymbol.fields ?? []).map((field) => (
+                                    <article
+                                      key={`${activeSymbol.name}:${field.name}:${field.line}`}
+                                      id={`detail-field:${field.name}:${field.line}`}
+                                      className={`compound-field-item ${
+                                        selectedDetailKey ===
+                                        `field:${field.name}:${field.line}`
+                                          ? "active"
+                                          : ""
+                                      }`}
+                                      onClick={() => {
+                                        setSelectedDetailKey(
+                                          `field:${field.name}:${field.line}`,
+                                        );
+                                      }}
+                                    >
+                                      <div className="compound-field-head">
+                                        <strong>{field.name}</strong>
+                                        <div className="compound-field-meta">
+                                          <span className="muted small">
+                                            line {field.line}
+                                          </span>
+                                          <button
+                                            type="button"
+                                            className="detail-link-btn"
+                                            onClick={(event) => {
+                                              event.stopPropagation();
+                                              void copyStdlibDetailLink(
+                                                `field:${field.name}:${field.line}`,
+                                              );
+                                            }}
+                                          >
+                                            {detailCopyKey ===
+                                            `field:${field.name}:${field.line}`
+                                              ? "Copied"
+                                              : "Permalink"}
+                                          </button>
+                                        </div>
+                                      </div>
+                                      <pre className="fun-block">
+                                        <code>
+                                          {highlightFun(field.signature)}
+                                        </code>
+                                      </pre>
+                                      {field.docsMarkdown ? (
+                                        <MarkdownWithPlayground
+                                          markdown={field.docsMarkdown}
+                                          sourcePath={`stdlib/std/${activeModule.module}`}
+                                        />
+                                      ) : field.inlineDoc ? (
+                                        <p className="muted">
+                                          {field.inlineDoc}
+                                        </p>
+                                      ) : (
+                                        <p className="muted">
+                                          No field-level docs found.
+                                        </p>
+                                      )}
+                                    </article>
+                                  ))}
+                                </div>
+                              </section>
+                            )}
+
+                          {activeSymbol.kind === "quirk" &&
+                            (activeSymbol.members?.length ?? 0) > 0 && (
+                              <section className="compound-fields">
+                                <h4>Members</h4>
+                                <div className="compound-fields-list">
+                                  {(activeSymbol.members ?? []).map(
+                                    (member) => (
+                                      <article
+                                        key={`${activeSymbol.name}:${member.name}:${member.line}`}
+                                        id={`detail-member:${member.name}:${member.line}`}
+                                        className={`compound-field-item ${
+                                          selectedDetailKey ===
+                                          `member:${member.name}:${member.line}`
+                                            ? "active"
+                                            : ""
+                                        }`}
+                                        onClick={() => {
+                                          setSelectedDetailKey(
+                                            `member:${member.name}:${member.line}`,
+                                          );
+                                        }}
+                                      >
+                                        <div className="compound-field-head">
+                                          <strong>{member.name}</strong>
+                                          <div className="compound-field-meta">
+                                            <span className="muted small">
+                                              line {member.line}
+                                            </span>
+                                            <button
+                                              type="button"
+                                              className="detail-link-btn"
+                                              onClick={(event) => {
+                                                event.stopPropagation();
+                                                void copyStdlibDetailLink(
+                                                  `member:${member.name}:${member.line}`,
+                                                );
+                                              }}
+                                            >
+                                              {detailCopyKey ===
+                                              `member:${member.name}:${member.line}`
+                                                ? "Copied"
+                                                : "Permalink"}
+                                            </button>
+                                          </div>
+                                        </div>
+                                        <pre className="fun-block">
+                                          <code>
+                                            {highlightFun(member.signature)}
+                                          </code>
+                                        </pre>
+                                        {member.docsMarkdown ? (
+                                          <MarkdownWithPlayground
+                                            markdown={member.docsMarkdown}
+                                            sourcePath={`stdlib/std/${activeModule.module}`}
+                                          />
+                                        ) : member.inlineDoc ? (
+                                          <p className="muted">
+                                            {member.inlineDoc}
+                                          </p>
+                                        ) : (
+                                          <p className="muted">
+                                            No member-level docs found.
+                                          </p>
+                                        )}
+                                      </article>
+                                    ),
+                                  )}
+                                </div>
+                              </section>
+                            )}
                         </article>
                       )}
                     </div>
