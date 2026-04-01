@@ -1,3 +1,57 @@
+## [unreleased]
+
+### Fix
+
+- *(release)* Ensure artifacts directory is created before building portable zip
+
+## [0.26.0] - 2026-04-01
+
+### Chore
+
+- *(deps)* Bump picomatch
+- *(deps)* Bump picomatch from 4.0.3 to 4.0.4 in /website/reference in the npm_and_yarn group across 1 directory (#78)
+- *(deps-dev)* Bump picomatch
+- *(deps-dev)* Bump picomatch from 2.3.1 to 2.3.2 in /editors/vscode in the npm_and_yarn group across 1 directory (#79)
+- *(deps)* Bump the npm_and_yarn group across 1 directory with 1 update
+- *(deps)* Bump the npm_and_yarn group across 1 directory with 1 update (#80)
+- *(deps)* Bump path-to-regexp
+- *(deps)* Bump path-to-regexp from 0.1.12 to 0.1.13 in /website/reference in the npm_and_yarn group across 1 directory (#81)
+
+### Feat
+
+- *(examples)* Add examples for private quirk method access and visibility rules
+- *(codegen)* Enhance transpiler to support aliased imports and function resolution
+- *(release)* Add portable zip support for Windows and update README
+- Enhance Markdown rendering with heading permalinks and copy functionality
+
+### Fix
+
+- *(codegen)* Scope import alias resolution to the owning module
+- *(fls)* Infer let array literal hover types in LSP
+- *(fls)* Harden let inference under incomplete code and dangling operators
+- *(fls)* Preserve imported enum let inference and harden incomplete-expression parsing
+- *(formatting)* Adjust spacing around operators and ensure consistent formatting in examples
+- *(impl)* Update implementation syntax to use 'as' for quirks
+- *(cli,codegen,stdlib)* Improve Linux C build compatibility and reduce gcc warnings
+
+## [0.25.3] - 2026-03-23
+
+### Feat
+
+- Enhance GitHub Pages experience by disabling runtime execution and updating related messages
+
+## [0.25.2] - 2026-03-22
+
+### Feat
+
+- Add syntax highlighting for Fun language reference and integrate favicon
+
+## [0.25.1] - 2026-03-22
+
+### Feat
+
+- Update CHANGELOG for version 0.25.0 with new features and dependency bumps
+
 ## [0.25.0] - 2026-03-22
 
 ### Chore
