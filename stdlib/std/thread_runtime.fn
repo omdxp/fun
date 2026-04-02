@@ -2,9 +2,11 @@
 // 
 // Notes:
 // - This module is the backend-facing contract for thread lifecycle operations.
-// - Current implementation delegates to std.thread (POSIX backend).
+// - Backend selection is sourced from std.runtime_backend.
 
+imp std.runtime_backend;
 imp std.thread;
+imp std.thread_backend_windows;
 
 // Return the active thread runtime backend id.
 // 
@@ -12,30 +14,22 @@ imp std.thread;
 // - 1: POSIX (current)
 // - 2: Windows (reserved)
 pub fun thread_runtime_backend_id() num {
-  ret 1;
+  ret runtime_backend_id();
 }
 
 // Return the active thread runtime backend name.
 pub fun thread_runtime_backend_name() str {
-  if thread_runtime_backend_id() == 2 {
-    ret "windows";
-  }
-  ret "posix";
+  ret runtime_backend_name();
 }
 
 // True when the active thread runtime backend is POSIX.
 pub fun thread_runtime_backend_is_posix() bin {
-  ret thread_runtime_backend_id() == 1;
+  ret runtime_backend_is_posix();
 }
 
 // True when the active thread runtime backend is Windows.
 pub fun thread_runtime_backend_is_windows() bin {
-  ret thread_runtime_backend_id() == 2;
-}
-
-// Return code used by reserved backend paths that are not implemented yet.
-fun thread_runtime_backend_unavailable() num {
-  ret -1000;
+  ret runtime_backend_is_windows();
 }
 
 fun runtime_thread_new_posix() Thread {
@@ -56,25 +50,19 @@ fun runtime_thread_detach_posix(Thread* thread) num {
 
 // Placeholder Windows constructor until a concrete backend is wired.
 fun runtime_thread_new_windows() Thread {
-  ret thread_new();
+  ret thread_backend_windows_new();
 }
 
 fun runtime_thread_start_windows(Thread* thread, raw* entry, raw* arg) num {
-  _ = thread;
-  _ = entry;
-  _ = arg;
-  ret thread_runtime_backend_unavailable();
+  ret thread_backend_windows_start(thread, entry, arg);
 }
 
 fun runtime_thread_join_windows(Thread* thread, raw* out_ret) num {
-  _ = thread;
-  _ = out_ret;
-  ret thread_runtime_backend_unavailable();
+  ret thread_backend_windows_join(thread, out_ret);
 }
 
 fun runtime_thread_detach_windows(Thread* thread) num {
-  _ = thread;
-  ret thread_runtime_backend_unavailable();
+  ret thread_backend_windows_detach(thread);
 }
 
 // Create a new runtime thread handle.

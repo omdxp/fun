@@ -567,6 +567,108 @@ test "std.sync_runtime backend selector APIs transpile" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "std.runtime_backend selector APIs transpile" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_runtime_backend.fn";
+
+    const input =
+        "imp std.runtime_backend;\n" ++
+        "fun main() {\n" ++
+        "  num id = runtime_backend_id();\n" ++
+        "  str name = runtime_backend_name();\n" ++
+        "  bin p = runtime_backend_is_posix();\n" ++
+        "  bin w = runtime_backend_is_windows();\n" ++
+        "  _ = runtime_backend_posix_id();\n" ++
+        "  _ = runtime_backend_windows_id();\n" ++
+        "  _ = id;\n" ++
+        "  _ = name;\n" ++
+        "  _ = p;\n" ++
+        "  _ = w;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_backend_id(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_backend_name(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_backend_is_posix(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_backend_is_windows(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_backend_posix_id(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_backend_windows_id(") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
+test "std.sync_backend_windows skeleton APIs transpile" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_sync_backend_windows.fn";
+
+    const input =
+        "imp std.sync_backend_windows;\n" ++
+        "fun main() {\n" ++
+        "  Mutex m = sync_backend_windows_mutex_new();\n" ++
+        "  CondVar c = sync_backend_windows_condvar_new();\n" ++
+        "  _ = sync_backend_windows_unavailable();\n" ++
+        "  _ = sync_backend_windows_mutex_init(&m);\n" ++
+        "  _ = sync_backend_windows_mutex_lock(&m);\n" ++
+        "  _ = sync_backend_windows_mutex_try_lock(&m);\n" ++
+        "  _ = sync_backend_windows_mutex_unlock(&m);\n" ++
+        "  _ = sync_backend_windows_condvar_init(&c);\n" ++
+        "  _ = sync_backend_windows_condvar_wait(&c, &m);\n" ++
+        "  _ = sync_backend_windows_condvar_timed_wait(&c, &m, NULL);\n" ++
+        "  _ = sync_backend_windows_condvar_signal(&c);\n" ++
+        "  _ = sync_backend_windows_condvar_broadcast(&c);\n" ++
+        "  _ = sync_backend_windows_condvar_destroy(&c);\n" ++
+        "  _ = sync_backend_windows_mutex_destroy(&m);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_windows_unavailable(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_windows_mutex_new(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_windows_condvar_new(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_windows_mutex_init(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_windows_mutex_lock(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_windows_mutex_try_lock(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_windows_mutex_unlock(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_windows_mutex_destroy(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_windows_condvar_init(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_windows_condvar_wait(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_windows_condvar_timed_wait(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_windows_condvar_signal(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_windows_condvar_broadcast(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_windows_condvar_destroy(") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
+test "std.thread_backend_windows skeleton APIs transpile" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_thread_backend_windows.fn";
+
+    const input =
+        "imp std.thread_backend_windows;\n" ++
+        "fun main() {\n" ++
+        "  Thread t = thread_backend_windows_new();\n" ++
+        "  _ = thread_backend_windows_unavailable();\n" ++
+        "  _ = thread_backend_windows_start(&t, NULL, NULL);\n" ++
+        "  _ = thread_backend_windows_join(&t, NULL);\n" ++
+        "  _ = thread_backend_windows_detach(&t);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_backend_windows_new(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_backend_windows_unavailable(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_backend_windows_start(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_backend_windows_join(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_backend_windows_detach(") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
 test "transitive std.thread_runtime import emits pthread headers" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_transitive_std_thread_runtime.fn";

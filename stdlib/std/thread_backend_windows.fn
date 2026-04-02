@@ -1,0 +1,44 @@
+// Windows thread backend skeleton.
+// 
+// Notes:
+// - This module defines the Windows backend contract used by std.thread_runtime.
+// - Lifecycle operations currently return an explicit unimplemented code.
+
+imp std.thread;
+
+// Return code for unimplemented Windows backend operations.
+pub fun thread_backend_windows_unavailable() num {
+  ret -1000;
+}
+
+// Create a new Windows backend thread handle placeholder.
+pub fun thread_backend_windows_new() Thread {
+  ret thread_new();
+}
+
+// Start a Windows backend thread handle placeholder.
+pub fun thread_backend_windows_start(Thread* thread, raw* entry, raw* arg) num {
+  _ = entry;
+  _ = arg;
+  if thread == NULL {
+    ret -1;
+  }
+  ret thread_backend_windows_unavailable();
+}
+
+// Join a Windows backend thread handle placeholder.
+pub fun thread_backend_windows_join(Thread* thread, raw* out_ret) num {
+  _ = out_ret;
+  if thread == NULL {
+    ret -1;
+  }
+  ret thread_backend_windows_unavailable();
+}
+
+// Detach a Windows backend thread handle placeholder.
+pub fun thread_backend_windows_detach(Thread* thread) num {
+  if thread == NULL {
+    ret -1;
+  }
+  ret thread_backend_windows_unavailable();
+}

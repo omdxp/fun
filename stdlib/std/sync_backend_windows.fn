@@ -1,0 +1,114 @@
+// Windows synchronization backend skeleton.
+// 
+// Notes:
+// - This module defines the Windows backend contract used by std.sync_runtime.
+// - Locking and condition variable operations currently return an explicit
+// unimplemented code.
+
+imp std.sync;
+
+// Return code for unimplemented Windows backend operations.
+pub fun sync_backend_windows_unavailable() num {
+  ret -1000;
+}
+
+// Create a new Windows backend mutex placeholder.
+pub fun sync_backend_windows_mutex_new() Mutex {
+  ret mutex_new();
+}
+
+// Create a new Windows backend condition variable placeholder.
+pub fun sync_backend_windows_condvar_new() CondVar {
+  ret condvar_new();
+}
+
+// Initialize a Windows backend mutex placeholder.
+pub fun sync_backend_windows_mutex_init(Mutex* mutex) num {
+  if mutex == NULL {
+    ret -1;
+  }
+  ret sync_backend_windows_unavailable();
+}
+
+// Lock a Windows backend mutex placeholder.
+pub fun sync_backend_windows_mutex_lock(Mutex* mutex) num {
+  if mutex == NULL {
+    ret -1;
+  }
+  ret sync_backend_windows_unavailable();
+}
+
+// Try lock a Windows backend mutex placeholder.
+pub fun sync_backend_windows_mutex_try_lock(Mutex* mutex) num {
+  if mutex == NULL {
+    ret -1;
+  }
+  ret sync_backend_windows_unavailable();
+}
+
+// Unlock a Windows backend mutex placeholder.
+pub fun sync_backend_windows_mutex_unlock(Mutex* mutex) num {
+  if mutex == NULL {
+    ret -1;
+  }
+  ret sync_backend_windows_unavailable();
+}
+
+// Destroy a Windows backend mutex placeholder.
+pub fun sync_backend_windows_mutex_destroy(Mutex* mutex) num {
+  if mutex == NULL {
+    ret -1;
+  }
+  ret sync_backend_windows_unavailable();
+}
+
+// Initialize a Windows backend condition variable placeholder.
+pub fun sync_backend_windows_condvar_init(CondVar* cond) num {
+  if cond == NULL {
+    ret -1;
+  }
+  ret sync_backend_windows_unavailable();
+}
+
+// Wait on a Windows backend condition variable placeholder.
+pub fun sync_backend_windows_condvar_wait(CondVar* cond, Mutex* mutex) num {
+  if cond == NULL || mutex == NULL {
+    ret -1;
+  }
+  ret sync_backend_windows_unavailable();
+}
+
+// Timed wait on a Windows backend condition variable placeholder.
+pub fun sync_backend_windows_condvar_timed_wait(CondVar* cond, Mutex* mutex, raw* abs_time) num {
+  if cond == NULL || mutex == NULL {
+    ret -1;
+  }
+  if abs_time == NULL {
+    ret -2;
+  }
+  ret sync_backend_windows_unavailable();
+}
+
+// Signal one Windows backend condition variable waiter placeholder.
+pub fun sync_backend_windows_condvar_signal(CondVar* cond) num {
+  if cond == NULL {
+    ret -1;
+  }
+  ret sync_backend_windows_unavailable();
+}
+
+// Broadcast to all Windows backend condition variable waiters placeholder.
+pub fun sync_backend_windows_condvar_broadcast(CondVar* cond) num {
+  if cond == NULL {
+    ret -1;
+  }
+  ret sync_backend_windows_unavailable();
+}
+
+// Destroy a Windows backend condition variable placeholder.
+pub fun sync_backend_windows_condvar_destroy(CondVar* cond) num {
+  if cond == NULL {
+    ret -1;
+  }
+  ret sync_backend_windows_unavailable();
+}
