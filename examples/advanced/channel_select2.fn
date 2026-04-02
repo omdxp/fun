@@ -9,9 +9,9 @@ fun main() {
 
   num out = 0;
   num which = -1;
-  num rc = a.select_recv_timeout_with(&b, &out, &which, 25);
+  num rc = a.select_recv_timeout_with_slice(&b, &out, &which, 25, 2);
 
-  printf("select rc=%lld which=%lld value=%lld\n", rc, which, out);
+  printf("select rc=%lld which=%lld value=%lld slice=%lld\n", rc, which, out, 2);
 
   _ = a.destroy();
   _ = b.destroy();

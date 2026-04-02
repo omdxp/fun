@@ -701,9 +701,31 @@ impl Channel<T> {
   // - -1 when other/out/out_index is null
   // - other nonzero codes on synchronization failures
   pub select_recv_timeout_with(Channel<T>* other, T* out, num* out_index, num timeout_ms) num {
+    ret self.select_recv_timeout_with_slice(other, out, out_index, timeout_ms, self.select_wait_slice_ms);
+  }
+
+  // Receive from self or another channel, polling until timeout, with
+  // an explicit wait-slice override.
+  // 
+  // Params:
+  // - other: second channel pointer
+  // - out: destination pointer
+  // - out_index: destination pointer for selected channel index (0 for self, 1 for other)
+  // - timeout_ms: max wait in ms (negative means wait forever)
+  // - wait_slice_ms: wait duration per polling round (clamped to >= 1)
+  // 
+  // Returns:
+  // - 0 on success
+  // - 1 when both channels are closed and empty
+  // - 2 on timeout
+  // - -1 when other/out/out_index is null
+  // - other nonzero codes on synchronization failures
+  pub select_recv_timeout_with_slice(Channel<T>* other, T* out, num* out_index, num timeout_ms, num wait_slice_ms) num {
     if other == NULL || out == NULL || out_index == NULL {
       ret -1;
     }
+
+    num base_wait_slice_ms = channel_sanitize_wait_slice_ms(wait_slice_ms);
 
     bin wait_forever = timeout_ms < 0;
     ChannelAbsTime abs_time;
@@ -753,18 +775,18 @@ impl Channel<T> {
         wait_slot = 0;
       }
 
-      num wait_slice_ms = channel_sanitize_wait_slice_ms(self.select_wait_slice_ms);
+      num wait_now_ms = base_wait_slice_ms;
       if wait_forever == false {
         num rem_ms = channel_deadline_remaining_ms(&abs_time);
         if rem_ms <= 0 {
           ret 2;
         }
-        if wait_slice_ms > rem_ms {
-          wait_slice_ms = rem_ms;
+        if wait_now_ms > rem_ms {
+          wait_now_ms = rem_ms;
         }
       }
 
-      num wait_rc = self.wait_recv_hint_timeout(hint, wait_slice_ms);
+      num wait_rc = self.wait_recv_hint_timeout(hint, wait_now_ms);
       if wait_rc != 0 && wait_rc != 2 {
         ret wait_rc;
       }
@@ -786,54 +808,7 @@ impl Channel<T> {
   // - -1 when other/out/out_index is null
   // - other nonzero codes on synchronization failures
   pub select_recv_with(Channel<T>* other, T* out, num* out_index) num {
-    if other == NULL || out == NULL || out_index == NULL {
-      ret -1;
-    }
-
-    num wait_slot = 0;
-
-    for true {
-      out_index[0] = -1;
-
-      num rc_self = self.try_recv(out);
-      if rc_self == 0 {
-        out_index[0] = 0;
-        ret 0;
-      }
-      if rc_self != 1 && rc_self != 2 {
-        ret rc_self;
-      }
-
-      num rc_other = other.try_recv(out);
-      if rc_other == 0 {
-        out_index[0] = 1;
-        ret 0;
-      }
-      if rc_other != 1 && rc_other != 2 {
-        ret rc_other;
-      }
-
-      if rc_self == 1 && rc_other == 1 {
-        ret 1;
-      }
-
-      Channel<T>* hint= self;
-      if wait_slot == 1 {
-        hint = other;
-      }
-      wait_slot = wait_slot + 1;
-      if wait_slot >= 2 {
-        wait_slot = 0;
-      }
-
-      num wait_slice_ms = channel_sanitize_wait_slice_ms(self.select_wait_slice_ms);
-      num wait_rc = self.wait_recv_hint_timeout(hint, wait_slice_ms);
-      if wait_rc != 0 && wait_rc != 2 {
-        ret wait_rc;
-      }
-    }
-
-    ret 1;
+    ret self.select_recv_timeout_with_slice(other, out, out_index, -1, self.select_wait_slice_ms);
   }
 
   // Try receiving from self + two other channels without blocking, using
@@ -928,9 +903,33 @@ impl Channel<T> {
   // - -1 when any pointer argument is null
   // - other nonzero codes on synchronization failures
   pub select_recv_timeout3_rr_with(Channel<T>* other_a, Channel<T>* other_b, num* next_index, T* out, num* out_index, num timeout_ms) num {
+    ret self.select_recv_timeout3_rr_with_slice(other_a, other_b, next_index, out, out_index, timeout_ms, self.select_wait_slice_ms);
+  }
+
+  // Receive from self + two other channels, polling until timeout, with
+  // fairness rotation and an explicit wait-slice override.
+  // 
+  // Params:
+  // - other_a: second channel pointer
+  // - other_b: third channel pointer
+  // - next_index: in/out probe start index (0=self, 1=other_a, 2=other_b)
+  // - out: destination pointer
+  // - out_index: destination pointer for selected channel index
+  // - timeout_ms: max wait in ms (negative means wait forever)
+  // - wait_slice_ms: wait duration per polling round (clamped to >= 1)
+  // 
+  // Returns:
+  // - 0 on success
+  // - 1 when all three channels are closed and empty
+  // - 2 on timeout
+  // - -1 when any pointer argument is null
+  // - other nonzero codes on synchronization failures
+  pub select_recv_timeout3_rr_with_slice(Channel<T>* other_a, Channel<T>* other_b, num* next_index, T* out, num* out_index, num timeout_ms, num wait_slice_ms) num {
     if other_a == NULL || other_b == NULL || next_index == NULL || out == NULL || out_index == NULL {
       ret -1;
     }
+
+    num base_wait_slice_ms = channel_sanitize_wait_slice_ms(wait_slice_ms);
 
     bin wait_forever = timeout_ms < 0;
     ChannelAbsTime abs_time;
@@ -973,18 +972,18 @@ impl Channel<T> {
         wait_slot = 0;
       }
 
-      num wait_slice_ms = channel_sanitize_wait_slice_ms(self.select_wait_slice_ms);
+      num wait_now_ms = base_wait_slice_ms;
       if wait_forever == false {
         num rem_ms = channel_deadline_remaining_ms(&abs_time);
         if rem_ms <= 0 {
           ret 2;
         }
-        if wait_slice_ms > rem_ms {
-          wait_slice_ms = rem_ms;
+        if wait_now_ms > rem_ms {
+          wait_now_ms = rem_ms;
         }
       }
 
-      num wait_rc = self.wait_recv_hint_timeout(hint, wait_slice_ms);
+      num wait_rc = self.wait_recv_hint_timeout(hint, wait_now_ms);
       if wait_rc != 0 && wait_rc != 2 {
         ret wait_rc;
       }

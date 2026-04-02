@@ -345,7 +345,7 @@ Examples:
 - `std.result`: generic `Result<T>` container
 - `std.collections`: collection quirks (len/is_empty)
 - `std.string`: string helpers
-- `std.channel`: bounded blocking channels (ring buffer) with timeout send/recv, configurable select wait-slice tuning, and select_recv_with/select_recv3_rr_with helpers, built on `std.sync`
+- `std.channel`: bounded blocking channels (ring buffer) with timeout send/recv, channel-level and per-call select wait-slice tuning, and select_recv_with/select_recv3_rr_with helpers, built on `std.sync`
 - `std.thread`: POSIX-backed thread helpers (`thread_new`, start/join/detach)
 - `std.sync`: POSIX-backed mutex and condition variable helpers
 - `std.json`, `std.toml`: minimal serialization helpers
