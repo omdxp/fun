@@ -1,0 +1,262 @@
+// Sync runtime shim contract.
+// 
+// Notes:
+// - This module is the backend-facing contract for synchronization operations.
+// - Current implementation delegates to std.sync (POSIX-backed).
+
+imp std.sync;
+
+// Return the active sync runtime backend id.
+// 
+// Backend ids:
+// - 1: POSIX (current)
+// - 2: Windows (reserved)
+pub fun sync_runtime_backend_id() num {
+  ret 1;
+}
+
+// Return the active sync runtime backend name.
+pub fun sync_runtime_backend_name() str {
+  if sync_runtime_backend_id() == 2 {
+    ret "windows";
+  }
+  ret "posix";
+}
+
+// True when the active sync runtime backend is POSIX.
+pub fun sync_runtime_backend_is_posix() bin {
+  ret sync_runtime_backend_id() == 1;
+}
+
+// True when the active sync runtime backend is Windows.
+pub fun sync_runtime_backend_is_windows() bin {
+  ret sync_runtime_backend_id() == 2;
+}
+
+// Return code used by reserved backend paths that are not implemented yet.
+fun sync_runtime_backend_unavailable() num {
+  ret -1000;
+}
+
+fun runtime_mutex_new_posix() Mutex {
+  ret mutex_new();
+}
+
+fun runtime_condvar_new_posix() CondVar {
+  ret condvar_new();
+}
+
+fun runtime_mutex_init_posix(Mutex* mutex) num {
+  ret mutex_init(mutex);
+}
+
+fun runtime_mutex_lock_posix(Mutex* mutex) num {
+  ret mutex_lock(mutex);
+}
+
+fun runtime_mutex_try_lock_posix(Mutex* mutex) num {
+  ret mutex_try_lock(mutex);
+}
+
+fun runtime_mutex_unlock_posix(Mutex* mutex) num {
+  ret mutex_unlock(mutex);
+}
+
+fun runtime_mutex_destroy_posix(Mutex* mutex) num {
+  ret mutex_destroy(mutex);
+}
+
+fun runtime_condvar_init_posix(CondVar* cond) num {
+  ret condvar_init(cond);
+}
+
+fun runtime_condvar_wait_posix(CondVar* cond, Mutex* mutex) num {
+  ret condvar_wait(cond, mutex);
+}
+
+fun runtime_condvar_timed_wait_posix(CondVar* cond, Mutex* mutex, raw* abs_time) num {
+  ret condvar_timed_wait(cond, mutex, abs_time);
+}
+
+fun runtime_condvar_signal_posix(CondVar* cond) num {
+  ret condvar_signal(cond);
+}
+
+fun runtime_condvar_broadcast_posix(CondVar* cond) num {
+  ret condvar_broadcast(cond);
+}
+
+fun runtime_condvar_destroy_posix(CondVar* cond) num {
+  ret condvar_destroy(cond);
+}
+
+// Placeholder Windows constructors until a concrete backend is wired.
+fun runtime_mutex_new_windows() Mutex {
+  ret mutex_new();
+}
+
+fun runtime_condvar_new_windows() CondVar {
+  ret condvar_new();
+}
+
+fun runtime_mutex_init_windows(Mutex* mutex) num {
+  _ = mutex;
+  ret sync_runtime_backend_unavailable();
+}
+
+fun runtime_mutex_lock_windows(Mutex* mutex) num {
+  _ = mutex;
+  ret sync_runtime_backend_unavailable();
+}
+
+fun runtime_mutex_try_lock_windows(Mutex* mutex) num {
+  _ = mutex;
+  ret sync_runtime_backend_unavailable();
+}
+
+fun runtime_mutex_unlock_windows(Mutex* mutex) num {
+  _ = mutex;
+  ret sync_runtime_backend_unavailable();
+}
+
+fun runtime_mutex_destroy_windows(Mutex* mutex) num {
+  _ = mutex;
+  ret sync_runtime_backend_unavailable();
+}
+
+fun runtime_condvar_init_windows(CondVar* cond) num {
+  _ = cond;
+  ret sync_runtime_backend_unavailable();
+}
+
+fun runtime_condvar_wait_windows(CondVar* cond, Mutex* mutex) num {
+  _ = cond;
+  _ = mutex;
+  ret sync_runtime_backend_unavailable();
+}
+
+fun runtime_condvar_timed_wait_windows(CondVar* cond, Mutex* mutex, raw* abs_time) num {
+  _ = cond;
+  _ = mutex;
+  _ = abs_time;
+  ret sync_runtime_backend_unavailable();
+}
+
+fun runtime_condvar_signal_windows(CondVar* cond) num {
+  _ = cond;
+  ret sync_runtime_backend_unavailable();
+}
+
+fun runtime_condvar_broadcast_windows(CondVar* cond) num {
+  _ = cond;
+  ret sync_runtime_backend_unavailable();
+}
+
+fun runtime_condvar_destroy_windows(CondVar* cond) num {
+  _ = cond;
+  ret sync_runtime_backend_unavailable();
+}
+
+// Create a new runtime mutex.
+pub fun runtime_mutex_new() Mutex {
+  if sync_runtime_backend_is_windows() == true {
+    ret runtime_mutex_new_windows();
+  }
+  ret runtime_mutex_new_posix();
+}
+
+// Create a new runtime condition variable.
+pub fun runtime_condvar_new() CondVar {
+  if sync_runtime_backend_is_windows() == true {
+    ret runtime_condvar_new_windows();
+  }
+  ret runtime_condvar_new_posix();
+}
+
+// Initialize a runtime mutex.
+pub fun runtime_mutex_init(Mutex* mutex) num {
+  if sync_runtime_backend_is_windows() == true {
+    ret runtime_mutex_init_windows(mutex);
+  }
+  ret runtime_mutex_init_posix(mutex);
+}
+
+// Lock a runtime mutex.
+pub fun runtime_mutex_lock(Mutex* mutex) num {
+  if sync_runtime_backend_is_windows() == true {
+    ret runtime_mutex_lock_windows(mutex);
+  }
+  ret runtime_mutex_lock_posix(mutex);
+}
+
+// Try locking a runtime mutex.
+pub fun runtime_mutex_try_lock(Mutex* mutex) num {
+  if sync_runtime_backend_is_windows() == true {
+    ret runtime_mutex_try_lock_windows(mutex);
+  }
+  ret runtime_mutex_try_lock_posix(mutex);
+}
+
+// Unlock a runtime mutex.
+pub fun runtime_mutex_unlock(Mutex* mutex) num {
+  if sync_runtime_backend_is_windows() == true {
+    ret runtime_mutex_unlock_windows(mutex);
+  }
+  ret runtime_mutex_unlock_posix(mutex);
+}
+
+// Destroy a runtime mutex.
+pub fun runtime_mutex_destroy(Mutex* mutex) num {
+  if sync_runtime_backend_is_windows() == true {
+    ret runtime_mutex_destroy_windows(mutex);
+  }
+  ret runtime_mutex_destroy_posix(mutex);
+}
+
+// Initialize a runtime condition variable.
+pub fun runtime_condvar_init(CondVar* cond) num {
+  if sync_runtime_backend_is_windows() == true {
+    ret runtime_condvar_init_windows(cond);
+  }
+  ret runtime_condvar_init_posix(cond);
+}
+
+// Wait on a runtime condition variable.
+pub fun runtime_condvar_wait(CondVar* cond, Mutex* mutex) num {
+  if sync_runtime_backend_is_windows() == true {
+    ret runtime_condvar_wait_windows(cond, mutex);
+  }
+  ret runtime_condvar_wait_posix(cond, mutex);
+}
+
+// Timed wait on a runtime condition variable.
+pub fun runtime_condvar_timed_wait(CondVar* cond, Mutex* mutex, raw* abs_time) num {
+  if sync_runtime_backend_is_windows() == true {
+    ret runtime_condvar_timed_wait_windows(cond, mutex, abs_time);
+  }
+  ret runtime_condvar_timed_wait_posix(cond, mutex, abs_time);
+}
+
+// Signal one runtime condition variable waiter.
+pub fun runtime_condvar_signal(CondVar* cond) num {
+  if sync_runtime_backend_is_windows() == true {
+    ret runtime_condvar_signal_windows(cond);
+  }
+  ret runtime_condvar_signal_posix(cond);
+}
+
+// Broadcast to all runtime condition variable waiters.
+pub fun runtime_condvar_broadcast(CondVar* cond) num {
+  if sync_runtime_backend_is_windows() == true {
+    ret runtime_condvar_broadcast_windows(cond);
+  }
+  ret runtime_condvar_broadcast_posix(cond);
+}
+
+// Destroy a runtime condition variable.
+pub fun runtime_condvar_destroy(CondVar* cond) num {
+  if sync_runtime_backend_is_windows() == true {
+    ret runtime_condvar_destroy_windows(cond);
+  }
+  ret runtime_condvar_destroy_posix(cond);
+}

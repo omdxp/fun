@@ -4,6 +4,7 @@
 // building block for higher-level concurrency features.
 
 imp std.sync;
+imp std.sync_runtime;
 imp std.c.mem;
 imp std.c.string;
 imp std.c.time;
@@ -49,9 +50,9 @@ pub compound Channel<T> {
 // - initialized channel
 pub fun channel_new<T>(T default_value) Channel<T> {
   Channel<T> ch;
-  ch.mu = mutex_new();
-  ch.can_send = condvar_new();
-  ch.can_recv = condvar_new();
+  ch.mu = runtime_mutex_new();
+  ch.can_send = runtime_condvar_new();
+  ch.can_recv = runtime_condvar_new();
 
   ch.cap = 1;
   ch.has_buffer = false;
@@ -86,9 +87,9 @@ pub fun channel_new_cap<T>(T default_value, num capacity) Channel<T> {
   }
 
   Channel<T> ch;
-  ch.mu = mutex_new();
-  ch.can_send = condvar_new();
-  ch.can_recv = condvar_new();
+  ch.mu = runtime_mutex_new();
+  ch.can_send = runtime_condvar_new();
+  ch.can_recv = runtime_condvar_new();
 
   ch.cap = capacity;
   ch.has_buffer = false;
@@ -278,15 +279,15 @@ impl Channel<T> {
       ret -2;
     }
 
-    num rc = self.mu.init();
+    num rc = runtime_mutex_init(&self.mu);
     if rc != 0 {
       ret rc;
     }
-    rc = self.can_send.init();
+    rc = runtime_condvar_init(&self.can_send);
     if rc != 0 {
       ret rc;
     }
-    rc = self.can_recv.init();
+    rc = runtime_condvar_init(&self.can_recv);
     if rc != 0 {
       ret rc;
     }
@@ -327,14 +328,14 @@ impl Channel<T> {
       ret rc;
     }
 
-    rc = self.mu.lock();
+    rc = runtime_mutex_lock(&self.mu);
     if rc != 0 {
       ret rc;
     }
-    defer self.mu.unlock();
+    defer runtime_mutex_unlock(&self.mu);
 
     for self.count == self.cap && self.closed == false {
-      rc = self.can_send.wait(&self.mu);
+      rc = runtime_condvar_wait(&self.can_send, &self.mu);
       if rc != 0 {
         ret rc;
       }
@@ -351,7 +352,7 @@ impl Channel<T> {
     }
     self.count = self.count + 1;
 
-    _ = self.can_recv.signal();
+    _ = runtime_condvar_signal(&self.can_recv);
     ret 0;
   }
 
@@ -376,11 +377,11 @@ impl Channel<T> {
       timeout_ms = 0;
     }
 
-    rc = self.mu.lock();
+    rc = runtime_mutex_lock(&self.mu);
     if rc != 0 {
       ret rc;
     }
-    defer self.mu.unlock();
+    defer runtime_mutex_unlock(&self.mu);
 
     if self.closed == true {
       ret 1;
@@ -393,7 +394,7 @@ impl Channel<T> {
     }
 
     for self.count == self.cap && self.closed == false {
-      rc = self.can_send.timed_wait(&self.mu, &abs_time);
+      rc = runtime_condvar_timed_wait(&self.can_send, &self.mu, &abs_time);
       if rc != 0 {
         if self.count < self.cap || self.closed == true {
           break;
@@ -419,7 +420,7 @@ impl Channel<T> {
     }
     self.count = self.count + 1;
 
-    _ = self.can_recv.signal();
+    _ = runtime_condvar_signal(&self.can_recv);
     ret 0;
   }
 
@@ -437,11 +438,11 @@ impl Channel<T> {
       ret rc;
     }
 
-    rc = self.mu.lock();
+    rc = runtime_mutex_lock(&self.mu);
     if rc != 0 {
       ret rc;
     }
-    defer self.mu.unlock();
+    defer runtime_mutex_unlock(&self.mu);
 
     if self.closed == true {
       ret 1;
@@ -457,7 +458,7 @@ impl Channel<T> {
     }
     self.count = self.count + 1;
 
-    _ = self.can_recv.signal();
+    _ = runtime_condvar_signal(&self.can_recv);
     ret 0;
   }
 
@@ -481,14 +482,14 @@ impl Channel<T> {
       ret rc;
     }
 
-    rc = self.mu.lock();
+    rc = runtime_mutex_lock(&self.mu);
     if rc != 0 {
       ret rc;
     }
-    defer self.mu.unlock();
+    defer runtime_mutex_unlock(&self.mu);
 
     for self.count == 0 && self.closed == false {
-      rc = self.can_recv.wait(&self.mu);
+      rc = runtime_condvar_wait(&self.can_recv, &self.mu);
       if rc != 0 {
         ret rc;
       }
@@ -505,7 +506,7 @@ impl Channel<T> {
     }
     self.count = self.count - 1;
 
-    _ = self.can_send.signal();
+    _ = runtime_condvar_signal(&self.can_send);
     ret 0;
   }
 
@@ -534,11 +535,11 @@ impl Channel<T> {
       timeout_ms = 0;
     }
 
-    rc = self.mu.lock();
+    rc = runtime_mutex_lock(&self.mu);
     if rc != 0 {
       ret rc;
     }
-    defer self.mu.unlock();
+    defer runtime_mutex_unlock(&self.mu);
 
     if self.count == 0 && self.closed == false {
       ChannelAbsTime abs_time;
@@ -548,7 +549,7 @@ impl Channel<T> {
       }
 
       for self.count == 0 && self.closed == false {
-        rc = self.can_recv.timed_wait(&self.mu, &abs_time);
+        rc = runtime_condvar_timed_wait(&self.can_recv, &self.mu, &abs_time);
         if rc != 0 {
           if self.count > 0 || self.closed == true {
             break;
@@ -575,7 +576,7 @@ impl Channel<T> {
     }
     self.count = self.count - 1;
 
-    _ = self.can_send.signal();
+    _ = runtime_condvar_signal(&self.can_send);
     ret 0;
   }
 
@@ -628,11 +629,11 @@ impl Channel<T> {
       ret rc;
     }
 
-    rc = self.mu.lock();
+    rc = runtime_mutex_lock(&self.mu);
     if rc != 0 {
       ret rc;
     }
-    defer self.mu.unlock();
+    defer runtime_mutex_unlock(&self.mu);
 
     if self.count == 0 {
       if self.closed == true {
@@ -648,7 +649,7 @@ impl Channel<T> {
     }
     self.count = self.count - 1;
 
-    _ = self.can_send.signal();
+    _ = runtime_condvar_signal(&self.can_send);
     ret 0;
   }
 
@@ -672,11 +673,11 @@ impl Channel<T> {
       ret rc;
     }
 
-    rc = hint.mu.lock();
+    rc = runtime_mutex_lock(&hint.mu);
     if rc != 0 {
       ret rc;
     }
-    defer hint.mu.unlock();
+    defer runtime_mutex_unlock(&hint.mu);
 
     if hint.count > 0 || hint.closed == true {
       ret 0;
@@ -688,7 +689,7 @@ impl Channel<T> {
       ret rc;
     }
 
-    rc = hint.can_recv.timed_wait(&hint.mu, &abs_time);
+    rc = runtime_condvar_timed_wait(&hint.can_recv, &hint.mu, &abs_time);
     if rc != 0 {
       if channel_deadline_reached(&abs_time) == true {
         ret 2;
@@ -1217,15 +1218,15 @@ impl Channel<T> {
       ret rc;
     }
 
-    rc = self.mu.lock();
+    rc = runtime_mutex_lock(&self.mu);
     if rc != 0 {
       ret rc;
     }
-    defer self.mu.unlock();
+    defer runtime_mutex_unlock(&self.mu);
 
     self.closed = true;
-    _ = self.can_recv.broadcast();
-    _ = self.can_send.broadcast();
+    _ = runtime_condvar_broadcast(&self.can_recv);
+    _ = runtime_condvar_broadcast(&self.can_send);
     ret 0;
   }
 
@@ -1254,14 +1255,14 @@ impl Channel<T> {
       self.has_buffer = false;
     }
 
-    num rc = self.can_recv.destroy();
+    num rc = runtime_condvar_destroy(&self.can_recv);
     if rc != 0 {
       ret rc;
     }
-    rc = self.can_send.destroy();
+    rc = runtime_condvar_destroy(&self.can_send);
     if rc != 0 {
       ret rc;
     }
-    ret self.mu.destroy();
+    ret runtime_mutex_destroy(&self.mu);
   }
 }

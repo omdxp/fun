@@ -40,7 +40,7 @@ pub quirk Serialize {
 Note: `num`/`dec` are 64-bit by default (`int64_t`/`double`), and Fun also supports fixed-width numeric types (`i8`..`i64`, `u8`..`u64`, `f32`, `f64`) plus arbitrary-width integers (`iN`, `uN`).
 
 - **std/array.fn**: Fixed-size array helpers (get/set/swap/reverse).
-- **std/channel.fn**: Bounded blocking ring-buffer channels with timeout send/recv, channel-level and per-call select wait-slice/backoff tuning (timeout and blocking variants), plus select_recv_with and select_recv3_rr_with helpers on top of std.sync.
+- **std/channel.fn**: Bounded blocking ring-buffer channels with timeout send/recv, channel-level and per-call select wait-slice/backoff tuning (timeout and blocking variants), plus select_recv_with and select_recv3_rr_with helpers with synchronization routed through std.sync_runtime.
 - **std/cli.fn**: Command-line argument parsing helpers (long/short flags, bundling, `--` stop).
 - **std/collections.fn**: Collection quirks (len/is_empty) aligned with std.quirks.
 - **std/fs.fn**: File system helpers (exists, read/write, copy, read_lines).
@@ -56,9 +56,10 @@ Note: `num`/`dec` are 64-bit by default (`int64_t`/`double`), and Fun also suppo
 - **std/path.fn**: Path helpers (join, join_many, basename, dirname, extname, strip_ext, change_ext, is_abs).
 - **std/rand.fn**: PRNG utilities (range_dec, chance, shuffle).
 - **std/sync.fn**: POSIX-backed synchronization wrappers (mutex/condition variable method and helper forms).
+- **std/sync_runtime.fn**: Backend-facing sync runtime shim (`runtime_mutex_*`, `runtime_condvar_*`) with backend selector helpers (`sync_runtime_backend_*`), currently using the POSIX path with Windows placeholders reserved.
 - **std/string.fn**: String helpers (count, strip prefix/suffix, split lines, replace, case conversion, repeat, etc.).
 - **std/thread.fn**: POSIX-backed thread lifecycle helpers (`thread_new`, plus method and helper forms for start/join/detach).
-- **std/thread_runtime.fn**: Backend-facing thread runtime shim (`runtime_thread_*`), currently backed by std.thread.
+- **std/thread_runtime.fn**: Backend-facing thread runtime shim (`runtime_thread_*`) with backend selector helpers (`thread_runtime_backend_*`), currently using the POSIX path with Windows placeholders reserved.
 - **std/thread_pool.fn**: POSIX-backed thread pool helpers (`thread_pool_new`, start_all/join_all/detach_all) routed through std.thread_runtime.
 - **std/time.fn**: Time helpers (epoch, formatting, UTC, diffs).
 - **std/toml.fn**: Minimal TOML parse/stringify for flat key/value.

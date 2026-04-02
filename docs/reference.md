@@ -345,10 +345,11 @@ Examples:
 - `std.result`: generic `Result<T>` container
 - `std.collections`: collection quirks (len/is_empty)
 - `std.string`: string helpers
-- `std.channel`: bounded blocking channels (ring buffer) with timeout send/recv, channel-level and per-call select wait-slice/backoff tuning (timeout and blocking variants), and select_recv_with/select_recv3_rr_with helpers, built on `std.sync`
+- `std.channel`: bounded blocking channels (ring buffer) with timeout send/recv, channel-level and per-call select wait-slice/backoff tuning (timeout and blocking variants), and select_recv_with/select_recv3_rr_with helpers, with synchronization routed through `std.sync_runtime`
 - `std.thread`: POSIX-backed thread helpers (`thread_new`, method and helper forms for start/join/detach)
-- `std.thread_runtime`: backend-facing thread runtime shim (`runtime_thread_*`), currently backed by `std.thread`
+- `std.thread_runtime`: backend-facing thread runtime shim (`runtime_thread_*`) plus backend selector helpers (`thread_runtime_backend_*`), currently using the POSIX path with Windows placeholders reserved
 - `std.thread_pool`: POSIX-backed thread pool helpers (`thread_pool_new`, start_all/join_all/detach_all) routed through `std.thread_runtime`
+- `std.sync_runtime`: backend-facing sync runtime shim (`runtime_mutex_*`, `runtime_condvar_*`) plus backend selector helpers (`sync_runtime_backend_*`), currently using the POSIX path with Windows placeholders reserved
 - `std.sync`: POSIX-backed mutex/condition variable helpers (method and helper forms)
 - `std.json`, `std.toml`: minimal serialization helpers
 - `std.time`, `std.rand`, `std.math`, `std.path`, `std.net`, etc.

@@ -6,22 +6,105 @@
 
 imp std.thread;
 
+// Return the active thread runtime backend id.
+// 
+// Backend ids:
+// - 1: POSIX (current)
+// - 2: Windows (reserved)
+pub fun thread_runtime_backend_id() num {
+  ret 1;
+}
+
+// Return the active thread runtime backend name.
+pub fun thread_runtime_backend_name() str {
+  if thread_runtime_backend_id() == 2 {
+    ret "windows";
+  }
+  ret "posix";
+}
+
+// True when the active thread runtime backend is POSIX.
+pub fun thread_runtime_backend_is_posix() bin {
+  ret thread_runtime_backend_id() == 1;
+}
+
+// True when the active thread runtime backend is Windows.
+pub fun thread_runtime_backend_is_windows() bin {
+  ret thread_runtime_backend_id() == 2;
+}
+
+// Return code used by reserved backend paths that are not implemented yet.
+fun thread_runtime_backend_unavailable() num {
+  ret -1000;
+}
+
+fun runtime_thread_new_posix() Thread {
+  ret thread_new();
+}
+
+fun runtime_thread_start_posix(Thread* thread, raw* entry, raw* arg) num {
+  ret thread_start(thread, entry, arg);
+}
+
+fun runtime_thread_join_posix(Thread* thread, raw* out_ret) num {
+  ret thread_join(thread, out_ret);
+}
+
+fun runtime_thread_detach_posix(Thread* thread) num {
+  ret thread_detach(thread);
+}
+
+// Placeholder Windows constructor until a concrete backend is wired.
+fun runtime_thread_new_windows() Thread {
+  ret thread_new();
+}
+
+fun runtime_thread_start_windows(Thread* thread, raw* entry, raw* arg) num {
+  _ = thread;
+  _ = entry;
+  _ = arg;
+  ret thread_runtime_backend_unavailable();
+}
+
+fun runtime_thread_join_windows(Thread* thread, raw* out_ret) num {
+  _ = thread;
+  _ = out_ret;
+  ret thread_runtime_backend_unavailable();
+}
+
+fun runtime_thread_detach_windows(Thread* thread) num {
+  _ = thread;
+  ret thread_runtime_backend_unavailable();
+}
+
 // Create a new runtime thread handle.
 pub fun runtime_thread_new() Thread {
-  ret thread_new();
+  if thread_runtime_backend_is_windows() == true {
+    ret runtime_thread_new_windows();
+  }
+  ret runtime_thread_new_posix();
 }
 
 // Start a runtime thread handle.
 pub fun runtime_thread_start(Thread* thread, raw* entry, raw* arg) num {
-  ret thread_start(thread, entry, arg);
+  if thread_runtime_backend_is_windows() == true {
+    ret runtime_thread_start_windows(thread, entry, arg);
+  }
+  ret runtime_thread_start_posix(thread, entry, arg);
 }
 
 // Join a runtime thread handle.
 pub fun runtime_thread_join(Thread* thread, raw* out_ret) num {
-  ret thread_join(thread, out_ret);
+  if thread_runtime_backend_is_windows() == true {
+    ret runtime_thread_join_windows(thread, out_ret);
+  }
+  ret runtime_thread_join_posix(thread, out_ret);
 }
 
 // Detach a runtime thread handle.
 pub fun runtime_thread_detach(Thread* thread) num {
-  ret thread_detach(thread);
+  if thread_runtime_backend_is_windows() == true {
+    ret runtime_thread_detach_windows(thread);
+  }
+  ret runtime_thread_detach_posix(thread);
 }
