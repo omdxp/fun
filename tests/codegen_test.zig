@@ -418,6 +418,44 @@ test "transitive std.thread import emits pthread headers" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "transitive std.channel import emits pthread headers" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_transitive_std_channel.fn";
+
+    const input =
+        "imp std.channel;\n" ++
+        "fun main() { ret; }\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <pthread.h>") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
+test "std.channel send and recv transpile for num" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_channel_send_recv.fn";
+
+    const input =
+        "imp std.channel;\n" ++
+        "fun main() {\n" ++
+        "  Channel<num> ch = channel_new(0);\n" ++
+        "  _ = ch.send(7);\n" ++
+        "  num out = ch.recv();\n" ++
+        "  _ = out;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__send(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__recv(") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
 test "generic function specialization emits concrete names" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_generic_fn.fn";

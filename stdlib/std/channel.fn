@@ -1,0 +1,246 @@
+// Blocking single-slot channels built on std.sync.
+// 
+// This module provides a minimal channel primitive suitable as a runtime
+// building block for higher-level concurrency features.
+
+imp std.sync;
+imp std.c.string;
+imp std.c.def;
+
+// Single-slot blocking channel.
+pub compound Channel<T> {
+  // Channel mutex.
+  Mutex mu;
+  // Signaled when slot transitions from full to empty.
+  CondVar can_send;
+  // Signaled when slot transitions from empty to full.
+  CondVar can_recv;
+  // True when a value is currently in slot.
+  bin has_value;
+  // True once close() is called.
+  bin closed;
+  // Storage slot for one value.
+  T slot;
+}
+
+// Create a channel with an initial default slot value.
+// 
+// Params:
+// - default_value: initial value for internal slot storage
+// 
+// Returns:
+// - initialized channel
+pub fun channel_new<T>(T default_value) Channel<T> {
+  Channel<T> ch;
+  ch.mu = mutex_new();
+  ch.can_send = condvar_new();
+  ch.can_recv = condvar_new();
+  ch.has_value = false;
+  ch.closed = false;
+  ch.slot = default_value;
+  ret ch;
+}
+
+impl Channel<T> {
+  // Return a zeroed value for T.
+  pub zero_value() T {
+    T out;
+    memset(&out, 0, sizeof(T));
+    ret out;
+  }
+
+  // Initialize internal synchronization primitives.
+  // 
+  // Returns:
+  // - 0 on success, nonzero error code on failure
+  pub init() num {
+    num rc = self.mu.init();
+    if rc != 0 {
+      ret rc;
+    }
+    rc = self.can_send.init();
+    if rc != 0 {
+      ret rc;
+    }
+    rc = self.can_recv.init();
+    if rc != 0 {
+      ret rc;
+    }
+    ret 0;
+  }
+
+  // Send one value, blocking while the slot is full.
+  // 
+  // Returns:
+  // - 0 on success
+  // - -1 when channel is closed
+  // - nonzero pthread error codes on synchronization failures
+  pub send(T value) num {
+    num rc = self.init();
+    if rc != 0 {
+      ret rc;
+    }
+
+    rc = self.mu.lock();
+    if rc != 0 {
+      ret rc;
+    }
+    defer self.mu.unlock();
+
+    for self.has_value == true && self.closed == false {
+      rc = self.can_send.wait(&self.mu);
+      if rc != 0 {
+        ret rc;
+      }
+    }
+
+    if self.closed == true {
+      ret -1;
+    }
+
+    self.slot = value;
+    self.has_value = true;
+    _ = self.can_recv.signal();
+    ret 0;
+  }
+
+  // Receive one value into out, blocking while empty.
+  // 
+  // Params:
+  // - out: destination pointer
+  // 
+  // Returns:
+  // - 0 on success
+  // - 1 when channel is closed and no value is available
+  // - -1 when out is null
+  // - nonzero pthread error codes on synchronization failures
+  pub recv_into(T* out) num {
+    if out == NULL {
+      ret -1;
+    }
+
+    num rc = self.init();
+    if rc != 0 {
+      ret rc;
+    }
+
+    rc = self.mu.lock();
+    if rc != 0 {
+      ret rc;
+    }
+    defer self.mu.unlock();
+
+    for self.has_value == false && self.closed == false {
+      rc = self.can_recv.wait(&self.mu);
+      if rc != 0 {
+        ret rc;
+      }
+    }
+
+    if self.has_value == false {
+      ret 1;
+    }
+
+    out[0] = self.slot;
+    self.has_value = false;
+    _ = self.can_send.signal();
+    ret 0;
+  }
+
+  // Receive one value, blocking while empty.
+  // 
+  // Returns:
+  // - received value on success
+  // - zeroed value when channel is closed and empty or on sync failure
+  pub recv() T {
+    T out = self.zero_value();
+    num rc = self.recv_into(&out);
+    if rc != 0 {
+      ret self.zero_value();
+    }
+    ret out;
+  }
+
+  // Try receiving one value without blocking.
+  // 
+  // Params:
+  // - out: destination pointer
+  // 
+  // Returns:
+  // - 0 on success
+  // - 1 when closed and empty
+  // - 2 when open but empty
+  // - -1 when out is null
+  // - nonzero pthread error codes on synchronization failures
+  pub try_recv(T* out) num {
+    if out == NULL {
+      ret -1;
+    }
+
+    num rc = self.init();
+    if rc != 0 {
+      ret rc;
+    }
+
+    rc = self.mu.lock();
+    if rc != 0 {
+      ret rc;
+    }
+    defer self.mu.unlock();
+
+    if self.has_value == false {
+      if self.closed == true {
+        ret 1;
+      }
+      ret 2;
+    }
+
+    out[0] = self.slot;
+    self.has_value = false;
+    _ = self.can_send.signal();
+    ret 0;
+  }
+
+  // Close channel and wake blocked senders/receivers.
+  // 
+  // Returns:
+  // - 0 on success, nonzero pthread error codes on sync failures
+  pub close() num {
+    num rc = self.init();
+    if rc != 0 {
+      ret rc;
+    }
+
+    rc = self.mu.lock();
+    if rc != 0 {
+      ret rc;
+    }
+    defer self.mu.unlock();
+
+    self.closed = true;
+    _ = self.can_recv.broadcast();
+    _ = self.can_send.broadcast();
+    ret 0;
+  }
+
+  // Read closed state.
+  pub is_closed() bin {
+    ret self.closed;
+  }
+
+  // Destroy channel synchronization primitives.
+  // 
+  // Returns:
+  // - 0 on success, nonzero pthread error code on failure
+  pub destroy() num {
+    num rc = self.can_recv.destroy();
+    if rc != 0 {
+      ret rc;
+    }
+    rc = self.can_send.destroy();
+    if rc != 0 {
+      ret rc;
+    }
+    ret self.mu.destroy();
+  }
+}
