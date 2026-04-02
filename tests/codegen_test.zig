@@ -476,6 +476,42 @@ test "std.c.thread symbols are callable after import" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "std.c.thread_windows import emits portable thread include layer" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_thread_windows_c.fn";
+
+    const input =
+        "imp std.c.thread_windows;\n" ++
+        "fun main() { ret; }\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "#if defined(_WIN32)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <pthread.h>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "long long pthread_cond_timedwait(") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
+test "std.c.thread_windows symbols are callable after import" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_thread_windows_symbols.fn";
+
+    const input =
+        "imp std.c.thread_windows;\n" ++
+        "fun main() {\n" ++
+        "  pthread_self();\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "pthread_self()") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
 test "transitive std.thread import emits pthread headers" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_transitive_std_thread.fn";

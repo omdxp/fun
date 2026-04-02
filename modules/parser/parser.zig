@@ -4165,7 +4165,7 @@ pub const ParseProcess = struct {
                     });
                 }
             }
-        } else if (mem.eql(u8, path, "std.c.thread")) {
+        } else if (mem.eql(u8, path, "std.c.thread") or mem.eql(u8, path, "std.c.thread_windows")) {
             const names = [_][]const u8{
                 "pthread_create",
                 "pthread_join",

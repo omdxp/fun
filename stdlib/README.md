@@ -58,12 +58,12 @@ Note: `num`/`dec` are 64-bit by default (`int64_t`/`double`), and Fun also suppo
 - **std/runtime_backend.fn**: Shared runtime backend selector helpers (`runtime_backend_*`) with precedence: `FUN_RUNTIME_BACKEND` -> `FUN_RUNTIME_OS` -> host hints (`OS`/`OSTYPE`) -> posix fallback.
 - **std/sync.fn**: POSIX-backed synchronization wrappers (mutex/condition variable method and helper forms).
 - **std/sync_backend_posix.fn**: POSIX synchronization backend module (`sync_backend_posix_*`) used by std.sync_runtime.
-- **std/sync_backend_windows.fn**: Windows synchronization backend module (`sync_backend_windows_*`) with direct mutex/condvar lifecycle operations over `std.c.thread` primitives.
+- **std/sync_backend_windows.fn**: Windows synchronization backend module (`sync_backend_windows_*`) with direct mutex/condvar lifecycle operations over `std.c.thread_windows`.
 - **std/sync_runtime.fn**: Backend-facing sync runtime shim (`runtime_mutex_*`, `runtime_condvar_*`) with backend selector helpers (`sync_runtime_backend_*`) routed through std.runtime_backend and backend modules.
 - **std/string.fn**: String helpers (count, strip prefix/suffix, split lines, replace, case conversion, repeat, etc.).
 - **std/thread.fn**: POSIX-backed thread lifecycle helpers (`thread_new`, plus method and helper forms for start/join/detach).
 - **std/thread_backend_posix.fn**: POSIX thread backend module (`thread_backend_posix_*`) used by std.thread_runtime.
-- **std/thread_backend_windows.fn**: Windows thread backend module (`thread_backend_windows_*`) with direct thread lifecycle operations over `std.c.thread` primitives.
+- **std/thread_backend_windows.fn**: Windows thread backend module (`thread_backend_windows_*`) with direct thread lifecycle operations over `std.c.thread_windows`.
 - **std/thread_runtime.fn**: Backend-facing thread runtime shim (`runtime_thread_*`) with backend selector helpers (`thread_runtime_backend_*`) routed through std.runtime_backend and backend modules.
 - **std/thread_pool.fn**: POSIX-backed thread pool helpers (`thread_pool_new`, start_all/join_all/detach_all) routed through std.thread_runtime.
 - **std/time.fn**: Time helpers (epoch, formatting, UTC, diffs).
@@ -80,6 +80,7 @@ Note: `num`/`dec` are 64-bit by default (`int64_t`/`double`), and Fun also suppo
 - **std/c/io.fn**: stdio bindings (FILE, printf, fopen, etc.).
 - **std/c/mem.fn**: stdlib bindings (malloc/free, env, system, etc.).
 - **std/c/thread.fn**: pthread-shaped thread/mutex/condition variable signatures with portable codegen support (`pthread.h` on POSIX, Win32 compatibility layer on Windows).
+- **std/c/thread_windows.fn**: Windows-oriented pthread compatibility signature module used by Windows backend wrappers.
 - **std/c/string.fn**: string.h bindings (strlen, memcpy, memset, etc.).
 - **std/c/time.fn**: time.h bindings (time, localtime, strftime, etc.).
 

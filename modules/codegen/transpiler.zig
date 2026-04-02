@@ -331,7 +331,8 @@ pub const TranspileProcess = struct {
     /// Standard library imports to be added at the beginning of the output
     std_imports: std.ArrayList([]const u8),
 
-    /// True when `std.c.thread` is imported anywhere in this module tree.
+    /// True when `std.c.thread` or `std.c.thread_windows` is imported
+    /// anywhere in this module tree.
     /// When set, codegen emits a small Windows compatibility layer that maps
     /// pthread-shaped symbols onto Win32 synchronization/thread primitives.
     requires_thread_compat_layer: bool = false,
@@ -11809,9 +11810,9 @@ pub const TranspileProcess = struct {
                 self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
                 return TranspileError.MemoryAllocationFailed;
             }) catch return TranspileError.MemoryAllocationFailed;
-        } else if (mem.eql(u8, import_path, "std.c.thread")) {
+        } else if (mem.eql(u8, import_path, "std.c.thread") or mem.eql(u8, import_path, "std.c.thread_windows")) {
             self.requires_thread_compat_layer = true;
-            // `std.c.thread` is handled specially in `write_std_imports`:
+            // `std.c.thread*` imports are handled specially in `write_std_imports`:
             // - on Windows, emit Win32-backed pthread-compatible definitions
             // - otherwise, include `<pthread.h>`
             try self.process_std_module_import(import_node, import_path);
@@ -12192,6 +12193,7 @@ pub const TranspileProcess = struct {
             try self.write("#include <windows.h>\n");
             try self.write("#include <process.h>\n");
             try self.write("#include <errno.h>\n");
+            try self.write("#include <time.h>\n");
             try self.write("\n");
             try self.write("typedef HANDLE pthread_t;\n");
             try self.write("typedef void pthread_attr_t;\n");
@@ -12199,6 +12201,10 @@ pub const TranspileProcess = struct {
             try self.write("typedef void pthread_mutexattr_t;\n");
             try self.write("typedef CONDITION_VARIABLE pthread_cond_t;\n");
             try self.write("typedef void pthread_condattr_t;\n");
+            try self.write("typedef struct __fun_win_timespec {\n");
+            try self.write("    time_t tv_sec;\n");
+            try self.write("    long tv_nsec;\n");
+            try self.write("} __fun_win_timespec;\n");
             try self.write("\n");
             try self.write("typedef struct __fun_win_thread_ctx {\n");
             try self.write("    void* (*entry)(void*);\n");
@@ -12356,11 +12362,53 @@ pub const TranspileProcess = struct {
             try self.write("}\n");
             try self.write("\n");
             try self.write("long long pthread_cond_timedwait(pthread_cond_t* cond, pthread_mutex_t* mutex, void* abstime) {\n");
-            try self.write("    (void)abstime;\n");
             try self.write("    if (cond == NULL || mutex == NULL) {\n");
             try self.write("        return (long long)EINVAL;\n");
             try self.write("    }\n");
-            try self.write("    BOOL ok = SleepConditionVariableCS(cond, mutex, 0);\n");
+            try self.write("    if (abstime == NULL) {\n");
+            try self.write("        return (long long)EINVAL;\n");
+            try self.write("    }\n");
+            try self.write("\n");
+            try self.write("    const __fun_win_timespec* ts = (const __fun_win_timespec*)abstime;\n");
+            try self.write("    if (ts->tv_nsec < 0 || ts->tv_nsec >= 1000000000L) {\n");
+            try self.write("        return (long long)EINVAL;\n");
+            try self.write("    }\n");
+            try self.write("\n");
+            try self.write("    FILETIME ft;\n");
+            try self.write("    GetSystemTimeAsFileTime(&ft);\n");
+            try self.write("    ULARGE_INTEGER now_filetime;\n");
+            try self.write("    now_filetime.LowPart = ft.dwLowDateTime;\n");
+            try self.write("    now_filetime.HighPart = ft.dwHighDateTime;\n");
+            try self.write("\n");
+            try self.write("    const unsigned long long unix_epoch_in_filetime = 116444736000000000ULL;\n");
+            try self.write("    unsigned long long now_ns = 0ULL;\n");
+            try self.write("    if (now_filetime.QuadPart > unix_epoch_in_filetime) {\n");
+            try self.write("        now_ns = (now_filetime.QuadPart - unix_epoch_in_filetime) * 100ULL;\n");
+            try self.write("    }\n");
+            try self.write("\n");
+            try self.write("    long long sec = (long long)ts->tv_sec;\n");
+            try self.write("    if (sec < 0) {\n");
+            try self.write("        return (long long)ETIMEDOUT;\n");
+            try self.write("    }\n");
+            try self.write("\n");
+            try self.write("    unsigned long long target_ns = ((unsigned long long)sec * 1000000000ULL) + (unsigned long long)ts->tv_nsec;\n");
+            try self.write("\n");
+            try self.write("    DWORD timeout_ms = 0;\n");
+            try self.write("    if (target_ns > now_ns) {\n");
+            try self.write("        unsigned long long delta_ns = target_ns - now_ns;\n");
+            try self.write("        unsigned long long delta_ms = delta_ns / 1000000ULL;\n");
+            try self.write("        if ((delta_ns % 1000000ULL) != 0ULL) {\n");
+            try self.write("            delta_ms += 1ULL;\n");
+            try self.write("        }\n");
+            try self.write("\n");
+            try self.write("        if (delta_ms >= 0xFFFFFFFEULL) {\n");
+            try self.write("            timeout_ms = 0xFFFFFFFEu;\n");
+            try self.write("        } else {\n");
+            try self.write("            timeout_ms = (DWORD)delta_ms;\n");
+            try self.write("        }\n");
+            try self.write("    }\n");
+            try self.write("\n");
+            try self.write("    BOOL ok = SleepConditionVariableCS(cond, mutex, timeout_ms);\n");
             try self.write("    if (ok != 0) {\n");
             try self.write("        return 0;\n");
             try self.write("    }\n");

@@ -2,10 +2,10 @@
 // 
 // Notes:
 // - This module defines the Windows backend contract used by std.sync_runtime.
-// - It talks directly to synchronization primitives from std.c.thread.
+// - It talks directly to pthread-shaped primitives from std.c.thread_windows.
 
 imp std.c.def;
-imp std.c.thread;
+imp std.c.thread_windows;
 imp std.sync;
 
 // Legacy compatibility function kept for API stability.

@@ -1,0 +1,10 @@
+// Windows-oriented pthread compatibility signature module.
+// 
+// Notes:
+// - This module re-exports pthread-shaped signatures for Windows-facing backends.
+// - Codegen maps these symbols to:
+// - Win32-backed compatibility functions on Windows
+// - pthread.h declarations on non-Windows hosts
+
+imp std.c.thread;
+

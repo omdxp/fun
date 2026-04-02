@@ -360,11 +360,11 @@ Examples:
 - `std.thread`: POSIX-backed thread helpers (`thread_new`, method and helper forms for start/join/detach)
 - `std.runtime_backend`: shared runtime backend selector helpers (`runtime_backend_*`) with environment overrides (`FUN_RUNTIME_BACKEND`, `FUN_RUNTIME_OS`)
 - `std.thread_backend_posix`: POSIX thread backend module (`thread_backend_posix_*`) used by `std.thread_runtime`
-- `std.thread_backend_windows`: Windows thread backend module (`thread_backend_windows_*`) with direct thread lifecycle operations over `std.c.thread` primitives
+- `std.thread_backend_windows`: Windows thread backend module (`thread_backend_windows_*`) with direct thread lifecycle operations over `std.c.thread_windows`
 - `std.thread_runtime`: backend-facing thread runtime shim (`runtime_thread_*`) plus backend selector helpers (`thread_runtime_backend_*`), routed through `std.runtime_backend` and backend modules
 - `std.thread_pool`: POSIX-backed thread pool helpers (`thread_pool_new`, start_all/join_all/detach_all) routed through `std.thread_runtime`
 - `std.sync_backend_posix`: POSIX sync backend module (`sync_backend_posix_*`) used by `std.sync_runtime`
-- `std.sync_backend_windows`: Windows sync backend module (`sync_backend_windows_*`) with direct mutex/condvar operations over `std.c.thread` primitives
+- `std.sync_backend_windows`: Windows sync backend module (`sync_backend_windows_*`) with direct mutex/condvar operations over `std.c.thread_windows`
 - `std.sync_runtime`: backend-facing sync runtime shim (`runtime_mutex_*`, `runtime_condvar_*`) plus backend selector helpers (`sync_runtime_backend_*`), routed through `std.runtime_backend` and backend modules
 - `std.sync`: POSIX-backed mutex/condition variable helpers (method and helper forms)
 - `std.json`, `std.toml`: minimal serialization helpers
