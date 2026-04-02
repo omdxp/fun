@@ -79,6 +79,69 @@ impl Thread {
   }
 }
 
+// Start a thread via pointer receiver helper.
+// 
+// Params:
+// - thread: thread handle pointer
+// - entry: pthread entry function pointer
+// - arg: user data passed to entry
+// 
+// Returns:
+// - 0 on success
+// - -1 when thread is null
+// - pthread return code on start failure
+pub fun thread_start(Thread* thread, raw* entry, raw* arg) num {
+  if thread == NULL {
+    ret -1;
+  }
+
+  Thread t = thread[0];
+  num rc = t.start(entry, arg);
+  thread[0] = t;
+  ret rc;
+}
+
+// Join a thread via pointer receiver helper.
+// 
+// Params:
+// - thread: thread handle pointer
+// - out_ret: optional output pointer for entry return value
+// 
+// Returns:
+// - 0 on success
+// - -1 when thread is null
+// - pthread return code on join failure
+pub fun thread_join(Thread* thread, raw* out_ret) num {
+  if thread == NULL {
+    ret -1;
+  }
+
+  Thread t = thread[0];
+  num rc = t.join(out_ret);
+  thread[0] = t;
+  ret rc;
+}
+
+// Detach a thread via pointer receiver helper.
+// 
+// Params:
+// - thread: thread handle pointer
+// 
+// Returns:
+// - 0 on success
+// - -1 when thread is null
+// - pthread return code on detach failure
+pub fun thread_detach(Thread* thread) num {
+  if thread == NULL {
+    ret -1;
+  }
+
+  Thread t = thread[0];
+  num rc = t.detach();
+  thread[0] = t;
+  ret rc;
+}
+
 // Return the current thread id.
 // 
 // Returns:

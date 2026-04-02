@@ -418,6 +418,29 @@ test "transitive std.thread import emits pthread headers" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "std.thread helper lifecycle APIs transpile" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_thread_helpers.fn";
+
+    const input =
+        "imp std.thread;\n" ++
+        "fun main() {\n" ++
+        "  Thread t = thread_new();\n" ++
+        "  _ = thread_start(&t, NULL, NULL);\n" ++
+        "  _ = thread_join(&t, NULL);\n" ++
+        "  _ = thread_detach(&t);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_start(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_join(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_detach(") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
 test "transitive std.channel import emits pthread headers" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_transitive_std_channel.fn";

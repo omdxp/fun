@@ -5,7 +5,6 @@
 // - Worker entrypoints use pthread-style function pointers (`raw*`).
 
 imp std.thread;
-imp std.c.thread;
 imp std.c.mem;
 imp std.c.def;
 
@@ -91,13 +90,7 @@ impl ThreadPool {
       }
 
       Thread worker = self.workers[i];
-      num rc = 0;
-      if worker.started == false {
-        rc = pthread_create(&worker.handle, NULL, entry, arg);
-        if rc == 0 {
-          worker.started = true;
-        }
-      }
+      num rc = thread_start(&worker, entry, arg);
       self.workers[i] = worker;
       if rc != 0 {
         ret rc;
@@ -131,13 +124,7 @@ impl ThreadPool {
       }
 
       Thread worker = self.workers[i];
-      num rc = 0;
-      if worker.started == true {
-        rc = pthread_join(worker.handle, out_ret);
-        if rc == 0 {
-          worker.started = false;
-        }
-      }
+      num rc = thread_join(&worker, out_ret);
       self.workers[i] = worker;
       if rc != 0 {
         ret rc;
@@ -163,13 +150,7 @@ impl ThreadPool {
     num i = 0;
     for i < self.size {
       Thread worker = self.workers[i];
-      num rc = 0;
-      if worker.started == true {
-        rc = pthread_detach(worker.handle);
-        if rc == 0 {
-          worker.started = false;
-        }
-      }
+      num rc = thread_detach(&worker);
       self.workers[i] = worker;
       if rc != 0 {
         ret rc;
