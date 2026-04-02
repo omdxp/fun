@@ -47,6 +47,7 @@ zig-out/bin/fun -in examples/<example>.fn
 - advanced/channel_select3_rr.fn
 - advanced/channel_single_slot.fn
 - advanced/channel_timeout.fn
+- advanced/thread_pool_zero_workers.fn
 - advanced/warning_allow.fn
 - advanced/warning_expect.fn
 - advanced/return_local_ptr_allow.fn

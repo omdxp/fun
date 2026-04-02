@@ -1,0 +1,19 @@
+imp std.c.io;
+imp std.thread_pool;
+
+fun main() {
+  ThreadPool pool = thread_pool_new(0);
+
+  num ready = 0;
+  if pool.is_ready() == true {
+    ready = 1;
+  }
+
+  num rc_start = pool.start_all(NULL, NULL);
+  num rc_join = pool.join_all(NULL);
+  num rc_detach = pool.detach_all();
+
+  printf("ready=%lld workers=%lld start=%lld join=%lld detach=%lld\n", ready, pool.count(), rc_start, rc_join, rc_detach);
+
+  _ = pool.destroy();
+}

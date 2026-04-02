@@ -434,6 +434,52 @@ test "transitive std.channel import emits pthread headers" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "transitive std.thread_pool import emits pthread headers" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_transitive_std_thread_pool.fn";
+
+    const input =
+        "imp std.thread_pool;\n" ++
+        "fun main() { ret; }\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <pthread.h>") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
+test "std.thread_pool lifecycle APIs transpile" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_thread_pool_lifecycle.fn";
+
+    const input =
+        "imp std.thread_pool;\n" ++
+        "fun main() {\n" ++
+        "  ThreadPool p = thread_pool_new(0);\n" ++
+        "  _ = p.start_all(NULL, NULL);\n" ++
+        "  _ = p.join_all(NULL);\n" ++
+        "  _ = p.detach_all();\n" ++
+        "  _ = p.count();\n" ++
+        "  _ = p.is_ready();\n" ++
+        "  _ = p.destroy();\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_pool_new(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "ThreadPool__start_all(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "ThreadPool__join_all(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "ThreadPool__detach_all(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "ThreadPool__count(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "ThreadPool__is_ready(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "ThreadPool__destroy(") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
 test "std.channel send and recv transpile for num" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_std_channel_send_recv.fn";

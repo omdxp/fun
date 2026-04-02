@@ -347,6 +347,7 @@ Examples:
 - `std.string`: string helpers
 - `std.channel`: bounded blocking channels (ring buffer) with timeout send/recv, channel-level and per-call select wait-slice/backoff tuning (timeout and blocking variants), and select_recv_with/select_recv3_rr_with helpers, built on `std.sync`
 - `std.thread`: POSIX-backed thread helpers (`thread_new`, start/join/detach)
+- `std.thread_pool`: POSIX-backed thread pool helpers (`thread_pool_new`, start_all/join_all/detach_all)
 - `std.sync`: POSIX-backed mutex and condition variable helpers
 - `std.json`, `std.toml`: minimal serialization helpers
 - `std.time`, `std.rand`, `std.math`, `std.path`, `std.net`, etc.
