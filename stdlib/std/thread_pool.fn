@@ -5,6 +5,7 @@
 // - Worker entrypoints use pthread-style function pointers (`raw*`).
 
 imp std.thread;
+imp std.thread_runtime;
 imp std.c.mem;
 imp std.c.def;
 
@@ -49,7 +50,7 @@ pub fun thread_pool_new(num size) ThreadPool {
 
   num i = 0;
   for i < size {
-    pool.workers[i] = thread_new();
+    pool.workers[i] = runtime_thread_new();
     i = i + 1;
   }
 
@@ -90,7 +91,7 @@ impl ThreadPool {
       }
 
       Thread worker = self.workers[i];
-      num rc = thread_start(&worker, entry, arg);
+      num rc = runtime_thread_start(&worker, entry, arg);
       self.workers[i] = worker;
       if rc != 0 {
         ret rc;
@@ -124,7 +125,7 @@ impl ThreadPool {
       }
 
       Thread worker = self.workers[i];
-      num rc = thread_join(&worker, out_ret);
+      num rc = runtime_thread_join(&worker, out_ret);
       self.workers[i] = worker;
       if rc != 0 {
         ret rc;
@@ -150,7 +151,7 @@ impl ThreadPool {
     num i = 0;
     for i < self.size {
       Thread worker = self.workers[i];
-      num rc = thread_detach(&worker);
+      num rc = runtime_thread_detach(&worker);
       self.workers[i] = worker;
       if rc != 0 {
         ret rc;

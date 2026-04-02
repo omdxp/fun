@@ -441,6 +441,86 @@ test "std.thread helper lifecycle APIs transpile" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "std.sync helper lifecycle APIs transpile" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_sync_helpers.fn";
+
+    const input =
+        "imp std.sync;\n" ++
+        "fun main() {\n" ++
+        "  Mutex m = mutex_new();\n" ++
+        "  CondVar c = condvar_new();\n" ++
+        "  _ = mutex_init(&m);\n" ++
+        "  _ = mutex_lock(&m);\n" ++
+        "  _ = mutex_try_lock(&m);\n" ++
+        "  _ = mutex_unlock(&m);\n" ++
+        "  _ = condvar_init(&c);\n" ++
+        "  _ = condvar_wait(&c, &m);\n" ++
+        "  _ = condvar_timed_wait(&c, &m, NULL);\n" ++
+        "  _ = condvar_signal(&c);\n" ++
+        "  _ = condvar_broadcast(&c);\n" ++
+        "  _ = condvar_destroy(&c);\n" ++
+        "  _ = mutex_destroy(&m);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "mutex_init(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "mutex_lock(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "mutex_try_lock(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "mutex_unlock(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "mutex_destroy(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "condvar_init(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "condvar_wait(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "condvar_timed_wait(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "condvar_signal(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "condvar_broadcast(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "condvar_destroy(") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
+test "transitive std.thread_runtime import emits pthread headers" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_transitive_std_thread_runtime.fn";
+
+    const input =
+        "imp std.thread_runtime;\n" ++
+        "fun main() { ret; }\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <pthread.h>") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
+test "std.thread_runtime lifecycle APIs transpile" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_thread_runtime_helpers.fn";
+
+    const input =
+        "imp std.thread_runtime;\n" ++
+        "fun main() {\n" ++
+        "  Thread t = runtime_thread_new();\n" ++
+        "  _ = runtime_thread_start(&t, NULL, NULL);\n" ++
+        "  _ = runtime_thread_join(&t, NULL);\n" ++
+        "  _ = runtime_thread_detach(&t);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_thread_new(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_thread_start(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_thread_join(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_thread_detach(") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
 test "transitive std.channel import emits pthread headers" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_transitive_std_channel.fn";

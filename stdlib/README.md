@@ -55,10 +55,11 @@ Note: `num`/`dec` are 64-bit by default (`int64_t`/`double`), and Fun also suppo
 - **std/sys.fn**: Environment, process control, and randomness helpers.
 - **std/path.fn**: Path helpers (join, join_many, basename, dirname, extname, strip_ext, change_ext, is_abs).
 - **std/rand.fn**: PRNG utilities (range_dec, chance, shuffle).
-- **std/sync.fn**: POSIX-backed synchronization wrappers (mutex and condition variable helpers).
+- **std/sync.fn**: POSIX-backed synchronization wrappers (mutex/condition variable method and helper forms).
 - **std/string.fn**: String helpers (count, strip prefix/suffix, split lines, replace, case conversion, repeat, etc.).
 - **std/thread.fn**: POSIX-backed thread lifecycle helpers (`thread_new`, plus method and helper forms for start/join/detach).
-- **std/thread_pool.fn**: POSIX-backed thread pool helpers (`thread_pool_new`, start_all/join_all/detach_all).
+- **std/thread_runtime.fn**: Backend-facing thread runtime shim (`runtime_thread_*`), currently backed by std.thread.
+- **std/thread_pool.fn**: POSIX-backed thread pool helpers (`thread_pool_new`, start_all/join_all/detach_all) routed through std.thread_runtime.
 - **std/time.fn**: Time helpers (epoch, formatting, UTC, diffs).
 - **std/toml.fn**: Minimal TOML parse/stringify for flat key/value.
 - **std/vec.fn**: Dynamic vector helpers (reserve/insert/remove/pop/swap_remove/extend/resize/shrink_to_fit).

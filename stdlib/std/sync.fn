@@ -221,3 +221,191 @@ impl CondVar {
     ret rc;
   }
 }
+
+// Initialize a mutex via pointer helper.
+// 
+// Returns:
+// - 0 on success
+// - -1 when mutex is null
+// - pthread return code on failure
+pub fun mutex_init(Mutex* mutex) num {
+  if mutex == NULL {
+    ret -1;
+  }
+
+  Mutex m = mutex[0];
+  num rc = m.init();
+  mutex[0] = m;
+  ret rc;
+}
+
+// Lock a mutex via pointer helper.
+// 
+// Returns:
+// - 0 on success
+// - -1 when mutex is null
+// - pthread return code on failure
+pub fun mutex_lock(Mutex* mutex) num {
+  if mutex == NULL {
+    ret -1;
+  }
+
+  Mutex m = mutex[0];
+  num rc = m.lock();
+  mutex[0] = m;
+  ret rc;
+}
+
+// Try lock a mutex via pointer helper.
+// 
+// Returns:
+// - 0 on success
+// - -1 when mutex is null
+// - pthread return code on failure
+pub fun mutex_try_lock(Mutex* mutex) num {
+  if mutex == NULL {
+    ret -1;
+  }
+
+  Mutex m = mutex[0];
+  num rc = m.try_lock();
+  mutex[0] = m;
+  ret rc;
+}
+
+// Unlock a mutex via pointer helper.
+// 
+// Returns:
+// - 0 on success
+// - -1 when mutex is null
+// - pthread return code on failure
+pub fun mutex_unlock(Mutex* mutex) num {
+  if mutex == NULL {
+    ret -1;
+  }
+
+  Mutex m = mutex[0];
+  num rc = m.unlock();
+  mutex[0] = m;
+  ret rc;
+}
+
+// Destroy a mutex via pointer helper.
+// 
+// Returns:
+// - 0 on success
+// - -1 when mutex is null
+// - pthread return code on failure
+pub fun mutex_destroy(Mutex* mutex) num {
+  if mutex == NULL {
+    ret -1;
+  }
+
+  Mutex m = mutex[0];
+  num rc = m.destroy();
+  mutex[0] = m;
+  ret rc;
+}
+
+// Initialize a condition variable via pointer helper.
+// 
+// Returns:
+// - 0 on success
+// - -1 when cond is null
+// - pthread return code on failure
+pub fun condvar_init(CondVar* cond) num {
+  if cond == NULL {
+    ret -1;
+  }
+
+  CondVar c = cond[0];
+  num rc = c.init();
+  cond[0] = c;
+  ret rc;
+}
+
+// Wait on a condition variable via pointer helper.
+// 
+// Returns:
+// - 0 on success
+// - -1 when cond or mutex is null
+// - pthread return code on failure
+pub fun condvar_wait(CondVar* cond, Mutex* mutex) num {
+  if cond == NULL || mutex == NULL {
+    ret -1;
+  }
+
+  CondVar c = cond[0];
+  num rc = c.wait(mutex);
+  cond[0] = c;
+  ret rc;
+}
+
+// Timed wait on a condition variable via pointer helper.
+// 
+// Returns:
+// - 0 on success
+// - -1 when cond or mutex is null
+// - -2 when abs_time is null
+// - pthread return code on timeout/failure
+pub fun condvar_timed_wait(CondVar* cond, Mutex* mutex, raw* abs_time) num {
+  if cond == NULL || mutex == NULL {
+    ret -1;
+  }
+
+  CondVar c = cond[0];
+  num rc = c.timed_wait(mutex, abs_time);
+  cond[0] = c;
+  ret rc;
+}
+
+// Wake one waiter via pointer helper.
+// 
+// Returns:
+// - 0 on success
+// - -1 when cond is null
+// - pthread return code on failure
+pub fun condvar_signal(CondVar* cond) num {
+  if cond == NULL {
+    ret -1;
+  }
+
+  CondVar c = cond[0];
+  num rc = c.signal();
+  cond[0] = c;
+  ret rc;
+}
+
+// Wake all waiters via pointer helper.
+// 
+// Returns:
+// - 0 on success
+// - -1 when cond is null
+// - pthread return code on failure
+pub fun condvar_broadcast(CondVar* cond) num {
+  if cond == NULL {
+    ret -1;
+  }
+
+  CondVar c = cond[0];
+  num rc = c.broadcast();
+  cond[0] = c;
+  ret rc;
+}
+
+// Destroy a condition variable via pointer helper.
+// 
+// Returns:
+// - 0 on success
+// - -1 when cond is null
+// - pthread return code on failure
+pub fun condvar_destroy(CondVar* cond) num {
+  if cond == NULL {
+    ret -1;
+  }
+
+  CondVar c = cond[0];
+  num rc = c.destroy();
+  cond[0] = c;
+  ret rc;
+}

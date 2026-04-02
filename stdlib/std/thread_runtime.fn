@@ -1,0 +1,27 @@
+// Thread runtime shim contract.
+// 
+// Notes:
+// - This module is the backend-facing contract for thread lifecycle operations.
+// - Current implementation delegates to std.thread (POSIX backend).
+
+imp std.thread;
+
+// Create a new runtime thread handle.
+pub fun runtime_thread_new() Thread {
+  ret thread_new();
+}
+
+// Start a runtime thread handle.
+pub fun runtime_thread_start(Thread* thread, raw* entry, raw* arg) num {
+  ret thread_start(thread, entry, arg);
+}
+
+// Join a runtime thread handle.
+pub fun runtime_thread_join(Thread* thread, raw* out_ret) num {
+  ret thread_join(thread, out_ret);
+}
+
+// Detach a runtime thread handle.
+pub fun runtime_thread_detach(Thread* thread) num {
+  ret thread_detach(thread);
+}
