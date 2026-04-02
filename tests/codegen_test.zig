@@ -606,6 +606,32 @@ test "std.channel select explicit wait-slice override transpile" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "std.channel select explicit wait-slice and backoff override transpile" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_channel_select_tuning_override.fn";
+
+    const input =
+        "imp std.channel;\n" ++
+        "fun main() {\n" ++
+        "  Channel<num> a = channel_new(0);\n" ++
+        "  Channel<num> b = channel_new(0);\n" ++
+        "  Channel<num> c = channel_new(0);\n" ++
+        "  num out = 0;\n" ++
+        "  num idx = -1;\n" ++
+        "  num next = 0;\n" ++
+        "  _ = a.select_recv_timeout_with_tuning(&b, &out, &idx, 10, 2, 1);\n" ++
+        "  _ = a.select_recv_timeout3_rr_with_tuning(&b, &c, &next, &out, &idx, 10, 2, 1);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with_tuning(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_tuning(") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
 test "std.channel select adaptive wait backoff transpile" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_std_channel_select_adaptive_wait.fn";

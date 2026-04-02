@@ -781,11 +781,33 @@ impl Channel<T> {
   // - -1 when other/out/out_index is null
   // - other nonzero codes on synchronization failures
   pub select_recv_timeout_with_slice(Channel<T>* other, T* out, num* out_index, num timeout_ms, num wait_slice_ms) num {
+    ret self.select_recv_timeout_with_tuning(other, out, out_index, timeout_ms, wait_slice_ms, self.select_wait_backoff_steps);
+  }
+
+  // Receive from self or another channel, polling until timeout, with
+  // explicit wait-slice and backoff-step overrides.
+  // 
+  // Params:
+  // - other: second channel pointer
+  // - out: destination pointer
+  // - out_index: destination pointer for selected channel index (0 for self, 1 for other)
+  // - timeout_ms: max wait in ms (negative means wait forever)
+  // - wait_slice_ms: wait duration per polling round (clamped to >= 1)
+  // - backoff_steps: max adaptive backoff steps (clamped to 0..8)
+  // 
+  // Returns:
+  // - 0 on success
+  // - 1 when both channels are closed and empty
+  // - 2 on timeout
+  // - -1 when other/out/out_index is null
+  // - other nonzero codes on synchronization failures
+  pub select_recv_timeout_with_tuning(Channel<T>* other, T* out, num* out_index, num timeout_ms, num wait_slice_ms, num backoff_steps) num {
     if other == NULL || out == NULL || out_index == NULL {
       ret -1;
     }
 
     num base_wait_slice_ms = channel_sanitize_wait_slice_ms(wait_slice_ms);
+    num max_backoff_steps = channel_sanitize_backoff_steps(backoff_steps);
 
     bin wait_forever = timeout_ms < 0;
     ChannelAbsTime abs_time;
@@ -798,7 +820,6 @@ impl Channel<T> {
 
     num wait_slot = 0;
     num idle_rounds = 0;
-    num max_backoff_steps = channel_sanitize_backoff_steps(self.select_wait_backoff_steps);
 
     for true {
       out_index[0] = -1;
@@ -875,7 +896,7 @@ impl Channel<T> {
   // - -1 when other/out/out_index is null
   // - other nonzero codes on synchronization failures
   pub select_recv_with(Channel<T>* other, T* out, num* out_index) num {
-    ret self.select_recv_timeout_with_slice(other, out, out_index, -1, self.select_wait_slice_ms);
+    ret self.select_recv_timeout_with_tuning(other, out, out_index, -1, self.select_wait_slice_ms, self.select_wait_backoff_steps);
   }
 
   // Try receiving from self + two other channels without blocking, using
@@ -992,11 +1013,35 @@ impl Channel<T> {
   // - -1 when any pointer argument is null
   // - other nonzero codes on synchronization failures
   pub select_recv_timeout3_rr_with_slice(Channel<T>* other_a, Channel<T>* other_b, num* next_index, T* out, num* out_index, num timeout_ms, num wait_slice_ms) num {
+    ret self.select_recv_timeout3_rr_with_tuning(other_a, other_b, next_index, out, out_index, timeout_ms, wait_slice_ms, self.select_wait_backoff_steps);
+  }
+
+  // Receive from self + two other channels, polling until timeout, with
+  // fairness rotation and explicit wait-slice/backoff-step overrides.
+  // 
+  // Params:
+  // - other_a: second channel pointer
+  // - other_b: third channel pointer
+  // - next_index: in/out probe start index (0=self, 1=other_a, 2=other_b)
+  // - out: destination pointer
+  // - out_index: destination pointer for selected channel index
+  // - timeout_ms: max wait in ms (negative means wait forever)
+  // - wait_slice_ms: wait duration per polling round (clamped to >= 1)
+  // - backoff_steps: max adaptive backoff steps (clamped to 0..8)
+  // 
+  // Returns:
+  // - 0 on success
+  // - 1 when all three channels are closed and empty
+  // - 2 on timeout
+  // - -1 when any pointer argument is null
+  // - other nonzero codes on synchronization failures
+  pub select_recv_timeout3_rr_with_tuning(Channel<T>* other_a, Channel<T>* other_b, num* next_index, T* out, num* out_index, num timeout_ms, num wait_slice_ms, num backoff_steps) num {
     if other_a == NULL || other_b == NULL || next_index == NULL || out == NULL || out_index == NULL {
       ret -1;
     }
 
     num base_wait_slice_ms = channel_sanitize_wait_slice_ms(wait_slice_ms);
+    num max_backoff_steps = channel_sanitize_backoff_steps(backoff_steps);
 
     bin wait_forever = timeout_ms < 0;
     ChannelAbsTime abs_time;
@@ -1012,7 +1057,6 @@ impl Channel<T> {
       wait_slot = wait_slot + 3;
     }
     num idle_rounds = 0;
-    num max_backoff_steps = channel_sanitize_backoff_steps(self.select_wait_backoff_steps);
 
     for true {
       num rc = self.select_try_recv3_rr_with(other_a, other_b, next_index, out, out_index);
@@ -1082,7 +1126,7 @@ impl Channel<T> {
   // - -1 when any pointer argument is null
   // - other nonzero codes on synchronization failures
   pub select_recv3_rr_with(Channel<T>* other_a, Channel<T>* other_b, num* next_index, T* out, num* out_index) num {
-    ret self.select_recv_timeout3_rr_with(other_a, other_b, next_index, out, out_index, -1);
+    ret self.select_recv_timeout3_rr_with_tuning(other_a, other_b, next_index, out, out_index, -1, self.select_wait_slice_ms, self.select_wait_backoff_steps);
   }
 
   // Close channel and wake blocked senders/receivers.
