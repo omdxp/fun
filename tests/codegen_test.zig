@@ -440,7 +440,7 @@ test "std.time import adds time.h include" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
-test "std.c.thread import adds pthread.h include" {
+test "std.c.thread import emits portable thread include layer" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_std_thread_c.fn";
 
@@ -451,7 +451,9 @@ test "std.c.thread import adds pthread.h include" {
     const out_owned = try runTranspile(allocator, ifilepath, input);
     defer allocator.free(out_owned);
 
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "#if defined(_WIN32)") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <pthread.h>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "long long pthread_create(") != null);
 
     try fs.cwd().deleteFile(ifilepath);
 }
@@ -671,7 +673,7 @@ test "std.runtime_backend selector APIs transpile" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
-test "std.sync_backend_windows skeleton APIs transpile" {
+test "std.sync_backend_windows native APIs transpile" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_std_sync_backend_windows.fn";
 
@@ -711,6 +713,8 @@ test "std.sync_backend_windows skeleton APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_windows_condvar_signal(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_windows_condvar_broadcast(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_windows_condvar_destroy(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "pthread_mutex_init(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_posix_mutex_init(") == null);
 
     try fs.cwd().deleteFile(ifilepath);
 }
@@ -757,7 +761,7 @@ test "std.sync_backend_posix lifecycle APIs transpile" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
-test "std.thread_backend_windows skeleton APIs transpile" {
+test "std.thread_backend_windows native APIs transpile" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_std_thread_backend_windows.fn";
 
@@ -779,6 +783,8 @@ test "std.thread_backend_windows skeleton APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_backend_windows_start(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_backend_windows_join(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_backend_windows_detach(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "pthread_create(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_backend_posix_start(") == null);
 
     try fs.cwd().deleteFile(ifilepath);
 }
@@ -967,6 +973,98 @@ test "thread and sync runtime selectors align with runtime backend" {
     defer allocator.free(stdout);
 
     try std.testing.expectEqualStrings("windows|windows|windows", stdout);
+}
+
+test "windows-selected sync runtime lifecycle operations execute" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_runtime_windows_sync_ops.fn";
+    const cpath = "codegen_runtime_windows_sync_ops.c";
+    const exe_path = if (builtin.os.tag == .windows)
+        "codegen_runtime_windows_sync_ops.exe"
+    else
+        "codegen_runtime_windows_sync_ops";
+
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(cpath) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.sync_runtime;\n" ++
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  Mutex m = runtime_mutex_new();\n" ++
+        "  CondVar c = runtime_condvar_new();\n" ++
+        "  num sum = 0;\n" ++
+        "  sum += runtime_mutex_init(&m);\n" ++
+        "  sum += runtime_condvar_init(&c);\n" ++
+        "  sum += runtime_mutex_lock(&m);\n" ++
+        "  sum += runtime_mutex_unlock(&m);\n" ++
+        "  sum += runtime_condvar_signal(&c);\n" ++
+        "  sum += runtime_condvar_broadcast(&c);\n" ++
+        "  sum += runtime_condvar_destroy(&c);\n" ++
+        "  sum += runtime_mutex_destroy(&m);\n" ++
+        "  printf(\"%d\", sum);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try fs.cwd().createFile(cpath, .{});
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, cpath, exe_path);
+
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{
+        .{ .key = "FUN_RUNTIME_BACKEND", .value = "windows" },
+    });
+    defer allocator.free(stdout);
+
+    try std.testing.expectEqualStrings("0", stdout);
+}
+
+test "windows-selected thread runtime null-pointer behavior is non-stub" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_runtime_windows_thread_null_ops.fn";
+    const cpath = "codegen_runtime_windows_thread_null_ops.c";
+    const exe_path = if (builtin.os.tag == .windows)
+        "codegen_runtime_windows_thread_null_ops.exe"
+    else
+        "codegen_runtime_windows_thread_null_ops";
+
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(cpath) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.thread_runtime;\n" ++
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  num s = runtime_thread_start(NULL, NULL, NULL);\n" ++
+        "  num j = runtime_thread_join(NULL, NULL);\n" ++
+        "  num d = runtime_thread_detach(NULL);\n" ++
+        "  printf(\"%d|%d|%d\", s, j, d);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try fs.cwd().createFile(cpath, .{});
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, cpath, exe_path);
+
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{
+        .{ .key = "FUN_RUNTIME_BACKEND", .value = "windows" },
+    });
+    defer allocator.free(stdout);
+
+    try std.testing.expectEqualStrings("-1|-1|-1", stdout);
 }
 
 test "transitive std.thread_runtime import emits pthread headers" {

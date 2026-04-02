@@ -49,7 +49,7 @@ fun runtime_thread_detach_posix(Thread* thread) num {
   ret thread_backend_posix_detach(thread);
 }
 
-// Placeholder Windows constructor until a concrete backend is wired.
+// Windows backend constructor.
 fun runtime_thread_new_windows() Thread {
   ret thread_backend_windows_new();
 }

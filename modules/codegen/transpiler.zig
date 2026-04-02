@@ -331,6 +331,11 @@ pub const TranspileProcess = struct {
     /// Standard library imports to be added at the beginning of the output
     std_imports: std.ArrayList([]const u8),
 
+    /// True when `std.c.thread` is imported anywhere in this module tree.
+    /// When set, codegen emits a small Windows compatibility layer that maps
+    /// pthread-shaped symbols onto Win32 synchronization/thread primitives.
+    requires_thread_compat_layer: bool = false,
+
     /// The input file path (used for relative path resolution)
     input_file_path: []const u8,
 
@@ -11805,10 +11810,12 @@ pub const TranspileProcess = struct {
                 return TranspileError.MemoryAllocationFailed;
             }) catch return TranspileError.MemoryAllocationFailed;
         } else if (mem.eql(u8, import_path, "std.c.thread")) {
-            header_name = self.allocator.dupe(u8, "pthread.h") catch |e| {
-                self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
-                return TranspileError.MemoryAllocationFailed;
-            };
+            self.requires_thread_compat_layer = true;
+            // `std.c.thread` is handled specially in `write_std_imports`:
+            // - on Windows, emit Win32-backed pthread-compatible definitions
+            // - otherwise, include `<pthread.h>`
+            try self.process_std_module_import(import_node, import_path);
+            return;
         } else if (mem.eql(u8, import_path, "std.c.limits")) {
             header_name = self.allocator.dupe(u8, "limits.h") catch |e| {
                 self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
@@ -12175,6 +12182,222 @@ pub const TranspileProcess = struct {
         try add_header(self, &seen, "stdarg.h");
         try add_header(self, &seen, "stdlib.h");
         try add_header(self, &seen, "string.h");
+
+        if (requires_thread_compat_recursive(self)) {
+            try self.write("\n");
+            try self.write("#if defined(_WIN32)\n");
+            try self.write("#ifndef WIN32_LEAN_AND_MEAN\n");
+            try self.write("#define WIN32_LEAN_AND_MEAN\n");
+            try self.write("#endif\n");
+            try self.write("#include <windows.h>\n");
+            try self.write("#include <process.h>\n");
+            try self.write("#include <errno.h>\n");
+            try self.write("\n");
+            try self.write("typedef HANDLE pthread_t;\n");
+            try self.write("typedef void pthread_attr_t;\n");
+            try self.write("typedef CRITICAL_SECTION pthread_mutex_t;\n");
+            try self.write("typedef void pthread_mutexattr_t;\n");
+            try self.write("typedef CONDITION_VARIABLE pthread_cond_t;\n");
+            try self.write("typedef void pthread_condattr_t;\n");
+            try self.write("\n");
+            try self.write("typedef struct __fun_win_thread_ctx {\n");
+            try self.write("    void* (*entry)(void*);\n");
+            try self.write("    void* arg;\n");
+            try self.write("} __fun_win_thread_ctx;\n");
+            try self.write("\n");
+            try self.write("static unsigned __stdcall __fun_win_thread_start(void* opaque) {\n");
+            try self.write("    __fun_win_thread_ctx* ctx = (__fun_win_thread_ctx*)opaque;\n");
+            try self.write("    if (ctx == NULL) {\n");
+            try self.write("        _endthreadex(0);\n");
+            try self.write("        return 0;\n");
+            try self.write("    }\n");
+            try self.write("\n");
+            try self.write("    void* (*entry)(void*) = ctx->entry;\n");
+            try self.write("    void* arg = ctx->arg;\n");
+            try self.write("    free(ctx);\n");
+            try self.write("\n");
+            try self.write("    if (entry != NULL) {\n");
+            try self.write("        (void)entry(arg);\n");
+            try self.write("    }\n");
+            try self.write("\n");
+            try self.write("    _endthreadex(0);\n");
+            try self.write("    return 0;\n");
+            try self.write("}\n");
+            try self.write("\n");
+            try self.write("long long pthread_create(pthread_t* thread, pthread_attr_t* attr, void* start_routine, void* arg) {\n");
+            try self.write("    (void)attr;\n");
+            try self.write("    if (thread == NULL || start_routine == NULL) {\n");
+            try self.write("        return (long long)EINVAL;\n");
+            try self.write("    }\n");
+            try self.write("\n");
+            try self.write("    __fun_win_thread_ctx* ctx = (__fun_win_thread_ctx*)malloc(sizeof(__fun_win_thread_ctx));\n");
+            try self.write("    if (ctx == NULL) {\n");
+            try self.write("        return (long long)ENOMEM;\n");
+            try self.write("    }\n");
+            try self.write("\n");
+            try self.write("    ctx->entry = (void* (*)(void*))start_routine;\n");
+            try self.write("    ctx->arg = arg;\n");
+            try self.write("\n");
+            try self.write("    uintptr_t thread_raw = _beginthreadex(NULL, 0, __fun_win_thread_start, (void*)ctx, 0, NULL);\n");
+            try self.write("    if (thread_raw == 0) {\n");
+            try self.write("        free(ctx);\n");
+            try self.write("        return (long long)errno;\n");
+            try self.write("    }\n");
+            try self.write("\n");
+            try self.write("    *thread = (HANDLE)thread_raw;\n");
+            try self.write("    return 0;\n");
+            try self.write("}\n");
+            try self.write("\n");
+            try self.write("long long pthread_join(pthread_t thread, void* retval) {\n");
+            try self.write("    if (thread == NULL) {\n");
+            try self.write("        return (long long)EINVAL;\n");
+            try self.write("    }\n");
+            try self.write("\n");
+            try self.write("    DWORD wait_rc = WaitForSingleObject(thread, INFINITE);\n");
+            try self.write("    if (wait_rc != WAIT_OBJECT_0) {\n");
+            try self.write("        return (long long)GetLastError();\n");
+            try self.write("    }\n");
+            try self.write("\n");
+            try self.write("    if (retval != NULL) {\n");
+            try self.write("        *((void**)retval) = NULL;\n");
+            try self.write("    }\n");
+            try self.write("\n");
+            try self.write("    if (CloseHandle(thread) == 0) {\n");
+            try self.write("        return (long long)GetLastError();\n");
+            try self.write("    }\n");
+            try self.write("\n");
+            try self.write("    return 0;\n");
+            try self.write("}\n");
+            try self.write("\n");
+            try self.write("long long pthread_detach(pthread_t thread) {\n");
+            try self.write("    if (thread == NULL) {\n");
+            try self.write("        return (long long)EINVAL;\n");
+            try self.write("    }\n");
+            try self.write("    if (CloseHandle(thread) == 0) {\n");
+            try self.write("        return (long long)GetLastError();\n");
+            try self.write("    }\n");
+            try self.write("    return 0;\n");
+            try self.write("}\n");
+            try self.write("\n");
+            try self.write("pthread_t pthread_self(void) {\n");
+            try self.write("    return GetCurrentThread();\n");
+            try self.write("}\n");
+            try self.write("\n");
+            try self.write("long long pthread_equal(pthread_t t1, pthread_t t2) {\n");
+            try self.write("    DWORD id1 = GetThreadId(t1);\n");
+            try self.write("    DWORD id2 = GetThreadId(t2);\n");
+            try self.write("    if (id1 == 0 || id2 == 0) {\n");
+            try self.write("        return (t1 == t2) ? 1 : 0;\n");
+            try self.write("    }\n");
+            try self.write("    return (id1 == id2) ? 1 : 0;\n");
+            try self.write("}\n");
+            try self.write("\n");
+            try self.write("long long pthread_mutex_init(pthread_mutex_t* mutex, pthread_mutexattr_t* attr) {\n");
+            try self.write("    (void)attr;\n");
+            try self.write("    if (mutex == NULL) {\n");
+            try self.write("        return (long long)EINVAL;\n");
+            try self.write("    }\n");
+            try self.write("    InitializeCriticalSection(mutex);\n");
+            try self.write("    return 0;\n");
+            try self.write("}\n");
+            try self.write("\n");
+            try self.write("long long pthread_mutex_destroy(pthread_mutex_t* mutex) {\n");
+            try self.write("    if (mutex == NULL) {\n");
+            try self.write("        return (long long)EINVAL;\n");
+            try self.write("    }\n");
+            try self.write("    DeleteCriticalSection(mutex);\n");
+            try self.write("    return 0;\n");
+            try self.write("}\n");
+            try self.write("\n");
+            try self.write("long long pthread_mutex_lock(pthread_mutex_t* mutex) {\n");
+            try self.write("    if (mutex == NULL) {\n");
+            try self.write("        return (long long)EINVAL;\n");
+            try self.write("    }\n");
+            try self.write("    EnterCriticalSection(mutex);\n");
+            try self.write("    return 0;\n");
+            try self.write("}\n");
+            try self.write("\n");
+            try self.write("long long pthread_mutex_trylock(pthread_mutex_t* mutex) {\n");
+            try self.write("    if (mutex == NULL) {\n");
+            try self.write("        return (long long)EINVAL;\n");
+            try self.write("    }\n");
+            try self.write("    return TryEnterCriticalSection(mutex) ? 0 : (long long)EBUSY;\n");
+            try self.write("}\n");
+            try self.write("\n");
+            try self.write("long long pthread_mutex_unlock(pthread_mutex_t* mutex) {\n");
+            try self.write("    if (mutex == NULL) {\n");
+            try self.write("        return (long long)EINVAL;\n");
+            try self.write("    }\n");
+            try self.write("    LeaveCriticalSection(mutex);\n");
+            try self.write("    return 0;\n");
+            try self.write("}\n");
+            try self.write("\n");
+            try self.write("long long pthread_cond_init(pthread_cond_t* cond, pthread_condattr_t* attr) {\n");
+            try self.write("    (void)attr;\n");
+            try self.write("    if (cond == NULL) {\n");
+            try self.write("        return (long long)EINVAL;\n");
+            try self.write("    }\n");
+            try self.write("    InitializeConditionVariable(cond);\n");
+            try self.write("    return 0;\n");
+            try self.write("}\n");
+            try self.write("\n");
+            try self.write("long long pthread_cond_destroy(pthread_cond_t* cond) {\n");
+            try self.write("    if (cond == NULL) {\n");
+            try self.write("        return (long long)EINVAL;\n");
+            try self.write("    }\n");
+            try self.write("    return 0;\n");
+            try self.write("}\n");
+            try self.write("\n");
+            try self.write("long long pthread_cond_wait(pthread_cond_t* cond, pthread_mutex_t* mutex) {\n");
+            try self.write("    if (cond == NULL || mutex == NULL) {\n");
+            try self.write("        return (long long)EINVAL;\n");
+            try self.write("    }\n");
+            try self.write("    return SleepConditionVariableCS(cond, mutex, INFINITE) ? 0 : (long long)GetLastError();\n");
+            try self.write("}\n");
+            try self.write("\n");
+            try self.write("long long pthread_cond_timedwait(pthread_cond_t* cond, pthread_mutex_t* mutex, void* abstime) {\n");
+            try self.write("    (void)abstime;\n");
+            try self.write("    if (cond == NULL || mutex == NULL) {\n");
+            try self.write("        return (long long)EINVAL;\n");
+            try self.write("    }\n");
+            try self.write("    BOOL ok = SleepConditionVariableCS(cond, mutex, 0);\n");
+            try self.write("    if (ok != 0) {\n");
+            try self.write("        return 0;\n");
+            try self.write("    }\n");
+            try self.write("    DWORD err = GetLastError();\n");
+            try self.write("    if (err == ERROR_TIMEOUT) {\n");
+            try self.write("        return (long long)ETIMEDOUT;\n");
+            try self.write("    }\n");
+            try self.write("    return (long long)err;\n");
+            try self.write("}\n");
+            try self.write("\n");
+            try self.write("long long pthread_cond_signal(pthread_cond_t* cond) {\n");
+            try self.write("    if (cond == NULL) {\n");
+            try self.write("        return (long long)EINVAL;\n");
+            try self.write("    }\n");
+            try self.write("    WakeConditionVariable(cond);\n");
+            try self.write("    return 0;\n");
+            try self.write("}\n");
+            try self.write("\n");
+            try self.write("long long pthread_cond_broadcast(pthread_cond_t* cond) {\n");
+            try self.write("    if (cond == NULL) {\n");
+            try self.write("        return (long long)EINVAL;\n");
+            try self.write("    }\n");
+            try self.write("    WakeAllConditionVariable(cond);\n");
+            try self.write("    return 0;\n");
+            try self.write("}\n");
+            try self.write("#else\n");
+            try self.write("#include <pthread.h>\n");
+            try self.write("#endif\n");
+        }
+    }
+
+    fn requires_thread_compat_recursive(proc: *Self) bool {
+        if (proc.requires_thread_compat_layer) return true;
+        for (proc.children.items) |child| {
+            if (requires_thread_compat_recursive(child)) return true;
+        }
+        return false;
     }
 };
 

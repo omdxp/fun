@@ -1,44 +1,81 @@
-// Windows thread backend skeleton.
+// Windows thread backend implementation.
 // 
 // Notes:
 // - This module defines the Windows backend contract used by std.thread_runtime.
-// - Lifecycle operations currently return an explicit unimplemented code.
+// - It talks directly to thread primitives from std.c.thread.
 
+imp std.c.def;
+imp std.c.thread;
 imp std.thread;
 
-// Return code for unimplemented Windows backend operations.
+// Legacy compatibility function kept for API stability.
 pub fun thread_backend_windows_unavailable() num {
-  ret -1000;
+  ret 0;
 }
 
-// Create a new Windows backend thread handle placeholder.
+// Create a new Windows backend thread handle.
 pub fun thread_backend_windows_new() Thread {
-  ret thread_new();
+  Thread t;
+  t.started = false;
+  ret t;
 }
 
-// Start a Windows backend thread handle placeholder.
+// Start a Windows backend thread handle.
 pub fun thread_backend_windows_start(Thread* thread, raw* entry, raw* arg) num {
-  _ = entry;
-  _ = arg;
   if thread == NULL {
     ret -1;
   }
-  ret thread_backend_windows_unavailable();
+  if entry == NULL {
+    ret -2;
+  }
+
+  Thread t = thread[0];
+  if t.started == true {
+    ret 0;
+  }
+
+  num rc = pthread_create(&t.handle, NULL, entry, arg);
+  if rc == 0 {
+    t.started = true;
+  }
+  thread[0] = t;
+  ret rc;
 }
 
-// Join a Windows backend thread handle placeholder.
+// Join a Windows backend thread handle.
 pub fun thread_backend_windows_join(Thread* thread, raw* out_ret) num {
-  _ = out_ret;
   if thread == NULL {
     ret -1;
   }
-  ret thread_backend_windows_unavailable();
+
+  Thread t = thread[0];
+  if t.started == false {
+    ret 0;
+  }
+
+  num rc = pthread_join(t.handle, out_ret);
+  if rc == 0 {
+    t.started = false;
+  }
+  thread[0] = t;
+  ret rc;
 }
 
-// Detach a Windows backend thread handle placeholder.
+// Detach a Windows backend thread handle.
 pub fun thread_backend_windows_detach(Thread* thread) num {
   if thread == NULL {
     ret -1;
   }
-  ret thread_backend_windows_unavailable();
+
+  Thread t = thread[0];
+  if t.started == false {
+    ret 0;
+  }
+
+  num rc = pthread_detach(t.handle);
+  if rc == 0 {
+    t.started = false;
+  }
+  thread[0] = t;
+  ret rc;
 }

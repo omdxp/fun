@@ -1,84 +1,180 @@
-// Windows synchronization backend skeleton.
+// Windows synchronization backend implementation.
 // 
 // Notes:
 // - This module defines the Windows backend contract used by std.sync_runtime.
-// - Locking and condition variable operations currently return an explicit
-// unimplemented code.
+// - It talks directly to synchronization primitives from std.c.thread.
 
+imp std.c.def;
+imp std.c.thread;
 imp std.sync;
 
-// Return code for unimplemented Windows backend operations.
+// Legacy compatibility function kept for API stability.
 pub fun sync_backend_windows_unavailable() num {
-  ret -1000;
+  ret 0;
 }
 
-// Create a new Windows backend mutex placeholder.
+// Create a new Windows backend mutex.
 pub fun sync_backend_windows_mutex_new() Mutex {
-  ret mutex_new();
+  Mutex m;
+  m.initialized = false;
+  ret m;
 }
 
-// Create a new Windows backend condition variable placeholder.
+// Create a new Windows backend condition variable.
 pub fun sync_backend_windows_condvar_new() CondVar {
-  ret condvar_new();
+  CondVar c;
+  c.initialized = false;
+  ret c;
 }
 
-// Initialize a Windows backend mutex placeholder.
+// Initialize a Windows backend mutex.
 pub fun sync_backend_windows_mutex_init(Mutex* mutex) num {
   if mutex == NULL {
     ret -1;
   }
-  ret sync_backend_windows_unavailable();
+
+  Mutex m = mutex[0];
+  if m.initialized == true {
+    ret 0;
+  }
+
+  num rc = pthread_mutex_init(&m.inner, NULL);
+  if rc == 0 {
+    m.initialized = true;
+  }
+  mutex[0] = m;
+  ret rc;
 }
 
-// Lock a Windows backend mutex placeholder.
+// Lock a Windows backend mutex.
 pub fun sync_backend_windows_mutex_lock(Mutex* mutex) num {
   if mutex == NULL {
     ret -1;
   }
-  ret sync_backend_windows_unavailable();
+
+  Mutex m = mutex[0];
+  if m.initialized == false {
+    num init_rc = pthread_mutex_init(&m.inner, NULL);
+    if init_rc != 0 {
+      ret init_rc;
+    }
+    m.initialized = true;
+  }
+
+  num rc = pthread_mutex_lock(&m.inner);
+  mutex[0] = m;
+  ret rc;
 }
 
-// Try lock a Windows backend mutex placeholder.
+// Try lock a Windows backend mutex.
 pub fun sync_backend_windows_mutex_try_lock(Mutex* mutex) num {
   if mutex == NULL {
     ret -1;
   }
-  ret sync_backend_windows_unavailable();
+
+  Mutex m = mutex[0];
+  if m.initialized == false {
+    num init_rc = pthread_mutex_init(&m.inner, NULL);
+    if init_rc != 0 {
+      ret init_rc;
+    }
+    m.initialized = true;
+  }
+
+  num rc = pthread_mutex_trylock(&m.inner);
+  mutex[0] = m;
+  ret rc;
 }
 
-// Unlock a Windows backend mutex placeholder.
+// Unlock a Windows backend mutex.
 pub fun sync_backend_windows_mutex_unlock(Mutex* mutex) num {
   if mutex == NULL {
     ret -1;
   }
-  ret sync_backend_windows_unavailable();
+
+  Mutex m = mutex[0];
+  if m.initialized == false {
+    ret 0;
+  }
+
+  num rc = pthread_mutex_unlock(&m.inner);
+  mutex[0] = m;
+  ret rc;
 }
 
-// Destroy a Windows backend mutex placeholder.
+// Destroy a Windows backend mutex.
 pub fun sync_backend_windows_mutex_destroy(Mutex* mutex) num {
   if mutex == NULL {
     ret -1;
   }
-  ret sync_backend_windows_unavailable();
+
+  Mutex m = mutex[0];
+  if m.initialized == false {
+    ret 0;
+  }
+
+  num rc = pthread_mutex_destroy(&m.inner);
+  if rc == 0 {
+    m.initialized = false;
+  }
+  mutex[0] = m;
+  ret rc;
 }
 
-// Initialize a Windows backend condition variable placeholder.
+// Initialize a Windows backend condition variable.
 pub fun sync_backend_windows_condvar_init(CondVar* cond) num {
   if cond == NULL {
     ret -1;
   }
-  ret sync_backend_windows_unavailable();
+
+  CondVar c = cond[0];
+  if c.initialized == true {
+    ret 0;
+  }
+
+  num rc = pthread_cond_init(&c.inner, NULL);
+  if rc == 0 {
+    c.initialized = true;
+  }
+  cond[0] = c;
+  ret rc;
 }
 
-// Wait on a Windows backend condition variable placeholder.
+// Wait on a Windows backend condition variable.
 pub fun sync_backend_windows_condvar_wait(CondVar* cond, Mutex* mutex) num {
   if cond == NULL || mutex == NULL {
     ret -1;
   }
-  ret sync_backend_windows_unavailable();
+
+  CondVar c = cond[0];
+  Mutex m = mutex[0];
+
+  if c.initialized == false {
+    num c_init_rc = pthread_cond_init(&c.inner, NULL);
+    if c_init_rc != 0 {
+      cond[0] = c;
+      ret c_init_rc;
+    }
+    c.initialized = true;
+  }
+
+  if m.initialized == false {
+    num m_init_rc = pthread_mutex_init(&m.inner, NULL);
+    if m_init_rc != 0 {
+      cond[0] = c;
+      mutex[0] = m;
+      ret m_init_rc;
+    }
+    m.initialized = true;
+  }
+
+  num rc = pthread_cond_wait(&c.inner, &m.inner);
+  cond[0] = c;
+  mutex[0] = m;
+  ret rc;
 }
 
-// Timed wait on a Windows backend condition variable placeholder.
+// Timed wait on a Windows backend condition variable.
 pub fun sync_backend_windows_condvar_timed_wait(CondVar* cond, Mutex* mutex, raw* abs_time) num {
   if cond == NULL || mutex == NULL {
     ret -1;
@@ -86,29 +182,82 @@ pub fun sync_backend_windows_condvar_timed_wait(CondVar* cond, Mutex* mutex, raw
   if abs_time == NULL {
     ret -2;
   }
-  ret sync_backend_windows_unavailable();
+
+  CondVar c = cond[0];
+  Mutex m = mutex[0];
+
+  if c.initialized == false {
+    num c_init_rc = pthread_cond_init(&c.inner, NULL);
+    if c_init_rc != 0 {
+      cond[0] = c;
+      ret c_init_rc;
+    }
+    c.initialized = true;
+  }
+
+  if m.initialized == false {
+    num m_init_rc = pthread_mutex_init(&m.inner, NULL);
+    if m_init_rc != 0 {
+      cond[0] = c;
+      mutex[0] = m;
+      ret m_init_rc;
+    }
+    m.initialized = true;
+  }
+
+  num rc = pthread_cond_timedwait(&c.inner, &m.inner, abs_time);
+  cond[0] = c;
+  mutex[0] = m;
+  ret rc;
 }
 
-// Signal one Windows backend condition variable waiter placeholder.
+// Signal one Windows backend condition variable waiter.
 pub fun sync_backend_windows_condvar_signal(CondVar* cond) num {
   if cond == NULL {
     ret -1;
   }
-  ret sync_backend_windows_unavailable();
+
+  CondVar c = cond[0];
+  if c.initialized == false {
+    ret 0;
+  }
+
+  num rc = pthread_cond_signal(&c.inner);
+  cond[0] = c;
+  ret rc;
 }
 
-// Broadcast to all Windows backend condition variable waiters placeholder.
+// Broadcast to all Windows backend condition variable waiters.
 pub fun sync_backend_windows_condvar_broadcast(CondVar* cond) num {
   if cond == NULL {
     ret -1;
   }
-  ret sync_backend_windows_unavailable();
+
+  CondVar c = cond[0];
+  if c.initialized == false {
+    ret 0;
+  }
+
+  num rc = pthread_cond_broadcast(&c.inner);
+  cond[0] = c;
+  ret rc;
 }
 
-// Destroy a Windows backend condition variable placeholder.
+// Destroy a Windows backend condition variable.
 pub fun sync_backend_windows_condvar_destroy(CondVar* cond) num {
   if cond == NULL {
     ret -1;
   }
-  ret sync_backend_windows_unavailable();
+
+  CondVar c = cond[0];
+  if c.initialized == false {
+    ret 0;
+  }
+
+  num rc = pthread_cond_destroy(&c.inner);
+  if rc == 0 {
+    c.initialized = false;
+  }
+  cond[0] = c;
+  ret rc;
 }

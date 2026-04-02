@@ -85,7 +85,7 @@ fun runtime_condvar_destroy_posix(CondVar* cond) num {
   ret sync_backend_posix_condvar_destroy(cond);
 }
 
-// Placeholder Windows constructors until a concrete backend is wired.
+// Windows backend constructors.
 fun runtime_mutex_new_windows() Mutex {
   ret sync_backend_windows_mutex_new();
 }
