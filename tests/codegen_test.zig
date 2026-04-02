@@ -456,6 +456,30 @@ test "std.channel send and recv transpile for num" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "std.channel buffered constructor and try_send transpile" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_channel_buffered.fn";
+
+    const input =
+        "imp std.channel;\n" ++
+        "fun main() {\n" ++
+        "  Channel<num> ch = channel_new_cap(0, 4);\n" ++
+        "  _ = ch.try_send(1);\n" ++
+        "  _ = ch.try_send(2);\n" ++
+        "  num a = ch.recv();\n" ++
+        "  num b = ch.recv();\n" ++
+        "  _ = a + b;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "channel_new_cap__num") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__try_send(") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
 test "generic function specialization emits concrete names" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_generic_fn.fn";

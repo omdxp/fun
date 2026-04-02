@@ -1,32 +1,43 @@
-// Blocking single-slot channels built on std.sync.
+// Blocking bounded channels built on std.sync.
 // 
 // This module provides a minimal channel primitive suitable as a runtime
 // building block for higher-level concurrency features.
 
 imp std.sync;
+imp std.c.mem;
 imp std.c.string;
 imp std.c.def;
 
-// Single-slot blocking channel.
+// Bounded blocking channel implemented as a ring buffer.
 pub compound Channel<T> {
   // Channel mutex.
   Mutex mu;
-  // Signaled when slot transitions from full to empty.
+  // Signaled when buffer transitions from full to not-full.
   CondVar can_send;
-  // Signaled when slot transitions from empty to full.
+  // Signaled when buffer transitions from empty to not-empty.
   CondVar can_recv;
-  // True when a value is currently in slot.
-  bin has_value;
+
+  // Ring buffer storage.
+  T[] data;
+  // True when ring storage is allocated.
+  bin has_buffer;
+  // Buffer capacity.
+  num cap;
+  // Read cursor.
+  num head;
+  // Write cursor.
+  num tail;
+  // Number of queued values.
+  num count;
+
   // True once close() is called.
   bin closed;
-  // Storage slot for one value.
-  T slot;
 }
 
-// Create a channel with an initial default slot value.
+// Create a single-slot channel.
 // 
 // Params:
-// - default_value: initial value for internal slot storage
+// - default_value: initial value used to initialize storage
 // 
 // Returns:
 // - initialized channel
@@ -35,9 +46,60 @@ pub fun channel_new<T>(T default_value) Channel<T> {
   ch.mu = mutex_new();
   ch.can_send = condvar_new();
   ch.can_recv = condvar_new();
-  ch.has_value = false;
+
+  ch.cap = 1;
+  ch.has_buffer = false;
+  ch.head = 0;
+  ch.tail = 0;
+  ch.count = 0;
   ch.closed = false;
-  ch.slot = default_value;
+
+  raw* data_ptr = malloc(sizeof(T));
+  ch.data = data_ptr;
+  if data_ptr != NULL {
+    ch.has_buffer = true;
+    ch.data[0] = default_value;
+  }
+
+  ret ch;
+}
+
+// Create a bounded channel with explicit capacity.
+// 
+// Params:
+// - default_value: initial value used to initialize storage
+// - capacity: requested channel capacity (values <= 0 become 1)
+// 
+// Returns:
+// - initialized channel
+pub fun channel_new_cap<T>(T default_value, num capacity) Channel<T> {
+  if capacity <= 0 {
+    capacity = 1;
+  }
+
+  Channel<T> ch;
+  ch.mu = mutex_new();
+  ch.can_send = condvar_new();
+  ch.can_recv = condvar_new();
+
+  ch.cap = capacity;
+  ch.has_buffer = false;
+  ch.head = 0;
+  ch.tail = 0;
+  ch.count = 0;
+  ch.closed = false;
+
+  raw* data_ptr = malloc(sizeof(T) * capacity);
+  ch.data = data_ptr;
+  if data_ptr != NULL {
+    ch.has_buffer = true;
+    num i = 0;
+    for i < capacity {
+      ch.data[i] = default_value;
+      i = i + 1;
+    }
+  }
+
   ret ch;
 }
 
@@ -54,6 +116,10 @@ impl Channel<T> {
   // Returns:
   // - 0 on success, nonzero error code on failure
   pub init() num {
+    if self.has_buffer == false {
+      ret -2;
+    }
+
     num rc = self.mu.init();
     if rc != 0 {
       ret rc;
@@ -87,7 +153,7 @@ impl Channel<T> {
     }
     defer self.mu.unlock();
 
-    for self.has_value == true && self.closed == false {
+    for self.count == self.cap && self.closed == false {
       rc = self.can_send.wait(&self.mu);
       if rc != 0 {
         ret rc;
@@ -98,8 +164,51 @@ impl Channel<T> {
       ret -1;
     }
 
-    self.slot = value;
-    self.has_value = true;
+    self.data[self.tail] = value;
+    self.tail = self.tail + 1;
+    if self.tail >= self.cap {
+      self.tail = 0;
+    }
+    self.count = self.count + 1;
+
+    _ = self.can_recv.signal();
+    ret 0;
+  }
+
+  // Try sending one value without blocking.
+  // 
+  // Returns:
+  // - 0 on success
+  // - 1 when channel is closed
+  // - 2 when channel is full
+  // - -2 when storage allocation failed
+  // - nonzero pthread error codes on synchronization failures
+  pub try_send(T value) num {
+    num rc = self.init();
+    if rc != 0 {
+      ret rc;
+    }
+
+    rc = self.mu.lock();
+    if rc != 0 {
+      ret rc;
+    }
+    defer self.mu.unlock();
+
+    if self.closed == true {
+      ret 1;
+    }
+    if self.count == self.cap {
+      ret 2;
+    }
+
+    self.data[self.tail] = value;
+    self.tail = self.tail + 1;
+    if self.tail >= self.cap {
+      self.tail = 0;
+    }
+    self.count = self.count + 1;
+
     _ = self.can_recv.signal();
     ret 0;
   }
@@ -130,19 +239,24 @@ impl Channel<T> {
     }
     defer self.mu.unlock();
 
-    for self.has_value == false && self.closed == false {
+    for self.count == 0 && self.closed == false {
       rc = self.can_recv.wait(&self.mu);
       if rc != 0 {
         ret rc;
       }
     }
 
-    if self.has_value == false {
+    if self.count == 0 {
       ret 1;
     }
 
-    out[0] = self.slot;
-    self.has_value = false;
+    out[0] = self.data[self.head];
+    self.head = self.head + 1;
+    if self.head >= self.cap {
+      self.head = 0;
+    }
+    self.count = self.count - 1;
+
     _ = self.can_send.signal();
     ret 0;
   }
@@ -188,15 +302,20 @@ impl Channel<T> {
     }
     defer self.mu.unlock();
 
-    if self.has_value == false {
+    if self.count == 0 {
       if self.closed == true {
         ret 1;
       }
       ret 2;
     }
 
-    out[0] = self.slot;
-    self.has_value = false;
+    out[0] = self.data[self.head];
+    self.head = self.head + 1;
+    if self.head >= self.cap {
+      self.head = 0;
+    }
+    self.count = self.count - 1;
+
     _ = self.can_send.signal();
     ret 0;
   }
@@ -228,11 +347,26 @@ impl Channel<T> {
     ret self.closed;
   }
 
+  // Number of queued values.
+  pub len() num {
+    ret self.count;
+  }
+
+  // Channel capacity.
+  pub capacity() num {
+    ret self.cap;
+  }
+
   // Destroy channel synchronization primitives.
   // 
   // Returns:
   // - 0 on success, nonzero pthread error code on failure
   pub destroy() num {
+    if self.has_buffer == true {
+      free(self.data);
+      self.has_buffer = false;
+    }
+
     num rc = self.can_recv.destroy();
     if rc != 0 {
       ret rc;

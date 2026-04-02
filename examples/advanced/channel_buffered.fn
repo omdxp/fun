@@ -1,0 +1,16 @@
+imp std.c.io;
+imp std.channel;
+
+fun main() {
+  Channel<num> ch = channel_new_cap(0, 2);
+
+  _ = ch.try_send(10);
+  _ = ch.try_send(20);
+
+  num a = ch.recv();
+  num b = ch.recv();
+
+  printf("buffered values: %d %d\n", a, b);
+
+  _ = ch.destroy();
+}

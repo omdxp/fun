@@ -42,6 +42,7 @@ zig-out/bin/fun -in examples/<example>.fn
 - advanced/asm_basic.fn
 - advanced/asm_operands.fn
 - advanced/asm_arch_specific.fn
+- advanced/channel_buffered.fn
 - advanced/channel_single_slot.fn
 - advanced/warning_allow.fn
 - advanced/warning_expect.fn
