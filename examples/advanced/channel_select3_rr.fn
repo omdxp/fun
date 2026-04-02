@@ -10,6 +10,10 @@ fun main() {
   _ = b.send(20);
   _ = c.send(30);
 
+  a.set_select_wait_slice_ms(2);
+  b.set_select_wait_slice_ms(2);
+  c.set_select_wait_slice_ms(2);
+
   num next = 0;
   num out = 0;
   num which = -1;
@@ -18,7 +22,7 @@ fun main() {
   num i = 0;
   for i < 3 {
     rc = a.select_recv_timeout3_rr_with(&b, &c, &next, &out, &which, 25);
-    printf("iter=%d rc=%d which=%d value=%d next=%d\n", i, rc, which, out, next);
+    printf("iter=%d rc=%d which=%d value=%d next=%d slice=%d\n", i, rc, which, out, next, a.get_select_wait_slice_ms());
     i = i + 1;
   }
 

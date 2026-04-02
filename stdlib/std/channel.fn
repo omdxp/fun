@@ -33,6 +33,9 @@ pub compound Channel<T> {
 
   // True once close() is called.
   bin closed;
+
+  // Per-channel select wait slice in milliseconds.
+  num select_wait_slice_ms;
 }
 
 // Create a single-slot channel.
@@ -54,6 +57,7 @@ pub fun channel_new<T>(T default_value) Channel<T> {
   ch.tail = 0;
   ch.count = 0;
   ch.closed = false;
+  ch.select_wait_slice_ms = 5;
 
   raw* data_ptr = malloc(sizeof(T));
   ch.data = data_ptr;
@@ -89,6 +93,7 @@ pub fun channel_new_cap<T>(T default_value, num capacity) Channel<T> {
   ch.tail = 0;
   ch.count = 0;
   ch.closed = false;
+  ch.select_wait_slice_ms = 5;
 
   raw* data_ptr = malloc(sizeof(T) * capacity);
   ch.data = data_ptr;
@@ -113,7 +118,7 @@ compound ChannelAbsTime {
 // Build an absolute timeout from a millisecond duration.
 // 
 // Note:
-// - Resolution is rounded up to whole seconds (uses `time()` backend).
+// - Uses `clock_gettime` and keeps millisecond-scale precision.
 fun channel_make_abs_time(num timeout_ms, ChannelAbsTime* out) num {
   if out == NULL {
     ret -1;
@@ -162,6 +167,48 @@ fun channel_deadline_reached(ChannelAbsTime* abs_time) bin {
   ret false;
 }
 
+// Clamp configurable select wait slice to a sane positive value.
+fun channel_sanitize_wait_slice_ms(num wait_slice_ms) num {
+  if wait_slice_ms <= 0 {
+    ret 1;
+  }
+  ret wait_slice_ms;
+}
+
+// Remaining time (ms) until absolute deadline.
+// 
+// Returns:
+// - remaining milliseconds rounded up
+// - 0 when already expired or on clock failure
+fun channel_deadline_remaining_ms(ChannelAbsTime* abs_time) num {
+  if abs_time == NULL {
+    ret 0;
+  }
+
+  ChannelAbsTime now;
+  num rc = clock_gettime(0, &now);
+  if rc != 0 {
+    ret 0;
+  }
+
+  num sec_diff = abs_time.tv_sec - now.tv_sec;
+  num nsec_diff = abs_time.tv_nsec - now.tv_nsec;
+  if nsec_diff < 0 {
+    sec_diff = sec_diff - 1;
+    nsec_diff = nsec_diff + 1000000000;
+  }
+
+  if sec_diff < 0 {
+    ret 0;
+  }
+
+  num out_ms = sec_diff * 1000 + (nsec_diff / 1000000);
+  if nsec_diff % 1000000 != 0 {
+    out_ms = out_ms + 1;
+  }
+  ret out_ms;
+}
+
 impl Channel<T> {
   // Return a zeroed value for T.
   pub zero_value() T {
@@ -191,7 +238,18 @@ impl Channel<T> {
     if rc != 0 {
       ret rc;
     }
+    self.select_wait_slice_ms = channel_sanitize_wait_slice_ms(self.select_wait_slice_ms);
     ret 0;
+  }
+
+  // Configure the per-channel select wait slice (in milliseconds).
+  pub set_select_wait_slice_ms(num wait_slice_ms) {
+    self.select_wait_slice_ms = channel_sanitize_wait_slice_ms(wait_slice_ms);
+  }
+
+  // Read the per-channel select wait slice (in milliseconds).
+  pub get_select_wait_slice_ms() num {
+    ret self.select_wait_slice_ms;
   }
 
   // Send one value, blocking while the slot is full.
@@ -238,7 +296,7 @@ impl Channel<T> {
   // 
   // Params:
   // - value: value to send
-  // - timeout_ms: max wait in ms (rounded up to whole seconds)
+  // - timeout_ms: max wait in milliseconds
   // 
   // Returns:
   // - 0 on success
@@ -392,7 +450,7 @@ impl Channel<T> {
   // 
   // Params:
   // - out: destination pointer
-  // - timeout_ms: max wait in ms (rounded up to whole seconds)
+  // - timeout_ms: max wait in milliseconds
   // 
   // Returns:
   // - 0 on success
@@ -692,7 +750,18 @@ impl Channel<T> {
         wait_slot = 0;
       }
 
-      num wait_rc = self.wait_recv_hint_timeout(hint, 5);
+      num wait_slice_ms = channel_sanitize_wait_slice_ms(self.select_wait_slice_ms);
+      if wait_forever == false {
+        num rem_ms = channel_deadline_remaining_ms(&abs_time);
+        if rem_ms <= 0 {
+          ret 2;
+        }
+        if wait_slice_ms > rem_ms {
+          wait_slice_ms = rem_ms;
+        }
+      }
+
+      num wait_rc = self.wait_recv_hint_timeout(hint, wait_slice_ms);
       if wait_rc != 0 && wait_rc != 2 {
         ret wait_rc;
       }
@@ -754,7 +823,8 @@ impl Channel<T> {
         wait_slot = 0;
       }
 
-      num wait_rc = self.wait_recv_hint_timeout(hint, 5);
+      num wait_slice_ms = channel_sanitize_wait_slice_ms(self.select_wait_slice_ms);
+      num wait_rc = self.wait_recv_hint_timeout(hint, wait_slice_ms);
       if wait_rc != 0 && wait_rc != 2 {
         ret wait_rc;
       }
@@ -900,7 +970,18 @@ impl Channel<T> {
         wait_slot = 0;
       }
 
-      num wait_rc = self.wait_recv_hint_timeout(hint, 5);
+      num wait_slice_ms = channel_sanitize_wait_slice_ms(self.select_wait_slice_ms);
+      if wait_forever == false {
+        num rem_ms = channel_deadline_remaining_ms(&abs_time);
+        if rem_ms <= 0 {
+          ret 2;
+        }
+        if wait_slice_ms > rem_ms {
+          wait_slice_ms = rem_ms;
+        }
+      }
+
+      num wait_rc = self.wait_recv_hint_timeout(hint, wait_slice_ms);
       if wait_rc != 0 && wait_rc != 2 {
         ret wait_rc;
       }

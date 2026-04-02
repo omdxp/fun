@@ -558,6 +558,28 @@ test "std.channel select recv3 fair timeout transpile" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "std.channel select wait-slice tuning transpile" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_channel_select_wait_slice.fn";
+
+    const input =
+        "imp std.channel;\n" ++
+        "fun main() {\n" ++
+        "  Channel<num> ch = channel_new(0);\n" ++
+        "  ch.set_select_wait_slice_ms(3);\n" ++
+        "  num slice = ch.get_select_wait_slice_ms();\n" ++
+        "  _ = slice;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__set_select_wait_slice_ms(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__get_select_wait_slice_ms(") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
 test "generic function specialization emits concrete names" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_generic_fn.fn";
