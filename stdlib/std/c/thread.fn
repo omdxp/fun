@@ -111,6 +111,17 @@ pub fun pthread_cond_destroy(pthread_cond_t* cond) num;
 // - 0 on success, nonzero error code on failure (C semantics)
 pub fun pthread_cond_wait(pthread_cond_t* cond, pthread_mutex_t* mutex) num;
 
+// Wait on a condition variable until an absolute timeout is reached.
+// 
+// Params:
+// - cond: condition variable pointer
+// - mutex: associated mutex pointer
+// - abstime: absolute deadline pointer (`struct timespec*`, C semantics)
+// 
+// Returns:
+// - 0 on success, nonzero error code on timeout/failure (C semantics)
+pub fun pthread_cond_timedwait(pthread_cond_t* cond, pthread_mutex_t* mutex, raw* abstime) num;
+
 // Wake one waiter.
 // 
 // Returns:

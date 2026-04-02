@@ -480,6 +480,32 @@ test "std.channel buffered constructor and try_send transpile" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "std.channel timeout send and recv transpile" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_channel_timeout.fn";
+
+    const input =
+        "imp std.channel;\n" ++
+        "fun main() {\n" ++
+        "  Channel<num> ch = channel_new_cap(0, 1);\n" ++
+        "  _ = ch.send_timeout(1, 0);\n" ++
+        "  num out = 0;\n" ++
+        "  _ = ch.recv_timeout_into(&out, 0);\n" ++
+        "  num v = ch.recv_timeout(0);\n" ++
+        "  _ = out + v;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <time.h>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__send_timeout(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__recv_timeout_into(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__recv_timeout(") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
 test "generic function specialization emits concrete names" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_generic_fn.fn";

@@ -44,6 +44,7 @@ zig-out/bin/fun -in examples/<example>.fn
 - advanced/asm_arch_specific.fn
 - advanced/channel_buffered.fn
 - advanced/channel_single_slot.fn
+- advanced/channel_timeout.fn
 - advanced/warning_allow.fn
 - advanced/warning_expect.fn
 - advanced/return_local_ptr_allow.fn

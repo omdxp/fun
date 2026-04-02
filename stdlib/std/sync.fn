@@ -154,6 +154,36 @@ impl CondVar {
     ret pthread_cond_wait(&self.inner, &mutex.inner);
   }
 
+  // Wait on the condition variable until an absolute timeout.
+  // 
+  // Params:
+  // - mutex: associated mutex wrapper
+  // - abs_time: absolute timeout pointer (`struct timespec*`, C semantics)
+  // 
+  // Returns:
+  // - pthread return code (0 on success, nonzero on timeout/failure)
+  pub timed_wait(Mutex* mutex, raw* abs_time) num {
+    if self.initialized == false {
+      num init_rc = self.init();
+      if init_rc != 0 {
+        ret init_rc;
+      }
+    }
+    if mutex == NULL {
+      ret -1;
+    }
+    if abs_time == NULL {
+      ret -2;
+    }
+    if mutex.initialized == false {
+      num m_rc = mutex.init();
+      if m_rc != 0 {
+        ret m_rc;
+      }
+    }
+    ret pthread_cond_timedwait(&self.inner, &mutex.inner, abs_time);
+  }
+
   // Wake one waiter.
   // 
   // Returns:

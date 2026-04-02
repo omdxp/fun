@@ -1,0 +1,20 @@
+imp std.c.io;
+imp std.channel;
+
+fun main() {
+  Channel<num> ch = channel_new_cap(0, 1);
+
+  _ = ch.send(7);
+
+  num rc = ch.send_timeout(11, 0);
+  printf("send_timeout rc=%d (2 means timeout)\n", rc);
+
+  num out = 0;
+  rc = ch.recv_timeout_into(&out, 0);
+  printf("recv_timeout_into rc=%d value=%d\n", rc, out);
+
+  num v = ch.recv_timeout(0);
+  printf("recv_timeout value=%d (0 means timeout/empty/closed)\n", v);
+
+  _ = ch.destroy();
+}

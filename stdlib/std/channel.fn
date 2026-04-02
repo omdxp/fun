@@ -6,6 +6,7 @@
 imp std.sync;
 imp std.c.mem;
 imp std.c.string;
+imp std.c.time;
 imp std.c.def;
 
 // Bounded blocking channel implemented as a ring buffer.
@@ -103,6 +104,51 @@ pub fun channel_new_cap<T>(T default_value, num capacity) Channel<T> {
   ret ch;
 }
 
+// Absolute timeout payload used with pthread timed waits.
+compound ChannelAbsTime {
+  num tv_sec;
+  num tv_nsec;
+}
+
+// Build an absolute timeout from a millisecond duration.
+// 
+// Note:
+// - Resolution is rounded up to whole seconds (uses `time()` backend).
+fun channel_make_abs_time(num timeout_ms, ChannelAbsTime* out) num {
+  if out == NULL {
+    ret -1;
+  }
+  if timeout_ms < 0 {
+    timeout_ms = 0;
+  }
+
+  num now_sec = time(NULL);
+  if now_sec < 0 {
+    ret -3;
+  }
+
+  num add_sec = timeout_ms / 1000;
+  if timeout_ms % 1000 != 0 {
+    add_sec = add_sec + 1;
+  }
+
+  out.tv_sec = now_sec + add_sec;
+  out.tv_nsec = 0;
+  ret 0;
+}
+
+// Returns true when the absolute timeout is reached.
+fun channel_deadline_reached(ChannelAbsTime* abs_time) bin {
+  if abs_time == NULL {
+    ret true;
+  }
+  num now_sec = time(NULL);
+  if now_sec < 0 {
+    ret true;
+  }
+  ret now_sec >= abs_time.tv_sec;
+}
+
 impl Channel<T> {
   // Return a zeroed value for T.
   pub zero_value() T {
@@ -162,6 +208,74 @@ impl Channel<T> {
 
     if self.closed == true {
       ret -1;
+    }
+
+    self.data[self.tail] = value;
+    self.tail = self.tail + 1;
+    if self.tail >= self.cap {
+      self.tail = 0;
+    }
+    self.count = self.count + 1;
+
+    _ = self.can_recv.signal();
+    ret 0;
+  }
+
+  // Send one value, blocking up to timeout_ms while full.
+  // 
+  // Params:
+  // - value: value to send
+  // - timeout_ms: max wait in ms (rounded up to whole seconds)
+  // 
+  // Returns:
+  // - 0 on success
+  // - 1 when channel is closed
+  // - 2 on timeout while still full
+  // - -2 when storage allocation failed
+  // - nonzero pthread error codes on synchronization failures
+  pub send_timeout(T value, num timeout_ms) num {
+    num rc = self.init();
+    if rc != 0 {
+      ret rc;
+    }
+    if timeout_ms < 0 {
+      timeout_ms = 0;
+    }
+
+    rc = self.mu.lock();
+    if rc != 0 {
+      ret rc;
+    }
+    defer self.mu.unlock();
+
+    if self.closed == true {
+      ret 1;
+    }
+
+    ChannelAbsTime abs_time;
+    rc = channel_make_abs_time(timeout_ms, &abs_time);
+    if rc != 0 {
+      ret rc;
+    }
+
+    for self.count == self.cap && self.closed == false {
+      rc = self.can_send.timed_wait(&self.mu, &abs_time);
+      if rc != 0 {
+        if self.count < self.cap || self.closed == true {
+          break;
+        }
+        if channel_deadline_reached(&abs_time) == true {
+          ret 2;
+        }
+        ret rc;
+      }
+    }
+
+    if self.closed == true {
+      ret 1;
+    }
+    if self.count == self.cap {
+      ret 2;
     }
 
     self.data[self.tail] = value;
@@ -261,6 +375,76 @@ impl Channel<T> {
     ret 0;
   }
 
+  // Receive one value into out, blocking up to timeout_ms while empty.
+  // 
+  // Params:
+  // - out: destination pointer
+  // - timeout_ms: max wait in ms (rounded up to whole seconds)
+  // 
+  // Returns:
+  // - 0 on success
+  // - 1 when channel is closed and empty
+  // - 2 on timeout while still empty
+  // - -1 when out is null
+  // - nonzero pthread error codes on synchronization failures
+  pub recv_timeout_into(T* out, num timeout_ms) num {
+    if out == NULL {
+      ret -1;
+    }
+
+    num rc = self.init();
+    if rc != 0 {
+      ret rc;
+    }
+    if timeout_ms < 0 {
+      timeout_ms = 0;
+    }
+
+    rc = self.mu.lock();
+    if rc != 0 {
+      ret rc;
+    }
+    defer self.mu.unlock();
+
+    if self.count == 0 && self.closed == false {
+      ChannelAbsTime abs_time;
+      rc = channel_make_abs_time(timeout_ms, &abs_time);
+      if rc != 0 {
+        ret rc;
+      }
+
+      for self.count == 0 && self.closed == false {
+        rc = self.can_recv.timed_wait(&self.mu, &abs_time);
+        if rc != 0 {
+          if self.count > 0 || self.closed == true {
+            break;
+          }
+          if channel_deadline_reached(&abs_time) == true {
+            ret 2;
+          }
+          ret rc;
+        }
+      }
+    }
+
+    if self.count == 0 {
+      if self.closed == true {
+        ret 1;
+      }
+      ret 2;
+    }
+
+    out[0] = self.data[self.head];
+    self.head = self.head + 1;
+    if self.head >= self.cap {
+      self.head = 0;
+    }
+    self.count = self.count - 1;
+
+    _ = self.can_send.signal();
+    ret 0;
+  }
+
   // Receive one value, blocking while empty.
   // 
   // Returns:
@@ -269,6 +453,20 @@ impl Channel<T> {
   pub recv() T {
     T out = self.zero_value();
     num rc = self.recv_into(&out);
+    if rc != 0 {
+      ret self.zero_value();
+    }
+    ret out;
+  }
+
+  // Receive one value, blocking up to timeout_ms while empty.
+  // 
+  // Returns:
+  // - received value on success
+  // - zeroed value when timeout/closed empty/sync error occurs
+  pub recv_timeout(num timeout_ms) T {
+    T out = self.zero_value();
+    num rc = self.recv_timeout_into(&out, timeout_ms);
     if rc != 0 {
       ret self.zero_value();
     }
