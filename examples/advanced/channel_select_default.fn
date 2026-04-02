@@ -1,0 +1,16 @@
+imp std.c.io;
+imp std.channel;
+
+fun main() {
+  Channel<num> a = channel_new(0);
+  Channel<num> b = channel_new(0);
+
+  num out = 0;
+  num idx = -1;
+  num rc = a.select_recv_default_with(&b, &out, &idx);
+
+  printf("default rc=%lld idx=%lld\n", rc, idx);
+
+  _ = a.destroy();
+  _ = b.destroy();
+}

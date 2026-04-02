@@ -1,0 +1,17 @@
+imp std.c.io;
+imp std.channel;
+
+fun main() {
+  Channel<num> a = channel_new(0);
+  Channel<num> b = channel_new(0);
+
+  num out = 0;
+  num idx = -1;
+  num cancel = 1;
+  num rc = a.select_recv_timeout_with_cancel(&b, &out, &idx, 100, &cancel);
+
+  printf("cancel rc=%lld idx=%lld\n", rc, idx);
+
+  _ = a.destroy();
+  _ = b.destroy();
+}

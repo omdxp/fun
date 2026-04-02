@@ -1357,6 +1357,63 @@ test "std.channel select recv3 fair timeout transpile" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "std.channel select default branch APIs transpile" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_channel_select_default.fn";
+
+    const input =
+        "imp std.channel;\n" ++
+        "fun main() {\n" ++
+        "  Channel<num> a = channel_new(0);\n" ++
+        "  Channel<num> b = channel_new(0);\n" ++
+        "  Channel<num> c = channel_new(0);\n" ++
+        "  num out = 0;\n" ++
+        "  num idx = -1;\n" ++
+        "  num next = 0;\n" ++
+        "  _ = a.select_recv_default_with(&b, &out, &idx);\n" ++
+        "  _ = a.select_recv3_rr_default_with(&b, &c, &next, &out, &idx);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_default_with(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv3_rr_default_with(") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
+test "std.channel select cancel-aware APIs transpile" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_channel_select_cancel.fn";
+
+    const input =
+        "imp std.channel;\n" ++
+        "fun main() {\n" ++
+        "  Channel<num> a = channel_new(0);\n" ++
+        "  Channel<num> b = channel_new(0);\n" ++
+        "  Channel<num> c = channel_new(0);\n" ++
+        "  num out = 0;\n" ++
+        "  num idx = -1;\n" ++
+        "  num next = 0;\n" ++
+        "  num cancel = 1;\n" ++
+        "  _ = a.select_recv_timeout_with_cancel(&b, &out, &idx, 10, &cancel);\n" ++
+        "  _ = a.select_recv_with_cancel(&b, &out, &idx, &cancel);\n" ++
+        "  _ = a.select_recv_timeout3_rr_with_cancel(&b, &c, &next, &out, &idx, 10, &cancel);\n" ++
+        "  _ = a.select_recv3_rr_with_cancel(&b, &c, &next, &out, &idx, &cancel);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with_cancel(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_with_cancel(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_cancel(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv3_rr_with_cancel(") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
 test "std.channel select wait-slice tuning transpile" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_std_channel_select_wait_slice.fn";
@@ -1503,6 +1560,107 @@ test "std.channel select backoff-step tuning transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__get_select_wait_backoff_steps(") != null);
 
     try fs.cwd().deleteFile(ifilepath);
+}
+
+test "channel select default returns default branch when empty" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_channel_select_default_runtime.fn";
+    const cpath = "codegen_channel_select_default_runtime.c";
+    const exe_path = if (builtin.os.tag == .windows)
+        "codegen_channel_select_default_runtime.exe"
+    else
+        "codegen_channel_select_default_runtime";
+
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(cpath) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.channel;\n" ++
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  Channel<num> a = channel_new(0);\n" ++
+        "  Channel<num> b = channel_new(0);\n" ++
+        "  Channel<num> c = channel_new(0);\n" ++
+        "  num out = 0;\n" ++
+        "  num idx = -1;\n" ++
+        "  num next = 0;\n" ++
+        "  num rc2 = a.select_recv_default_with(&b, &out, &idx);\n" ++
+        "  num idx2 = idx;\n" ++
+        "  num rc3 = a.select_recv3_rr_default_with(&b, &c, &next, &out, &idx);\n" ++
+        "  num idx3 = idx;\n" ++
+        "  printf(\"%lld|%lld|%lld|%lld\", rc2, idx2, rc3, idx3);\n" ++
+        "  _ = a.destroy();\n" ++
+        "  _ = b.destroy();\n" ++
+        "  _ = c.destroy();\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try fs.cwd().createFile(cpath, .{});
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, cpath, exe_path);
+
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+
+    try std.testing.expectEqualStrings("3|-1|3|-1", stdout);
+}
+
+test "channel select cancel returns cancelled status" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_channel_select_cancel_runtime.fn";
+    const cpath = "codegen_channel_select_cancel_runtime.c";
+    const exe_path = if (builtin.os.tag == .windows)
+        "codegen_channel_select_cancel_runtime.exe"
+    else
+        "codegen_channel_select_cancel_runtime";
+
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(cpath) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.channel;\n" ++
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  Channel<num> a = channel_new(0);\n" ++
+        "  Channel<num> b = channel_new(0);\n" ++
+        "  Channel<num> c = channel_new(0);\n" ++
+        "  num out = 0;\n" ++
+        "  num idx = -1;\n" ++
+        "  num next = 0;\n" ++
+        "  num cancel = 1;\n" ++
+        "  num rc2 = a.select_recv_timeout_with_cancel(&b, &out, &idx, 10, &cancel);\n" ++
+        "  num idx2 = idx;\n" ++
+        "  num rc3 = a.select_recv_timeout3_rr_with_cancel(&b, &c, &next, &out, &idx, 10, &cancel);\n" ++
+        "  num idx3 = idx;\n" ++
+        "  printf(\"%lld|%lld|%lld|%lld\", rc2, idx2, rc3, idx3);\n" ++
+        "  _ = a.destroy();\n" ++
+        "  _ = b.destroy();\n" ++
+        "  _ = c.destroy();\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try fs.cwd().createFile(cpath, .{});
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, cpath, exe_path);
+
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+
+    try std.testing.expectEqualStrings("3|-1|3|-1", stdout);
 }
 
 test "generic function specialization emits concrete names" {

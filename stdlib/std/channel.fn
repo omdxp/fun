@@ -262,6 +262,18 @@ fun channel_compute_wait_slice_ms(num base_wait_slice_ms, num rem_ms, num idle_r
   ret wait_ms;
 }
 
+// Returns true when an optional cancellation flag is set.
+// 
+// Convention:
+// - NULL flag pointer means cancellation is disabled.
+// - nonzero flag value means cancelled.
+fun channel_is_cancelled(num* cancel_flag) bin {
+  if cancel_flag == NULL {
+    ret false;
+  }
+  ret cancel_flag[0] != 0;
+}
+
 impl Channel<T> {
   // Return a zeroed value for T.
   pub zero_value() T {
@@ -744,6 +756,28 @@ impl Channel<T> {
     ret 2;
   }
 
+  // Try receiving from self or another channel, else take the default branch.
+  // 
+  // Params:
+  // - other: second channel pointer
+  // - out: destination pointer
+  // - out_index: destination pointer for selected channel index (0 for self, 1 for other, -1 for default)
+  // 
+  // Returns:
+  // - 0 on success
+  // - 1 when both channels are closed and empty
+  // - 3 when default branch is selected (both open/empty in this step)
+  // - -1 when other/out/out_index is null
+  // - other nonzero codes on synchronization failures
+  pub select_recv_default_with(Channel<T>* other, T* out, num* out_index) num {
+    num rc = self.select_try_recv_with(other, out, out_index);
+    if rc == 2 {
+      out_index[0] = -1;
+      ret 3;
+    }
+    ret rc;
+  }
+
   // Receive from self or another channel, polling until timeout.
   // 
   // Notes:
@@ -803,6 +837,29 @@ impl Channel<T> {
   // - -1 when other/out/out_index is null
   // - other nonzero codes on synchronization failures
   pub select_recv_timeout_with_tuning(Channel<T>* other, T* out, num* out_index, num timeout_ms, num wait_slice_ms, num backoff_steps) num {
+    ret self.select_recv_timeout_with_tuning_cancel(other, out, out_index, timeout_ms, wait_slice_ms, backoff_steps, NULL);
+  }
+
+  // Receive from self or another channel, polling until timeout, with
+  // explicit wait-slice/backoff-step overrides and optional cancellation.
+  // 
+  // Params:
+  // - other: second channel pointer
+  // - out: destination pointer
+  // - out_index: destination pointer for selected channel index (0 for self, 1 for other)
+  // - timeout_ms: max wait in ms (negative means wait forever)
+  // - wait_slice_ms: wait duration per polling round (clamped to >= 1)
+  // - backoff_steps: max adaptive backoff steps (clamped to 0..8)
+  // - cancel_flag: optional pointer to cancellation flag (nonzero => cancelled)
+  // 
+  // Returns:
+  // - 0 on success
+  // - 1 when both channels are closed and empty
+  // - 2 on timeout
+  // - 3 when cancelled
+  // - -1 when other/out/out_index is null
+  // - other nonzero codes on synchronization failures
+  pub select_recv_timeout_with_tuning_cancel(Channel<T>* other, T* out, num* out_index, num timeout_ms, num wait_slice_ms, num backoff_steps, num* cancel_flag) num {
     if other == NULL || out == NULL || out_index == NULL {
       ret -1;
     }
@@ -823,6 +880,11 @@ impl Channel<T> {
     num idle_rounds = 0;
 
     for true {
+      if channel_is_cancelled(cancel_flag) == true {
+        out_index[0] = -1;
+        ret 3;
+      }
+
       out_index[0] = -1;
 
       num rc_self = self.try_recv(out);
@@ -882,6 +944,33 @@ impl Channel<T> {
     }
 
     ret 2;
+  }
+
+  // Receive from self or another channel, polling until timeout, with
+  // optional cancellation and default wait tuning.
+  // 
+  // Returns:
+  // - 0 on success
+  // - 1 when both channels are closed and empty
+  // - 2 on timeout
+  // - 3 when cancelled
+  // - -1 when other/out/out_index is null
+  // - other nonzero codes on synchronization failures
+  pub select_recv_timeout_with_cancel(Channel<T>* other, T* out, num* out_index, num timeout_ms, num* cancel_flag) num {
+    ret self.select_recv_timeout_with_tuning_cancel(other, out, out_index, timeout_ms, self.select_wait_slice_ms, self.select_wait_backoff_steps, cancel_flag);
+  }
+
+  // Receive from self or another channel, polling until one is ready,
+  // with optional cancellation and default wait tuning.
+  // 
+  // Returns:
+  // - 0 on success
+  // - 1 when both channels are closed and empty
+  // - 3 when cancelled
+  // - -1 when other/out/out_index is null
+  // - other nonzero codes on synchronization failures
+  pub select_recv_with_cancel(Channel<T>* other, T* out, num* out_index, num* cancel_flag) num {
+    ret self.select_recv_timeout_with_tuning_cancel(other, out, out_index, -1, self.select_wait_slice_ms, self.select_wait_backoff_steps, cancel_flag);
   }
 
   // Receive from self or another channel, polling until one is ready.
@@ -1008,6 +1097,30 @@ impl Channel<T> {
     ret 2;
   }
 
+  // Try receiving from self + two other channels, else take the default branch.
+  // 
+  // Params:
+  // - other_a: second channel pointer
+  // - other_b: third channel pointer
+  // - next_index: in/out probe start index (0=self, 1=other_a, 2=other_b)
+  // - out: destination pointer
+  // - out_index: destination pointer for selected channel index (-1 for default)
+  // 
+  // Returns:
+  // - 0 on success
+  // - 1 when all three channels are closed and empty
+  // - 3 when default branch is selected (all open/empty in this step)
+  // - -1 when any pointer argument is null
+  // - other nonzero codes on synchronization failures
+  pub select_recv3_rr_default_with(Channel<T>* other_a, Channel<T>* other_b, num* next_index, T* out, num* out_index) num {
+    num rc = self.select_try_recv3_rr_with(other_a, other_b, next_index, out, out_index);
+    if rc == 2 {
+      out_index[0] = -1;
+      ret 3;
+    }
+    ret rc;
+  }
+
   // Receive from self + two other channels, polling until timeout, with
   // fairness rotation driven by next_index.
   // 
@@ -1074,6 +1187,20 @@ impl Channel<T> {
   // - -1 when any pointer argument is null
   // - other nonzero codes on synchronization failures
   pub select_recv_timeout3_rr_with_tuning(Channel<T>* other_a, Channel<T>* other_b, num* next_index, T* out, num* out_index, num timeout_ms, num wait_slice_ms, num backoff_steps) num {
+    ret self.select_recv_timeout3_rr_with_tuning_cancel(other_a, other_b, next_index, out, out_index, timeout_ms, wait_slice_ms, backoff_steps, NULL);
+  }
+
+  // Receive from self + two other channels, polling until timeout, with
+  // fairness rotation, explicit wait tuning, and optional cancellation.
+  // 
+  // Returns:
+  // - 0 on success
+  // - 1 when all three channels are closed and empty
+  // - 2 on timeout
+  // - 3 when cancelled
+  // - -1 when any pointer argument is null
+  // - other nonzero codes on synchronization failures
+  pub select_recv_timeout3_rr_with_tuning_cancel(Channel<T>* other_a, Channel<T>* other_b, num* next_index, T* out, num* out_index, num timeout_ms, num wait_slice_ms, num backoff_steps, num* cancel_flag) num {
     if other_a == NULL || other_b == NULL || next_index == NULL || out == NULL || out_index == NULL {
       ret -1;
     }
@@ -1097,6 +1224,11 @@ impl Channel<T> {
     num idle_rounds = 0;
 
     for true {
+      if channel_is_cancelled(cancel_flag) == true {
+        out_index[0] = -1;
+        ret 3;
+      }
+
       num rc = self.select_try_recv3_rr_with(other_a, other_b, next_index, out, out_index);
       if rc == 0 {
         ret 0;
@@ -1146,6 +1278,33 @@ impl Channel<T> {
     }
 
     ret 2;
+  }
+
+  // Receive from self + two other channels, polling until timeout, with
+  // optional cancellation and default wait tuning.
+  // 
+  // Returns:
+  // - 0 on success
+  // - 1 when all three channels are closed and empty
+  // - 2 on timeout
+  // - 3 when cancelled
+  // - -1 when any pointer argument is null
+  // - other nonzero codes on synchronization failures
+  pub select_recv_timeout3_rr_with_cancel(Channel<T>* other_a, Channel<T>* other_b, num* next_index, T* out, num* out_index, num timeout_ms, num* cancel_flag) num {
+    ret self.select_recv_timeout3_rr_with_tuning_cancel(other_a, other_b, next_index, out, out_index, timeout_ms, self.select_wait_slice_ms, self.select_wait_backoff_steps, cancel_flag);
+  }
+
+  // Receive from self + two other channels, polling until one is ready,
+  // with fairness rotation and optional cancellation.
+  // 
+  // Returns:
+  // - 0 on success
+  // - 1 when all three channels are closed and empty
+  // - 3 when cancelled
+  // - -1 when any pointer argument is null
+  // - other nonzero codes on synchronization failures
+  pub select_recv3_rr_with_cancel(Channel<T>* other_a, Channel<T>* other_b, num* next_index, T* out, num* out_index, num* cancel_flag) num {
+    ret self.select_recv_timeout3_rr_with_tuning_cancel(other_a, other_b, next_index, out, out_index, -1, self.select_wait_slice_ms, self.select_wait_backoff_steps, cancel_flag);
   }
 
   // Receive from self + two other channels, polling until one is ready,

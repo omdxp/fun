@@ -356,7 +356,7 @@ Examples:
 - `std.result`: generic `Result<T>` container
 - `std.collections`: collection quirks (len/is_empty)
 - `std.string`: string helpers
-- `std.channel`: bounded blocking channels (ring buffer) with timeout send/recv, channel-level and per-call select wait-slice/backoff tuning (timeout and blocking variants), and select_recv_with/select_recv3_rr_with helpers, with synchronization routed through `std.sync_runtime`
+- `std.channel`: bounded blocking channels (ring buffer) with timeout send/recv, non-blocking `try_send`/`try_recv`, default-branch select helpers (`select_recv_default_with`, `select_recv3_rr_default_with`), cancellation-aware select APIs (`*_with_cancel`), and channel-level/per-call select wait-slice/backoff tuning (timeout and blocking variants), with synchronization routed through `std.sync_runtime`
 - `std.thread`: POSIX-backed thread helpers (`thread_new`, method and helper forms for start/join/detach)
 - `std.runtime_backend`: shared runtime backend selector helpers (`runtime_backend_*`) with environment overrides (`FUN_RUNTIME_BACKEND`, `FUN_RUNTIME_OS`)
 - `std.thread_backend_posix`: POSIX thread backend module (`thread_backend_posix_*`) used by `std.thread_runtime`
