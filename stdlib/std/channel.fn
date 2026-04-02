@@ -122,18 +122,22 @@ fun channel_make_abs_time(num timeout_ms, ChannelAbsTime* out) num {
     timeout_ms = 0;
   }
 
-  num now_sec = time(NULL);
-  if now_sec < 0 {
+  num rc = clock_gettime(0, out);
+  if rc != 0 {
     ret -3;
   }
 
   num add_sec = timeout_ms / 1000;
-  if timeout_ms % 1000 != 0 {
-    add_sec = add_sec + 1;
+  num add_nsec = (timeout_ms % 1000) * 1000000;
+
+  out.tv_sec = out.tv_sec + add_sec;
+  out.tv_nsec = out.tv_nsec + add_nsec;
+
+  if out.tv_nsec >= 1000000000 {
+    out.tv_sec = out.tv_sec + (out.tv_nsec / 1000000000);
+    out.tv_nsec = out.tv_nsec % 1000000000;
   }
 
-  out.tv_sec = now_sec + add_sec;
-  out.tv_nsec = 0;
   ret 0;
 }
 
@@ -142,11 +146,20 @@ fun channel_deadline_reached(ChannelAbsTime* abs_time) bin {
   if abs_time == NULL {
     ret true;
   }
-  num now_sec = time(NULL);
-  if now_sec < 0 {
+
+  ChannelAbsTime now;
+  num rc = clock_gettime(0, &now);
+  if rc != 0 {
     ret true;
   }
-  ret now_sec >= abs_time.tv_sec;
+
+  if now.tv_sec > abs_time.tv_sec {
+    ret true;
+  }
+  if now.tv_sec == abs_time.tv_sec && now.tv_nsec >= abs_time.tv_nsec {
+    ret true;
+  }
+  ret false;
 }
 
 impl Channel<T> {
@@ -518,6 +531,53 @@ impl Channel<T> {
     ret 0;
   }
 
+  // Wait for a receive signal on a hint channel for up to timeout_ms.
+  // 
+  // Returns:
+  // - 0 when woken or wait skipped
+  // - 2 on timeout
+  // - -1 when hint is null
+  // - other nonzero codes on synchronization failures
+  pub wait_recv_hint_timeout(Channel<T>* hint, num timeout_ms) num {
+    if hint == NULL {
+      ret -1;
+    }
+    if timeout_ms < 0 {
+      timeout_ms = 0;
+    }
+
+    num rc = hint.init();
+    if rc != 0 {
+      ret rc;
+    }
+
+    rc = hint.mu.lock();
+    if rc != 0 {
+      ret rc;
+    }
+    defer hint.mu.unlock();
+
+    if hint.count > 0 || hint.closed == true {
+      ret 0;
+    }
+
+    ChannelAbsTime abs_time;
+    rc = channel_make_abs_time(timeout_ms, &abs_time);
+    if rc != 0 {
+      ret rc;
+    }
+
+    rc = hint.can_recv.timed_wait(&hint.mu, &abs_time);
+    if rc != 0 {
+      if channel_deadline_reached(&abs_time) == true {
+        ret 2;
+      }
+      ret rc;
+    }
+
+    ret 0;
+  }
+
   // Try receiving from self or another channel without blocking.
   // 
   // Params:
@@ -565,7 +625,7 @@ impl Channel<T> {
   // Receive from self or another channel, polling until timeout.
   // 
   // Notes:
-  // - This uses polling with `try_recv`; timeout resolution is rounded to whole seconds.
+  // - This uses polling with `try_recv` plus short condvar-assisted waits.
   // 
   // Params:
   // - other: second channel pointer
@@ -592,6 +652,8 @@ impl Channel<T> {
         ret time_rc;
       }
     }
+
+    num wait_slot = 0;
 
     for true {
       out_index[0] = -1;
@@ -620,6 +682,20 @@ impl Channel<T> {
       if wait_forever == false && channel_deadline_reached(&abs_time) == true {
         ret 2;
       }
+
+      Channel<T>* hint= self;
+      if wait_slot == 1 {
+        hint = other;
+      }
+      wait_slot = wait_slot + 1;
+      if wait_slot >= 2 {
+        wait_slot = 0;
+      }
+
+      num wait_rc = self.wait_recv_hint_timeout(hint, 5);
+      if wait_rc != 0 && wait_rc != 2 {
+        ret wait_rc;
+      }
     }
 
     ret 2;
@@ -641,6 +717,8 @@ impl Channel<T> {
     if other == NULL || out == NULL || out_index == NULL {
       ret -1;
     }
+
+    num wait_slot = 0;
 
     for true {
       out_index[0] = -1;
@@ -665,6 +743,20 @@ impl Channel<T> {
 
       if rc_self == 1 && rc_other == 1 {
         ret 1;
+      }
+
+      Channel<T>* hint= self;
+      if wait_slot == 1 {
+        hint = other;
+      }
+      wait_slot = wait_slot + 1;
+      if wait_slot >= 2 {
+        wait_slot = 0;
+      }
+
+      num wait_rc = self.wait_recv_hint_timeout(hint, 5);
+      if wait_rc != 0 && wait_rc != 2 {
+        ret wait_rc;
       }
     }
 
@@ -746,7 +838,7 @@ impl Channel<T> {
   // fairness rotation driven by next_index.
   // 
   // Notes:
-  // - This uses polling with `try_recv`; timeout resolution is rounded to whole seconds.
+  // - This uses polling with `try_recv` plus short condvar-assisted waits.
   // 
   // Params:
   // - other_a: second channel pointer
@@ -776,6 +868,11 @@ impl Channel<T> {
       }
     }
 
+    num wait_slot = next_index[0] % 3;
+    if wait_slot < 0 {
+      wait_slot = wait_slot + 3;
+    }
+
     for true {
       num rc = self.select_try_recv3_rr_with(other_a, other_b, next_index, out, out_index);
       if rc == 0 {
@@ -790,6 +887,22 @@ impl Channel<T> {
 
       if wait_forever == false && channel_deadline_reached(&abs_time) == true {
         ret 2;
+      }
+
+      Channel<T>* hint= self;
+      if wait_slot == 1 {
+        hint = other_a;
+      } elif wait_slot == 2 {
+        hint = other_b;
+      }
+      wait_slot = wait_slot + 1;
+      if wait_slot >= 3 {
+        wait_slot = 0;
+      }
+
+      num wait_rc = self.wait_recv_hint_timeout(hint, 5);
+      if wait_rc != 0 && wait_rc != 2 {
+        ret wait_rc;
       }
     }
 

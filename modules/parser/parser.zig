@@ -4121,6 +4121,7 @@ pub const ParseProcess = struct {
             const names = [_][]const u8{
                 "time",
                 "clock",
+                "clock_gettime",
                 "difftime",
                 "mktime",
                 "asctime",

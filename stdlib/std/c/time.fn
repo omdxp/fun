@@ -26,6 +26,14 @@ pub compound tm {
   num tm_isdst;
 }
 
+// Timespec payload used by POSIX timed APIs.
+pub compound timespec {
+  // Whole seconds.
+  num tv_sec;
+  // Nanoseconds component (0..999999999).
+  num tv_nsec;
+}
+
 // Returns the current calendar time.
 // 
 // Params:
@@ -40,6 +48,16 @@ pub fun time(num* tloc) num;
 // Returns:
 // - processor time value, or -1 if not available (C semantics)
 pub fun clock() num;
+
+// Reads the current time for a clock id.
+// 
+// Params:
+// - clk_id: POSIX clock id (`CLOCK_REALTIME` is typically 0)
+// - tp: destination timespec pointer
+// 
+// Returns:
+// - 0 on success, nonzero on failure (C semantics)
+pub fun clock_gettime(num clk_id, raw* tp) num;
 
 // Computes the difference between two time values.
 // 
