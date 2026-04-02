@@ -628,6 +628,28 @@ test "std.channel select adaptive wait backoff transpile" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "std.channel select backoff-step tuning transpile" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_channel_select_backoff_steps.fn";
+
+    const input =
+        "imp std.channel;\n" ++
+        "fun main() {\n" ++
+        "  Channel<num> ch = channel_new(0);\n" ++
+        "  ch.set_select_wait_backoff_steps(4);\n" ++
+        "  num steps = ch.get_select_wait_backoff_steps();\n" ++
+        "  _ = steps;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__set_select_wait_backoff_steps(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__get_select_wait_backoff_steps(") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
 test "generic function specialization emits concrete names" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_generic_fn.fn";

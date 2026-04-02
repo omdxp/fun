@@ -36,6 +36,8 @@ pub compound Channel<T> {
 
   // Per-channel select wait slice in milliseconds.
   num select_wait_slice_ms;
+  // Per-channel adaptive select backoff steps (0 disables backoff).
+  num select_wait_backoff_steps;
 }
 
 // Create a single-slot channel.
@@ -58,6 +60,7 @@ pub fun channel_new<T>(T default_value) Channel<T> {
   ch.count = 0;
   ch.closed = false;
   ch.select_wait_slice_ms = 5;
+  ch.select_wait_backoff_steps = 3;
 
   raw* data_ptr = malloc(sizeof(T));
   ch.data = data_ptr;
@@ -94,6 +97,7 @@ pub fun channel_new_cap<T>(T default_value, num capacity) Channel<T> {
   ch.count = 0;
   ch.closed = false;
   ch.select_wait_slice_ms = 5;
+  ch.select_wait_backoff_steps = 3;
 
   raw* data_ptr = malloc(sizeof(T) * capacity);
   ch.data = data_ptr;
@@ -177,6 +181,17 @@ fun channel_sanitize_wait_slice_ms(num wait_slice_ms) num {
   ret wait_slice_ms;
 }
 
+// Clamp adaptive select backoff steps to a sane nonnegative range.
+fun channel_sanitize_backoff_steps(num backoff_steps) num {
+  if backoff_steps < 0 {
+    ret 0;
+  }
+  if backoff_steps > 8 {
+    ret 8;
+  }
+  ret backoff_steps;
+}
+
 // Remaining time (ms) until absolute deadline.
 // 
 // Returns:
@@ -216,18 +231,19 @@ fun channel_deadline_remaining_ms(ChannelAbsTime* abs_time) num {
 // 
 // Strategy:
 // - Start from base_wait_slice_ms.
-// - Back off exponentially with idle rounds (up to 8x).
+// - Back off exponentially with idle rounds.
 // - Clamp to rem_ms when rem_ms >= 0.
-fun channel_compute_wait_slice_ms(num base_wait_slice_ms, num rem_ms, num idle_rounds) num {
+fun channel_compute_wait_slice_ms(num base_wait_slice_ms, num rem_ms, num idle_rounds, num max_backoff_steps) num {
   num wait_ms = channel_sanitize_wait_slice_ms(base_wait_slice_ms);
+  max_backoff_steps = channel_sanitize_backoff_steps(max_backoff_steps);
 
   if idle_rounds < 0 {
     idle_rounds = 0;
   }
 
   num backoff_steps = idle_rounds;
-  if backoff_steps > 3 {
-    backoff_steps = 3;
+  if backoff_steps > max_backoff_steps {
+    backoff_steps = max_backoff_steps;
   }
 
   num i = 0;
@@ -275,6 +291,7 @@ impl Channel<T> {
       ret rc;
     }
     self.select_wait_slice_ms = channel_sanitize_wait_slice_ms(self.select_wait_slice_ms);
+    self.select_wait_backoff_steps = channel_sanitize_backoff_steps(self.select_wait_backoff_steps);
     ret 0;
   }
 
@@ -286,6 +303,16 @@ impl Channel<T> {
   // Read the per-channel select wait slice (in milliseconds).
   pub get_select_wait_slice_ms() num {
     ret self.select_wait_slice_ms;
+  }
+
+  // Configure max adaptive select backoff steps (0 disables backoff).
+  pub set_select_wait_backoff_steps(num backoff_steps) {
+    self.select_wait_backoff_steps = channel_sanitize_backoff_steps(backoff_steps);
+  }
+
+  // Read max adaptive select backoff steps.
+  pub get_select_wait_backoff_steps() num {
+    ret self.select_wait_backoff_steps;
   }
 
   // Send one value, blocking while the slot is full.
@@ -771,6 +798,7 @@ impl Channel<T> {
 
     num wait_slot = 0;
     num idle_rounds = 0;
+    num max_backoff_steps = channel_sanitize_backoff_steps(self.select_wait_backoff_steps);
 
     for true {
       out_index[0] = -1;
@@ -817,13 +845,13 @@ impl Channel<T> {
         }
       }
 
-      num wait_now_ms = channel_compute_wait_slice_ms(base_wait_slice_ms, rem_ms, idle_rounds);
+      num wait_now_ms = channel_compute_wait_slice_ms(base_wait_slice_ms, rem_ms, idle_rounds, max_backoff_steps);
 
       num wait_rc = self.wait_recv_hint_timeout(hint, wait_now_ms);
       if wait_rc != 0 && wait_rc != 2 {
         ret wait_rc;
       }
-      if idle_rounds < 3 {
+      if idle_rounds < max_backoff_steps {
         idle_rounds = idle_rounds + 1;
       }
       if wait_rc == 0 {
@@ -984,6 +1012,7 @@ impl Channel<T> {
       wait_slot = wait_slot + 3;
     }
     num idle_rounds = 0;
+    num max_backoff_steps = channel_sanitize_backoff_steps(self.select_wait_backoff_steps);
 
     for true {
       num rc = self.select_try_recv3_rr_with(other_a, other_b, next_index, out, out_index);
@@ -1020,13 +1049,13 @@ impl Channel<T> {
         }
       }
 
-      num wait_now_ms = channel_compute_wait_slice_ms(base_wait_slice_ms, rem_ms, idle_rounds);
+      num wait_now_ms = channel_compute_wait_slice_ms(base_wait_slice_ms, rem_ms, idle_rounds, max_backoff_steps);
 
       num wait_rc = self.wait_recv_hint_timeout(hint, wait_now_ms);
       if wait_rc != 0 && wait_rc != 2 {
         ret wait_rc;
       }
-      if idle_rounds < 3 {
+      if idle_rounds < max_backoff_steps {
         idle_rounds = idle_rounds + 1;
       }
       if wait_rc == 0 {
