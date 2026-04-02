@@ -10,7 +10,7 @@ fun main() {
   num a = ch.recv();
   num b = ch.recv();
 
-  printf("buffered values: %d %d\n", a, b);
+  printf("buffered values: %lld %lld\n", a, b);
 
   _ = ch.destroy();
 }

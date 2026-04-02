@@ -11,7 +11,7 @@ fun main() {
   }
 
   num value = ch.recv();
-  printf("channel value: %d\n", value);
+  printf("channel value: %lld\n", value);
 
   _ = ch.destroy();
 }

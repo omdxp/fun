@@ -22,7 +22,7 @@ fun main() {
   num i = 0;
   for i < 3 {
     rc = a.select_recv_timeout3_rr_with(&b, &c, &next, &out, &which, 25);
-    printf("iter=%d rc=%d which=%d value=%d next=%d slice=%d\n", i, rc, which, out, next, a.get_select_wait_slice_ms());
+    printf("iter=%lld rc=%lld which=%lld value=%lld next=%lld slice=%lld\n", i, rc, which, out, next, a.get_select_wait_slice_ms());
     i = i + 1;
   }
 

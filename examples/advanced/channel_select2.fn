@@ -11,7 +11,7 @@ fun main() {
   num which = -1;
   num rc = a.select_recv_timeout_with(&b, &out, &which, 25);
 
-  printf("select rc=%d which=%d value=%d\n", rc, which, out);
+  printf("select rc=%lld which=%lld value=%lld\n", rc, which, out);
 
   _ = a.destroy();
   _ = b.destroy();

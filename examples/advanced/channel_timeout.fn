@@ -7,14 +7,14 @@ fun main() {
   _ = ch.send(7);
 
   num rc = ch.send_timeout(11, 0);
-  printf("send_timeout rc=%d (2 means timeout)\n", rc);
+  printf("send_timeout rc=%lld (2 means timeout)\n", rc);
 
   num out = 0;
   rc = ch.recv_timeout_into(&out, 0);
-  printf("recv_timeout_into rc=%d value=%d\n", rc, out);
+  printf("recv_timeout_into rc=%lld value=%lld\n", rc, out);
 
   num v = ch.recv_timeout(0);
-  printf("recv_timeout value=%d (0 means timeout/empty/closed)\n", v);
+  printf("recv_timeout value=%lld (0 means timeout/empty/closed)\n", v);
 
   _ = ch.destroy();
 }
