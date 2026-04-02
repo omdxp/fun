@@ -1,0 +1,28 @@
+imp std.c.io;
+imp std.channel;
+
+fun main() {
+  Channel<num> a = channel_new(0);
+  Channel<num> b = channel_new(0);
+  Channel<num> c = channel_new(0);
+
+  _ = a.send(10);
+  _ = b.send(20);
+  _ = c.send(30);
+
+  num next = 0;
+  num out = 0;
+  num which = -1;
+  num rc = 0;
+
+  num i = 0;
+  for i < 3 {
+    rc = a.select_recv_timeout3_rr_with(&b, &c, &next, &out, &which, 25);
+    printf("iter=%d rc=%d which=%d value=%d next=%d\n", i, rc, which, out, next);
+    i = i + 1;
+  }
+
+  _ = a.destroy();
+  _ = b.destroy();
+  _ = c.destroy();
+}

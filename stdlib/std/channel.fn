@@ -671,6 +671,150 @@ impl Channel<T> {
     ret 1;
   }
 
+  // Try receiving from self + two other channels without blocking, using
+  // a rotating start index for fairness.
+  // 
+  // Params:
+  // - other_a: second channel pointer
+  // - other_b: third channel pointer
+  // - next_index: in/out probe start index (0=self, 1=other_a, 2=other_b)
+  // - out: destination pointer
+  // - out_index: destination pointer for selected channel index
+  // 
+  // Returns:
+  // - 0 on success
+  // - 1 when all three channels are closed and empty
+  // - 2 when all three channels are open/empty in this polling step
+  // - -1 when any pointer argument is null
+  // - other nonzero codes on synchronization failures
+  pub select_try_recv3_rr_with(Channel<T>* other_a, Channel<T>* other_b, num* next_index, T* out, num* out_index) num {
+    if other_a == NULL || other_b == NULL || next_index == NULL || out == NULL || out_index == NULL {
+      ret -1;
+    }
+
+    out_index[0] = -1;
+
+    num start = next_index[0] % 3;
+    if start < 0 {
+      start = start + 3;
+    }
+
+    num closed_count = 0;
+    num i = 0;
+    for i < 3 {
+      num slot = start + i;
+      if slot >= 3 {
+        slot = slot - 3;
+      }
+
+      num rc = 2;
+      if slot == 0 {
+        rc = self.try_recv(out);
+      } elif slot == 1 {
+        rc = other_a.try_recv(out);
+      } else {
+        rc = other_b.try_recv(out);
+      }
+
+      if rc == 0 {
+        out_index[0] = slot;
+        num nxt = slot + 1;
+        if nxt >= 3 {
+          nxt = 0;
+        }
+        next_index[0] = nxt;
+        ret 0;
+      }
+
+      if rc != 1 && rc != 2 {
+        ret rc;
+      }
+      if rc == 1 {
+        closed_count = closed_count + 1;
+      }
+
+      i = i + 1;
+    }
+
+    if closed_count == 3 {
+      ret 1;
+    }
+    ret 2;
+  }
+
+  // Receive from self + two other channels, polling until timeout, with
+  // fairness rotation driven by next_index.
+  // 
+  // Notes:
+  // - This uses polling with `try_recv`; timeout resolution is rounded to whole seconds.
+  // 
+  // Params:
+  // - other_a: second channel pointer
+  // - other_b: third channel pointer
+  // - next_index: in/out probe start index (0=self, 1=other_a, 2=other_b)
+  // - out: destination pointer
+  // - out_index: destination pointer for selected channel index
+  // - timeout_ms: max wait in ms (negative means wait forever)
+  // 
+  // Returns:
+  // - 0 on success
+  // - 1 when all three channels are closed and empty
+  // - 2 on timeout
+  // - -1 when any pointer argument is null
+  // - other nonzero codes on synchronization failures
+  pub select_recv_timeout3_rr_with(Channel<T>* other_a, Channel<T>* other_b, num* next_index, T* out, num* out_index, num timeout_ms) num {
+    if other_a == NULL || other_b == NULL || next_index == NULL || out == NULL || out_index == NULL {
+      ret -1;
+    }
+
+    bin wait_forever = timeout_ms < 0;
+    ChannelAbsTime abs_time;
+    if wait_forever == false {
+      num time_rc = channel_make_abs_time(timeout_ms, &abs_time);
+      if time_rc != 0 {
+        ret time_rc;
+      }
+    }
+
+    for true {
+      num rc = self.select_try_recv3_rr_with(other_a, other_b, next_index, out, out_index);
+      if rc == 0 {
+        ret 0;
+      }
+      if rc == 1 {
+        ret 1;
+      }
+      if rc != 2 {
+        ret rc;
+      }
+
+      if wait_forever == false && channel_deadline_reached(&abs_time) == true {
+        ret 2;
+      }
+    }
+
+    ret 2;
+  }
+
+  // Receive from self + two other channels, polling until one is ready,
+  // with fairness rotation driven by next_index.
+  // 
+  // Params:
+  // - other_a: second channel pointer
+  // - other_b: third channel pointer
+  // - next_index: in/out probe start index (0=self, 1=other_a, 2=other_b)
+  // - out: destination pointer
+  // - out_index: destination pointer for selected channel index
+  // 
+  // Returns:
+  // - 0 on success
+  // - 1 when all three channels are closed and empty
+  // - -1 when any pointer argument is null
+  // - other nonzero codes on synchronization failures
+  pub select_recv3_rr_with(Channel<T>* other_a, Channel<T>* other_b, num* next_index, T* out, num* out_index) num {
+    ret self.select_recv_timeout3_rr_with(other_a, other_b, next_index, out, out_index, -1);
+  }
+
   // Close channel and wake blocked senders/receivers.
   // 
   // Returns:
