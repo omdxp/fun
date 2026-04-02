@@ -40,7 +40,7 @@ pub quirk Serialize {
 Note: `num`/`dec` are 64-bit by default (`int64_t`/`double`), and Fun also supports fixed-width numeric types (`i8`..`i64`, `u8`..`u64`, `f32`, `f64`) plus arbitrary-width integers (`iN`, `uN`).
 
 - **std/array.fn**: Fixed-size array helpers (get/set/swap/reverse).
-- **std/channel.fn**: Bounded blocking ring-buffer channels with timeout send/recv, channel-level and per-call select wait-slice tuning, plus select_recv_with and select_recv3_rr_with helpers on top of std.sync.
+- **std/channel.fn**: Bounded blocking ring-buffer channels with timeout send/recv, channel-level and per-call select wait-slice tuning, adaptive select wait backoff, plus select_recv_with and select_recv3_rr_with helpers on top of std.sync.
 - **std/cli.fn**: Command-line argument parsing helpers (long/short flags, bundling, `--` stop).
 - **std/collections.fn**: Collection quirks (len/is_empty) aligned with std.quirks.
 - **std/fs.fn**: File system helpers (exists, read/write, copy, read_lines).

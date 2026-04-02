@@ -606,6 +606,28 @@ test "std.channel select explicit wait-slice override transpile" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "std.channel select adaptive wait backoff transpile" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_channel_select_adaptive_wait.fn";
+
+    const input =
+        "imp std.channel;\n" ++
+        "fun main() {\n" ++
+        "  Channel<num> a = channel_new(0);\n" ++
+        "  Channel<num> b = channel_new(0);\n" ++
+        "  num out = 0;\n" ++
+        "  num idx = -1;\n" ++
+        "  _ = a.select_recv_timeout_with(&b, &out, &idx, 10);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "channel_compute_wait_slice_ms(") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
 test "generic function specialization emits concrete names" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_generic_fn.fn";

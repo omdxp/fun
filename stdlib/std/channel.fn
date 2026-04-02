@@ -212,6 +212,39 @@ fun channel_deadline_remaining_ms(ChannelAbsTime* abs_time) num {
   ret out_ms;
 }
 
+// Compute per-round select wait duration with bounded adaptive backoff.
+// 
+// Strategy:
+// - Start from base_wait_slice_ms.
+// - Back off exponentially with idle rounds (up to 8x).
+// - Clamp to rem_ms when rem_ms >= 0.
+fun channel_compute_wait_slice_ms(num base_wait_slice_ms, num rem_ms, num idle_rounds) num {
+  num wait_ms = channel_sanitize_wait_slice_ms(base_wait_slice_ms);
+
+  if idle_rounds < 0 {
+    idle_rounds = 0;
+  }
+
+  num backoff_steps = idle_rounds;
+  if backoff_steps > 3 {
+    backoff_steps = 3;
+  }
+
+  num i = 0;
+  for i < backoff_steps {
+    wait_ms = wait_ms * 2;
+    i = i + 1;
+  }
+
+  if rem_ms >= 0 && wait_ms > rem_ms {
+    wait_ms = rem_ms;
+  }
+  if wait_ms <= 0 {
+    ret 1;
+  }
+  ret wait_ms;
+}
+
 impl Channel<T> {
   // Return a zeroed value for T.
   pub zero_value() T {
@@ -737,6 +770,7 @@ impl Channel<T> {
     }
 
     num wait_slot = 0;
+    num idle_rounds = 0;
 
     for true {
       out_index[0] = -1;
@@ -775,20 +809,25 @@ impl Channel<T> {
         wait_slot = 0;
       }
 
-      num wait_now_ms = base_wait_slice_ms;
+      num rem_ms = -1;
       if wait_forever == false {
-        num rem_ms = channel_deadline_remaining_ms(&abs_time);
+        rem_ms = channel_deadline_remaining_ms(&abs_time);
         if rem_ms <= 0 {
           ret 2;
         }
-        if wait_now_ms > rem_ms {
-          wait_now_ms = rem_ms;
-        }
       }
+
+      num wait_now_ms = channel_compute_wait_slice_ms(base_wait_slice_ms, rem_ms, idle_rounds);
 
       num wait_rc = self.wait_recv_hint_timeout(hint, wait_now_ms);
       if wait_rc != 0 && wait_rc != 2 {
         ret wait_rc;
+      }
+      if idle_rounds < 3 {
+        idle_rounds = idle_rounds + 1;
+      }
+      if wait_rc == 0 {
+        idle_rounds = 0;
       }
     }
 
@@ -944,6 +983,7 @@ impl Channel<T> {
     if wait_slot < 0 {
       wait_slot = wait_slot + 3;
     }
+    num idle_rounds = 0;
 
     for true {
       num rc = self.select_try_recv3_rr_with(other_a, other_b, next_index, out, out_index);
@@ -972,20 +1012,25 @@ impl Channel<T> {
         wait_slot = 0;
       }
 
-      num wait_now_ms = base_wait_slice_ms;
+      num rem_ms = -1;
       if wait_forever == false {
-        num rem_ms = channel_deadline_remaining_ms(&abs_time);
+        rem_ms = channel_deadline_remaining_ms(&abs_time);
         if rem_ms <= 0 {
           ret 2;
         }
-        if wait_now_ms > rem_ms {
-          wait_now_ms = rem_ms;
-        }
       }
+
+      num wait_now_ms = channel_compute_wait_slice_ms(base_wait_slice_ms, rem_ms, idle_rounds);
 
       num wait_rc = self.wait_recv_hint_timeout(hint, wait_now_ms);
       if wait_rc != 0 && wait_rc != 2 {
         ret wait_rc;
+      }
+      if idle_rounds < 3 {
+        idle_rounds = idle_rounds + 1;
+      }
+      if wait_rc == 0 {
+        idle_rounds = 0;
       }
     }
 
