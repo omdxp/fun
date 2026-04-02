@@ -273,6 +273,13 @@ pub fn get_c_typedef_alias_datatype_type(dt: []const u8) ?dtype.DataTypeType {
     if (mem.eql(u8, "FILE", dt)) return .Unknown;
     // `stdarg.h`
     if (mem.eql(u8, "va_list", dt)) return .Unknown;
+    // `pthread.h`
+    if (mem.eql(u8, "pthread_t", dt)) return .Unknown;
+    if (mem.eql(u8, "pthread_attr_t", dt)) return .Unknown;
+    if (mem.eql(u8, "pthread_mutex_t", dt)) return .Unknown;
+    if (mem.eql(u8, "pthread_mutexattr_t", dt)) return .Unknown;
+    if (mem.eql(u8, "pthread_cond_t", dt)) return .Unknown;
+    if (mem.eql(u8, "pthread_condattr_t", dt)) return .Unknown;
     return null;
 }
 

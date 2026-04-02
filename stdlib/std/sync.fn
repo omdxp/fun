@@ -1,0 +1,193 @@
+// Synchronization helpers built on POSIX pthread APIs.
+// 
+// Provides mutex and condition variable wrappers with lazy init.
+
+imp std.c.thread;
+imp std.c.def;
+
+// Managed mutex.
+pub compound Mutex {
+  // Underlying pthread mutex.
+  pthread_mutex_t inner;
+  // True once initialized and not yet destroyed.
+  bin initialized;
+}
+
+// Managed condition variable.
+pub compound CondVar {
+  // Underlying pthread condvar.
+  pthread_cond_t inner;
+  // True once initialized and not yet destroyed.
+  bin initialized;
+}
+
+// Create an uninitialized mutex wrapper.
+// 
+// Returns:
+// - new Mutex value
+pub fun mutex_new() Mutex {
+  Mutex m;
+  m.initialized = false;
+  ret m;
+}
+
+// Create an uninitialized condition variable wrapper.
+// 
+// Returns:
+// - new CondVar value
+pub fun condvar_new() CondVar {
+  CondVar c;
+  c.initialized = false;
+  ret c;
+}
+
+impl Mutex {
+  // Initialize the mutex.
+  // 
+  // Returns:
+  // - pthread return code (0 on success)
+  pub init() num {
+    if self.initialized == true {
+      ret 0;
+    }
+    num rc = pthread_mutex_init(&self.inner, NULL);
+    if rc == 0 {
+      self.initialized = true;
+    }
+    ret rc;
+  }
+
+  // Lock the mutex.
+  // 
+  // Returns:
+  // - pthread return code (0 on success)
+  pub lock() num {
+    if self.initialized == false {
+      num init_rc = self.init();
+      if init_rc != 0 {
+        ret init_rc;
+      }
+    }
+    ret pthread_mutex_lock(&self.inner);
+  }
+
+  // Try locking the mutex without blocking.
+  // 
+  // Returns:
+  // - pthread return code (0 on success)
+  pub try_lock() num {
+    if self.initialized == false {
+      num init_rc = self.init();
+      if init_rc != 0 {
+        ret init_rc;
+      }
+    }
+    ret pthread_mutex_trylock(&self.inner);
+  }
+
+  // Unlock the mutex.
+  // 
+  // Returns:
+  // - pthread return code (0 on success)
+  pub unlock() num {
+    if self.initialized == false {
+      ret 0;
+    }
+    ret pthread_mutex_unlock(&self.inner);
+  }
+
+  // Destroy the mutex.
+  // 
+  // Returns:
+  // - pthread return code (0 on success)
+  pub destroy() num {
+    if self.initialized == false {
+      ret 0;
+    }
+    num rc = pthread_mutex_destroy(&self.inner);
+    if rc == 0 {
+      self.initialized = false;
+    }
+    ret rc;
+  }
+}
+
+impl CondVar {
+  // Initialize the condition variable.
+  // 
+  // Returns:
+  // - pthread return code (0 on success)
+  pub init() num {
+    if self.initialized == true {
+      ret 0;
+    }
+    num rc = pthread_cond_init(&self.inner, NULL);
+    if rc == 0 {
+      self.initialized = true;
+    }
+    ret rc;
+  }
+
+  // Wait on the condition variable.
+  // 
+  // Params:
+  // - mutex: associated mutex wrapper
+  // 
+  // Returns:
+  // - pthread return code (0 on success)
+  pub wait(Mutex* mutex) num {
+    if self.initialized == false {
+      num init_rc = self.init();
+      if init_rc != 0 {
+        ret init_rc;
+      }
+    }
+    if mutex == NULL {
+      ret -1;
+    }
+    if mutex.initialized == false {
+      num m_rc = mutex.init();
+      if m_rc != 0 {
+        ret m_rc;
+      }
+    }
+    ret pthread_cond_wait(&self.inner, &mutex.inner);
+  }
+
+  // Wake one waiter.
+  // 
+  // Returns:
+  // - pthread return code (0 on success)
+  pub signal() num {
+    if self.initialized == false {
+      ret 0;
+    }
+    ret pthread_cond_signal(&self.inner);
+  }
+
+  // Wake all waiters.
+  // 
+  // Returns:
+  // - pthread return code (0 on success)
+  pub broadcast() num {
+    if self.initialized == false {
+      ret 0;
+    }
+    ret pthread_cond_broadcast(&self.inner);
+  }
+
+  // Destroy the condition variable.
+  // 
+  // Returns:
+  // - pthread return code (0 on success)
+  pub destroy() num {
+    if self.initialized == false {
+      ret 0;
+    }
+    num rc = pthread_cond_destroy(&self.inner);
+    if rc == 0 {
+      self.initialized = false;
+    }
+    ret rc;
+  }
+}

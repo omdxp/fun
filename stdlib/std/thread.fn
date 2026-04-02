@@ -1,0 +1,96 @@
+// Thread helpers built on POSIX pthread APIs.
+// 
+// Usage:
+// Thread t = thread_new();
+// num rc = t.start(entry_ptr, arg_ptr);
+
+imp std.c.thread;
+imp std.c.def;
+
+// Managed thread handle.
+pub compound Thread {
+  // Underlying pthread handle.
+  pthread_t handle;
+  // True once started and not yet joined/detached.
+  bin started;
+}
+
+// Create a thread handle in stopped state.
+// 
+// Returns:
+// - new Thread value
+pub fun thread_new() Thread {
+  Thread t;
+  t.started = false;
+  ret t;
+}
+
+impl Thread {
+  // Start this thread.
+  // 
+  // Params:
+  // - entry: pthread entry function pointer
+  // - arg: user data passed to entry
+  // 
+  // Returns:
+  // - pthread return code (0 on success)
+  pub start(raw* entry, raw* arg) num {
+    if self.started == true {
+      ret 0;
+    }
+    num rc = pthread_create(&self.handle, NULL, entry, arg);
+    if rc == 0 {
+      self.started = true;
+    }
+    ret rc;
+  }
+
+  // Join this thread.
+  // 
+  // Params:
+  // - out_ret: optional output pointer for entry return value
+  // 
+  // Returns:
+  // - pthread return code (0 on success)
+  pub join(raw* out_ret) num {
+    if self.started == false {
+      ret 0;
+    }
+    num rc = pthread_join(self.handle, out_ret);
+    if rc == 0 {
+      self.started = false;
+    }
+    ret rc;
+  }
+
+  // Detach this thread.
+  // 
+  // Returns:
+  // - pthread return code (0 on success)
+  pub detach() num {
+    if self.started == false {
+      ret 0;
+    }
+    num rc = pthread_detach(self.handle);
+    if rc == 0 {
+      self.started = false;
+    }
+    ret rc;
+  }
+}
+
+// Return the current thread id.
+// 
+// Returns:
+// - current pthread handle
+pub fun current_thread() pthread_t {
+  ret pthread_self();
+}
+
+// Compare two thread ids.
+// 
+// Returns:
+// - true when equal
+pub fun thread_equal(pthread_t a, pthread_t b) bin {
+  ret pthread_equal(a, b) != 0;
+}

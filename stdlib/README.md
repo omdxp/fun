@@ -54,7 +54,9 @@ Note: `num`/`dec` are 64-bit by default (`int64_t`/`double`), and Fun also suppo
 - **std/sys.fn**: Environment, process control, and randomness helpers.
 - **std/path.fn**: Path helpers (join, join_many, basename, dirname, extname, strip_ext, change_ext, is_abs).
 - **std/rand.fn**: PRNG utilities (range_dec, chance, shuffle).
+- **std/sync.fn**: POSIX-backed synchronization wrappers (mutex and condition variable helpers).
 - **std/string.fn**: String helpers (count, strip prefix/suffix, split lines, replace, case conversion, repeat, etc.).
+- **std/thread.fn**: POSIX-backed thread lifecycle helpers (`thread_new`, start/join/detach).
 - **std/time.fn**: Time helpers (epoch, formatting, UTC, diffs).
 - **std/toml.fn**: Minimal TOML parse/stringify for flat key/value.
 - **std/vec.fn**: Dynamic vector helpers (reserve/insert/remove/pop/swap_remove/extend/resize/shrink_to_fit).
@@ -68,6 +70,7 @@ Note: `num`/`dec` are 64-bit by default (`int64_t`/`double`), and Fun also suppo
 - **std/c/def.fn**: Common C definitions and constants.
 - **std/c/io.fn**: stdio bindings (FILE, printf, fopen, etc.).
 - **std/c/mem.fn**: stdlib bindings (malloc/free, env, system, etc.).
+- **std/c/thread.fn**: POSIX pthread bindings (thread, mutex, and condition variable functions).
 - **std/c/string.fn**: string.h bindings (strlen, memcpy, memset, etc.).
 - **std/c/time.fn**: time.h bindings (time, localtime, strftime, etc.).
 

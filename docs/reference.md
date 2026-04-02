@@ -345,6 +345,8 @@ Examples:
 - `std.result`: generic `Result<T>` container
 - `std.collections`: collection quirks (len/is_empty)
 - `std.string`: string helpers
+- `std.thread`: POSIX-backed thread helpers (`thread_new`, start/join/detach)
+- `std.sync`: POSIX-backed mutex and condition variable helpers
 - `std.json`, `std.toml`: minimal serialization helpers
 - `std.time`, `std.rand`, `std.math`, `std.path`, `std.net`, etc.
 - `std.sys`: environment and process helpers (`sys_exit`, `sys_abort`, `sys_system`)

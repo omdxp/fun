@@ -1,0 +1,124 @@
+// POSIX thread bindings (pthread.h)
+// 
+// Notes:
+// - These are declarations only; implementations come from your system libc.
+// - This module targets POSIX pthread APIs.
+// - Function-pointer parameters are modeled as raw*.
+
+// Thread lifecycle
+// Create a new thread.
+// 
+// Params:
+// - thread: output thread handle pointer
+// - attr: optional thread attributes (null for defaults)
+// - start_routine: thread entry function pointer
+// - arg: argument passed to start_routine
+// 
+// Returns:
+// - 0 on success, nonzero error code on failure (C semantics)
+pub fun pthread_create(pthread_t* thread, pthread_attr_t* attr, raw* start_routine, raw* arg) num;
+
+// Wait for a thread to terminate.
+// 
+// Params:
+// - thread: thread handle
+// - retval: optional output pointer for return value
+// 
+// Returns:
+// - 0 on success, nonzero error code on failure (C semantics)
+pub fun pthread_join(pthread_t thread, raw* retval) num;
+
+// Detach a thread.
+// 
+// Params:
+// - thread: thread handle
+// 
+// Returns:
+// - 0 on success, nonzero error code on failure (C semantics)
+pub fun pthread_detach(pthread_t thread) num;
+
+// Get the calling thread handle.
+// 
+// Returns:
+// - current thread handle
+pub fun pthread_self() pthread_t;
+
+// Compare two thread handles.
+// 
+// Returns:
+// - nonzero when equal, 0 otherwise (C semantics)
+pub fun pthread_equal(pthread_t t1, pthread_t t2) num;
+
+// Mutex
+// Initialize a mutex.
+// 
+// Params:
+// - mutex: mutex object pointer
+// - attr: optional mutex attributes (null for defaults)
+// 
+// Returns:
+// - 0 on success, nonzero error code on failure (C semantics)
+pub fun pthread_mutex_init(pthread_mutex_t* mutex, pthread_mutexattr_t* attr) num;
+
+// Destroy a mutex.
+// 
+// Returns:
+// - 0 on success, nonzero error code on failure (C semantics)
+pub fun pthread_mutex_destroy(pthread_mutex_t* mutex) num;
+
+// Lock a mutex.
+// 
+// Returns:
+// - 0 on success, nonzero error code on failure (C semantics)
+pub fun pthread_mutex_lock(pthread_mutex_t* mutex) num;
+
+// Try to lock a mutex without blocking.
+// 
+// Returns:
+// - 0 on success, error code when lock is unavailable/fails (C semantics)
+pub fun pthread_mutex_trylock(pthread_mutex_t* mutex) num;
+
+// Unlock a mutex.
+// 
+// Returns:
+// - 0 on success, nonzero error code on failure (C semantics)
+pub fun pthread_mutex_unlock(pthread_mutex_t* mutex) num;
+
+// Condition variables
+// Initialize a condition variable.
+// 
+// Params:
+// - cond: condition variable object pointer
+// - attr: optional condition attributes (null for defaults)
+// 
+// Returns:
+// - 0 on success, nonzero error code on failure (C semantics)
+pub fun pthread_cond_init(pthread_cond_t* cond, pthread_condattr_t* attr) num;
+
+// Destroy a condition variable.
+// 
+// Returns:
+// - 0 on success, nonzero error code on failure (C semantics)
+pub fun pthread_cond_destroy(pthread_cond_t* cond) num;
+
+// Wait on a condition variable.
+// 
+// Params:
+// - cond: condition variable pointer
+// - mutex: associated mutex pointer
+// 
+// Returns:
+// - 0 on success, nonzero error code on failure (C semantics)
+pub fun pthread_cond_wait(pthread_cond_t* cond, pthread_mutex_t* mutex) num;
+
+// Wake one waiter.
+// 
+// Returns:
+// - 0 on success, nonzero error code on failure (C semantics)
+pub fun pthread_cond_signal(pthread_cond_t* cond) num;
+
+// Wake all waiters.
+// 
+// Returns:
+// - 0 on success, nonzero error code on failure (C semantics)
+pub fun pthread_cond_broadcast(pthread_cond_t* cond) num;

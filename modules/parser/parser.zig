@@ -4164,6 +4164,34 @@ pub const ParseProcess = struct {
                     });
                 }
             }
+        } else if (mem.eql(u8, path, "std.c.thread")) {
+            const names = [_][]const u8{
+                "pthread_create",
+                "pthread_join",
+                "pthread_detach",
+                "pthread_self",
+                "pthread_equal",
+                "pthread_mutex_init",
+                "pthread_mutex_destroy",
+                "pthread_mutex_lock",
+                "pthread_mutex_trylock",
+                "pthread_mutex_unlock",
+                "pthread_cond_init",
+                "pthread_cond_destroy",
+                "pthread_cond_wait",
+                "pthread_cond_signal",
+                "pthread_cond_broadcast",
+            };
+            for (names) |name| {
+                if (self.transpile_proc.get_symbol(name) == null) {
+                    try self.transpile_proc.push_symbol(.{
+                        .type = symbol.SymbolType.NativeFunction,
+                        .name = name,
+                        .data = null,
+                        .symbol_table = null,
+                    });
+                }
+            }
         } else if (mem.eql(u8, path, "std.c.math")) {
             const names = [_][]const u8{
                 "sin",

@@ -714,6 +714,10 @@ fn append_default_compile_args(allocator: mem.Allocator, argv_list: *std.ArrayLi
             try argv_list.append(try allocator.dupe(u8, c_path));
             try argv_list.append(try allocator.dupe(u8, "-o"));
             try argv_list.append(try allocator.dupe(u8, exe_file));
+            // GCC/Clang-style Unix threading support.
+            if (builtin.target.os.tag != .windows) {
+                try argv_list.append(try allocator.dupe(u8, "-pthread"));
+            }
             // GCC/Clang-style Linux links libm separately.
             if (builtin.target.os.tag != .windows) {
                 try argv_list.append(try allocator.dupe(u8, "-lm"));
@@ -810,6 +814,41 @@ test "FUN_CC=zig with FUN_CC_ARGS=cc keeps zig cc ordering" {
     try std.testing.expect(std.mem.eql(u8, argv_list.items[0], "zig"));
     try std.testing.expect(std.mem.eql(u8, argv_list.items[1], "cc"));
     try std.testing.expect(!std.mem.eql(u8, argv_list.items[argv_list.items.len - 1], "cc"));
+}
+
+test "default gcc-like args include pthread on non-windows" {
+    if (builtin.target.os.tag == .windows) return;
+
+    const allocator = std.testing.allocator;
+    var argv_list = std.ArrayList([]const u8).init(allocator);
+    defer argv_list.deinit();
+    defer free_arg_list(allocator, argv_list.items);
+
+    try argv_list.append(try allocator.dupe(u8, "clang"));
+    try append_default_compile_args(allocator, &argv_list, .gcc_like, "test.c", "test.exe");
+
+    var has_pthread = false;
+    for (argv_list.items) |arg| {
+        if (std.mem.eql(u8, arg, "-pthread")) {
+            has_pthread = true;
+            break;
+        }
+    }
+    try std.testing.expect(has_pthread);
+}
+
+test "default cl args do not include pthread" {
+    const allocator = std.testing.allocator;
+    var argv_list = std.ArrayList([]const u8).init(allocator);
+    defer argv_list.deinit();
+    defer free_arg_list(allocator, argv_list.items);
+
+    try argv_list.append(try allocator.dupe(u8, "cl"));
+    try append_default_compile_args(allocator, &argv_list, .cl, "test.c", "test.exe");
+
+    for (argv_list.items) |arg| {
+        try std.testing.expect(!std.mem.eql(u8, arg, "-pthread"));
+    }
 }
 
 fn prev_significant_index(toks: []const token.Token, idx: usize) ?usize {

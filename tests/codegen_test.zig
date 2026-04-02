@@ -368,6 +368,56 @@ test "std.time import adds time.h include" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "std.c.thread import adds pthread.h include" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_thread_c.fn";
+
+    const input =
+        "imp std.c.thread;\n" ++
+        "fun main() { ret; }\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <pthread.h>") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
+test "std.c.thread symbols are callable after import" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_thread_symbols.fn";
+
+    const input =
+        "imp std.c.thread;\n" ++
+        "fun main() {\n" ++
+        "  pthread_self();\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "pthread_self()") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
+test "transitive std.thread import emits pthread headers" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_transitive_std_thread.fn";
+
+    const input =
+        "imp std.thread;\n" ++
+        "fun main() { ret; }\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <pthread.h>") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
 test "generic function specialization emits concrete names" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_generic_fn.fn";
