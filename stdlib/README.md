@@ -55,7 +55,7 @@ Note: `num`/`dec` are 64-bit by default (`int64_t`/`double`), and Fun also suppo
 - **std/sys.fn**: Environment, process control, and randomness helpers.
 - **std/path.fn**: Path helpers (join, join_many, basename, dirname, extname, strip_ext, change_ext, is_abs).
 - **std/rand.fn**: PRNG utilities (range_dec, chance, shuffle).
-- **std/runtime_backend.fn**: Shared runtime backend selector helpers (`runtime_backend_*`) with environment overrides (`FUN_RUNTIME_BACKEND`, `FUN_RUNTIME_OS`).
+- **std/runtime_backend.fn**: Shared runtime backend selector helpers (`runtime_backend_*`) with precedence: `FUN_RUNTIME_BACKEND` -> `FUN_RUNTIME_OS` -> host hints (`OS`/`OSTYPE`) -> posix fallback.
 - **std/sync.fn**: POSIX-backed synchronization wrappers (mutex/condition variable method and helper forms).
 - **std/sync_backend_posix.fn**: POSIX synchronization backend module (`sync_backend_posix_*`) used by std.sync_runtime.
 - **std/sync_backend_windows.fn**: Windows synchronization backend skeleton (`sync_backend_windows_*`) used by std.sync_runtime.

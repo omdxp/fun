@@ -1,9 +1,15 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const fs = std.fs;
 const lexer = @import("lexer");
 const ParseProcess = @import("parser").ParseProcess;
 const codegen = @import("codegen");
 const cli = @import("cli");
+
+const EnvOverride = struct {
+    key: []const u8,
+    value: []const u8,
+};
 
 fn runTranspile(allocator: std.mem.Allocator, input_path: []const u8, input: []const u8) ![]const u8 {
     {
@@ -33,6 +39,72 @@ fn runTranspile(allocator: std.mem.Allocator, input_path: []const u8, input: []c
     const out = transpile_proc.get_output() orelse return error.NoOutput;
     // Copy it so it remains valid after deinit.
     return allocator.dupe(u8, out);
+}
+
+fn compileWithZigCc(allocator: std.mem.Allocator, c_path: []const u8, exe_path: []const u8) !void {
+    var argv = std.ArrayList([]const u8).init(allocator);
+    defer argv.deinit();
+
+    try argv.append("zig");
+    try argv.append("cc");
+    try argv.append(c_path);
+    try argv.append("-o");
+    try argv.append(exe_path);
+    if (builtin.os.tag != .windows) {
+        try argv.append("-lm");
+    }
+
+    const result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = argv.items,
+    });
+    defer {
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
+
+    switch (result.term) {
+        .Exited => |code| {
+            if (code != 0) {
+                return error.CompilationFailed;
+            }
+        },
+        else => return error.CompilationFailed,
+    }
+}
+
+fn runExeWithEnv(allocator: std.mem.Allocator, exe_path: []const u8, overrides: []const EnvOverride) ![]const u8 {
+    const exe_abs = try fs.cwd().realpathAlloc(allocator, exe_path);
+    defer allocator.free(exe_abs);
+
+    var env_map = try std.process.getEnvMap(allocator);
+    defer env_map.deinit();
+
+    for (overrides) |ov| {
+        try env_map.put(ov.key, ov.value);
+    }
+
+    const result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{exe_abs},
+        .env_map = &env_map,
+    });
+    defer allocator.free(result.stderr);
+
+    switch (result.term) {
+        .Exited => |code| {
+            if (code != 0) {
+                allocator.free(result.stdout);
+                return error.ExecutionFailed;
+            }
+        },
+        else => {
+            allocator.free(result.stdout);
+            return error.ExecutionFailed;
+        },
+    }
+
+    return result.stdout;
 }
 
 test "if/elif/else transpiles" {
@@ -733,6 +805,168 @@ test "std.thread_backend_posix lifecycle APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_backend_posix_detach(") != null);
 
     try fs.cwd().deleteFile(ifilepath);
+}
+
+test "runtime backend honors FUN_RUNTIME_BACKEND override" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_runtime_backend_override_windows.fn";
+    const cpath = "codegen_runtime_backend_override_windows.c";
+    const exe_path = if (builtin.os.tag == .windows)
+        "codegen_runtime_backend_override_windows.exe"
+    else
+        "codegen_runtime_backend_override_windows";
+
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(cpath) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.runtime_backend;\n" ++
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  printf(\"%s\", runtime_backend_name());\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try fs.cwd().createFile(cpath, .{});
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, cpath, exe_path);
+
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{
+        .{ .key = "FUN_RUNTIME_BACKEND", .value = "windows" },
+        .{ .key = "FUN_RUNTIME_OS", .value = "posix" },
+    });
+    defer allocator.free(stdout);
+
+    try std.testing.expectEqualStrings("windows", stdout);
+}
+
+test "runtime backend FUN_RUNTIME_BACKEND wins over FUN_RUNTIME_OS" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_runtime_backend_precedence.fn";
+    const cpath = "codegen_runtime_backend_precedence.c";
+    const exe_path = if (builtin.os.tag == .windows)
+        "codegen_runtime_backend_precedence.exe"
+    else
+        "codegen_runtime_backend_precedence";
+
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(cpath) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.runtime_backend;\n" ++
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  printf(\"%s\", runtime_backend_name());\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try fs.cwd().createFile(cpath, .{});
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, cpath, exe_path);
+
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{
+        .{ .key = "FUN_RUNTIME_BACKEND", .value = "posix" },
+        .{ .key = "FUN_RUNTIME_OS", .value = "windows" },
+        .{ .key = "OS", .value = "Windows_NT" },
+    });
+    defer allocator.free(stdout);
+
+    try std.testing.expectEqualStrings("posix", stdout);
+}
+
+test "runtime backend uses FUN_RUNTIME_OS when backend override is unknown" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_runtime_backend_os_override.fn";
+    const cpath = "codegen_runtime_backend_os_override.c";
+    const exe_path = if (builtin.os.tag == .windows)
+        "codegen_runtime_backend_os_override.exe"
+    else
+        "codegen_runtime_backend_os_override";
+
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(cpath) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.runtime_backend;\n" ++
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  printf(\"%s\", runtime_backend_name());\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try fs.cwd().createFile(cpath, .{});
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, cpath, exe_path);
+
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{
+        .{ .key = "FUN_RUNTIME_BACKEND", .value = "unknown" },
+        .{ .key = "FUN_RUNTIME_OS", .value = "windows" },
+    });
+    defer allocator.free(stdout);
+
+    try std.testing.expectEqualStrings("windows", stdout);
+}
+
+test "thread and sync runtime selectors align with runtime backend" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_runtime_backend_alignment.fn";
+    const cpath = "codegen_runtime_backend_alignment.c";
+    const exe_path = if (builtin.os.tag == .windows)
+        "codegen_runtime_backend_alignment.exe"
+    else
+        "codegen_runtime_backend_alignment";
+
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(cpath) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.runtime_backend;\n" ++
+        "imp std.thread_runtime;\n" ++
+        "imp std.sync_runtime;\n" ++
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  printf(\"%s|%s|%s\", runtime_backend_name(), thread_runtime_backend_name(), sync_runtime_backend_name());\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try fs.cwd().createFile(cpath, .{});
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, cpath, exe_path);
+
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{
+        .{ .key = "FUN_RUNTIME_BACKEND", .value = "windows" },
+    });
+    defer allocator.free(stdout);
+
+    try std.testing.expectEqualStrings("windows|windows|windows", stdout);
 }
 
 test "transitive std.thread_runtime import emits pthread headers" {

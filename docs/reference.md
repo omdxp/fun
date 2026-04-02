@@ -326,6 +326,17 @@ Examples:
 - `FUN_CC=zig` and `FUN_CC_ARGS="cc"`
 - `FUN_CC="clang -O2 {src} -o {out}"`
 
+## Runtime Backend Selection
+
+`std.runtime_backend` selects the runtime backend with this precedence:
+
+1. `FUN_RUNTIME_BACKEND` (`posix`/`windows` or `1`/`2`)
+2. `FUN_RUNTIME_OS` (`posix`/`unix`/`windows`)
+3. Host hints from environment (`OS`, `OSTYPE`)
+4. Fallback to `posix`
+
+`std.thread_runtime` and `std.sync_runtime` follow the same selector.
+
 ## Formatting
 - `fun -fmt -in file.fn` formats a file in place.
 - `fun -fmt-all -in file.fn` formats local imports (skips `std.*`).
