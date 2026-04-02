@@ -127,7 +127,8 @@ fun channel_make_abs_time(num timeout_ms, ChannelAbsTime* out) num {
     timeout_ms = 0;
   }
 
-  num rc = clock_gettime(0, out);
+  raw* out_raw = out;
+  num rc = clock_gettime(0, out_raw);
   if rc != 0 {
     ret -3;
   }
@@ -153,7 +154,8 @@ fun channel_deadline_reached(ChannelAbsTime* abs_time) bin {
   }
 
   ChannelAbsTime now;
-  num rc = clock_gettime(0, &now);
+  raw* now_raw = &now;
+  num rc = clock_gettime(0, now_raw);
   if rc != 0 {
     ret true;
   }
@@ -186,7 +188,8 @@ fun channel_deadline_remaining_ms(ChannelAbsTime* abs_time) num {
   }
 
   ChannelAbsTime now;
-  num rc = clock_gettime(0, &now);
+  raw* now_raw = &now;
+  num rc = clock_gettime(0, now_raw);
   if rc != 0 {
     ret 0;
   }
