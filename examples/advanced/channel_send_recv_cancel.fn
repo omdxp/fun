@@ -1,0 +1,22 @@
+imp std.c.io;
+imp std.channel;
+
+fun main() {
+  Channel<num> ch = channel_new_cap(0, 1);
+
+  num cancel = 0;
+  num out = 0;
+
+  num rc1 = ch.send_with_cancel(5, &cancel);
+  num rc2 = ch.recv_into_with_cancel(&out, &cancel);
+
+  cancel = 1;
+  _ = ch.send(1);
+  num rc3 = ch.send_timeout_with_cancel(2, 10, &cancel);
+  _ = ch.recv_into(&out);
+  num rc4 = ch.recv_timeout_into_with_cancel(&out, 10, &cancel);
+
+  printf("ok_send=%lld ok_recv=%lld cancel_send=%lld cancel_recv=%lld\n", rc1, rc2, rc3, rc4);
+
+  _ = ch.destroy();
+}

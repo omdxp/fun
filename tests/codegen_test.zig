@@ -1305,6 +1305,38 @@ test "std.channel timeout send and recv transpile" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "std.channel cancel-aware send and recv APIs transpile" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_channel_cancel_send_recv.fn";
+
+    const input =
+        "imp std.channel;\n" ++
+        "fun main() {\n" ++
+        "  Channel<num> ch = channel_new_cap(0, 1);\n" ++
+        "  num out = 0;\n" ++
+        "  num cancel = 1;\n" ++
+        "  _ = ch.send_timeout_with_cancel(1, 10, &cancel);\n" ++
+        "  _ = ch.send_with_cancel(1, &cancel);\n" ++
+        "  _ = ch.recv_timeout_into_with_cancel(&out, 10, &cancel);\n" ++
+        "  _ = ch.recv_into_with_cancel(&out, &cancel);\n" ++
+        "  num a = ch.recv_timeout_with_cancel(10, &cancel);\n" ++
+        "  num b = ch.recv_with_cancel(&cancel);\n" ++
+        "  _ = out + a + b;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__send_timeout_with_cancel(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__send_with_cancel(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__recv_timeout_into_with_cancel(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__recv_into_with_cancel(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__recv_timeout_with_cancel(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__recv_with_cancel(") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
 test "std.channel select recv2 timeout transpile" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_std_channel_select2.fn";
@@ -1661,6 +1693,96 @@ test "channel select cancel returns cancelled status" {
     defer allocator.free(stdout);
 
     try std.testing.expectEqualStrings("3|-1|3|-1", stdout);
+}
+
+test "channel cancel-aware send and recv return cancelled status" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_channel_cancel_send_recv_runtime.fn";
+    const cpath = "codegen_channel_cancel_send_recv_runtime.c";
+    const exe_path = if (builtin.os.tag == .windows)
+        "codegen_channel_cancel_send_recv_runtime.exe"
+    else
+        "codegen_channel_cancel_send_recv_runtime";
+
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(cpath) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.channel;\n" ++
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  Channel<num> ch = channel_new_cap(0, 1);\n" ++
+        "  _ = ch.send(1);\n" ++
+        "  num cancel = 1;\n" ++
+        "  num out = 0;\n" ++
+        "  num rc_send = ch.send_timeout_with_cancel(2, 10, &cancel);\n" ++
+        "  _ = ch.recv_into(&out);\n" ++
+        "  num rc_recv = ch.recv_timeout_into_with_cancel(&out, 10, &cancel);\n" ++
+        "  printf(\"%lld|%lld\", rc_send, rc_recv);\n" ++
+        "  _ = ch.destroy();\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try fs.cwd().createFile(cpath, .{});
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, cpath, exe_path);
+
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+
+    try std.testing.expectEqualStrings("3|3", stdout);
+}
+
+test "channel cancel-aware send and recv succeed when not cancelled" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_channel_cancel_send_recv_success_runtime.fn";
+    const cpath = "codegen_channel_cancel_send_recv_success_runtime.c";
+    const exe_path = if (builtin.os.tag == .windows)
+        "codegen_channel_cancel_send_recv_success_runtime.exe"
+    else
+        "codegen_channel_cancel_send_recv_success_runtime";
+
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(cpath) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.channel;\n" ++
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  Channel<num> ch = channel_new_cap(0, 1);\n" ++
+        "  num cancel = 0;\n" ++
+        "  num out = 0;\n" ++
+        "  num rc1 = ch.send_with_cancel(5, &cancel);\n" ++
+        "  num rc2 = ch.recv_into_with_cancel(&out, &cancel);\n" ++
+        "  num rc3 = ch.send_timeout_with_cancel(6, 10, &cancel);\n" ++
+        "  num rc4 = ch.recv_timeout_into_with_cancel(&out, 10, &cancel);\n" ++
+        "  printf(\"%lld|%lld|%lld|%lld|%lld\", rc1, rc2, rc3, rc4, out);\n" ++
+        "  _ = ch.destroy();\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try fs.cwd().createFile(cpath, .{});
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, cpath, exe_path);
+
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+
+    try std.testing.expectEqualStrings("0|0|0|0|6", stdout);
 }
 
 test "generic function specialization emits concrete names" {

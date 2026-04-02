@@ -381,13 +381,33 @@ impl Channel<T> {
   // - -2 when storage allocation failed
   // - nonzero pthread error codes on synchronization failures
   pub send_timeout(T value, num timeout_ms) num {
+    ret self.send_timeout_with_cancel(value, timeout_ms, NULL);
+  }
+
+  // Send one value, blocking up to timeout_ms while full, with optional cancellation.
+  // 
+  // Params:
+  // - value: value to send
+  // - timeout_ms: max wait in milliseconds (negative means wait forever)
+  // - cancel_flag: optional pointer to cancellation flag (nonzero => cancelled)
+  // 
+  // Returns:
+  // - 0 on success
+  // - 1 when channel is closed
+  // - 2 on timeout while still full
+  // - 3 when cancelled
+  // - -2 when storage allocation failed
+  // - nonzero pthread error codes on synchronization failures
+  pub send_timeout_with_cancel(T value, num timeout_ms, num* cancel_flag) num {
     num rc = self.init();
     if rc != 0 {
       ret rc;
     }
-    if timeout_ms < 0 {
-      timeout_ms = 0;
-    }
+
+    bin wait_forever = timeout_ms < 0;
+    num base_wait_slice_ms = channel_sanitize_wait_slice_ms(self.select_wait_slice_ms);
+    num max_backoff_steps = channel_sanitize_backoff_steps(self.select_wait_backoff_steps);
+    num idle_rounds = 0;
 
     rc = runtime_mutex_lock(&self.mu);
     if rc != 0 {
@@ -400,22 +420,66 @@ impl Channel<T> {
     }
 
     ChannelAbsTime abs_time;
-    rc = channel_make_abs_time(timeout_ms, &abs_time);
-    if rc != 0 {
-      ret rc;
+    if wait_forever == false {
+      if timeout_ms < 0 {
+        timeout_ms = 0;
+      }
+      rc = channel_make_abs_time(timeout_ms, &abs_time);
+      if rc != 0 {
+        ret rc;
+      }
     }
 
     for self.count == self.cap && self.closed == false {
-      rc = runtime_condvar_timed_wait(&self.can_send, &self.mu, &abs_time);
-      if rc != 0 {
-        if self.count < self.cap || self.closed == true {
-          break;
-        }
-        if channel_deadline_reached(&abs_time) == true {
+      if channel_is_cancelled(cancel_flag) == true {
+        ret 3;
+      }
+
+      num rem_ms = -1;
+      if wait_forever == false {
+        rem_ms = channel_deadline_remaining_ms(&abs_time);
+        if rem_ms <= 0 {
           ret 2;
         }
+      }
+
+      num wait_now_ms = channel_compute_wait_slice_ms(base_wait_slice_ms, rem_ms, idle_rounds, max_backoff_steps);
+      ChannelAbsTime round_abs;
+      rc = channel_make_abs_time(wait_now_ms, &round_abs);
+      if rc != 0 {
         ret rc;
       }
+
+      rc = runtime_condvar_timed_wait(&self.can_send, &self.mu, &round_abs);
+      if rc != 0 {
+        if self.count < self.cap || self.closed == true {
+          idle_rounds = 0;
+          break;
+        }
+
+        if channel_deadline_reached(&round_abs) == true {
+          if wait_forever == false && channel_deadline_reached(&abs_time) == true {
+            ret 2;
+          }
+
+          if idle_rounds < max_backoff_steps {
+            idle_rounds = idle_rounds + 1;
+          }
+          continue;
+        }
+
+        if wait_forever == false && channel_deadline_reached(&abs_time) == true {
+          ret 2;
+        }
+
+        ret rc;
+      }
+
+      idle_rounds = 0;
+    }
+
+    if channel_is_cancelled(cancel_flag) == true {
+      ret 3;
     }
 
     if self.closed == true {
@@ -434,6 +498,18 @@ impl Channel<T> {
 
     _ = runtime_condvar_signal(&self.can_recv);
     ret 0;
+  }
+
+  // Send one value, waiting forever while full, with optional cancellation.
+  // 
+  // Returns:
+  // - 0 on success
+  // - 1 when channel is closed
+  // - 3 when cancelled
+  // - -2 when storage allocation failed
+  // - nonzero pthread error codes on synchronization failures
+  pub send_with_cancel(T value, num* cancel_flag) num {
+    ret self.send_timeout_with_cancel(value, -1, cancel_flag);
   }
 
   // Try sending one value without blocking.
@@ -535,6 +611,25 @@ impl Channel<T> {
   // - -1 when out is null
   // - nonzero pthread error codes on synchronization failures
   pub recv_timeout_into(T* out, num timeout_ms) num {
+    ret self.recv_timeout_into_with_cancel(out, timeout_ms, NULL);
+  }
+
+  // Receive one value into out, blocking up to timeout_ms while empty,
+  // with optional cancellation.
+  // 
+  // Params:
+  // - out: destination pointer
+  // - timeout_ms: max wait in milliseconds (negative means wait forever)
+  // - cancel_flag: optional pointer to cancellation flag (nonzero => cancelled)
+  // 
+  // Returns:
+  // - 0 on success
+  // - 1 when channel is closed and empty
+  // - 2 on timeout while still empty
+  // - 3 when cancelled
+  // - -1 when out is null
+  // - nonzero pthread error codes on synchronization failures
+  pub recv_timeout_into_with_cancel(T* out, num timeout_ms, num* cancel_flag) num {
     if out == NULL {
       ret -1;
     }
@@ -543,9 +638,11 @@ impl Channel<T> {
     if rc != 0 {
       ret rc;
     }
-    if timeout_ms < 0 {
-      timeout_ms = 0;
-    }
+
+    bin wait_forever = timeout_ms < 0;
+    num base_wait_slice_ms = channel_sanitize_wait_slice_ms(self.select_wait_slice_ms);
+    num max_backoff_steps = channel_sanitize_backoff_steps(self.select_wait_backoff_steps);
+    num idle_rounds = 0;
 
     rc = runtime_mutex_lock(&self.mu);
     if rc != 0 {
@@ -553,25 +650,67 @@ impl Channel<T> {
     }
     defer runtime_mutex_unlock(&self.mu);
 
-    if self.count == 0 && self.closed == false {
-      ChannelAbsTime abs_time;
+    ChannelAbsTime abs_time;
+    if wait_forever == false {
+      if timeout_ms < 0 {
+        timeout_ms = 0;
+      }
       rc = channel_make_abs_time(timeout_ms, &abs_time);
       if rc != 0 {
         ret rc;
       }
+    }
 
-      for self.count == 0 && self.closed == false {
-        rc = runtime_condvar_timed_wait(&self.can_recv, &self.mu, &abs_time);
-        if rc != 0 {
-          if self.count > 0 || self.closed == true {
-            break;
-          }
-          if channel_deadline_reached(&abs_time) == true {
-            ret 2;
-          }
-          ret rc;
+    for self.count == 0 && self.closed == false {
+      if channel_is_cancelled(cancel_flag) == true {
+        ret 3;
+      }
+
+      num rem_ms = -1;
+      if wait_forever == false {
+        rem_ms = channel_deadline_remaining_ms(&abs_time);
+        if rem_ms <= 0 {
+          ret 2;
         }
       }
+
+      num wait_now_ms = channel_compute_wait_slice_ms(base_wait_slice_ms, rem_ms, idle_rounds, max_backoff_steps);
+      ChannelAbsTime round_abs;
+      rc = channel_make_abs_time(wait_now_ms, &round_abs);
+      if rc != 0 {
+        ret rc;
+      }
+
+      rc = runtime_condvar_timed_wait(&self.can_recv, &self.mu, &round_abs);
+      if rc != 0 {
+        if self.count > 0 || self.closed == true {
+          idle_rounds = 0;
+          break;
+        }
+
+        if channel_deadline_reached(&round_abs) == true {
+          if wait_forever == false && channel_deadline_reached(&abs_time) == true {
+            ret 2;
+          }
+
+          if idle_rounds < max_backoff_steps {
+            idle_rounds = idle_rounds + 1;
+          }
+          continue;
+        }
+
+        if wait_forever == false && channel_deadline_reached(&abs_time) == true {
+          ret 2;
+        }
+
+        ret rc;
+      }
+
+      idle_rounds = 0;
+    }
+
+    if channel_is_cancelled(cancel_flag) == true {
+      ret 3;
     }
 
     if self.count == 0 {
@@ -606,6 +745,18 @@ impl Channel<T> {
     ret out;
   }
 
+  // Receive one value into out, waiting forever while empty, with optional cancellation.
+  // 
+  // Returns:
+  // - 0 on success
+  // - 1 when channel is closed and empty
+  // - 3 when cancelled
+  // - -1 when out is null
+  // - nonzero pthread error codes on synchronization failures
+  pub recv_into_with_cancel(T* out, num* cancel_flag) num {
+    ret self.recv_timeout_into_with_cancel(out, -1, cancel_flag);
+  }
+
   // Receive one value, blocking up to timeout_ms while empty.
   // 
   // Returns:
@@ -618,6 +769,29 @@ impl Channel<T> {
       ret self.zero_value();
     }
     ret out;
+  }
+
+  // Receive one value, blocking up to timeout_ms while empty, with optional cancellation.
+  // 
+  // Returns:
+  // - received value on success
+  // - zeroed value when timeout/closed empty/cancelled/sync error occurs
+  pub recv_timeout_with_cancel(num timeout_ms, num* cancel_flag) T {
+    T out = self.zero_value();
+    num rc = self.recv_timeout_into_with_cancel(&out, timeout_ms, cancel_flag);
+    if rc != 0 {
+      ret self.zero_value();
+    }
+    ret out;
+  }
+
+  // Receive one value, waiting forever while empty, with optional cancellation.
+  // 
+  // Returns:
+  // - received value on success
+  // - zeroed value when closed/cancelled/sync error occurs
+  pub recv_with_cancel(num* cancel_flag) T {
+    ret self.recv_timeout_with_cancel(-1, cancel_flag);
   }
 
   // Try receiving one value without blocking.
