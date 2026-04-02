@@ -506,6 +506,31 @@ test "std.channel timeout send and recv transpile" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "std.channel select recv2 timeout transpile" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_channel_select2.fn";
+
+    const input =
+        "imp std.channel;\n" ++
+        "fun main() {\n" ++
+        "  Channel<num> a = channel_new(0);\n" ++
+        "  Channel<num> b = channel_new(0);\n" ++
+        "  _ = b.send(42);\n" ++
+        "  num out = 0;\n" ++
+        "  num idx = -1;\n" ++
+        "  _ = a.select_recv_timeout_with(&b, &out, &idx, 10);\n" ++
+        "  _ = out + idx;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_try_recv_with(") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
 test "generic function specialization emits concrete names" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_generic_fn.fn";

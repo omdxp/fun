@@ -518,6 +518,159 @@ impl Channel<T> {
     ret 0;
   }
 
+  // Try receiving from self or another channel without blocking.
+  // 
+  // Params:
+  // - other: second channel pointer
+  // - out: destination pointer
+  // - out_index: destination pointer for selected channel index (0 for self, 1 for other)
+  // 
+  // Returns:
+  // - 0 on success
+  // - 1 when both channels are closed and empty
+  // - 2 when both channels are open/empty in this polling step
+  // - -1 when other/out/out_index is null
+  // - other nonzero codes on synchronization failures
+  pub select_try_recv_with(Channel<T>* other, T* out, num* out_index) num {
+    if other == NULL || out == NULL || out_index == NULL {
+      ret -1;
+    }
+
+    out_index[0] = -1;
+
+    num rc_self = self.try_recv(out);
+    if rc_self == 0 {
+      out_index[0] = 0;
+      ret 0;
+    }
+    if rc_self != 1 && rc_self != 2 {
+      ret rc_self;
+    }
+
+    num rc_other = other.try_recv(out);
+    if rc_other == 0 {
+      out_index[0] = 1;
+      ret 0;
+    }
+    if rc_other != 1 && rc_other != 2 {
+      ret rc_other;
+    }
+
+    if rc_self == 1 && rc_other == 1 {
+      ret 1;
+    }
+    ret 2;
+  }
+
+  // Receive from self or another channel, polling until timeout.
+  // 
+  // Notes:
+  // - This uses polling with `try_recv`; timeout resolution is rounded to whole seconds.
+  // 
+  // Params:
+  // - other: second channel pointer
+  // - out: destination pointer
+  // - out_index: destination pointer for selected channel index (0 for self, 1 for other)
+  // - timeout_ms: max wait in ms (negative means wait forever)
+  // 
+  // Returns:
+  // - 0 on success
+  // - 1 when both channels are closed and empty
+  // - 2 on timeout
+  // - -1 when other/out/out_index is null
+  // - other nonzero codes on synchronization failures
+  pub select_recv_timeout_with(Channel<T>* other, T* out, num* out_index, num timeout_ms) num {
+    if other == NULL || out == NULL || out_index == NULL {
+      ret -1;
+    }
+
+    bin wait_forever = timeout_ms < 0;
+    ChannelAbsTime abs_time;
+    if wait_forever == false {
+      num time_rc = channel_make_abs_time(timeout_ms, &abs_time);
+      if time_rc != 0 {
+        ret time_rc;
+      }
+    }
+
+    for true {
+      out_index[0] = -1;
+
+      num rc_self = self.try_recv(out);
+      if rc_self == 0 {
+        out_index[0] = 0;
+        ret 0;
+      }
+      if rc_self != 1 && rc_self != 2 {
+        ret rc_self;
+      }
+
+      num rc_other = other.try_recv(out);
+      if rc_other == 0 {
+        out_index[0] = 1;
+        ret 0;
+      }
+      if rc_other != 1 && rc_other != 2 {
+        ret rc_other;
+      }
+
+      if rc_self == 1 && rc_other == 1 {
+        ret 1;
+      }
+      if wait_forever == false && channel_deadline_reached(&abs_time) == true {
+        ret 2;
+      }
+    }
+
+    ret 2;
+  }
+
+  // Receive from self or another channel, polling until one is ready.
+  // 
+  // Params:
+  // - other: second channel pointer
+  // - out: destination pointer
+  // - out_index: destination pointer for selected channel index (0 for self, 1 for other)
+  // 
+  // Returns:
+  // - 0 on success
+  // - 1 when both channels are closed and empty
+  // - -1 when other/out/out_index is null
+  // - other nonzero codes on synchronization failures
+  pub select_recv_with(Channel<T>* other, T* out, num* out_index) num {
+    if other == NULL || out == NULL || out_index == NULL {
+      ret -1;
+    }
+
+    for true {
+      out_index[0] = -1;
+
+      num rc_self = self.try_recv(out);
+      if rc_self == 0 {
+        out_index[0] = 0;
+        ret 0;
+      }
+      if rc_self != 1 && rc_self != 2 {
+        ret rc_self;
+      }
+
+      num rc_other = other.try_recv(out);
+      if rc_other == 0 {
+        out_index[0] = 1;
+        ret 0;
+      }
+      if rc_other != 1 && rc_other != 2 {
+        ret rc_other;
+      }
+
+      if rc_self == 1 && rc_other == 1 {
+        ret 1;
+      }
+    }
+
+    ret 1;
+  }
+
   // Close channel and wake blocked senders/receivers.
   // 
   // Returns:

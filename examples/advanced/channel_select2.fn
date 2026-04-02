@@ -1,0 +1,18 @@
+imp std.c.io;
+imp std.channel;
+
+fun main() {
+  Channel<num> a = channel_new(0);
+  Channel<num> b = channel_new(0);
+
+  _ = b.send(42);
+
+  num out = 0;
+  num which = -1;
+  num rc = a.select_recv_timeout_with(&b, &out, &which, 25);
+
+  printf("select rc=%d which=%d value=%d\n", rc, which, out);
+
+  _ = a.destroy();
+  _ = b.destroy();
+}
