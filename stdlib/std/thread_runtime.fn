@@ -6,6 +6,7 @@
 
 imp std.runtime_backend;
 imp std.thread;
+imp std.thread_backend_posix;
 imp std.thread_backend_windows;
 
 // Return the active thread runtime backend id.
@@ -33,19 +34,19 @@ pub fun thread_runtime_backend_is_windows() bin {
 }
 
 fun runtime_thread_new_posix() Thread {
-  ret thread_new();
+  ret thread_backend_posix_new();
 }
 
 fun runtime_thread_start_posix(Thread* thread, raw* entry, raw* arg) num {
-  ret thread_start(thread, entry, arg);
+  ret thread_backend_posix_start(thread, entry, arg);
 }
 
 fun runtime_thread_join_posix(Thread* thread, raw* out_ret) num {
-  ret thread_join(thread, out_ret);
+  ret thread_backend_posix_join(thread, out_ret);
 }
 
 fun runtime_thread_detach_posix(Thread* thread) num {
-  ret thread_detach(thread);
+  ret thread_backend_posix_detach(thread);
 }
 
 // Placeholder Windows constructor until a concrete backend is wired.

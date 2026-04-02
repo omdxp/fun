@@ -6,6 +6,7 @@
 
 imp std.runtime_backend;
 imp std.sync;
+imp std.sync_backend_posix;
 imp std.sync_backend_windows;
 
 // Return the active sync runtime backend id.
@@ -33,55 +34,55 @@ pub fun sync_runtime_backend_is_windows() bin {
 }
 
 fun runtime_mutex_new_posix() Mutex {
-  ret mutex_new();
+  ret sync_backend_posix_mutex_new();
 }
 
 fun runtime_condvar_new_posix() CondVar {
-  ret condvar_new();
+  ret sync_backend_posix_condvar_new();
 }
 
 fun runtime_mutex_init_posix(Mutex* mutex) num {
-  ret mutex_init(mutex);
+  ret sync_backend_posix_mutex_init(mutex);
 }
 
 fun runtime_mutex_lock_posix(Mutex* mutex) num {
-  ret mutex_lock(mutex);
+  ret sync_backend_posix_mutex_lock(mutex);
 }
 
 fun runtime_mutex_try_lock_posix(Mutex* mutex) num {
-  ret mutex_try_lock(mutex);
+  ret sync_backend_posix_mutex_try_lock(mutex);
 }
 
 fun runtime_mutex_unlock_posix(Mutex* mutex) num {
-  ret mutex_unlock(mutex);
+  ret sync_backend_posix_mutex_unlock(mutex);
 }
 
 fun runtime_mutex_destroy_posix(Mutex* mutex) num {
-  ret mutex_destroy(mutex);
+  ret sync_backend_posix_mutex_destroy(mutex);
 }
 
 fun runtime_condvar_init_posix(CondVar* cond) num {
-  ret condvar_init(cond);
+  ret sync_backend_posix_condvar_init(cond);
 }
 
 fun runtime_condvar_wait_posix(CondVar* cond, Mutex* mutex) num {
-  ret condvar_wait(cond, mutex);
+  ret sync_backend_posix_condvar_wait(cond, mutex);
 }
 
 fun runtime_condvar_timed_wait_posix(CondVar* cond, Mutex* mutex, raw* abs_time) num {
-  ret condvar_timed_wait(cond, mutex, abs_time);
+  ret sync_backend_posix_condvar_timed_wait(cond, mutex, abs_time);
 }
 
 fun runtime_condvar_signal_posix(CondVar* cond) num {
-  ret condvar_signal(cond);
+  ret sync_backend_posix_condvar_signal(cond);
 }
 
 fun runtime_condvar_broadcast_posix(CondVar* cond) num {
-  ret condvar_broadcast(cond);
+  ret sync_backend_posix_condvar_broadcast(cond);
 }
 
 fun runtime_condvar_destroy_posix(CondVar* cond) num {
-  ret condvar_destroy(cond);
+  ret sync_backend_posix_condvar_destroy(cond);
 }
 
 // Placeholder Windows constructors until a concrete backend is wired.

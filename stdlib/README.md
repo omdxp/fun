@@ -57,12 +57,14 @@ Note: `num`/`dec` are 64-bit by default (`int64_t`/`double`), and Fun also suppo
 - **std/rand.fn**: PRNG utilities (range_dec, chance, shuffle).
 - **std/runtime_backend.fn**: Shared runtime backend selector helpers (`runtime_backend_*`) with environment overrides (`FUN_RUNTIME_BACKEND`, `FUN_RUNTIME_OS`).
 - **std/sync.fn**: POSIX-backed synchronization wrappers (mutex/condition variable method and helper forms).
+- **std/sync_backend_posix.fn**: POSIX synchronization backend module (`sync_backend_posix_*`) used by std.sync_runtime.
 - **std/sync_backend_windows.fn**: Windows synchronization backend skeleton (`sync_backend_windows_*`) used by std.sync_runtime.
-- **std/sync_runtime.fn**: Backend-facing sync runtime shim (`runtime_mutex_*`, `runtime_condvar_*`) with backend selector helpers (`sync_runtime_backend_*`) routed through std.runtime_backend.
+- **std/sync_runtime.fn**: Backend-facing sync runtime shim (`runtime_mutex_*`, `runtime_condvar_*`) with backend selector helpers (`sync_runtime_backend_*`) routed through std.runtime_backend and backend modules.
 - **std/string.fn**: String helpers (count, strip prefix/suffix, split lines, replace, case conversion, repeat, etc.).
 - **std/thread.fn**: POSIX-backed thread lifecycle helpers (`thread_new`, plus method and helper forms for start/join/detach).
+- **std/thread_backend_posix.fn**: POSIX thread backend module (`thread_backend_posix_*`) used by std.thread_runtime.
 - **std/thread_backend_windows.fn**: Windows thread backend skeleton (`thread_backend_windows_*`) used by std.thread_runtime.
-- **std/thread_runtime.fn**: Backend-facing thread runtime shim (`runtime_thread_*`) with backend selector helpers (`thread_runtime_backend_*`) routed through std.runtime_backend.
+- **std/thread_runtime.fn**: Backend-facing thread runtime shim (`runtime_thread_*`) with backend selector helpers (`thread_runtime_backend_*`) routed through std.runtime_backend and backend modules.
 - **std/thread_pool.fn**: POSIX-backed thread pool helpers (`thread_pool_new`, start_all/join_all/detach_all) routed through std.thread_runtime.
 - **std/time.fn**: Time helpers (epoch, formatting, UTC, diffs).
 - **std/toml.fn**: Minimal TOML parse/stringify for flat key/value.

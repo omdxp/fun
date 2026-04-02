@@ -348,11 +348,13 @@ Examples:
 - `std.channel`: bounded blocking channels (ring buffer) with timeout send/recv, channel-level and per-call select wait-slice/backoff tuning (timeout and blocking variants), and select_recv_with/select_recv3_rr_with helpers, with synchronization routed through `std.sync_runtime`
 - `std.thread`: POSIX-backed thread helpers (`thread_new`, method and helper forms for start/join/detach)
 - `std.runtime_backend`: shared runtime backend selector helpers (`runtime_backend_*`) with environment overrides (`FUN_RUNTIME_BACKEND`, `FUN_RUNTIME_OS`)
+- `std.thread_backend_posix`: POSIX thread backend module (`thread_backend_posix_*`) used by `std.thread_runtime`
 - `std.thread_backend_windows`: Windows thread backend skeleton (`thread_backend_windows_*`) used by `std.thread_runtime`
-- `std.thread_runtime`: backend-facing thread runtime shim (`runtime_thread_*`) plus backend selector helpers (`thread_runtime_backend_*`), routed through `std.runtime_backend`
+- `std.thread_runtime`: backend-facing thread runtime shim (`runtime_thread_*`) plus backend selector helpers (`thread_runtime_backend_*`), routed through `std.runtime_backend` and backend modules
 - `std.thread_pool`: POSIX-backed thread pool helpers (`thread_pool_new`, start_all/join_all/detach_all) routed through `std.thread_runtime`
+- `std.sync_backend_posix`: POSIX sync backend module (`sync_backend_posix_*`) used by `std.sync_runtime`
 - `std.sync_backend_windows`: Windows sync backend skeleton (`sync_backend_windows_*`) used by `std.sync_runtime`
-- `std.sync_runtime`: backend-facing sync runtime shim (`runtime_mutex_*`, `runtime_condvar_*`) plus backend selector helpers (`sync_runtime_backend_*`), routed through `std.runtime_backend`
+- `std.sync_runtime`: backend-facing sync runtime shim (`runtime_mutex_*`, `runtime_condvar_*`) plus backend selector helpers (`sync_runtime_backend_*`), routed through `std.runtime_backend` and backend modules
 - `std.sync`: POSIX-backed mutex/condition variable helpers (method and helper forms)
 - `std.json`, `std.toml`: minimal serialization helpers
 - `std.time`, `std.rand`, `std.math`, `std.path`, `std.net`, etc.

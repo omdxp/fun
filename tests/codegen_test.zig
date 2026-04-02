@@ -643,6 +643,48 @@ test "std.sync_backend_windows skeleton APIs transpile" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "std.sync_backend_posix lifecycle APIs transpile" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_sync_backend_posix.fn";
+
+    const input =
+        "imp std.sync_backend_posix;\n" ++
+        "fun main() {\n" ++
+        "  Mutex m = sync_backend_posix_mutex_new();\n" ++
+        "  CondVar c = sync_backend_posix_condvar_new();\n" ++
+        "  _ = sync_backend_posix_mutex_init(&m);\n" ++
+        "  _ = sync_backend_posix_mutex_lock(&m);\n" ++
+        "  _ = sync_backend_posix_mutex_try_lock(&m);\n" ++
+        "  _ = sync_backend_posix_mutex_unlock(&m);\n" ++
+        "  _ = sync_backend_posix_condvar_init(&c);\n" ++
+        "  _ = sync_backend_posix_condvar_wait(&c, &m);\n" ++
+        "  _ = sync_backend_posix_condvar_timed_wait(&c, &m, NULL);\n" ++
+        "  _ = sync_backend_posix_condvar_signal(&c);\n" ++
+        "  _ = sync_backend_posix_condvar_broadcast(&c);\n" ++
+        "  _ = sync_backend_posix_condvar_destroy(&c);\n" ++
+        "  _ = sync_backend_posix_mutex_destroy(&m);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_posix_mutex_new(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_posix_condvar_new(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_posix_mutex_init(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_posix_mutex_lock(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_posix_mutex_try_lock(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_posix_mutex_unlock(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_posix_mutex_destroy(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_posix_condvar_init(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_posix_condvar_wait(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_posix_condvar_timed_wait(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_posix_condvar_signal(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_posix_condvar_broadcast(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_posix_condvar_destroy(") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
 test "std.thread_backend_windows skeleton APIs transpile" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_std_thread_backend_windows.fn";
@@ -665,6 +707,30 @@ test "std.thread_backend_windows skeleton APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_backend_windows_start(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_backend_windows_join(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_backend_windows_detach(") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
+test "std.thread_backend_posix lifecycle APIs transpile" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_thread_backend_posix.fn";
+
+    const input =
+        "imp std.thread_backend_posix;\n" ++
+        "fun main() {\n" ++
+        "  Thread t = thread_backend_posix_new();\n" ++
+        "  _ = thread_backend_posix_start(&t, NULL, NULL);\n" ++
+        "  _ = thread_backend_posix_join(&t, NULL);\n" ++
+        "  _ = thread_backend_posix_detach(&t);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_backend_posix_new(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_backend_posix_start(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_backend_posix_join(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_backend_posix_detach(") != null);
 
     try fs.cwd().deleteFile(ifilepath);
 }
