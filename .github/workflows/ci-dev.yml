@@ -14,10 +14,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runtime_backend:
-          - posix
-          - windows
-    runs-on: ubuntu-latest
+        include:
+          - os: ubuntu-latest
+            runtime_backend: posix
+            lane: linux-posix
+          - os: ubuntu-latest
+            runtime_backend: windows
+            lane: linux-selector-windows
+          - os: macos-latest
+            runtime_backend: posix
+            lane: macos-posix
+          - os: windows-latest
+            runtime_backend: windows
+            lane: windows-native
+    runs-on: ${{ matrix.os }}
     env:
       FUN_RUNTIME_BACKEND: ${{ matrix.runtime_backend }}
     steps:
@@ -25,7 +35,8 @@ jobs:
       - uses: goto-bus-stop/setup-zig@v2
         with:
           version: ${{ env.zig_version }}
-      - name: Run all tests (including fls LSP) with backend selector
+      - name: Run all tests (including fls LSP) on ${{ matrix.lane }}
+        timeout-minutes: 10
         run: zig build test --summary all
   run:
     runs-on: ubuntu-latest
