@@ -103,6 +103,8 @@ pub fn is_keyword(str: []const u8) bool {
         mem.eql(u8, "true", str) or mem.eql(u8, "false", str) or
         mem.eql(u8, "fit", str) or mem.eql(u8, "ret", str) or
         mem.eql(u8, "for", str) or
+        mem.eql(u8, "async", str) or
+        mem.eql(u8, "await", str) or
         mem.eql(u8, "break", str) or
         mem.eql(u8, "continue", str) or
         mem.eql(u8, "allow", str) or

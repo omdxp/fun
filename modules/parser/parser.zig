@@ -2094,6 +2094,27 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if reading the next token fails.
     /// - Logs an error message if any expected token is not found.
+    fn parse_await_operand(self: *Self, hist: *utils.History) ParseError!bool {
+        _ = self.token_next(); // skip await
+        if (!hist.*.flags.inside_function_body) {
+            self.transpile_proc.err("await statement outside of function", .{});
+            return ParseError.InvalidStatement;
+        }
+        const next_tok = self.token_peek_next() orelse {
+            self.transpile_proc.err("expected expression after 'await'", .{});
+            return ParseError.InvalidExpression;
+        };
+        if (next_tok.type == .Symbol and next_tok.data.cval == ';') {
+            self.transpile_proc.err("expected expression after 'await'", .{});
+            return ParseError.InvalidExpression;
+        }
+        if (!try self.parse_expressionable_single(hist)) {
+            self.transpile_proc.err("expected expression after 'await'", .{});
+            return ParseError.InvalidExpression;
+        }
+        return true;
+    }
+
     fn parse_expressionable_single(self: *Self, hist: *utils.History) ParseError!bool {
         const t = self.token_peek_next();
         if (t == null) {
@@ -2240,6 +2261,11 @@ pub const ParseProcess = struct {
             },
             .Keyword => {
                 const kw = t.?.data.sval.items;
+
+                // Phase 1 async surface: parse `await expr` and lower it as `expr`.
+                if (mem.eql(u8, kw, "await")) {
+                    return try self.parse_await_operand(hist);
+                }
 
                 // Allow primitive type keywords as operands to the builtin `sizeof(Type)`.
                 // Example: `sizeof(num)`.
@@ -3300,7 +3326,7 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
-    fn parse_function(self: *Self, is_public: bool) ParseError!void {
+    fn parse_function(self: *Self, is_public: bool, is_async: bool) ParseError!void {
         _ = try self.transpile_proc.new_scope();
         errdefer self.transpile_proc.finish_scope();
         _ = self.token_next(); // skip fun
@@ -3309,7 +3335,7 @@ pub const ParseProcess = struct {
             // Set once we read the function name token.
             .pos = self.*.transpile_proc.*.pos,
             .flags = .{ .is_public = is_public },
-            .node_variant = .{ .function = .{} },
+            .node_variant = .{ .function = .{ .is_async = is_async } },
         };
         // Initialize `dt` so optional fields are well-defined before `parse_datatype()`.
         // `parse_datatype()` will set `type`/`flags` and overwrite `type_str`.
@@ -4273,8 +4299,19 @@ pub const ParseProcess = struct {
             return try self.parse_quirk(false);
         } else if (mem.eql(u8, "impl", sval)) {
             return try self.parse_impl(false);
+        } else if (mem.eql(u8, "async", sval)) {
+            _ = self.token_next(); // skip async
+            const next_tok = self.token_peek_next() orelse {
+                self.transpile_proc.err("expected 'fun' after 'async'", .{});
+                return ParseError.InvalidKeyword;
+            };
+            if (!(next_tok.type == .Keyword and mem.eql(u8, "fun", next_tok.data.sval.items))) {
+                self.transpile_proc.err("expected 'fun' after 'async'", .{});
+                return ParseError.InvalidKeyword;
+            }
+            return try self.parse_function(false, true);
         } else if (mem.eql(u8, "fun", sval)) {
-            return try self.parse_function(false);
+            return try self.parse_function(false, false);
         } else if (mem.eql(u8, "for", sval)) {
             return try self.parse_for_statement(hist);
         } else if (mem.eql(u8, "if", sval)) {
@@ -4291,6 +4328,10 @@ pub const ParseProcess = struct {
             return try self.parse_asm_statement(hist);
         } else if (mem.eql(u8, "ret", sval)) {
             return try self.parse_return(hist);
+        } else if (mem.eql(u8, "await", sval)) {
+            _ = try self.parse_await_operand(hist);
+            try self.expect_sym(';');
+            return;
         } else if (mem.eql(u8, "allow", sval)) {
             return try self.parse_warning_control(.allow);
         } else if (mem.eql(u8, "expect", sval)) {
@@ -4482,8 +4523,19 @@ pub const ParseProcess = struct {
                 return try self.parse_quirk(true);
             } else if (mem.eql(u8, "impl", kw)) {
                 return try self.parse_impl(true);
+            } else if (mem.eql(u8, "async", kw)) {
+                _ = self.token_next(); // skip async
+                const next_tok = self.token_peek_next() orelse {
+                    self.transpile_proc.err("expected 'fun' after 'async'", .{});
+                    return ParseError.InvalidKeyword;
+                };
+                if (!(next_tok.type == .Keyword and mem.eql(u8, "fun", next_tok.data.sval.items))) {
+                    self.transpile_proc.err("expected 'fun' after 'async'", .{});
+                    return ParseError.InvalidKeyword;
+                }
+                return try self.parse_function(true, true);
             } else if (mem.eql(u8, "fun", kw)) {
-                return try self.parse_function(true);
+                return try self.parse_function(true, false);
             }
         } else if (t.type == .Identifier) {
             // public variable with user-defined type: `pub User u;`

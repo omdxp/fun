@@ -38,6 +38,81 @@ test "ParseProcess parse_function" {
     try fs.cwd().deleteFile(ofilepath);
 }
 
+test "ParseProcess parse_async_function" {
+    const ifilepath = "ParseProcess_parse_async_function.fn";
+    const ofilepath = "ParseProcess_parse_async_function.c";
+    {
+        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
+        defer file.close();
+        const input = "async fun test() { ret; }";
+        try file.writeAll(input);
+    }
+
+    const allocator = std.testing.allocator;
+    var transpile_proc = try codegen.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
+    var lex_proc = lexer.LexProcess.init(&transpile_proc);
+    var parse_proc = ParseProcess.init(&transpile_proc);
+
+    defer {
+        lex_proc.deinit();
+        transpile_proc.deinit();
+    }
+
+    try lex_proc.lex();
+    try parse_proc.parse();
+    const nodes = transpile_proc.nodes.items();
+    try std.testing.expectEqual(@as(usize, 1), nodes.len);
+    try std.testing.expectEqual(ast.NodeType.Function, nodes[0].type);
+    try std.testing.expect(nodes[0].node_variant.?.function.is_async);
+
+    try fs.cwd().deleteFile(ifilepath);
+    try fs.cwd().deleteFile(ofilepath);
+}
+
+test "ParseProcess parse_await_expression" {
+    const ifilepath = "ParseProcess_parse_await_expression.fn";
+    const ofilepath = "ParseProcess_parse_await_expression.c";
+    {
+        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
+        defer file.close();
+        const input =
+            "fun inc(num x) num { ret x + 1; }\n" ++
+            "fun main() {\n" ++
+            "  num y = await inc(41);\n" ++
+            "  ret y;\n" ++
+            "}\n";
+        try file.writeAll(input);
+    }
+
+    const allocator = std.testing.allocator;
+    var transpile_proc = try codegen.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
+    var lex_proc = lexer.LexProcess.init(&transpile_proc);
+    var parse_proc = ParseProcess.init(&transpile_proc);
+
+    defer {
+        lex_proc.deinit();
+        transpile_proc.deinit();
+    }
+
+    try lex_proc.lex();
+    try parse_proc.parse();
+    const nodes = transpile_proc.nodes.items();
+    try std.testing.expectEqual(@as(usize, 2), nodes.len);
+    try std.testing.expectEqual(ast.NodeType.Function, nodes[0].type);
+    try std.testing.expectEqual(ast.NodeType.Function, nodes[1].type);
+
+    const main_body = nodes[1].node_variant.?.function.body.?;
+    const stmts = main_body.node_variant.?.body.statements.items();
+    try std.testing.expect(stmts.len >= 1);
+    try std.testing.expectEqual(ast.NodeType.Variable, stmts[0].type);
+    const val = stmts[0].node_variant.?.variable.val.?;
+    try std.testing.expectEqual(ast.NodeType.Expression, val.type);
+    try std.testing.expectEqualStrings("()", val.node_variant.?.exp.op);
+
+    try fs.cwd().deleteFile(ifilepath);
+    try fs.cwd().deleteFile(ofilepath);
+}
+
 test "ParseProcess parses variadic function declaration" {
     const ifilepath = "ParseProcess_parse_variadic_function.fn";
     const ofilepath = "ParseProcess_parse_variadic_function.c";

@@ -221,6 +221,8 @@ pub const Node = struct {
             type_params: ?utils.Vector(std.ArrayList(u8)) = null,
             /// The arguments of the function.
             args: ?utils.Vector(*Node) = null,
+            /// Whether the function was declared with the `async` keyword.
+            is_async: bool = false,
             /// Whether the function is variadic (C-style varargs).
             is_variadic: bool = false,
             /// The body of the function.
