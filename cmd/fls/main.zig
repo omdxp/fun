@@ -675,6 +675,13 @@ const LspServer = struct {
                 };
                 continue;
             }
+            if (std.mem.eql(u8, method, "textDocument/codeAction")) {
+                self.handleCodeAction(id_val, obj.get("params") orelse null) catch |err| {
+                    std.debug.print("[fls] codeAction failed: {s}\n", .{@errorName(err)});
+                    if (is_request) self.sendResponseJson(id_val, "[]") catch {};
+                };
+                continue;
+            }
             if (std.mem.eql(u8, method, "textDocument/completion")) {
                 self.handleCompletion(id_val, obj.get("params") orelse null) catch |err| {
                     std.debug.print("[fls] completion failed: {s}\n", .{@errorName(err)});
@@ -735,6 +742,7 @@ const LspServer = struct {
                 implementationProvider: bool,
                 referencesProvider: bool,
                 renameProvider: bool,
+                codeActionProvider: bool,
                 completionProvider: struct {
                     resolveProvider: bool = false,
                     triggerCharacters: []const []const u8 = &[_][]const u8{ ".", "(", ":" },
@@ -765,6 +773,7 @@ const LspServer = struct {
                 .implementationProvider = true,
                 .referencesProvider = true,
                 .renameProvider = true,
+                .codeActionProvider = true,
                 .completionProvider = .{ .triggerCharacters = &[_][]const u8{ ".", "(", ":" } },
                 .signatureHelpProvider = .{ .triggerCharacters = &[_][]const u8{ "(", "," } },
                 .documentSymbolProvider = true,
@@ -3319,6 +3328,112 @@ const LspServer = struct {
             try w.writeAll(edits_json);
         }
         try w.writeAll("}}");
+
+        try self.sendResponseJson(id_val, json_buf.items);
+    }
+
+    fn handleCodeAction(self: *LspServer, id_val: ?std.json.Value, params_val: ?std.json.Value) !void {
+        const parsed = try parseCodeActionParams(params_val);
+        if (parsed == null) {
+            try self.sendResponseJson(id_val, "[]");
+            return;
+        }
+
+        const uri = parsed.?.uri;
+        const doc = self.docs.get(uri) orelse {
+            try self.sendResponseJson(id_val, "[]");
+            return;
+        };
+        const idx = doc.index orelse {
+            try self.sendResponseJson(id_val, "[]");
+            return;
+        };
+
+        const CodeActionFix = struct {
+            title: []const u8,
+            range: Range,
+            new_text: []const u8,
+            is_preferred: bool = true,
+        };
+
+        var fixes = std.ArrayList(CodeActionFix).init(self.allocator);
+        defer fixes.deinit();
+
+        for (parsed.?.diagnostics) |diag_val| {
+            if (diag_val != .object) continue;
+            const msg_val = diag_val.object.get("message") orelse continue;
+            const range_val = diag_val.object.get("range") orelse continue;
+            if (msg_val != .string) continue;
+
+            const diag_range = parseJsonRange(range_val) orelse continue;
+
+            if (isMissingAwaitDiagnosticMessage(msg_val.string)) {
+                const insert_range: Range = .{ .start = diag_range.start, .end = diag_range.start };
+                const fix: CodeActionFix = .{
+                    .title = "Insert 'await'",
+                    .range = insert_range,
+                    .new_text = "await ",
+                    .is_preferred = true,
+                };
+
+                var exists = false;
+                for (fixes.items) |it| {
+                    if (std.mem.eql(u8, it.title, fix.title) and std.mem.eql(u8, it.new_text, fix.new_text) and rangeEqual(it.range, fix.range)) {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (!exists) try fixes.append(fix);
+                continue;
+            }
+
+            if (isAwaitOutsideAsyncDiagnosticMessage(msg_val.string)) {
+                const insert_pos = findEnclosingFunctionAsyncInsertPosFromTokens(idx.tokens, diag_range.start.line) orelse continue;
+                const insert_range: Range = .{ .start = insert_pos, .end = insert_pos };
+                const fix: CodeActionFix = .{
+                    .title = "Mark enclosing function async",
+                    .range = insert_range,
+                    .new_text = "async ",
+                    .is_preferred = true,
+                };
+
+                var exists = false;
+                for (fixes.items) |it| {
+                    if (std.mem.eql(u8, it.title, fix.title) and std.mem.eql(u8, it.new_text, fix.new_text) and rangeEqual(it.range, fix.range)) {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (!exists) try fixes.append(fix);
+            }
+        }
+
+        if (fixes.items.len == 0) {
+            try self.sendResponseJson(id_val, "[]");
+            return;
+        }
+
+        var json_buf = std.ArrayList(u8).init(self.allocator);
+        defer json_buf.deinit();
+        var w = json_buf.writer();
+
+        try w.writeByte('[');
+        for (fixes.items, 0..) |fix, i| {
+            if (i != 0) try w.writeByte(',');
+
+            try w.writeAll("{\"title\":");
+            try writeJsonString(w, fix.title);
+            try w.writeAll(",\"kind\":\"quickfix\",\"isPreferred\":");
+            try w.writeAll(if (fix.is_preferred) "true" else "false");
+            try w.writeAll(",\"edit\":{\"changes\":{");
+            try writeJsonString(w, uri);
+            try w.writeAll(":[{\"range\":");
+            try writeRangeJson(w, fix.range);
+            try w.writeAll(",\"newText\":");
+            try writeJsonString(w, fix.new_text);
+            try w.writeAll("}]}}}");
+        }
+        try w.writeByte(']');
 
         try self.sendResponseJson(id_val, json_buf.items);
     }
@@ -6138,9 +6253,10 @@ const LspServer = struct {
 
     fn rebuildIndex(self: *LspServer, uri: []const u8) !void {
         const doc_ptr = self.docs.getPtr(uri) orelse return;
+        const scope: IndexBuildScope = if (doc_ptr.version > 0) .open_document else .background;
 
         // Build the new index first; if it fails, keep the old one so completion doesn't "die" mid-edit.
-        const new_idx = buildIndexFromTextAt(self.allocator, doc_ptr.text, null) catch |err| {
+        const new_idx = buildIndexFromTextAt(self.allocator, doc_ptr.text, null, scope) catch |err| {
             std.debug.print("[fls] rebuildIndex failed (keeping old index): {s}\n", .{@errorName(err)});
             return;
         };
@@ -7272,6 +7388,13 @@ fn writeJsonString(w: anytype, s: []const u8) !void {
     try std.json.stringify(s, .{}, w);
 }
 
+fn writeRangeJson(w: anytype, r: Range) !void {
+    try w.print(
+        "{{\"start\":{{\"line\":{d},\"character\":{d}}},\"end\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ r.start.line, r.start.character, r.end.line, r.end.character },
+    );
+}
+
 fn isUriUnreserved(ch: u8) bool {
     return (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or
         ch == '-' or ch == '_' or ch == '.' or ch == '~' or ch == '/' or ch == ':';
@@ -7492,6 +7615,67 @@ fn rangeStartEqual(a: Range, b: Range) bool {
 fn rangeEqual(a: Range, b: Range) bool {
     return a.start.line == b.start.line and a.start.character == b.start.character and
         a.end.line == b.end.line and a.end.character == b.end.character;
+}
+
+fn findEnclosingFunctionAsyncInsertPosFromTokens(tokens: []const TokenLite, target_line: i64) ?Position {
+    const FnScope = struct {
+        body_depth: i64,
+        insert_pos: ?Position,
+    };
+
+    var scopes: [128]FnScope = undefined;
+    var scopes_len: usize = 0;
+    var depth: i64 = 0;
+
+    var pending_fun_pos: ?Position = null;
+    var pending_fun_is_async: bool = false;
+
+    for (tokens, 0..) |t, i| {
+        if (t.range.start.line > target_line) break;
+
+        if (t.kind == .keyword and std.mem.eql(u8, t.text, "fun")) {
+            var is_async = false;
+            var j: isize = @as(isize, @intCast(i)) - 1;
+            while (j >= 0) : (j -= 1) {
+                const prev = tokens[@as(usize, @intCast(j))];
+                if (prev.range.start.line < t.range.start.line) break;
+                if (prev.kind == .keyword and std.mem.eql(u8, prev.text, "async")) {
+                    is_async = true;
+                    break;
+                }
+            }
+            pending_fun_pos = t.range.start;
+            pending_fun_is_async = is_async;
+            continue;
+        }
+
+        if ((t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, "{")) {
+            depth += 1;
+            if (pending_fun_pos) |fun_pos| {
+                if (scopes_len < scopes.len) {
+                    scopes[scopes_len] = .{
+                        .body_depth = depth,
+                        .insert_pos = if (pending_fun_is_async) null else fun_pos,
+                    };
+                    scopes_len += 1;
+                }
+                pending_fun_pos = null;
+                pending_fun_is_async = false;
+            }
+            continue;
+        }
+
+        if ((t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, "}")) {
+            if (scopes_len != 0 and scopes[scopes_len - 1].body_depth == depth) {
+                scopes_len -= 1;
+            }
+            if (depth > 0) depth -= 1;
+            continue;
+        }
+    }
+
+    if (scopes_len == 0) return null;
+    return scopes[scopes_len - 1].insert_pos;
 }
 
 fn isBuiltinTypeName(name: []const u8) bool {
@@ -7865,6 +8049,11 @@ fn guessReceiverAtCursorWithIndex(text: []const u8, p: Position) ?ReceiverGuess 
 
 const ParsedTextDocPosition = struct { uri: []const u8, pos: Position };
 
+const ParsedCodeActionParams = struct {
+    uri: []const u8,
+    diagnostics: []const std.json.Value,
+};
+
 fn parseTextDocPosition(params_val: ?std.json.Value) !?ParsedTextDocPosition {
     const params = params_val orelse return null;
     if (params != .object) return null;
@@ -7878,6 +8067,54 @@ fn parseTextDocPosition(params_val: ?std.json.Value) !?ParsedTextDocPosition {
     const character = (pv.object.get("character") orelse return null).integer;
 
     return .{ .uri = uri, .pos = .{ .line = line, .character = character } };
+}
+
+fn parseCodeActionParams(params_val: ?std.json.Value) !?ParsedCodeActionParams {
+    const params = params_val orelse return null;
+    if (params != .object) return null;
+
+    const td = params.object.get("textDocument") orelse return null;
+    if (td != .object) return null;
+    const uri_val = td.object.get("uri") orelse return null;
+    if (uri_val != .string) return null;
+
+    var diagnostics: []const std.json.Value = &[_]std.json.Value{};
+    if (params.object.get("context")) |ctx_val| {
+        if (ctx_val == .object) {
+            if (ctx_val.object.get("diagnostics")) |diags_val| {
+                if (diags_val == .array) diagnostics = diags_val.array.items;
+            }
+        }
+    }
+
+    return .{ .uri = uri_val.string, .diagnostics = diagnostics };
+}
+
+fn parseJsonRange(v: std.json.Value) ?Range {
+    if (v != .object) return null;
+    const start_val = v.object.get("start") orelse return null;
+    const end_val = v.object.get("end") orelse return null;
+    if (start_val != .object or end_val != .object) return null;
+
+    const sl = start_val.object.get("line") orelse return null;
+    const sc = start_val.object.get("character") orelse return null;
+    const el = end_val.object.get("line") orelse return null;
+    const ec = end_val.object.get("character") orelse return null;
+    if (sl != .integer or sc != .integer or el != .integer or ec != .integer) return null;
+
+    return .{
+        .start = .{ .line = sl.integer, .character = sc.integer },
+        .end = .{ .line = el.integer, .character = ec.integer },
+    };
+}
+
+fn isMissingAwaitDiagnosticMessage(message: []const u8) bool {
+    return std.mem.indexOf(u8, message, "must be awaited") != null and
+        std.mem.indexOf(u8, message, "async function") != null;
+}
+
+fn isAwaitOutsideAsyncDiagnosticMessage(message: []const u8) bool {
+    return std.mem.indexOf(u8, message, "await is only allowed inside async functions") != null;
 }
 
 fn parseTextDocUri(params_val: ?std.json.Value) !?[]const u8 {
@@ -8054,10 +8291,15 @@ fn maybeCleanupFlsTempDir(dir: *std.fs.Dir) void {
 }
 
 fn buildIndexFromText(allocator: Allocator, text: []const u8) !*Index {
-    return buildIndexFromTextAt(allocator, text, null);
+    return buildIndexFromTextAt(allocator, text, null, .open_document);
 }
 
-fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path_opt: ?[]const u8) !*Index {
+const IndexBuildScope = enum {
+    open_document,
+    background,
+};
+
+fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path_opt: ?[]const u8, scope: IndexBuildScope) !*Index {
     // Parsing while typing regularly hits syntax errors.
     // Use an arena for the full compiler pipeline and for all index allocations.
     // This avoids per-token frees (which are brittle if anything is corrupted) and
@@ -8171,18 +8413,40 @@ fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path_opt
         try tokens_out.append(.{ .kind = kind, .text = text_copy, .range = rangeFromTokenPos(t.pos) });
     }
 
-    // Best-effort parse. Disabled by default because parser panics are process-fatal in Zig
-    // and can crash the LSP on malformed/edge-case files during workspace indexing.
-    // Set FLS_ENABLE_INPROC_PARSE=1 to opt in for debugging richer AST-backed symbols.
+    // Best-effort parse. Policy is scope-aware:
+    // - open documents: enabled by default for richer local/AST-backed symbols
+    // - background/workspace/import indexing: disabled by default for safety
+    // Overrides:
+    // - FLS_ENABLE_INPROC_PARSE=<truthy|falsey> forces on/off globally
+    // - FLS_PARSE_SCOPE=none|open|all controls scoped parsing when the global override is unset
     const parse_enabled: bool = blk: {
-        const v = std.process.getEnvVarOwned(tmp_alloc, "FLS_ENABLE_INPROC_PARSE") catch break :blk false;
-        const s = std.mem.trim(u8, v, " \t\r\n");
-        if (s.len == 0) break :blk false;
-        if (std.ascii.eqlIgnoreCase(s, "0")) break :blk false;
-        if (std.ascii.eqlIgnoreCase(s, "false")) break :blk false;
-        if (std.ascii.eqlIgnoreCase(s, "no")) break :blk false;
-        if (std.ascii.eqlIgnoreCase(s, "off")) break :blk false;
-        break :blk true;
+        const isTruthy = struct {
+            fn call(v: []const u8) bool {
+                const s = std.mem.trim(u8, v, " \t\r\n");
+                if (s.len == 0) return false;
+                if (std.ascii.eqlIgnoreCase(s, "0")) return false;
+                if (std.ascii.eqlIgnoreCase(s, "false")) return false;
+                if (std.ascii.eqlIgnoreCase(s, "no")) return false;
+                if (std.ascii.eqlIgnoreCase(s, "off")) return false;
+                return true;
+            }
+        }.call;
+
+        if (std.process.getEnvVarOwned(tmp_alloc, "FLS_ENABLE_INPROC_PARSE")) |raw_global| {
+            defer tmp_alloc.free(raw_global);
+            break :blk isTruthy(raw_global);
+        } else |_| {}
+
+        if (std.process.getEnvVarOwned(tmp_alloc, "FLS_PARSE_SCOPE")) |raw_scope| {
+            defer tmp_alloc.free(raw_scope);
+            const s = std.mem.trim(u8, raw_scope, " \t\r\n");
+            if (s.len == 0) break :blk false;
+            if (std.ascii.eqlIgnoreCase(s, "none")) break :blk false;
+            if (std.ascii.eqlIgnoreCase(s, "all")) break :blk true;
+            if (std.ascii.eqlIgnoreCase(s, "open")) break :blk scope == .open_document;
+        } else |_| {}
+
+        break :blk scope == .open_document;
     };
 
     var parse_ok: bool = false;

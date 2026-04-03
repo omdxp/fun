@@ -792,6 +792,47 @@ fn expectHoverContains(allocator: Allocator, result_val: std.json.Value, needle:
     return error.TestUnexpectedResult;
 }
 
+fn codeActionHasTitleWithNewText(result_val: std.json.Value, title: []const u8, new_text: []const u8) bool {
+    if (result_val != .array) return false;
+
+    for (result_val.array.items) |item| {
+        if (item != .object) continue;
+
+        const title_val = item.object.get("title") orelse continue;
+        if (title_val != .string or !std.mem.eql(u8, title_val.string, title)) continue;
+
+        const edit_val = item.object.get("edit") orelse continue;
+        if (edit_val != .object) continue;
+
+        const changes_val = edit_val.object.get("changes") orelse continue;
+        if (changes_val != .object) continue;
+
+        var it = changes_val.object.iterator();
+        while (it.next()) |entry| {
+            const edits_val = entry.value_ptr.*;
+            if (edits_val != .array) continue;
+            for (edits_val.array.items) |ev| {
+                if (ev != .object) continue;
+                const nt = ev.object.get("newText") orelse continue;
+                if (nt == .string and std.mem.eql(u8, nt.string, new_text)) return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+fn expectCodeActionHasTitleWithNewText(allocator: Allocator, result_val: std.json.Value, title: []const u8, new_text: []const u8) !void {
+    if (codeActionHasTitleWithNewText(result_val, title, new_text)) return;
+
+    const dumped = std.json.stringifyAlloc(allocator, result_val, .{}) catch null;
+    if (dumped) |s| {
+        defer allocator.free(s);
+        std.debug.print("\n[fls_e2e] codeAction missing title '{s}' with newText '{s}'\n{s}\n", .{ title, new_text, s });
+    }
+    return error.TestUnexpectedResult;
+}
+
 fn expectSemanticTokensNonEmpty(allocator: Allocator, result_val: std.json.Value) !void {
     if (result_val == .null) return error.TestUnexpectedResult;
     if (result_val != .object) return error.TestUnexpectedResult;
@@ -2589,6 +2630,83 @@ test "fls e2e: async/await completion details + hover + signatureHelp" {
     const sig_val = try jsonResultFromResponseObj(sig_res.parsed.value.object);
     try expectSignatureHelpLabelContains(allocator, sig_val, "async inc(num by) num");
     try expectSignatureHelpActiveParameter(allocator, sig_val, 0);
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: async diagnostics map to code actions" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "async fun inc(num x) num { ret x + 1; }\n" ++
+        "async fun missing() num {\n" ++
+        "  num y = inc(1);\n" ++
+        "  ret y;\n" ++
+        "}\n" ++
+        "fun plain() num {\n" ++
+        "  num z = await inc(1);\n" ++
+        "  ret z;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-codeaction-async.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const missing_stmt = try findPosition(doc_text, "num y = inc(1);", 0);
+    const missing_start = missing_stmt.col + @as(i64, @intCast("num y = ".len));
+    const missing_end = missing_start + @as(i64, @intCast("inc".len));
+
+    const await_stmt = try findPosition(doc_text, "await inc(1);", 0);
+    const await_start = await_stmt.col;
+    const await_end = await_start + @as(i64, @intCast("await".len));
+
+    const code_action_params = try std.fmt.allocPrint(
+        allocator,
+        "{{" ++
+            "\"textDocument\":{{\"uri\":\"{s}\"}}," ++
+            "\"range\":{{\"start\":{{\"line\":{d},\"character\":{d}}},\"end\":{{\"line\":{d},\"character\":{d}}}}}," ++
+            "\"context\":{{\"diagnostics\":[" ++
+            "{{\"range\":{{\"start\":{{\"line\":{d},\"character\":{d}}},\"end\":{{\"line\":{d},\"character\":{d}}}}},\"severity\":1,\"message\":\"call to async function 'inc' must be awaited\"}}," ++
+            "{{\"range\":{{\"start\":{{\"line\":{d},\"character\":{d}}},\"end\":{{\"line\":{d},\"character\":{d}}}}},\"severity\":1,\"message\":\"await is only allowed inside async functions\"}}" ++
+            "]}}" ++
+            "}}",
+        .{
+            doc_uri,
+            missing_stmt.line,
+            missing_start,
+            missing_stmt.line,
+            missing_end,
+            missing_stmt.line,
+            missing_start,
+            missing_stmt.line,
+            missing_end,
+            await_stmt.line,
+            await_start,
+            await_stmt.line,
+            await_end,
+        },
+    );
+    defer allocator.free(code_action_params);
+
+    const ca_id = try lsp.request("textDocument/codeAction", code_action_params);
+    var ca_res = try lsp.waitResponse(ca_id, 15000);
+    defer ca_res.deinit();
+    const ca_val = try jsonResultFromResponseObj(ca_res.parsed.value.object);
+
+    try expectCodeActionHasTitleWithNewText(allocator, ca_val, "Insert 'await'", "await ");
+    try expectCodeActionHasTitleWithNewText(allocator, ca_val, "Mark enclosing function async", "async ");
 
     const shutdown_id = try lsp.request("shutdown", "{}");
     var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);

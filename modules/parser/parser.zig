@@ -462,7 +462,7 @@ pub const ParseProcess = struct {
         }
         try self.parse_expressionable_root(hist);
         t = self.token_peek_next();
-        if (t.?.type == .Symbol and t.?.data.cval != ';') {
+        if (t != null and t.?.type == .Symbol and t.?.data.cval != ';') {
             return try self.parse_symbol();
         }
         try self.expect_sym(';');
@@ -1027,6 +1027,10 @@ pub const ParseProcess = struct {
     /// - Logs an error message if the next token is not of an expected type.
     fn parse_single_token_to_node(self: *Self) ParseError!bool {
         const t = self.token_next();
+        if (t == null) {
+            self.transpile_proc.err("expected token, got eof", .{});
+            return ParseError.InvalidToken;
+        }
         switch (t.?.type) {
             .Number => {
                 switch (t.?.data) {
@@ -1888,6 +1892,10 @@ pub const ParseProcess = struct {
     /// - Returns an error if any parsing operation fails.
     fn parse_normal_expression(self: *Self, hist: *utils.History) ParseError!void {
         var t = self.token_peek_next();
+        if (t == null) {
+            self.transpile_proc.err("expected operator in expression", .{});
+            return ParseError.InvalidExpression;
+        }
         const op = t.?.data.sval.items;
         const op_pos = t.?.pos;
         var node_left = self.node_peek_expressionable_or_null();
@@ -1908,16 +1916,22 @@ pub const ParseProcess = struct {
 
                 // Expect a single identifier after '.'
                 _ = try self.parse_identifier();
-                var node_right = self.node_pop();
-                node_right.?.flags = .{ .inside_expression = true };
+                var node_right = self.node_pop() orelse {
+                    self.transpile_proc.err("expected identifier after '.'", .{});
+                    return ParseError.InvalidOperand;
+                };
+                node_right.flags = .{ .inside_expression = true };
 
                 var blank_left: ast.Node = .{ .type = .Blank, .pos = op_pos };
                 blank_left.flags = .{ .inside_expression = true };
-                try self.make_expression_node(&blank_left, &node_right.?, op, op_pos);
+                try self.make_expression_node(&blank_left, &node_right, op, op_pos);
 
-                var exp_node = self.node_pop();
-                try self.parse_reorder_expression(&exp_node.?);
-                self.transpile_proc.nodes.push(exp_node.?) catch |e| {
+                var exp_node = self.node_pop() orelse {
+                    self.transpile_proc.err("expected expression after '.'", .{});
+                    return ParseError.InvalidExpression;
+                };
+                try self.parse_reorder_expression(&exp_node);
+                self.transpile_proc.nodes.push(exp_node) catch |e| {
                     std.debug.print("Error adding node to list: {s}", .{@errorName(e)});
                     return ParseError.MemoryAllocationFailed;
                 };
@@ -1961,12 +1975,18 @@ pub const ParseProcess = struct {
             defer hist_down.deinit();
             try self.parse_expressionable(&hist_down);
         }
-        var node_right = self.node_pop();
-        node_right.?.flags = .{ .inside_expression = true };
-        try self.make_expression_node(&node_left.?, &node_right.?, op, op_pos);
-        var exp_node = self.node_pop();
-        try self.parse_reorder_expression(&exp_node.?);
-        self.transpile_proc.nodes.push(exp_node.?) catch |e| {
+        var node_right = self.node_pop() orelse {
+            self.transpile_proc.err("expected expressionable for '{s}' operator", .{op});
+            return ParseError.InvalidOperand;
+        };
+        node_right.flags = .{ .inside_expression = true };
+        try self.make_expression_node(&node_left.?, &node_right, op, op_pos);
+        var exp_node = self.node_pop() orelse {
+            self.transpile_proc.err("expected expression node for '{s}' operator", .{op});
+            return ParseError.InvalidExpression;
+        };
+        try self.parse_reorder_expression(&exp_node);
+        self.transpile_proc.nodes.push(exp_node) catch |e| {
             std.debug.print("Error adding node to list: {s}", .{@errorName(e)});
             return ParseError.MemoryAllocationFailed;
         };
@@ -2020,7 +2040,11 @@ pub const ParseProcess = struct {
     /// - Logs an error message if the next token is not an identifier.
     fn parse_identifier(self: *Self) ParseError!bool {
         const t = self.token_peek_next();
-        if (t != null and t.?.type != .Identifier) {
+        if (t == null) {
+            self.transpile_proc.err("expected identifier, got eof", .{});
+            return ParseError.InvalidIdentifier;
+        }
+        if (t.?.type != .Identifier) {
             // Allow primitive type keywords as operands to the builtin `sizeof(Type)`.
             // Example: `sizeof(num)`.
             if (t.?.type == .Keyword) {
@@ -2071,7 +2095,11 @@ pub const ParseProcess = struct {
     /// - Logs an error message if the next token is not a string.
     fn parse_string(self: *Self) !bool {
         const t = self.token_peek_next();
-        if (t != null and t.?.type != .String) {
+        if (t == null) {
+            self.transpile_proc.err("expected string, got eof", .{});
+            return ParseError.InvalidString;
+        }
+        if (t.?.type != .String) {
             self.transpile_proc.err("expected string, got '{?}'", .{t.?.type});
             return ParseError.InvalidString;
         }
@@ -3064,8 +3092,11 @@ pub const ParseProcess = struct {
     /// - Returns an error if any parsing operation fails.
     fn parse_expressionable_root(self: *Self, hist: *utils.History) ParseError!void {
         try self.parse_expressionable(hist);
-        const n = self.node_pop();
-        self.transpile_proc.nodes.push(n.?) catch |e| {
+        const n = self.node_pop() orelse {
+            self.transpile_proc.err("expected expression", .{});
+            return ParseError.InvalidExpression;
+        };
+        self.transpile_proc.nodes.push(n) catch |e| {
             std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});
             return ParseError.MemoryAllocationFailed;
         };
@@ -3799,18 +3830,27 @@ pub const ParseProcess = struct {
                 // Directly parse `.Variant` as fit branch pattern, bypassing normal root logic.
                 _ = self.token_next(); // skip '.'
                 _ = try self.parse_identifier();
-                var node_right = self.node_pop();
-                node_right.?.flags = .{ .inside_expression = true };
+                var node_right = self.node_pop() orelse {
+                    self.transpile_proc.err("expected identifier after '.' in fit pattern", .{});
+                    return ParseError.InvalidExpression;
+                };
+                node_right.flags = .{ .inside_expression = true };
                 var blank_left: ast.Node = .{ .type = .Blank, .pos = t.?.pos };
                 blank_left.flags = .{ .inside_expression = true };
-                try self.make_expression_node(&blank_left, &node_right.?, ".", t.?.pos);
-                var exp_node = self.node_pop();
-                try self.parse_reorder_expression(&exp_node.?);
+                try self.make_expression_node(&blank_left, &node_right, ".", t.?.pos);
+                var exp_node = self.node_pop() orelse {
+                    self.transpile_proc.err("expected fit branch condition expression", .{});
+                    return ParseError.InvalidExpression;
+                };
+                try self.parse_reorder_expression(&exp_node);
                 condition_node = exp_node;
             } else {
                 // If not dot, use normal root logic.
                 try self.parse_expressionable_root(&hist_down);
-                condition_node = self.node_pop();
+                condition_node = self.node_pop() orelse {
+                    self.transpile_proc.err("expected fit branch condition expression", .{});
+                    return ParseError.InvalidExpression;
+                };
             }
             if (condition_node.?.type == .Expression and mem.eql(u8, condition_node.?.node_variant.?.exp.op, "=")) {
                 self.transpile_proc.err("expected expression, got assignment", .{});
@@ -5196,11 +5236,14 @@ pub const ParseProcess = struct {
         defer hist.deinit();
 
         try self.parse_keyword(&hist);
-        const n = self.node_pop();
-        if (n.?.type != .Function) {
-            try self.transpile_proc.register_global_node_symbol(n.?);
+        const n = self.node_pop() orelse {
+            self.transpile_proc.err("expected declaration after keyword", .{});
+            return ParseError.InvalidStatement;
+        };
+        if (n.type != .Function) {
+            try self.transpile_proc.register_global_node_symbol(n);
         }
-        self.transpile_proc.nodes.push(n.?) catch |e| {
+        self.transpile_proc.nodes.push(n) catch |e| {
             std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});
             return ParseError.MemoryAllocationFailed;
         };
