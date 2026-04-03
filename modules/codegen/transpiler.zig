@@ -255,6 +255,9 @@ pub const TranspileProcess = struct {
     /// True while inferring the operand of an `await` unary expression.
     in_await_operand_inference: bool = false,
 
+    /// Source position of the top-level call currently being awaited.
+    await_operand_target_pos: ?token.Pos = null,
+
     /// Temp name counter for codegen.
     tmp_counter: usize = 0,
 
@@ -471,6 +474,10 @@ pub const TranspileProcess = struct {
     }
 
     fn is_await_dynamic_quirk_dispatch(self: *Self, call_node: ast.Node) bool {
+        if (self.lookup_await_call_override(call_node)) |ov| {
+            if (ov.dynamic_quirk_dispatch) return true;
+        }
+
         if (call_node.type != .Expression or call_node.node_variant == null or !mem.eql(u8, call_node.node_variant.?.exp.op, "()")) {
             return false;
         }
@@ -1503,6 +1510,22 @@ pub const TranspileProcess = struct {
             .callee_name = callee_name,
             .has_receiver = has_receiver,
             .receiver_pass_by_ref = receiver_pass_by_ref,
+        };
+    }
+
+    fn record_await_dynamic_quirk_override(self: *Self, node: ast.Node) TranspileError!void {
+        const p = node.pos orelse return;
+        const key = try self.call_pos_key_alloc(p);
+        const gop = self.await_call_overrides.getOrPut(key) catch {
+            self.allocator.free(key);
+            return TranspileError.MemoryAllocationFailed;
+        };
+        if (gop.found_existing) {
+            self.allocator.free(key);
+        }
+        gop.value_ptr.* = .{
+            .callee_name = "",
+            .dynamic_quirk_dispatch = true,
         };
     }
 
@@ -3308,6 +3331,7 @@ pub const TranspileProcess = struct {
         callee_name: []const u8,
         has_receiver: bool = false,
         receiver_pass_by_ref: bool = false,
+        dynamic_quirk_dispatch: bool = false,
     };
 
     const GenericFnInstantiation = struct {
@@ -4388,7 +4412,18 @@ pub const TranspileProcess = struct {
     ) TranspileError!void {
         const display = callee_name orelse "<call>";
 
-        if (self.in_await_operand_inference) {
+        const is_await_target_call = blk: {
+            if (!self.in_await_operand_inference) break :blk false;
+            const target = self.await_operand_target_pos orelse break :blk false;
+            const call_pos = call_node.pos orelse break :blk false;
+            break :blk std.mem.eql(u8, target.filename, call_pos.filename) and
+                target.line == call_pos.line and
+                target.start_col == call_pos.start_col and
+                target.end_line == call_pos.end_line and
+                target.end_col == call_pos.end_col;
+        };
+
+        if (is_await_target_call) {
             if (!async_known) {
                 self.report_type_error(call_node, "await target '{s}' must resolve to an async function", .{display});
                 return TranspileError.TypeMismatch;
@@ -4412,6 +4447,10 @@ pub const TranspileProcess = struct {
         }
 
         if (self.lookup_await_call_override(call_node)) |ov| {
+            if (ov.dynamic_quirk_dispatch) {
+                return null;
+            }
+
             var receiver_expr: ?*ast.Node = null;
             if (ov.has_receiver) {
                 const call = call_node.node_variant.?.exp;
@@ -4632,8 +4671,13 @@ pub const TranspileProcess = struct {
                     }
 
                     const prev = self.in_await_operand_inference;
+                    const prev_target = self.await_operand_target_pos;
                     self.in_await_operand_inference = true;
-                    defer self.in_await_operand_inference = prev;
+                    self.await_operand_target_pos = operand.pos;
+                    defer {
+                        self.in_await_operand_inference = prev;
+                        self.await_operand_target_pos = prev_target;
+                    }
 
                     return try self.infer_expr_type(operand, env, fns);
                 }
@@ -4727,6 +4771,7 @@ pub const TranspileProcess = struct {
                     var await_lowering_callee: ?[]const u8 = null;
                     var await_lowering_has_receiver: bool = false;
                     var await_lowering_receiver_by_ref: bool = false;
+                    var await_lowering_dynamic_quirk_dispatch: bool = false;
 
                     if (callee.type == .Identifier and callee.data != null) {
                         const fname = callee.data.?.sval.items;
@@ -4968,6 +5013,7 @@ pub const TranspileProcess = struct {
                             call_rtype = type_from_dtype(&method_sig.?.rtype);
                             callee_is_async = method_sig.?.is_async;
                             callee_async_known = true;
+                            await_lowering_dynamic_quirk_dispatch = method_sig.?.is_async;
                         } else {
                             if (recv_t.pointer_depth > 1) {
                                 self.report_type_error(node, "method calls support at most one pointer indirection", .{});
@@ -5324,6 +5370,9 @@ pub const TranspileProcess = struct {
 
                     if (await_lowering_callee) |lower_name| {
                         try self.record_await_call_override(node, lower_name, await_lowering_has_receiver, await_lowering_receiver_by_ref);
+                    }
+                    if (self.in_await_operand_inference and await_lowering_dynamic_quirk_dispatch) {
+                        try self.record_await_dynamic_quirk_override(node);
                     }
 
                     try self.validate_async_call_usage(node, callee_name, callee_is_async, callee_async_known);
@@ -10834,13 +10883,18 @@ pub const TranspileProcess = struct {
                     // Quirk method call: `q.method(...)` emits `q.vtable->method(q.self, ...)`.
                     if (exp.left) |left| {
                         if (left.type == .Expression and left.node_variant != null and mem.eql(u8, left.node_variant.?.exp.op, ".")) {
+                            const force_dynamic_quirk_dispatch = if (self.lookup_await_call_override(node)) |ov|
+                                ov.dynamic_quirk_dispatch
+                            else
+                                false;
+
                             const dot = left.node_variant.?.exp;
                             const recv = dot.left orelse null;
                             const member = dot.right orelse null;
                             if (recv != null and member != null and member.?.type == .Identifier and member.?.data != null) {
                                 // Special-case quirk method calls for any receiver expression
                                 // we can resolve as quirk-typed from the current scope.
-                                if (self.expr_is_quirk_typed_from_scope(recv.?.*)) {
+                                if (force_dynamic_quirk_dispatch or self.expr_is_quirk_typed_from_scope(recv.?.*)) {
                                     const mname = member.?.data.?.sval.items;
                                     const recv_is_identifier = recv.?.type == .Identifier;
                                     try self.write("(");

@@ -276,6 +276,30 @@ test "typecheck await async quirk field method call is ok" {
     try runTranspileExpectOk(std.testing.allocator, "typecheck_await_async_quirk_field_method_ok.fn", input);
 }
 
+test "typecheck await async quirk function-returned receiver method call is ok" {
+    const input =
+        "compound Counter {\n" ++
+        "  num base;\n" ++
+        "}\n" ++
+        "quirk AsyncCounter {\n" ++
+        "  async add(num x) num;\n" ++
+        "}\n" ++
+        "impl Counter as AsyncCounter {\n" ++
+        "  async add(num x) num { ret self.base + x; }\n" ++
+        "}\n" ++
+        "fun passthrough(AsyncCounter q) AsyncCounter {\n" ++
+        "  ret q;\n" ++
+        "}\n" ++
+        "async fun main() {\n" ++
+        "  Counter c;\n" ++
+        "  c.base = 1;\n" ++
+        "  AsyncCounter q = &c;\n" ++
+        "  num out = await passthrough(q).add(2);\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_await_async_quirk_function_receiver_ok.fn", input);
+}
+
 test "typecheck quirk async signature mismatch errors" {
     const input =
         "compound Counter {\n" ++
