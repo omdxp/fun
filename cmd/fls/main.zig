@@ -8537,9 +8537,9 @@ fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path_opt
         try tokens_out.append(.{ .kind = kind, .text = text_copy, .range = rangeFromTokenPos(t.pos) });
     }
 
-    // Best-effort parse. Policy is scope-aware:
-    // - open documents: enabled by default for richer local/AST-backed symbols
-    // - background/workspace/import indexing: disabled by default for safety
+    // Best-effort parse. Policy is scope-aware but opt-in by default for stability:
+    // - open documents: disabled by default (token-only)
+    // - background/workspace/import indexing: disabled by default (token-only)
     // Overrides:
     // - FLS_ENABLE_INPROC_PARSE=<truthy|falsey> forces on/off globally
     // - FLS_PARSE_SCOPE=none|open|all controls scoped parsing when the global override is unset
@@ -8570,7 +8570,8 @@ fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path_opt
             if (std.ascii.eqlIgnoreCase(s, "open")) break :blk scope == .open_document;
         } else |_| {}
 
-        break :blk scope == .open_document;
+        // Default to token-only indexing unless explicitly opted into parser-backed indexing.
+        break :blk false;
     };
 
     var parse_ok: bool = false;

@@ -16,4 +16,4 @@ A: In the [examples/](../examples/) directory.
 A: See [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 **Q: Why does FLS restart in a loop with EPIPE/SIGABRT errors?**
-A: That usually means the language server process crashed while indexing workspace files. FLS now uses panic-safe token-only indexing by default. If you manually enabled parser-heavy indexing for debugging, disable it by unsetting `FLS_ENABLE_INPROC_PARSE` (or setting it to `0`).
+A: That usually means the language server process crashed while indexing workspace files. FLS uses panic-safe token-only indexing by default. If you manually enabled parser-heavy indexing for debugging, disable it by unsetting `FLS_ENABLE_INPROC_PARSE` (or setting it to `0`) and keep `FLS_PARSE_SCOPE=none`.
