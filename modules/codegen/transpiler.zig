@@ -13151,7 +13151,7 @@ pub const TranspileProcess = struct {
 
         if (requires_thread_compat_recursive(self)) {
             try self.write("\n");
-            try self.write("#if defined(_WIN32)\n");
+            try self.write("#if defined(_WIN32) && !defined(__MINGW32__) && !defined(__MINGW64__)\n");
             try self.write("#ifndef WIN32_LEAN_AND_MEAN\n");
             try self.write("#define WIN32_LEAN_AND_MEAN\n");
             try self.write("#endif\n");

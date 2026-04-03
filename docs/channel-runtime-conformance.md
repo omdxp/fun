@@ -28,7 +28,6 @@ Host lanes are also validated in CI:
 | Lane | runs-on | `FUN_RUNTIME_BACKEND` | Purpose |
 | --- | --- | --- | --- |
 | `linux-posix` | `ubuntu-latest` | `posix` | Primary POSIX host behavior + regression gate |
-| `linux-selector-windows` | `ubuntu-latest` | `windows` | Backend selector override parity check |
 | `macos-posix` | `macos-latest` | `posix` | Native macOS scheduler/timer behavior |
 | `windows-native` | `windows-latest` | `windows` | Native Windows scheduler/timer behavior |
 

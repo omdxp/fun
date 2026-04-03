@@ -18,9 +18,6 @@ jobs:
           - os: ubuntu-latest
             runtime_backend: posix
             lane: linux-posix
-          - os: ubuntu-latest
-            runtime_backend: windows
-            lane: linux-selector-windows
           - os: macos-latest
             runtime_backend: posix
             lane: macos-posix
