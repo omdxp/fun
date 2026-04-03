@@ -227,6 +227,47 @@ test "async and await surface transpiles and runs" {
     try std.testing.expectEqualStrings("42", stdout);
 }
 
+test "async impl method await transpiles and runs" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_async_impl_method_await.fn";
+    const c_path = "codegen_async_impl_method_await.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_async_impl_method_await.exe" else "codegen_async_impl_method_await";
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(c_path) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.c.io;\n" ++
+        "compound Counter {\n" ++
+        "  num base;\n" ++
+        "}\n" ++
+        "impl Counter {\n" ++
+        "  async add(num x) num { ret self.base + x; }\n" ++
+        "}\n" ++
+        "async fun main() {\n" ++
+        "  Counter c;\n" ++
+        "  c.base = 41;\n" ++
+        "  num out = await c.add(1);\n" ++
+        "  printf(\"%lld\", out);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "__fun_async_call_Counter__add(") != null);
+
+    {
+        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("42", stdout);
+}
+
 test "function definitions can be out of order (prototypes emitted)" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_fn_prototype_order.fn";

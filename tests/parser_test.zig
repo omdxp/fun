@@ -69,6 +69,47 @@ test "ParseProcess parse_async_function" {
     try fs.cwd().deleteFile(ofilepath);
 }
 
+test "ParseProcess parse_async_impl_method" {
+    const ifilepath = "ParseProcess_parse_async_impl_method.fn";
+    const ofilepath = "ParseProcess_parse_async_impl_method.c";
+    {
+        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
+        defer file.close();
+        const input =
+            "compound Counter { num base; }\n" ++
+            "impl Counter {\n" ++
+            "  async add(num x) num { ret self.base + x; }\n" ++
+            "}\n";
+        try file.writeAll(input);
+    }
+
+    const allocator = std.testing.allocator;
+    var transpile_proc = try codegen.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
+    var lex_proc = lexer.LexProcess.init(&transpile_proc);
+    var parse_proc = ParseProcess.init(&transpile_proc);
+
+    defer {
+        lex_proc.deinit();
+        transpile_proc.deinit();
+    }
+
+    try lex_proc.lex();
+    try parse_proc.parse();
+
+    const nodes = transpile_proc.nodes.items();
+    try std.testing.expectEqual(@as(usize, 2), nodes.len);
+    try std.testing.expectEqual(ast.NodeType.Compound, nodes[0].type);
+    try std.testing.expectEqual(ast.NodeType.Impl, nodes[1].type);
+
+    const methods = nodes[1].node_variant.?.impl.methods.items();
+    try std.testing.expectEqual(@as(usize, 1), methods.len);
+    try std.testing.expectEqual(ast.NodeType.Function, methods[0].type);
+    try std.testing.expect(methods[0].node_variant.?.function.is_async);
+
+    try fs.cwd().deleteFile(ifilepath);
+    try fs.cwd().deleteFile(ofilepath);
+}
+
 test "ParseProcess parse_await_expression" {
     const ifilepath = "ParseProcess_parse_await_expression.fn";
     const ofilepath = "ParseProcess_parse_await_expression.c";

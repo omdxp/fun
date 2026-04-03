@@ -3232,6 +3232,12 @@ pub const TranspileProcess = struct {
         type_params: ?*const utils.Vector(std.ArrayList(u8)) = null,
     };
 
+    const AwaitLoweringInfo = struct {
+        callee_name: []const u8,
+        receiver_expr: ?*ast.Node = null,
+        receiver_pass_by_ref: bool = false,
+    };
+
     const GenericFnInstantiation = struct {
         fn_node: *ast.Node,
         params: *const utils.Vector(std.ArrayList(u8)),
@@ -4328,16 +4334,27 @@ pub const TranspileProcess = struct {
         }
     }
 
-    fn resolve_await_callee_effective_name(self: *Self, call_node: ast.Node) TranspileError!?[]const u8 {
+    fn resolve_await_lowering_info(self: *Self, call_node: ast.Node) TranspileError!?AwaitLoweringInfo {
         if (call_node.type != .Expression or call_node.node_variant == null or !mem.eql(u8, call_node.node_variant.?.exp.op, "()")) {
             return null;
         }
+
+        if (self.lookup_generic_call_override(call_node)) |ov| {
+            return .{
+                .callee_name = self.allocator.dupe(u8, ov) catch {
+                    return TranspileError.MemoryAllocationFailed;
+                },
+            };
+        }
+
         const call = call_node.node_variant.?.exp;
         const callee = call.left orelse return null;
 
         if (callee.*.type == .Identifier and callee.*.data != null) {
-            return self.allocator.dupe(u8, callee.*.data.?.sval.items) catch {
-                return TranspileError.MemoryAllocationFailed;
+            return .{
+                .callee_name = self.allocator.dupe(u8, callee.*.data.?.sval.items) catch {
+                    return TranspileError.MemoryAllocationFailed;
+                },
             };
         }
 
@@ -4346,7 +4363,57 @@ pub const TranspileProcess = struct {
             const left = dot.left orelse return null;
             const right = dot.right orelse return null;
             if (left.*.type == .Identifier and left.*.data != null and right.*.type == .Identifier and right.*.data != null) {
-                return try self.resolve_alias_qualified_symbol_name(&call_node, left.*.data.?.sval.items, right.*.data.?.sval.items);
+                const left_name = left.*.data.?.sval.items;
+                const right_name = right.*.data.?.sval.items;
+
+                if (try self.resolve_alias_qualified_symbol_name(&call_node, left_name, right_name)) |qualified| {
+                    return .{ .callee_name = qualified };
+                }
+
+                if (self.identifier_is_quirk_typed(left_name)) {
+                    return null;
+                }
+
+                const recv_dt = self.identifier_declared_dtype(left_name) orelse return null;
+                if (recv_dt.type != .Unknown or self.is_quirk_name(recv_dt.type_str.items)) {
+                    return null;
+                }
+                if (recv_dt.pointer_depth != 0 and recv_dt.pointer_depth != 1) {
+                    return null;
+                }
+
+                var type_name: []const u8 = recv_dt.type_str.items;
+                var owned_type_name = false;
+                if (recv_dt.generic_args != null) {
+                    type_name = try self.type_name_mangled_for_emit(recv_dt);
+                    owned_type_name = true;
+                }
+                defer if (owned_type_name) self.allocator.free(@constCast(type_name));
+
+                const type_name_canon = self.canonical_compound_name(type_name);
+
+                if (self.lookup_plain_impl_method_fn(&call_node, type_name_canon, right_name)) |fn_name| {
+                    return .{
+                        .callee_name = self.allocator.dupe(u8, fn_name) catch {
+                            return TranspileError.MemoryAllocationFailed;
+                        },
+                        .receiver_expr = left,
+                        .receiver_pass_by_ref = recv_dt.pointer_depth == 0,
+                    };
+                }
+
+                const qres = self.resolve_quirk_impl_method_for_concrete(call_node, type_name_canon, right_name);
+                if (!qres.ambiguous) {
+                    if (qres.fn_name) |qfn_name| {
+                        return .{
+                            .callee_name = self.allocator.dupe(u8, qfn_name) catch {
+                                return TranspileError.MemoryAllocationFailed;
+                            },
+                            .receiver_expr = left,
+                            .receiver_pass_by_ref = recv_dt.pointer_depth == 0,
+                        };
+                    }
+                }
             }
         }
 
@@ -4468,14 +4535,6 @@ pub const TranspileProcess = struct {
                     const operand = u.operand.*;
                     if (operand.type != .Expression or operand.node_variant == null or !mem.eql(u8, operand.node_variant.?.exp.op, "()")) {
                         self.report_type_error(node, "await expects a function call", .{});
-                        return TranspileError.TypeMismatch;
-                    }
-
-                    const await_target = try self.resolve_await_callee_effective_name(operand);
-                    if (await_target) |resolved| {
-                        self.allocator.free(resolved);
-                    } else {
-                        self.report_type_error(node, "await currently supports named function calls only", .{});
                         return TranspileError.TypeMismatch;
                     }
 
@@ -8728,6 +8787,13 @@ pub const TranspileProcess = struct {
             }
             self.in_function_params = false;
             try self.write(");\n");
+
+            if (fnv.is_async) {
+                const prev_override = self.override_fn_name;
+                self.override_fn_name = impl_fn_name;
+                defer self.override_fn_name = prev_override;
+                try self.write_async_function_support_prototypes(m.*);
+            }
         }
         try self.write("\n");
 
@@ -9008,6 +9074,13 @@ pub const TranspileProcess = struct {
                         }
                         self.in_function_params = false;
                         try self.write(");\n");
+
+                        if (fnv.is_async) {
+                            const prev_override = self.override_fn_name;
+                            self.override_fn_name = spec_name;
+                            defer self.override_fn_name = prev_override;
+                            try self.write_async_function_support_prototypes(m.*);
+                        }
                     }
                 }
             }
@@ -9068,6 +9141,13 @@ pub const TranspileProcess = struct {
                         }
                         self.in_function_params = false;
                         try self.write(");\n");
+
+                        if (fnv.is_async) {
+                            const prev_override = self.override_fn_name;
+                            self.override_fn_name = spec_name;
+                            defer self.override_fn_name = prev_override;
+                            try self.write_async_function_support_prototypes(m.*);
+                        }
                     }
                 }
             }
@@ -9103,6 +9183,10 @@ pub const TranspileProcess = struct {
             }
             self.in_function_params = false;
             try self.write(");\n");
+
+            if (fnv.is_async) {
+                try self.write_async_function_support_prototypes(m.*);
+            }
         }
     }
 
@@ -12125,19 +12209,40 @@ pub const TranspileProcess = struct {
                 const unary = node.node_variant.?.unary;
                 if (mem.eql(u8, unary.op, "await")) {
                     const operand = unary.operand.*;
-                    if (try self.resolve_await_callee_effective_name(operand)) |callee_name| {
-                        defer self.allocator.free(callee_name);
-                        const call_exp = operand.node_variant.?.exp;
-                        try self.write("__fun_async_call_");
-                        try self.write(callee_name);
-                        try self.write("(");
-                        if (call_exp.right) |right| {
-                            try self.transpile_node(right.*);
+                    const lowering = (try self.resolve_await_lowering_info(operand)) orelse {
+                        self.report_type_error(node, "await currently supports statically resolved async calls only", .{});
+                        return TranspileError.TypeMismatch;
+                    };
+                    defer self.allocator.free(lowering.callee_name);
+
+                    const call_exp = operand.node_variant.?.exp;
+                    try self.write("__fun_async_call_");
+                    try self.write(lowering.callee_name);
+                    try self.write("(");
+
+                    var wrote_arg = false;
+                    if (lowering.receiver_expr) |recv| {
+                        if (lowering.receiver_pass_by_ref) {
+                            try self.write("&");
                         }
-                        try self.write(")");
-                    } else {
-                        try self.transpile_node(operand);
+                        try self.transpile_node(recv.*);
+                        wrote_arg = true;
                     }
+
+                    if (call_exp.right) |right| {
+                        const inner = if (right.type == .ExpressionParenthesis and right.node_variant != null)
+                            right.node_variant.?.paren.exp.*
+                        else
+                            right.*;
+                        if (inner.type != .Blank) {
+                            if (wrote_arg) {
+                                try self.write(", ");
+                            }
+                            try self.transpile_node(inner);
+                        }
+                    }
+
+                    try self.write(")");
                     return;
                 }
                 if (unary.is_left_operanded_unary) {

@@ -2807,14 +2807,27 @@ pub const ParseProcess = struct {
         // Example: `fun1() void { ... }`
         while (!self.next_token_is_symbol('}')) {
             var method_is_public = is_public;
-            var name_tok = self.token_peek_next();
-            if (name_tok != null and name_tok.?.type == .Keyword and mem.eql(u8, name_tok.?.data.sval.items, "pub")) {
-                _ = self.token_next(); // skip pub
-                method_is_public = true;
-                name_tok = self.token_next();
-            } else {
-                name_tok = self.token_next();
+            var method_is_async = false;
+
+            while (true) {
+                const peek = self.token_peek_next();
+                if (peek == null or peek.?.type != .Keyword) break;
+                const kw = peek.?.data.sval.items;
+
+                if (mem.eql(u8, kw, "pub")) {
+                    _ = self.token_next();
+                    method_is_public = true;
+                    continue;
+                }
+                if (mem.eql(u8, kw, "async")) {
+                    _ = self.token_next();
+                    method_is_async = true;
+                    continue;
+                }
+                break;
             }
+
+            const name_tok = self.token_next();
             if (name_tok == null or name_tok.?.type != .Identifier) {
                 self.transpile_proc.err("expected method name in impl", .{});
                 return ParseError.InvalidIdentifier;
@@ -2827,7 +2840,7 @@ pub const ParseProcess = struct {
                 .type = .Function,
                 .pos = name_tok.?.pos,
                 .flags = .{ .is_public = method_is_public },
-                .node_variant = .{ .function = .{} },
+                .node_variant = .{ .function = .{ .is_async = method_is_async } },
             };
 
             const gen_name = if (quirk_name) |qn|

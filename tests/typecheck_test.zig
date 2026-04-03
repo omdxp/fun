@@ -130,6 +130,40 @@ test "typecheck async call with await is ok" {
     try runTranspileExpectOk(std.testing.allocator, "typecheck_async_call_with_await_ok.fn", input);
 }
 
+test "typecheck async method call requires await" {
+    const input =
+        "compound Counter {\n" ++
+        "  num base;\n" ++
+        "}\n" ++
+        "impl Counter {\n" ++
+        "  async add(num x) num { ret self.base + x; }\n" ++
+        "}\n" ++
+        "async fun main() {\n" ++
+        "  Counter c;\n" ++
+        "  c.base = 1;\n" ++
+        "  num out = c.add(2);\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_async_method_call_requires_await.fn", input);
+}
+
+test "typecheck await async method call is ok" {
+    const input =
+        "compound Counter {\n" ++
+        "  num base;\n" ++
+        "}\n" ++
+        "impl Counter {\n" ++
+        "  async add(num x) num { ret self.base + x; }\n" ++
+        "}\n" ++
+        "async fun main() {\n" ++
+        "  Counter c;\n" ++
+        "  c.base = 1;\n" ++
+        "  num out = await c.add(2);\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_await_async_method_ok.fn", input);
+}
+
 test "typecheck enum dot shorthand in init/assign/compare" {
     const input =
         "enum Color {\n" ++
