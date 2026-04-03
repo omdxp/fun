@@ -58,6 +58,7 @@ const Diagnostic = struct {
     range: Range,
     severity: i64,
     message: []const u8,
+    code: ?[]const u8 = null,
 };
 
 const DiagnosticWithUri = struct {
@@ -3361,13 +3362,21 @@ const LspServer = struct {
 
         for (parsed.?.diagnostics) |diag_val| {
             if (diag_val != .object) continue;
-            const msg_val = diag_val.object.get("message") orelse continue;
             const range_val = diag_val.object.get("range") orelse continue;
-            if (msg_val != .string) continue;
+
+            const msg_val_opt = diag_val.object.get("message");
+            const msg_opt: ?[]const u8 = if (msg_val_opt) |mv| switch (mv) {
+                .string => mv.string,
+                else => null,
+            } else null;
+
+            const diag_code = parseDiagnosticCodeValue(diag_val.object.get("code"));
 
             const diag_range = parseJsonRange(range_val) orelse continue;
 
-            if (isMissingAwaitDiagnosticMessage(msg_val.string)) {
+            const matches_missing_await = isMissingAwaitDiagnosticCode(diag_code) or
+                (diag_code == null and msg_opt != null and isMissingAwaitDiagnosticMessage(msg_opt.?));
+            if (matches_missing_await) {
                 const insert_range: Range = .{ .start = diag_range.start, .end = diag_range.start };
                 const fix: CodeActionFix = .{
                     .title = "Insert 'await'",
@@ -3387,7 +3396,9 @@ const LspServer = struct {
                 continue;
             }
 
-            if (isAwaitOutsideAsyncDiagnosticMessage(msg_val.string)) {
+            const matches_await_outside_async = isAwaitOutsideAsyncDiagnosticCode(diag_code) or
+                (diag_code == null and msg_opt != null and isAwaitOutsideAsyncDiagnosticMessage(msg_opt.?));
+            if (matches_await_outside_async) {
                 const insert_pos = findEnclosingFunctionAsyncInsertPosFromTokens(idx.tokens, diag_range.start.line) orelse continue;
                 const insert_range: Range = .{ .start = insert_pos, .end = insert_pos };
                 const fix: CodeActionFix = .{
@@ -6455,6 +6466,7 @@ const LspServer = struct {
             for (diags_owned) |d| {
                 self.allocator.free(d.uri);
                 self.allocator.free(d.diag.message);
+                if (d.diag.code) |c| self.allocator.free(c);
             }
             self.allocator.free(diags_owned);
         }
@@ -6667,6 +6679,41 @@ fn runCaptureStderr(allocator: Allocator, argv: []const []const u8, stderr_out: 
     };
 }
 
+const ParsedDiagnosticTag = struct {
+    severity: i64,
+    code: ?[]const u8 = null,
+};
+
+fn parseDiagnosticTag(line: []const u8) ?ParsedDiagnosticTag {
+    if (line.len < 3) return null;
+    if (line[0] != '[' or line[line.len - 1] != ']') return null;
+
+    const inner = line[1 .. line.len - 1];
+    var severity: i64 = 0;
+
+    if (std.mem.startsWith(u8, inner, "Warning")) {
+        severity = 2;
+    } else if (std.mem.startsWith(u8, inner, "Error") or std.mem.startsWith(u8, inner, "TypeError")) {
+        severity = 1;
+    } else {
+        return null;
+    }
+
+    var code: ?[]const u8 = null;
+    if (std.mem.indexOfScalar(u8, inner, ':')) |colon| {
+        const raw = std.mem.trim(u8, inner[colon + 1 ..], " \t\r\n");
+        if (raw.len != 0) code = raw;
+    }
+
+    return .{ .severity = severity, .code = code };
+}
+
+fn inferDiagnosticCodeFromMessage(message: []const u8) ?[]const u8 {
+    if (isMissingAwaitDiagnosticMessage(message)) return "async_call_requires_await";
+    if (isAwaitOutsideAsyncDiagnosticMessage(message)) return "await_outside_async_function";
+    return null;
+}
+
 fn parseFunDiagnosticsByUri(allocator: Allocator, stderr_text: []const u8, current_uri: []const u8, tmp_name: []const u8) ![]DiagnosticWithUri {
     const current_path_opt = uriToPath(allocator, current_uri) catch null;
     defer if (current_path_opt) |p| allocator.free(p);
@@ -6677,6 +6724,7 @@ fn parseFunDiagnosticsByUri(allocator: Allocator, stderr_text: []const u8, curre
         for (diags.items) |d| {
             allocator.free(d.uri);
             allocator.free(d.diag.message);
+            if (d.diag.code) |c| allocator.free(c);
         }
         diags.deinit();
     }
@@ -6684,22 +6732,23 @@ fn parseFunDiagnosticsByUri(allocator: Allocator, stderr_text: []const u8, curre
     var it = std.mem.splitScalar(u8, stderr_text, '\n');
     var pending_severity: ?i64 = null;
     var pending_message: ?std.ArrayList(u8) = null;
+    var pending_code: ?[]u8 = null;
     errdefer if (pending_message) |*m| m.deinit();
+    errdefer if (pending_code) |c| allocator.free(c);
 
     while (it.next()) |raw_line| {
         const line = std.mem.trim(u8, raw_line, "\r\n");
         if (line.len == 0) continue;
 
-        if (std.mem.startsWith(u8, line, "[Warning]") or std.mem.startsWith(u8, line, "[Warning:")) {
-            pending_severity = 2;
+        if (parseDiagnosticTag(line)) |tag| {
+            pending_severity = tag.severity;
             if (pending_message) |*m| m.deinit();
             pending_message = null;
-            continue;
-        }
-        if (std.mem.startsWith(u8, line, "[Error]") or std.mem.startsWith(u8, line, "[Error:") or std.mem.startsWith(u8, line, "[TypeError]") or std.mem.startsWith(u8, line, "[TypeError:")) {
-            pending_severity = 1;
-            if (pending_message) |*m| m.deinit();
-            pending_message = null;
+            if (pending_code) |c| allocator.free(c);
+            pending_code = null;
+            if (tag.code) |c| {
+                pending_code = try allocator.dupe(u8, c);
+            }
             continue;
         }
 
@@ -6738,6 +6787,17 @@ fn parseFunDiagnosticsByUri(allocator: Allocator, stderr_text: []const u8, curre
                     pending_message = null;
                     break :blk owned;
                 } else try allocator.dupe(u8, "diagnostic");
+
+                const code = blk: {
+                    if (pending_code) |c| {
+                        pending_code = null;
+                        break :blk @as(?[]u8, c);
+                    }
+                    if (inferDiagnosticCodeFromMessage(msg)) |inferred| {
+                        break :blk try allocator.dupe(u8, inferred);
+                    }
+                    break :blk null;
+                };
 
                 const target_uri: []u8 = blk: {
                     if (std.mem.endsWith(u8, file_part, tmp_name)) break :blk try allocator.dupe(u8, current_uri);
@@ -6778,6 +6838,7 @@ fn parseFunDiagnosticsByUri(allocator: Allocator, stderr_text: []const u8, curre
                         },
                         .severity = pending_severity.?,
                         .message = msg,
+                        .code = code,
                     },
                 });
             }
@@ -6785,10 +6846,13 @@ fn parseFunDiagnosticsByUri(allocator: Allocator, stderr_text: []const u8, curre
             pending_severity = null;
             if (pending_message) |*m| m.deinit();
             pending_message = null;
+            if (pending_code) |c| allocator.free(c);
+            pending_code = null;
         }
     }
 
     if (pending_message) |*m| m.deinit();
+    if (pending_code) |c| allocator.free(c);
     return diags.toOwnedSlice();
 }
 
@@ -7022,6 +7086,7 @@ test "fls: parseFunDiagnosticsByUri maps tmp file to current uri" {
         for (diags) |d| {
             allocator.free(d.uri);
             allocator.free(d.diag.message);
+            if (d.diag.code) |c| allocator.free(c);
         }
         allocator.free(diags);
     }
@@ -7030,6 +7095,7 @@ test "fls: parseFunDiagnosticsByUri maps tmp file to current uri" {
     try std.testing.expect(std.mem.eql(u8, diags[0].uri, current_uri));
     try std.testing.expect(std.mem.eql(u8, diags[0].diag.message, "boom"));
     try std.testing.expectEqual(@as(i64, 1), diags[0].diag.severity);
+    try std.testing.expect(diags[0].diag.code == null);
     try std.testing.expectEqual(@as(i64, 1), diags[0].diag.range.start.line);
     try std.testing.expectEqual(@as(i64, 0), diags[0].diag.range.start.character);
 }
@@ -7058,6 +7124,7 @@ test "fls: parseFunDiagnosticsByUri supports warning IDs" {
         for (diags) |d| {
             allocator.free(d.uri);
             allocator.free(d.diag.message);
+            if (d.diag.code) |c| allocator.free(c);
         }
         allocator.free(diags);
     }
@@ -7066,8 +7133,44 @@ test "fls: parseFunDiagnosticsByUri supports warning IDs" {
     try std.testing.expect(std.mem.eql(u8, diags[0].uri, current_uri));
     try std.testing.expect(std.mem.eql(u8, diags[0].diag.message, "boom"));
     try std.testing.expectEqual(@as(i64, 2), diags[0].diag.severity);
+    try std.testing.expect(diags[0].diag.code != null);
+    try std.testing.expect(std.mem.eql(u8, diags[0].diag.code.?, "return_local_ptr"));
     try std.testing.expectEqual(@as(i64, 1), diags[0].diag.range.start.line);
     try std.testing.expectEqual(@as(i64, 0), diags[0].diag.range.start.character);
+}
+
+test "fls: parseFunDiagnosticsByUri infers async diagnostic code" {
+    if (_skip_lsp_tests_in_ci) return;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("src");
+    {
+        var f = try tmp.dir.createFile("src/main.fn", .{ .read = true, .truncate = true });
+        defer f.close();
+        try f.writeAll("// file\n");
+    }
+
+    const current_abs = try tmp.dir.realpathAlloc(allocator, "src/main.fn");
+    defer allocator.free(current_abs);
+    const current_uri = try pathToUri(allocator, current_abs);
+    defer allocator.free(current_uri);
+
+    const stderr_text = "[TypeError]\ncall to async function 'inc' must be awaited\nLocation: _fls_tmp.fn:2:1-2\n";
+    const diags = try parseFunDiagnosticsByUri(allocator, stderr_text, current_uri, "_fls_tmp.fn");
+    defer {
+        for (diags) |d| {
+            allocator.free(d.uri);
+            allocator.free(d.diag.message);
+            if (d.diag.code) |c| allocator.free(c);
+        }
+        allocator.free(diags);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), diags.len);
+    try std.testing.expect(diags[0].diag.code != null);
+    try std.testing.expect(std.mem.eql(u8, diags[0].diag.code.?, "async_call_requires_await"));
 }
 
 test "fls: byteIndexForPosition clamps past end-of-line" {
@@ -7147,6 +7250,7 @@ test "fls: parseFunDiagnosticsByUri supports multiline messages and Location spl
         for (diags) |d| {
             allocator.free(d.uri);
             allocator.free(d.diag.message);
+            if (d.diag.code) |c| allocator.free(c);
         }
         allocator.free(diags);
     }
@@ -8106,6 +8210,26 @@ fn parseJsonRange(v: std.json.Value) ?Range {
         .start = .{ .line = sl.integer, .character = sc.integer },
         .end = .{ .line = el.integer, .character = ec.integer },
     };
+}
+
+fn parseDiagnosticCodeValue(v_opt: ?std.json.Value) ?[]const u8 {
+    const v = v_opt orelse return null;
+    return switch (v) {
+        .string => v.string,
+        .integer => null,
+        .float => null,
+        else => null,
+    };
+}
+
+fn isMissingAwaitDiagnosticCode(code_opt: ?[]const u8) bool {
+    const code = code_opt orelse return false;
+    return std.mem.eql(u8, code, "async_call_requires_await");
+}
+
+fn isAwaitOutsideAsyncDiagnosticCode(code_opt: ?[]const u8) bool {
+    const code = code_opt orelse return false;
+    return std.mem.eql(u8, code, "await_outside_async_function");
 }
 
 fn isMissingAwaitDiagnosticMessage(message: []const u8) bool {

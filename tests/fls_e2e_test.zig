@@ -1039,6 +1039,88 @@ test "fls e2e: indexing edge-case workspace files does not crash server" {
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: workspace indexing survives multiple malformed files" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    const tmp_rel_dir = "tests/_fls_e2e_index_regress";
+    std.fs.cwd().makePath(tmp_rel_dir) catch {};
+    defer std.fs.cwd().deleteTree(tmp_rel_dir) catch {};
+
+    const malformed = [_]struct { rel: []const u8, text: []const u8 }{
+        .{
+            .rel = "tests/_fls_e2e_index_regress/malformed_bin_rhs.fn",
+            .text = "fun main() {\n" ++
+                "  num x = 1 + ;\n" ++
+                "  ret;\n" ++
+                "}\n",
+        },
+        .{
+            .rel = "tests/_fls_e2e_index_regress/malformed_fit_dot.fn",
+            .text = "fun main() {\n" ++
+                "  num x = 1;\n" ++
+                "  fit x {\n" ++
+                "    . -> { ret; },\n" ++
+                "  }\n" ++
+                "}\n",
+        },
+        .{
+            .rel = "tests/_fls_e2e_index_regress/malformed_import_dot.fn",
+            .text = "imp std.;\n" ++
+                "fun main() {\n" ++
+                "  ret;\n" ++
+                "}\n",
+        },
+    };
+
+    for (malformed) |mf| {
+        const f = try std.fs.cwd().createFile(mf.rel, .{ .read = true, .truncate = true });
+        defer f.close();
+        try f.writeAll(mf.text);
+    }
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    for (malformed) |mf| {
+        const abs = try std.fs.path.join(allocator, &[_][]const u8{ setup.root_abs, mf.rel });
+        defer allocator.free(abs);
+        const doc_uri = try pathToFileUriAlloc(allocator, abs);
+        defer allocator.free(doc_uri);
+
+        try lspOpenDoc(allocator, &lsp, doc_uri, 1, mf.text);
+
+        const ds_params = try std.fmt.allocPrint(
+            allocator,
+            "{{\"textDocument\":{{\"uri\":\"{s}\"}}}}",
+            .{doc_uri},
+        );
+        defer allocator.free(ds_params);
+        const ds_id = try lsp.request("textDocument/documentSymbol", ds_params);
+        var ds_res = try lsp.waitResponse(ds_id, 15000);
+        defer ds_res.deinit();
+        _ = try jsonResultFromResponseObj(ds_res.parsed.value.object);
+    }
+
+    var i: usize = 0;
+    while (i < 8) : (i += 1) {
+        const ws_id = try lsp.request("workspace/symbol", "{\"query\":\"main\"}");
+        var ws_res = try lsp.waitResponse(ws_id, 15000);
+        defer ws_res.deinit();
+        _ = try jsonResultFromResponseObj(ws_res.parsed.value.object);
+    }
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: formatting never returns empty output" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -2678,8 +2760,8 @@ test "fls e2e: async diagnostics map to code actions" {
             "\"textDocument\":{{\"uri\":\"{s}\"}}," ++
             "\"range\":{{\"start\":{{\"line\":{d},\"character\":{d}}},\"end\":{{\"line\":{d},\"character\":{d}}}}}," ++
             "\"context\":{{\"diagnostics\":[" ++
-            "{{\"range\":{{\"start\":{{\"line\":{d},\"character\":{d}}},\"end\":{{\"line\":{d},\"character\":{d}}}}},\"severity\":1,\"message\":\"call to async function 'inc' must be awaited\"}}," ++
-            "{{\"range\":{{\"start\":{{\"line\":{d},\"character\":{d}}},\"end\":{{\"line\":{d},\"character\":{d}}}}},\"severity\":1,\"message\":\"await is only allowed inside async functions\"}}" ++
+            "{{\"range\":{{\"start\":{{\"line\":{d},\"character\":{d}}},\"end\":{{\"line\":{d},\"character\":{d}}}}},\"severity\":1,\"code\":\"async_call_requires_await\",\"message\":\"diagnostic message intentionally not matched by text\"}}," ++
+            "{{\"range\":{{\"start\":{{\"line\":{d},\"character\":{d}}},\"end\":{{\"line\":{d},\"character\":{d}}}}},\"severity\":1,\"code\":\"await_outside_async_function\",\"message\":\"diagnostic message intentionally not matched by text\"}}" ++
             "]}}" ++
             "}}",
         .{
