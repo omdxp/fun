@@ -268,6 +268,124 @@ test "async impl method await transpiles and runs" {
     try std.testing.expectEqualStrings("42", stdout);
 }
 
+test "async field method await transpiles and runs" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_async_field_method_await.fn";
+    const c_path = "codegen_async_field_method_await.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_async_field_method_await.exe" else "codegen_async_field_method_await";
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(c_path) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.c.io;\n" ++
+        "compound Counter {\n" ++
+        "  num base;\n" ++
+        "}\n" ++
+        "compound Holder {\n" ++
+        "  Counter counter;\n" ++
+        "}\n" ++
+        "impl Counter {\n" ++
+        "  async add(num x) num { ret self.base + x; }\n" ++
+        "}\n" ++
+        "async fun main() {\n" ++
+        "  Holder h;\n" ++
+        "  h.counter.base = 41;\n" ++
+        "  num out = await h.counter.add(1);\n" ++
+        "  printf(\"%lld\", out);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "__fun_async_call_Counter__add(") != null);
+
+    {
+        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("42", stdout);
+}
+
+test "async generic function await transpiles and runs" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_async_generic_fn_await.fn";
+    const c_path = "codegen_async_generic_fn_await.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_async_generic_fn_await.exe" else "codegen_async_generic_fn_await";
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(c_path) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.c.io;\n" ++
+        "async fun id<T>(T x) T { ret x; }\n" ++
+        "async fun main() {\n" ++
+        "  num out = await id(42);\n" ++
+        "  printf(\"%lld\", out);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "__fun_async_call_id__num(") != null);
+
+    {
+        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("42", stdout);
+}
+
+test "async generic impl method await transpiles and runs" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_async_generic_method_await.fn";
+    const c_path = "codegen_async_generic_method_await.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_async_generic_method_await.exe" else "codegen_async_generic_method_await";
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(c_path) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.c.io;\n" ++
+        "compound Box<T> {\n" ++
+        "  num pad;\n" ++
+        "}\n" ++
+        "impl Box<T> {\n" ++
+        "  async forty_two() num { ret 42; }\n" ++
+        "}\n" ++
+        "async fun main() {\n" ++
+        "  Box<num> b;\n" ++
+        "  num out = await b.forty_two();\n" ++
+        "  printf(\"%lld\", out);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "__fun_async_call_Box__num__forty_two(") != null);
+
+    {
+        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("42", stdout);
+}
+
 test "function definitions can be out of order (prototypes emitted)" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_fn_prototype_order.fn";

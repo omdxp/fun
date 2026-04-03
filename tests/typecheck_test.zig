@@ -164,6 +164,52 @@ test "typecheck await async method call is ok" {
     try runTranspileExpectOk(std.testing.allocator, "typecheck_await_async_method_ok.fn", input);
 }
 
+test "typecheck await async field method call is ok" {
+    const input =
+        "compound Counter {\n" ++
+        "  num base;\n" ++
+        "}\n" ++
+        "compound Holder {\n" ++
+        "  Counter counter;\n" ++
+        "}\n" ++
+        "impl Counter {\n" ++
+        "  async add(num x) num { ret self.base + x; }\n" ++
+        "}\n" ++
+        "async fun main() {\n" ++
+        "  Holder h;\n" ++
+        "  h.counter.base = 1;\n" ++
+        "  num out = await h.counter.add(2);\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_await_async_field_method_ok.fn", input);
+}
+
+test "typecheck await async generic function is ok" {
+    const input =
+        "async fun id<T>(T x) T { ret x; }\n" ++
+        "async fun main() {\n" ++
+        "  num out = await id(2);\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_await_async_generic_function_ok.fn", input);
+}
+
+test "typecheck await async method in generic impl is ok" {
+    const input =
+        "compound Box<T> {\n" ++
+        "  num pad;\n" ++
+        "}\n" ++
+        "impl Box<T> {\n" ++
+        "  async forty_two() num { ret 42; }\n" ++
+        "}\n" ++
+        "async fun main() {\n" ++
+        "  Box<num> b;\n" ++
+        "  num out = await b.forty_two();\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_await_async_generic_method_ok.fn", input);
+}
+
 test "typecheck enum dot shorthand in init/assign/compare" {
     const input =
         "enum Color {\n" ++

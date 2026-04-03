@@ -301,6 +301,9 @@ pub const TranspileProcess = struct {
     /// Call-site overrides for generic function names (keyed by position).
     generic_call_overrides: std.StringHashMap([]const u8),
 
+    /// Call-site overrides for await lowering (resolved callee + receiver strategy).
+    await_call_overrides: std.StringHashMap(AwaitCallOverride),
+
     /// Import chain to detect circular dependencies
     import_chain: std.ArrayList([]const u8),
 
@@ -1449,6 +1452,36 @@ pub const TranspileProcess = struct {
         var buf: [512]u8 = undefined;
         const key = call_pos_key_buf(p, &buf) orelse return null;
         return self.generic_call_overrides.get(key);
+    }
+
+    fn record_await_call_override(
+        self: *Self,
+        node: ast.Node,
+        callee_name: []const u8,
+        has_receiver: bool,
+        receiver_pass_by_ref: bool,
+    ) TranspileError!void {
+        const p = node.pos orelse return;
+        const key = try self.call_pos_key_alloc(p);
+        const gop = self.await_call_overrides.getOrPut(key) catch {
+            self.allocator.free(key);
+            return TranspileError.MemoryAllocationFailed;
+        };
+        if (gop.found_existing) {
+            self.allocator.free(key);
+        }
+        gop.value_ptr.* = .{
+            .callee_name = callee_name,
+            .has_receiver = has_receiver,
+            .receiver_pass_by_ref = receiver_pass_by_ref,
+        };
+    }
+
+    fn lookup_await_call_override(self: *Self, node: ast.Node) ?AwaitCallOverride {
+        const p = node.pos orelse return null;
+        var buf: [512]u8 = undefined;
+        const key = call_pos_key_buf(p, &buf) orelse return null;
+        return self.await_call_overrides.get(key);
     }
 
     const PrintFmtArgKind = enum {
@@ -2872,6 +2905,7 @@ pub const TranspileProcess = struct {
             .generic_fn_instantiations = std.ArrayList(GenericFnInstantiation).init(a),
             .generic_fn_instantiation_keys = std.StringHashMap(bool).init(a),
             .generic_call_overrides = std.StringHashMap([]const u8).init(a),
+            .await_call_overrides = std.StringHashMap(AwaitCallOverride).init(a),
             .input_file_path = input_file_path,
             .input_source = input_source,
             .stdlib_dir = discovered_stdlib_dir,
@@ -3235,6 +3269,12 @@ pub const TranspileProcess = struct {
     const AwaitLoweringInfo = struct {
         callee_name: []const u8,
         receiver_expr: ?*ast.Node = null,
+        receiver_pass_by_ref: bool = false,
+    };
+
+    const AwaitCallOverride = struct {
+        callee_name: []const u8,
+        has_receiver: bool = false,
         receiver_pass_by_ref: bool = false,
     };
 
@@ -4339,6 +4379,27 @@ pub const TranspileProcess = struct {
             return null;
         }
 
+        if (self.lookup_await_call_override(call_node)) |ov| {
+            var receiver_expr: ?*ast.Node = null;
+            if (ov.has_receiver) {
+                const call = call_node.node_variant.?.exp;
+                const callee = call.left orelse return null;
+                if (callee.*.type != .Expression or callee.*.node_variant == null or !mem.eql(u8, callee.*.node_variant.?.exp.op, ".")) {
+                    return null;
+                }
+                receiver_expr = callee.*.node_variant.?.exp.left;
+                if (receiver_expr == null) return null;
+            }
+
+            return .{
+                .callee_name = self.allocator.dupe(u8, ov.callee_name) catch {
+                    return TranspileError.MemoryAllocationFailed;
+                },
+                .receiver_expr = receiver_expr,
+                .receiver_pass_by_ref = ov.receiver_pass_by_ref,
+            };
+        }
+
         if (self.lookup_generic_call_override(call_node)) |ov| {
             return .{
                 .callee_name = self.allocator.dupe(u8, ov) catch {
@@ -4631,6 +4692,9 @@ pub const TranspileProcess = struct {
                     var callee_name: ?[]const u8 = null;
                     var callee_is_async: bool = false;
                     var callee_async_known: bool = false;
+                    var await_lowering_callee: ?[]const u8 = null;
+                    var await_lowering_has_receiver: bool = false;
+                    var await_lowering_receiver_by_ref: bool = false;
 
                     if (callee.type == .Identifier and callee.data != null) {
                         const fname = callee.data.?.sval.items;
@@ -4760,6 +4824,7 @@ pub const TranspileProcess = struct {
                             call_rtype = sig.rtype;
                             callee_is_async = sig.is_async;
                             callee_async_known = true;
+                            await_lowering_callee = fname;
                             if (self.find_function_node(fname)) |fn_node| {
                                 if (!self.can_access(&node, fn_node)) {
                                     self.report_type_error(node, "function '{s}' is private", .{fname});
@@ -4875,12 +4940,18 @@ pub const TranspileProcess = struct {
                                 return TranspileError.NotCallable;
                             }
 
+                            await_lowering_has_receiver = true;
+                            await_lowering_receiver_by_ref = recv_t.pointer_depth == 0;
+
                             const recv_dt = if (recv_t.dtype_ref) |dt| dt else self.lookup_receiver_dtype(recv.*) orelse null;
                             if (recv_dt != null and recv_dt.?.generic_args != null) {
                                 if (self.synthesize_generic_plain_method_sig(recv_dt.?, recv_name_canon, mname)) |sig| {
                                     plain_method_sig = sig;
                                     plain_method_name = mname;
                                     call_rtype = sig.rtype;
+                                    if (self.lookup_plain_impl_method_fn(&node, recv_name_canon, mname)) |fn_name| {
+                                        await_lowering_callee = fn_name;
+                                    }
                                 }
                             }
 
@@ -4898,6 +4969,7 @@ pub const TranspileProcess = struct {
                                     };
                                     plain_method_name = mname;
                                     call_rtype = plain_method_sig.?.rtype;
+                                    await_lowering_callee = fn_name;
                                 }
                             }
 
@@ -4935,6 +5007,7 @@ pub const TranspileProcess = struct {
                                         };
                                         plain_method_name = mname;
                                         call_rtype = plain_method_sig.?.rtype;
+                                        await_lowering_callee = fn_name;
                                         if (alt_owned) self.allocator.free(@constCast(alt));
                                     } else {
                                         if (alt_owned) self.allocator.free(@constCast(alt));
@@ -4950,6 +5023,7 @@ pub const TranspileProcess = struct {
                                             };
                                             plain_method_name = mname;
                                             call_rtype = plain_method_sig.?.rtype;
+                                            await_lowering_callee = qfn;
                                         } else {
                                             self.report_type_error(node, "type '{s}' has no method '{s}'", .{ recv_name_canon, mname });
                                             return TranspileError.NotCallable;
@@ -4971,6 +5045,7 @@ pub const TranspileProcess = struct {
                                         };
                                         plain_method_name = mname;
                                         call_rtype = plain_method_sig.?.rtype;
+                                        await_lowering_callee = qfn;
                                     } else {
                                         self.report_type_error(node, "type '{s}' has no method '{s}'", .{ recv_name_canon, mname });
                                         return TranspileError.NotCallable;
@@ -5091,6 +5166,7 @@ pub const TranspileProcess = struct {
                             // Register instantiation and call override for codegen.
                             const spec_name = try self.mangle_generic_fn_name(callee_name.?, gargs);
                             try self.register_generic_fn_instantiation(fn_node.?, params_ptr, gargs, spec_name);
+                            await_lowering_callee = spec_name;
                             if (node.pos) |p| {
                                 const key = try self.call_pos_key_alloc(p);
                                 if (!self.generic_call_overrides.contains(key)) {
@@ -5210,6 +5286,10 @@ pub const TranspileProcess = struct {
                                 }
                             }
                         }
+                    }
+
+                    if (await_lowering_callee) |lower_name| {
+                        try self.record_await_call_override(node, lower_name, await_lowering_has_receiver, await_lowering_receiver_by_ref);
                     }
 
                     try self.validate_async_call_usage(node, callee_name, callee_is_async, callee_async_known);
@@ -6220,10 +6300,6 @@ pub const TranspileProcess = struct {
                 proc.report_type_error(node, "async variadic functions are not supported yet", .{});
                 return TranspileError.TypeMismatch;
             }
-            if (fnv.is_async and fnv.type_params != null) {
-                proc.report_type_error(node, "async generic functions are not supported yet", .{});
-                return TranspileError.TypeMismatch;
-            }
 
             const fn_rtype: CheckedType = if (fnv.rtype) |rt| try proc.type_from_dtype_with_mangled(&rt) else CheckedType{ .base = .Void };
 
@@ -6345,10 +6421,6 @@ pub const TranspileProcess = struct {
 
                 if (fnv.is_async and fnv.is_variadic) {
                     proc.report_type_error(m, "async variadic methods are not supported yet", .{});
-                    return TranspileError.TypeMismatch;
-                }
-                if (fnv.is_async and allow_params != null) {
-                    proc.report_type_error(m, "async methods in generic contexts are not supported yet", .{});
                     return TranspileError.TypeMismatch;
                 }
 
@@ -7567,6 +7639,14 @@ pub const TranspileProcess = struct {
             }
         }
         self.generic_call_overrides.deinit();
+
+        if (self.await_call_overrides.count() > 0) {
+            var it3 = self.await_call_overrides.iterator();
+            while (it3.next()) |e| {
+                self.allocator.free(e.key_ptr.*);
+            }
+        }
+        self.await_call_overrides.deinit();
 
         // Release all arena allocations back to the backing allocator.
         self.arena.deinit();
