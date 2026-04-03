@@ -48,6 +48,7 @@ zig-out/bin/fun -in examples/<example>.fn
 - advanced/async_quirk_await_nested_receiver.fn
 - advanced/async_quirk_await_parenthesized_receiver.fn
 - advanced/async_quirk_await_pointer_receiver.fn
+- advanced/channel_async_wrappers.fn
 - advanced/channel_buffered.fn
 - advanced/channel_select2.fn
 - advanced/channel_select3_rr.fn

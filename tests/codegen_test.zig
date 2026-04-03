@@ -2338,6 +2338,137 @@ test "std.channel timeout send and recv transpile" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "std.channel async wrapper APIs await and run" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_channel_async_wrappers.fn";
+    const cpath = "codegen_std_channel_async_wrappers.c";
+    const exe_path = if (builtin.os.tag == .windows)
+        "codegen_std_channel_async_wrappers.exe"
+    else
+        "codegen_std_channel_async_wrappers";
+
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(cpath) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.channel;\n" ++
+        "imp std.c.io;\n" ++
+        "async fun main() {\n" ++
+        "  Channel<num> ch = channel_new_cap(0, 1);\n" ++
+        "  num rc_send = await ch.send_async(41);\n" ++
+        "  num first = await ch.recv_async();\n" ++
+        "\n" ++
+        "  ChannelCancelToken token = channel_cancel_token_new();\n" ++
+        "  _ = channel_cancel_token_reset(&token);\n" ++
+        "  num rc_send_timed = await ch.send_timeout_with_token_async(42, 0, &token);\n" ++
+        "  num out = 0;\n" ++
+        "  num rc_recv_into = await ch.recv_timeout_into_async(&out, 0);\n" ++
+        "\n" ++
+        "  Channel<num> a = channel_new(0);\n" ++
+        "  Channel<num> b = channel_new(0);\n" ++
+        "  _ = await b.send_async(99);\n" ++
+        "  num idx = -1;\n" ++
+        "  num sel = 0;\n" ++
+        "  num rc_sel = await a.select_recv_with_async(&b, &sel, &idx);\n" ++
+        "\n" ++
+        "  Channel<num> x = channel_new(0);\n" ++
+        "  Channel<num> y = channel_new(0);\n" ++
+        "  Channel<num> z = channel_new(0);\n" ++
+        "  _ = await y.send_async(7);\n" ++
+        "  num next = 0;\n" ++
+        "  num out3 = 0;\n" ++
+        "  num idx3 = -1;\n" ++
+        "  num rc_sel3 = await x.select_recv3_rr_with_async(&y, &z, &next, &out3, &idx3);\n" ++
+        "\n" ++
+        "  printf(\"%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld\", rc_send, first, rc_send_timed, rc_recv_into, out, rc_sel, idx, sel, rc_sel3, idx3, out3);\n" ++
+        "\n" ++
+        "  _ = ch.destroy();\n" ++
+        "  _ = a.destroy();\n" ++
+        "  _ = b.destroy();\n" ++
+        "  _ = x.destroy();\n" ++
+        "  _ = y.destroy();\n" ++
+        "  _ = z.destroy();\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try fs.cwd().createFile(cpath, .{});
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, cpath, exe_path);
+
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+
+    try std.testing.expectEqualStrings("0|41|0|0|42|0|1|99|0|1|7", stdout);
+}
+
+test "std.channel async forwarding APIs await and run" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_channel_async_forwarding.fn";
+    const cpath = "codegen_std_channel_async_forwarding.c";
+    const exe_path = if (builtin.os.tag == .windows)
+        "codegen_std_channel_async_forwarding.exe"
+    else
+        "codegen_std_channel_async_forwarding";
+
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(cpath) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.channel;\n" ++
+        "imp std.c.io;\n" ++
+        "async fun main() {\n" ++
+        "  Channel<num> src = channel_new_cap(0, 1);\n" ++
+        "  Channel<num> dst = channel_new_cap(0, 1);\n" ++
+        "  _ = await src.send_async(55);\n" ++
+        "  num rc_fwd = await src.forward_one_to_async(&dst, 20);\n" ++
+        "  num moved = await dst.recv_async();\n" ++
+        "\n" ++
+        "  Channel<num> a = channel_new(0);\n" ++
+        "  Channel<num> b = channel_new(0);\n" ++
+        "  Channel<num> out = channel_new(0);\n" ++
+        "  _ = await b.send_async(77);\n" ++
+        "  num idx = -1;\n" ++
+        "  num rc_sel_fwd = await a.select_forward_one_to_async(&b, &out, 20, &idx);\n" ++
+        "  num moved_sel = await out.recv_async();\n" ++
+        "\n" ++
+        "  ChannelCancelToken token = channel_cancel_token_new();\n" ++
+        "  _ = channel_cancel_token_cancel(&token);\n" ++
+        "  num rc_cancel = await a.forward_one_to_with_token_async(&out, 20, &token);\n" ++
+        "\n" ++
+        "  printf(\"%lld|%lld|%lld|%lld|%lld|%lld\", rc_fwd, moved, rc_sel_fwd, idx, moved_sel, rc_cancel);\n" ++
+        "\n" ++
+        "  _ = src.destroy();\n" ++
+        "  _ = dst.destroy();\n" ++
+        "  _ = a.destroy();\n" ++
+        "  _ = b.destroy();\n" ++
+        "  _ = out.destroy();\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try fs.cwd().createFile(cpath, .{});
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, cpath, exe_path);
+
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+
+    try std.testing.expectEqualStrings("0|55|0|1|77|3", stdout);
+}
+
 test "std.channel cancel-aware send and recv APIs transpile" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_std_channel_cancel_send_recv.fn";
