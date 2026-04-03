@@ -938,6 +938,66 @@ test "fls e2e: initialize, open, typing didChange, completion + definition do no
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: indexing edge-case workspace files does not crash server" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const rel_paths = [_][]const u8{
+        "examples/error_cases/private_quirk_method_access.fn",
+        "examples/imports/alias_module_scope.fn",
+    };
+
+    for (rel_paths) |rel| {
+        const abs = try std.fs.path.join(allocator, &[_][]const u8{ setup.root_abs, rel });
+        defer allocator.free(abs);
+
+        const src = blk: {
+            var f = try std.fs.openFileAbsolute(abs, .{});
+            defer f.close();
+            break :blk try f.readToEndAlloc(allocator, 512 * 1024);
+        };
+        defer allocator.free(src);
+
+        const doc_uri = try pathToFileUriAlloc(allocator, abs);
+        defer allocator.free(doc_uri);
+
+        try lspOpenDoc(allocator, &lsp, doc_uri, 1, src);
+
+        const ds_params = try std.fmt.allocPrint(
+            allocator,
+            "{{\"textDocument\":{{\"uri\":\"{s}\"}}}}",
+            .{doc_uri},
+        );
+        defer allocator.free(ds_params);
+        const ds_id = try lsp.request("textDocument/documentSymbol", ds_params);
+        var ds_res = try lsp.waitResponse(ds_id, 15000);
+        defer ds_res.deinit();
+        _ = try jsonResultFromResponseObj(ds_res.parsed.value.object);
+    }
+
+    // Keep pinging after opens so a late async indexing crash is surfaced.
+    var i: usize = 0;
+    while (i < 5) : (i += 1) {
+        const ws_id = try lsp.request("workspace/symbol", "{\"query\":\"main\"}");
+        var ws_res = try lsp.waitResponse(ws_id, 15000);
+        defer ws_res.deinit();
+        _ = try jsonResultFromResponseObj(ws_res.parsed.value.object);
+    }
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: formatting never returns empty output" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
