@@ -190,6 +190,7 @@ Explore the [`examples/`](examples/) directory for more:
 
 - Language overview: [docs/language.md](docs/language.md)
 - Full reference: [docs/reference.md](docs/reference.md)
+- Channel/runtime conformance matrix and backend thresholds: [docs/channel-runtime-conformance.md](docs/channel-runtime-conformance.md)
 
 ## Project Structure
 

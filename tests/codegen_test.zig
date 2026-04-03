@@ -114,6 +114,25 @@ fn runExeWithEnv(allocator: std.mem.Allocator, exe_path: []const u8, overrides: 
     return result.stdout;
 }
 
+fn parseMetricValue(stdout: []const u8, key: []const u8) ![]const u8 {
+    var lines = std.mem.tokenizeScalar(u8, stdout, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trimRight(u8, raw_line, "\r");
+        if (line.len <= key.len) continue;
+        if (line[key.len] != '=') continue;
+        if (std.mem.eql(u8, line[0..key.len], key)) {
+            return line[key.len + 1 ..];
+        }
+    }
+
+    return error.MetricNotFound;
+}
+
+fn parseMetricInt(stdout: []const u8, key: []const u8) !i64 {
+    const value = try parseMetricValue(stdout, key);
+    return std.fmt.parseInt(i64, value, 10);
+}
+
 test "if/elif/else transpiles" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_if_elif_else.fn";
@@ -1826,6 +1845,293 @@ test "std.thread_runtime backend selector APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_runtime_backend_is_windows(") != null);
 
     try fs.cwd().deleteFile(ifilepath);
+}
+
+test "std.channel runtime conformance matrix is stable across backend selectors" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_channel_runtime_conformance.fn";
+    const cpath = "codegen_channel_runtime_conformance.c";
+    const exe_path = if (builtin.os.tag == .windows)
+        "codegen_channel_runtime_conformance.exe"
+    else
+        "codegen_channel_runtime_conformance";
+
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(cpath) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.channel;\n" ++
+        "imp std.runtime_backend;\n" ++
+        "imp std.sync_runtime;\n" ++
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  Channel<num> ch = channel_new_cap(0, 1);\n" ++
+        "  num out = -1;\n" ++
+        "  num rc_try_recv_empty = ch.try_recv(&out);\n" ++
+        "  num rc_send_ok = ch.send_timeout(11, 0);\n" ++
+        "  num rc_try_send_full = ch.try_send(22);\n" ++
+        "  num rc_recv_ok = ch.recv_timeout_into(&out, 0);\n" ++
+        "  num recv_value = out;\n" ++
+        "  num rc_recv_timeout = ch.recv_timeout_into(&out, 0);\n" ++
+        "  _ = ch.send_timeout(33, 0);\n" ++
+        "  num cancel = 1;\n" ++
+        "  num rc_send_cancelled = ch.send_timeout_with_cancel(44, 50, &cancel);\n" ++
+        "  _ = ch.close();\n" ++
+        "  num rc_send_closed = ch.send_timeout(55, 0);\n" ++
+        "  num rc_recv_after_close_drain = ch.recv_timeout_into(&out, 0);\n" ++
+        "  num recv_after_close_value = out;\n" ++
+        "  num rc_recv_closed = ch.recv_timeout_into(&out, 0);\n" ++
+        "\n" ++
+        "  Channel<num> a = channel_new(0);\n" ++
+        "  Channel<num> b = channel_new(0);\n" ++
+        "  num idx = 99;\n" ++
+        "  num out_sel = 0;\n" ++
+        "  num rc_default = a.select_recv_default_with(&b, &out_sel, &idx);\n" ++
+        "  num idx_default = idx;\n" ++
+        "  num rc_select_timeout = a.select_recv_timeout_with(&b, &out_sel, &idx, 20);\n" ++
+        "  num cancel_select = 1;\n" ++
+        "  num rc_select_cancelled = a.select_recv_timeout_with_cancel(&b, &out_sel, &idx, 20, &cancel_select);\n" ++
+        "\n" ++
+        "  printf(\"backend=%s\\n\", runtime_backend_name());\n" ++
+        "  printf(\"sync_backend=%s\\n\", sync_runtime_backend_name());\n" ++
+        "  printf(\"const_rc_ok=%lld\\n\", channel_rc_ok());\n" ++
+        "  printf(\"const_rc_timeout=%lld\\n\", channel_rc_timeout());\n" ++
+        "  printf(\"const_rc_full=%lld\\n\", channel_rc_full());\n" ++
+        "  printf(\"const_rc_empty=%lld\\n\", channel_rc_empty());\n" ++
+        "  printf(\"const_rc_default=%lld\\n\", channel_rc_default());\n" ++
+        "  printf(\"const_rc_cancelled=%lld\\n\", channel_rc_cancelled());\n" ++
+        "  printf(\"const_select_default=%lld\\n\", channel_select_index_default());\n" ++
+        "  printf(\"rc_try_recv_empty=%lld\\n\", rc_try_recv_empty);\n" ++
+        "  printf(\"rc_send_ok=%lld\\n\", rc_send_ok);\n" ++
+        "  printf(\"rc_try_send_full=%lld\\n\", rc_try_send_full);\n" ++
+        "  printf(\"rc_recv_ok=%lld\\n\", rc_recv_ok);\n" ++
+        "  printf(\"recv_value=%lld\\n\", recv_value);\n" ++
+        "  printf(\"rc_recv_timeout=%lld\\n\", rc_recv_timeout);\n" ++
+        "  printf(\"rc_send_cancelled=%lld\\n\", rc_send_cancelled);\n" ++
+        "  printf(\"rc_send_closed=%lld\\n\", rc_send_closed);\n" ++
+        "  printf(\"rc_recv_after_close_drain=%lld\\n\", rc_recv_after_close_drain);\n" ++
+        "  printf(\"recv_after_close_value=%lld\\n\", recv_after_close_value);\n" ++
+        "  printf(\"rc_recv_closed=%lld\\n\", rc_recv_closed);\n" ++
+        "  printf(\"rc_default=%lld\\n\", rc_default);\n" ++
+        "  printf(\"idx_default=%lld\\n\", idx_default);\n" ++
+        "  printf(\"rc_select_timeout=%lld\\n\", rc_select_timeout);\n" ++
+        "  printf(\"rc_select_cancelled=%lld\\n\", rc_select_cancelled);\n" ++
+        "\n" ++
+        "  _ = ch.destroy();\n" ++
+        "  _ = a.destroy();\n" ++
+        "  _ = b.destroy();\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try fs.cwd().createFile(cpath, .{});
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, cpath, exe_path);
+
+    for ([_][]const u8{ "posix", "windows" }) |backend_name| {
+        const overrides = [_]EnvOverride{
+            .{ .key = "FUN_RUNTIME_BACKEND", .value = backend_name },
+        };
+
+        const stdout = try runExeWithEnv(allocator, exe_path, &overrides);
+        defer allocator.free(stdout);
+
+        try std.testing.expectEqualStrings(backend_name, try parseMetricValue(stdout, "backend"));
+        try std.testing.expectEqualStrings(backend_name, try parseMetricValue(stdout, "sync_backend"));
+
+        try std.testing.expectEqual(@as(i64, 0), try parseMetricInt(stdout, "const_rc_ok"));
+        try std.testing.expectEqual(@as(i64, 2), try parseMetricInt(stdout, "const_rc_timeout"));
+        try std.testing.expectEqual(@as(i64, 2), try parseMetricInt(stdout, "const_rc_full"));
+        try std.testing.expectEqual(@as(i64, 2), try parseMetricInt(stdout, "const_rc_empty"));
+        try std.testing.expectEqual(@as(i64, 3), try parseMetricInt(stdout, "const_rc_default"));
+        try std.testing.expectEqual(@as(i64, 3), try parseMetricInt(stdout, "const_rc_cancelled"));
+        try std.testing.expectEqual(@as(i64, -1), try parseMetricInt(stdout, "const_select_default"));
+
+        try std.testing.expectEqual(@as(i64, 2), try parseMetricInt(stdout, "rc_try_recv_empty"));
+        try std.testing.expectEqual(@as(i64, 0), try parseMetricInt(stdout, "rc_send_ok"));
+        try std.testing.expectEqual(@as(i64, 2), try parseMetricInt(stdout, "rc_try_send_full"));
+        try std.testing.expectEqual(@as(i64, 0), try parseMetricInt(stdout, "rc_recv_ok"));
+        try std.testing.expectEqual(@as(i64, 11), try parseMetricInt(stdout, "recv_value"));
+        try std.testing.expectEqual(@as(i64, 2), try parseMetricInt(stdout, "rc_recv_timeout"));
+        try std.testing.expectEqual(@as(i64, 3), try parseMetricInt(stdout, "rc_send_cancelled"));
+        try std.testing.expectEqual(@as(i64, 1), try parseMetricInt(stdout, "rc_send_closed"));
+        try std.testing.expectEqual(@as(i64, 0), try parseMetricInt(stdout, "rc_recv_after_close_drain"));
+        try std.testing.expectEqual(@as(i64, 33), try parseMetricInt(stdout, "recv_after_close_value"));
+        try std.testing.expectEqual(@as(i64, 1), try parseMetricInt(stdout, "rc_recv_closed"));
+        try std.testing.expectEqual(@as(i64, 3), try parseMetricInt(stdout, "rc_default"));
+        try std.testing.expectEqual(@as(i64, -1), try parseMetricInt(stdout, "idx_default"));
+        try std.testing.expectEqual(@as(i64, 2), try parseMetricInt(stdout, "rc_select_timeout"));
+        try std.testing.expectEqual(@as(i64, 3), try parseMetricInt(stdout, "rc_select_cancelled"));
+    }
+}
+
+test "std.channel fairness and timeout benchmark stays within backend thresholds" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_channel_runtime_benchmark.fn";
+    const cpath = "codegen_channel_runtime_benchmark.c";
+    const exe_path = if (builtin.os.tag == .windows)
+        "codegen_channel_runtime_benchmark.exe"
+    else
+        "codegen_channel_runtime_benchmark";
+
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(cpath) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.channel;\n" ++
+        "imp std.runtime_backend;\n" ++
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  num rounds = 120;\n" ++
+        "  num total_rounds = rounds * 3;\n" ++
+        "  num timeout_rounds = 20;\n" ++
+        "\n" ++
+        "  Channel<num> a = channel_new_cap(0, rounds);\n" ++
+        "  Channel<num> b = channel_new_cap(0, rounds);\n" ++
+        "  Channel<num> c = channel_new_cap(0, rounds);\n" ++
+        "\n" ++
+        "  num i = 0;\n" ++
+        "  for i < rounds {\n" ++
+        "    _ = a.send(i);\n" ++
+        "    _ = b.send(i + 1000);\n" ++
+        "    _ = c.send(i + 2000);\n" ++
+        "    i = i + 1;\n" ++
+        "  }\n" ++
+        "\n" ++
+        "  num next = 0;\n" ++
+        "  num count_a = 0;\n" ++
+        "  num count_b = 0;\n" ++
+        "  num count_c = 0;\n" ++
+        "  num fairness_rc = channel_rc_ok();\n" ++
+        "\n" ++
+        "  i = 0;\n" ++
+        "  for i < total_rounds {\n" ++
+        "    num out = 0;\n" ++
+        "    num which = -1;\n" ++
+        "    num rc = a.select_recv_timeout3_rr_with_tuning(&b, &c, &next, &out, &which, 50, 1, 0);\n" ++
+        "    if rc != channel_rc_ok() {\n" ++
+        "      fairness_rc = rc;\n" ++
+        "      i = total_rounds;\n" ++
+        "    } else {\n" ++
+        "      if which == channel_select_index_self() {\n" ++
+        "        count_a = count_a + 1;\n" ++
+        "      } elif which == channel_select_index_other() {\n" ++
+        "        count_b = count_b + 1;\n" ++
+        "      } elif which == channel_select_index_other_b() {\n" ++
+        "        count_c = count_c + 1;\n" ++
+        "      }\n" ++
+        "      i = i + 1;\n" ++
+        "    }\n" ++
+        "  }\n" ++
+        "\n" ++
+        "  num max_count = count_a;\n" ++
+        "  if count_b > max_count {\n" ++
+        "    max_count = count_b;\n" ++
+        "  }\n" ++
+        "  if count_c > max_count {\n" ++
+        "    max_count = count_c;\n" ++
+        "  }\n" ++
+        "\n" ++
+        "  num min_count = count_a;\n" ++
+        "  if count_b < min_count {\n" ++
+        "    min_count = count_b;\n" ++
+        "  }\n" ++
+        "  if count_c < min_count {\n" ++
+        "    min_count = count_c;\n" ++
+        "  }\n" ++
+        "\n" ++
+        "  Channel<num> x = channel_new(0);\n" ++
+        "  Channel<num> y = channel_new(0);\n" ++
+        "  Channel<num> z = channel_new(0);\n" ++
+        "\n" ++
+        "  num out_timeout = 0;\n" ++
+        "  num idx_timeout = -1;\n" ++
+        "  num next_timeout = 0;\n" ++
+        "  num timeout_failures = 0;\n" ++
+        "  i = 0;\n" ++
+        "  for i < timeout_rounds {\n" ++
+        "    num timeout_rc = x.select_recv_timeout3_rr_with_tuning(&y, &z, &next_timeout, &out_timeout, &idx_timeout, 15, 1, 0);\n" ++
+        "    if timeout_rc != channel_rc_timeout() {\n" ++
+        "      timeout_failures = timeout_failures + 1;\n" ++
+        "    }\n" ++
+        "    i = i + 1;\n" ++
+        "  }\n" ++
+        "\n" ++
+        "  printf(\"backend=%s\\n\", runtime_backend_name());\n" ++
+        "  printf(\"fairness_rc=%lld\\n\", fairness_rc);\n" ++
+        "  printf(\"fairness_skew=%lld\\n\", max_count - min_count);\n" ++
+        "  printf(\"count_a=%lld\\n\", count_a);\n" ++
+        "  printf(\"count_b=%lld\\n\", count_b);\n" ++
+        "  printf(\"count_c=%lld\\n\", count_c);\n" ++
+        "  printf(\"count_total=%lld\\n\", count_a + count_b + count_c);\n" ++
+        "  printf(\"timeout_rounds=%lld\\n\", timeout_rounds);\n" ++
+        "  printf(\"timeout_failures=%lld\\n\", timeout_failures);\n" ++
+        "\n" ++
+        "  _ = a.destroy();\n" ++
+        "  _ = b.destroy();\n" ++
+        "  _ = c.destroy();\n" ++
+        "  _ = x.destroy();\n" ++
+        "  _ = y.destroy();\n" ++
+        "  _ = z.destroy();\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try fs.cwd().createFile(cpath, .{});
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, cpath, exe_path);
+
+    var posix_elapsed: i64 = -1;
+    var windows_elapsed: i64 = -1;
+
+    for ([_][]const u8{ "posix", "windows" }) |backend_name| {
+        const overrides = [_]EnvOverride{
+            .{ .key = "FUN_RUNTIME_BACKEND", .value = backend_name },
+        };
+
+        const started_ms = std.time.milliTimestamp();
+        const stdout = try runExeWithEnv(allocator, exe_path, &overrides);
+        const finished_ms = std.time.milliTimestamp();
+        defer allocator.free(stdout);
+
+        try std.testing.expectEqualStrings(backend_name, try parseMetricValue(stdout, "backend"));
+        try std.testing.expectEqual(@as(i64, 0), try parseMetricInt(stdout, "fairness_rc"));
+        try std.testing.expect((try parseMetricInt(stdout, "fairness_skew")) <= 1);
+        try std.testing.expectEqual(@as(i64, 360), try parseMetricInt(stdout, "count_total"));
+        try std.testing.expectEqual(@as(i64, 20), try parseMetricInt(stdout, "timeout_rounds"));
+        try std.testing.expectEqual(@as(i64, 0), try parseMetricInt(stdout, "timeout_failures"));
+
+        const elapsed = finished_ms - started_ms;
+        try std.testing.expect(elapsed >= 150);
+        try std.testing.expect(elapsed <= 5000);
+
+        if (std.mem.eql(u8, backend_name, "posix")) {
+            posix_elapsed = elapsed;
+        } else {
+            windows_elapsed = elapsed;
+        }
+    }
+
+    try std.testing.expect(posix_elapsed >= 0);
+    try std.testing.expect(windows_elapsed >= 0);
+
+    const drift = if (posix_elapsed > windows_elapsed)
+        posix_elapsed - windows_elapsed
+    else
+        windows_elapsed - posix_elapsed;
+    try std.testing.expect(drift <= 800);
 }
 
 test "transitive std.channel import emits pthread headers" {
