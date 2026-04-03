@@ -1,5 +1,94 @@
 ## [unreleased]
 
+### Chore
+
+- Enhance channel functionality and testing
+
+### Docs
+
+- Update FAQ to clarify default indexing behavior and parser settings
+
+### Feat
+
+- Add POSIX thread and synchronization support with pthread bindings
+- Add std.channel module with single-slot blocking channels and related tests
+- Enhance std.channel with bounded ring-buffer channels and add related tests
+- Add timeout support for std.channel with related examples and tests
+- Add select_recv_with and select_recv_timeout_with to std.channel; update documentation and examples
+- Add select_recv3_rr_with and select_recv_timeout3_rr_with to std.channel; update documentation and examples
+- Add clock_gettime and timespec support; update channel timeout handling
+- Enhance std.channel with configurable select wait-slice tuning; update related examples and tests
+- Add explicit wait-slice override for channel select functions; update examples and tests
+- Add adaptive wait backoff for std.channel select; update tests and documentation
+- Add configurable adaptive select wait backoff steps to std.channel; update documentation and tests
+- Update std.channel to include tuning options for select wait-slice and backoff; enhance documentation and tests
+- Enhance std.channel with explicit wait-slice and backoff tuning options; update examples and tests
+- Add std.thread_pool module with lifecycle APIs; update examples and tests
+- Add lifecycle helper functions for std.thread; update documentation and tests
+- Implement mutex and condition variable lifecycle APIs; add tests for std.sync and std.thread_runtime
+- Enhance std.sync_runtime and std.thread_runtime with backend selector APIs; update std.channel to use runtime synchronization primitives; add tests for new APIs
+- Implement Windows backend support for runtime, sync, and thread modules; add transpile tests for new APIs
+- Implement POSIX backend support for sync and thread modules; add lifecycle APIs and transpile tests
+- Add runtime backend selection documentation and update stdlib README; enhance codegen tests for backend precedence
+- Implement Windows backend support for synchronization and threading; enhance related documentation and tests
+- Enhance Windows backend support by updating thread and sync module references; add tests for thread_windows compatibility
+- Enhance std.channel with cancellation-aware select APIs and default branch handling; add tests for new functionalities
+- Add cancellation-aware send/recv APIs to std.channel; enhance documentation and tests for new functionalities
+- Add cancellation token support to std.channel; enhance related APIs and tests
+- Enhance channel synchronization with eager initialization to prevent race conditions under multi-thread contention; add tests for channel behavior under contention and cancellation scenarios
+- Implement async/await syntax support; add parsing and transpilation for async functions and await expressions; enhance tests for async behavior
+- Add async/await support; enhance transpiler and parser for async function handling; improve type checking and related tests
+- Add support for async function handling; implement await resolution and related prototypes; enhance error reporting for async functions
+- Add async method support; enhance parser and transpiler for async function handling; implement type checking for await expressions
+- Add support for async field methods and generic functions; enhance type checking for await expressions in various contexts
+- Add async support for quirk methods; enhance parsing and transpilation for async method handling; implement type checking for async quirk method calls
+- Enhance async quirk field dispatch tests; add cleanup for generated files and ensure proper execution
+- Add support for async quirk function-returned receiver; enhance type checking and transpilation for await expressions
+- Add tests for async quirk nested composite receiver handling; enhance type checking for async method calls
+- Add tests for async quirk generic wrapper receiver handling in codegen and typecheck; ensure proper transpilation and type checking
+- Update async quirk handling in transpiler; enhance type resolution for generic-specialized receivers and adjust test cases for Box<T> structure
+- Add examples and tests for async quirk handling; include various receiver types and ensure proper transpilation and type checking
+- Add async/await support to language reference and syntax highlighting; update editor configurations for async keywords
+- Implement async/await completion details, hover, and signature help in e2e tests
+- Implement code action handling for async diagnostics and enhance parser error handling
+- Enhance diagnostic handling by adding support for diagnostic codes and updating tests for async diagnostics
+- Add channel/runtime conformance matrix documentation and related tests
+- Enhance CI configuration to support runtime backend matrix for testing
+
+### Fix
+
+- Update clock_gettime calls to use raw pointers for ChannelAbsTime handling
+- Update printf format specifiers to use %lld for long long integers
+
+### Fls
+
+- Harden indexing crash path and document parse mode
+
+## [0.27.1] - 2026-04-01
+
+### Feat
+
+- *(docs)* Update language reference with `allow` and `expect` keywords
+
+## [0.27.0] - 2026-04-01
+
+### Feat
+
+- Implement warning control mechanisms with `allow` and `expect` statements
+- *(tests)* Add end-to-end tests for warning IDs completion with allow and expect keywords
+
+## [0.26.2] - 2026-04-01
+
+### Feat
+
+- *(docs)* Enhance documentation comments across various modules for clarity and consistency
+
+## [0.26.1] - 2026-04-01
+
+### Chore
+
+- Update CHANGELOG for upcoming release with new fixes and enhancements
+
 ### Fix
 
 - *(release)* Ensure artifacts directory is created before building portable zip
