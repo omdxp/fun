@@ -2095,7 +2095,7 @@ pub const ParseProcess = struct {
     /// - Returns an error if reading the next token fails.
     /// - Logs an error message if any expected token is not found.
     fn parse_await_operand(self: *Self, hist: *utils.History) ParseError!bool {
-        _ = self.token_next(); // skip await
+        const await_tok = self.token_next(); // skip await
         if (!hist.*.flags.inside_function_body) {
             self.transpile_proc.err("await statement outside of function", .{});
             return ParseError.InvalidStatement;
@@ -2108,10 +2108,38 @@ pub const ParseProcess = struct {
             self.transpile_proc.err("expected expression after 'await'", .{});
             return ParseError.InvalidExpression;
         }
-        if (!try self.parse_expressionable_single(hist)) {
+        const before_count = self.transpile_proc.nodes.count;
+        try self.parse_expressionable(hist);
+        if (self.transpile_proc.nodes.count == before_count) {
             self.transpile_proc.err("expected expression after 'await'", .{});
             return ParseError.InvalidExpression;
         }
+
+        const await_operand_node = self.node_pop();
+        if (await_operand_node == null) {
+            self.transpile_proc.err("expected expression after 'await'", .{});
+            return ParseError.InvalidExpression;
+        }
+        const operand = self.transpile_proc.allocator.create(ast.Node) catch |e| {
+            std.debug.print("Error creating node: {s}", .{@errorName(e)});
+            return ParseError.MemoryAllocationFailed;
+        };
+        errdefer self.transpile_proc.allocator.destroy(operand);
+        operand.* = await_operand_node.?;
+
+        self.transpile_proc.nodes.push(ast.Node{
+            .type = .Unary,
+            .pos = if (await_tok) |t| t.pos else operand.*.pos,
+            .node_variant = .{
+                .unary = .{
+                    .op = "await",
+                    .operand = operand,
+                },
+            },
+        }) catch |e| {
+            std.debug.print("Error adding node to list: {s}", .{@errorName(e)});
+            return ParseError.MemoryAllocationFailed;
+        };
         return true;
     }
 

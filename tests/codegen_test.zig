@@ -205,7 +205,7 @@ test "async and await surface transpiles and runs" {
     const input =
         "imp std.c.io;\n" ++
         "async fun inc(num x) num { ret x + 1; }\n" ++
-        "fun main() {\n" ++
+        "async fun main() {\n" ++
         "  num out = await inc(41);\n" ++
         "  printf(\"%lld\", out);\n" ++
         "}\n";

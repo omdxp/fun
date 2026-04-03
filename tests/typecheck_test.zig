@@ -90,6 +90,46 @@ test "typecheck call with two args ok" {
     try runTranspileExpectOk(std.testing.allocator, "typecheck_arg_ok.fn", input);
 }
 
+test "typecheck await requires async function context" {
+    const input =
+        "async fun inc(num a) num { ret a + 1; }\n" ++
+        "fun main() {\n" ++
+        "  num x = await inc(1);\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_await_requires_async_context.fn", input);
+}
+
+test "typecheck async call requires await" {
+    const input =
+        "async fun inc(num a) num { ret a + 1; }\n" ++
+        "async fun main() {\n" ++
+        "  num x = inc(1);\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_async_call_requires_await.fn", input);
+}
+
+test "typecheck await target must be async" {
+    const input =
+        "fun inc(num a) num { ret a + 1; }\n" ++
+        "async fun main() {\n" ++
+        "  num x = await inc(1);\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_await_target_must_be_async.fn", input);
+}
+
+test "typecheck async call with await is ok" {
+    const input =
+        "async fun inc(num a) num { ret a + 1; }\n" ++
+        "async fun main() {\n" ++
+        "  num x = await inc(1);\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_async_call_with_await_ok.fn", input);
+}
+
 test "typecheck enum dot shorthand in init/assign/compare" {
     const input =
         "enum Color {\n" ++

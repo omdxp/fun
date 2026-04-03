@@ -106,8 +106,11 @@ test "ParseProcess parse_await_expression" {
     try std.testing.expect(stmts.len >= 1);
     try std.testing.expectEqual(ast.NodeType.Variable, stmts[0].type);
     const val = stmts[0].node_variant.?.variable.val.?;
-    try std.testing.expectEqual(ast.NodeType.Expression, val.type);
-    try std.testing.expectEqualStrings("()", val.node_variant.?.exp.op);
+    try std.testing.expectEqual(ast.NodeType.Unary, val.type);
+    try std.testing.expectEqualStrings("await", val.node_variant.?.unary.op);
+    const awaited = val.node_variant.?.unary.operand;
+    try std.testing.expectEqual(ast.NodeType.Expression, awaited.type);
+    try std.testing.expectEqualStrings("()", awaited.node_variant.?.exp.op);
 
     try fs.cwd().deleteFile(ifilepath);
     try fs.cwd().deleteFile(ofilepath);

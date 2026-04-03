@@ -249,6 +249,12 @@ pub const TranspileProcess = struct {
     /// Track whether current function is variadic.
     current_fn_is_variadic: bool = false,
 
+    /// Track whether current function is async (for await semantics in typecheck).
+    current_fn_is_async: bool = false,
+
+    /// True while inferring the operand of an `await` unary expression.
+    in_await_operand_inference: bool = false,
+
     /// Temp name counter for codegen.
     tmp_counter: usize = 0,
 
@@ -3222,6 +3228,7 @@ pub const TranspileProcess = struct {
         rtype: CheckedType,
         args: []CheckedType,
         is_variadic: bool = false,
+        is_async: bool = false,
         type_params: ?*const utils.Vector(std.ArrayList(u8)) = null,
     };
 
@@ -3871,7 +3878,7 @@ pub const TranspileProcess = struct {
         }
 
         const rtype = if (fnv.rtype) |rt| self.type_from_dtype_with_subst(&rt, params.*, gargs) catch return null else CheckedType{ .base = .Void };
-        return .{ .rtype = rtype, .args = args_slice, .is_variadic = fnv.is_variadic };
+        return .{ .rtype = rtype, .args = args_slice, .is_variadic = fnv.is_variadic, .is_async = fnv.is_async };
     }
 
     fn find_function_node_proc(self: *Self, proc: *Self, name: []const u8) ?*ast.Node {
@@ -4294,6 +4301,33 @@ pub const TranspileProcess = struct {
         };
     }
 
+    fn validate_async_call_usage(
+        self: *Self,
+        call_node: ast.Node,
+        callee_name: ?[]const u8,
+        callee_is_async: bool,
+        async_known: bool,
+    ) TranspileError!void {
+        const display = callee_name orelse "<call>";
+
+        if (self.in_await_operand_inference) {
+            if (!async_known) {
+                self.report_type_error(call_node, "await target '{s}' must resolve to an async function", .{display});
+                return TranspileError.TypeMismatch;
+            }
+            if (!callee_is_async) {
+                self.report_type_error(call_node, "await target '{s}' is not async", .{display});
+                return TranspileError.TypeMismatch;
+            }
+            return;
+        }
+
+        if (async_known and callee_is_async) {
+            self.report_type_error(call_node, "call to async function '{s}' must be awaited", .{display});
+            return TranspileError.TypeMismatch;
+        }
+    }
+
     fn infer_expr_type(self: *Self, node: ast.Node, env: *TypeEnv, fns: *const std.StringHashMap(FnSig)) TranspileError!CheckedType {
         switch (node.type) {
             .CompoundInit => {
@@ -4399,6 +4433,26 @@ pub const TranspileProcess = struct {
             },
             .Unary => {
                 const u = node.node_variant.?.unary;
+
+                if (mem.eql(u8, u.op, "await")) {
+                    if (!self.current_fn_is_async) {
+                        self.report_type_error(node, "await is only allowed inside async functions", .{});
+                        return TranspileError.TypeMismatch;
+                    }
+
+                    const operand = u.operand.*;
+                    if (operand.type != .Expression or operand.node_variant == null or !mem.eql(u8, operand.node_variant.?.exp.op, "()")) {
+                        self.report_type_error(node, "await expects a function call", .{});
+                        return TranspileError.TypeMismatch;
+                    }
+
+                    const prev = self.in_await_operand_inference;
+                    self.in_await_operand_inference = true;
+                    defer self.in_await_operand_inference = prev;
+
+                    return try self.infer_expr_type(operand, env, fns);
+                }
+
                 const operand_t = try self.infer_expr_type(u.operand.*, env, fns);
 
                 // Indirection unary: `*x`, `**x`, ...
@@ -4483,10 +4537,28 @@ pub const TranspileProcess = struct {
                     var skip_signature_typecheck: bool = false;
                     var handled_generic_call: bool = false;
                     var callee_name: ?[]const u8 = null;
+                    var callee_is_async: bool = false;
+                    var callee_async_known: bool = false;
 
                     if (callee.type == .Identifier and callee.data != null) {
                         const fname = callee.data.?.sval.items;
                         callee_name = fname;
+
+                        if (self.in_await_operand_inference and
+                            (mem.eql(u8, fname, "sizeof") or
+                                mem.eql(u8, fname, "va_start") or
+                                mem.eql(u8, fname, "va_end") or
+                                mem.eql(u8, fname, "va_copy") or
+                                mem.eql(u8, fname, "va_arg_num") or
+                                mem.eql(u8, fname, "va_arg_dec") or
+                                mem.eql(u8, fname, "va_arg_bin") or
+                                mem.eql(u8, fname, "va_arg_chr") or
+                                mem.eql(u8, fname, "va_arg_str") or
+                                mem.eql(u8, fname, "va_arg_raw")))
+                        {
+                            self.report_type_error(node, "await target '{s}' is not async", .{fname});
+                            return TranspileError.TypeMismatch;
+                        }
 
                         if (mem.eql(u8, fname, "va_start")) {
                             if (args_nodes.items.len != 2) {
@@ -4594,6 +4666,8 @@ pub const TranspileProcess = struct {
                         if (fns.get(fname)) |sig| {
                             maybe_sig = sig;
                             call_rtype = sig.rtype;
+                            callee_is_async = sig.is_async;
+                            callee_async_known = true;
                             if (self.find_function_node(fname)) |fn_node| {
                                 if (!self.can_access(&node, fn_node)) {
                                     self.report_type_error(node, "function '{s}' is private", .{fname});
@@ -4634,15 +4708,19 @@ pub const TranspileProcess = struct {
                         if (recv.type == .Identifier and recv.data != null) {
                             const alias_name = recv.data.?.sval.items;
                             const member_name = member.data.?.sval.items;
+                            callee_name = member_name;
                             if (try self.resolve_alias_qualified_symbol_name(&node, alias_name, member_name)) |qualified| {
                                 defer self.allocator.free(qualified);
 
                                 if (fns.get(qualified)) |sig| {
                                     maybe_sig = sig;
                                     call_rtype = sig.rtype;
+                                    callee_is_async = sig.is_async;
+                                    callee_async_known = true;
                                 } else if (self.global_symbols.get(qualified) != null or is_known_extern_function_name(qualified)) {
                                     skip_signature_typecheck = true;
                                     call_rtype = .{ .base = .Unknown };
+                                    callee_async_known = false;
                                 } else {
                                     self.report_type_error(node, "unknown function '{s}.{s}'", .{ alias_name, member_name });
                                     return TranspileError.SymbolNotDefined;
@@ -4651,12 +4729,14 @@ pub const TranspileProcess = struct {
                                 for (args_nodes.items) |arg_node| {
                                     _ = try self.infer_expr_type(arg_node.*, env, fns);
                                 }
+                                try self.validate_async_call_usage(node, callee_name, callee_is_async, callee_async_known);
                                 return call_rtype;
                             }
                         }
 
                         const recv_t = try self.infer_expr_type(recv.*, env, fns);
                         const mname = member.data.?.sval.items;
+                        callee_name = mname;
                         if (!is_user_named_type(recv_t)) {
                             self.report_type_error(node, "method calls require a named receiver", .{});
                             return TranspileError.NotCallable;
@@ -4810,6 +4890,11 @@ pub const TranspileProcess = struct {
                         if (recv_name_owned) {
                             self.allocator.free(recv_name);
                         }
+
+                        if (plain_method_sig != null) {
+                            callee_is_async = plain_method_sig.?.is_async;
+                            callee_async_known = true;
+                        }
                     } else {
                         self.report_type_error(node, "only calling named functions or quirk methods is supported", .{});
                         return TranspileError.NotCallable;
@@ -4822,6 +4907,7 @@ pub const TranspileProcess = struct {
                         for (args_nodes.items) |arg_node| {
                             _ = try self.infer_expr_type(arg_node.*, env, fns);
                         }
+                        try self.validate_async_call_usage(node, callee_name, callee_is_async, callee_async_known);
                         return call_rtype;
                     }
 
@@ -4907,6 +4993,8 @@ pub const TranspileProcess = struct {
                             } else {
                                 call_rtype = .{ .base = .Void };
                             }
+                            callee_is_async = fnv.is_async;
+                            callee_async_known = true;
 
                             // Register instantiation and call override for codegen.
                             const spec_name = try self.mangle_generic_fn_name(callee_name.?, gargs);
@@ -4925,6 +5013,7 @@ pub const TranspileProcess = struct {
                     }
 
                     if (handled_generic_call) {
+                        try self.validate_async_call_usage(node, callee_name, callee_is_async, callee_async_known);
                         return call_rtype;
                     }
 
@@ -5031,6 +5120,7 @@ pub const TranspileProcess = struct {
                         }
                     }
 
+                    try self.validate_async_call_usage(node, callee_name, callee_is_async, callee_async_known);
                     return call_rtype;
                 }
 
@@ -5600,6 +5690,7 @@ pub const TranspileProcess = struct {
                 .rtype = fn_rtype,
                 .args = args_slice,
                 .is_variadic = fnv.is_variadic,
+                .is_async = fnv.is_async,
                 .type_params = if (fnv.type_params) |*params| params else null,
             }) catch {
                 return TranspileError.MemoryAllocationFailed;
@@ -5612,6 +5703,7 @@ pub const TranspileProcess = struct {
                         .rtype = fn_rtype,
                         .args = args_slice,
                         .is_variadic = fnv.is_variadic,
+                        .is_async = fnv.is_async,
                         .type_params = if (fnv.type_params) |*params| params else null,
                     }) catch {
                         return TranspileError.MemoryAllocationFailed;
@@ -5664,6 +5756,7 @@ pub const TranspileProcess = struct {
                 .rtype = fn_rtype,
                 .args = args_slice,
                 .is_variadic = fnv.is_variadic,
+                .is_async = fnv.is_async,
                 .type_params = if (fnv.type_params) |*params| params else null,
             }) catch {
                 return TranspileError.MemoryAllocationFailed;
@@ -5676,6 +5769,7 @@ pub const TranspileProcess = struct {
                         .rtype = fn_rtype,
                         .args = args_slice,
                         .is_variadic = fnv.is_variadic,
+                        .is_async = fnv.is_async,
                         .type_params = if (fnv.type_params) |*params| params else null,
                     }) catch {
                         return TranspileError.MemoryAllocationFailed;
@@ -5766,6 +5860,7 @@ pub const TranspileProcess = struct {
                             .rtype = fn_rtype,
                             .args = args_slice,
                             .is_variadic = fnv.is_variadic,
+                            .is_async = fnv.is_async,
                             .type_params = null,
                         }) catch {
                             return TranspileError.MemoryAllocationFailed;
@@ -5815,6 +5910,7 @@ pub const TranspileProcess = struct {
                     .rtype = fn_rtype,
                     .args = args_slice,
                     .is_variadic = fnv.is_variadic,
+                    .is_async = fnv.is_async,
                     .type_params = null,
                 }) catch {
                     return TranspileError.MemoryAllocationFailed;
@@ -5923,6 +6019,9 @@ pub const TranspileProcess = struct {
             }
 
             if (fnv.body) |b| {
+                const prev_async = self.current_fn_is_async;
+                self.current_fn_is_async = fnv.is_async;
+                defer self.current_fn_is_async = prev_async;
                 self.check_body(b, &fn_env, &fns, fn_rtype) catch {};
             }
         }
@@ -5978,6 +6077,9 @@ pub const TranspileProcess = struct {
                 }
 
                 if (fnv.body) |b| {
+                    const prev_async = self.current_fn_is_async;
+                    self.current_fn_is_async = fnv.is_async;
+                    defer self.current_fn_is_async = prev_async;
                     self.check_body(b, &fn_env, &fns, fn_rtype) catch {};
                 }
             }
@@ -6069,6 +6171,9 @@ pub const TranspileProcess = struct {
             }
 
             if (fnv.body) |body| {
+                const prev_async = proc.current_fn_is_async;
+                proc.current_fn_is_async = fnv.is_async;
+                defer proc.current_fn_is_async = prev_async;
                 try proc.check_body(body, &fn_env, fns, fn_rtype);
             }
         }
@@ -6169,6 +6274,9 @@ pub const TranspileProcess = struct {
                 }
 
                 if (fnv.body) |body| {
+                    const prev_async = proc.current_fn_is_async;
+                    proc.current_fn_is_async = fnv.is_async;
+                    defer proc.current_fn_is_async = prev_async;
                     try proc.check_body(body, &fn_env, fns, fn_rtype);
                 }
             }
@@ -11641,6 +11749,10 @@ pub const TranspileProcess = struct {
             },
             .Unary => {
                 const unary = node.node_variant.?.unary;
+                if (mem.eql(u8, unary.op, "await")) {
+                    try self.transpile_node(unary.operand.*);
+                    return;
+                }
                 if (unary.is_left_operanded_unary) {
                     try self.transpile_node(unary.operand.*);
                     try self.write(unary.op);
