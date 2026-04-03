@@ -4328,6 +4328,31 @@ pub const TranspileProcess = struct {
         }
     }
 
+    fn resolve_await_callee_effective_name(self: *Self, call_node: ast.Node) TranspileError!?[]const u8 {
+        if (call_node.type != .Expression or call_node.node_variant == null or !mem.eql(u8, call_node.node_variant.?.exp.op, "()")) {
+            return null;
+        }
+        const call = call_node.node_variant.?.exp;
+        const callee = call.left orelse return null;
+
+        if (callee.*.type == .Identifier and callee.*.data != null) {
+            return self.allocator.dupe(u8, callee.*.data.?.sval.items) catch {
+                return TranspileError.MemoryAllocationFailed;
+            };
+        }
+
+        if (callee.*.type == .Expression and callee.*.node_variant != null and mem.eql(u8, callee.*.node_variant.?.exp.op, ".")) {
+            const dot = callee.*.node_variant.?.exp;
+            const left = dot.left orelse return null;
+            const right = dot.right orelse return null;
+            if (left.*.type == .Identifier and left.*.data != null and right.*.type == .Identifier and right.*.data != null) {
+                return try self.resolve_alias_qualified_symbol_name(&call_node, left.*.data.?.sval.items, right.*.data.?.sval.items);
+            }
+        }
+
+        return null;
+    }
+
     fn infer_expr_type(self: *Self, node: ast.Node, env: *TypeEnv, fns: *const std.StringHashMap(FnSig)) TranspileError!CheckedType {
         switch (node.type) {
             .CompoundInit => {
@@ -4443,6 +4468,14 @@ pub const TranspileProcess = struct {
                     const operand = u.operand.*;
                     if (operand.type != .Expression or operand.node_variant == null or !mem.eql(u8, operand.node_variant.?.exp.op, "()")) {
                         self.report_type_error(node, "await expects a function call", .{});
+                        return TranspileError.TypeMismatch;
+                    }
+
+                    const await_target = try self.resolve_await_callee_effective_name(operand);
+                    if (await_target) |resolved| {
+                        self.allocator.free(resolved);
+                    } else {
+                        self.report_type_error(node, "await currently supports named function calls only", .{});
                         return TranspileError.TypeMismatch;
                     }
 
@@ -6123,6 +6156,16 @@ pub const TranspileProcess = struct {
         for (proc.nodes.items()) |node| {
             if (node.type != .Function or node.node_variant == null) continue;
             const fnv = node.node_variant.?.function;
+
+            if (fnv.is_async and fnv.is_variadic) {
+                proc.report_type_error(node, "async variadic functions are not supported yet", .{});
+                return TranspileError.TypeMismatch;
+            }
+            if (fnv.is_async and fnv.type_params != null) {
+                proc.report_type_error(node, "async generic functions are not supported yet", .{});
+                return TranspileError.TypeMismatch;
+            }
+
             const fn_rtype: CheckedType = if (fnv.rtype) |rt| try proc.type_from_dtype_with_mangled(&rt) else CheckedType{ .base = .Void };
 
             var allow_params: ?[]const []const u8 = null;
@@ -6240,6 +6283,16 @@ pub const TranspileProcess = struct {
                 const m = m_ptr.*;
                 if (m.type != .Function or m.node_variant == null) continue;
                 const fnv = m.node_variant.?.function;
+
+                if (fnv.is_async and fnv.is_variadic) {
+                    proc.report_type_error(m, "async variadic methods are not supported yet", .{});
+                    return TranspileError.TypeMismatch;
+                }
+                if (fnv.is_async and allow_params != null) {
+                    proc.report_type_error(m, "async methods in generic contexts are not supported yet", .{});
+                    return TranspileError.TypeMismatch;
+                }
+
                 const fn_rtype: CheckedType = if (fnv.rtype) |rt| try proc.type_from_dtype_with_mangled(&rt) else CheckedType{ .base = .Void };
 
                 if (fnv.rtype) |rt| {
@@ -9939,6 +9992,303 @@ pub const TranspileProcess = struct {
         try self.write(name);
     }
 
+    fn alloc_effective_function_name(self: *Self, name: []const u8) TranspileError![]const u8 {
+        if (self.override_fn_name) |ov| {
+            return self.allocator.dupe(u8, ov) catch {
+                return TranspileError.MemoryAllocationFailed;
+            };
+        }
+
+        if (self.import_alias) |alias| {
+            if (!mem.eql(u8, name, "main")) {
+                return std.fmt.allocPrint(self.allocator, "{s}__{s}", .{ alias, name }) catch {
+                    return TranspileError.MemoryAllocationFailed;
+                };
+            }
+        }
+
+        return self.allocator.dupe(u8, name) catch {
+            return TranspileError.MemoryAllocationFailed;
+        };
+    }
+
+    fn write_async_function_support_prototypes(self: *Self, node: ast.Node) TranspileError!void {
+        if (node.type != .Function or node.node_variant == null) return;
+        const fnv = node.node_variant.?.function;
+        if (!fnv.is_async) return;
+        if (fnv.name == null or fnv.body == null) return;
+
+        const effective_name = try self.alloc_effective_function_name(fnv.name.?.items);
+        defer self.allocator.free(effective_name);
+
+        try self.write("typedef struct __fun_async_payload_");
+        try self.write(effective_name);
+        try self.write(" {\n");
+
+        if (fnv.args) |args| {
+            for (args.items(), 0..) |arg, i| {
+                if (arg.type != .Variable or arg.node_variant == null) continue;
+                const v = arg.node_variant.?.variable;
+                try self.write("  ");
+                try self.write_type(v.type.*);
+                try self.write(" __arg");
+                try self.print("{d}", .{i});
+                try self.write(";\n");
+            }
+        }
+
+        if (fnv.rtype) |rt| {
+            if (rt.type != .Void) {
+                try self.write("  ");
+                try self.write_type(rt);
+                try self.write(" __result;\n");
+            }
+        }
+
+        try self.write("} __fun_async_payload_");
+        try self.write(effective_name);
+        try self.write(";\n");
+
+        try self.write("static void* __fun_async_entry_");
+        try self.write(effective_name);
+        try self.write("(void* __arg);\n");
+
+        try self.write("static int __fun_async_spawn_");
+        try self.write(effective_name);
+        try self.write("(__fun_async_payload_");
+        try self.write(effective_name);
+        try self.write("* __payload, __fun_thread_t* __thr);\n");
+
+        if (fnv.rtype) |rt| {
+            try self.write("static ");
+            try self.write_type(rt);
+        } else {
+            try self.write("static void");
+        }
+        try self.write(" __fun_async_await_");
+        try self.write(effective_name);
+        try self.write("(__fun_async_payload_");
+        try self.write(effective_name);
+        try self.write("* __payload, __fun_thread_t __thr);\n");
+
+        if (fnv.rtype) |rt| {
+            try self.write("static ");
+            try self.write_type(rt);
+        } else {
+            try self.write("static void");
+        }
+        try self.write(" __fun_async_call_");
+        try self.write(effective_name);
+        try self.write("(");
+        self.in_function_params = true;
+        if (fnv.args) |args| {
+            for (args.items(), 0..) |arg, i| {
+                if (i > 0) try self.write(", ");
+                try self.transpile_node(arg.*);
+            }
+        }
+        self.in_function_params = false;
+        try self.write(");\n");
+    }
+
+    fn write_async_function_support_definitions(self: *Self, node: ast.Node) TranspileError!void {
+        if (node.type != .Function or node.node_variant == null) return;
+        const fnv = node.node_variant.?.function;
+        if (!fnv.is_async) return;
+        if (fnv.name == null or fnv.body == null) return;
+
+        const effective_name = try self.alloc_effective_function_name(fnv.name.?.items);
+        defer self.allocator.free(effective_name);
+
+        // Entry trampoline.
+        try self.write("static void* __fun_async_entry_");
+        try self.write(effective_name);
+        try self.write("(void* __arg) {\n");
+        try self.write("  __fun_async_payload_");
+        try self.write(effective_name);
+        try self.write("* __payload = (__fun_async_payload_");
+        try self.write(effective_name);
+        try self.write("*)__arg;\n");
+
+        if (fnv.rtype) |rt| {
+            if (rt.type != .Void) {
+                try self.write("  __payload->__result = ");
+            } else {
+                try self.write("  ");
+            }
+        } else {
+            try self.write("  ");
+        }
+        try self.write(effective_name);
+        try self.write("(");
+        if (fnv.args) |args| {
+            for (args.items(), 0..) |_, i| {
+                if (i > 0) try self.write(", ");
+                try self.write("__payload->__arg");
+                try self.print("{d}", .{i});
+            }
+        }
+        try self.write(");\n");
+        try self.write("  return NULL;\n");
+        try self.write("}\n");
+
+        // Spawn helper.
+        try self.write("static int __fun_async_spawn_");
+        try self.write(effective_name);
+        try self.write("(__fun_async_payload_");
+        try self.write(effective_name);
+        try self.write("* __payload, __fun_thread_t* __thr) {\n");
+        try self.write("  return __fun_thread_start(__thr, __fun_async_entry_");
+        try self.write(effective_name);
+        try self.write(", __payload);\n");
+        try self.write("}\n");
+
+        // Await helper.
+        if (fnv.rtype) |rt| {
+            try self.write("static ");
+            try self.write_type(rt);
+        } else {
+            try self.write("static void");
+        }
+        try self.write(" __fun_async_await_");
+        try self.write(effective_name);
+        try self.write("(__fun_async_payload_");
+        try self.write(effective_name);
+        try self.write("* __payload, __fun_thread_t __thr) {\n");
+        try self.write("  (void)__fun_thread_join(__thr);\n");
+        if (fnv.rtype) |rt| {
+            if (rt.type != .Void) {
+                try self.write("  ");
+                try self.write_type(rt);
+                try self.write(" __result = __payload->__result;\n");
+                try self.write("  free(__payload);\n");
+                try self.write("  return __result;\n");
+            } else {
+                try self.write("  free(__payload);\n");
+            }
+        } else {
+            try self.write("  free(__payload);\n");
+        }
+        try self.write("}\n");
+
+        // High-level call helper used by `await` lowering.
+        if (fnv.rtype) |rt| {
+            try self.write("static ");
+            try self.write_type(rt);
+        } else {
+            try self.write("static void");
+        }
+        try self.write(" __fun_async_call_");
+        try self.write(effective_name);
+        try self.write("(");
+        self.in_function_params = true;
+        if (fnv.args) |args| {
+            for (args.items(), 0..) |arg, i| {
+                if (i > 0) try self.write(", ");
+                try self.transpile_node(arg.*);
+            }
+        }
+        self.in_function_params = false;
+        try self.write(") {\n");
+
+        try self.write("  __fun_async_payload_");
+        try self.write(effective_name);
+        try self.write("* __payload = (__fun_async_payload_");
+        try self.write(effective_name);
+        try self.write("*)malloc(sizeof(__fun_async_payload_");
+        try self.write(effective_name);
+        try self.write("));\n");
+
+        try self.write("  if (__payload == NULL) {\n");
+        if (fnv.rtype) |rt| {
+            if (rt.type != .Void) {
+                try self.write("    return ");
+            } else {
+                try self.write("    ");
+            }
+        } else {
+            try self.write("    ");
+        }
+        try self.write(effective_name);
+        try self.write("(");
+        if (fnv.args) |args| {
+            for (args.items(), 0..) |arg, i| {
+                if (arg.type != .Variable or arg.node_variant == null) continue;
+                if (i > 0) try self.write(", ");
+                try self.write(arg.node_variant.?.variable.name.items);
+            }
+        }
+        try self.write(");\n");
+        if (fnv.rtype) |rt| {
+            if (rt.type == .Void) {
+                try self.write("    return;\n");
+            }
+        }
+        try self.write("  }\n");
+
+        if (fnv.args) |args| {
+            for (args.items(), 0..) |arg, i| {
+                if (arg.type != .Variable or arg.node_variant == null) continue;
+                try self.write("  __payload->__arg");
+                try self.print("{d}", .{i});
+                try self.write(" = ");
+                try self.write(arg.node_variant.?.variable.name.items);
+                try self.write(";\n");
+            }
+        }
+
+        try self.write("  __fun_thread_t __thr;\n");
+        try self.write("  int __rc = __fun_async_spawn_");
+        try self.write(effective_name);
+        try self.write("(__payload, &__thr);\n");
+        try self.write("  if (__rc != 0) {\n");
+        try self.write("    free(__payload);\n");
+        if (fnv.rtype) |rt| {
+            if (rt.type != .Void) {
+                try self.write("    return ");
+            } else {
+                try self.write("    ");
+            }
+        } else {
+            try self.write("    ");
+        }
+        try self.write(effective_name);
+        try self.write("(");
+        if (fnv.args) |args| {
+            for (args.items(), 0..) |arg, i| {
+                if (arg.type != .Variable or arg.node_variant == null) continue;
+                if (i > 0) try self.write(", ");
+                try self.write(arg.node_variant.?.variable.name.items);
+            }
+        }
+        try self.write(");\n");
+        if (fnv.rtype) |rt| {
+            if (rt.type == .Void) {
+                try self.write("    return;\n");
+            }
+        }
+        try self.write("  }\n");
+
+        if (fnv.rtype) |rt| {
+            if (rt.type != .Void) {
+                try self.write("  return ");
+            } else {
+                try self.write("  ");
+            }
+        } else {
+            try self.write("  ");
+        }
+        try self.write("__fun_async_await_");
+        try self.write(effective_name);
+        try self.write("(__payload, __thr);\n");
+        if (fnv.rtype) |rt| {
+            if (rt.type == .Void) {
+                try self.write("  return;\n");
+            }
+        }
+        try self.write("}\n");
+    }
+
     fn write_function_prototype(self: *Self, node: ast.Node) TranspileError!void {
         if (node.type != .Function or node.node_variant == null) return;
         const function = node.node_variant.?.function;
@@ -9977,6 +10327,8 @@ pub const TranspileProcess = struct {
         }
         self.in_function_params = false;
         try self.write(");\n");
+
+        try self.write_async_function_support_prototypes(node);
     }
 
     // Helper function to recursively transpile children
@@ -10063,6 +10415,23 @@ pub const TranspileProcess = struct {
         try self.write("\n");
 
         if (!self.is_importing) {
+            try self.write("#include <stdlib.h>\n");
+            try self.write("#ifdef _WIN32\n");
+            try self.write("#include <windows.h>\n");
+            try self.write("typedef HANDLE __fun_thread_t;\n");
+            try self.write("typedef void* (*__fun_thread_entry_t)(void*);\n");
+            try self.write("typedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;\n");
+            try self.write("static DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }\n");
+            try self.write("static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 0, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }\n");
+            try self.write("static int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }\n");
+            try self.write("#else\n");
+            try self.write("#include <pthread.h>\n");
+            try self.write("typedef pthread_t __fun_thread_t;\n");
+            try self.write("typedef void* (*__fun_thread_entry_t)(void*);\n");
+            try self.write("static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }\n");
+            try self.write("static int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }\n");
+            try self.write("#endif\n\n");
+
             try self.write("#define __fun_tag(x) _Generic((x), ");
             try self.write("char*: 's', const char*: 's', ");
             try self.write("long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', ");
@@ -11016,6 +11385,11 @@ pub const TranspileProcess = struct {
                 _ = try self.new_scope();
                 defer self.finish_scope();
 
+                if (function.is_async and function.name != null and !mem.eql(u8, function.name.?.items, "main")) {
+                    try self.write_async_function_support_definitions(node);
+                    try self.write("\n");
+                }
+
                 // Skip main functions in imported modules
                 if (function.name != null and mem.eql(u8, function.name.?.items, "main")) {
                     // Only include main function from the main module (not from imported modules)
@@ -11750,7 +12124,20 @@ pub const TranspileProcess = struct {
             .Unary => {
                 const unary = node.node_variant.?.unary;
                 if (mem.eql(u8, unary.op, "await")) {
-                    try self.transpile_node(unary.operand.*);
+                    const operand = unary.operand.*;
+                    if (try self.resolve_await_callee_effective_name(operand)) |callee_name| {
+                        defer self.allocator.free(callee_name);
+                        const call_exp = operand.node_variant.?.exp;
+                        try self.write("__fun_async_call_");
+                        try self.write(callee_name);
+                        try self.write("(");
+                        if (call_exp.right) |right| {
+                            try self.transpile_node(right.*);
+                        }
+                        try self.write(")");
+                    } else {
+                        try self.transpile_node(operand);
+                    }
                     return;
                 }
                 if (unary.is_left_operanded_unary) {
