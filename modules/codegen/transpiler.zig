@@ -3849,13 +3849,39 @@ pub const TranspileProcess = struct {
             return TranspileError.InvalidFieldAccess;
         }
 
-        const tname = base.name.?;
+        const tname = base.mangled_name orelse base.name.?;
         const base_name = if (mem.indexOf(u8, tname, "__")) |idx| tname[0..idx] else tname;
         try self.ensure_named_type_visible(node, tname);
 
         if (base.pointer_depth > 1) {
             self.report_type_error(node, "field access supports at most one pointer indirection", .{});
             return TranspileError.InvalidFieldAccess;
+        }
+
+        // For generic-specialized receivers (e.g. Box__AsyncCounter), resolve
+        // fields from the generic declaration with type-parameter substitution.
+        if (base.mangled_name) |mangled| {
+            if (try self.dtype_from_mangled_type(mangled)) |spec_dt| {
+                if (spec_dt.generic_args) |gargs_vec| {
+                    if (self.root_registry()) |reg| {
+                        if (reg.compounds_by_name.get(spec_dt.type_str.items)) |cnode| {
+                            if (cnode.node_variant != null) {
+                                const cdef = cnode.node_variant.?.compound;
+                                if (cdef.type_params) |params| {
+                                    const gargs = gargs_vec.items();
+                                    if (params.count == gargs.len) {
+                                        for (cdef.fields.items()) |f| {
+                                            if (mem.eql(u8, f.name.items, field_name)) {
+                                                return try self.type_from_dtype_with_subst(f.dtype, params, gargs);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         const fdt = self.lookup_compound_field(tname, field_name) orelse
@@ -7908,14 +7934,17 @@ pub const TranspileProcess = struct {
             while (i < params_items.len and i < args.len) : (i += 1) {
                 const p = params_items[i];
                 if (mem.eql(u8, p.items, dt.type_str.items)) {
-                    var sub = args[i].*;
-                    if (dt.pointer_depth > 0) {
-                        var flags = sub.flags orelse dtype.DataTypeFlags{};
-                        flags.is_pointer = true;
-                        sub.flags = flags;
-                        sub.pointer_depth += dt.pointer_depth;
+                    const sub = args[i];
+                    var out = type_from_dtype(sub);
+                    if (dt.flags != null and dt.flags.?.is_array) {
+                        out.is_array = true;
                     }
-                    return try self.type_from_dtype_with_mangled(&sub);
+                    out.pointer_depth += dt.pointer_depth;
+                    out.dtype_ref = sub;
+                    if (sub.generic_args != null and (sub.type == null or sub.type == .Unknown)) {
+                        out.mangled_name = try self.type_name_mangled(sub);
+                    }
+                    return out;
                 }
             }
         }

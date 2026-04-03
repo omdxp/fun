@@ -603,14 +603,13 @@ test "async quirk generic wrapper receiver await transpiles and runs" {
         "  async add(num x) num;\n" ++
         "}\n" ++
         "compound Box<T> {\n" ++
-        "  T tag;\n" ++
-        "  AsyncCounter v;\n" ++
+        "  T v;\n" ++
         "}\n" ++
         "impl Counter as AsyncCounter {\n" ++
         "  async add(num x) num { ret self.base + x; }\n" ++
         "}\n" ++
-        "fun pack(AsyncCounter q) Box<num> {\n" ++
-        "  ret Box<num>{ tag = 0, v = q };\n" ++
+        "fun pack(AsyncCounter q) Box<AsyncCounter> {\n" ++
+        "  ret Box<AsyncCounter>{ v = q };\n" ++
         "}\n" ++
         "async fun main() {\n" ++
         "  Counter c;\n" ++
