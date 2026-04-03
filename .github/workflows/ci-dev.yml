@@ -11,13 +11,21 @@ env:
 
 jobs:
   test:
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime_backend:
+          - posix
+          - windows
     runs-on: ubuntu-latest
+    env:
+      FUN_RUNTIME_BACKEND: ${{ matrix.runtime_backend }}
     steps:
       - uses: actions/checkout@v2
       - uses: goto-bus-stop/setup-zig@v2
         with:
           version: ${{ env.zig_version }}
-      - name: Run all tests (including fls LSP)
+      - name: Run all tests (including fls LSP) with backend selector
         run: zig build test --summary all
   run:
     runs-on: ubuntu-latest
