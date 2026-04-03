@@ -45,6 +45,16 @@ fn runTranspile(allocator: std.mem.Allocator, input_path: []const u8, input: []c
     return allocator.dupe(u8, out);
 }
 
+fn runTranspileExpectFailure(allocator: std.mem.Allocator, input_path: []const u8, input: []const u8) !void {
+    const out_owned = runTranspile(allocator, input_path, input) catch {
+        fs.cwd().deleteFile(input_path) catch {};
+        return;
+    };
+    defer allocator.free(out_owned);
+    fs.cwd().deleteFile(input_path) catch {};
+    return error.ExpectedFailure;
+}
+
 fn compileWithZigCc(allocator: std.mem.Allocator, c_path: []const u8, exe_path: []const u8) !void {
     var argv = std.ArrayList([]const u8).init(allocator);
     defer argv.deinit();
@@ -244,6 +254,66 @@ test "async and await surface transpiles and runs" {
     const stdout = try runExeWithEnv(allocator, exe_path, &.{});
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("42", stdout);
+}
+
+test "async and await let surface transpiles and runs" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_async_await_let_surface.fn";
+    const c_path = "codegen_async_await_let_surface.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_async_await_let_surface.exe" else "codegen_async_await_let_surface";
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(c_path) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.c.io;\n" ++
+        "async fun inc(num x) num { ret x + 1; }\n" ++
+        "async fun main() {\n" ++
+        "  let out = await inc(41);\n" ++
+        "  printf(\"%lld\", out);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "__fun_async_call_inc") != null);
+
+    {
+        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("42", stdout);
+}
+
+test "let await requires async context during transpile" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_let_await_requires_async_context.fn";
+    const input =
+        "async fun inc(num x) num { ret x + 1; }\n" ++
+        "fun main() {\n" ++
+        "  let out = await inc(1);\n" ++
+        "  _ = out;\n" ++
+        "}\n";
+
+    try runTranspileExpectFailure(allocator, ifilepath, input);
+}
+
+test "let async call requires await during transpile" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_let_async_call_requires_await.fn";
+    const input =
+        "async fun inc(num x) num { ret x + 1; }\n" ++
+        "async fun main() {\n" ++
+        "  let out = inc(1);\n" ++
+        "  _ = out;\n" ++
+        "}\n";
+
+    try runTranspileExpectFailure(allocator, ifilepath, input);
 }
 
 test "async impl method await transpiles and runs" {
