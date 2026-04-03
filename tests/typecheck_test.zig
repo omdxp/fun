@@ -330,6 +330,34 @@ test "typecheck await async quirk nested composite receiver method call is ok" {
     try runTranspileExpectOk(std.testing.allocator, "typecheck_await_async_quirk_nested_receiver_ok.fn", input);
 }
 
+test "typecheck await async quirk generic wrapper receiver method call is ok" {
+    const input =
+        "compound Counter {\n" ++
+        "  num base;\n" ++
+        "}\n" ++
+        "quirk AsyncCounter {\n" ++
+        "  async add(num x) num;\n" ++
+        "}\n" ++
+        "compound Box<T> {\n" ++
+        "  T tag;\n" ++
+        "  AsyncCounter v;\n" ++
+        "}\n" ++
+        "impl Counter as AsyncCounter {\n" ++
+        "  async add(num x) num { ret self.base + x; }\n" ++
+        "}\n" ++
+        "fun pack(AsyncCounter q) Box<num> {\n" ++
+        "  ret Box<num>{ tag = 0, v = q };\n" ++
+        "}\n" ++
+        "async fun main() {\n" ++
+        "  Counter c;\n" ++
+        "  c.base = 1;\n" ++
+        "  AsyncCounter q = &c;\n" ++
+        "  num out = await pack(q).v.add(2);\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_await_async_quirk_generic_wrapper_receiver_ok.fn", input);
+}
+
 test "typecheck quirk async signature mismatch errors" {
     const input =
         "compound Counter {\n" ++
