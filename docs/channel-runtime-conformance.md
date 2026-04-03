@@ -1,6 +1,6 @@
 # Channel Runtime Conformance
 
-This document defines the stabilization gate for std.channel behavior across runtime backend selections.
+This document defines the stabilization gate for std.channel behavior across runtime backend selections and host OS behavior lanes.
 
 ## Scope
 
@@ -10,11 +10,27 @@ The gate focuses on behavior that must remain stable while channel/runtime APIs 
 - Select fairness under sustained ready-state load
 - Timeout behavior under empty-channel waits
 - Cross-backend consistency when selected via environment override
+- Host OS behavior coverage for scheduler/timer/runtime differences
 
 Backends are selected through `FUN_RUNTIME_BACKEND` and validated with both values:
 
 - `posix`
 - `windows`
+
+Host lanes are also validated in CI:
+
+- Linux (`ubuntu-latest`)
+- macOS (`macos-latest`)
+- Windows (`windows-latest`)
+
+## CI Coverage Matrix
+
+| Lane | runs-on | `FUN_RUNTIME_BACKEND` | Purpose |
+| --- | --- | --- | --- |
+| `linux-posix` | `ubuntu-latest` | `posix` | Primary POSIX host behavior + regression gate |
+| `linux-selector-windows` | `ubuntu-latest` | `windows` | Backend selector override parity check |
+| `macos-posix` | `macos-latest` | `posix` | Native macOS scheduler/timer behavior |
+| `windows-native` | `windows-latest` | `windows` | Native Windows scheduler/timer behavior |
 
 ## Compatibility Matrix
 
@@ -49,8 +65,8 @@ A micro-benchmark validates select round-robin fairness and timeout stability:
 - Fairness threshold: `fairness_skew <= 1`
 - Completion threshold: `count_total == 360`
 - Timeout threshold: `timeout_failures == 0` across all timeout rounds
-- Process elapsed budget per backend run: `150ms <= elapsed_ms <= 5000ms`
-- Cross-backend elapsed drift budget: `abs(posix_elapsed_ms - windows_elapsed_ms) <= 800ms`
+- Process elapsed budget per host lane run: `150ms <= elapsed_ms <= 5000ms`
+- Cross-backend elapsed drift budget within a host lane: `abs(posix_elapsed_ms - windows_elapsed_ms) <= 800ms`
 
 ## CI Gate
 
@@ -58,5 +74,7 @@ The tests in tests/codegen_test.zig are the executable gate:
 
 - `std.channel runtime conformance matrix is stable across backend selectors`
 - `std.channel fairness and timeout benchmark stays within backend thresholds`
+
+These gates run in every CI lane from the matrix above.
 
 When these tests fail, treat it as a behavior regression and stabilize before adding new channel/runtime API surface.

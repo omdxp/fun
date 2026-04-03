@@ -3255,7 +3255,9 @@ test "channel pthread close race under contention" {
 
     try compileWithZigCc(allocator, hpath, exe_path);
 
-    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{
+        .{ .key = "FUN_RUNTIME_BACKEND", .value = "posix" },
+    });
     defer allocator.free(stdout);
 
     try std.testing.expectEqualStrings("1|1|1|1", stdout);
@@ -3448,7 +3450,9 @@ test "channel pthread cancelled-token contention is stable" {
 
     try compileWithZigCc(allocator, hpath, exe_path);
 
-    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{
+        .{ .key = "FUN_RUNTIME_BACKEND", .value = "posix" },
+    });
     defer allocator.free(stdout);
 
     try std.testing.expectEqualStrings("1|1|1", stdout);
