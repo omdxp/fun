@@ -233,9 +233,14 @@ pub fun mutex_init(Mutex* mutex) num {
     ret -1;
   }
 
-  Mutex m = mutex[0];
-  num rc = m.init();
-  mutex[0] = m;
+  if mutex.initialized == true {
+    ret 0;
+  }
+
+  num rc = pthread_mutex_init(&mutex.inner, NULL);
+  if rc == 0 {
+    mutex.initialized = true;
+  }
   ret rc;
 }
 
@@ -250,9 +255,14 @@ pub fun mutex_lock(Mutex* mutex) num {
     ret -1;
   }
 
-  Mutex m = mutex[0];
-  num rc = m.lock();
-  mutex[0] = m;
+  if mutex.initialized == false {
+    num init_rc = mutex_init(mutex);
+    if init_rc != 0 {
+      ret init_rc;
+    }
+  }
+
+  num rc = pthread_mutex_lock(&mutex.inner);
   ret rc;
 }
 
@@ -267,9 +277,14 @@ pub fun mutex_try_lock(Mutex* mutex) num {
     ret -1;
   }
 
-  Mutex m = mutex[0];
-  num rc = m.try_lock();
-  mutex[0] = m;
+  if mutex.initialized == false {
+    num init_rc = mutex_init(mutex);
+    if init_rc != 0 {
+      ret init_rc;
+    }
+  }
+
+  num rc = pthread_mutex_trylock(&mutex.inner);
   ret rc;
 }
 
@@ -284,9 +299,11 @@ pub fun mutex_unlock(Mutex* mutex) num {
     ret -1;
   }
 
-  Mutex m = mutex[0];
-  num rc = m.unlock();
-  mutex[0] = m;
+  if mutex.initialized == false {
+    ret 0;
+  }
+
+  num rc = pthread_mutex_unlock(&mutex.inner);
   ret rc;
 }
 
@@ -301,9 +318,14 @@ pub fun mutex_destroy(Mutex* mutex) num {
     ret -1;
   }
 
-  Mutex m = mutex[0];
-  num rc = m.destroy();
-  mutex[0] = m;
+  if mutex.initialized == false {
+    ret 0;
+  }
+
+  num rc = pthread_mutex_destroy(&mutex.inner);
+  if rc == 0 {
+    mutex.initialized = false;
+  }
   ret rc;
 }
 
@@ -318,9 +340,14 @@ pub fun condvar_init(CondVar* cond) num {
     ret -1;
   }
 
-  CondVar c = cond[0];
-  num rc = c.init();
-  cond[0] = c;
+  if cond.initialized == true {
+    ret 0;
+  }
+
+  num rc = pthread_cond_init(&cond.inner, NULL);
+  if rc == 0 {
+    cond.initialized = true;
+  }
   ret rc;
 }
 
@@ -335,9 +362,21 @@ pub fun condvar_wait(CondVar* cond, Mutex* mutex) num {
     ret -1;
   }
 
-  CondVar c = cond[0];
-  num rc = c.wait(mutex);
-  cond[0] = c;
+  if cond.initialized == false {
+    num init_rc = condvar_init(cond);
+    if init_rc != 0 {
+      ret init_rc;
+    }
+  }
+
+  if mutex.initialized == false {
+    num m_rc = mutex_init(mutex);
+    if m_rc != 0 {
+      ret m_rc;
+    }
+  }
+
+  num rc = pthread_cond_wait(&cond.inner, &mutex.inner);
   ret rc;
 }
 
@@ -353,9 +392,25 @@ pub fun condvar_timed_wait(CondVar* cond, Mutex* mutex, raw* abs_time) num {
     ret -1;
   }
 
-  CondVar c = cond[0];
-  num rc = c.timed_wait(mutex, abs_time);
-  cond[0] = c;
+  if abs_time == NULL {
+    ret -2;
+  }
+
+  if cond.initialized == false {
+    num init_rc = condvar_init(cond);
+    if init_rc != 0 {
+      ret init_rc;
+    }
+  }
+
+  if mutex.initialized == false {
+    num m_rc = mutex_init(mutex);
+    if m_rc != 0 {
+      ret m_rc;
+    }
+  }
+
+  num rc = pthread_cond_timedwait(&cond.inner, &mutex.inner, abs_time);
   ret rc;
 }
 
@@ -370,9 +425,11 @@ pub fun condvar_signal(CondVar* cond) num {
     ret -1;
   }
 
-  CondVar c = cond[0];
-  num rc = c.signal();
-  cond[0] = c;
+  if cond.initialized == false {
+    ret 0;
+  }
+
+  num rc = pthread_cond_signal(&cond.inner);
   ret rc;
 }
 
@@ -387,9 +444,11 @@ pub fun condvar_broadcast(CondVar* cond) num {
     ret -1;
   }
 
-  CondVar c = cond[0];
-  num rc = c.broadcast();
-  cond[0] = c;
+  if cond.initialized == false {
+    ret 0;
+  }
+
+  num rc = pthread_cond_broadcast(&cond.inner);
   ret rc;
 }
 
@@ -404,8 +463,13 @@ pub fun condvar_destroy(CondVar* cond) num {
     ret -1;
   }
 
-  CondVar c = cond[0];
-  num rc = c.destroy();
-  cond[0] = c;
+  if cond.initialized == false {
+    ret 0;
+  }
+
+  num rc = pthread_cond_destroy(&cond.inner);
+  if rc == 0 {
+    cond.initialized = false;
+  }
   ret rc;
 }

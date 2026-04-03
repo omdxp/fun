@@ -18,7 +18,11 @@ fn runTranspile(allocator: std.mem.Allocator, input_path: []const u8, input: []c
         try file.writeAll(input);
     }
 
-    var transpile_proc = try codegen.TranspileProcess.init(allocator, input_path, "_ignored.c", .{
+    const out_path = try std.fmt.allocPrint(allocator, "{s}.out.c", .{input_path});
+    defer allocator.free(out_path);
+    defer fs.cwd().deleteFile(out_path) catch {};
+
+    var transpile_proc = try codegen.TranspileProcess.init(allocator, input_path, out_path, .{
         .outf = false,
         .preload_imports = false,
         .preload_std_imports = false,
@@ -66,6 +70,9 @@ fn compileWithZigCc(allocator: std.mem.Allocator, c_path: []const u8, exe_path: 
     switch (result.term) {
         .Exited => |code| {
             if (code != 0) {
+                if (result.stderr.len != 0) {
+                    std.debug.print("{s}\n", .{result.stderr});
+                }
                 return error.CompilationFailed;
             }
         },
@@ -2086,6 +2093,409 @@ test "channel default and cancel select stress stays stable" {
     defer allocator.free(stdout);
 
     try std.testing.expectEqualStrings("1|1", stdout);
+}
+
+test "channel pthread close race under contention" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_channel_thread_close_race.fn";
+    const cpath = "codegen_channel_thread_close_race.c";
+    const hpath = "codegen_channel_thread_close_race_harness.c";
+    const exe_path = if (builtin.os.tag == .windows)
+        "codegen_channel_thread_close_race.exe"
+    else
+        "codegen_channel_thread_close_race";
+
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(cpath) catch {};
+    defer fs.cwd().deleteFile(hpath) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.channel;\n" ++
+        "fun touch() {\n" ++
+        "  Channel<num> ch = channel_new_cap(0, 64);\n" ++
+        "  num out = 0;\n" ++
+        "  _ = ch.try_send(1);\n" ++
+        "  _ = ch.try_recv(&out);\n" ++
+        "  _ = ch.len();\n" ++
+        "  _ = ch.close();\n" ++
+        "  _ = ch.destroy();\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try fs.cwd().createFile(cpath, .{});
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    const harness =
+        "#include \"codegen_channel_thread_close_race.c\"\n" ++
+        "#include <stdatomic.h>\n" ++
+        "#if defined(_WIN32)\n" ++
+        "#include <windows.h>\n" ++
+        "static void spin_pause(void) { Sleep(0); }\n" ++
+        "#else\n" ++
+        "#include <sched.h>\n" ++
+        "static void spin_pause(void) { sched_yield(); }\n" ++
+        "#endif\n" ++
+        "\n" ++
+        "typedef struct {\n" ++
+        "  Channel__num* ch;\n" ++
+        "  _Atomic long long* sends_ok;\n" ++
+        "  _Atomic long long* bad_rc;\n" ++
+        "} SenderCtx;\n" ++
+        "\n" ++
+        "typedef struct {\n" ++
+        "  Channel__num* ch;\n" ++
+        "  _Atomic long long* recvs_ok;\n" ++
+        "  _Atomic long long* bad_rc;\n" ++
+        "} ReceiverCtx;\n" ++
+        "\n" ++
+        "static void* sender_main(void* arg) {\n" ++
+        "  SenderCtx* ctx = (SenderCtx*)arg;\n" ++
+        "  for (long long i = 0; i < 10000; ++i) {\n" ++
+        "    long long rc = Channel__num__try_send(ctx->ch, i);\n" ++
+        "    if (rc == channel_rc_ok()) {\n" ++
+        "      atomic_fetch_add(ctx->sends_ok, 1);\n" ++
+        "      continue;\n" ++
+        "    }\n" ++
+        "    if (rc == channel_rc_full()) {\n" ++
+        "      spin_pause();\n" ++
+        "      continue;\n" ++
+        "    }\n" ++
+        "    if (rc == channel_rc_closed()) {\n" ++
+        "      break;\n" ++
+        "    }\n" ++
+        "    atomic_fetch_add(ctx->bad_rc, 1);\n" ++
+        "    break;\n" ++
+        "  }\n" ++
+        "  return NULL;\n" ++
+        "}\n" ++
+        "\n" ++
+        "static void* receiver_main(void* arg) {\n" ++
+        "  ReceiverCtx* ctx = (ReceiverCtx*)arg;\n" ++
+        "  for (long long i = 0; i < 10000; ++i) {\n" ++
+        "    long long out = 0;\n" ++
+        "    long long rc = Channel__num__try_recv(ctx->ch, &out);\n" ++
+        "    if (rc == channel_rc_ok()) {\n" ++
+        "      atomic_fetch_add(ctx->recvs_ok, 1);\n" ++
+        "      continue;\n" ++
+        "    }\n" ++
+        "    if (rc == channel_rc_empty()) {\n" ++
+        "      spin_pause();\n" ++
+        "      continue;\n" ++
+        "    }\n" ++
+        "    if (rc == channel_rc_closed()) {\n" ++
+        "      break;\n" ++
+        "    }\n" ++
+        "    atomic_fetch_add(ctx->bad_rc, 1);\n" ++
+        "    break;\n" ++
+        "  }\n" ++
+        "  return NULL;\n" ++
+        "}\n" ++
+        "\n" ++
+        "int main(void) {\n" ++
+        "  Channel__num ch = channel_new_cap__num(0, 64);\n" ++
+        "\n" ++
+        "  _Atomic long long sends_ok = 0;\n" ++
+        "  _Atomic long long recvs_ok = 0;\n" ++
+        "  _Atomic long long bad_rc = 0;\n" ++
+        "  _Atomic long long start_err = 0;\n" ++
+        "\n" ++
+        "  enum { N = 1 };\n" ++
+        "  pthread_t senders[N];\n" ++
+        "  pthread_t receivers[N];\n" ++
+        "  int sender_started[N];\n" ++
+        "  int receiver_started[N];\n" ++
+        "  SenderCtx sender_ctx[N];\n" ++
+        "  ReceiverCtx receiver_ctx[N];\n" ++
+        "\n" ++
+        "  for (int i = 0; i < N; ++i) {\n" ++
+        "    sender_started[i] = 0;\n" ++
+        "    receiver_started[i] = 0;\n" ++
+        "\n" ++
+        "    sender_ctx[i].ch = &ch;\n" ++
+        "    sender_ctx[i].sends_ok = &sends_ok;\n" ++
+        "    sender_ctx[i].bad_rc = &bad_rc;\n" ++
+        "\n" ++
+        "    receiver_ctx[i].ch = &ch;\n" ++
+        "    receiver_ctx[i].recvs_ok = &recvs_ok;\n" ++
+        "    receiver_ctx[i].bad_rc = &bad_rc;\n" ++
+        "\n" ++
+        "    long long src = pthread_create(&senders[i], NULL, sender_main, &sender_ctx[i]);\n" ++
+        "    if (src == 0) {\n" ++
+        "      sender_started[i] = 1;\n" ++
+        "    } else {\n" ++
+        "      atomic_fetch_add(&start_err, 1);\n" ++
+        "    }\n" ++
+        "\n" ++
+        "    long long rrc = pthread_create(&receivers[i], NULL, receiver_main, &receiver_ctx[i]);\n" ++
+        "    if (rrc == 0) {\n" ++
+        "      receiver_started[i] = 1;\n" ++
+        "    } else {\n" ++
+        "      atomic_fetch_add(&start_err, 1);\n" ++
+        "    }\n" ++
+        "  }\n" ++
+        "\n" ++
+        "  for (int i = 0; i < N; ++i) {\n" ++
+        "    if (sender_started[i] == 1) {\n" ++
+        "      long long jrc = pthread_join(senders[i], NULL);\n" ++
+        "      if (jrc != 0) {\n" ++
+        "        atomic_fetch_add(&start_err, 1);\n" ++
+        "      }\n" ++
+        "    }\n" ++
+        "  }\n" ++
+        "\n" ++
+        "  for (int i = 0; i < N; ++i) {\n" ++
+        "    if (receiver_started[i] == 1) {\n" ++
+        "      long long jrc = pthread_join(receivers[i], NULL);\n" ++
+        "      if (jrc != 0) {\n" ++
+        "        atomic_fetch_add(&start_err, 1);\n" ++
+        "      }\n" ++
+        "    }\n" ++
+        "  }\n" ++
+        "\n" ++
+        "  long long close_code = Channel__num__close(&ch);\n" ++
+        "\n" ++
+        "  long long sends = atomic_load(&sends_ok);\n" ++
+        "  long long recvs = atomic_load(&recvs_ok);\n" ++
+        "  long long bad = atomic_load(&bad_rc);\n" ++
+        "  long long serr = atomic_load(&start_err);\n" ++
+        "  long long len = Channel__num__len(&ch);\n" ++
+        "\n" ++
+        "  long long ok_close = 0;\n" ++
+        "  if (close_code == channel_rc_ok()) {\n" ++
+        "    ok_close = 1;\n" ++
+        "  }\n" ++
+        "\n" ++
+        "  long long ok_counts = 0;\n" ++
+        "  if (sends >= recvs && (sends - recvs) <= 64) {\n" ++
+        "    ok_counts = 1;\n" ++
+        "  }\n" ++
+        "\n" ++
+        "  long long ok_len = 0;\n" ++
+        "  if (len == (sends - recvs)) {\n" ++
+        "    ok_len = 1;\n" ++
+        "  }\n" ++
+        "\n" ++
+        "  long long ok_bad = 0;\n" ++
+        "  if (bad == 0 && serr == 0) {\n" ++
+        "    ok_bad = 1;\n" ++
+        "  }\n" ++
+        "\n" ++
+        "  printf(\"%lld|%lld|%lld|%lld\", ok_close, ok_counts, ok_len, ok_bad);\n" ++
+        "  (void)Channel__num__destroy(&ch);\n" ++
+        "  return 0;\n" ++
+        "}\n";
+
+    {
+        const h_file = try fs.cwd().createFile(hpath, .{});
+        defer h_file.close();
+        try h_file.writeAll(harness);
+    }
+
+    try compileWithZigCc(allocator, hpath, exe_path);
+
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+
+    try std.testing.expectEqualStrings("1|1|1|1", stdout);
+}
+
+test "channel pthread cancelled-token contention is stable" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_channel_thread_cancel_token_contention.fn";
+    const cpath = "codegen_channel_thread_cancel_token_contention.c";
+    const hpath = "codegen_channel_thread_cancel_token_contention_harness.c";
+    const exe_path = if (builtin.os.tag == .windows)
+        "codegen_channel_thread_cancel_token_contention.exe"
+    else
+        "codegen_channel_thread_cancel_token_contention";
+
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(cpath) catch {};
+    defer fs.cwd().deleteFile(hpath) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.channel;\n" ++
+        "fun touch() {\n" ++
+        "  Channel<num> ch = channel_new_cap(0, 8);\n" ++
+        "  ChannelCancelToken tok = channel_cancel_token_cancelled();\n" ++
+        "  num out = 0;\n" ++
+        "  _ = ch.send_timeout_with_token(1, 0, &tok);\n" ++
+        "  _ = ch.recv_timeout_into_with_token(&out, 0, &tok);\n" ++
+        "  _ = ch.close();\n" ++
+        "  _ = ch.destroy();\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try fs.cwd().createFile(cpath, .{});
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    const harness =
+        "#include \"codegen_channel_thread_cancel_token_contention.c\"\n" ++
+        "#include <stdatomic.h>\n" ++
+        "\n" ++
+        "typedef struct {\n" ++
+        "  Channel__num ch;\n" ++
+        "  ChannelCancelToken token;\n" ++
+        "  _Atomic long long* cancelled;\n" ++
+        "  _Atomic long long* bad_rc;\n" ++
+        "} TokenSenderCtx;\n" ++
+        "\n" ++
+        "typedef struct {\n" ++
+        "  Channel__num ch;\n" ++
+        "  ChannelCancelToken token;\n" ++
+        "  _Atomic long long* cancelled;\n" ++
+        "  _Atomic long long* bad_rc;\n" ++
+        "} TokenReceiverCtx;\n" ++
+        "\n" ++
+        "static void* token_sender_main(void* arg) {\n" ++
+        "  TokenSenderCtx* ctx = (TokenSenderCtx*)arg;\n" ++
+        "  for (long long i = 0; i < 1000; ++i) {\n" ++
+        "    long long rc = Channel__num__send_timeout_with_token(&ctx->ch, i, 0, &ctx->token);\n" ++
+        "    if (rc == channel_rc_cancelled()) {\n" ++
+        "      atomic_fetch_add(ctx->cancelled, 1);\n" ++
+        "      continue;\n" ++
+        "    }\n" ++
+        "    atomic_fetch_add(ctx->bad_rc, 1);\n" ++
+        "    break;\n" ++
+        "  }\n" ++
+        "  return NULL;\n" ++
+        "}\n" ++
+        "\n" ++
+        "static void* token_receiver_main(void* arg) {\n" ++
+        "  TokenReceiverCtx* ctx = (TokenReceiverCtx*)arg;\n" ++
+        "  for (long long i = 0; i < 1000; ++i) {\n" ++
+        "    long long out = 0;\n" ++
+        "    long long rc = Channel__num__recv_timeout_into_with_token(&ctx->ch, &out, 0, &ctx->token);\n" ++
+        "    if (rc == channel_rc_cancelled()) {\n" ++
+        "      atomic_fetch_add(ctx->cancelled, 1);\n" ++
+        "      continue;\n" ++
+        "    }\n" ++
+        "    atomic_fetch_add(ctx->bad_rc, 1);\n" ++
+        "    break;\n" ++
+        "  }\n" ++
+        "  return NULL;\n" ++
+        "}\n" ++
+        "\n" ++
+        "int main(void) {\n" ++
+        "  _Atomic long long send_cancelled = 0;\n" ++
+        "  _Atomic long long recv_cancelled = 0;\n" ++
+        "  _Atomic long long bad_rc = 0;\n" ++
+        "  _Atomic long long start_err = 0;\n" ++
+        "\n" ++
+        "  enum { N = 6 };\n" ++
+        "  enum { ITERS = 1000 };\n" ++
+        "\n" ++
+        "  pthread_t senders[N];\n" ++
+        "  pthread_t receivers[N];\n" ++
+        "  int sender_started[N];\n" ++
+        "  int receiver_started[N];\n" ++
+        "  TokenSenderCtx sender_ctx[N];\n" ++
+        "  TokenReceiverCtx receiver_ctx[N];\n" ++
+        "\n" ++
+        "  for (int i = 0; i < N; ++i) {\n" ++
+        "    sender_started[i] = 0;\n" ++
+        "    receiver_started[i] = 0;\n" ++
+        "\n" ++
+        "    sender_ctx[i].ch = channel_new_cap__num(0, 8);\n" ++
+        "    sender_ctx[i].token = channel_cancel_token_cancelled();\n" ++
+        "    sender_ctx[i].cancelled = &send_cancelled;\n" ++
+        "    sender_ctx[i].bad_rc = &bad_rc;\n" ++
+        "\n" ++
+        "    receiver_ctx[i].ch = channel_new_cap__num(0, 8);\n" ++
+        "    receiver_ctx[i].token = channel_cancel_token_cancelled();\n" ++
+        "    receiver_ctx[i].cancelled = &recv_cancelled;\n" ++
+        "    receiver_ctx[i].bad_rc = &bad_rc;\n" ++
+        "\n" ++
+        "    long long src = pthread_create(&senders[i], NULL, token_sender_main, &sender_ctx[i]);\n" ++
+        "    if (src == 0) {\n" ++
+        "      sender_started[i] = 1;\n" ++
+        "    } else {\n" ++
+        "      atomic_fetch_add(&start_err, 1);\n" ++
+        "    }\n" ++
+        "\n" ++
+        "    long long rrc = pthread_create(&receivers[i], NULL, token_receiver_main, &receiver_ctx[i]);\n" ++
+        "    if (rrc == 0) {\n" ++
+        "      receiver_started[i] = 1;\n" ++
+        "    } else {\n" ++
+        "      atomic_fetch_add(&start_err, 1);\n" ++
+        "    }\n" ++
+        "  }\n" ++
+        "\n" ++
+        "  for (int i = 0; i < N; ++i) {\n" ++
+        "    if (sender_started[i] == 1) {\n" ++
+        "      long long jrc = pthread_join(senders[i], NULL);\n" ++
+        "      if (jrc != 0) {\n" ++
+        "        atomic_fetch_add(&start_err, 1);\n" ++
+        "      }\n" ++
+        "    }\n" ++
+        "  }\n" ++
+        "\n" ++
+        "  for (int i = 0; i < N; ++i) {\n" ++
+        "    if (receiver_started[i] == 1) {\n" ++
+        "      long long jrc = pthread_join(receivers[i], NULL);\n" ++
+        "      if (jrc != 0) {\n" ++
+        "        atomic_fetch_add(&start_err, 1);\n" ++
+        "      }\n" ++
+        "    }\n" ++
+        "  }\n" ++
+        "\n" ++
+        "  for (int i = 0; i < N; ++i) {\n" ++
+        "    (void)Channel__num__close(&sender_ctx[i].ch);\n" ++
+        "    (void)Channel__num__destroy(&sender_ctx[i].ch);\n" ++
+        "    (void)Channel__num__close(&receiver_ctx[i].ch);\n" ++
+        "    (void)Channel__num__destroy(&receiver_ctx[i].ch);\n" ++
+        "  }\n" ++
+        "\n" ++
+        "  long long sc = atomic_load(&send_cancelled);\n" ++
+        "  long long rc = atomic_load(&recv_cancelled);\n" ++
+        "  long long bad = atomic_load(&bad_rc);\n" ++
+        "  long long serr = atomic_load(&start_err);\n" ++
+        "\n" ++
+        "  long long expected = (long long)N * (long long)ITERS;\n" ++
+        "\n" ++
+        "  long long ok_send = 0;\n" ++
+        "  if (sc == expected) {\n" ++
+        "    ok_send = 1;\n" ++
+        "  }\n" ++
+        "\n" ++
+        "  long long ok_recv = 0;\n" ++
+        "  if (rc == expected) {\n" ++
+        "    ok_recv = 1;\n" ++
+        "  }\n" ++
+        "\n" ++
+        "  long long ok_bad = 0;\n" ++
+        "  if (bad == 0 && serr == 0) {\n" ++
+        "    ok_bad = 1;\n" ++
+        "  }\n" ++
+        "\n" ++
+        "  printf(\"%lld|%lld|%lld\", ok_send, ok_recv, ok_bad);\n" ++
+        "  return 0;\n" ++
+        "}\n";
+
+    {
+        const h_file = try fs.cwd().createFile(hpath, .{});
+        defer h_file.close();
+        try h_file.writeAll(harness);
+    }
+
+    try compileWithZigCc(allocator, hpath, exe_path);
+
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+
+    try std.testing.expectEqualStrings("1|1|1", stdout);
 }
 
 test "generic function specialization emits concrete names" {

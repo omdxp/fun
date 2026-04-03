@@ -54,6 +54,12 @@ pub fun channel_new<T>(T default_value) Channel<T> {
   ch.can_send = runtime_condvar_new();
   ch.can_recv = runtime_condvar_new();
 
+  // Eagerly initialize synchronization primitives before sharing the channel.
+  // This avoids racy first-use init under heavy multi-thread contention.
+  _ = runtime_mutex_init(&ch.mu);
+  _ = runtime_condvar_init(&ch.can_send);
+  _ = runtime_condvar_init(&ch.can_recv);
+
   ch.cap = 1;
   ch.has_buffer = false;
   ch.head = 0;
@@ -90,6 +96,12 @@ pub fun channel_new_cap<T>(T default_value, num capacity) Channel<T> {
   ch.mu = runtime_mutex_new();
   ch.can_send = runtime_condvar_new();
   ch.can_recv = runtime_condvar_new();
+
+  // Eagerly initialize synchronization primitives before sharing the channel.
+  // This avoids racy first-use init under heavy multi-thread contention.
+  _ = runtime_mutex_init(&ch.mu);
+  _ = runtime_condvar_init(&ch.can_send);
+  _ = runtime_condvar_init(&ch.can_recv);
 
   ch.cap = capacity;
   ch.has_buffer = false;
@@ -407,6 +419,12 @@ impl Channel<T> {
   pub init() num {
     if self.has_buffer == false {
       ret channel_rc_alloc_failed();
+    }
+
+    if self.mu.initialized == true && self.can_send.initialized == true && self.can_recv.initialized == true {
+      self.select_wait_slice_ms = channel_sanitize_wait_slice_ms(self.select_wait_slice_ms);
+      self.select_wait_backoff_steps = channel_sanitize_backoff_steps(self.select_wait_backoff_steps);
+      ret channel_rc_ok();
     }
 
     num rc = runtime_mutex_init(&self.mu);
