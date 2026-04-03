@@ -12,7 +12,7 @@
 
 (defconst fun-keywords
   '("imp" "as" "pub" "fun" "compound" "quirk" "impl" "enum" "asm" "volatile" "arch"
-    "defer" "ret" "if" "elif" "else" "for" "fit" "break" "continue" "assert" "allow" "expect" "let"))
+    "defer" "ret" "if" "elif" "else" "for" "fit" "async" "await" "break" "continue" "assert" "allow" "expect" "let"))
 
 (defconst fun-types
   '("void" "raw" "num" "dec" "f32" "f64" "str" "bin" "chr"))

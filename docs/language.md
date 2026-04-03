@@ -14,6 +14,7 @@
     - Quirk implementation: `impl Rectangle as Shape { ... }`
     - Plain compound methods: `impl Point { ... }`
 - **Pattern Matching**: `fit x { ... }` for value-based branching.
+- **Async/Await**: Async functions are declared with `async fun ...`; async calls must be awaited with `await` inside async functions.
 - **Comments**: Use `//` for single-line comments.
 
 ### Types
@@ -107,6 +108,34 @@
 - **No Nested Functions**: Functions cannot be declared inside other functions.
 - **Generic Functions**: `fun id<T>(T x) T { ret x; }`
     - Type arguments are inferred from call sites: `num v = id(1);`.
+
+### Async / Await
+- **Async function declaration**: `async fun name(args) type { ... }`
+- **Await usage**: `await` is valid only inside an `async fun` body.
+- **Required await**: Calls to async functions and async quirk methods must be awaited.
+- **Await target**: The awaited expression must resolve to an async call.
+
+Example:
+```fun
+compound Counter {
+    num base;
+}
+
+quirk AsyncCounter {
+    async add(num x) num;
+}
+
+impl Counter as AsyncCounter {
+    async add(num x) num { ret self.base + x; }
+}
+
+async fun main() {
+    Counter c;
+    c.base = 41;
+    num out = await c.add(1);
+    _ = out;
+}
+```
 
 ### Compounds & Quirks
 - **Compounds**: Like C structs, can have methods via `impl`.

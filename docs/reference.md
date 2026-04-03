@@ -228,6 +228,33 @@ fun main() {
 }
 ```
 
+## Async / Await
+- Declare async functions with `async fun`.
+- `await` is only valid inside `async fun` bodies.
+- Calls to async functions and async quirk methods must be awaited.
+- Await targets must resolve to async calls.
+
+```fun
+compound Counter {
+  num base;
+}
+
+quirk AsyncCounter {
+  async add(num x) num;
+}
+
+impl Counter as AsyncCounter {
+  async add(num x) num { ret self.base + x; }
+}
+
+async fun main() {
+  Counter c;
+  c.base = 41;
+  num out = await c.add(1);
+  _ = out;
+}
+```
+
 ## Control Flow
 ### If / Elif / Else
 ```fun

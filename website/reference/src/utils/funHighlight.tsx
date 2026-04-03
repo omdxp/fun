@@ -19,6 +19,8 @@ const FUN_KEYWORDS = [
   "fit",
   "ret",
   "for",
+  "async",
+  "await",
   "break",
   "continue",
   "defer",
