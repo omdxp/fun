@@ -7872,17 +7872,40 @@ pub const TranspileProcess = struct {
         }
     }
 
-    fn append_mangled_type(self: *Self, buf: *std.ArrayList(u8), dt: *const dtype.DataType) TranspileError!void {
+    fn append_mangled_type_depth(self: *Self, buf: *std.ArrayList(u8), dt: *const dtype.DataType, depth: usize) TranspileError!void {
+        const max_depth: usize = 32;
+        const max_segment_len: usize = 256;
+        const max_total_len: usize = 8192;
+
+        // Guard against malformed/cyclic dtype graphs that would recurse forever.
+        if (depth > max_depth) {
+            return TranspileError.TypeMismatch;
+        }
         if (dt.type_str.items.len > 0 and @intFromPtr(dt.type_str.items.ptr) == 0) {
             return TranspileError.TypeMismatch;
         }
+
+        if (dt.type_str.items.len > max_segment_len) {
+            return TranspileError.TypeMismatch;
+        }
+        if (buf.items.len >= max_total_len or dt.type_str.items.len > (max_total_len - buf.items.len)) {
+            return TranspileError.TypeMismatch;
+        }
+
         buf.appendSlice(dt.type_str.items) catch return TranspileError.MemoryAllocationFailed;
         if (dt.generic_args) |gargs| {
             for (gargs.items()) |ga| {
+                if (buf.items.len + 2 > max_total_len) {
+                    return TranspileError.TypeMismatch;
+                }
                 buf.appendSlice("__") catch return TranspileError.MemoryAllocationFailed;
-                try self.append_mangled_type(buf, ga);
+                try self.append_mangled_type_depth(buf, ga, depth + 1);
             }
         }
+    }
+
+    fn append_mangled_type(self: *Self, buf: *std.ArrayList(u8), dt: *const dtype.DataType) TranspileError!void {
+        try self.append_mangled_type_depth(buf, dt, 0);
     }
 
     fn type_name_mangled(self: *Self, dt: *const dtype.DataType) TranspileError![]const u8 {
@@ -7892,23 +7915,52 @@ pub const TranspileProcess = struct {
         return buf.toOwnedSlice() catch return TranspileError.MemoryAllocationFailed;
     }
 
-    fn append_mangled_type_with_subst(self: *Self, buf: *std.ArrayList(u8), dt: *const dtype.DataType, params: utils.Vector(std.ArrayList(u8)), args: []*dtype.DataType) TranspileError!void {
+    fn append_mangled_type_with_subst_depth(
+        self: *Self,
+        buf: *std.ArrayList(u8),
+        dt: *const dtype.DataType,
+        params: utils.Vector(std.ArrayList(u8)),
+        args: []*dtype.DataType,
+        depth: usize,
+    ) TranspileError!void {
+        const max_depth: usize = 32;
+        const max_segment_len: usize = 256;
+        const max_total_len: usize = 8192;
+
+        // Guard against malformed/cyclic dtype graphs that would recurse forever.
+        if (depth > max_depth) {
+            return TranspileError.TypeMismatch;
+        }
         if ((dt.type == null or dt.type == .Unknown) and dt.type_str.items.len > 0) {
             for (params.items(), 0..) |p, i| {
                 if (mem.eql(u8, p.items, dt.type_str.items)) {
-                    try self.append_mangled_type(buf, args[i]);
+                    try self.append_mangled_type_depth(buf, args[i], depth + 1);
                     return;
                 }
             }
         }
 
+        if (dt.type_str.items.len > max_segment_len) {
+            return TranspileError.TypeMismatch;
+        }
+        if (buf.items.len >= max_total_len or dt.type_str.items.len > (max_total_len - buf.items.len)) {
+            return TranspileError.TypeMismatch;
+        }
+
         buf.appendSlice(dt.type_str.items) catch return TranspileError.MemoryAllocationFailed;
         if (dt.generic_args) |gargs| {
             for (gargs.items()) |ga| {
+                if (buf.items.len + 2 > max_total_len) {
+                    return TranspileError.TypeMismatch;
+                }
                 buf.appendSlice("__") catch return TranspileError.MemoryAllocationFailed;
-                try self.append_mangled_type_with_subst(buf, ga, params, args);
+                try self.append_mangled_type_with_subst_depth(buf, ga, params, args, depth + 1);
             }
         }
+    }
+
+    fn append_mangled_type_with_subst(self: *Self, buf: *std.ArrayList(u8), dt: *const dtype.DataType, params: utils.Vector(std.ArrayList(u8)), args: []*dtype.DataType) TranspileError!void {
+        try self.append_mangled_type_with_subst_depth(buf, dt, params, args, 0);
     }
 
     fn type_name_mangled_with_subst(self: *Self, dt: *const dtype.DataType, params: utils.Vector(std.ArrayList(u8)), args: []*dtype.DataType) TranspileError![]const u8 {

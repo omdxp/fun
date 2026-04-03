@@ -1,0 +1,33 @@
+imp std.c.io;
+
+compound Counter {
+  num base;
+}
+
+quirk AsyncCounter {
+  async add(num x) num;
+}
+
+compound Holder {
+  AsyncCounter q;
+}
+
+compound Wrap {
+  Holder h;
+}
+
+impl Counter as AsyncCounter {
+  async add(num x) num { ret self.base + x; }
+}
+
+fun wrap(AsyncCounter q) Wrap {
+  ret Wrap{ h = Holder{ q = q } };
+}
+
+async fun main() {
+  Counter c;
+  c.base = 41;
+  AsyncCounter q = &c;
+  num out = await wrap(q).h.q.add(1);
+  printf("%lld\n", out);
+}

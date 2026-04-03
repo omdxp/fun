@@ -637,6 +637,212 @@ test "async quirk generic wrapper receiver await transpiles and runs" {
     try std.testing.expectEqualStrings("42", stdout);
 }
 
+test "async quirk parenthesized generic receiver await transpiles and runs" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_async_quirk_paren_generic_receiver_await.fn";
+    const c_path = "codegen_async_quirk_paren_generic_receiver_await.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_async_quirk_paren_generic_receiver_await.exe" else "codegen_async_quirk_paren_generic_receiver_await";
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(c_path) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.c.io;\n" ++
+        "compound Counter {\n" ++
+        "  num base;\n" ++
+        "}\n" ++
+        "quirk AsyncCounter {\n" ++
+        "  async add(num x) num;\n" ++
+        "}\n" ++
+        "compound Box<T> {\n" ++
+        "  T v;\n" ++
+        "}\n" ++
+        "impl Counter as AsyncCounter {\n" ++
+        "  async add(num x) num { ret self.base + x; }\n" ++
+        "}\n" ++
+        "fun pack(AsyncCounter q) Box<AsyncCounter> {\n" ++
+        "  ret Box<AsyncCounter>{ v = q };\n" ++
+        "}\n" ++
+        "async fun main() {\n" ++
+        "  Counter c;\n" ++
+        "  c.base = 41;\n" ++
+        "  AsyncCounter q = &c;\n" ++
+        "  num out = await (pack(q).v).add(1);\n" ++
+        "  printf(\"%lld\", out);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, ".vtable->add(") != null);
+
+    {
+        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("42", stdout);
+}
+
+test "async quirk pointer generic receiver await transpiles and runs" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_async_quirk_ptr_generic_receiver_await.fn";
+    const c_path = "codegen_async_quirk_ptr_generic_receiver_await.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_async_quirk_ptr_generic_receiver_await.exe" else "codegen_async_quirk_ptr_generic_receiver_await";
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(c_path) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.c.io;\n" ++
+        "compound Counter {\n" ++
+        "  num base;\n" ++
+        "}\n" ++
+        "quirk AsyncCounter {\n" ++
+        "  async add(num x) num;\n" ++
+        "}\n" ++
+        "compound Box<T> {\n" ++
+        "  T v;\n" ++
+        "}\n" ++
+        "impl Counter as AsyncCounter {\n" ++
+        "  async add(num x) num { ret self.base + x; }\n" ++
+        "}\n" ++
+        "fun ptr(Box<AsyncCounter>* b) Box<AsyncCounter>* {\n" ++
+        "  ret b;\n" ++
+        "}\n" ++
+        "async fun main() {\n" ++
+        "  Counter c;\n" ++
+        "  c.base = 41;\n" ++
+        "  AsyncCounter q = &c;\n" ++
+        "  Box<AsyncCounter> b = Box<AsyncCounter>{ v = q };\n" ++
+        "  num out = await (*ptr(&b)).v.add(1);\n" ++
+        "  printf(\"%lld\", out);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, ".vtable->add(") != null);
+
+    {
+        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("42", stdout);
+}
+
+test "async quirk indexed generic receiver await transpiles and runs" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_async_quirk_indexed_generic_receiver_await.fn";
+    const c_path = "codegen_async_quirk_indexed_generic_receiver_await.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_async_quirk_indexed_generic_receiver_await.exe" else "codegen_async_quirk_indexed_generic_receiver_await";
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(c_path) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.c.io;\n" ++
+        "compound Counter {\n" ++
+        "  num base;\n" ++
+        "}\n" ++
+        "quirk AsyncCounter {\n" ++
+        "  async add(num x) num;\n" ++
+        "}\n" ++
+        "impl Counter as AsyncCounter {\n" ++
+        "  async add(num x) num { ret self.base + x; }\n" ++
+        "}\n" ++
+        "Counter[] counters = [Counter{ base = 40 }, Counter{ base = 41 }];\n" ++
+        "async fun main() {\n" ++
+        "  Counter picked = counters[1];\n" ++
+        "  num out = await picked.add(1);\n" ++
+        "  printf(\"%lld\", out);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Counter__AsyncCounter__add") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "[1]") != null);
+
+    {
+        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("42", stdout);
+}
+
+test "aliased module async quirk generic receiver await transpiles and runs" {
+    const allocator = std.testing.allocator;
+    const mod_path = "codegen_alias_async_quirk_mod.fn";
+    const main_path = "codegen_alias_async_quirk_main.fn";
+    const c_path = "codegen_alias_async_quirk_main.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_alias_async_quirk_main.exe" else "codegen_alias_async_quirk_main";
+    defer fs.cwd().deleteFile(mod_path) catch {};
+    defer fs.cwd().deleteFile(main_path) catch {};
+    defer fs.cwd().deleteFile(c_path) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    {
+        const mod_file = try fs.cwd().createFile(mod_path, .{ .read = true });
+        defer mod_file.close();
+        try mod_file.writeAll(
+            "pub compound Counter {\n" ++
+                "  num base;\n" ++
+                "}\n" ++
+                "pub quirk AsyncCounter {\n" ++
+                "  async add(num x) num;\n" ++
+                "}\n" ++
+                "impl Counter as AsyncCounter {\n" ++
+                "  async add(num x) num { ret self.base + x; }\n" ++
+                "}\n" ++
+                "pub fun to_async(Counter* c) AsyncCounter {\n" ++
+                "  ret c;\n" ++
+                "}\n",
+        );
+    }
+
+    const input =
+        "imp std.c.io;\n" ++
+        "imp codegen_alias_async_quirk_mod as m;\n" ++
+        "async fun main() {\n" ++
+        "  m.Counter c;\n" ++
+        "  c.base = 41;\n" ++
+        "  num out = await (m.to_async(&c)).add(1);\n" ++
+        "  printf(\"%lld\", out);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, main_path, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, ".vtable->add(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "m__to_async") != null);
+
+    {
+        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("42", stdout);
+}
+
 test "function definitions can be out of order (prototypes emitted)" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_fn_prototype_order.fn";

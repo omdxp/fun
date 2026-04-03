@@ -357,6 +357,73 @@ test "typecheck await async quirk generic wrapper receiver method call is ok" {
     try runTranspileExpectOk(std.testing.allocator, "typecheck_await_async_quirk_generic_wrapper_receiver_ok.fn", input);
 }
 
+test "typecheck generic wrapper non-quirk receiver method call errors" {
+    const input =
+        "compound Box<T> {\n" ++
+        "  T v;\n" ++
+        "}\n" ++
+        "async fun main() {\n" ++
+        "  Box<num> b = Box<num>{ v = 1 };\n" ++
+        "  num out = await b.v.add(2);\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_generic_wrapper_non_quirk_receiver_err.fn", input);
+}
+
+test "typecheck generic wrapper async receiver call requires await" {
+    const input =
+        "compound Counter {\n" ++
+        "  num base;\n" ++
+        "}\n" ++
+        "quirk AsyncCounter {\n" ++
+        "  async add(num x) num;\n" ++
+        "}\n" ++
+        "compound Box<T> {\n" ++
+        "  T v;\n" ++
+        "}\n" ++
+        "impl Counter as AsyncCounter {\n" ++
+        "  async add(num x) num { ret self.base + x; }\n" ++
+        "}\n" ++
+        "fun pack(AsyncCounter q) Box<AsyncCounter> {\n" ++
+        "  ret Box<AsyncCounter>{ v = q };\n" ++
+        "}\n" ++
+        "async fun main() {\n" ++
+        "  Counter c;\n" ++
+        "  c.base = 1;\n" ++
+        "  AsyncCounter q = &c;\n" ++
+        "  num out = pack(q).v.add(2);\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_generic_wrapper_async_call_requires_await.fn", input);
+}
+
+test "typecheck generic wrapper await non-async receiver errors" {
+    const input =
+        "compound Counter {\n" ++
+        "  num base;\n" ++
+        "}\n" ++
+        "quirk CounterOps {\n" ++
+        "  add(num x) num;\n" ++
+        "}\n" ++
+        "compound Box<T> {\n" ++
+        "  T v;\n" ++
+        "}\n" ++
+        "impl Counter as CounterOps {\n" ++
+        "  add(num x) num { ret self.base + x; }\n" ++
+        "}\n" ++
+        "fun pack(CounterOps q) Box<CounterOps> {\n" ++
+        "  ret Box<CounterOps>{ v = q };\n" ++
+        "}\n" ++
+        "async fun main() {\n" ++
+        "  Counter c;\n" ++
+        "  c.base = 1;\n" ++
+        "  CounterOps q = &c;\n" ++
+        "  num out = await pack(q).v.add(2);\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_generic_wrapper_await_non_async_err.fn", input);
+}
+
 test "typecheck quirk async signature mismatch errors" {
     const input =
         "compound Counter {\n" ++

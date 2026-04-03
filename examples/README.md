@@ -42,6 +42,12 @@ zig-out/bin/fun -in examples/<example>.fn
 - advanced/asm_basic.fn
 - advanced/asm_operands.fn
 - advanced/asm_arch_specific.fn
+- advanced/async_quirk_await_function_receiver.fn
+- advanced/async_quirk_await_generic_wrapper.fn
+- advanced/async_quirk_await_indexed_receiver.fn
+- advanced/async_quirk_await_nested_receiver.fn
+- advanced/async_quirk_await_parenthesized_receiver.fn
+- advanced/async_quirk_await_pointer_receiver.fn
 - advanced/channel_buffered.fn
 - advanced/channel_select2.fn
 - advanced/channel_select3_rr.fn
@@ -56,6 +62,7 @@ zig-out/bin/fun -in examples/<example>.fn
 ## Imports
 - imports/main.fn
 - imports/alias_collision/main.fn
+- imports/async_quirk_alias/main.fn
 - imports/alias_module_scope.fn
 - imports/nested/deep_import.fn
 - imports/relative/parent.fn

@@ -1,0 +1,27 @@
+imp std.c.io;
+
+compound Counter {
+  num base;
+}
+
+quirk AsyncCounter {
+  async add(num x) num;
+}
+
+impl Counter as AsyncCounter {
+  async add(num x) num {
+    ret self.base + x;
+  }
+}
+
+fun passthrough(AsyncCounter q) AsyncCounter {
+  ret q;
+}
+
+async fun main() {
+  Counter c;
+  c.base = 41;
+  AsyncCounter q = &c;
+  num out = await passthrough(q).add(1);
+  printf("%lld\n", out);
+}

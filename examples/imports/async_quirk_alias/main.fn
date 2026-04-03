@@ -1,0 +1,9 @@
+imp std.c.io;
+imp mod as m;
+
+async fun main() {
+  m.Counter c;
+  c.base = 41;
+  num out = await (m.to_async(&c)).add(1);
+  printf("%lld\n", out);
+}

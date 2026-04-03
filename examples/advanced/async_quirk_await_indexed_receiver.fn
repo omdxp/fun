@@ -1,0 +1,25 @@
+imp std.c.io;
+
+compound Counter {
+  num base;
+}
+
+quirk AsyncCounter {
+  async add(num x) num;
+}
+
+compound Box<T> {
+  T v;
+}
+
+impl Counter as AsyncCounter {
+  async add(num x) num { ret self.base + x; }
+}
+
+Counter[] counters = [Counter{ base = 40 }, Counter{ base = 41 }];
+
+async fun main() {
+  Counter picked = counters[1];
+  num out = await picked.add(1);
+  printf("%lld\n", out);
+}
