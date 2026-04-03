@@ -3,18 +3,18 @@ imp std.channel;
 
 fun main() {
   Channel<num> ch = channel_new_cap(0, 1);
+  ChannelCancelToken token = channel_cancel_token_new();
 
-  num cancel = 0;
   num out = 0;
 
-  num rc1 = ch.send_with_cancel(5, &cancel);
-  num rc2 = ch.recv_into_with_cancel(&out, &cancel);
+  num rc1 = ch.send_with_token(5, &token);
+  num rc2 = ch.recv_into_with_token(&out, &token);
 
-  cancel = 1;
+  _ = channel_cancel_token_cancel(&token);
   _ = ch.send(1);
-  num rc3 = ch.send_timeout_with_cancel(2, 10, &cancel);
+  num rc3 = ch.send_timeout_with_token(2, 10, &token);
   _ = ch.recv_into(&out);
-  num rc4 = ch.recv_timeout_into_with_cancel(&out, 10, &cancel);
+  num rc4 = ch.recv_timeout_into_with_token(&out, 10, &token);
 
   num ok_send = 0;
   if rc1 == channel_rc_ok() {

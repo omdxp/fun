@@ -274,6 +274,59 @@ fun channel_is_cancelled(num* cancel_flag) bin {
   ret cancel_flag[0] != 0;
 }
 
+// Dedicated cancellation token for channel APIs.
+pub compound ChannelCancelToken {
+  num flag;
+}
+
+// Create a non-cancelled channel token.
+pub fun channel_cancel_token_new() ChannelCancelToken {
+  ChannelCancelToken token;
+  token.flag = 0;
+  ret token;
+}
+
+// Create an already-cancelled channel token.
+pub fun channel_cancel_token_cancelled() ChannelCancelToken {
+  ChannelCancelToken token;
+  token.flag = 1;
+  ret token;
+}
+
+// Set cancellation state to cancelled.
+pub fun channel_cancel_token_cancel(ChannelCancelToken* token) num {
+  if token == NULL {
+    ret channel_rc_null_arg();
+  }
+  token.flag = 1;
+  ret channel_rc_ok();
+}
+
+// Set cancellation state to not-cancelled.
+pub fun channel_cancel_token_reset(ChannelCancelToken* token) num {
+  if token == NULL {
+    ret channel_rc_null_arg();
+  }
+  token.flag = 0;
+  ret channel_rc_ok();
+}
+
+// Read cancellation state.
+pub fun channel_cancel_token_is_cancelled(ChannelCancelToken* token) bin {
+  if token == NULL {
+    ret false;
+  }
+  ret token.flag != 0;
+}
+
+// Convert optional token pointer into optional raw cancellation flag pointer.
+fun channel_cancel_token_flag_ptr(ChannelCancelToken* token) num* {
+  if token == NULL {
+    ret NULL;
+  }
+  ret &token.flag;
+}
+
 // Shared channel return codes exposed as helpers.
 // 
 // Note:
@@ -577,6 +630,22 @@ impl Channel<T> {
     ret self.send_timeout_with_cancel(value, -1, cancel_flag);
   }
 
+  // Send one value, blocking up to timeout_ms while full, with optional token cancellation.
+  // 
+  // Returns:
+  // - same return codes as send_timeout_with_cancel
+  pub send_timeout_with_token(T value, num timeout_ms, ChannelCancelToken* cancel_token) num {
+    ret self.send_timeout_with_cancel(value, timeout_ms, channel_cancel_token_flag_ptr(cancel_token));
+  }
+
+  // Send one value, waiting forever while full, with optional token cancellation.
+  // 
+  // Returns:
+  // - same return codes as send_with_cancel
+  pub send_with_token(T value, ChannelCancelToken* cancel_token) num {
+    ret self.send_with_cancel(value, channel_cancel_token_flag_ptr(cancel_token));
+  }
+
   // Try sending one value without blocking.
   // 
   // Returns:
@@ -822,6 +891,24 @@ impl Channel<T> {
     ret self.recv_timeout_into_with_cancel(out, -1, cancel_flag);
   }
 
+  // Receive one value into out, blocking up to timeout_ms while empty,
+  // with optional token cancellation.
+  // 
+  // Returns:
+  // - same return codes as recv_timeout_into_with_cancel
+  pub recv_timeout_into_with_token(T* out, num timeout_ms, ChannelCancelToken* cancel_token) num {
+    ret self.recv_timeout_into_with_cancel(out, timeout_ms, channel_cancel_token_flag_ptr(cancel_token));
+  }
+
+  // Receive one value into out, waiting forever while empty,
+  // with optional token cancellation.
+  // 
+  // Returns:
+  // - same return codes as recv_into_with_cancel
+  pub recv_into_with_token(T* out, ChannelCancelToken* cancel_token) num {
+    ret self.recv_into_with_cancel(out, channel_cancel_token_flag_ptr(cancel_token));
+  }
+
   // Receive one value, blocking up to timeout_ms while empty.
   // 
   // Returns:
@@ -857,6 +944,24 @@ impl Channel<T> {
   // - zeroed value when closed/cancelled/sync error occurs
   pub recv_with_cancel(num* cancel_flag) T {
     ret self.recv_timeout_with_cancel(-1, cancel_flag);
+  }
+
+  // Receive one value, blocking up to timeout_ms while empty,
+  // with optional token cancellation.
+  // 
+  // Returns:
+  // - same return behavior as recv_timeout_with_cancel
+  pub recv_timeout_with_token(num timeout_ms, ChannelCancelToken* cancel_token) T {
+    ret self.recv_timeout_with_cancel(timeout_ms, channel_cancel_token_flag_ptr(cancel_token));
+  }
+
+  // Receive one value, waiting forever while empty,
+  // with optional token cancellation.
+  // 
+  // Returns:
+  // - same return behavior as recv_with_cancel
+  pub recv_with_token(ChannelCancelToken* cancel_token) T {
+    ret self.recv_with_cancel(channel_cancel_token_flag_ptr(cancel_token));
   }
 
   // Try receiving one value without blocking.
@@ -1186,6 +1291,15 @@ impl Channel<T> {
   }
 
   // Receive from self or another channel, polling until timeout, with
+  // explicit wait tuning and optional token cancellation.
+  // 
+  // Returns:
+  // - same return codes as select_recv_timeout_with_tuning_cancel
+  pub select_recv_timeout_with_tuning_token(Channel<T>* other, T* out, num* out_index, num timeout_ms, num wait_slice_ms, num backoff_steps, ChannelCancelToken* cancel_token) num {
+    ret self.select_recv_timeout_with_tuning_cancel(other, out, out_index, timeout_ms, wait_slice_ms, backoff_steps, channel_cancel_token_flag_ptr(cancel_token));
+  }
+
+  // Receive from self or another channel, polling until timeout, with
   // optional cancellation and default wait tuning.
   // 
   // Returns:
@@ -1199,6 +1313,15 @@ impl Channel<T> {
     ret self.select_recv_timeout_with_tuning_cancel(other, out, out_index, timeout_ms, self.select_wait_slice_ms, self.select_wait_backoff_steps, cancel_flag);
   }
 
+  // Receive from self or another channel, polling until timeout,
+  // with optional token cancellation and default wait tuning.
+  // 
+  // Returns:
+  // - same return codes as select_recv_timeout_with_cancel
+  pub select_recv_timeout_with_token(Channel<T>* other, T* out, num* out_index, num timeout_ms, ChannelCancelToken* cancel_token) num {
+    ret self.select_recv_timeout_with_cancel(other, out, out_index, timeout_ms, channel_cancel_token_flag_ptr(cancel_token));
+  }
+
   // Receive from self or another channel, polling until one is ready,
   // with optional cancellation and default wait tuning.
   // 
@@ -1210,6 +1333,15 @@ impl Channel<T> {
   // - other nonzero codes on synchronization failures
   pub select_recv_with_cancel(Channel<T>* other, T* out, num* out_index, num* cancel_flag) num {
     ret self.select_recv_timeout_with_tuning_cancel(other, out, out_index, -1, self.select_wait_slice_ms, self.select_wait_backoff_steps, cancel_flag);
+  }
+
+  // Receive from self or another channel, polling until one is ready,
+  // with optional token cancellation and default wait tuning.
+  // 
+  // Returns:
+  // - same return codes as select_recv_with_cancel
+  pub select_recv_with_token(Channel<T>* other, T* out, num* out_index, ChannelCancelToken* cancel_token) num {
+    ret self.select_recv_with_cancel(other, out, out_index, channel_cancel_token_flag_ptr(cancel_token));
   }
 
   // Receive from self or another channel, polling until one is ready.
@@ -1520,6 +1652,15 @@ impl Channel<T> {
   }
 
   // Receive from self + two other channels, polling until timeout, with
+  // fairness rotation, explicit wait tuning, and optional token cancellation.
+  // 
+  // Returns:
+  // - same return codes as select_recv_timeout3_rr_with_tuning_cancel
+  pub select_recv_timeout3_rr_with_tuning_token(Channel<T>* other_a, Channel<T>* other_b, num* next_index, T* out, num* out_index, num timeout_ms, num wait_slice_ms, num backoff_steps, ChannelCancelToken* cancel_token) num {
+    ret self.select_recv_timeout3_rr_with_tuning_cancel(other_a, other_b, next_index, out, out_index, timeout_ms, wait_slice_ms, backoff_steps, channel_cancel_token_flag_ptr(cancel_token));
+  }
+
+  // Receive from self + two other channels, polling until timeout, with
   // optional cancellation and default wait tuning.
   // 
   // Returns:
@@ -1533,6 +1674,15 @@ impl Channel<T> {
     ret self.select_recv_timeout3_rr_with_tuning_cancel(other_a, other_b, next_index, out, out_index, timeout_ms, self.select_wait_slice_ms, self.select_wait_backoff_steps, cancel_flag);
   }
 
+  // Receive from self + two other channels, polling until timeout,
+  // with optional token cancellation and default wait tuning.
+  // 
+  // Returns:
+  // - same return codes as select_recv_timeout3_rr_with_cancel
+  pub select_recv_timeout3_rr_with_token(Channel<T>* other_a, Channel<T>* other_b, num* next_index, T* out, num* out_index, num timeout_ms, ChannelCancelToken* cancel_token) num {
+    ret self.select_recv_timeout3_rr_with_cancel(other_a, other_b, next_index, out, out_index, timeout_ms, channel_cancel_token_flag_ptr(cancel_token));
+  }
+
   // Receive from self + two other channels, polling until one is ready,
   // with fairness rotation and optional cancellation.
   // 
@@ -1544,6 +1694,15 @@ impl Channel<T> {
   // - other nonzero codes on synchronization failures
   pub select_recv3_rr_with_cancel(Channel<T>* other_a, Channel<T>* other_b, num* next_index, T* out, num* out_index, num* cancel_flag) num {
     ret self.select_recv_timeout3_rr_with_tuning_cancel(other_a, other_b, next_index, out, out_index, -1, self.select_wait_slice_ms, self.select_wait_backoff_steps, cancel_flag);
+  }
+
+  // Receive from self + two other channels, polling until one is ready,
+  // with fairness rotation and optional token cancellation.
+  // 
+  // Returns:
+  // - same return codes as select_recv3_rr_with_cancel
+  pub select_recv3_rr_with_token(Channel<T>* other_a, Channel<T>* other_b, num* next_index, T* out, num* out_index, ChannelCancelToken* cancel_token) num {
+    ret self.select_recv3_rr_with_cancel(other_a, other_b, next_index, out, out_index, channel_cancel_token_flag_ptr(cancel_token));
   }
 
   // Receive from self + two other channels, polling until one is ready,

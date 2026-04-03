@@ -1337,6 +1337,63 @@ test "std.channel cancel-aware send and recv APIs transpile" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "std.channel cancel token APIs transpile" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_channel_cancel_token.fn";
+
+    const input =
+        "imp std.channel;\n" ++
+        "fun main() {\n" ++
+        "  Channel<num> ch = channel_new_cap(0, 1);\n" ++
+        "  Channel<num> a = channel_new(0);\n" ++
+        "  Channel<num> b = channel_new(0);\n" ++
+        "  Channel<num> c = channel_new(0);\n" ++
+        "  num out = 0;\n" ++
+        "  num idx = -1;\n" ++
+        "  num next = 0;\n" ++
+        "  ChannelCancelToken token = channel_cancel_token_new();\n" ++
+        "  _ = channel_cancel_token_cancel(&token);\n" ++
+        "  _ = channel_cancel_token_reset(&token);\n" ++
+        "  bin cancelled = channel_cancel_token_is_cancelled(&token);\n" ++
+        "  _ = cancelled;\n" ++
+        "  _ = ch.send_timeout_with_token(1, 10, &token);\n" ++
+        "  _ = ch.send_with_token(1, &token);\n" ++
+        "  _ = ch.recv_timeout_into_with_token(&out, 10, &token);\n" ++
+        "  _ = ch.recv_into_with_token(&out, &token);\n" ++
+        "  num v1 = ch.recv_timeout_with_token(10, &token);\n" ++
+        "  num v2 = ch.recv_with_token(&token);\n" ++
+        "  _ = a.select_recv_timeout_with_token(&b, &out, &idx, 10, &token);\n" ++
+        "  _ = a.select_recv_with_token(&b, &out, &idx, &token);\n" ++
+        "  _ = a.select_recv_timeout3_rr_with_token(&b, &c, &next, &out, &idx, 10, &token);\n" ++
+        "  _ = a.select_recv3_rr_with_token(&b, &c, &next, &out, &idx, &token);\n" ++
+        "  _ = a.select_recv_timeout_with_tuning_token(&b, &out, &idx, 10, 2, 1, &token);\n" ++
+        "  _ = a.select_recv_timeout3_rr_with_tuning_token(&b, &c, &next, &out, &idx, 10, 2, 1, &token);\n" ++
+        "  _ = out + idx + next + v1 + v2;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "channel_cancel_token_new(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "channel_cancel_token_cancel(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "channel_cancel_token_reset(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "channel_cancel_token_is_cancelled(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__send_timeout_with_token(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__send_with_token(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__recv_timeout_into_with_token(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__recv_into_with_token(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__recv_timeout_with_token(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__recv_with_token(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with_token(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_with_token(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_token(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv3_rr_with_token(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with_tuning_token(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_tuning_token(") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
 test "std.channel select recv2 timeout transpile" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_std_channel_select2.fn";
@@ -1795,6 +1852,64 @@ test "channel cancel-aware send and recv succeed when not cancelled" {
         "  num ok_out = 0;\n" ++
         "  if out == 6 { ok_out = 1; }\n" ++
         "  printf(\"%lld|%lld|%lld|%lld|%lld\", ok1, ok2, ok3, ok4, ok_out);\n" ++
+        "  _ = ch.destroy();\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try fs.cwd().createFile(cpath, .{});
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, cpath, exe_path);
+
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+
+    try std.testing.expectEqualStrings("1|1|1|1|1", stdout);
+}
+
+test "channel cancel token controls cancel and reset behavior" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_channel_cancel_token_runtime.fn";
+    const cpath = "codegen_channel_cancel_token_runtime.c";
+    const exe_path = if (builtin.os.tag == .windows)
+        "codegen_channel_cancel_token_runtime.exe"
+    else
+        "codegen_channel_cancel_token_runtime";
+
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(cpath) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.channel;\n" ++
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  Channel<num> ch = channel_new_cap(0, 1);\n" ++
+        "  ChannelCancelToken token = channel_cancel_token_new();\n" ++
+        "  num out = 0;\n" ++
+        "  _ = ch.send(1);\n" ++
+        "  _ = channel_cancel_token_cancel(&token);\n" ++
+        "  num rc_cancel = ch.send_timeout_with_token(2, 10, &token);\n" ++
+        "  _ = ch.recv_into(&out);\n" ++
+        "  _ = channel_cancel_token_reset(&token);\n" ++
+        "  num rc_send = ch.send_with_token(3, &token);\n" ++
+        "  num rc_recv = ch.recv_into_with_token(&out, &token);\n" ++
+        "  num ok_cancel = 0;\n" ++
+        "  if rc_cancel == channel_rc_cancelled() { ok_cancel = 1; }\n" ++
+        "  num ok_send = 0;\n" ++
+        "  if rc_send == channel_rc_ok() { ok_send = 1; }\n" ++
+        "  num ok_recv = 0;\n" ++
+        "  if rc_recv == channel_rc_ok() { ok_recv = 1; }\n" ++
+        "  num ok_out = 0;\n" ++
+        "  if out == 3 { ok_out = 1; }\n" ++
+        "  num ok_state = 0;\n" ++
+        "  if channel_cancel_token_is_cancelled(&token) == false { ok_state = 1; }\n" ++
+        "  printf(\"%lld|%lld|%lld|%lld|%lld\", ok_cancel, ok_send, ok_recv, ok_out, ok_state);\n" ++
         "  _ = ch.destroy();\n" ++
         "}\n";
 

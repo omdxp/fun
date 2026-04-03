@@ -4,11 +4,12 @@ imp std.channel;
 fun main() {
   Channel<num> a = channel_new(0);
   Channel<num> b = channel_new(0);
+  ChannelCancelToken token = channel_cancel_token_new();
+  _ = channel_cancel_token_cancel(&token);
 
   num out = 0;
   num idx = channel_select_index_default();
-  num cancel = 1;
-  num rc = a.select_recv_timeout_with_cancel(&b, &out, &idx, 100, &cancel);
+  num rc = a.select_recv_timeout_with_token(&b, &out, &idx, 100, &token);
 
   num ok_rc = 0;
   if rc == channel_rc_cancelled() {
