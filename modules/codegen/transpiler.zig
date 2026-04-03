@@ -8691,6 +8691,51 @@ pub const TranspileProcess = struct {
         }
         if (compound_nodes.items.len > 0) try self.write("\n");
 
+        // Emit quirk object structs early so compounds can store quirks by-value.
+        // Vtable structs are forward-declared here and defined later once all
+        // argument/return types are available.
+        var qf_sig_it = registry.quirks_by_sig.iterator();
+        while (qf_sig_it.next()) |entry| {
+            const sig = entry.key_ptr.*;
+            const h = self.quirk_sig_hash_cached(sig);
+            const names = try write_quirk_c_names_hash(h);
+            const quirk_c = names.quirk[0..names.quirk_len];
+            const vtable_c = names.vtable[0..names.vtable_len];
+
+            try self.write("typedef struct ");
+            try self.write(vtable_c);
+            try self.write(" ");
+            try self.write(vtable_c);
+            try self.write(";\n");
+
+            try self.write("typedef struct ");
+            try self.write(quirk_c);
+            try self.write(" {\n");
+            try self.write("  void* self;\n");
+            try self.write("  const ");
+            try self.write(vtable_c);
+            try self.write("* vtable;\n");
+            try self.write("} ");
+            try self.write(quirk_c);
+            try self.write(";\n");
+        }
+
+        var qf_name_it = registry.quirk_sig_by_name.iterator();
+        while (qf_name_it.next()) |entry| {
+            const qname = entry.key_ptr.*;
+            const sig = entry.value_ptr.*;
+            const h = self.quirk_sig_hash_cached(sig);
+            const names = try write_quirk_c_names_hash(h);
+            const quirk_c = names.quirk[0..names.quirk_len];
+
+            try self.write("typedef ");
+            try self.write(quirk_c);
+            try self.write(" ");
+            try self.write(qname);
+            try self.write(";\n");
+        }
+        if (registry.quirks_by_sig.count() > 0 or registry.quirk_sig_by_name.count() > 0) try self.write("\n");
+
         var remaining_specs = std.ArrayList(GenericSpec).init(self.allocator);
         defer remaining_specs.deinit();
         remaining_specs.appendSlice(specs.items) catch {
@@ -8813,7 +8858,6 @@ pub const TranspileProcess = struct {
 
             const h = self.quirk_sig_hash_cached(sig);
             const names = try write_quirk_c_names_hash(h);
-            const quirk_c = names.quirk[0..names.quirk_len];
             const vtable_c = names.vtable[0..names.vtable_len];
 
             // Vtable type
@@ -8836,35 +8880,9 @@ pub const TranspileProcess = struct {
             try self.write("} ");
             try self.write(vtable_c);
             try self.write(";\n\n");
-
-            // Quirk object type
-            try self.write("typedef struct ");
-            try self.write(quirk_c);
-            try self.write(" {\n");
-            try self.write("  void* self;\n");
-            try self.write("  const ");
-            try self.write(vtable_c);
-            try self.write("* vtable;\n");
-            try self.write("} ");
-            try self.write(quirk_c);
-            try self.write(";\n\n");
         }
 
-        // Quirk name aliases
-        var qn_it = registry.quirk_sig_by_name.iterator();
-        while (qn_it.next()) |entry| {
-            const qname = entry.key_ptr.*;
-            const sig = entry.value_ptr.*;
-            const h = self.quirk_sig_hash_cached(sig);
-            const names = try write_quirk_c_names_hash(h);
-            const quirk_c = names.quirk[0..names.quirk_len];
-            try self.write("typedef ");
-            try self.write(quirk_c);
-            try self.write(" ");
-            try self.write(qname);
-            try self.write(";\n");
-        }
-        try self.write("\n");
+        // Quirk aliases are emitted above as forward typedefs.
     }
 
     fn emit_quirk_impl_instance(
@@ -10693,11 +10711,46 @@ pub const TranspileProcess = struct {
                 if (ci.fields.count == 0) {
                     try self.write("0");
                 } else {
+                    const target_compound_name = if (dt.type == .Unknown and dt.type_str.items.len > 0)
+                        self.canonical_compound_name(dt.type_str.items)
+                    else
+                        "";
+
                     for (ci.fields.items(), 0..) |f, i| {
                         if (i > 0) try self.write(", ");
                         try self.write(".");
                         try self.write(f.name.items);
                         try self.write(" = ");
+
+                        // Implicit quirk coercion for compound initializer fields,
+                        // e.g. `Holder{ q = &c }` where `q` is a quirk-typed field.
+                        const field_dt = if (target_compound_name.len > 0)
+                            self.lookup_compound_field(target_compound_name, f.name.items)
+                        else
+                            null;
+                        if (field_dt != null and field_dt.?.type == .Unknown and field_dt.?.pointer_depth == 0 and self.is_quirk_name(field_dt.?.type_str.items)) {
+                            const reg = self.root_registry() orelse {
+                                try self.transpile_node(f.value.*);
+                                continue;
+                            };
+                            const sig = reg.quirk_sig_by_name.get(field_dt.?.type_str.items) orelse null;
+                            if (sig != null) {
+                                const actual = self.expr_named_pointee_from_scope(f.value.*);
+                                if (actual != null and reg.impls_by_key.contains(.{ .type_name = actual.?, .quirk_sig = sig.? })) {
+                                    var type_stack4: [128]u8 = undefined;
+                                    const type_s = try self.c_ident_sanitize_temp(actual.?, &type_stack4);
+                                    defer if (type_s.owned) self.backing_allocator.free(type_s.slice);
+                                    var coerce_buf: [96]u8 = undefined;
+                                    const coerce_name = (std.fmt.bufPrint(&coerce_buf, "__fun_coerce_{s}_{x}", .{ type_s.slice, self.quirk_sig_hash_cached(sig.?) }) catch unreachable);
+                                    try self.write(coerce_name);
+                                    try self.write("(");
+                                    try self.transpile_node(f.value.*);
+                                    try self.write(")");
+                                    continue;
+                                }
+                            }
+                        }
+
                         try self.transpile_node(f.value.*);
                     }
                 }

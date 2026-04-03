@@ -432,10 +432,14 @@ test "async quirk dispatch await transpiles and runs" {
     try std.testing.expectEqualStrings("42", stdout);
 }
 
-test "async quirk field dispatch await transpiles" {
+test "async quirk field dispatch await transpiles and runs" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_async_quirk_field_dispatch_await.fn";
+    const c_path = "codegen_async_quirk_field_dispatch_await.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_async_quirk_field_dispatch_await.exe" else "codegen_async_quirk_field_dispatch_await";
     defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(c_path) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
 
     const input =
         "imp std.c.io;\n" ++
@@ -464,6 +468,17 @@ test "async quirk field dispatch await transpiles" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, ".vtable->add(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "h.q") != null);
+
+    {
+        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("42", stdout);
 }
 
 test "function definitions can be out of order (prototypes emitted)" {
