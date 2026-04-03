@@ -2506,6 +2506,12 @@ pub const ParseProcess = struct {
         }
 
         while (!self.next_token_is_symbol('}')) {
+            var method_is_async = false;
+            if (self.next_token_is_keyword("async")) {
+                _ = self.token_next();
+                method_is_async = true;
+            }
+
             const mname_tok = self.token_next();
             if (mname_tok == null or mname_tok.?.type != .Identifier) {
                 self.transpile_proc.err("expected method name", .{});
@@ -2571,7 +2577,7 @@ pub const ParseProcess = struct {
             }
 
             try self.expect_sym(';');
-            methods.push(.{ .name = mname, .rtype = rtype, .args = args }) catch {
+            methods.push(.{ .name = mname, .rtype = rtype, .args = args, .is_async = method_is_async }) catch {
                 return ParseError.MemoryAllocationFailed;
             };
         }

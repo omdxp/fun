@@ -110,6 +110,44 @@ test "ParseProcess parse_async_impl_method" {
     try fs.cwd().deleteFile(ofilepath);
 }
 
+test "ParseProcess parse_async_quirk_method" {
+    const ifilepath = "ParseProcess_parse_async_quirk_method.fn";
+    const ofilepath = "ParseProcess_parse_async_quirk_method.c";
+    {
+        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
+        defer file.close();
+        const input =
+            "quirk AsyncQ {\n" ++
+            "  async get() num;\n" ++
+            "}\n";
+        try file.writeAll(input);
+    }
+
+    const allocator = std.testing.allocator;
+    var transpile_proc = try codegen.TranspileProcess.init(allocator, ifilepath, ofilepath, .{ .outf = true });
+    var lex_proc = lexer.LexProcess.init(&transpile_proc);
+    var parse_proc = ParseProcess.init(&transpile_proc);
+
+    defer {
+        lex_proc.deinit();
+        transpile_proc.deinit();
+    }
+
+    try lex_proc.lex();
+    try parse_proc.parse();
+
+    const nodes = transpile_proc.nodes.items();
+    try std.testing.expectEqual(@as(usize, 1), nodes.len);
+    try std.testing.expectEqual(ast.NodeType.Quirk, nodes[0].type);
+
+    const methods = nodes[0].node_variant.?.quirk.methods.items();
+    try std.testing.expectEqual(@as(usize, 1), methods.len);
+    try std.testing.expect(methods[0].is_async);
+
+    try fs.cwd().deleteFile(ifilepath);
+    try fs.cwd().deleteFile(ofilepath);
+}
+
 test "ParseProcess parse_await_expression" {
     const ifilepath = "ParseProcess_parse_await_expression.fn";
     const ofilepath = "ParseProcess_parse_await_expression.c";

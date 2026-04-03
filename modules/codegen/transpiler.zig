@@ -470,6 +470,20 @@ pub const TranspileProcess = struct {
         return null;
     }
 
+    fn is_await_dynamic_quirk_dispatch(self: *Self, call_node: ast.Node) bool {
+        if (call_node.type != .Expression or call_node.node_variant == null or !mem.eql(u8, call_node.node_variant.?.exp.op, "()")) {
+            return false;
+        }
+        const call = call_node.node_variant.?.exp;
+        const callee = call.left orelse return false;
+        if (callee.*.type != .Expression or callee.*.node_variant == null or !mem.eql(u8, callee.*.node_variant.?.exp.op, ".")) {
+            return false;
+        }
+        const dot = callee.*.node_variant.?.exp;
+        const recv = dot.left orelse return false;
+        return self.expr_is_quirk_typed_from_scope(recv.*);
+    }
+
     fn discover_stdlib_dir_near_input(backing: mem.Allocator, a: mem.Allocator, ifilepath: []const u8) TranspileError!?[]const u8 {
         const abs = if (std.fs.path.isAbsolute(ifilepath))
             (backing.dupe(u8, ifilepath) catch return TranspileError.MemoryAllocationFailed)
@@ -658,6 +672,12 @@ pub const TranspileProcess = struct {
 
         for (idxs) |mi| {
             const m = methods[mi];
+
+            if (m.is_async) {
+                buf.appendSlice("async ") catch {
+                    return TranspileError.MemoryAllocationFailed;
+                };
+            }
 
             buf.appendSlice(m.name.items) catch {
                 return TranspileError.MemoryAllocationFailed;
@@ -972,6 +992,15 @@ pub const TranspileProcess = struct {
             return TranspileError.UnsupportedNodeType;
         }
         const impl_fn = impl_method_node.node_variant.?.function;
+
+        if (impl_fn.is_async != quirk_sig.is_async) {
+            self.report_type_error(
+                impl_node.*,
+                "impl method '{s}' async modifier mismatch: expected {s}",
+                .{ method_name, if (quirk_sig.is_async) "async" else "non-async" },
+            );
+            return TranspileError.TypeMismatch;
+        }
 
         // Impl args include implicit `self` as arg0; quirk sig args do not.
         const impl_args = if (impl_fn.args) |a| a.items() else &[_]*ast.Node{};
@@ -2213,6 +2242,9 @@ pub const TranspileProcess = struct {
     }
 
     fn append_quirk_method_stub_sig(self: *Self, buf: *std.ArrayList(u8), m: ast.QuirkMethodSig) TranspileError!void {
+        if (m.is_async) {
+            buf.appendSlice("async ") catch return TranspileError.MemoryAllocationFailed;
+        }
         buf.appendSlice(m.name.items) catch return TranspileError.MemoryAllocationFailed;
         buf.append('(') catch return TranspileError.MemoryAllocationFailed;
 
@@ -4934,6 +4966,8 @@ pub const TranspileProcess = struct {
                                 return TranspileError.NotCallable;
                             };
                             call_rtype = type_from_dtype(&method_sig.?.rtype);
+                            callee_is_async = method_sig.?.is_async;
+                            callee_async_known = true;
                         } else {
                             if (recv_t.pointer_depth > 1) {
                                 self.report_type_error(node, "method calls support at most one pointer indirection", .{});
@@ -8108,6 +8142,42 @@ pub const TranspileProcess = struct {
         return self.is_quirk_name(dt.type_str.items);
     }
 
+    fn expr_named_type_from_scope(self: *Self, node: ast.Node) ?[]const u8 {
+        switch (node.type) {
+            .Identifier => {
+                if (node.data == null) return null;
+                const dt = self.identifier_declared_dtype(node.data.?.sval.items) orelse return null;
+                if (dt.type != .Unknown) return null;
+                return dt.type_str.items;
+            },
+            .ExpressionParenthesis => {
+                if (node.node_variant == null) return null;
+                return self.expr_named_type_from_scope(node.node_variant.?.paren.exp.*);
+            },
+            .Expression => {
+                if (node.node_variant == null) return null;
+                const exp = node.node_variant.?.exp;
+                if (!mem.eql(u8, exp.op, ".")) return null;
+
+                const left = exp.left orelse return null;
+                const right = exp.right orelse return null;
+                if (right.*.type != .Identifier or right.*.data == null) return null;
+
+                const left_name = self.expr_named_type_from_scope(left.*) orelse return null;
+                const left_name_canon = self.canonical_compound_name(left_name);
+                const fdt = self.lookup_compound_field(left_name_canon, right.*.data.?.sval.items) orelse return null;
+                if (fdt.type != .Unknown) return null;
+                return fdt.type_str.items;
+            },
+            else => return null,
+        }
+    }
+
+    fn expr_is_quirk_typed_from_scope(self: *Self, node: ast.Node) bool {
+        const tname = self.expr_named_type_from_scope(node) orelse return false;
+        return self.is_quirk_name(tname);
+    }
+
     fn node_is_public(node: *const ast.Node) bool {
         return node.flags != null and node.flags.?.is_public;
     }
@@ -8949,6 +9019,9 @@ pub const TranspileProcess = struct {
             try self.write("  ");
             if (m.rtype.type != .Void) {
                 try self.write("return ");
+            }
+            if (m.is_async) {
+                try self.write("__fun_async_call_");
             }
             try self.write(impl_fn_name.?);
             try self.write("((");
@@ -10712,16 +10785,30 @@ pub const TranspileProcess = struct {
                             const recv = dot.left orelse null;
                             const member = dot.right orelse null;
                             if (recv != null and member != null and member.?.type == .Identifier and member.?.data != null) {
-                                // Only special-case when receiver is a quirk-typed identifier.
-                                if (recv.?.type == .Identifier and recv.?.data != null and self.identifier_is_quirk_typed(recv.?.data.?.sval.items)) {
+                                // Special-case quirk method calls for any receiver expression
+                                // we can resolve as quirk-typed from the current scope.
+                                if (self.expr_is_quirk_typed_from_scope(recv.?.*)) {
                                     const mname = member.?.data.?.sval.items;
+                                    const recv_is_identifier = recv.?.type == .Identifier;
                                     try self.write("(");
-                                    try self.transpile_node(recv.?.*);
-                                    try self.write(".vtable->");
+                                    if (recv_is_identifier) {
+                                        try self.transpile_node(recv.?.*);
+                                        try self.write(".vtable->");
+                                    } else {
+                                        try self.write("(");
+                                        try self.transpile_node(recv.?.*);
+                                        try self.write(").vtable->");
+                                    }
                                     try self.write(mname);
                                     try self.write("(");
-                                    try self.transpile_node(recv.?.*);
-                                    try self.write(".self");
+                                    if (recv_is_identifier) {
+                                        try self.transpile_node(recv.?.*);
+                                        try self.write(".self");
+                                    } else {
+                                        try self.write("(");
+                                        try self.transpile_node(recv.?.*);
+                                        try self.write(").self");
+                                    }
 
                                     // Append call args.
                                     if (exp.right) |right| {
@@ -12289,41 +12376,47 @@ pub const TranspileProcess = struct {
                 const unary = node.node_variant.?.unary;
                 if (mem.eql(u8, unary.op, "await")) {
                     const operand = unary.operand.*;
-                    const lowering = (try self.resolve_await_lowering_info(operand)) orelse {
-                        self.report_type_error(node, "await currently supports statically resolved async calls only", .{});
-                        return TranspileError.TypeMismatch;
-                    };
-                    defer self.allocator.free(lowering.callee_name);
+                    if (try self.resolve_await_lowering_info(operand)) |lowering| {
+                        defer self.allocator.free(lowering.callee_name);
 
-                    const call_exp = operand.node_variant.?.exp;
-                    try self.write("__fun_async_call_");
-                    try self.write(lowering.callee_name);
-                    try self.write("(");
+                        const call_exp = operand.node_variant.?.exp;
+                        try self.write("__fun_async_call_");
+                        try self.write(lowering.callee_name);
+                        try self.write("(");
 
-                    var wrote_arg = false;
-                    if (lowering.receiver_expr) |recv| {
-                        if (lowering.receiver_pass_by_ref) {
-                            try self.write("&");
-                        }
-                        try self.transpile_node(recv.*);
-                        wrote_arg = true;
-                    }
-
-                    if (call_exp.right) |right| {
-                        const inner = if (right.type == .ExpressionParenthesis and right.node_variant != null)
-                            right.node_variant.?.paren.exp.*
-                        else
-                            right.*;
-                        if (inner.type != .Blank) {
-                            if (wrote_arg) {
-                                try self.write(", ");
+                        var wrote_arg = false;
+                        if (lowering.receiver_expr) |recv| {
+                            if (lowering.receiver_pass_by_ref) {
+                                try self.write("&");
                             }
-                            try self.transpile_node(inner);
+                            try self.transpile_node(recv.*);
+                            wrote_arg = true;
                         }
+
+                        if (call_exp.right) |right| {
+                            const inner = if (right.type == .ExpressionParenthesis and right.node_variant != null)
+                                right.node_variant.?.paren.exp.*
+                            else
+                                right.*;
+                            if (inner.type != .Blank) {
+                                if (wrote_arg) {
+                                    try self.write(", ");
+                                }
+                                try self.transpile_node(inner);
+                            }
+                        }
+
+                        try self.write(")");
+                        return;
                     }
 
-                    try self.write(")");
-                    return;
+                    if (self.is_await_dynamic_quirk_dispatch(operand)) {
+                        try self.transpile_node(operand);
+                        return;
+                    }
+
+                    self.report_type_error(node, "await currently supports statically resolved async calls only", .{});
+                    return TranspileError.TypeMismatch;
                 }
                 if (unary.is_left_operanded_unary) {
                     try self.transpile_node(unary.operand.*);

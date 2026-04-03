@@ -210,6 +210,87 @@ test "typecheck await async method in generic impl is ok" {
     try runTranspileExpectOk(std.testing.allocator, "typecheck_await_async_generic_method_ok.fn", input);
 }
 
+test "typecheck async quirk method call requires await" {
+    const input =
+        "compound Counter {\n" ++
+        "  num base;\n" ++
+        "}\n" ++
+        "quirk AsyncCounter {\n" ++
+        "  async add(num x) num;\n" ++
+        "}\n" ++
+        "impl Counter as AsyncCounter {\n" ++
+        "  async add(num x) num { ret self.base + x; }\n" ++
+        "}\n" ++
+        "async fun main() {\n" ++
+        "  Counter c;\n" ++
+        "  c.base = 1;\n" ++
+        "  AsyncCounter q = &c;\n" ++
+        "  num out = q.add(2);\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_async_quirk_method_requires_await.fn", input);
+}
+
+test "typecheck await async quirk method call is ok" {
+    const input =
+        "compound Counter {\n" ++
+        "  num base;\n" ++
+        "}\n" ++
+        "quirk AsyncCounter {\n" ++
+        "  async add(num x) num;\n" ++
+        "}\n" ++
+        "impl Counter as AsyncCounter {\n" ++
+        "  async add(num x) num { ret self.base + x; }\n" ++
+        "}\n" ++
+        "async fun main() {\n" ++
+        "  Counter c;\n" ++
+        "  c.base = 1;\n" ++
+        "  AsyncCounter q = &c;\n" ++
+        "  num out = await q.add(2);\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_await_async_quirk_method_ok.fn", input);
+}
+
+test "typecheck await async quirk field method call is ok" {
+    const input =
+        "compound Counter {\n" ++
+        "  num base;\n" ++
+        "}\n" ++
+        "quirk AsyncCounter {\n" ++
+        "  async add(num x) num;\n" ++
+        "}\n" ++
+        "compound Holder {\n" ++
+        "  AsyncCounter q;\n" ++
+        "}\n" ++
+        "impl Counter as AsyncCounter {\n" ++
+        "  async add(num x) num { ret self.base + x; }\n" ++
+        "}\n" ++
+        "async fun main() {\n" ++
+        "  Counter c;\n" ++
+        "  c.base = 1;\n" ++
+        "  Holder h = Holder{ q = &c };\n" ++
+        "  num out = await h.q.add(2);\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_await_async_quirk_field_method_ok.fn", input);
+}
+
+test "typecheck quirk async signature mismatch errors" {
+    const input =
+        "compound Counter {\n" ++
+        "  num base;\n" ++
+        "}\n" ++
+        "quirk AsyncCounter {\n" ++
+        "  async add(num x) num;\n" ++
+        "}\n" ++
+        "impl Counter as AsyncCounter {\n" ++
+        "  add(num x) num { ret self.base + x; }\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_quirk_async_sig_mismatch.fn", input);
+}
+
 test "typecheck enum dot shorthand in init/assign/compare" {
     const input =
         "enum Color {\n" ++

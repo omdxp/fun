@@ -362,6 +362,7 @@ pub const QuirkMethodSig = struct {
     name: std.ArrayList(u8),
     rtype: dtype.DataType,
     args: utils.Vector(QuirkArg),
+    is_async: bool = false,
 };
 
 pub const QuirkArg = struct {
