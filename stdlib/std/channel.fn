@@ -126,7 +126,7 @@ compound ChannelAbsTime {
 // - Uses `clock_gettime` and keeps millisecond-scale precision.
 fun channel_make_abs_time(num timeout_ms, ChannelAbsTime* out) num {
   if out == NULL {
-    ret -1;
+    ret channel_rc_null_arg();
   }
   if timeout_ms < 0 {
     timeout_ms = 0;
@@ -135,7 +135,7 @@ fun channel_make_abs_time(num timeout_ms, ChannelAbsTime* out) num {
   raw* out_raw = out;
   num rc = clock_gettime(0, out_raw);
   if rc != 0 {
-    ret -3;
+    ret channel_rc_clock_failed();
   }
 
   num add_sec = timeout_ms / 1000;
@@ -149,7 +149,7 @@ fun channel_make_abs_time(num timeout_ms, ChannelAbsTime* out) num {
     out.tv_nsec = out.tv_nsec % 1000000000;
   }
 
-  ret 0;
+  ret channel_rc_ok();
 }
 
 // Returns true when the absolute timeout is reached.
@@ -274,6 +274,71 @@ fun channel_is_cancelled(num* cancel_flag) bin {
   ret cancel_flag[0] != 0;
 }
 
+// Shared channel return codes exposed as helpers.
+// 
+// Note:
+// - Some APIs intentionally alias meanings to the same numeric code.
+pub fun channel_rc_ok() num {
+  ret 0;
+}
+
+pub fun channel_rc_closed() num {
+  ret 1;
+}
+
+pub fun channel_rc_timeout() num {
+  ret 2;
+}
+
+pub fun channel_rc_full() num {
+  ret 2;
+}
+
+pub fun channel_rc_empty() num {
+  ret 2;
+}
+
+pub fun channel_rc_default() num {
+  ret 3;
+}
+
+pub fun channel_rc_cancelled() num {
+  ret 3;
+}
+
+pub fun channel_rc_null_arg() num {
+  ret -1;
+}
+
+pub fun channel_rc_send_closed_blocking() num {
+  ret -1;
+}
+
+pub fun channel_rc_alloc_failed() num {
+  ret -2;
+}
+
+pub fun channel_rc_clock_failed() num {
+  ret -3;
+}
+
+// Select index helpers for readability.
+pub fun channel_select_index_default() num {
+  ret -1;
+}
+
+pub fun channel_select_index_self() num {
+  ret 0;
+}
+
+pub fun channel_select_index_other() num {
+  ret 1;
+}
+
+pub fun channel_select_index_other_b() num {
+  ret 2;
+}
+
 impl Channel<T> {
   // Return a zeroed value for T.
   pub zero_value() T {
@@ -288,7 +353,7 @@ impl Channel<T> {
   // - 0 on success, nonzero error code on failure
   pub init() num {
     if self.has_buffer == false {
-      ret -2;
+      ret channel_rc_alloc_failed();
     }
 
     num rc = runtime_mutex_init(&self.mu);
@@ -305,7 +370,7 @@ impl Channel<T> {
     }
     self.select_wait_slice_ms = channel_sanitize_wait_slice_ms(self.select_wait_slice_ms);
     self.select_wait_backoff_steps = channel_sanitize_backoff_steps(self.select_wait_backoff_steps);
-    ret 0;
+    ret channel_rc_ok();
   }
 
   // Configure the per-channel select wait slice (in milliseconds).
@@ -354,7 +419,7 @@ impl Channel<T> {
     }
 
     if self.closed == true {
-      ret -1;
+      ret channel_rc_send_closed_blocking();
     }
 
     self.data[self.tail] = value;
@@ -365,7 +430,7 @@ impl Channel<T> {
     self.count = self.count + 1;
 
     _ = runtime_condvar_signal(&self.can_recv);
-    ret 0;
+    ret channel_rc_ok();
   }
 
   // Send one value, blocking up to timeout_ms while full.
@@ -416,7 +481,7 @@ impl Channel<T> {
     defer runtime_mutex_unlock(&self.mu);
 
     if self.closed == true {
-      ret 1;
+      ret channel_rc_closed();
     }
 
     ChannelAbsTime abs_time;
@@ -432,14 +497,14 @@ impl Channel<T> {
 
     for self.count == self.cap && self.closed == false {
       if channel_is_cancelled(cancel_flag) == true {
-        ret 3;
+        ret channel_rc_cancelled();
       }
 
       num rem_ms = -1;
       if wait_forever == false {
         rem_ms = channel_deadline_remaining_ms(&abs_time);
         if rem_ms <= 0 {
-          ret 2;
+          ret channel_rc_timeout();
         }
       }
 
@@ -459,7 +524,7 @@ impl Channel<T> {
 
         if channel_deadline_reached(&round_abs) == true {
           if wait_forever == false && channel_deadline_reached(&abs_time) == true {
-            ret 2;
+            ret channel_rc_timeout();
           }
 
           if idle_rounds < max_backoff_steps {
@@ -469,7 +534,7 @@ impl Channel<T> {
         }
 
         if wait_forever == false && channel_deadline_reached(&abs_time) == true {
-          ret 2;
+          ret channel_rc_timeout();
         }
 
         ret rc;
@@ -479,14 +544,14 @@ impl Channel<T> {
     }
 
     if channel_is_cancelled(cancel_flag) == true {
-      ret 3;
+      ret channel_rc_cancelled();
     }
 
     if self.closed == true {
-      ret 1;
+      ret channel_rc_closed();
     }
     if self.count == self.cap {
-      ret 2;
+      ret channel_rc_timeout();
     }
 
     self.data[self.tail] = value;
@@ -497,7 +562,7 @@ impl Channel<T> {
     self.count = self.count + 1;
 
     _ = runtime_condvar_signal(&self.can_recv);
-    ret 0;
+    ret channel_rc_ok();
   }
 
   // Send one value, waiting forever while full, with optional cancellation.
@@ -533,10 +598,10 @@ impl Channel<T> {
     defer runtime_mutex_unlock(&self.mu);
 
     if self.closed == true {
-      ret 1;
+      ret channel_rc_closed();
     }
     if self.count == self.cap {
-      ret 2;
+      ret channel_rc_full();
     }
 
     self.data[self.tail] = value;
@@ -547,7 +612,7 @@ impl Channel<T> {
     self.count = self.count + 1;
 
     _ = runtime_condvar_signal(&self.can_recv);
-    ret 0;
+    ret channel_rc_ok();
   }
 
   // Receive one value into out, blocking while empty.
@@ -562,7 +627,7 @@ impl Channel<T> {
   // - nonzero pthread error codes on synchronization failures
   pub recv_into(T* out) num {
     if out == NULL {
-      ret -1;
+      ret channel_rc_null_arg();
     }
 
     num rc = self.init();
@@ -584,7 +649,7 @@ impl Channel<T> {
     }
 
     if self.count == 0 {
-      ret 1;
+      ret channel_rc_closed();
     }
 
     out[0] = self.data[self.head];
@@ -595,7 +660,7 @@ impl Channel<T> {
     self.count = self.count - 1;
 
     _ = runtime_condvar_signal(&self.can_send);
-    ret 0;
+    ret channel_rc_ok();
   }
 
   // Receive one value into out, blocking up to timeout_ms while empty.
@@ -631,7 +696,7 @@ impl Channel<T> {
   // - nonzero pthread error codes on synchronization failures
   pub recv_timeout_into_with_cancel(T* out, num timeout_ms, num* cancel_flag) num {
     if out == NULL {
-      ret -1;
+      ret channel_rc_null_arg();
     }
 
     num rc = self.init();
@@ -663,14 +728,14 @@ impl Channel<T> {
 
     for self.count == 0 && self.closed == false {
       if channel_is_cancelled(cancel_flag) == true {
-        ret 3;
+        ret channel_rc_cancelled();
       }
 
       num rem_ms = -1;
       if wait_forever == false {
         rem_ms = channel_deadline_remaining_ms(&abs_time);
         if rem_ms <= 0 {
-          ret 2;
+          ret channel_rc_timeout();
         }
       }
 
@@ -690,7 +755,7 @@ impl Channel<T> {
 
         if channel_deadline_reached(&round_abs) == true {
           if wait_forever == false && channel_deadline_reached(&abs_time) == true {
-            ret 2;
+            ret channel_rc_timeout();
           }
 
           if idle_rounds < max_backoff_steps {
@@ -700,7 +765,7 @@ impl Channel<T> {
         }
 
         if wait_forever == false && channel_deadline_reached(&abs_time) == true {
-          ret 2;
+          ret channel_rc_timeout();
         }
 
         ret rc;
@@ -710,14 +775,14 @@ impl Channel<T> {
     }
 
     if channel_is_cancelled(cancel_flag) == true {
-      ret 3;
+      ret channel_rc_cancelled();
     }
 
     if self.count == 0 {
       if self.closed == true {
-        ret 1;
+        ret channel_rc_closed();
       }
-      ret 2;
+      ret channel_rc_timeout();
     }
 
     out[0] = self.data[self.head];
@@ -728,7 +793,7 @@ impl Channel<T> {
     self.count = self.count - 1;
 
     _ = runtime_condvar_signal(&self.can_send);
-    ret 0;
+    ret channel_rc_ok();
   }
 
   // Receive one value, blocking while empty.
@@ -807,7 +872,7 @@ impl Channel<T> {
   // - nonzero pthread error codes on synchronization failures
   pub try_recv(T* out) num {
     if out == NULL {
-      ret -1;
+      ret channel_rc_null_arg();
     }
 
     num rc = self.init();
@@ -823,9 +888,9 @@ impl Channel<T> {
 
     if self.count == 0 {
       if self.closed == true {
-        ret 1;
+        ret channel_rc_closed();
       }
-      ret 2;
+      ret channel_rc_empty();
     }
 
     out[0] = self.data[self.head];
@@ -836,7 +901,7 @@ impl Channel<T> {
     self.count = self.count - 1;
 
     _ = runtime_condvar_signal(&self.can_send);
-    ret 0;
+    ret channel_rc_ok();
   }
 
   // Wait for a receive signal on a hint channel for up to timeout_ms.
@@ -848,7 +913,7 @@ impl Channel<T> {
   // - other nonzero codes on synchronization failures
   pub wait_recv_hint_timeout(Channel<T>* hint, num timeout_ms) num {
     if hint == NULL {
-      ret -1;
+      ret channel_rc_null_arg();
     }
     if timeout_ms < 0 {
       timeout_ms = 0;
@@ -866,7 +931,7 @@ impl Channel<T> {
     defer runtime_mutex_unlock(&hint.mu);
 
     if hint.count > 0 || hint.closed == true {
-      ret 0;
+      ret channel_rc_ok();
     }
 
     ChannelAbsTime abs_time;
@@ -878,12 +943,12 @@ impl Channel<T> {
     rc = runtime_condvar_timed_wait(&hint.can_recv, &hint.mu, &abs_time);
     if rc != 0 {
       if channel_deadline_reached(&abs_time) == true {
-        ret 2;
+        ret channel_rc_timeout();
       }
       ret rc;
     }
 
-    ret 0;
+    ret channel_rc_ok();
   }
 
   // Try receiving from self or another channel without blocking.
@@ -901,33 +966,33 @@ impl Channel<T> {
   // - other nonzero codes on synchronization failures
   pub select_try_recv_with(Channel<T>* other, T* out, num* out_index) num {
     if other == NULL || out == NULL || out_index == NULL {
-      ret -1;
+      ret channel_rc_null_arg();
     }
 
-    out_index[0] = -1;
+    out_index[0] = channel_select_index_default();
 
     num rc_self = self.try_recv(out);
-    if rc_self == 0 {
-      out_index[0] = 0;
-      ret 0;
+    if rc_self == channel_rc_ok() {
+      out_index[0] = channel_select_index_self();
+      ret channel_rc_ok();
     }
-    if rc_self != 1 && rc_self != 2 {
+    if rc_self != channel_rc_closed() && rc_self != channel_rc_empty() {
       ret rc_self;
     }
 
     num rc_other = other.try_recv(out);
-    if rc_other == 0 {
-      out_index[0] = 1;
-      ret 0;
+    if rc_other == channel_rc_ok() {
+      out_index[0] = channel_select_index_other();
+      ret channel_rc_ok();
     }
-    if rc_other != 1 && rc_other != 2 {
+    if rc_other != channel_rc_closed() && rc_other != channel_rc_empty() {
       ret rc_other;
     }
 
-    if rc_self == 1 && rc_other == 1 {
-      ret 1;
+    if rc_self == channel_rc_closed() && rc_other == channel_rc_closed() {
+      ret channel_rc_closed();
     }
-    ret 2;
+    ret channel_rc_empty();
   }
 
   // Try receiving from self or another channel, else take the default branch.
@@ -945,9 +1010,9 @@ impl Channel<T> {
   // - other nonzero codes on synchronization failures
   pub select_recv_default_with(Channel<T>* other, T* out, num* out_index) num {
     num rc = self.select_try_recv_with(other, out, out_index);
-    if rc == 2 {
-      out_index[0] = -1;
-      ret 3;
+    if rc == channel_rc_empty() {
+      out_index[0] = channel_select_index_default();
+      ret channel_rc_default();
     }
     ret rc;
   }
@@ -1035,7 +1100,7 @@ impl Channel<T> {
   // - other nonzero codes on synchronization failures
   pub select_recv_timeout_with_tuning_cancel(Channel<T>* other, T* out, num* out_index, num timeout_ms, num wait_slice_ms, num backoff_steps, num* cancel_flag) num {
     if other == NULL || out == NULL || out_index == NULL {
-      ret -1;
+      ret channel_rc_null_arg();
     }
 
     num base_wait_slice_ms = channel_sanitize_wait_slice_ms(wait_slice_ms);
@@ -1050,74 +1115,74 @@ impl Channel<T> {
       }
     }
 
-    num wait_slot = 0;
+    num wait_slot = channel_select_index_self();
     num idle_rounds = 0;
 
     for true {
       if channel_is_cancelled(cancel_flag) == true {
-        out_index[0] = -1;
-        ret 3;
+        out_index[0] = channel_select_index_default();
+        ret channel_rc_cancelled();
       }
 
-      out_index[0] = -1;
+      out_index[0] = channel_select_index_default();
 
       num rc_self = self.try_recv(out);
-      if rc_self == 0 {
-        out_index[0] = 0;
-        ret 0;
+      if rc_self == channel_rc_ok() {
+        out_index[0] = channel_select_index_self();
+        ret channel_rc_ok();
       }
-      if rc_self != 1 && rc_self != 2 {
+      if rc_self != channel_rc_closed() && rc_self != channel_rc_empty() {
         ret rc_self;
       }
 
       num rc_other = other.try_recv(out);
-      if rc_other == 0 {
-        out_index[0] = 1;
-        ret 0;
+      if rc_other == channel_rc_ok() {
+        out_index[0] = channel_select_index_other();
+        ret channel_rc_ok();
       }
-      if rc_other != 1 && rc_other != 2 {
+      if rc_other != channel_rc_closed() && rc_other != channel_rc_empty() {
         ret rc_other;
       }
 
-      if rc_self == 1 && rc_other == 1 {
-        ret 1;
+      if rc_self == channel_rc_closed() && rc_other == channel_rc_closed() {
+        ret channel_rc_closed();
       }
       if wait_forever == false && channel_deadline_reached(&abs_time) == true {
-        ret 2;
+        ret channel_rc_timeout();
       }
 
       Channel<T>* hint= self;
-      if wait_slot == 1 {
+      if wait_slot == channel_select_index_other() {
         hint = other;
       }
       wait_slot = wait_slot + 1;
       if wait_slot >= 2 {
-        wait_slot = 0;
+        wait_slot = channel_select_index_self();
       }
 
       num rem_ms = -1;
       if wait_forever == false {
         rem_ms = channel_deadline_remaining_ms(&abs_time);
         if rem_ms <= 0 {
-          ret 2;
+          ret channel_rc_timeout();
         }
       }
 
       num wait_now_ms = channel_compute_wait_slice_ms(base_wait_slice_ms, rem_ms, idle_rounds, max_backoff_steps);
 
       num wait_rc = self.wait_recv_hint_timeout(hint, wait_now_ms);
-      if wait_rc != 0 && wait_rc != 2 {
+      if wait_rc != channel_rc_ok() && wait_rc != channel_rc_timeout() {
         ret wait_rc;
       }
       if idle_rounds < max_backoff_steps {
         idle_rounds = idle_rounds + 1;
       }
-      if wait_rc == 0 {
+      if wait_rc == channel_rc_ok() {
         idle_rounds = 0;
       }
     }
 
-    ret 2;
+    ret channel_rc_timeout();
   }
 
   // Receive from self or another channel, polling until timeout, with
@@ -1218,10 +1283,10 @@ impl Channel<T> {
   // - other nonzero codes on synchronization failures
   pub select_try_recv3_rr_with(Channel<T>* other_a, Channel<T>* other_b, num* next_index, T* out, num* out_index) num {
     if other_a == NULL || other_b == NULL || next_index == NULL || out == NULL || out_index == NULL {
-      ret -1;
+      ret channel_rc_null_arg();
     }
 
-    out_index[0] = -1;
+    out_index[0] = channel_select_index_default();
 
     num start = next_index[0] % 3;
     if start < 0 {
@@ -1236,29 +1301,29 @@ impl Channel<T> {
         slot = slot - 3;
       }
 
-      num rc = 2;
-      if slot == 0 {
+      num rc = channel_rc_empty();
+      if slot == channel_select_index_self() {
         rc = self.try_recv(out);
-      } elif slot == 1 {
+      } elif slot == channel_select_index_other() {
         rc = other_a.try_recv(out);
       } else {
         rc = other_b.try_recv(out);
       }
 
-      if rc == 0 {
+      if rc == channel_rc_ok() {
         out_index[0] = slot;
         num nxt = slot + 1;
         if nxt >= 3 {
-          nxt = 0;
+          nxt = channel_select_index_self();
         }
         next_index[0] = nxt;
-        ret 0;
+        ret channel_rc_ok();
       }
 
-      if rc != 1 && rc != 2 {
+      if rc != channel_rc_closed() && rc != channel_rc_empty() {
         ret rc;
       }
-      if rc == 1 {
+      if rc == channel_rc_closed() {
         closed_count = closed_count + 1;
       }
 
@@ -1266,9 +1331,9 @@ impl Channel<T> {
     }
 
     if closed_count == 3 {
-      ret 1;
+      ret channel_rc_closed();
     }
-    ret 2;
+    ret channel_rc_empty();
   }
 
   // Try receiving from self + two other channels, else take the default branch.
@@ -1288,9 +1353,9 @@ impl Channel<T> {
   // - other nonzero codes on synchronization failures
   pub select_recv3_rr_default_with(Channel<T>* other_a, Channel<T>* other_b, num* next_index, T* out, num* out_index) num {
     num rc = self.select_try_recv3_rr_with(other_a, other_b, next_index, out, out_index);
-    if rc == 2 {
-      out_index[0] = -1;
-      ret 3;
+    if rc == channel_rc_empty() {
+      out_index[0] = channel_select_index_default();
+      ret channel_rc_default();
     }
     ret rc;
   }
@@ -1376,7 +1441,7 @@ impl Channel<T> {
   // - other nonzero codes on synchronization failures
   pub select_recv_timeout3_rr_with_tuning_cancel(Channel<T>* other_a, Channel<T>* other_b, num* next_index, T* out, num* out_index, num timeout_ms, num wait_slice_ms, num backoff_steps, num* cancel_flag) num {
     if other_a == NULL || other_b == NULL || next_index == NULL || out == NULL || out_index == NULL {
-      ret -1;
+      ret channel_rc_null_arg();
     }
 
     num base_wait_slice_ms = channel_sanitize_wait_slice_ms(wait_slice_ms);
@@ -1399,29 +1464,29 @@ impl Channel<T> {
 
     for true {
       if channel_is_cancelled(cancel_flag) == true {
-        out_index[0] = -1;
-        ret 3;
+        out_index[0] = channel_select_index_default();
+        ret channel_rc_cancelled();
       }
 
       num rc = self.select_try_recv3_rr_with(other_a, other_b, next_index, out, out_index);
-      if rc == 0 {
-        ret 0;
+      if rc == channel_rc_ok() {
+        ret channel_rc_ok();
       }
-      if rc == 1 {
-        ret 1;
+      if rc == channel_rc_closed() {
+        ret channel_rc_closed();
       }
-      if rc != 2 {
+      if rc != channel_rc_empty() {
         ret rc;
       }
 
       if wait_forever == false && channel_deadline_reached(&abs_time) == true {
-        ret 2;
+        ret channel_rc_timeout();
       }
 
       Channel<T>* hint= self;
-      if wait_slot == 1 {
+      if wait_slot == channel_select_index_other() {
         hint = other_a;
-      } elif wait_slot == 2 {
+      } elif wait_slot == channel_select_index_other_b() {
         hint = other_b;
       }
       wait_slot = wait_slot + 1;
@@ -1433,25 +1498,25 @@ impl Channel<T> {
       if wait_forever == false {
         rem_ms = channel_deadline_remaining_ms(&abs_time);
         if rem_ms <= 0 {
-          ret 2;
+          ret channel_rc_timeout();
         }
       }
 
       num wait_now_ms = channel_compute_wait_slice_ms(base_wait_slice_ms, rem_ms, idle_rounds, max_backoff_steps);
 
       num wait_rc = self.wait_recv_hint_timeout(hint, wait_now_ms);
-      if wait_rc != 0 && wait_rc != 2 {
+      if wait_rc != channel_rc_ok() && wait_rc != channel_rc_timeout() {
         ret wait_rc;
       }
       if idle_rounds < max_backoff_steps {
         idle_rounds = idle_rounds + 1;
       }
-      if wait_rc == 0 {
+      if wait_rc == channel_rc_ok() {
         idle_rounds = 0;
       }
     }
 
-    ret 2;
+    ret channel_rc_timeout();
   }
 
   // Receive from self + two other channels, polling until timeout, with
@@ -1560,7 +1625,7 @@ impl Channel<T> {
     self.closed = true;
     _ = runtime_condvar_broadcast(&self.can_recv);
     _ = runtime_condvar_broadcast(&self.can_send);
-    ret 0;
+    ret channel_rc_ok();
   }
 
   // Read closed state.

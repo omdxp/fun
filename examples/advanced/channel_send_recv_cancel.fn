@@ -16,7 +16,24 @@ fun main() {
   _ = ch.recv_into(&out);
   num rc4 = ch.recv_timeout_into_with_cancel(&out, 10, &cancel);
 
-  printf("ok_send=%lld ok_recv=%lld cancel_send=%lld cancel_recv=%lld\n", rc1, rc2, rc3, rc4);
+  num ok_send = 0;
+  if rc1 == channel_rc_ok() {
+    ok_send = 1;
+  }
+  num ok_recv = 0;
+  if rc2 == channel_rc_ok() {
+    ok_recv = 1;
+  }
+  num ok_cancel_send = 0;
+  if rc3 == channel_rc_cancelled() {
+    ok_cancel_send = 1;
+  }
+  num ok_cancel_recv = 0;
+  if rc4 == channel_rc_cancelled() {
+    ok_cancel_recv = 1;
+  }
+
+  printf("ok_send=%lld ok_recv=%lld cancel_send=%lld cancel_recv=%lld\n", ok_send, ok_recv, ok_cancel_send, ok_cancel_recv);
 
   _ = ch.destroy();
 }

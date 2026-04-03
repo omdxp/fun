@@ -40,7 +40,7 @@ pub quirk Serialize {
 Note: `num`/`dec` are 64-bit by default (`int64_t`/`double`), and Fun also supports fixed-width numeric types (`i8`..`i64`, `u8`..`u64`, `f32`, `f64`) plus arbitrary-width integers (`iN`, `uN`).
 
 - **std/array.fn**: Fixed-size array helpers (get/set/swap/reverse).
-- **std/channel.fn**: Bounded blocking ring-buffer channels with timeout send/recv, non-blocking `try_send`/`try_recv`, cancellation-aware send/recv helpers (`send_with_cancel`, `recv_into_with_cancel`, timeout variants), default-branch select helpers (`select_recv_default_with`, `select_recv3_rr_default_with`), and cancellation-aware select APIs (`*_with_cancel`) plus channel-level/per-call select wait-slice/backoff tuning, with synchronization routed through std.sync_runtime.
+- **std/channel.fn**: Bounded blocking ring-buffer channels with timeout send/recv, non-blocking `try_send`/`try_recv`, cancellation-aware send/recv helpers (`send_with_cancel`, `recv_into_with_cancel`, timeout variants), default-branch select helpers (`select_recv_default_with`, `select_recv3_rr_default_with`), cancellation-aware select APIs (`*_with_cancel`), status helper symbols (`channel_rc_*`), select index helpers (`channel_select_index_*`), plus channel-level/per-call select wait-slice/backoff tuning, with synchronization routed through std.sync_runtime.
 - **std/cli.fn**: Command-line argument parsing helpers (long/short flags, bundling, `--` stop).
 - **std/collections.fn**: Collection quirks (len/is_empty) aligned with std.quirks.
 - **std/fs.fn**: File system helpers (exists, read/write, copy, read_lines).

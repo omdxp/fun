@@ -1621,7 +1621,15 @@ test "channel select default returns default branch when empty" {
         "  num idx2 = idx;\n" ++
         "  num rc3 = a.select_recv3_rr_default_with(&b, &c, &next, &out, &idx);\n" ++
         "  num idx3 = idx;\n" ++
-        "  printf(\"%lld|%lld|%lld|%lld\", rc2, idx2, rc3, idx3);\n" ++
+        "  num ok_rc2 = 0;\n" ++
+        "  if rc2 == channel_rc_default() { ok_rc2 = 1; }\n" ++
+        "  num ok_idx2 = 0;\n" ++
+        "  if idx2 == channel_select_index_default() { ok_idx2 = 1; }\n" ++
+        "  num ok_rc3 = 0;\n" ++
+        "  if rc3 == channel_rc_default() { ok_rc3 = 1; }\n" ++
+        "  num ok_idx3 = 0;\n" ++
+        "  if idx3 == channel_select_index_default() { ok_idx3 = 1; }\n" ++
+        "  printf(\"%lld|%lld|%lld|%lld\", ok_rc2, ok_idx2, ok_rc3, ok_idx3);\n" ++
         "  _ = a.destroy();\n" ++
         "  _ = b.destroy();\n" ++
         "  _ = c.destroy();\n" ++
@@ -1641,7 +1649,7 @@ test "channel select default returns default branch when empty" {
     const stdout = try runExeWithEnv(allocator, exe_path, &.{});
     defer allocator.free(stdout);
 
-    try std.testing.expectEqualStrings("3|-1|3|-1", stdout);
+    try std.testing.expectEqualStrings("1|1|1|1", stdout);
 }
 
 test "channel select cancel returns cancelled status" {
@@ -1672,7 +1680,15 @@ test "channel select cancel returns cancelled status" {
         "  num idx2 = idx;\n" ++
         "  num rc3 = a.select_recv_timeout3_rr_with_cancel(&b, &c, &next, &out, &idx, 10, &cancel);\n" ++
         "  num idx3 = idx;\n" ++
-        "  printf(\"%lld|%lld|%lld|%lld\", rc2, idx2, rc3, idx3);\n" ++
+        "  num ok_rc2 = 0;\n" ++
+        "  if rc2 == channel_rc_cancelled() { ok_rc2 = 1; }\n" ++
+        "  num ok_idx2 = 0;\n" ++
+        "  if idx2 == channel_select_index_default() { ok_idx2 = 1; }\n" ++
+        "  num ok_rc3 = 0;\n" ++
+        "  if rc3 == channel_rc_cancelled() { ok_rc3 = 1; }\n" ++
+        "  num ok_idx3 = 0;\n" ++
+        "  if idx3 == channel_select_index_default() { ok_idx3 = 1; }\n" ++
+        "  printf(\"%lld|%lld|%lld|%lld\", ok_rc2, ok_idx2, ok_rc3, ok_idx3);\n" ++
         "  _ = a.destroy();\n" ++
         "  _ = b.destroy();\n" ++
         "  _ = c.destroy();\n" ++
@@ -1692,7 +1708,7 @@ test "channel select cancel returns cancelled status" {
     const stdout = try runExeWithEnv(allocator, exe_path, &.{});
     defer allocator.free(stdout);
 
-    try std.testing.expectEqualStrings("3|-1|3|-1", stdout);
+    try std.testing.expectEqualStrings("1|1|1|1", stdout);
 }
 
 test "channel cancel-aware send and recv return cancelled status" {
@@ -1719,7 +1735,11 @@ test "channel cancel-aware send and recv return cancelled status" {
         "  num rc_send = ch.send_timeout_with_cancel(2, 10, &cancel);\n" ++
         "  _ = ch.recv_into(&out);\n" ++
         "  num rc_recv = ch.recv_timeout_into_with_cancel(&out, 10, &cancel);\n" ++
-        "  printf(\"%lld|%lld\", rc_send, rc_recv);\n" ++
+        "  num ok_send = 0;\n" ++
+        "  if rc_send == channel_rc_cancelled() { ok_send = 1; }\n" ++
+        "  num ok_recv = 0;\n" ++
+        "  if rc_recv == channel_rc_cancelled() { ok_recv = 1; }\n" ++
+        "  printf(\"%lld|%lld\", ok_send, ok_recv);\n" ++
         "  _ = ch.destroy();\n" ++
         "}\n";
 
@@ -1737,7 +1757,7 @@ test "channel cancel-aware send and recv return cancelled status" {
     const stdout = try runExeWithEnv(allocator, exe_path, &.{});
     defer allocator.free(stdout);
 
-    try std.testing.expectEqualStrings("3|3", stdout);
+    try std.testing.expectEqualStrings("1|1", stdout);
 }
 
 test "channel cancel-aware send and recv succeed when not cancelled" {
@@ -1764,7 +1784,17 @@ test "channel cancel-aware send and recv succeed when not cancelled" {
         "  num rc2 = ch.recv_into_with_cancel(&out, &cancel);\n" ++
         "  num rc3 = ch.send_timeout_with_cancel(6, 10, &cancel);\n" ++
         "  num rc4 = ch.recv_timeout_into_with_cancel(&out, 10, &cancel);\n" ++
-        "  printf(\"%lld|%lld|%lld|%lld|%lld\", rc1, rc2, rc3, rc4, out);\n" ++
+        "  num ok1 = 0;\n" ++
+        "  if rc1 == channel_rc_ok() { ok1 = 1; }\n" ++
+        "  num ok2 = 0;\n" ++
+        "  if rc2 == channel_rc_ok() { ok2 = 1; }\n" ++
+        "  num ok3 = 0;\n" ++
+        "  if rc3 == channel_rc_ok() { ok3 = 1; }\n" ++
+        "  num ok4 = 0;\n" ++
+        "  if rc4 == channel_rc_ok() { ok4 = 1; }\n" ++
+        "  num ok_out = 0;\n" ++
+        "  if out == 6 { ok_out = 1; }\n" ++
+        "  printf(\"%lld|%lld|%lld|%lld|%lld\", ok1, ok2, ok3, ok4, ok_out);\n" ++
         "  _ = ch.destroy();\n" ++
         "}\n";
 
@@ -1782,7 +1812,165 @@ test "channel cancel-aware send and recv succeed when not cancelled" {
     const stdout = try runExeWithEnv(allocator, exe_path, &.{});
     defer allocator.free(stdout);
 
-    try std.testing.expectEqualStrings("0|0|0|0|6", stdout);
+    try std.testing.expectEqualStrings("1|1|1|1|1", stdout);
+}
+
+test "channel select3 rr stress drains all values with expected statuses" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_channel_select_rr_stress_runtime.fn";
+    const cpath = "codegen_channel_select_rr_stress_runtime.c";
+    const exe_path = if (builtin.os.tag == .windows)
+        "codegen_channel_select_rr_stress_runtime.exe"
+    else
+        "codegen_channel_select_rr_stress_runtime";
+
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(cpath) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.channel;\n" ++
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  Channel<num> a = channel_new_cap(0, 256);\n" ++
+        "  Channel<num> b = channel_new_cap(0, 256);\n" ++
+        "  Channel<num> c = channel_new_cap(0, 256);\n" ++
+        "  num i = 0;\n" ++
+        "  for i < 200 {\n" ++
+        "    _ = a.send(i);\n" ++
+        "    _ = b.send(i + 1000);\n" ++
+        "    _ = c.send(i + 2000);\n" ++
+        "    i = i + 1;\n" ++
+        "  }\n" ++
+        "  num next = 0;\n" ++
+        "  num out = 0;\n" ++
+        "  num idx = channel_select_index_default();\n" ++
+        "  num got_a = 0;\n" ++
+        "  num got_b = 0;\n" ++
+        "  num got_c = 0;\n" ++
+        "  num sum = 0;\n" ++
+        "  i = 0;\n" ++
+        "  for i < 600 {\n" ++
+        "    num rc = a.select_recv3_rr_with(&b, &c, &next, &out, &idx);\n" ++
+        "    if rc != channel_rc_ok() {\n" ++
+        "      printf(\"0|0|0|0|0\");\n" ++
+        "      _ = a.destroy();\n" ++
+        "      _ = b.destroy();\n" ++
+        "      _ = c.destroy();\n" ++
+        "      ret;\n" ++
+        "    }\n" ++
+        "    if idx == channel_select_index_self() {\n" ++
+        "      got_a = got_a + 1;\n" ++
+        "    } elif idx == channel_select_index_other() {\n" ++
+        "      got_b = got_b + 1;\n" ++
+        "    } else {\n" ++
+        "      got_c = got_c + 1;\n" ++
+        "    }\n" ++
+        "    sum = sum + out;\n" ++
+        "    i = i + 1;\n" ++
+        "  }\n" ++
+        "  _ = a.close();\n" ++
+        "  _ = b.close();\n" ++
+        "  _ = c.close();\n" ++
+        "  num tail = 0;\n" ++
+        "  num rc_done = a.select_try_recv3_rr_with(&b, &c, &next, &tail, &idx);\n" ++
+        "  num ok_a = 0;\n" ++
+        "  if got_a == 200 { ok_a = 1; }\n" ++
+        "  num ok_b = 0;\n" ++
+        "  if got_b == 200 { ok_b = 1; }\n" ++
+        "  num ok_c = 0;\n" ++
+        "  if got_c == 200 { ok_c = 1; }\n" ++
+        "  num ok_sum = 0;\n" ++
+        "  if sum == 659700 { ok_sum = 1; }\n" ++
+        "  num ok_done = 0;\n" ++
+        "  if rc_done == channel_rc_closed() { ok_done = 1; }\n" ++
+        "  printf(\"%lld|%lld|%lld|%lld|%lld\", ok_a, ok_b, ok_c, ok_sum, ok_done);\n" ++
+        "  _ = a.destroy();\n" ++
+        "  _ = b.destroy();\n" ++
+        "  _ = c.destroy();\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try fs.cwd().createFile(cpath, .{});
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, cpath, exe_path);
+
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+
+    try std.testing.expectEqualStrings("1|1|1|1|1", stdout);
+}
+
+test "channel default and cancel select stress stays stable" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_channel_select_default_cancel_stress_runtime.fn";
+    const cpath = "codegen_channel_select_default_cancel_stress_runtime.c";
+    const exe_path = if (builtin.os.tag == .windows)
+        "codegen_channel_select_default_cancel_stress_runtime.exe"
+    else
+        "codegen_channel_select_default_cancel_stress_runtime";
+
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(cpath) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.channel;\n" ++
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  Channel<num> a = channel_new(0);\n" ++
+        "  Channel<num> b = channel_new(0);\n" ++
+        "  num out = 0;\n" ++
+        "  num idx = channel_select_index_default();\n" ++
+        "  num i = 0;\n" ++
+        "  num ok_default = 1;\n" ++
+        "  for i < 300 {\n" ++
+        "    num rc = a.select_recv_default_with(&b, &out, &idx);\n" ++
+        "    if rc != channel_rc_default() {\n" ++
+        "      ok_default = 0;\n" ++
+        "    } elif idx != channel_select_index_default() {\n" ++
+        "      ok_default = 0;\n" ++
+        "    }\n" ++
+        "    i = i + 1;\n" ++
+        "  }\n" ++
+        "  num cancel = 1;\n" ++
+        "  i = 0;\n" ++
+        "  num ok_cancel = 1;\n" ++
+        "  for i < 300 {\n" ++
+        "    num rc = a.select_recv_timeout_with_cancel(&b, &out, &idx, 5, &cancel);\n" ++
+        "    if rc != channel_rc_cancelled() {\n" ++
+        "      ok_cancel = 0;\n" ++
+        "    } elif idx != channel_select_index_default() {\n" ++
+        "      ok_cancel = 0;\n" ++
+        "    }\n" ++
+        "    i = i + 1;\n" ++
+        "  }\n" ++
+        "  printf(\"%lld|%lld\", ok_default, ok_cancel);\n" ++
+        "  _ = a.destroy();\n" ++
+        "  _ = b.destroy();\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try fs.cwd().createFile(cpath, .{});
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, cpath, exe_path);
+
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+
+    try std.testing.expectEqualStrings("1|1", stdout);
 }
 
 test "generic function specialization emits concrete names" {

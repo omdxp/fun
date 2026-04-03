@@ -6,10 +6,19 @@ fun main() {
   Channel<num> b = channel_new(0);
 
   num out = 0;
-  num idx = -1;
+  num idx = channel_select_index_default();
   num rc = a.select_recv_default_with(&b, &out, &idx);
 
-  printf("default rc=%lld idx=%lld\n", rc, idx);
+  num ok_rc = 0;
+  if rc == channel_rc_default() {
+    ok_rc = 1;
+  }
+  num ok_idx = 0;
+  if idx == channel_select_index_default() {
+    ok_idx = 1;
+  }
+
+  printf("default ok=%lld idx_ok=%lld\n", ok_rc, ok_idx);
 
   _ = a.destroy();
   _ = b.destroy();
