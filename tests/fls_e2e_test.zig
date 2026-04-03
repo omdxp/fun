@@ -666,6 +666,53 @@ fn expectCompletionMissingLabel(allocator: Allocator, result_val: std.json.Value
     return error.TestUnexpectedResult;
 }
 
+fn completionLabelDetailContains(result_val: std.json.Value, label: []const u8, needle: []const u8) bool {
+    const itemMatches = struct {
+        fn call(it: std.json.Value, label2: []const u8, needle2: []const u8) bool {
+            if (it != .object) return false;
+            const lbl = it.object.get("label") orelse return false;
+            if (lbl != .string or !std.mem.eql(u8, lbl.string, label2)) return false;
+            const detail = it.object.get("detail") orelse return false;
+            if (detail != .string) return false;
+            return std.mem.indexOf(u8, detail.string, needle2) != null;
+        }
+    }.call;
+
+    switch (result_val) {
+        .array => |arr| {
+            for (arr.items) |it| {
+                if (itemMatches(it, label, needle)) return true;
+            }
+            return false;
+        },
+        .object => |obj| {
+            if (obj.get("items")) |items| {
+                if (items == .array) {
+                    for (items.array.items) |it| {
+                        if (itemMatches(it, label, needle)) return true;
+                    }
+                }
+            }
+            return false;
+        },
+        else => return false,
+    }
+}
+
+fn expectCompletionLabelDetailContains(allocator: Allocator, result_val: std.json.Value, label: []const u8, needle: []const u8) !void {
+    if (completionLabelDetailContains(result_val, label, needle)) return;
+
+    const dumped = std.json.stringifyAlloc(allocator, result_val, .{}) catch null;
+    if (dumped) |s| {
+        defer allocator.free(s);
+        std.debug.print("\n[fls_e2e] completion detail for '{s}' missing '{s}'\n{s}\n", .{ label, needle, s });
+    } else {
+        std.debug.print("\n[fls_e2e] completion detail for '{s}' missing '{s}' (failed to stringify)\n", .{ label, needle });
+    }
+
+    return error.TestUnexpectedResult;
+}
+
 fn expectSignatureHelpLabelContains(allocator: Allocator, result_val: std.json.Value, needle: []const u8) !void {
     if (result_val == .null) return error.TestUnexpectedResult;
     if (result_val != .object) return error.TestUnexpectedResult;
@@ -2356,6 +2403,132 @@ test "fls e2e: warning control keywords completion" {
     defer ex_comp_res.deinit();
     const ex_comp_val = try jsonResultFromResponseObj(ex_comp_res.parsed.value.object);
     try expectCompletionHasLabel(allocator, ex_comp_val, "expect");
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: async/await completion details + hover + signatureHelp" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "compound Worker {\n" ++
+        "  num value;\n" ++
+        "}\n\n" ++
+        "impl Worker {\n" ++
+        "  async inc(num by) num {\n" ++
+        "    self.value += by;\n" ++
+        "    ret self.value;\n" ++
+        "  }\n" ++
+        "}\n\n" ++
+        "async fun main() num {\n" ++
+        "  Worker w;\n" ++
+        "  a;\n" ++
+        "  aw;\n" ++
+        "  await w.inc(1);\n" ++
+        "  w.\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-async-await.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // Completion should include async/await with contextual detail.
+    const a_pos = try findPosition(doc_text, "a;", 0);
+    const a_comp_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, a_pos.line, a_pos.col + 1 },
+    );
+    defer allocator.free(a_comp_params);
+    const a_comp_id = try lsp.request("textDocument/completion", a_comp_params);
+    var a_comp_res = try lsp.waitResponse(a_comp_id, 15000);
+    defer a_comp_res.deinit();
+    const a_comp_val = try jsonResultFromResponseObj(a_comp_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, a_comp_val, "async");
+    try expectCompletionLabelDetailContains(allocator, a_comp_val, "async", "declare async");
+
+    const aw_pos = try findPosition(doc_text, "aw;", 0);
+    const aw_comp_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, aw_pos.line, aw_pos.col + 2 },
+    );
+    defer allocator.free(aw_comp_params);
+    const aw_comp_id = try lsp.request("textDocument/completion", aw_comp_params);
+    var aw_comp_res = try lsp.waitResponse(aw_comp_id, 15000);
+    defer aw_comp_res.deinit();
+    const aw_comp_val = try jsonResultFromResponseObj(aw_comp_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, aw_comp_val, "await");
+    try expectCompletionLabelDetailContains(allocator, aw_comp_val, "await", "await async call");
+
+    // Hover on `await` keyword should describe async-only usage.
+    const await_pos = try findPosition(doc_text, "await w.inc", 0);
+    const await_hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, await_pos.line, await_pos.col + 2 },
+    );
+    defer allocator.free(await_hover_params);
+    const await_hover_id = try lsp.request("textDocument/hover", await_hover_params);
+    var await_hover_res = try lsp.waitResponse(await_hover_id, 15000);
+    defer await_hover_res.deinit();
+    const await_hover_val = try jsonResultFromResponseObj(await_hover_res.parsed.value.object);
+    try expectHoverContains(allocator, await_hover_val, "only valid inside `async` functions");
+
+    // Dot completion should include async method signatures in detail.
+    const dot_pos = try findPosition(doc_text, "  w.\n", 0);
+    const dot_comp_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, dot_pos.line, dot_pos.col + 4 },
+    );
+    defer allocator.free(dot_comp_params);
+    const dot_comp_id = try lsp.request("textDocument/completion", dot_comp_params);
+    var dot_comp_res = try lsp.waitResponse(dot_comp_id, 15000);
+    defer dot_comp_res.deinit();
+    const dot_comp_val = try jsonResultFromResponseObj(dot_comp_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, dot_comp_val, "inc");
+    try expectCompletionLabelDetailContains(allocator, dot_comp_val, "inc", "async inc(num by) num");
+
+    // Hover and signatureHelp on async member call should include async in signature.
+    const inc_use = try findPosition(doc_text, "w.inc(1)", 0);
+    const inc_hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, inc_use.line, inc_use.col + 3 },
+    );
+    defer allocator.free(inc_hover_params);
+    const inc_hover_id = try lsp.request("textDocument/hover", inc_hover_params);
+    var inc_hover_res = try lsp.waitResponse(inc_hover_id, 15000);
+    defer inc_hover_res.deinit();
+    const inc_hover_val = try jsonResultFromResponseObj(inc_hover_res.parsed.value.object);
+    try expectHoverContains(allocator, inc_hover_val, "async inc(num by) num");
+
+    const sig_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, inc_use.line, inc_use.col + 6 },
+    );
+    defer allocator.free(sig_params);
+    const sig_id = try lsp.request("textDocument/signatureHelp", sig_params);
+    var sig_res = try lsp.waitResponse(sig_id, 15000);
+    defer sig_res.deinit();
+    const sig_val = try jsonResultFromResponseObj(sig_res.parsed.value.object);
+    try expectSignatureHelpLabelContains(allocator, sig_val, "async inc(num by) num");
+    try expectSignatureHelpActiveParameter(allocator, sig_val, 0);
 
     const shutdown_id = try lsp.request("shutdown", "{}");
     var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);

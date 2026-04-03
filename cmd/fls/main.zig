@@ -1052,6 +1052,39 @@ const LspServer = struct {
             try self.sendResponseJson(id_val, "null");
             return;
         };
+        if (tok.kind == .keyword) {
+            var buf = std.ArrayList(u8).init(self.allocator);
+            defer buf.deinit();
+
+            if (std.mem.eql(u8, tok.text, "async")) {
+                try buf.writer().writeAll(
+                    "**async**\n\n" ++
+                        "```fun\n" ++
+                        "async fun name(...) Type { ... }\n" ++
+                        "```\n" ++
+                        "Marks a function or method as asynchronous.\n" ++
+                        "Calls to async functions must use `await`.\n",
+                );
+            } else if (std.mem.eql(u8, tok.text, "await")) {
+                try buf.writer().writeAll(
+                    "**await**\n\n" ++
+                        "```fun\n" ++
+                        "await some_async_call();\n" ++
+                        "```\n" ++
+                        "Waits for an async call and yields its result.\n" ++
+                        "`await` is only valid inside `async` functions.\n",
+                );
+            } else {
+                try self.sendResponseJson(id_val, "null");
+                return;
+            }
+
+            const hover: Hover = .{ .contents = .{ .value = buf.items }, .range = tok.range };
+            const json = try std.json.stringifyAlloc(self.allocator, hover, .{});
+            defer self.allocator.free(json);
+            try self.sendResponseJson(id_val, json);
+            return;
+        }
         if (tok.kind != .identifier) {
             try self.sendResponseJson(id_val, "null");
             return;
@@ -3316,17 +3349,27 @@ const LspServer = struct {
         const idx = doc.index orelse {
             var items = std.ArrayList(CompletionItem).init(self.allocator);
             defer {
-                for (items.items) |it| self.allocator.free(it.label);
+                for (items.items) |it| {
+                    self.allocator.free(it.label);
+                    if (it.detail) |d| self.allocator.free(d);
+                }
                 items.deinit();
             }
 
             const keywords = [_][]const u8{
-                "imp",  "as",  "pub", "fun", "compound", "quirk", "impl", "enum", "asm",   "volatile", "arch",   "ret", "if", "elif", "else", "for", "fit", "break", "continue",
-                "void", "raw", "num", "dec", "str",      "bin",   "chr",  "true", "false", "allow",    "expect",
+                "imp",    "as",   "pub", "async", "fun",   "compound", "quirk", "impl", "enum", "asm", "volatile", "arch", "defer", "await", "ret",   "if",
+                "elif",   "else", "for", "fit",   "break", "continue", "void",  "raw",  "num",  "dec", "str",      "bin",  "chr",   "true",  "false", "allow",
+                "expect",
             };
             for (keywords) |kw| {
                 if (prefix.len == 0 or std.mem.startsWith(u8, kw, prefix)) {
-                    try items.append(.{ .label = try self.allocator.dupe(u8, kw), .kind = 14 });
+                    const kw_detail: ?[]u8 = if (std.mem.eql(u8, kw, "async"))
+                        try self.allocator.dupe(u8, "keyword: declare async function or method")
+                    else if (std.mem.eql(u8, kw, "await"))
+                        try self.allocator.dupe(u8, "keyword: await async call result (inside async functions)")
+                    else
+                        null;
+                    try items.append(.{ .label = try self.allocator.dupe(u8, kw), .kind = 14, .detail = kw_detail });
                 }
             }
 
@@ -3640,12 +3683,19 @@ const LspServer = struct {
 
         // Keywords.
         const keywords = [_][]const u8{
-            "imp",  "as",  "pub", "fun", "compound", "quirk", "impl", "enum", "asm",   "volatile", "arch",   "defer", "ret", "if", "elif", "else", "for", "fit", "break", "continue",
-            "void", "raw", "num", "dec", "str",      "bin",   "chr",  "true", "false", "allow",    "expect",
+            "imp",    "as",   "pub", "async", "fun",   "compound", "quirk", "impl", "enum", "asm", "volatile", "arch", "defer", "await", "ret",   "if",
+            "elif",   "else", "for", "fit",   "break", "continue", "void",  "raw",  "num",  "dec", "str",      "bin",  "chr",   "true",  "false", "allow",
+            "expect",
         };
         for (keywords) |kw| {
             if (prefix.len == 0 or std.mem.startsWith(u8, kw, prefix)) {
-                try items.append(.{ .label = try self.allocator.dupe(u8, kw), .kind = 14 });
+                const kw_detail: ?[]u8 = if (std.mem.eql(u8, kw, "async"))
+                    try self.allocator.dupe(u8, "keyword: declare async function or method")
+                else if (std.mem.eql(u8, kw, "await"))
+                    try self.allocator.dupe(u8, "keyword: await async call result (inside async functions)")
+                else
+                    null;
+                try items.append(.{ .label = try self.allocator.dupe(u8, kw), .kind = 14, .detail = kw_detail });
             }
         }
 
@@ -8121,18 +8171,31 @@ fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path_opt
         try tokens_out.append(.{ .kind = kind, .text = text_copy, .range = rangeFromTokenPos(t.pos) });
     }
 
-    // Best-effort parse. On success, we can use AST-backed types/ranges for globals/locals.
-    var parse_ok: bool = true;
-    {
+    // Best-effort parse. Disabled by default because parser panics are process-fatal in Zig
+    // and can crash the LSP on malformed/edge-case files during workspace indexing.
+    // Set FLS_ENABLE_INPROC_PARSE=1 to opt in for debugging richer AST-backed symbols.
+    const parse_enabled: bool = blk: {
+        const v = std.process.getEnvVarOwned(tmp_alloc, "FLS_ENABLE_INPROC_PARSE") catch break :blk false;
+        const s = std.mem.trim(u8, v, " \t\r\n");
+        if (s.len == 0) break :blk false;
+        if (std.ascii.eqlIgnoreCase(s, "0")) break :blk false;
+        if (std.ascii.eqlIgnoreCase(s, "false")) break :blk false;
+        if (std.ascii.eqlIgnoreCase(s, "no")) break :blk false;
+        if (std.ascii.eqlIgnoreCase(s, "off")) break :blk false;
+        break :blk true;
+    };
+
+    var parse_ok: bool = false;
+    if (parse_enabled) {
+        parse_ok = true;
         var pp = parser.ParseProcess.init(&tp);
         pp.parse() catch {
             parse_ok = false;
         };
-    }
-
-    if (parse_ok) {
-        // Let inference updates AST variable types so LSP can expose concrete types.
-        tp.infer_let_types_best_effort();
+        if (parse_ok) {
+            // Let inference updates AST variable types so LSP can expose concrete types.
+            tp.infer_let_types_best_effort();
+        }
     }
 
     var symbols_out = std.ArrayList(SymbolLite).init(tmp_alloc);
@@ -8437,6 +8500,11 @@ fn buildSignatureFromAst(
     var buf = std.ArrayList(u8).init(allocator);
     errdefer buf.deinit();
 
+    const is_async_fn = @hasField(@TypeOf(fnv), "is_async") and fnv.is_async;
+    if (is_async_fn) {
+        try buf.appendSlice("async ");
+    }
+
     if (include_fun_prefix) {
         try buf.writer().print("fun {s}", .{name});
     } else {
@@ -8479,6 +8547,9 @@ fn buildQuirkMethodSignatureFromAst(allocator: Allocator, m: ast.QuirkMethodSig)
     var buf = std.ArrayList(u8).init(allocator);
     errdefer buf.deinit();
 
+    if (m.is_async) {
+        try buf.appendSlice("async ");
+    }
     try buf.writer().print("{s}(", .{m.name.items});
     var first: bool = true;
     for (m.args.items()) |a| {
@@ -8925,6 +8996,17 @@ fn nextNonTrivialToken(tokens: []const token.Token, start_index: usize) ?usize {
     return null;
 }
 
+fn prevNonTrivialToken(tokens: []const token.Token, start_index: usize) ?usize {
+    if (start_index == 0) return null;
+    var i: isize = @intCast(start_index);
+    while (i > 0) : (i -= 1) {
+        const t = tokens[@intCast(i - 1)];
+        if (t.type == .NewLine or t.type == .Comment) continue;
+        return @intCast(i - 1);
+    }
+    return null;
+}
+
 fn skipGenericArgsForward(tokens: []const token.Token, start_index: usize) usize {
     if (start_index >= tokens.len) return start_index;
     if (!isPunctChar(tokens[start_index], '<')) return start_index;
@@ -9020,6 +9102,20 @@ fn buildSignatureFromTokens(
 
     var buf = std.ArrayList(u8).init(allocator);
     errdefer buf.deinit();
+
+    const is_async_decl = blk: {
+        const prev_i = prevNonTrivialToken(tokens, name_i) orelse break :blk false;
+        if (isKeyword(tokens[prev_i], "async")) break :blk true;
+        if (include_fun_prefix and isKeyword(tokens[prev_i], "fun")) {
+            const prev2_i = prevNonTrivialToken(tokens, prev_i) orelse break :blk false;
+            if (isKeyword(tokens[prev2_i], "async")) break :blk true;
+        }
+        break :blk false;
+    };
+
+    if (is_async_decl) {
+        try buf.appendSlice("async ");
+    }
 
     if (include_fun_prefix) {
         try buf.writer().print("fun {s}(", .{name_buf.items});
@@ -9182,19 +9278,6 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
     const isLetToken = struct {
         fn call(t: token.Token) bool {
             return t.type == .Keyword and std.mem.eql(u8, tokenString(t), "let");
-        }
-    }.call;
-
-    const prevNonTrivialToken = struct {
-        fn call(tokens_: []const token.Token, start_index: usize) ?usize {
-            if (start_index == 0) return null;
-            var i: isize = @intCast(start_index);
-            while (i > 0) : (i -= 1) {
-                const t = tokens_[@intCast(i - 1)];
-                if (t.type == .NewLine or t.type == .Comment) continue;
-                return @intCast(i - 1);
-            }
-            return null;
         }
     }.call;
 
@@ -10494,6 +10577,9 @@ fn collectSymbolsFromTopLevel(allocator: Allocator, out: *std.ArrayList(SymbolLi
 fn formatFunctionSignature(allocator: Allocator, name: []const u8, fnv: anytype) ![]u8 {
     var buf = std.ArrayList(u8).init(allocator);
     errdefer buf.deinit();
+    if (@hasField(@TypeOf(fnv), "is_async") and fnv.is_async) {
+        try buf.appendSlice("async ");
+    }
     try buf.writer().print("fun {s}", .{name});
 
     if (@hasField(@TypeOf(fnv), "type_params")) {
