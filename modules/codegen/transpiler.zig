@@ -4636,10 +4636,15 @@ pub const TranspileProcess = struct {
                 if (node.data == null) return .{ .base = .Unknown };
                 const name = node.data.?.sval.items;
                 if (env.get(name)) |t| return t;
-                // If it's a known function name used as a value, it's not a first-class function.
+                // Allow function symbols as callback values.
                 if (fns.get(name) != null) {
-                    self.report_type_error(node, "function '{s}' is not a value", .{name});
-                    return TranspileError.NotCallable;
+                    if (self.find_function_node(name)) |fn_node| {
+                        if (!self.can_access(&node, fn_node)) {
+                            self.report_type_error(node, "function '{s}' is private", .{name});
+                            return TranspileError.SymbolNotDefined;
+                        }
+                    }
+                    return .{ .base = .Raw, .pointer_depth = 1 };
                 }
 
                 // Best-effort typing for common C macro constants.

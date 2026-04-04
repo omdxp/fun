@@ -1,0 +1,91 @@
+// Complex async runtime + threads + channels pipeline.
+// 
+// Flow:
+// - producer thread sends values to channel A
+// - async main awaits channel A, transforms values, forwards to channel B
+// - consumer thread receives from channel B and aggregates
+
+imp std.c.io;
+imp std.thread;
+imp std.channel;
+
+fun producer_main(raw* arg) raw* {
+  Channel<num>* out= arg;
+  num i = 1;
+  for i <= 20 {
+    _ = out.send(i);
+    i = i + 1;
+  }
+  _ = out.close();
+  ret 0;
+}
+
+fun consumer_main(raw* arg) raw* {
+  Channel<num>* input= arg;
+  num sum = 0;
+  num count = 0;
+
+  for true {
+    num v = 0;
+    num rc = input.recv_into(&v);
+    if rc == channel_rc_ok() {
+      sum = sum + v;
+      count = count + 1;
+      continue;
+    }
+    if rc == channel_rc_closed() {
+      break;
+    }
+    break;
+  }
+
+  printf("consumer count=%lld sum=%lld\n", count, sum);
+  ret 0;
+}
+
+async fun main() {
+  Channel<num> from_producer = channel_new_cap(0, 8);
+  Channel<num> to_consumer = channel_new_cap(0, 8);
+
+  Thread producer = thread_new();
+  Thread consumer = thread_new();
+
+  num rc_start_producer = thread_start(&producer, producer_main, &from_producer);
+  num rc_start_consumer = thread_start(&consumer, consumer_main, &to_consumer);
+
+  num moved = 0;
+  num timeout_ticks = 0;
+
+  for true {
+    num in = 0;
+    num rc_recv = await from_producer.recv_timeout_into_async(&in, 20);
+
+    if rc_recv == channel_rc_ok() {
+      num out = in * in;
+      _ = await to_consumer.send_async(out);
+      moved = moved + 1;
+      continue;
+    }
+
+    if rc_recv == channel_rc_closed() {
+      break;
+    }
+
+    if rc_recv == channel_rc_timeout() {
+      timeout_ticks = timeout_ticks + 1;
+      continue;
+    }
+
+    break;
+  }
+
+  _ = to_consumer.close();
+
+  num rc_join_producer = thread_join(&producer, 0);
+  num rc_join_consumer = thread_join(&consumer, 0);
+
+  printf("main moved=%lld start=(%lld,%lld) join=(%lld,%lld) timeouts=%lld\n", moved, rc_start_producer, rc_start_consumer, rc_join_producer, rc_join_consumer, timeout_ticks);
+
+  _ = from_producer.destroy();
+  _ = to_consumer.destroy();
+}

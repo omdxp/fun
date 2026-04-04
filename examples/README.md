@@ -48,7 +48,8 @@ zig-out/bin/fun -in examples/<example>.fn
 - advanced/async_quirk_await_nested_receiver.fn
 - advanced/async_quirk_await_parenthesized_receiver.fn
 - advanced/async_quirk_await_pointer_receiver.fn
-- advanced/channel_async_wrappers.fn
+- advanced/channel_async_composed.fn
+- advanced/async_runtime_threads_channels.fn
 - advanced/channel_buffered.fn
 - advanced/channel_select2.fn
 - advanced/channel_select3_rr.fn
@@ -82,6 +83,7 @@ zig-out/bin/fun -in examples/<example>.fn
 - stdlib/error_basic.fn
 - stdlib/io_file_copy.fn
 - stdlib/io_read_write.fn
+- stdlib/io_async_pipeline.fn
 - stdlib/io_format.fn
 - stdlib/print_fmt_varargs.fn
 - stdlib/json_basic.fn
@@ -94,6 +96,7 @@ zig-out/bin/fun -in examples/<example>.fn
 - stdlib/math_ops.fn
 - stdlib/mem_env_random.fn
 - stdlib/net_url_parse.fn
+- stdlib/net_async_composition.fn
 - stdlib/option_basic.fn
 - stdlib/path_ops.fn
 - stdlib/rand_basic.fn
@@ -102,6 +105,7 @@ zig-out/bin/fun -in examples/<example>.fn
 - stdlib/serde_json_toml.fn
 - stdlib/string_helpers.fn
 - stdlib/string_parse_csv_line.fn
+- stdlib/fs_async_streaming.fn
 - stdlib/time_format_now.fn
 - stdlib/time_helpers.fn
 - stdlib/toml_basic.fn

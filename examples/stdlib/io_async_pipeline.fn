@@ -1,0 +1,42 @@
+// Async-friendly io flow: sync file APIs + async channel handoff.
+
+imp std.c.io;
+imp std.c.mem;
+imp std.io;
+imp std.channel;
+
+async fun main() {
+  str path = "_tmp_io_async_pipeline.txt";
+
+  _ = write_all(path, "hello");
+
+  File r = open_read(path);
+  str first_raw = r.read_bytes(5);
+  str first = first_raw;
+  r.close();
+
+  str all_raw = read_all(path);
+  str all = all_raw;
+
+  Channel<str> done = channel_new_cap("", 1);
+  _ = await done.send_async("ok");
+  str status = await done.recv_async();
+
+  if first == 0 {
+    first = "";
+  }
+  if all == 0 {
+    all = "";
+  }
+
+  printf("status=%s first=%s all=%s\n", status, first, all);
+
+  if all_raw != NULL {
+    free(all_raw);
+  }
+  if first_raw != NULL {
+    free(first_raw);
+  }
+
+  _ = done.destroy();
+}

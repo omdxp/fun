@@ -1297,6 +1297,29 @@ test "std.thread helper lifecycle APIs transpile" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "std.thread accepts named function callbacks" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_thread_callback_symbol.fn";
+
+    const input =
+        "imp std.thread;\n" ++
+        "fun worker(raw* arg) raw* {\n" ++
+        "  ret arg;\n" ++
+        "}\n" ++
+        "fun main() {\n" ++
+        "  Thread t = thread_new();\n" ++
+        "  _ = thread_start(&t, worker, NULL);\n" ++
+        "  _ = thread_join(&t, NULL);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_start(&t, worker, NULL)") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
 test "std.sync helper lifecycle APIs transpile" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_std_sync_helpers.fn";
@@ -2467,6 +2490,55 @@ test "std.channel async forwarding APIs await and run" {
     defer allocator.free(stdout);
 
     try std.testing.expectEqualStrings("0|55|0|1|77|3", stdout);
+}
+
+test "std.io APIs usable in async function transpile" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_io_async_context.fn";
+
+    const input =
+        "imp std.io;\n" ++
+        "async fun main() {\n" ++
+        "  str path = \"codegen_std_io_async_context_tmp.txt\";\n" ++
+        "  _ = write_all(path, \"xyz\");\n" ++
+        "  File f = open_read(path);\n" ++
+        "  _ = f.read_bytes(3);\n" ++
+        "  f.close();\n" ++
+        "  _ = read_all(path);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "write_all(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "open_read(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "read_bytes(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "read_all(") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
+test "std.net async APIs transpile" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_net_async_apis.fn";
+
+    const input =
+        "imp std.net;\n" ++
+        "imp std.channel;\n" ++
+        "async fun main() {\n" ++
+        "  Channel<str> reqs = channel_new_cap(\"\", 1);\n" ++
+        "  ChannelCancelToken token = channel_cancel_token_new();\n" ++
+        "  _ = await build_http_get_to_channel_async(\"http://example.com/\", &reqs, &token);\n" ++
+        "  _ = await tcp_roundtrip_async(-1, \"ping\", \"\", 1, &token);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "build_http_get_to_channel_async") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "tcp_roundtrip_async") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
 }
 
 test "std.channel cancel-aware send and recv APIs transpile" {

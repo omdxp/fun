@@ -1,0 +1,37 @@
+// Async net APIs: request building channel + socket roundtrip primitive.
+
+imp std.c.io;
+imp std.c.mem;
+imp std.net;
+imp std.channel;
+
+async fun main() {
+  Channel<str> reqs = channel_new_cap("", 1);
+  ChannelCancelToken token = channel_cancel_token_new();
+  num build_rc = await build_http_get_to_channel_async("http://example.com:8080/health", &reqs, &token);
+
+  str req_raw = NULL;
+  str req = "";
+  if reqs.try_recv(&req_raw) == channel_rc_ok() {
+    req = req_raw;
+  }
+
+  str recv_buf = malloc(16);
+  num roundtrip_rc = -1;
+  if recv_buf != NULL {
+    roundtrip_rc = await tcp_roundtrip_async(-1, "PING", recv_buf, 15, &token);
+    free(recv_buf);
+  }
+
+  chr first = '?';
+  if req != NULL {
+    first = req[0];
+  }
+
+  printf("build_rc=%lld roundtrip_rc=%lld req_first=%c\n", build_rc, roundtrip_rc, first);
+
+  if req_raw != NULL {
+    free(req_raw);
+  }
+  _ = reqs.destroy();
+}

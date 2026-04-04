@@ -11,6 +11,7 @@ imp std.vec;
 imp std.c.io;
 imp std.c.mem;
 imp std.c.net;
+imp std.channel;
 imp std.result;
 imp std.error;
 
@@ -262,6 +263,94 @@ pub fun try_tcp_write(num fd, str buf, num len) Result<num> {
 // - fd: socket fd
 pub fun tcp_close(num fd) {
   close(fd);
+}
+
+// Perform a best-effort request/response exchange on an existing socket.
+// 
+// Params:
+// - fd: connected socket descriptor
+// - send_buf: optional payload to send first (null/empty skips write)
+// - recv_buf: destination buffer for response bytes
+// - recv_len: max bytes to read into recv_buf
+// - cancel_token: optional cancellation token
+// 
+// Returns:
+// - >= 0 bytes read
+// - -1 on invalid args or socket write/read failure
+// - -3 when cancelled
+pub async fun tcp_roundtrip_async(num fd, str send_buf, str recv_buf, num recv_len, ChannelCancelToken* cancel_token) num {
+  if recv_buf == NULL || recv_len <= 0 {
+    ret -1;
+  }
+
+  if channel_cancel_token_is_cancelled(cancel_token) == true {
+    ret -3;
+  }
+
+  if send_buf != NULL {
+    num send_len = len(send_buf);
+    if send_len > 0 {
+      num wrote = tcp_write(fd, send_buf, send_len);
+      if wrote < 0 {
+        ret -1;
+      }
+    }
+  }
+
+  if channel_cancel_token_is_cancelled(cancel_token) == true {
+    ret -3;
+  }
+
+  num n = tcp_read(fd, recv_buf, recv_len);
+  if n < 0 {
+    ret -1;
+  }
+  ret n;
+}
+
+// Parse a URL, build an HTTP GET request, and publish it to a channel.
+// 
+// Ownership:
+// - The emitted request string is heap-allocated; the receiver should free it.
+// 
+// Returns:
+// - 0 on success
+// - 1 when output channel is closed
+// - -1 on invalid args or malformed url
+// - -2 when request allocation fails
+// - -3 when cancelled
+pub async fun build_http_get_to_channel_async(str raw_url, Channel<str>* out_requests, ChannelCancelToken* cancel_token) num {
+  if raw_url == NULL || out_requests == NULL {
+    ret -1;
+  }
+
+  if channel_cancel_token_is_cancelled(cancel_token) == true {
+    ret -3;
+  }
+
+  Url u = parse_url(raw_url);
+  if u.host == NULL || len(u.host) == 0 {
+    ret -1;
+  }
+
+  str req = u.build_http_get();
+  if req == NULL {
+    ret -2;
+  }
+
+  num rc = await out_requests.send_with_token_async(req, cancel_token);
+  if rc == channel_rc_ok() {
+    ret 0;
+  }
+
+  free(req);
+  if rc == channel_rc_cancelled() {
+    ret -3;
+  }
+  if rc == channel_rc_closed() {
+    ret 1;
+  }
+  ret -1;
 }
 
 // Serve a single HTTP request with a fixed response.

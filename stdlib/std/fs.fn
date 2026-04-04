@@ -7,6 +7,7 @@
 // ```
 
 imp std.io;
+imp std.channel;
 imp std.c.io;
 imp std.c.mem;
 imp std.c.def;
@@ -431,4 +432,138 @@ pub fun size(str path) num {
 pub fun read_lines(str path, num max_len) Vec<str> {
   Fs f = fs();
   ret f.read_lines(path, max_len);
+}
+
+// Copy a file in chunks with optional cancellation and non-blocking progress updates.
+// 
+// Params:
+// - src: source path
+// - dst: destination path
+// - chunk_size: bytes per copy chunk (<= 0 defaults to 4096)
+// - progress_updates: optional channel receiving cumulative copied byte counts
+// - cancel_token: optional cancellation token
+// 
+// Returns:
+// - >= 0 total copied bytes on success
+// - -1 on open/read/write/flush failure or null src/dst
+// - -2 when buffer allocation fails
+// - -3 when cancelled
+pub async fun copy_file_progress_async(str src, str dst, num chunk_size, Channel<num>* progress_updates, ChannelCancelToken* cancel_token) num {
+  if src == NULL || dst == NULL {
+    ret -1;
+  }
+
+  if chunk_size <= 0 {
+    chunk_size = 4096;
+  }
+
+  if channel_cancel_token_is_cancelled(cancel_token) == true {
+    ret -3;
+  }
+
+  File in_file = open_read(src);
+  if in_file.handle == NULL {
+    ret -1;
+  }
+  defer in_file.close();
+
+  File out_file = open_write(dst);
+  if out_file.handle == NULL {
+    ret -1;
+  }
+  defer out_file.close();
+
+  raw* buf = malloc(chunk_size);
+  if buf == NULL {
+    ret -2;
+  }
+  defer free(buf);
+
+  num total = 0;
+  for true {
+    if channel_cancel_token_is_cancelled(cancel_token) == true {
+      ret -3;
+    }
+
+    num n = in_file.read_into(buf, chunk_size);
+    if n < 0 {
+      ret -1;
+    }
+    if n == 0 {
+      break;
+    }
+
+    if out_file.write_bytes(buf, n) == false {
+      ret -1;
+    }
+    total = total + n;
+
+    if progress_updates != NULL {
+      num rc = await progress_updates.send_timeout_with_token_async(total, 0, cancel_token);
+      if rc == channel_rc_cancelled() {
+        ret -3;
+      }
+      if rc != channel_rc_ok() && rc != channel_rc_full() && rc != channel_rc_timeout() {
+        ret -1;
+      }
+    }
+  }
+
+  if out_file.flush() == false {
+    ret -1;
+  }
+  ret total;
+}
+
+// Stream lines from a file into a channel using async send operations.
+// 
+// Ownership:
+// - each pushed line is heap-allocated; the receiver should free it.
+// 
+// Returns:
+// - >= 0 number of lines sent on success
+// - -1 on invalid args or file open/read failure
+// - -3 when cancelled
+pub async fun read_lines_into_channel_async(str path, num max_len, Channel<str>* out_lines, ChannelCancelToken* cancel_token) num {
+  if path == NULL || out_lines == NULL || max_len <= 1 {
+    ret -1;
+  }
+
+  if channel_cancel_token_is_cancelled(cancel_token) == true {
+    ret -3;
+  }
+
+  File f = open_read(path);
+  if f.handle == NULL {
+    ret -1;
+  }
+  defer f.close();
+
+  num sent = 0;
+  for true {
+    if channel_cancel_token_is_cancelled(cancel_token) == true {
+      ret -3;
+    }
+
+    str line = f.read_line_max(max_len);
+    if line == NULL {
+      break;
+    }
+
+    num rc = await out_lines.send_with_token_async(line, cancel_token);
+    if rc != channel_rc_ok() {
+      free(line);
+      if rc == channel_rc_cancelled() {
+        ret -3;
+      }
+      if rc == channel_rc_closed() {
+        ret sent;
+      }
+      ret -1;
+    }
+
+    sent = sent + 1;
+  }
+
+  ret sent;
 }
