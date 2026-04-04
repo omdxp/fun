@@ -3,6 +3,9 @@
 ### Chore
 
 - Enhance channel functionality and testing
+- Update CHANGELOG with recent enhancements, fixes, and documentation updates
+- *(deps-dev)* Bump lodash
+- *(deps-dev)* Bump lodash from 4.17.23 to 4.18.1 in /editors/vscode in the npm_and_yarn group across 1 directory (#82)
 
 ### Docs
 
@@ -54,6 +57,14 @@
 - Enhance diagnostic handling by adding support for diagnostic codes and updating tests for async diagnostics
 - Add channel/runtime conformance matrix documentation and related tests
 - Enhance CI configuration to support runtime backend matrix for testing
+- Enhance CI configuration with runtime backend matrix and update documentation for channel/runtime conformance
+- Add timeout to test job and simplify environment variable usage in tests
+- Remove unused windows runtime backend lane and update conformance documentation
+- Add tests for async function handling with let and await, including error cases
+- Add async wrappers for channel send/recv and update related tests
+- Add async file and network APIs, enhance examples, and update documentation
+- Add async spawn and join handle example, enhance net async APIs with offload support, and update related tests
+- Add tests for async task handle behavior and net offload edge return codes across backend selectors
 
 ### Fix
 
