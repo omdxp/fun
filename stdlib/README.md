@@ -40,16 +40,16 @@ pub quirk Serialize {
 Note: `num`/`dec` are 64-bit by default (`int64_t`/`double`), and Fun also supports fixed-width numeric types (`i8`..`i64`, `u8`..`u64`, `f32`, `f64`) plus arbitrary-width integers (`iN`, `uN`).
 
 - **std/array.fn**: Fixed-size array helpers (get/set/swap/reverse).
-- **std/channel.fn**: Bounded blocking ring-buffer channels with timeout send/recv, non-blocking `try_send`/`try_recv`, cancellation-aware send/recv helpers (`send_with_cancel`, `recv_into_with_cancel`, token variants `*_with_token`), default-branch select helpers (`select_recv_default_with`, `select_recv3_rr_default_with`), cancellation-aware select APIs (`*_with_cancel`, token variants `*_with_token`), dedicated cancel tokens (`ChannelCancelToken`, `channel_cancel_token_*`), status helper symbols (`channel_rc_*`), select index helpers (`channel_select_index_*`), plus channel-level/per-call select wait-slice/backoff tuning, with synchronization routed through std.sync_runtime.
+- **std/channel.fn**: Bounded blocking ring-buffer channels with timeout send/recv, non-blocking `try_send`/`try_recv`, cancellation-aware send/recv helpers (`send_with_cancel`, `recv_into_with_cancel`, token variants `*_with_token`), await-friendly async APIs (`send_async`, `recv_async`, timeout/token/select async variants), composed async forwarding helpers (`forward_one_to_async`, `forward_one_to_with_token_async`, `select_forward_one_to_async`, `select_forward_one_to_with_token_async`), default-branch select helpers (`select_recv_default_with`, `select_recv3_rr_default_with`), cancellation-aware select APIs (`*_with_cancel`, token variants `*_with_token`), dedicated cancel tokens (`ChannelCancelToken`, `channel_cancel_token_*`), status helper symbols (`channel_rc_*`), select index helpers (`channel_select_index_*`), plus channel-level/per-call select wait-slice/backoff tuning, with synchronization routed through std.sync_runtime.
 - **std/cli.fn**: Command-line argument parsing helpers (long/short flags, bundling, `--` stop).
 - **std/collections.fn**: Collection quirks (len/is_empty) aligned with std.quirks.
-- **std/fs.fn**: File system helpers (exists, read/write, copy, read_lines).
+- **std/fs.fn**: File system helpers (exists, read/write, copy, read_lines) plus async streaming/cancellation helpers (`copy_file_progress_async`, `read_lines_into_channel_async`).
 - **std/io.fn**: File helpers (append, size, read bytes, read line, flush).
 - **std/json.fn**: JSON stringify/parse for string objects and arrays (with escaping, keys/has/remove).
 - **std/log.fn**: Logging with levels and typed log helpers.
 - **std/map.fn**: Generic map type `Map<K, V>` with typed keys/values and bytewise hashed lookups by default.
 - **std/math.fn**: Math helpers.
-- **std/net.fn**: Basic URL parsing, HTTP GET builder, and POSIX TCP/HTTP helpers.
+- **std/net.fn**: Basic URL parsing, HTTP GET builder, and POSIX TCP/HTTP helpers, plus async composition APIs (`build_http_get_to_channel_async`, `tcp_roundtrip_async`).
 - **std/option.fn**: Generic `Option<T>` container with `some<T>`/`none<T>` helpers.
 - **std/c/net.fn**: POSIX socket bindings (sys/socket.h, netinet/in.h, arpa/inet.h, unistd.h).
 - **std/sys.fn**: Environment, process control, and randomness helpers.
@@ -64,7 +64,7 @@ Note: `num`/`dec` are 64-bit by default (`int64_t`/`double`), and Fun also suppo
 - **std/thread.fn**: POSIX-backed thread lifecycle helpers (`thread_new`, plus method and helper forms for start/join/detach).
 - **std/thread_backend_posix.fn**: POSIX thread backend module (`thread_backend_posix_*`) used by std.thread_runtime.
 - **std/thread_backend_windows.fn**: Windows thread backend module (`thread_backend_windows_*`) with direct thread lifecycle operations over `std.c.thread_windows`.
-- **std/thread_runtime.fn**: Backend-facing thread runtime shim (`runtime_thread_*`) with backend selector helpers (`thread_runtime_backend_*`) routed through std.runtime_backend and backend modules.
+- **std/thread_runtime.fn**: Backend-facing thread runtime shim (`runtime_thread_*`), async task handle APIs (`RuntimeAsyncTask`, `runtime_async_spawn`, `join_async`, `detach_async`), and backend selector helpers (`thread_runtime_backend_*`) routed through std.runtime_backend and backend modules.
 - **std/thread_pool.fn**: POSIX-backed thread pool helpers (`thread_pool_new`, start_all/join_all/detach_all) routed through std.thread_runtime.
 - **std/time.fn**: Time helpers (epoch, formatting, UTC, diffs).
 - **std/toml.fn**: Minimal TOML parse/stringify for flat key/value.

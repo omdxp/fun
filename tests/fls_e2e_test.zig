@@ -609,6 +609,63 @@ fn expectDefinitionPointsTo(allocator: Allocator, result_val: std.json.Value, ur
     return error.TestUnexpectedResult;
 }
 
+fn expectLocationsContain(allocator: Allocator, result_val: std.json.Value, uri_contains: []const u8, line: i64, character: i64) !void {
+    if (definitionResultHasLocation(result_val, uri_contains, line, character)) return;
+
+    const dumped = std.json.stringifyAlloc(allocator, result_val, .{}) catch null;
+    if (dumped) |s| {
+        defer allocator.free(s);
+        std.debug.print(
+            "\n[fls_e2e] locations expected uri contains '{s}' @ {d}:{d}\n{s}\n",
+            .{ uri_contains, line, character, s },
+        );
+    } else {
+        std.debug.print("\n[fls_e2e] locations mismatch (failed to stringify)\n", .{});
+    }
+    return error.TestUnexpectedResult;
+}
+
+fn workspaceEditCountUriNewText(result_val: std.json.Value, uri: []const u8, new_text: []const u8) usize {
+    if (result_val != .object) return 0;
+    const changes_val = result_val.object.get("changes") orelse return 0;
+    if (changes_val != .object) return 0;
+    const edits_val = changes_val.object.get(uri) orelse return 0;
+    if (edits_val != .array) return 0;
+
+    var count: usize = 0;
+    for (edits_val.array.items) |edit_val| {
+        if (edit_val != .object) continue;
+        const nt = edit_val.object.get("newText") orelse continue;
+        if (nt == .string and std.mem.eql(u8, nt.string, new_text)) {
+            count += 1;
+        }
+    }
+    return count;
+}
+
+fn expectRenameEditCountForUri(
+    allocator: Allocator,
+    result_val: std.json.Value,
+    uri: []const u8,
+    new_text: []const u8,
+    expected_min_count: usize,
+) !void {
+    const count = workspaceEditCountUriNewText(result_val, uri, new_text);
+    if (count >= expected_min_count) return;
+
+    const dumped = std.json.stringifyAlloc(allocator, result_val, .{}) catch null;
+    if (dumped) |s| {
+        defer allocator.free(s);
+        std.debug.print(
+            "\n[fls_e2e] rename expected at least {d} edits to '{s}' in uri '{s}', found {d}\n{s}\n",
+            .{ expected_min_count, new_text, uri, count, s },
+        );
+    } else {
+        std.debug.print("\n[fls_e2e] rename edit count mismatch (failed to stringify)\n", .{});
+    }
+    return error.TestUnexpectedResult;
+}
+
 fn completionHasLabel(result_val: std.json.Value, label: []const u8) bool {
     // Accept CompletionList or CompletionItem[]; both should include items with label.
     switch (result_val) {
@@ -775,14 +832,7 @@ fn expectSignatureHelpHasParameter(allocator: Allocator, result_val: std.json.Va
 }
 
 fn expectHoverContains(allocator: Allocator, result_val: std.json.Value, needle: []const u8) !void {
-    if (result_val == .null) return error.TestUnexpectedResult;
-    if (result_val != .object) return error.TestUnexpectedResult;
-    const obj = result_val.object;
-    const contents = obj.get("contents") orelse return error.TestUnexpectedResult;
-    if (contents != .object) return error.TestUnexpectedResult;
-    const v = contents.object.get("value") orelse return error.TestUnexpectedResult;
-    if (v != .string) return error.TestUnexpectedResult;
-    if (std.mem.indexOf(u8, v.string, needle) != null) return;
+    if (hoverContains(result_val, needle)) return;
 
     const dumped = std.json.stringifyAlloc(allocator, result_val, .{}) catch null;
     if (dumped) |s| {
@@ -790,6 +840,65 @@ fn expectHoverContains(allocator: Allocator, result_val: std.json.Value, needle:
         std.debug.print("\n[fls_e2e] hover missing '{s}'\n{s}\n", .{ needle, s });
     }
     return error.TestUnexpectedResult;
+}
+
+fn hoverContains(result_val: std.json.Value, needle: []const u8) bool {
+    if (result_val == .null) return false;
+    if (result_val != .object) return false;
+    const obj = result_val.object;
+    const contents = obj.get("contents") orelse return false;
+    if (contents != .object) return false;
+    const v = contents.object.get("value") orelse return false;
+    if (v != .string) return false;
+    return std.mem.indexOf(u8, v.string, needle) != null;
+}
+
+fn waitForCompletionLabel(allocator: Allocator, lsp: *LspProc, params_json: []const u8, label: []const u8, timeout_ms: i64) !void {
+    const deadline_ms = std.time.milliTimestamp() + timeout_ms;
+
+    while (true) {
+        const req_id = try lsp.request("textDocument/completion", params_json);
+        var res = lsp.waitResponse(req_id, 5000) catch |err| switch (err) {
+            error.Timeout => {
+                if (std.time.milliTimestamp() >= deadline_ms) return err;
+                continue;
+            },
+            else => return err,
+        };
+        defer res.deinit();
+
+        const result_val = try jsonResultFromResponseObj(res.parsed.value.object);
+        if (completionHasLabel(result_val, label)) return;
+        if (std.time.milliTimestamp() >= deadline_ms) {
+            return expectCompletionHasLabel(allocator, result_val, label);
+        }
+
+        std.time.sleep(100 * std.time.ns_per_ms);
+    }
+}
+
+fn waitForHoverContains(allocator: Allocator, lsp: *LspProc, params_json: []const u8, needle: []const u8, timeout_ms: i64) !void {
+    const deadline_ms = std.time.milliTimestamp() + timeout_ms;
+
+    while (true) {
+        const req_id = try lsp.request("textDocument/hover", params_json);
+        var res = lsp.waitResponse(req_id, 5000) catch |err| switch (err) {
+            error.Timeout => {
+                if (std.time.milliTimestamp() >= deadline_ms) return err;
+                continue;
+            },
+            else => return err,
+        };
+        defer res.deinit();
+
+        const result_val = try jsonResultFromResponseObj(res.parsed.value.object);
+        if (hoverContains(result_val, needle)) return;
+        if (std.time.milliTimestamp() >= deadline_ms) {
+            return expectHoverContains(allocator, result_val, needle);
+        }
+
+        std.time.sleep(100 * std.time.ns_per_ms);
+    }
 }
 
 fn codeActionHasTitleWithNewText(result_val: std.json.Value, title: []const u8, new_text: []const u8) bool {
@@ -1208,13 +1317,7 @@ test "fls e2e: C macro completion for std.c.limits and std.c.def" {
         .{ doc_uri, int_pos.line, int_pos.col + @as(i64, @intCast("INT".len)) },
     );
     defer allocator.free(int_params);
-    const int_id = try lsp.request("textDocument/completion", int_params);
-    var int_res = try lsp.waitResponse(int_id, 5000);
-    defer int_res.deinit();
-    try std.testing.expect(int_res.parsed.value == .object);
-    const int_obj = int_res.parsed.value.object;
-    const int_result = try jsonResultFromResponseObj(int_obj);
-    try expectCompletionHasLabel(allocator, int_result, "INT_MAX");
+    try waitForCompletionLabel(allocator, &lsp, int_params, "INT_MAX", 15000);
 
     // Completion at end of `NUL` should include `NULL`.
     const nul_pos = try findPosition(doc_text, "NUL;", 0);
@@ -1224,13 +1327,7 @@ test "fls e2e: C macro completion for std.c.limits and std.c.def" {
         .{ doc_uri, nul_pos.line, nul_pos.col + @as(i64, @intCast("NUL".len)) },
     );
     defer allocator.free(nul_params);
-    const nul_id = try lsp.request("textDocument/completion", nul_params);
-    var nul_res = try lsp.waitResponse(nul_id, 5000);
-    defer nul_res.deinit();
-    try std.testing.expect(nul_res.parsed.value == .object);
-    const nul_obj = nul_res.parsed.value.object;
-    const nul_result = try jsonResultFromResponseObj(nul_obj);
-    try expectCompletionHasLabel(allocator, nul_result, "NULL");
+    try waitForCompletionLabel(allocator, &lsp, nul_params, "NULL", 15000);
 
     const shutdown_id = try lsp.request("shutdown", "{}");
     var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
@@ -1626,16 +1723,12 @@ test "fls e2e: custom import namespace hover shows README" {
     const hover_params = try std.fmt.allocPrint(
         allocator,
         "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
-        .{ doc_uri, pos.line, pos.col },
+        .{ doc_uri, pos.line, pos.col + 2 },
     );
     defer allocator.free(hover_params);
 
-    const hover_id = try lsp.request("textDocument/hover", hover_params);
-    var hover_res = try lsp.waitResponse(hover_id, 15000);
-    defer hover_res.deinit();
-    const hover_val = try jsonResultFromResponseObj(hover_res.parsed.value.object);
-    try expectHoverContains(allocator, hover_val, "MyLib");
-    try expectHoverContains(allocator, hover_val, "Custom module README hover works");
+    try waitForHoverContains(allocator, &lsp, hover_params, "MyLib", 15000);
+    try waitForHoverContains(allocator, &lsp, hover_params, "Custom module README hover works", 15000);
 
     const shutdown_id = try lsp.request("shutdown", "{}");
     var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
@@ -2796,6 +2889,306 @@ test "fls e2e: async diagnostics map to code actions" {
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: let await parity hover completion definition signatureHelp" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "compound User {\n" ++
+        "  num id;\n" ++
+        "  num age;\n" ++
+        "}\n\n" ++
+        "async fun fetch_user(num id) User {\n" ++
+        "  User u;\n" ++
+        "  u.id = id;\n" ++
+        "  u.age = 42;\n" ++
+        "  ret u;\n" ++
+        "}\n\n" ++
+        "async fun main() num {\n" ++
+        "  let out = await fetch_user(7);\n" ++
+        "  out.\n" ++
+        "  num age = out.age;\n" ++
+        "  ret age;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-let-await-parity.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const let_pos = try findPosition(doc_text, "let out = await fetch_user", 0);
+    const out_hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, let_pos.line, let_pos.col + 5 },
+    );
+    defer allocator.free(out_hover_params);
+    const out_hover_id = try lsp.request("textDocument/hover", out_hover_params);
+    var out_hover_res = try lsp.waitResponse(out_hover_id, 15000);
+    defer out_hover_res.deinit();
+    const out_hover_val = try jsonResultFromResponseObj(out_hover_res.parsed.value.object);
+    try expectHoverContains(allocator, out_hover_val, "User out");
+
+    const out_dot_pos = try findPosition(doc_text, "  out.\n", 0);
+    const out_comp_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, out_dot_pos.line, out_dot_pos.col + @as(i64, @intCast("  out.".len)) },
+    );
+    defer allocator.free(out_comp_params);
+    const out_comp_id = try lsp.request("textDocument/completion", out_comp_params);
+    var out_comp_res = try lsp.waitResponse(out_comp_id, 15000);
+    defer out_comp_res.deinit();
+    const out_comp_val = try jsonResultFromResponseObj(out_comp_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, out_comp_val, "id");
+    try expectCompletionHasLabel(allocator, out_comp_val, "age");
+
+    const call_pos = try findPosition(doc_text, "fetch_user(7)", 0);
+    const def_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, call_pos.line, call_pos.col + 2 },
+    );
+    defer allocator.free(def_params);
+    const def_id = try lsp.request("textDocument/definition", def_params);
+    var def_res = try lsp.waitResponse(def_id, 15000);
+    defer def_res.deinit();
+    const def_val = try jsonResultFromResponseObj(def_res.parsed.value.object);
+    const decl_pos = try findPosition(doc_text, "fetch_user(num id)", 0);
+    try expectDefinitionPointsTo(allocator, def_val, doc_uri, decl_pos.line, decl_pos.col + 2);
+
+    const sig_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, call_pos.line, call_pos.col + @as(i64, @intCast("fetch_user(".len)) },
+    );
+    defer allocator.free(sig_params);
+    const sig_id = try lsp.request("textDocument/signatureHelp", sig_params);
+    var sig_res = try lsp.waitResponse(sig_id, 15000);
+    defer sig_res.deinit();
+    const sig_val = try jsonResultFromResponseObj(sig_res.parsed.value.object);
+    try expectSignatureHelpLabelContains(allocator, sig_val, "async fun fetch_user(num id) User");
+    try expectSignatureHelpActiveParameter(allocator, sig_val, 0);
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: std.channel async forwarding completion + hover" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    // Ensure the workspace std.channel symbols are indexed for this session.
+    const channel_abs = try std.fs.path.join(allocator, &[_][]const u8{ setup.root_abs, "stdlib", "std", "channel.fn" });
+    defer allocator.free(channel_abs);
+    const channel_src = blk: {
+        var f = try std.fs.openFileAbsolute(channel_abs, .{});
+        defer f.close();
+        break :blk try f.readToEndAlloc(allocator, 1024 * 1024);
+    };
+    defer allocator.free(channel_src);
+    const channel_uri = try pathToFileUriAlloc(allocator, channel_abs);
+    defer allocator.free(channel_uri);
+    try lspOpenDoc(allocator, &lsp, channel_uri, 1, channel_src);
+
+    const doc_text =
+        "imp std.channel;\n\n" ++
+        "async fun main() num {\n" ++
+        "  Channel<num> src = channel_new_cap(0, 1);\n" ++
+        "  Channel<num> other = channel_new_cap(0, 1);\n" ++
+        "  Channel<num> dst = channel_new_cap(0, 1);\n" ++
+        "  num idx = -1;\n" ++
+        "  src.\n" ++
+        "  await src.forward_one_to_async(&dst, 20);\n" ++
+        "  await src.select_forward_one_to_async(&other, &dst, 20, &idx);\n" ++
+        "  ret idx;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-channel-forwarding-async.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const dot_pos = try findPosition(doc_text, "  src.\n", 0);
+    const comp_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, dot_pos.line, dot_pos.col + @as(i64, @intCast("  src.".len)) },
+    );
+    defer allocator.free(comp_params);
+
+    const comp_id = try lsp.request("textDocument/completion", comp_params);
+    var comp_res = try lsp.waitResponse(comp_id, 15000);
+    defer comp_res.deinit();
+    const comp_val = try jsonResultFromResponseObj(comp_res.parsed.value.object);
+    try expectCompletionMissingLabel(allocator, comp_val, "forward_one_to_async");
+    try expectCompletionMissingLabel(allocator, comp_val, "select_forward_one_to_async");
+
+    const fwd_pos = try findPosition(doc_text, "forward_one_to_async", 0);
+    const fwd_hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, fwd_pos.line, fwd_pos.col + 2 },
+    );
+    defer allocator.free(fwd_hover_params);
+    try waitForHoverContains(allocator, &lsp, fwd_hover_params, "forward_one_to_async", 15000);
+
+    const select_fwd_pos = try findPosition(doc_text, "select_forward_one_to_async", 0);
+    const select_fwd_hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, select_fwd_pos.line, select_fwd_pos.col + 2 },
+    );
+    defer allocator.free(select_fwd_hover_params);
+    try waitForHoverContains(allocator, &lsp, select_fwd_hover_params, "select_forward_one_to_async", 15000);
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: references and rename baseline" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "fun add_one(num x) num { ret x + 1; }\n" ++
+        "fun main() num {\n" ++
+        "  num a = add_one(1);\n" ++
+        "  num b = add_one(2);\n" ++
+        "  ret a + b;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-references-rename-baseline.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const decl_pos = try findPosition(doc_text, "add_one(num x)", 0);
+    const call1_pos = try findPosition(doc_text, "add_one(1)", 0);
+    const call2_pos = try findPosition(doc_text, "add_one(2)", 0);
+
+    const refs_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, call1_pos.line, call1_pos.col + 2 },
+    );
+    defer allocator.free(refs_params);
+    const refs_id = try lsp.request("textDocument/references", refs_params);
+    var refs_res = try lsp.waitResponse(refs_id, 15000);
+    defer refs_res.deinit();
+    const refs_val = try jsonResultFromResponseObj(refs_res.parsed.value.object);
+    try expectLocationsContain(allocator, refs_val, doc_uri, decl_pos.line, decl_pos.col + 2);
+    try expectLocationsContain(allocator, refs_val, doc_uri, call1_pos.line, call1_pos.col + 2);
+    try expectLocationsContain(allocator, refs_val, doc_uri, call2_pos.line, call2_pos.col + 2);
+
+    const rename_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}},\"newName\":\"sum_one\"}}",
+        .{ doc_uri, call1_pos.line, call1_pos.col + 2 },
+    );
+    defer allocator.free(rename_params);
+    const rename_id = try lsp.request("textDocument/rename", rename_params);
+    var rename_res = try lsp.waitResponse(rename_id, 15000);
+    defer rename_res.deinit();
+    const rename_val = try jsonResultFromResponseObj(rename_res.parsed.value.object);
+    try expectRenameEditCountForUri(allocator, rename_val, doc_uri, "sum_one", 3);
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: references and rename with let await async calls" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "compound User { num id; }\n" ++
+        "async fun fetch_user(num id) User {\n" ++
+        "  User u;\n" ++
+        "  u.id = id;\n" ++
+        "  ret u;\n" ++
+        "}\n" ++
+        "async fun main() num {\n" ++
+        "  let a = await fetch_user(1);\n" ++
+        "  let b = await fetch_user(2);\n" ++
+        "  ret a.id + b.id;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-references-rename-async-let-await.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const decl_pos = try findPosition(doc_text, "fetch_user(num id)", 0);
+    const call1_pos = try findPosition(doc_text, "fetch_user(1)", 0);
+    const call2_pos = try findPosition(doc_text, "fetch_user(2)", 0);
+
+    const refs_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, call1_pos.line, call1_pos.col + 2 },
+    );
+    defer allocator.free(refs_params);
+    const refs_id = try lsp.request("textDocument/references", refs_params);
+    var refs_res = try lsp.waitResponse(refs_id, 15000);
+    defer refs_res.deinit();
+    const refs_val = try jsonResultFromResponseObj(refs_res.parsed.value.object);
+    try expectLocationsContain(allocator, refs_val, doc_uri, decl_pos.line, decl_pos.col + 2);
+    try expectLocationsContain(allocator, refs_val, doc_uri, call1_pos.line, call1_pos.col + 2);
+    try expectLocationsContain(allocator, refs_val, doc_uri, call2_pos.line, call2_pos.col + 2);
+
+    const rename_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}},\"newName\":\"load_user\"}}",
+        .{ doc_uri, call1_pos.line, call1_pos.col + 2 },
+    );
+    defer allocator.free(rename_params);
+    const rename_id = try lsp.request("textDocument/rename", rename_params);
+    var rename_res = try lsp.waitResponse(rename_id, 15000);
+    defer rename_res.deinit();
+    const rename_val = try jsonResultFromResponseObj(rename_res.parsed.value.object);
+    try expectRenameEditCountForUri(allocator, rename_val, doc_uri, "load_user", 3);
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: warning ids completion for allow and expect" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -3140,26 +3533,21 @@ test "fls e2e: quirks across folders complete + missing methods diagnose" {
     const doc_text_impl_header =
         "imp qaf.defs.user;\n" ++
         "imp qaf.defs.greeter;\n\n" ++
-        "impl User \n";
+        "impl User as \n";
 
     const doc_uri_impl_header = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-qaf-impl-header.fn");
     defer allocator.free(doc_uri_impl_header);
     try lspOpenDoc(allocator, &lsp, doc_uri_impl_header, 1, doc_text_impl_header);
 
-    const impl_pos = try findPosition(doc_text_impl_header, "impl User ", 0);
+    const impl_pos = try findPosition(doc_text_impl_header, "impl User as ", 0);
     const comp_params_impl = try std.fmt.allocPrint(
         allocator,
         "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
-        .{ doc_uri_impl_header, impl_pos.line, impl_pos.col + @as(i64, @intCast("impl User ".len)) },
+        .{ doc_uri_impl_header, impl_pos.line, impl_pos.col + @as(i64, @intCast("impl User as ".len)) },
     );
     defer allocator.free(comp_params_impl);
 
-    const comp_id_impl = try lsp.request("textDocument/completion", comp_params_impl);
-    var comp_res_impl = try lsp.waitResponse(comp_id_impl, 5000);
-    defer comp_res_impl.deinit();
-    const comp_obj_impl = comp_res_impl.parsed.value.object;
-    const comp_val_impl = try jsonResultFromResponseObj(comp_obj_impl);
-    try expectCompletionHasLabel(allocator, comp_val_impl, "Greeter");
+    try waitForCompletionLabel(allocator, &lsp, comp_params_impl, "Greeter", 15000);
 
     // --- 2) Member completion for impl methods across imported files.
     const doc_text_members =
@@ -3184,13 +3572,8 @@ test "fls e2e: quirks across folders complete + missing methods diagnose" {
     );
     defer allocator.free(comp_params_dot);
 
-    const comp_id_dot = try lsp.request("textDocument/completion", comp_params_dot);
-    var comp_res_dot = try lsp.waitResponse(comp_id_dot, 5000);
-    defer comp_res_dot.deinit();
-    const comp_obj_dot = comp_res_dot.parsed.value.object;
-    const comp_val_dot = try jsonResultFromResponseObj(comp_obj_dot);
-    try expectCompletionHasLabel(allocator, comp_val_dot, "greet");
-    try expectCompletionHasLabel(allocator, comp_val_dot, "bye");
+    try waitForCompletionLabel(allocator, &lsp, comp_params_dot, "greet", 15000);
+    try waitForCompletionLabel(allocator, &lsp, comp_params_dot, "bye", 15000);
 
     // --- 3) Diagnostics should report missing quirk methods in an imported impl.
     const doc_text_bad =

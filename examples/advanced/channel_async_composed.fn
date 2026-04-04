@@ -1,0 +1,32 @@
+imp std.c.io;
+imp std.channel;
+
+async fun main() {
+  Channel<num> src = channel_new_cap(0, 1);
+  Channel<num> dst = channel_new_cap(0, 1);
+
+  _ = await src.send_async(55);
+  num rc_forward = await src.forward_one_to_async(&dst, 20);
+  num moved = await dst.recv_async();
+
+  Channel<num> a = channel_new(0);
+  Channel<num> b = channel_new(0);
+  Channel<num> out = channel_new(0);
+  _ = await b.send_async(77);
+
+  num idx = -1;
+  num rc_select_forward = await a.select_forward_one_to_async(&b, &out, 20, &idx);
+  num selected = await out.recv_async();
+
+  ChannelCancelToken token = channel_cancel_token_new();
+  _ = channel_cancel_token_cancel(&token);
+  num rc_cancel = await a.forward_one_to_with_token_async(&out, 20, &token);
+
+  printf("rc_forward=%lld moved=%lld rc_select_forward=%lld idx=%lld selected=%lld rc_cancel=%lld\n", rc_forward, moved, rc_select_forward, idx, selected, rc_cancel);
+
+  _ = src.destroy();
+  _ = dst.destroy();
+  _ = a.destroy();
+  _ = b.destroy();
+  _ = out.destroy();
+}

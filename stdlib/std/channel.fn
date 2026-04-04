@@ -664,6 +664,29 @@ impl Channel<T> {
     ret self.send_with_cancel(value, channel_cancel_token_flag_ptr(cancel_token));
   }
 
+  // Await-friendly wrapper for send.
+  // 
+  // Note:
+  // - This remains a blocking channel send under the hood.
+  pub async send_async(T value) num {
+    ret self.send(value);
+  }
+
+  // Await-friendly wrapper for send_timeout.
+  pub async send_timeout_async(T value, num timeout_ms) num {
+    ret self.send_timeout(value, timeout_ms);
+  }
+
+  // Await-friendly wrapper for send_with_token.
+  pub async send_with_token_async(T value, ChannelCancelToken* cancel_token) num {
+    ret self.send_with_token(value, cancel_token);
+  }
+
+  // Await-friendly wrapper for send_timeout_with_token.
+  pub async send_timeout_with_token_async(T value, num timeout_ms, ChannelCancelToken* cancel_token) num {
+    ret self.send_timeout_with_token(value, timeout_ms, cancel_token);
+  }
+
   // Try sending one value without blocking.
   // 
   // Returns:
@@ -980,6 +1003,44 @@ impl Channel<T> {
   // - same return behavior as recv_with_cancel
   pub recv_with_token(ChannelCancelToken* cancel_token) T {
     ret self.recv_with_cancel(channel_cancel_token_flag_ptr(cancel_token));
+  }
+
+  // Await-friendly wrapper for recv.
+  // 
+  // Note:
+  // - This remains a blocking channel receive under the hood.
+  pub async recv_async() T {
+    ret self.recv();
+  }
+
+  // Await-friendly wrapper for recv_timeout.
+  pub async recv_timeout_async(num timeout_ms) T {
+    ret self.recv_timeout(timeout_ms);
+  }
+
+  // Await-friendly wrapper for recv_into.
+  pub async recv_into_async(T* out) num {
+    ret self.recv_into(out);
+  }
+
+  // Await-friendly wrapper for recv_timeout_into.
+  pub async recv_timeout_into_async(T* out, num timeout_ms) num {
+    ret self.recv_timeout_into(out, timeout_ms);
+  }
+
+  // Await-friendly wrapper for recv_timeout_into_with_token.
+  pub async recv_timeout_into_with_token_async(T* out, num timeout_ms, ChannelCancelToken* cancel_token) num {
+    ret self.recv_timeout_into_with_token(out, timeout_ms, cancel_token);
+  }
+
+  // Await-friendly wrapper for recv_with_token.
+  pub async recv_with_token_async(ChannelCancelToken* cancel_token) T {
+    ret self.recv_with_token(cancel_token);
+  }
+
+  // Await-friendly wrapper for recv_timeout_with_token.
+  pub async recv_timeout_with_token_async(num timeout_ms, ChannelCancelToken* cancel_token) T {
+    ret self.recv_timeout_with_token(timeout_ms, cancel_token);
   }
 
   // Try receiving one value without blocking.
@@ -1415,6 +1476,21 @@ impl Channel<T> {
     ret self.select_recv_with_tuning(other, out, out_index, self.select_wait_slice_ms, self.select_wait_backoff_steps);
   }
 
+  // Await-friendly wrapper for select_recv_with.
+  pub async select_recv_with_async(Channel<T>* other, T* out, num* out_index) num {
+    ret self.select_recv_with(other, out, out_index);
+  }
+
+  // Await-friendly wrapper for select_recv_timeout_with.
+  pub async select_recv_timeout_with_async(Channel<T>* other, T* out, num* out_index, num timeout_ms) num {
+    ret self.select_recv_timeout_with(other, out, out_index, timeout_ms);
+  }
+
+  // Await-friendly wrapper for select_recv_timeout_with_token.
+  pub async select_recv_timeout_with_token_async(Channel<T>* other, T* out, num* out_index, num timeout_ms, ChannelCancelToken* cancel_token) num {
+    ret self.select_recv_timeout_with_token(other, out, out_index, timeout_ms, cancel_token);
+  }
+
   // Try receiving from self + two other channels without blocking, using
   // a rotating start index for fairness.
   // 
@@ -1781,6 +1857,103 @@ impl Channel<T> {
   // - other nonzero codes on synchronization failures
   pub select_recv3_rr_with(Channel<T>* other_a, Channel<T>* other_b, num* next_index, T* out, num* out_index) num {
     ret self.select_recv3_rr_with_tuning(other_a, other_b, next_index, out, out_index, self.select_wait_slice_ms, self.select_wait_backoff_steps);
+  }
+
+  // Await-friendly wrapper for select_recv3_rr_with.
+  pub async select_recv3_rr_with_async(Channel<T>* other_a, Channel<T>* other_b, num* next_index, T* out, num* out_index) num {
+    ret self.select_recv3_rr_with(other_a, other_b, next_index, out, out_index);
+  }
+
+  // Await-friendly wrapper for select_recv_timeout3_rr_with.
+  pub async select_recv_timeout3_rr_with_async(Channel<T>* other_a, Channel<T>* other_b, num* next_index, T* out, num* out_index, num timeout_ms) num {
+    ret self.select_recv_timeout3_rr_with(other_a, other_b, next_index, out, out_index, timeout_ms);
+  }
+
+  // Await-friendly wrapper for select_recv_timeout3_rr_with_token.
+  pub async select_recv_timeout3_rr_with_token_async(Channel<T>* other_a, Channel<T>* other_b, num* next_index, T* out, num* out_index, num timeout_ms, ChannelCancelToken* cancel_token) num {
+    ret self.select_recv_timeout3_rr_with_token(other_a, other_b, next_index, out, out_index, timeout_ms, cancel_token);
+  }
+
+  // Receive one value from self and forward it to dst using async channel APIs.
+  // 
+  // Returns:
+  // - 0 on success
+  // - timeout/closed/cancelled/null_arg values propagated from recv/send paths
+  pub async forward_one_to_async(Channel<T>* dst, num timeout_ms) num {
+    if dst == NULL {
+      ret channel_rc_null_arg();
+    }
+
+    T value = self.zero_value();
+    num rc = await self.recv_timeout_into_async(&value, timeout_ms);
+    if rc != channel_rc_ok() {
+      ret rc;
+    }
+
+    ret await dst.send_timeout_async(value, timeout_ms);
+  }
+
+  // Token-aware variant of forward_one_to_async.
+  // 
+  // Returns:
+  // - 0 on success
+  // - timeout/closed/cancelled/null_arg values propagated from recv/send paths
+  pub async forward_one_to_with_token_async(Channel<T>* dst, num timeout_ms, ChannelCancelToken* cancel_token) num {
+    if dst == NULL {
+      ret channel_rc_null_arg();
+    }
+
+    T value = self.zero_value();
+    num rc = await self.recv_timeout_into_with_token_async(&value, timeout_ms, cancel_token);
+    if rc != channel_rc_ok() {
+      ret rc;
+    }
+
+    ret await dst.send_timeout_with_token_async(value, timeout_ms, cancel_token);
+  }
+
+  // Receive one value from self or other and forward it to dst using async APIs.
+  // 
+  // Params:
+  // - other: second source channel pointer
+  // - dst: destination channel pointer
+  // - timeout_ms: max wait in ms (negative means wait forever)
+  // - out_index: selected source index (0=self, 1=other)
+  // 
+  // Returns:
+  // - 0 on success
+  // - timeout/closed/cancelled/null_arg values propagated from select/send paths
+  pub async select_forward_one_to_async(Channel<T>* other, Channel<T>* dst, num timeout_ms, num* out_index) num {
+    if other == NULL || dst == NULL || out_index == NULL {
+      ret channel_rc_null_arg();
+    }
+
+    T value = self.zero_value();
+    num rc = await self.select_recv_timeout_with_async(other, &value, out_index, timeout_ms);
+    if rc != channel_rc_ok() {
+      ret rc;
+    }
+
+    ret await dst.send_timeout_async(value, timeout_ms);
+  }
+
+  // Token-aware variant of select_forward_one_to_async.
+  // 
+  // Returns:
+  // - 0 on success
+  // - timeout/closed/cancelled/null_arg values propagated from select/send paths
+  pub async select_forward_one_to_with_token_async(Channel<T>* other, Channel<T>* dst, num timeout_ms, num* out_index, ChannelCancelToken* cancel_token) num {
+    if other == NULL || dst == NULL || out_index == NULL {
+      ret channel_rc_null_arg();
+    }
+
+    T value = self.zero_value();
+    num rc = await self.select_recv_timeout_with_token_async(other, &value, out_index, timeout_ms, cancel_token);
+    if rc != channel_rc_ok() {
+      ret rc;
+    }
+
+    ret await dst.send_timeout_with_token_async(value, timeout_ms, cancel_token);
   }
 
   // Close channel and wake blocked senders/receivers.

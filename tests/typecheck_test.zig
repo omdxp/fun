@@ -130,6 +130,121 @@ test "typecheck async call with await is ok" {
     try runTranspileExpectOk(std.testing.allocator, "typecheck_async_call_with_await_ok.fn", input);
 }
 
+test "typecheck let await async call is ok" {
+    const input =
+        "async fun inc(num a) num { ret a + 1; }\n" ++
+        "async fun main() {\n" ++
+        "  let out = await inc(41);\n" ++
+        "  num verify = out + 1;\n" ++
+        "  _ = verify;\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_let_await_async_call_ok.fn", input);
+}
+
+test "typecheck let async call requires await" {
+    const input =
+        "async fun inc(num a) num { ret a + 1; }\n" ++
+        "async fun main() {\n" ++
+        "  let out = inc(41);\n" ++
+        "  _ = out;\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_let_async_call_requires_await.fn", input);
+}
+
+test "typecheck let await requires async function context" {
+    const input =
+        "async fun inc(num a) num { ret a + 1; }\n" ++
+        "fun main() {\n" ++
+        "  let out = await inc(41);\n" ++
+        "  _ = out;\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_let_await_requires_async_context.fn", input);
+}
+
+test "typecheck let await target must be async" {
+    const input =
+        "fun inc(num a) num { ret a + 1; }\n" ++
+        "async fun main() {\n" ++
+        "  let out = await inc(41);\n" ++
+        "  _ = out;\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_let_await_target_not_async.fn", input);
+}
+
+test "typecheck std.channel async wrappers with await are ok" {
+    const input =
+        "imp std.channel;\n" ++
+        "async fun main() {\n" ++
+        "  Channel<num> ch = channel_new_cap(0, 1);\n" ++
+        "  num rc_send = await ch.send_async(7);\n" ++
+        "  let out = await ch.recv_async();\n" ++
+        "\n" ++
+        "  Channel<num> a = channel_new(0);\n" ++
+        "  Channel<num> b = channel_new(0);\n" ++
+        "  _ = await b.send_async(9);\n" ++
+        "  num sel = 0;\n" ++
+        "  num idx = -1;\n" ++
+        "  num rc_sel = await a.select_recv_with_async(&b, &sel, &idx);\n" ++
+        "\n" ++
+        "  _ = rc_send + out + rc_sel + sel + idx;\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_std_channel_async_wrappers_ok.fn", input);
+}
+
+test "typecheck std.channel async wrappers require await" {
+    const input =
+        "imp std.channel;\n" ++
+        "async fun main() {\n" ++
+        "  Channel<num> ch = channel_new(0);\n" ++
+        "  num rc = ch.send_async(7);\n" ++
+        "  _ = rc;\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_std_channel_async_wrappers_require_await.fn", input);
+}
+
+test "typecheck std.channel async forwarding APIs with await are ok" {
+    const input =
+        "imp std.channel;\n" ++
+        "async fun main() {\n" ++
+        "  Channel<num> src = channel_new_cap(0, 1);\n" ++
+        "  Channel<num> dst = channel_new_cap(0, 1);\n" ++
+        "  _ = await src.send_async(5);\n" ++
+        "  num rc_forward = await src.forward_one_to_async(&dst, 20);\n" ++
+        "  let moved = await dst.recv_async();\n" ++
+        "\n" ++
+        "  Channel<num> a = channel_new(0);\n" ++
+        "  Channel<num> b = channel_new(0);\n" ++
+        "  Channel<num> out = channel_new(0);\n" ++
+        "  _ = await b.send_async(9);\n" ++
+        "  num idx = -1;\n" ++
+        "  num rc_select_forward = await a.select_forward_one_to_async(&b, &out, 20, &idx);\n" ++
+        "  let selected = await out.recv_async();\n" ++
+        "\n" ++
+        "  _ = rc_forward + moved + rc_select_forward + selected + idx;\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_std_channel_async_forwarding_ok.fn", input);
+}
+
+test "typecheck std.channel async forwarding requires await" {
+    const input =
+        "imp std.channel;\n" ++
+        "async fun main() {\n" ++
+        "  Channel<num> src = channel_new(0);\n" ++
+        "  Channel<num> dst = channel_new(0);\n" ++
+        "  num rc = src.forward_one_to_async(&dst, 10);\n" ++
+        "  _ = rc;\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_std_channel_async_forwarding_require_await.fn", input);
+}
+
 test "typecheck async method call requires await" {
     const input =
         "compound Counter {\n" ++

@@ -1,0 +1,42 @@
+// Async fs APIs: progress copy + line streaming.
+
+imp std.c.io;
+imp std.c.mem;
+imp std.fs;
+imp std.channel;
+
+async fun main() {
+  str src = "_tmp_fs_async_streaming_src.txt";
+  str dst = "_tmp_fs_async_streaming_dst.txt";
+
+  _ = write_string(src, "a\nb\n");
+
+  Channel<num> progress = channel_new_cap(0, 8);
+  ChannelCancelToken token = channel_cancel_token_new();
+  num copied = await copy_file_progress_async(src, dst, 4, &progress, &token);
+
+  Channel<str> lines = channel_new_cap("", 8);
+  num sent = await read_lines_into_channel_async(dst, 64, &lines, &token);
+
+  bin exists_dst = exists(dst);
+  num size_dst = size(dst);
+
+  str first_line_raw = NULL;
+  str first_line = "";
+  if lines.try_recv(&first_line_raw) == channel_rc_ok() {
+    first_line = first_line_raw;
+  }
+
+  if first_line == 0 {
+    first_line = "";
+  }
+
+  printf("copied=%lld sent=%lld exists_dst=%lld size_dst=%lld first=%s\n", copied, sent, exists_dst, size_dst, first_line);
+
+  if first_line_raw != NULL {
+    free(first_line_raw);
+  }
+
+  _ = progress.destroy();
+  _ = lines.destroy();
+}
