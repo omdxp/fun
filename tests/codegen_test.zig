@@ -1939,6 +1939,103 @@ test "std.thread_runtime async task handle APIs transpile" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "std.thread_runtime async task handle behavior is stable across backend selectors" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_thread_runtime_async_task_behavior.fn";
+    const cpath = "codegen_std_thread_runtime_async_task_behavior.c";
+    const exe_path = if (builtin.os.tag == .windows)
+        "codegen_std_thread_runtime_async_task_behavior.exe"
+    else
+        "codegen_std_thread_runtime_async_task_behavior";
+
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(cpath) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.thread_runtime;\n" ++
+        "imp std.runtime_backend;\n" ++
+        "imp std.c.io;\n" ++
+        "fun worker(raw* arg) raw* {\n" ++
+        "  ret arg;\n" ++
+        "}\n" ++
+        "async fun main() {\n" ++
+        "  RuntimeAsyncTask joined = runtime_async_spawn(worker, NULL);\n" ++
+        "  num joined_start = joined.last_start_rc();\n" ++
+        "  bin joined_active_before = joined.is_active();\n" ++
+        "  num joined_join_rc = await joined.join_async(NULL);\n" ++
+        "  bin joined_active_after = joined.is_active();\n" ++
+        "\n" ++
+        "  RuntimeAsyncTask detached = runtime_async_spawn(worker, NULL);\n" ++
+        "  num detached_start = detached.last_start_rc();\n" ++
+        "  bin detached_active_before = detached.is_active();\n" ++
+        "  num detached_detach_rc = await detached.detach_async();\n" ++
+        "  bin detached_active_after = detached.is_active();\n" ++
+        "\n" ++
+        "  RuntimeAsyncTask bad = runtime_async_task_new();\n" ++
+        "  bad.start_rc = -7;\n" ++
+        "  bad.active = false;\n" ++
+        "  num bad_start = bad.last_start_rc();\n" ++
+        "  num bad_join_rc = await bad.join_async(NULL);\n" ++
+        "  num bad_detach_rc = await bad.detach_async();\n" ++
+        "  bin bad_active = bad.is_active();\n" ++
+        "\n" ++
+        "  printf(\"backend=%s\\n\", runtime_backend_name());\n" ++
+        "  printf(\"joined_start=%lld\\n\", joined_start);\n" ++
+        "  printf(\"joined_active_before=%lld\\n\", joined_active_before);\n" ++
+        "  printf(\"joined_join_rc=%lld\\n\", joined_join_rc);\n" ++
+        "  printf(\"joined_active_after=%lld\\n\", joined_active_after);\n" ++
+        "  printf(\"detached_start=%lld\\n\", detached_start);\n" ++
+        "  printf(\"detached_active_before=%lld\\n\", detached_active_before);\n" ++
+        "  printf(\"detached_detach_rc=%lld\\n\", detached_detach_rc);\n" ++
+        "  printf(\"detached_active_after=%lld\\n\", detached_active_after);\n" ++
+        "  printf(\"bad_start=%lld\\n\", bad_start);\n" ++
+        "  printf(\"bad_join_rc=%lld\\n\", bad_join_rc);\n" ++
+        "  printf(\"bad_detach_rc=%lld\\n\", bad_detach_rc);\n" ++
+        "  printf(\"bad_active=%lld\\n\", bad_active);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try fs.cwd().createFile(cpath, .{});
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, cpath, exe_path);
+
+    for ([_][]const u8{ "posix", "windows" }) |backend_name| {
+        const overrides = [_]EnvOverride{
+            .{ .key = "FUN_RUNTIME_BACKEND", .value = backend_name },
+        };
+
+        const stdout = try runExeWithEnv(allocator, exe_path, &overrides);
+        defer allocator.free(stdout);
+
+        try std.testing.expectEqualStrings(backend_name, try parseMetricValue(stdout, "backend"));
+
+        try std.testing.expectEqual(@as(i64, 0), try parseMetricInt(stdout, "joined_start"));
+        try std.testing.expectEqual(@as(i64, 1), try parseMetricInt(stdout, "joined_active_before"));
+        try std.testing.expectEqual(@as(i64, 0), try parseMetricInt(stdout, "joined_join_rc"));
+        try std.testing.expectEqual(@as(i64, 0), try parseMetricInt(stdout, "joined_active_after"));
+
+        try std.testing.expectEqual(@as(i64, 0), try parseMetricInt(stdout, "detached_start"));
+        try std.testing.expectEqual(@as(i64, 1), try parseMetricInt(stdout, "detached_active_before"));
+        try std.testing.expectEqual(@as(i64, 0), try parseMetricInt(stdout, "detached_detach_rc"));
+        try std.testing.expectEqual(@as(i64, 0), try parseMetricInt(stdout, "detached_active_after"));
+
+        const bad_start = try parseMetricInt(stdout, "bad_start");
+        const bad_join_rc = try parseMetricInt(stdout, "bad_join_rc");
+        const bad_detach_rc = try parseMetricInt(stdout, "bad_detach_rc");
+        try std.testing.expectEqual(@as(i64, -7), bad_start);
+        try std.testing.expectEqual(@as(i64, -7), bad_join_rc);
+        try std.testing.expectEqual(@as(i64, -7), bad_detach_rc);
+        try std.testing.expectEqual(@as(i64, 0), try parseMetricInt(stdout, "bad_active"));
+    }
+}
+
 test "std.thread_runtime backend selector APIs transpile" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_std_thread_runtime_backend.fn";
@@ -2568,6 +2665,86 @@ test "std.net async APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "tcp_roundtrip_offload_async") != null);
 
     try fs.cwd().deleteFile(ifilepath);
+}
+
+test "std.net offload async edge return codes are stable across backend selectors" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_net_offload_edge_codes.fn";
+    const cpath = "codegen_std_net_offload_edge_codes.c";
+    const exe_path = if (builtin.os.tag == .windows)
+        "codegen_std_net_offload_edge_codes.exe"
+    else
+        "codegen_std_net_offload_edge_codes";
+
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(cpath) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.net;\n" ++
+        "imp std.channel;\n" ++
+        "imp std.runtime_backend;\n" ++
+        "imp std.c.io;\n" ++
+        "async fun main() {\n" ++
+        "  ChannelCancelToken token = channel_cancel_token_new();\n" ++
+        "  ChannelCancelToken cancelled = channel_cancel_token_new();\n" ++
+        "  _ = channel_cancel_token_cancel(&cancelled);\n" ++
+        "\n" ++
+        "  str recv_buf = malloc(8);\n" ++
+        "  str recv_buf2 = malloc(8);\n" ++
+        "\n" ++
+        "  num rc_cancelled = -99;\n" ++
+        "  if recv_buf != NULL {\n" ++
+        "    rc_cancelled = await tcp_roundtrip_offload_async(-1, \"PING\", recv_buf, 7, &cancelled);\n" ++
+        "    free(recv_buf);\n" ++
+        "  }\n" ++
+        "\n" ++
+        "  num rc_invalid_buf = await tcp_roundtrip_offload_async(-1, \"PING\", NULL, 7, &token);\n" ++
+        "  num rc_invalid_len = -99;\n" ++
+        "  if recv_buf2 != NULL {\n" ++
+        "    rc_invalid_len = await tcp_roundtrip_offload_async(-1, \"PING\", recv_buf2, 0, &token);\n" ++
+        "    free(recv_buf2);\n" ++
+        "  }\n" ++
+        "\n" ++
+        "  str recv_buf3 = malloc(8);\n" ++
+        "  num rc_invalid_fd = -99;\n" ++
+        "  if recv_buf3 != NULL {\n" ++
+        "    rc_invalid_fd = await tcp_roundtrip_offload_async(-1, \"PING\", recv_buf3, 7, &token);\n" ++
+        "    free(recv_buf3);\n" ++
+        "  }\n" ++
+        "\n" ++
+        "  printf(\"backend=%s\\n\", runtime_backend_name());\n" ++
+        "  printf(\"rc_cancelled=%lld\\n\", rc_cancelled);\n" ++
+        "  printf(\"rc_invalid_buf=%lld\\n\", rc_invalid_buf);\n" ++
+        "  printf(\"rc_invalid_len=%lld\\n\", rc_invalid_len);\n" ++
+        "  printf(\"rc_invalid_fd=%lld\\n\", rc_invalid_fd);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try fs.cwd().createFile(cpath, .{});
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, cpath, exe_path);
+
+    for ([_][]const u8{ "posix", "windows" }) |backend_name| {
+        const overrides = [_]EnvOverride{
+            .{ .key = "FUN_RUNTIME_BACKEND", .value = backend_name },
+        };
+
+        const stdout = try runExeWithEnv(allocator, exe_path, &overrides);
+        defer allocator.free(stdout);
+
+        try std.testing.expectEqualStrings(backend_name, try parseMetricValue(stdout, "backend"));
+        try std.testing.expectEqual(@as(i64, -3), try parseMetricInt(stdout, "rc_cancelled"));
+        try std.testing.expectEqual(@as(i64, -1), try parseMetricInt(stdout, "rc_invalid_buf"));
+        try std.testing.expectEqual(@as(i64, -1), try parseMetricInt(stdout, "rc_invalid_len"));
+        try std.testing.expectEqual(@as(i64, -1), try parseMetricInt(stdout, "rc_invalid_fd"));
+    }
 }
 
 test "std.channel cancel-aware send and recv APIs transpile" {
@@ -4056,4 +4233,123 @@ test "stdlib hot path stress transpiles" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Map__num__str__remove") != null);
 
     try fs.cwd().deleteFile(ifilepath);
+}
+
+test "generic specialization plus net offload async regression stays stable" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_generic_net_regression.fn";
+
+    const input =
+        "imp stdlib.std.map;\n" ++
+        "imp std.net;\n" ++
+        "imp std.channel;\n" ++
+        "imp std.c.mem;\n" ++
+        "compound UserKey { num id; num region; }\n" ++
+        "async fun main() {\n" ++
+        "  Map<UserKey, str> by_user;\n" ++
+        "  by_user.init(8);\n" ++
+        "  UserKey a = UserKey{id = 7, region = 1};\n" ++
+        "  by_user.put(a, \"alice\");\n" ++
+        "  str out = by_user.get(a);\n" ++
+        "  bin present = by_user.has(a);\n" ++
+        "\n" ++
+        "  ChannelCancelToken token = channel_cancel_token_new();\n" ++
+        "  str recv_buf = malloc(8);\n" ++
+        "  num rc = -2;\n" ++
+        "  if recv_buf != NULL {\n" ++
+        "    rc = await tcp_roundtrip_offload_async(-1, \"PING\", recv_buf, 7, &token);\n" ++
+        "    free(recv_buf);\n" ++
+        "  }\n" ++
+        "\n" ++
+        "  if present == true {\n" ++
+        "    _ = out;\n" ++
+        "  }\n" ++
+        "  _ = rc;\n" ++
+        "  by_user.free();\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Map__UserKey__str__init") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Map__UserKey__str__put") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Map__UserKey__str__get") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "tcp_roundtrip_offload_async") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
+test "nested import generic impl specialization prototypes emit and run" {
+    const allocator = std.testing.allocator;
+    const leaf_path = "codegen_nested_generic_leaf.fn";
+    const mid_path = "codegen_nested_generic_mid.fn";
+    const main_path = "codegen_nested_generic_main.fn";
+    const cpath = "codegen_nested_generic_main.c";
+    const exe_path = if (builtin.os.tag == .windows)
+        "codegen_nested_generic_main.exe"
+    else
+        "codegen_nested_generic_main";
+
+    defer fs.cwd().deleteFile(leaf_path) catch {};
+    defer fs.cwd().deleteFile(mid_path) catch {};
+    defer fs.cwd().deleteFile(main_path) catch {};
+    defer fs.cwd().deleteFile(cpath) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    {
+        const leaf_file = try fs.cwd().createFile(leaf_path, .{ .read = true, .truncate = true });
+        defer leaf_file.close();
+        try leaf_file.writeAll(
+            "pub compound Box<T> {\n" ++
+                "  T value;\n" ++
+                "}\n" ++
+                "impl Box<T> {\n" ++
+                "  pub id() T { ret self.value; }\n" ++
+                "}\n",
+        );
+    }
+
+    {
+        const mid_file = try fs.cwd().createFile(mid_path, .{ .read = true, .truncate = true });
+        defer mid_file.close();
+        try mid_file.writeAll(
+            "imp codegen_nested_generic_leaf;\n" ++
+                "pub fun calc_num() num {\n" ++
+                "  Box<num> b = Box<num>{value = 42};\n" ++
+                "  ret b.id();\n" ++
+                "}\n" ++
+                "pub fun calc_str() str {\n" ++
+                "  Box<str> b = Box<str>{value = \"ok\"};\n" ++
+                "  ret b.id();\n" ++
+                "}\n",
+        );
+    }
+
+    const input =
+        "imp codegen_nested_generic_mid;\n" ++
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  num a = calc_num();\n" ++
+        "  str b = calc_str();\n" ++
+        "  printf(\"%lld|%s\", a, b);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, main_path, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Box__num__id") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Box__str__id") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Box__T__id") == null);
+
+    {
+        const c_file = try fs.cwd().createFile(cpath, .{});
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, cpath, exe_path);
+
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("42|ok", stdout);
 }
