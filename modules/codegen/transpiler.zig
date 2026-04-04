@@ -349,6 +349,11 @@ pub const TranspileProcess = struct {
     /// pthread-shaped symbols onto Win32 synchronization/thread primitives.
     requires_thread_compat_layer: bool = false,
 
+    /// True when `std.c.net` is imported anywhere in this module tree.
+    /// When set, codegen emits host-specific socket headers and Windows
+    /// close-socket compatibility aliases.
+    requires_net_compat_layer: bool = false,
+
     /// The input file path (used for relative path resolution)
     input_file_path: []const u8,
 
@@ -12771,23 +12776,12 @@ pub const TranspileProcess = struct {
                 return TranspileError.MemoryAllocationFailed;
             };
         } else if (mem.eql(u8, import_path, "std.c.net")) {
-            header_name = self.allocator.dupe(u8, "sys/socket.h") catch |e| {
-                self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
-                return TranspileError.MemoryAllocationFailed;
-            };
-            // Additional headers needed for inet_addr and sockaddr_in.
-            self.std_imports.append(self.allocator.dupe(u8, "netinet/in.h") catch |e| {
-                self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
-                return TranspileError.MemoryAllocationFailed;
-            }) catch return TranspileError.MemoryAllocationFailed;
-            self.std_imports.append(self.allocator.dupe(u8, "arpa/inet.h") catch |e| {
-                self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
-                return TranspileError.MemoryAllocationFailed;
-            }) catch return TranspileError.MemoryAllocationFailed;
-            self.std_imports.append(self.allocator.dupe(u8, "unistd.h") catch |e| {
-                self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
-                return TranspileError.MemoryAllocationFailed;
-            }) catch return TranspileError.MemoryAllocationFailed;
+            self.requires_net_compat_layer = true;
+            // `std.c.net` is handled specially in `write_std_imports`:
+            // - on Windows, emit winsock headers and close()->closesocket alias
+            // - otherwise, include POSIX socket headers
+            try self.process_std_module_import(import_node, import_path);
+            return;
         } else if (mem.eql(u8, import_path, "std.c.thread") or mem.eql(u8, import_path, "std.c.thread_windows")) {
             self.requires_thread_compat_layer = true;
             // `std.c.thread*` imports are handled specially in `write_std_imports`:
@@ -13162,6 +13156,26 @@ pub const TranspileProcess = struct {
         try add_header(self, &seen, "stdlib.h");
         try add_header(self, &seen, "string.h");
 
+        if (requires_net_compat_recursive(self)) {
+            try self.write("\n");
+            try self.write("#if defined(_WIN32)\n");
+            try self.write("#ifndef WIN32_LEAN_AND_MEAN\n");
+            try self.write("#define WIN32_LEAN_AND_MEAN\n");
+            try self.write("#endif\n");
+            try self.write("#include <winsock2.h>\n");
+            try self.write("#include <ws2tcpip.h>\n");
+            try self.write("#pragma comment(lib, \"Ws2_32.lib\")\n");
+            try self.write("#ifndef close\n");
+            try self.write("#define close closesocket\n");
+            try self.write("#endif\n");
+            try self.write("#else\n");
+            try self.write("#include <sys/socket.h>\n");
+            try self.write("#include <netinet/in.h>\n");
+            try self.write("#include <arpa/inet.h>\n");
+            try self.write("#include <unistd.h>\n");
+            try self.write("#endif\n");
+        }
+
         if (requires_thread_compat_recursive(self)) {
             try self.write("\n");
             try self.write("#if defined(_WIN32) && !defined(__MINGW32__) && !defined(__MINGW64__)\n");
@@ -13352,38 +13366,45 @@ pub const TranspileProcess = struct {
             try self.write("        return (long long)EINVAL;\n");
             try self.write("    }\n");
             try self.write("\n");
-            try self.write("    FILETIME ft;\n");
-            try self.write("    GetSystemTimeAsFileTime(&ft);\n");
-            try self.write("    ULARGE_INTEGER now_filetime;\n");
-            try self.write("    now_filetime.LowPart = ft.dwLowDateTime;\n");
-            try self.write("    now_filetime.HighPart = ft.dwHighDateTime;\n");
-            try self.write("\n");
-            try self.write("    const unsigned long long unix_epoch_in_filetime = 116444736000000000ULL;\n");
-            try self.write("    unsigned long long now_ns = 0ULL;\n");
-            try self.write("    if (now_filetime.QuadPart > unix_epoch_in_filetime) {\n");
-            try self.write("        now_ns = (now_filetime.QuadPart - unix_epoch_in_filetime) * 100ULL;\n");
-            try self.write("    }\n");
-            try self.write("\n");
             try self.write("    long long sec = (long long)ts->tv_sec;\n");
             try self.write("    if (sec < 0) {\n");
             try self.write("        return (long long)ETIMEDOUT;\n");
             try self.write("    }\n");
             try self.write("\n");
-            try self.write("    unsigned long long target_ns = ((unsigned long long)sec * 1000000000ULL) + (unsigned long long)ts->tv_nsec;\n");
+            try self.write("    __fun_win_timespec now_ts;\n");
+            try self.write("    if (clock_gettime(0, (void*)&now_ts) != 0) {\n");
+            try self.write("        return (long long)ETIMEDOUT;\n");
+            try self.write("    }\n");
+            try self.write("    if (now_ts.tv_nsec < 0 || now_ts.tv_nsec >= 1000000000L) {\n");
+            try self.write("        return (long long)ETIMEDOUT;\n");
+            try self.write("    }\n");
+            try self.write("\n");
+            try self.write("    long long now_sec = (long long)now_ts.tv_sec;\n");
+            try self.write("    long long now_nsec = (long long)now_ts.tv_nsec;\n");
+            try self.write("    long long sec_diff = sec - now_sec;\n");
+            try self.write("    long long nsec_diff = (long long)ts->tv_nsec - now_nsec;\n");
+            try self.write("    if (nsec_diff < 0) {\n");
+            try self.write("        sec_diff -= 1;\n");
+            try self.write("        nsec_diff += 1000000000LL;\n");
+            try self.write("    }\n");
+            try self.write("    if (sec_diff < 0) {\n");
+            try self.write("        return (long long)ETIMEDOUT;\n");
+            try self.write("    }\n");
+            try self.write("\n");
+            try self.write("    unsigned long long delta_ms = (unsigned long long)sec_diff * 1000ULL;\n");
+            try self.write("    delta_ms += (unsigned long long)(nsec_diff / 1000000LL);\n");
+            try self.write("    if ((nsec_diff % 1000000LL) != 0LL) {\n");
+            try self.write("        delta_ms += 1ULL;\n");
+            try self.write("    }\n");
+            try self.write("    if (delta_ms == 0ULL) {\n");
+            try self.write("        delta_ms = 1ULL;\n");
+            try self.write("    }\n");
             try self.write("\n");
             try self.write("    DWORD timeout_ms = 0;\n");
-            try self.write("    if (target_ns > now_ns) {\n");
-            try self.write("        unsigned long long delta_ns = target_ns - now_ns;\n");
-            try self.write("        unsigned long long delta_ms = delta_ns / 1000000ULL;\n");
-            try self.write("        if ((delta_ns % 1000000ULL) != 0ULL) {\n");
-            try self.write("            delta_ms += 1ULL;\n");
-            try self.write("        }\n");
-            try self.write("\n");
-            try self.write("        if (delta_ms >= 0xFFFFFFFEULL) {\n");
-            try self.write("            timeout_ms = 0xFFFFFFFEu;\n");
-            try self.write("        } else {\n");
-            try self.write("            timeout_ms = (DWORD)delta_ms;\n");
-            try self.write("        }\n");
+            try self.write("    if (delta_ms >= 0xFFFFFFFEULL) {\n");
+            try self.write("        timeout_ms = 0xFFFFFFFEu;\n");
+            try self.write("    } else {\n");
+            try self.write("        timeout_ms = (DWORD)delta_ms;\n");
             try self.write("    }\n");
             try self.write("\n");
             try self.write("    BOOL ok = SleepConditionVariableCS(cond, mutex, timeout_ms);\n");
@@ -13422,6 +13443,14 @@ pub const TranspileProcess = struct {
         if (proc.requires_thread_compat_layer) return true;
         for (proc.children.items) |child| {
             if (requires_thread_compat_recursive(child)) return true;
+        }
+        return false;
+    }
+
+    fn requires_net_compat_recursive(proc: *Self) bool {
+        if (proc.requires_net_compat_layer) return true;
+        for (proc.children.items) |child| {
+            if (requires_net_compat_recursive(child)) return true;
         }
         return false;
     }

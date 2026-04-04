@@ -64,7 +64,10 @@ fn compileWithZigCc(allocator: std.mem.Allocator, c_path: []const u8, exe_path: 
     try argv.append(c_path);
     try argv.append("-o");
     try argv.append(exe_path);
-    if (builtin.os.tag != .windows) {
+    if (builtin.os.tag == .windows) {
+        // `std.c.net` uses winsock symbols on Windows.
+        try argv.append("-lws2_32");
+    } else {
         try argv.append("-lm");
     }
 
@@ -122,6 +125,75 @@ fn runExeWithEnv(allocator: std.mem.Allocator, exe_path: []const u8, overrides: 
     }
 
     return result.stdout;
+}
+
+fn runExeWithEnvTimeout(
+    allocator: std.mem.Allocator,
+    exe_path: []const u8,
+    overrides: []const EnvOverride,
+    timeout_ms: u32,
+) ![]const u8 {
+    const exe_abs = try fs.cwd().realpathAlloc(allocator, exe_path);
+    defer allocator.free(exe_abs);
+
+    var env_map = try std.process.getEnvMap(allocator);
+    defer env_map.deinit();
+
+    for (overrides) |ov| {
+        try env_map.put(ov.key, ov.value);
+    }
+
+    var child = std.process.Child.init(&.{exe_abs}, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+    child.env_map = &env_map;
+
+    try child.spawn();
+    errdefer {
+        _ = child.kill() catch {};
+    }
+
+    if (builtin.os.tag == .windows) {
+        std.os.windows.WaitForSingleObjectEx(child.id, timeout_ms, false) catch |err| switch (err) {
+            error.WaitTimeOut => {
+                _ = child.kill() catch {};
+                _ = child.wait() catch {};
+                return error.ExecutionTimedOut;
+            },
+            else => return err,
+        };
+    }
+
+    var stdout_list: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer stdout_list.deinit(allocator);
+
+    var stderr_list: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer stderr_list.deinit(allocator);
+
+    try child.collectOutput(allocator, &stdout_list, &stderr_list, 1024 * 1024);
+
+    const term = try child.wait();
+    const stderr_owned = try stderr_list.toOwnedSlice(allocator);
+    defer allocator.free(stderr_owned);
+
+    switch (term) {
+        .Exited => |code| {
+            if (code != 0) {
+                stdout_list.deinit(allocator);
+                if (stderr_owned.len != 0) {
+                    std.debug.print("{s}\n", .{stderr_owned});
+                }
+                return error.ExecutionFailed;
+            }
+        },
+        else => {
+            stdout_list.deinit(allocator);
+            return error.ExecutionFailed;
+        },
+    }
+
+    return try stdout_list.toOwnedSlice(allocator);
 }
 
 fn parseMetricValue(stdout: []const u8, key: []const u8) ![]const u8 {
@@ -2011,7 +2083,7 @@ test "std.thread_runtime async task handle behavior is stable across backend sel
             .{ .key = "FUN_RUNTIME_BACKEND", .value = backend_name },
         };
 
-        const stdout = try runExeWithEnv(allocator, exe_path, &overrides);
+        const stdout = try runExeWithEnvTimeout(allocator, exe_path, &overrides, 12_000);
         defer allocator.free(stdout);
 
         try std.testing.expectEqualStrings(backend_name, try parseMetricValue(stdout, "backend"));
@@ -2156,7 +2228,7 @@ test "std.channel runtime conformance matrix is stable across backend selectors"
             .{ .key = "FUN_RUNTIME_BACKEND", .value = backend_name },
         };
 
-        const stdout = try runExeWithEnv(allocator, exe_path, &overrides);
+        const stdout = try runExeWithEnvTimeout(allocator, exe_path, &overrides, 12_000);
         defer allocator.free(stdout);
 
         try std.testing.expectEqualStrings(backend_name, try parseMetricValue(stdout, "backend"));
@@ -2232,7 +2304,7 @@ test "std.channel fairness and timeout benchmark stays within backend thresholds
         "  for i < total_rounds {\n" ++
         "    num out = 0;\n" ++
         "    num which = -1;\n" ++
-        "    num rc = a.select_recv_timeout3_rr_with_tuning(&b, &c, &next, &out, &which, 50, 1, 0);\n" ++
+        "    num rc = a.select_recv_timeout3_rr_with_tuning(&b, &c, &next, &out, &which, 50, 5, 0);\n" ++
         "    if rc != channel_rc_ok() {\n" ++
         "      fairness_rc = rc;\n" ++
         "      i = total_rounds;\n" ++
@@ -2274,7 +2346,7 @@ test "std.channel fairness and timeout benchmark stays within backend thresholds
         "  num timeout_failures = 0;\n" ++
         "  i = 0;\n" ++
         "  for i < timeout_rounds {\n" ++
-        "    num timeout_rc = x.select_recv_timeout3_rr_with_tuning(&y, &z, &next_timeout, &out_timeout, &idx_timeout, 15, 1, 0);\n" ++
+        "    num timeout_rc = x.select_recv_timeout3_rr_with_tuning(&y, &z, &next_timeout, &out_timeout, &idx_timeout, 15, 5, 0);\n" ++
         "    if timeout_rc != channel_rc_timeout() {\n" ++
         "      timeout_failures = timeout_failures + 1;\n" ++
         "    }\n" ++
@@ -2319,7 +2391,7 @@ test "std.channel fairness and timeout benchmark stays within backend thresholds
         };
 
         const started_ms = std.time.milliTimestamp();
-        const stdout = try runExeWithEnv(allocator, exe_path, &overrides);
+        const stdout = try runExeWithEnvTimeout(allocator, exe_path, &overrides, 12_000);
         const finished_ms = std.time.milliTimestamp();
         defer allocator.free(stdout);
 
@@ -4136,6 +4208,9 @@ test "transitive std.net import emits socket headers" {
     const out_owned = try runTranspile(allocator, ifilepath, input);
     defer allocator.free(out_owned);
 
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "#if defined(_WIN32)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <winsock2.h>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <ws2tcpip.h>") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <sys/socket.h>") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <netinet/in.h>") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <arpa/inet.h>") != null);

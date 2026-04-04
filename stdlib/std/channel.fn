@@ -132,6 +132,23 @@ compound ChannelAbsTime {
   num tv_nsec;
 }
 
+// Normalize absolute time values so tv_nsec always stays in [0, 1e9).
+fun channel_normalize_abs_time(ChannelAbsTime* ts) {
+  if ts == NULL {
+    ret;
+  }
+
+  if ts.tv_nsec <=-1000000000 || ts.tv_nsec >= 1000000000 {
+    ts.tv_sec = ts.tv_sec + (ts.tv_nsec / 1000000000);
+    ts.tv_nsec = ts.tv_nsec % 1000000000;
+  }
+
+  if ts.tv_nsec < 0 {
+    ts.tv_sec = ts.tv_sec - 1;
+    ts.tv_nsec = ts.tv_nsec + 1000000000;
+  }
+}
+
 // Build an absolute timeout from a millisecond duration.
 // 
 // Note:
@@ -144,22 +161,24 @@ fun channel_make_abs_time(num timeout_ms, ChannelAbsTime* out) num {
     timeout_ms = 0;
   }
 
+  // Zero fields before clock_gettime so any partial writes (e.g. 32-bit tv_nsec on Windows)
+  // cannot leave stale high bits that would corrupt normalization/deadline math.
+  out.tv_sec = 0;
+  out.tv_nsec = 0;
   raw* out_raw = out;
   num rc = clock_gettime(0, out_raw);
   if rc != 0 {
     ret channel_rc_clock_failed();
   }
 
+  channel_normalize_abs_time(out);
+
   num add_sec = timeout_ms / 1000;
   num add_nsec = (timeout_ms % 1000) * 1000000;
 
   out.tv_sec = out.tv_sec + add_sec;
   out.tv_nsec = out.tv_nsec + add_nsec;
-
-  if out.tv_nsec >= 1000000000 {
-    out.tv_sec = out.tv_sec + (out.tv_nsec / 1000000000);
-    out.tv_nsec = out.tv_nsec % 1000000000;
-  }
+  channel_normalize_abs_time(out);
 
   ret channel_rc_ok();
 }
@@ -170,17 +189,25 @@ fun channel_deadline_reached(ChannelAbsTime* abs_time) bin {
     ret true;
   }
 
+  ChannelAbsTime target;
+  target.tv_sec = abs_time.tv_sec;
+  target.tv_nsec = abs_time.tv_nsec;
+  channel_normalize_abs_time(&target);
+
   ChannelAbsTime now;
+  now.tv_sec = 0;
+  now.tv_nsec = 0;
   raw* now_raw = &now;
   num rc = clock_gettime(0, now_raw);
   if rc != 0 {
     ret true;
   }
+  channel_normalize_abs_time(&now);
 
-  if now.tv_sec > abs_time.tv_sec {
+  if now.tv_sec > target.tv_sec {
     ret true;
   }
-  if now.tv_sec == abs_time.tv_sec && now.tv_nsec >= abs_time.tv_nsec {
+  if now.tv_sec == target.tv_sec && now.tv_nsec >= target.tv_nsec {
     ret true;
   }
   ret false;
@@ -215,15 +242,23 @@ fun channel_deadline_remaining_ms(ChannelAbsTime* abs_time) num {
     ret 0;
   }
 
+  ChannelAbsTime target;
+  target.tv_sec = abs_time.tv_sec;
+  target.tv_nsec = abs_time.tv_nsec;
+  channel_normalize_abs_time(&target);
+
   ChannelAbsTime now;
+  now.tv_sec = 0;
+  now.tv_nsec = 0;
   raw* now_raw = &now;
   num rc = clock_gettime(0, now_raw);
   if rc != 0 {
     ret 0;
   }
+  channel_normalize_abs_time(&now);
 
-  num sec_diff = abs_time.tv_sec - now.tv_sec;
-  num nsec_diff = abs_time.tv_nsec - now.tv_nsec;
+  num sec_diff = target.tv_sec - now.tv_sec;
+  num nsec_diff = target.tv_nsec - now.tv_nsec;
   if nsec_diff < 0 {
     sec_diff = sec_diff - 1;
     nsec_diff = nsec_diff + 1000000000;
