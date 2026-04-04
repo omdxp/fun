@@ -12,6 +12,7 @@ imp std.c.io;
 imp std.c.mem;
 imp std.c.net;
 imp std.channel;
+imp std.thread_runtime;
 imp std.result;
 imp std.error;
 
@@ -265,20 +266,16 @@ pub fun tcp_close(num fd) {
   close(fd);
 }
 
-// Perform a best-effort request/response exchange on an existing socket.
-// 
-// Params:
-// - fd: connected socket descriptor
-// - send_buf: optional payload to send first (null/empty skips write)
-// - recv_buf: destination buffer for response bytes
-// - recv_len: max bytes to read into recv_buf
-// - cancel_token: optional cancellation token
-// 
-// Returns:
-// - >= 0 bytes read
-// - -1 on invalid args or socket write/read failure
-// - -3 when cancelled
-pub async fun tcp_roundtrip_async(num fd, str send_buf, str recv_buf, num recv_len, ChannelCancelToken* cancel_token) num {
+compound TcpRoundtripOffloadJob {
+  num fd;
+  str send_buf;
+  str recv_buf;
+  num recv_len;
+  ChannelCancelToken* cancel_token;
+  num result_rc;
+}
+
+fun _tcp_roundtrip_core(num fd, str send_buf, str recv_buf, num recv_len, ChannelCancelToken* cancel_token) num {
   if recv_buf == NULL || recv_len <= 0 {
     ret -1;
   }
@@ -306,6 +303,75 @@ pub async fun tcp_roundtrip_async(num fd, str send_buf, str recv_buf, num recv_l
     ret -1;
   }
   ret n;
+}
+
+fun _tcp_roundtrip_offload_worker(raw* arg) raw* {
+  if arg == NULL {
+    ret NULL;
+  }
+
+  TcpRoundtripOffloadJob* job = arg;
+  job.result_rc = _tcp_roundtrip_core(job.fd, job.send_buf, job.recv_buf, job.recv_len, job.cancel_token);
+
+  ret NULL;
+}
+
+// Perform a best-effort request/response exchange on an existing socket.
+// 
+// Params:
+// - fd: connected socket descriptor
+// - send_buf: optional payload to send first (null/empty skips write)
+// - recv_buf: destination buffer for response bytes
+// - recv_len: max bytes to read into recv_buf
+// - cancel_token: optional cancellation token
+// 
+// Returns:
+// - >= 0 bytes read
+// - -1 on invalid args or socket write/read failure
+// - -3 when cancelled
+pub async fun tcp_roundtrip_async(num fd, str send_buf, str recv_buf, num recv_len, ChannelCancelToken* cancel_token) num {
+  ret _tcp_roundtrip_core(fd, send_buf, recv_buf, recv_len, cancel_token);
+}
+
+// Offload a roundtrip operation to a runtime thread and await its result.
+// 
+// Notes:
+// - Uses runtime_async_spawn so the socket call runs off the caller thread.
+// - Cancellation is checked before/after join. Join still waits for worker completion.
+// 
+// Returns:
+// - same codes as tcp_roundtrip_async
+// - backend thread start/join error code when spawn/join fails
+pub async fun tcp_roundtrip_offload_async(num fd, str send_buf, str recv_buf, num recv_len, ChannelCancelToken* cancel_token) num {
+  if recv_buf == NULL || recv_len <= 0 {
+    ret -1;
+  }
+  if channel_cancel_token_is_cancelled(cancel_token) == true {
+    ret -3;
+  }
+
+  TcpRoundtripOffloadJob job;
+  job.fd = fd;
+  job.send_buf = send_buf;
+  job.recv_buf = recv_buf;
+  job.recv_len = recv_len;
+  job.cancel_token = cancel_token;
+  job.result_rc = -1;
+
+  RuntimeAsyncTask task = runtime_async_spawn(_tcp_roundtrip_offload_worker, &job);
+  if task.last_start_rc() != 0 {
+    ret task.last_start_rc();
+  }
+
+  num join_rc = await task.join_async(NULL);
+  if join_rc != 0 {
+    ret join_rc;
+  }
+
+  if channel_cancel_token_is_cancelled(cancel_token) == true {
+    ret -3;
+  }
+  ret job.result_rc;
 }
 
 // Parse a URL, build an HTTP GET request, and publish it to a channel.

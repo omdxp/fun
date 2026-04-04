@@ -97,3 +97,104 @@ pub fun runtime_thread_detach(Thread* thread) num {
   }
   ret runtime_thread_detach_posix(thread);
 }
+
+// Handle returned by runtime async spawn helpers.
+pub compound RuntimeAsyncTask {
+  // Backing runtime thread handle.
+  Thread thread;
+  // Start result from runtime_thread_start.
+  num start_rc;
+  // True while the thread is considered active.
+  bin active;
+}
+
+// Create an inactive runtime async task handle.
+pub fun runtime_async_task_new() RuntimeAsyncTask {
+  RuntimeAsyncTask task;
+  task.thread = runtime_thread_new();
+  task.start_rc = 0;
+  task.active = false;
+  ret task;
+}
+
+// Spawn a runtime thread and return a join handle.
+// 
+// Params:
+// - entry: pthread-style entry pointer (`raw* (*)(raw*)`)
+// - arg: user argument passed to entry
+// 
+// Returns:
+// - RuntimeAsyncTask with start_rc set to the thread start result
+pub fun runtime_async_spawn(raw* entry, raw* arg) RuntimeAsyncTask {
+  RuntimeAsyncTask task = runtime_async_task_new();
+  task.start_rc = runtime_thread_start(&task.thread, entry, arg);
+  task.active = task.start_rc == 0;
+  ret task;
+}
+
+impl RuntimeAsyncTask {
+  // True while the task has an active thread.
+  pub is_active() bin {
+    ret self.active;
+  }
+
+  // Return the most recent start result.
+  pub last_start_rc() num {
+    ret self.start_rc;
+  }
+
+  // Join the spawned runtime thread.
+  // 
+  // Params:
+  // - out_ret: optional output pointer for entry return value
+  // 
+  // Returns:
+  // - 0 on success
+  // - start_rc when task never started successfully
+  // - backend join error code
+  pub join(raw* out_ret) num {
+    if self.active == false {
+      if self.start_rc != 0 {
+        ret self.start_rc;
+      }
+      ret 0;
+    }
+
+    num rc = runtime_thread_join(&self.thread, out_ret);
+    if rc == 0 {
+      self.active = false;
+    }
+    ret rc;
+  }
+
+  // Async wrapper for join.
+  pub async join_async(raw* out_ret) num {
+    ret self.join(out_ret);
+  }
+
+  // Detach the spawned runtime thread.
+  // 
+  // Returns:
+  // - 0 on success
+  // - start_rc when task never started successfully
+  // - backend detach error code
+  pub detach() num {
+    if self.active == false {
+      if self.start_rc != 0 {
+        ret self.start_rc;
+      }
+      ret 0;
+    }
+
+    num rc = runtime_thread_detach(&self.thread);
+    if rc == 0 {
+      self.active = false;
+    }
+    ret rc;
+  }
+
+  // Async wrapper for detach.
+  pub async detach_async() num {
+    ret self.detach();
+  }
+}

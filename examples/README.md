@@ -50,6 +50,7 @@ zig-out/bin/fun -in examples/<example>.fn
 - advanced/async_quirk_await_pointer_receiver.fn
 - advanced/channel_async_composed.fn
 - advanced/async_runtime_threads_channels.fn
+- advanced/async_spawn_join_handle.fn
 - advanced/channel_buffered.fn
 - advanced/channel_select2.fn
 - advanced/channel_select3_rr.fn

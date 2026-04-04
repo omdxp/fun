@@ -1,0 +1,26 @@
+// Runtime async spawn + join handle example.
+
+imp std.c.io;
+imp std.thread_runtime;
+
+fun worker(raw* arg) raw* {
+  ret arg;
+}
+
+async fun main() {
+  RuntimeAsyncTask joined = runtime_async_spawn(worker, NULL);
+  num join_rc = await joined.join_async(NULL);
+
+  RuntimeAsyncTask detached = runtime_async_spawn(worker, NULL);
+  num detach_rc = await detached.detach_async();
+
+  printf(
+    "join(start=%lld rc=%lld active=%lld) detach(start=%lld rc=%lld active=%lld)\n",
+    joined.last_start_rc(),
+    join_rc,
+    joined.is_active(),
+    detached.last_start_rc(),
+    detach_rc,
+    detached.is_active()
+  );
+}

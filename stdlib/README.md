@@ -64,7 +64,7 @@ Note: `num`/`dec` are 64-bit by default (`int64_t`/`double`), and Fun also suppo
 - **std/thread.fn**: POSIX-backed thread lifecycle helpers (`thread_new`, plus method and helper forms for start/join/detach).
 - **std/thread_backend_posix.fn**: POSIX thread backend module (`thread_backend_posix_*`) used by std.thread_runtime.
 - **std/thread_backend_windows.fn**: Windows thread backend module (`thread_backend_windows_*`) with direct thread lifecycle operations over `std.c.thread_windows`.
-- **std/thread_runtime.fn**: Backend-facing thread runtime shim (`runtime_thread_*`) with backend selector helpers (`thread_runtime_backend_*`) routed through std.runtime_backend and backend modules.
+- **std/thread_runtime.fn**: Backend-facing thread runtime shim (`runtime_thread_*`), async task handle APIs (`RuntimeAsyncTask`, `runtime_async_spawn`, `join_async`, `detach_async`), and backend selector helpers (`thread_runtime_backend_*`) routed through std.runtime_backend and backend modules.
 - **std/thread_pool.fn**: POSIX-backed thread pool helpers (`thread_pool_new`, start_all/join_all/detach_all) routed through std.thread_runtime.
 - **std/time.fn**: Time helpers (epoch, formatting, UTC, diffs).
 - **std/toml.fn**: Minimal TOML parse/stringify for flat key/value.

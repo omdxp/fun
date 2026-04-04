@@ -1912,6 +1912,33 @@ test "std.thread_runtime lifecycle APIs transpile" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "std.thread_runtime async task handle APIs transpile" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_thread_runtime_async_task.fn";
+
+    const input =
+        "imp std.thread_runtime;\n" ++
+        "fun worker(raw* arg) raw* {\n" ++
+        "  ret arg;\n" ++
+        "}\n" ++
+        "fun main() {\n" ++
+        "  RuntimeAsyncTask task = runtime_async_spawn(worker, NULL);\n" ++
+        "  _ = task.is_active();\n" ++
+        "  _ = task.last_start_rc();\n" ++
+        "  _ = task.join(NULL);\n" ++
+        "  _ = task.detach();\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_async_spawn(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "RuntimeAsyncTask__join(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "RuntimeAsyncTask__detach(") != null);
+
+    try fs.cwd().deleteFile(ifilepath);
+}
+
 test "std.thread_runtime backend selector APIs transpile" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_std_thread_runtime_backend.fn";
@@ -2530,6 +2557,7 @@ test "std.net async APIs transpile" {
         "  ChannelCancelToken token = channel_cancel_token_new();\n" ++
         "  _ = await build_http_get_to_channel_async(\"http://example.com/\", &reqs, &token);\n" ++
         "  _ = await tcp_roundtrip_async(-1, \"ping\", \"\", 1, &token);\n" ++
+        "  _ = await tcp_roundtrip_offload_async(-1, \"ping\", \"\", 1, &token);\n" ++
         "}\n";
 
     const out_owned = try runTranspile(allocator, ifilepath, input);
@@ -2537,6 +2565,7 @@ test "std.net async APIs transpile" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "build_http_get_to_channel_async") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "tcp_roundtrip_async") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "tcp_roundtrip_offload_async") != null);
 
     try fs.cwd().deleteFile(ifilepath);
 }

@@ -1127,12 +1127,24 @@ pub const TranspileProcess = struct {
         if (@intFromPtr(dt.type_str.items.ptr) == 0) return;
         if (self.dtype_has_unresolved_placeholder(dt)) return;
         const root = self.get_root();
-        const key = try self.type_name_mangled(dt);
-        if (root.forced_generic_instantiation_keys.contains(key)) {
-            self.allocator.free(key);
+        const local_key = try self.type_name_mangled(dt);
+        if (root.forced_generic_instantiation_keys.contains(local_key)) {
+            self.allocator.free(local_key);
             return;
         }
-        const clone = try self.clone_dtype(dt);
+
+        const key = if (@intFromPtr(root) == @intFromPtr(self))
+            local_key
+        else blk: {
+            const root_key = root.allocator.dupe(u8, local_key) catch {
+                self.allocator.free(local_key);
+                return TranspileError.MemoryAllocationFailed;
+            };
+            self.allocator.free(local_key);
+            break :blk root_key;
+        };
+
+        const clone = try self.clone_dtype_with_allocator(root.allocator, dt);
         root.forced_generic_instantiation_keys.put(key, true) catch return TranspileError.MemoryAllocationFailed;
         root.forced_generic_instantiations.append(clone) catch return TranspileError.MemoryAllocationFailed;
     }
@@ -1986,34 +1998,38 @@ pub const TranspileProcess = struct {
         return out;
     }
 
-    fn clone_dtype(self: *Self, dt: *const dtype.DataType) TranspileError!*dtype.DataType {
+    fn clone_dtype_with_allocator(self: *Self, alloc: mem.Allocator, dt: *const dtype.DataType) TranspileError!*dtype.DataType {
         if (dt.array != null) return TranspileError.TypeMismatch;
 
-        const out = self.allocator.create(dtype.DataType) catch {
+        const out = alloc.create(dtype.DataType) catch {
             return TranspileError.MemoryAllocationFailed;
         };
         out.* = dt.*;
-        out.type_str = std.ArrayList(u8).init(self.allocator);
+        out.type_str = std.ArrayList(u8).init(alloc);
         out.type_str.appendSlice(dt.type_str.items) catch return TranspileError.MemoryAllocationFailed;
         out.generic_args = null;
 
         if (dt.generic_args) |gargs| {
-            var out_args = utils.Vector(*dtype.DataType).init(self.allocator);
+            var out_args = utils.Vector(*dtype.DataType).init(alloc);
             errdefer {
                 for (out_args.items()) |ga| {
                     ga.type_str.deinit();
-                    self.allocator.destroy(ga);
+                    alloc.destroy(ga);
                 }
                 out_args.deinit();
             }
             for (gargs.items()) |ga| {
-                const ga_copy = try self.clone_dtype(ga);
+                const ga_copy = try self.clone_dtype_with_allocator(alloc, ga);
                 out_args.push(ga_copy) catch return TranspileError.MemoryAllocationFailed;
             }
             out.generic_args = out_args;
         }
 
         return out;
+    }
+
+    fn clone_dtype(self: *Self, dt: *const dtype.DataType) TranspileError!*dtype.DataType {
+        return self.clone_dtype_with_allocator(self.allocator, dt);
     }
 
     fn validate_compound_init(self: *Self, init_node: ast.Node, dt: *dtype.DataType, env: *TypeEnv, fns: *const std.StringHashMap(FnSig)) TranspileError!void {
@@ -7746,20 +7762,12 @@ pub const TranspileProcess = struct {
         self.generic_fn_instantiation_keys.deinit();
         self.generic_fn_instantiations.deinit();
 
-        if (self.generic_call_overrides.count() > 0) {
-            var it2 = self.generic_call_overrides.iterator();
-            while (it2.next()) |e| {
-                self.allocator.free(e.key_ptr.*);
-            }
-        }
+        // Keys are arena-allocated call-position strings; avoid per-key frees here.
+        // Imported/module process graphs can observe shared key lifetimes, and arena
+        // teardown below releases all allocations in one pass.
         self.generic_call_overrides.deinit();
 
-        if (self.await_call_overrides.count() > 0) {
-            var it3 = self.await_call_overrides.iterator();
-            while (it3.next()) |e| {
-                self.allocator.free(e.key_ptr.*);
-            }
-        }
+        // Same ownership model as generic_call_overrides.
         self.await_call_overrides.deinit();
 
         // Release all arena allocations back to the backing allocator.
