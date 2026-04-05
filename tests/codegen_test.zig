@@ -93,6 +93,40 @@ fn compileWithZigCc(allocator: std.mem.Allocator, c_path: []const u8, exe_path: 
     }
 }
 
+fn normalizeCrLfOwned(allocator: std.mem.Allocator, owned: []u8) ![]u8 {
+    var crlf_count: usize = 0;
+    var i: usize = 0;
+    while (i + 1 < owned.len) : (i += 1) {
+        if (owned[i] == '\r' and owned[i + 1] == '\n') {
+            crlf_count += 1;
+        }
+    }
+
+    if (crlf_count == 0) {
+        return owned;
+    }
+
+    const out_len = owned.len - crlf_count;
+    var out = allocator.alloc(u8, out_len) catch |err| {
+        allocator.free(owned);
+        return err;
+    };
+
+    var read_i: usize = 0;
+    var write_i: usize = 0;
+    while (read_i < owned.len) : (read_i += 1) {
+        if (read_i + 1 < owned.len and owned[read_i] == '\r' and owned[read_i + 1] == '\n') {
+            continue;
+        }
+        out[write_i] = owned[read_i];
+        write_i += 1;
+    }
+
+    std.debug.assert(write_i == out_len);
+    allocator.free(owned);
+    return out;
+}
+
 fn runExeWithEnv(allocator: std.mem.Allocator, exe_path: []const u8, overrides: []const EnvOverride) ![]const u8 {
     const exe_abs = try fs.cwd().realpathAlloc(allocator, exe_path);
     defer allocator.free(exe_abs);
@@ -124,7 +158,7 @@ fn runExeWithEnv(allocator: std.mem.Allocator, exe_path: []const u8, overrides: 
         },
     }
 
-    return result.stdout;
+    return normalizeCrLfOwned(allocator, result.stdout);
 }
 
 fn runExeWithEnvTimeout(
@@ -193,7 +227,8 @@ fn runExeWithEnvTimeout(
         },
     }
 
-    return try stdout_list.toOwnedSlice(allocator);
+    const stdout_owned = try stdout_list.toOwnedSlice(allocator);
+    return normalizeCrLfOwned(allocator, stdout_owned);
 }
 
 fn parseMetricValue(stdout: []const u8, key: []const u8) ![]const u8 {
