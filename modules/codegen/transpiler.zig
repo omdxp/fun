@@ -8041,13 +8041,21 @@ pub const TranspileProcess = struct {
         }
     }
 
+    fn node_needs_trailing_semicolon(self: *Self, node: ast.Node) bool {
+        _ = self;
+        return switch (node.type) {
+            .Expression, .ExpressionParenthesis, .Unary => true,
+            else => false,
+        };
+    }
+
     fn emit_defer_body(self: *Self, node: *ast.Node) TranspileError!void {
         if (node.type == .Body) {
             try self.transpile_node(node.*);
             return;
         }
         try self.transpile_node(node.*);
-        if (node.type == .Expression or node.type == .ExpressionParenthesis or node.type == .Unary) {
+        if (self.node_needs_trailing_semicolon(node.*)) {
             try self.write(";");
         }
     }
@@ -12297,7 +12305,7 @@ pub const TranspileProcess = struct {
                         try self.write_indent();
                     }
                     try self.transpile_node(statement.*);
-                    if (statement.type == .Expression) {
+                    if (self.node_needs_trailing_semicolon(statement.*)) {
                         try self.write(";");
                     }
                 }
@@ -12451,14 +12459,14 @@ pub const TranspileProcess = struct {
                             for (body.statements.items()) |body_stmt| {
                                 try self.write_indent();
                                 try self.transpile_node(body_stmt.*);
-                                if (body_stmt.type == .Expression) {
+                                if (self.node_needs_trailing_semicolon(body_stmt.*)) {
                                     try self.write(";");
                                 }
                             }
                         } else {
                             try self.write_indent();
                             try self.transpile_node(if_s.body.*);
-                            if (if_s.body.type == .Expression) {
+                            if (self.node_needs_trailing_semicolon(if_s.body.*)) {
                                 try self.write(";");
                             }
                         }
@@ -12476,14 +12484,14 @@ pub const TranspileProcess = struct {
                             for (body.statements.items()) |body_stmt| {
                                 try self.write_indent();
                                 try self.transpile_node(body_stmt.*);
-                                if (body_stmt.type == .Expression) {
+                                if (self.node_needs_trailing_semicolon(body_stmt.*)) {
                                     try self.write(";");
                                 }
                             }
                         } else {
                             try self.write_indent();
                             try self.transpile_node(elif.body.*);
-                            if (elif.body.type == .Expression) {
+                            if (self.node_needs_trailing_semicolon(elif.body.*)) {
                                 try self.write(";");
                             }
                         }
@@ -12500,14 +12508,14 @@ pub const TranspileProcess = struct {
                             for (body.statements.items()) |body_stmt| {
                                 try self.write_indent();
                                 try self.transpile_node(body_stmt.*);
-                                if (body_stmt.type == .Expression) {
+                                if (self.node_needs_trailing_semicolon(body_stmt.*)) {
                                     try self.write(";");
                                 }
                             }
                         } else {
                             try self.write_indent();
                             try self.transpile_node(else_s.body.*);
-                            if (else_s.body.type == .Expression) {
+                            if (self.node_needs_trailing_semicolon(else_s.body.*)) {
                                 try self.write(";");
                             }
                         }
@@ -12605,14 +12613,14 @@ pub const TranspileProcess = struct {
                                     for (body.statements.items()) |body_stmt| {
                                         try self.write_indent();
                                         try self.transpile_node(body_stmt.*);
-                                        if (body_stmt.type == .Expression) {
+                                        if (self.node_needs_trailing_semicolon(body_stmt.*)) {
                                             try self.write(";");
                                         }
                                     }
                                 } else {
                                     try self.write_indent();
                                     try self.transpile_node(fc.body.*);
-                                    if (fc.body.type == .Expression) {
+                                    if (self.node_needs_trailing_semicolon(fc.body.*)) {
                                         try self.write(";");
                                     }
                                 }
@@ -12647,14 +12655,14 @@ pub const TranspileProcess = struct {
                                     for (body.statements.items()) |body_stmt| {
                                         try self.write_indent();
                                         try self.transpile_node(body_stmt.*);
-                                        if (body_stmt.type == .Expression) {
+                                        if (self.node_needs_trailing_semicolon(body_stmt.*)) {
                                             try self.write(";");
                                         }
                                     }
                                 } else {
                                     try self.write_indent();
                                     try self.transpile_node(fr.body.*);
-                                    if (fr.body.type == .Expression) {
+                                    if (self.node_needs_trailing_semicolon(fr.body.*)) {
                                         try self.write(";");
                                     }
                                 }
@@ -12747,14 +12755,14 @@ pub const TranspileProcess = struct {
                                     for (body.statements.items()) |body_stmt| {
                                         try self.write_indent();
                                         try self.transpile_node(body_stmt.*);
-                                        if (body_stmt.type == .Expression) {
+                                        if (self.node_needs_trailing_semicolon(body_stmt.*)) {
                                             try self.write(";");
                                         }
                                     }
                                 } else {
                                     try self.write_indent();
                                     try self.transpile_node(fi.body.*);
-                                    if (fi.body.type == .Expression) {
+                                    if (self.node_needs_trailing_semicolon(fi.body.*)) {
                                         try self.write(";");
                                     }
                                 }
@@ -12778,7 +12786,7 @@ pub const TranspileProcess = struct {
                                 try self.transpile_node(condition.*);
                                 try self.write(":");
                                 self.indent();
-                                if (branch.body.type == .Expression or branch.body.type == .ExpressionParenthesis) {
+                                if (self.node_needs_trailing_semicolon(branch.body.*)) {
                                     try self.write_indent();
                                     try self.transpile_node(branch.body.*);
                                     try self.write(";");
@@ -12794,7 +12802,7 @@ pub const TranspileProcess = struct {
                                 try self.write("default:");
 
                                 self.indent();
-                                if (branch.body.type == .Expression or branch.body.type == .ExpressionParenthesis) {
+                                if (self.node_needs_trailing_semicolon(branch.body.*)) {
                                     try self.write_indent();
                                     try self.transpile_node(branch.body.*);
                                     try self.write(";");
