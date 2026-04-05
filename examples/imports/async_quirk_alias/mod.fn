@@ -7,7 +7,9 @@ pub quirk AsyncCounter {
 }
 
 impl Counter as AsyncCounter {
-  async add(num x) num { ret self.base + x; }
+  async add(num x) num {
+    ret self.base + x;
+  }
 }
 
 pub fun to_async(Counter* c) AsyncCounter {

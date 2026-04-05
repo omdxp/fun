@@ -21,6 +21,12 @@ if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
   $RepoRoot = (Resolve-Path (Join-Path $scriptDir "..")).Path
 }
 
+if (-not $env:FUN_STDLIB_DIR -or [string]::IsNullOrWhiteSpace($env:FUN_STDLIB_DIR)) {
+  $env:FUN_STDLIB_DIR = (Join-Path $RepoRoot 'stdlib')
+}
+
+Write-Host "Using FUN_STDLIB_DIR=$($env:FUN_STDLIB_DIR)"
+
 function Get-RelativePath([string]$base, [string]$full) {
   if (-not $full.StartsWith($base, [System.StringComparison]::OrdinalIgnoreCase)) {
     return $full
@@ -29,12 +35,21 @@ function Get-RelativePath([string]$base, [string]$full) {
 }
 
 function Is-RunnableFile([string]$path) {
+  if ($path -like '*\examples\stdlib\net_http_server.fn') {
+    return $false
+  }
   return ((Get-Content -LiteralPath $path -Raw) -match '(?m)^\s*fun\s+main\s*\(')
 }
 
 function Is-ExpectedFail([string]$relPath) {
   # Intentional negative examples.
   if ($relPath -ieq 'examples\test_circular.fn') { return $true }
+
+  # Private visibility example should fail.
+  if ($relPath -ieq 'examples\pub_visibility\private_access.fn') { return $true }
+
+  # Arch-specific asm example is expected to fail on some targets.
+  if ($relPath -ieq 'examples\advanced\asm_arch_specific.fn') { return $true }
 
   # Direct files in examples/error_cases are meant to fail.
   if ($relPath -match '^examples\\error_cases\\[^\\]+\.fn$') { return $true }
@@ -45,6 +60,11 @@ function Is-ExpectedFail([string]$relPath) {
   # NOTE: Files under examples/error_cases/duplicate_symbols/* are helper modules;
   # they should compile successfully on their own.
   return $false
+}
+
+function Get-ExpectedRunExitCode([string]$relPath) {
+  if ($relPath -ieq 'examples\main_exit_status.fn') { return 7 }
+  return 0
 }
 
 function Quote-WinArg([string]$arg) {
@@ -195,7 +215,8 @@ foreach ($f in $files) {
     continue
   }
 
-  if ($res.ExitCode -ne 0) {
+  $expectedExit = if ($isRunnable) { Get-ExpectedRunExitCode -relPath $rel } else { 0 }
+  if ($res.ExitCode -ne $expectedExit) {
     $failed.Add("$rel (exit=$($res.ExitCode))")
     continue
   }

@@ -13,10 +13,12 @@ compound Box<T> {
 }
 
 impl Counter as AsyncCounter {
-  async add(num x) num { ret self.base + x; }
+  async add(num x) num {
+    ret self.base + x;
+  }
 }
 
-Counter[] counters = [Counter{ base = 40 }, Counter{ base = 41 }];
+Counter[] counters = [Counter{base = 40}, Counter{base = 41}];
 
 async fun main() {
   Counter picked = counters[1];

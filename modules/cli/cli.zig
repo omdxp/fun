@@ -569,30 +569,62 @@ fn isLikelyTypeToken(t: token.Token) bool {
     };
 }
 
-fn nextSignificantToken(toks: []const token.Token, start_at: usize) ?token.Token {
+fn nextSignificantIndex(toks: []const token.Token, start_at: usize) ?usize {
     var i: usize = start_at;
     while (i < toks.len) : (i += 1) {
         const t = toks[i];
         if (t.type == .NewLine or t.type == .Comment) continue;
-        return t;
+        return i;
     }
     return null;
 }
 
+fn nextSignificantToken(toks: []const token.Token, start_at: usize) ?token.Token {
+    const idx = nextSignificantIndex(toks, start_at) orelse return null;
+    return toks[idx];
+}
+
 fn isPointerTypeStarContext(toks: []const token.Token, idx: usize, prev: token.Token, in_decl_only_ctx: bool) bool {
-    if (!in_decl_only_ctx and !isLikelyTypeToken(prev)) {
-        const is_generic_close = (prev.type == .Operator and std.mem.eql(u8, prev.data.sval.items, ">")) or
-            (prev.type == .Symbol and prev.data.cval == '>');
+    var base_prev = prev;
+    const prev_is_star = (prev.type == .Symbol and prev.data.cval == '*') or
+        (prev.type == .Operator and std.mem.eql(u8, prev.data.sval.items, "*"));
+    if (prev_is_star) {
+        // For chains like `Type** name`, walk left to recover the base type token.
+        var walk_idx = prev_significant_index(toks, idx) orelse return false;
+        var walk_tok = toks[walk_idx];
+        while ((walk_tok.type == .Symbol and walk_tok.data.cval == '*') or
+            (walk_tok.type == .Operator and std.mem.eql(u8, walk_tok.data.sval.items, "*")))
+        {
+            walk_idx = prev_significant_index(toks, walk_idx) orelse return false;
+            walk_tok = toks[walk_idx];
+        }
+        base_prev = walk_tok;
+    }
+
+    if (!in_decl_only_ctx and !isLikelyTypeToken(base_prev)) {
+        const is_generic_close = (base_prev.type == .Operator and std.mem.eql(u8, base_prev.data.sval.items, ">")) or
+            (base_prev.type == .Symbol and base_prev.data.cval == '>');
         if (!is_generic_close) return false;
     }
 
-    const next = nextSignificantToken(toks, idx + 1) orelse return false;
+    var next_idx = nextSignificantIndex(toks, idx + 1) orelse return false;
+    var next = toks[next_idx];
+
+    // Support pointer chains such as `Type** name` by consuming subsequent stars.
+    while ((next.type == .Symbol and next.data.cval == '*') or
+        (next.type == .Operator and std.mem.eql(u8, next.data.sval.items, "*")))
+    {
+        next_idx = nextSignificantIndex(toks, next_idx + 1) orelse return false;
+        next = toks[next_idx];
+    }
+
     // Return type pointers: `...) Type* {` or `...) Type*;`
     if (next.type == .Symbol and (next.data.cval == '{' or next.data.cval == ';')) return true;
 
     // Declaration/field/param pointers: `Type* name` (name then delimiter)
     if (next.type == .Identifier) {
-        const after_name = nextSignificantToken(toks, idx + 2) orelse return false;
+        const after_name_idx = nextSignificantIndex(toks, next_idx + 1) orelse return false;
+        const after_name = toks[after_name_idx];
         if (after_name.type == .Symbol and (after_name.data.cval == ';' or after_name.data.cval == ',' or after_name.data.cval == ')' or after_name.data.cval == ']')) return true;
         if (after_name.type == .Operator and (std.mem.eql(u8, after_name.data.sval.items, "=") or std.mem.eql(u8, after_name.data.sval.items, ","))) return true;
     }
@@ -891,6 +923,34 @@ fn has_paren_before_brace(toks: []const token.Token, idx: usize) bool {
     return false;
 }
 
+fn generic_angle_sequence_followed_by_lbrace(toks: []const token.Token, open_idx: usize, first_arg_idx: usize) bool {
+    _ = open_idx;
+    var depth: usize = 1;
+    var i: usize = first_arg_idx + 1;
+    while (i < toks.len) : (i += 1) {
+        const t = toks[i];
+        if (t.type == .NewLine or t.type == .Comment) continue;
+
+        const is_lt = (t.type == .Operator and std.mem.eql(u8, t.data.sval.items, "<")) or
+            (t.type == .Symbol and t.data.cval == '<');
+        if (is_lt) {
+            depth += 1;
+            continue;
+        }
+
+        const closes = generic_close_count(t);
+        if (closes == 0) continue;
+        if (closes >= depth) {
+            const after_idx = next_significant_index(toks, i) orelse return false;
+            const after = toks[after_idx];
+            return (after.type == .Symbol and after.data.cval == '{') or
+                (after.type == .Operator and std.mem.eql(u8, after.data.sval.items, "{"));
+        }
+        depth -= closes;
+    }
+    return false;
+}
+
 fn is_generic_angle_open(toks: []const token.Token, idx: usize, in_decl_only_ctx: bool) bool {
     if (idx >= toks.len) return false;
     const t = toks[idx];
@@ -916,6 +976,7 @@ fn is_generic_angle_open(toks: []const token.Token, idx: usize, in_decl_only_ctx
     if (before_prev.type == .Keyword) {
         const kw = before_prev.data.sval.items;
         if (std.mem.eql(u8, kw, "impl") or std.mem.eql(u8, kw, "compound") or std.mem.eql(u8, kw, "fun") or std.mem.eql(u8, kw, "pub")) return true;
+        if (std.mem.eql(u8, kw, "ret") and generic_angle_sequence_followed_by_lbrace(toks, idx, next_idx)) return true;
     }
     if (before_prev.type == .Symbol) {
         const c = before_prev.data.cval;
@@ -924,6 +985,7 @@ fn is_generic_angle_open(toks: []const token.Token, idx: usize, in_decl_only_ctx
     if (before_prev.type == .Operator) {
         const op = before_prev.data.sval.items;
         if (std.mem.eql(u8, op, "(") or std.mem.eql(u8, op, "[") or std.mem.eql(u8, op, ",") or std.mem.eql(u8, op, ":")) return true;
+        if (std.mem.eql(u8, op, "=") and generic_angle_sequence_followed_by_lbrace(toks, idx, next_idx)) return true;
     }
     return false;
 }
@@ -1342,6 +1404,53 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
         // Decide whether to add a space before this token.
         if (state.prev_token.*) |pt2| {
             const needs_space = blk: {
+                const t2_is_equal = (t2.type == .Symbol and t2.data.cval == '=') or
+                    (t2.type == .Operator and std.mem.eql(u8, t2.data.sval.items, "="));
+
+                // Keep assignment and split `==`/`!=` readable after identifiers/prefixes.
+                if (t2_is_equal and (is_word_like(pt2) or (pt2.type == .Symbol and is_closing_symbol(pt2.data.cval)))) {
+                    break :blk true;
+                }
+
+                // When lexing produces split operator tokens, keep comparison/equality pairs
+                // glued so we emit valid operators: <=, >=, !=, ==.
+                if (t2.type == .Symbol and t2.data.cval == '=') {
+                    if (pt2.type == .Symbol) {
+                        const pc = pt2.data.cval;
+                        if (pc == '<' or pc == '>' or pc == '!' or pc == '=') {
+                            break :blk false;
+                        }
+                    }
+                    if (pt2.type == .Operator) {
+                        const pop = pt2.data.sval.items;
+                        if (std.mem.eql(u8, pop, "<") or std.mem.eql(u8, pop, ">") or std.mem.eql(u8, pop, "!") or std.mem.eql(u8, pop, "=")) {
+                            break :blk false;
+                        }
+                    }
+                }
+                if (t2.type == .Operator and std.mem.eql(u8, t2.data.sval.items, "=")) {
+                    if (pt2.type == .Symbol) {
+                        const pc = pt2.data.cval;
+                        if (pc == '<' or pc == '>' or pc == '!' or pc == '=') {
+                            break :blk false;
+                        }
+                    }
+                    if (pt2.type == .Operator) {
+                        const pop = pt2.data.sval.items;
+                        if (std.mem.eql(u8, pop, "<") or std.mem.eql(u8, pop, ">") or std.mem.eql(u8, pop, "!") or std.mem.eql(u8, pop, "=")) {
+                            break :blk false;
+                        }
+                    }
+                }
+                if ((t2.type == .Symbol and t2.data.cval == '*') or
+                    (t2.type == .Operator and std.mem.eql(u8, t2.data.sval.items, "*")))
+                {
+                    // Keep pointer type stars glued in declarations/signatures, including
+                    // generic closes like `Channel<T>* value`.
+                    if (isPointerTypeStarContext(toks, idx, pt2, in_decl_only_ctx)) {
+                        break :blk false;
+                    }
+                }
                 if (is_word_like(t2) and idx >= 2) {
                     const prev_of_star = toks[idx - 2];
                     if ((pt2.type == .Symbol and pt2.data.cval == '*') or
@@ -1382,7 +1491,18 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                             if (pt2.type == .Symbol and is_closing_symbol(pt2.data.cval)) break :blk_unary false;
                             break :blk_unary true;
                         };
-                        if (unary_ctx) break :blk false;
+                        if (unary_ctx) {
+                            // Keep unary prefixes glued to their operand (`-x`) but preserve
+                            // a separator after binary operators (`x <= -1`, `a + -b`).
+                            if (pt2.type == .Operator and operator_needs_spaces(pt2.data.sval.items)) break :blk true;
+                            if (pt2.type == .Symbol) {
+                                const pc = pt2.data.cval;
+                                if (pc == '*' or pc == '+' or pc == '-' or pc == '/' or pc == '%' or pc == '<' or pc == '>' or pc == '=' or pc == '&' or pc == '|' or pc == '^' or pc == '!') {
+                                    break :blk true;
+                                }
+                            }
+                            break :blk false;
+                        }
                     }
                 }
                 if (t2.type == .Symbol and (t2.data.cval == '&' or t2.data.cval == '*' or t2.data.cval == '+' or t2.data.cval == '-')) {
@@ -1397,7 +1517,16 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                         if (pt2.type == .Symbol and is_closing_symbol(pt2.data.cval)) break :blk_unary_sym false;
                         break :blk_unary_sym true;
                     };
-                    if (unary_ctx) break :blk false;
+                    if (unary_ctx) {
+                        if (pt2.type == .Operator and operator_needs_spaces(pt2.data.sval.items)) break :blk true;
+                        if (pt2.type == .Symbol) {
+                            const pc = pt2.data.cval;
+                            if (pc == '*' or pc == '+' or pc == '-' or pc == '/' or pc == '%' or pc == '<' or pc == '>' or pc == '=' or pc == '&' or pc == '|' or pc == '^' or pc == '!') {
+                                break :blk true;
+                            }
+                        }
+                        break :blk false;
+                    }
                 }
                 if (t2.type == .Operator and std.mem.eql(u8, t2.data.sval.items, "*") and isPointerTypeStarContext(toks, idx, pt2, in_decl_only_ctx)) {
                     // Pointer types: `Type* name` / `Type* {`.
@@ -1417,6 +1546,10 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                     if (std.mem.eql(u8, pkw2, "if") or std.mem.eql(u8, pkw2, "elif")) {
                         // Always separate the keyword from the start of its condition, even if
                         // the condition starts with an inner grouping `(`.
+                        break :blk true;
+                    }
+                    if (std.mem.eql(u8, pkw2, "await")) {
+                        // Keep await as a keyword followed by an expression: `await (...)`.
                         break :blk true;
                     }
                     if (std.mem.eql(u8, pkw2, "imp")) {
@@ -1606,6 +1739,16 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
         if (t2.type == .Operator) {
             const op2 = t2.data.sval.items;
             if ((std.mem.eql(u8, op2, "-") or std.mem.eql(u8, op2, "+") or std.mem.eql(u8, op2, "&") or std.mem.eql(u8, op2, "*"))) {
+                const is_pointer_decl_star = std.mem.eql(u8, op2, "*") and blk_ptr: {
+                    const prev = state.prev_token.*;
+                    if (prev == null) break :blk_ptr false;
+                    break :blk_ptr isPointerTypeStarContext(toks, idx, prev.?, in_decl_only_ctx);
+                };
+                if (is_pointer_decl_star) {
+                    state.prev_token.* = t2;
+                    continue;
+                }
+
                 const unary_ctx = blk: {
                     const prev = state.prev_token.*;
                     if (prev == null) break :blk true;

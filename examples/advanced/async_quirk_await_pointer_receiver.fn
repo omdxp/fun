@@ -13,7 +13,9 @@ compound Box<T> {
 }
 
 impl Counter as AsyncCounter {
-  async add(num x) num { ret self.base + x; }
+  async add(num x) num {
+    ret self.base + x;
+  }
 }
 
 fun ptr(Box<AsyncCounter>* b) Box<AsyncCounter>* {
@@ -24,7 +26,7 @@ async fun main() {
   Counter c;
   c.base = 41;
   AsyncCounter q = &c;
-  Box<AsyncCounter> b = Box<AsyncCounter>{ v = q };
-  num out = await (*ptr(&b)).v.add(1);
+  Box<AsyncCounter> b = Box<AsyncCounter>{v = q};
+  num out = await(*ptr(&b)).v.add(1);
   printf("%lld\n", out);
 }

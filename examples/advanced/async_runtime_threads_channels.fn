@@ -10,7 +10,7 @@ imp std.thread;
 imp std.channel;
 
 fun producer_main(raw* arg) raw* {
-  Channel<num>* out= arg;
+  Channel<num>* out = arg;
   num i = 1;
   for i <= 20 {
     _ = out.send(i);
@@ -21,7 +21,7 @@ fun producer_main(raw* arg) raw* {
 }
 
 fun consumer_main(raw* arg) raw* {
-  Channel<num>* input= arg;
+  Channel<num>* input = arg;
   num sum = 0;
   num count = 0;
 

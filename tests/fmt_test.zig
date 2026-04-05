@@ -331,6 +331,132 @@ test "-fmt formats lowercase type pointers in signatures" {
     try std.testing.expectEqualStrings(expected, got);
 }
 
+test "-fmt keeps generic pointer signatures glued" {
+    const allocator = std.testing.allocator;
+
+    const ugly =
+        "compound Box<T>{T value;}\n" ++
+        "fun get(Box<num> * p) num;\n" ++
+        "fun put(Box<num>* p,num v) num;\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_generic_ptr", ugly);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, path);
+
+    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    defer allocator.free(got);
+
+    const expected =
+        "compound Box<T> {\n" ++
+        "  T value;\n" ++
+        "}\n" ++
+        "\n" ++
+        "fun get(Box<num>* p) num;\n" ++
+        "fun put(Box<num>* p, num v) num;\n";
+
+    try std.testing.expectEqualStrings(expected, got);
+    try expectFileParses(allocator, path);
+}
+
+test "-fmt keeps generic compound literals tight after ret" {
+    const allocator = std.testing.allocator;
+
+    const ugly =
+        "compound Box<T>{T v;}\n" ++
+        "fun pack(Box<num> q) Box<num>{ret Box < num >{v = q};}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_generic_compound_ret", ugly);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, path);
+
+    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    defer allocator.free(got);
+
+    const expected =
+        "compound Box<T> {\n" ++
+        "  T v;\n" ++
+        "}\n" ++
+        "\n" ++
+        "fun pack(Box<num> q) Box<num> {\n" ++
+        "  ret Box<num>{v = q};\n" ++
+        "}\n";
+
+    try std.testing.expectEqualStrings(expected, got);
+    try expectFileParses(allocator, path);
+}
+
+test "-fmt keeps space after await before parenthesized receiver" {
+    const allocator = std.testing.allocator;
+
+    const ugly =
+        "compound Box{num v;}\n" ++
+        "fun pack(Box q) Box{ret q;}\n" ++
+        "async fun f() num{Box q;num out=await(pack(q)).v;ret out;}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_await_paren", ugly);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, path);
+
+    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    defer allocator.free(got);
+
+    const expected =
+        "compound Box {\n" ++
+        "  num v;\n" ++
+        "}\n" ++
+        "\n" ++
+        "fun pack(Box q) Box {\n" ++
+        "  ret q;\n" ++
+        "}\n" ++
+        "async fun f() num {\n" ++
+        "  Box q;\n" ++
+        "  num out = await (pack(q)).v;\n" ++
+        "  ret out;\n" ++
+        "}\n";
+
+    try std.testing.expectEqualStrings(expected, got);
+    try expectFileParses(allocator, path);
+}
+
+test "-fmt keeps pointer-to-pointer spacing and assignment spacing" {
+    const allocator = std.testing.allocator;
+
+    const ugly =
+        "fun use(raw **args) num{raw** local=args;ret 0;}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_ptr_ptr", ugly);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, path);
+
+    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    defer allocator.free(got);
+
+    const expected =
+        "fun use(raw** args) num {\n" ++
+        "  raw** local = args;\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    try std.testing.expectEqualStrings(expected, got);
+    try expectFileParses(allocator, path);
+}
+
 test "-fmt-all formats local imports recursively (skips std.*)" {
     const allocator = std.testing.allocator;
 
@@ -586,6 +712,35 @@ test "-fmt keeps space after ret before unary reference" {
         "}\n";
 
     try std.testing.expectEqualStrings(expected, got);
+}
+
+test "-fmt keeps space before unary minus after comparisons" {
+    const allocator = std.testing.allocator;
+
+    const ugly =
+        "fun f(num x) bin{if x<=-1000000000{ret true;}ret false;}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_cmp_unary_minus", ugly);
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, path);
+
+    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    defer allocator.free(got);
+
+    const expected =
+        "fun f(num x) bin {\n" ++
+        "  if x <= -1000000000 {\n" ++
+        "    ret true;\n" ++
+        "  }\n" ++
+        "  ret false;\n" ++
+        "}\n";
+
+    try std.testing.expectEqualStrings(expected, got);
+    try expectFileParses(allocator, path);
 }
 
 test "-fmt nested generics keep closing brackets tight" {

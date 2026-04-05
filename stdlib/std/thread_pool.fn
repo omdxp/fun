@@ -78,7 +78,7 @@ impl ThreadPool {
   // - 0 on success
   // - -2 when pool allocation failed
   // - first nonzero thread start error code
-  pub start_all(raw* entry, raw **args) num {
+  pub start_all(raw* entry, raw** args) num {
     if self.has_storage == false {
       ret -2;
     }
@@ -112,7 +112,7 @@ impl ThreadPool {
   // - 0 on success
   // - -2 when pool allocation failed
   // - first nonzero thread join error code
-  pub join_all(raw **out_rets) num {
+  pub join_all(raw** out_rets) num {
     if self.has_storage == false {
       ret -2;
     }

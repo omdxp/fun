@@ -17,11 +17,13 @@ compound Wrap {
 }
 
 impl Counter as AsyncCounter {
-  async add(num x) num { ret self.base + x; }
+  async add(num x) num {
+    ret self.base + x;
+  }
 }
 
 fun wrap(AsyncCounter q) Wrap {
-  ret Wrap{ h = Holder{ q = q } };
+  ret Wrap{h = Holder{q = q}};
 }
 
 async fun main() {
