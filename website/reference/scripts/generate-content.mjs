@@ -406,7 +406,7 @@ function isSectionHeader(line) {
 
 function parseCommentBlock(lines) {
   const cleaned = trimEmptyLines(lines);
-  const summary = cleaned.find((line) => line.trim() !== "") ?? "";
+  const summary = deriveCommentSummary(cleaned);
   const descriptionLines = [];
   const sectionLines = [];
   let inSections = false;
@@ -434,6 +434,23 @@ function parseCommentBlock(lines) {
     sections,
     example,
   };
+}
+
+function deriveCommentSummary(lines) {
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (!trimmed) continue;
+    if (isSectionHeader(trimmed)) continue;
+    if (/^```/.test(trimmed)) continue;
+    if (/^#{1,6}\s+/.test(trimmed)) continue;
+
+    const compact = trimmed.replace(/`+/g, "").replace(/\s+/g, " ").trim();
+
+    if (!compact) continue;
+    return compact;
+  }
+
+  return "";
 }
 
 function splitSections(lines) {

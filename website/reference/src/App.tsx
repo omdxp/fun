@@ -246,6 +246,31 @@ function cleanHeadingText(raw: string) {
     .trim();
 }
 
+function normalizeModuleSummary(
+  summary: string,
+  fallback = "No summary found.",
+) {
+  const raw = String(summary ?? "");
+  const firstLine = raw.split(/\r?\n/)[0] ?? "";
+  const compact = firstLine
+    .replace(/```/g, "")
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!compact) return fallback;
+  if (
+    /^(usage|example|examples|params|returns|fields|notes)\s*:?\s*$/i.test(
+      compact,
+    )
+  ) {
+    return fallback;
+  }
+
+  return compact.length > 180 ? `${compact.slice(0, 177)}...` : compact;
+}
+
 function extractDocSections(
   markdown: string,
   tab: Extract<TabKey, "language" | "reference">,
@@ -344,6 +369,7 @@ export default function App() {
   const [isVersionLoading, setIsVersionLoading] = useState(false);
   const [copyStatus, setCopyStatus] = useState<"idle" | "ok" | "err">("idle");
   const [detailCopyKey, setDetailCopyKey] = useState("");
+  const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState(false);
   const releaseUrl = `https://github.com/omdxp/fun/releases/tag/v${content.funVersion}`;
 
   const scrollToDocAnchor = (
@@ -461,7 +487,8 @@ export default function App() {
     }
 
     for (const moduleItem of content.stdlib) {
-      const moduleHay = `${moduleItem.module}\n${moduleItem.summary}\n${moduleItem.docsMarkdown}`;
+      const moduleSummary = normalizeModuleSummary(moduleItem.summary, "");
+      const moduleHay = `${moduleItem.module}\n${moduleSummary}\n${moduleItem.docsMarkdown}`;
       if (moduleHay.toLowerCase().includes(q)) {
         out.push({
           id: `module:${moduleItem.module}`,
@@ -535,8 +562,9 @@ export default function App() {
     const q = search.toLowerCase().trim();
     if (!q) return content.stdlib;
     return content.stdlib.filter((m) => {
+      const moduleSummary = normalizeModuleSummary(m.summary, "");
       if (m.module.toLowerCase().includes(q)) return true;
-      if (m.summary.toLowerCase().includes(q)) return true;
+      if (moduleSummary.toLowerCase().includes(q)) return true;
       if ((m.docsMarkdown ?? "").toLowerCase().includes(q)) return true;
       return m.symbols.some(
         (s) =>
@@ -660,6 +688,7 @@ export default function App() {
 
   const activateGlobalResult = (result: GlobalSearchResult) => {
     setTab(result.tab);
+    setIsMobileDrawerOpen(false);
     if (
       (result.tab === "language" || result.tab === "reference") &&
       result.docAnchorKey
@@ -710,6 +739,20 @@ export default function App() {
   useEffect(() => {
     setActiveGlobalResultIndex(globalResults.length > 0 ? 0 : -1);
   }, [globalSearch, globalResults.length]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const onResize = () => {
+      if (window.innerWidth > 980) {
+        setIsMobileDrawerOpen(false);
+      }
+    };
+
+    onResize();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1080,187 +1123,215 @@ export default function App() {
   return (
     <div className="app-shell">
       <aside>
-        <div className="brand">Fun Language Reference</div>
-        <p className="muted">Interactive docs + local runner</p>
-        <div className="global-search-wrap">
-          <input
-            id="global-search-input"
-            className="search global-search"
-            placeholder="Search everything (/ to focus)"
-            value={globalSearch}
-            onChange={(e) => setGlobalSearch(e.target.value)}
-            onKeyDown={(event) => {
-              if (!globalSearch.trim()) return;
-
-              if (event.key === "ArrowDown") {
-                event.preventDefault();
-                setActiveGlobalResultIndex((prev) => {
-                  if (globalResults.length === 0) return -1;
-                  return (
-                    (prev + 1 + globalResults.length) % globalResults.length
-                  );
-                });
-                return;
-              }
-
-              if (event.key === "ArrowUp") {
-                event.preventDefault();
-                setActiveGlobalResultIndex((prev) => {
-                  if (globalResults.length === 0) return -1;
-                  return (
-                    (prev - 1 + globalResults.length) % globalResults.length
-                  );
-                });
-                return;
-              }
-
-              if (event.key === "Enter") {
-                if (activeGlobalResultIndex < 0) return;
-                event.preventDefault();
-                const selected = globalResults[activeGlobalResultIndex];
-                if (selected) {
-                  activateGlobalResult(selected);
-                }
-                return;
-              }
-
-              if (event.key === "Escape") {
-                event.preventDefault();
-                setGlobalSearch("");
-                setActiveGlobalResultIndex(-1);
-              }
-            }}
-          />
-          {globalSearch.trim() && (
-            <div className="global-results">
-              {globalResults.length === 0 ? (
-                <div className="muted small">No results</div>
-              ) : (
-                (
-                  [
-                    {
-                      key: "docs",
-                      label: "Docs",
-                      items: groupedGlobalResults.docs,
-                    },
-                    {
-                      key: "stdlib",
-                      label: "Standard Library",
-                      items: groupedGlobalResults.stdlib,
-                    },
-                    {
-                      key: "samples",
-                      label: "Playground Samples",
-                      items: groupedGlobalResults.samples,
-                    },
-                  ] as const
-                ).map((section) => {
-                  if (section.items.length === 0) return null;
-
-                  return (
-                    <section key={section.key} className="global-result-group">
-                      <div className="global-result-group-title muted small">
-                        {section.label}
-                      </div>
-                      {section.items.map((result) => {
-                        const absoluteIndex = globalResults.findIndex(
-                          (item) => item.id === result.id,
-                        );
-
-                        return (
-                          <button
-                            key={result.id}
-                            type="button"
-                            className={`global-result-item ${
-                              absoluteIndex === activeGlobalResultIndex
-                                ? "active"
-                                : ""
-                            }`}
-                            onMouseEnter={() => {
-                              setActiveGlobalResultIndex(absoluteIndex);
-                            }}
-                            onClick={() => {
-                              activateGlobalResult(result);
-                            }}
-                          >
-                            <div className="global-result-title">
-                              {result.title}
-                            </div>
-                            <div className="global-result-subtitle muted small">
-                              {result.subtitle}
-                            </div>
-                          </button>
-                        );
-                      })}
-                    </section>
-                  );
-                })
-              )}
-            </div>
-          )}
-        </div>
-
-        <div className="version-controls">
-          <label htmlFor="version-select" className="muted small">
-            Docs version
-          </label>
-          <select
-            id="version-select"
-            value={selectedVersion}
-            onChange={(event) => {
-              setSelectedVersion(event.target.value);
-              setSearch("");
-              setSelectedModulePath("");
-              setSelectedSymbolKey("");
-              setIsStdlibModalOpen(false);
+        <div className="drawer-mobile-bar">
+          <div className="brand">Fun Language Reference</div>
+          <button
+            type="button"
+            className="drawer-toggle"
+            aria-expanded={isMobileDrawerOpen}
+            aria-controls="sidebar-drawer-content"
+            onClick={() => {
+              setIsMobileDrawerOpen((prev) => !prev);
             }}
           >
-            {versionList.map((version) => (
-              <option key={version} value={version}>
-                v{version}
-                {version === (versionList[0] ?? version) ? " (latest)" : ""}
-              </option>
-            ))}
-          </select>
-          {isVersionLoading && (
-            <div className="muted small">Loading version...</div>
-          )}
+            {isMobileDrawerOpen ? "Hide menu" : "Show menu"}
+          </button>
         </div>
 
-        <nav>
-          {TABS.map((t) => (
-            <button
-              key={t.key}
-              onClick={() => {
-                if (!t.disabled) {
-                  setTab(t.key);
-                  if (t.key !== "language" && t.key !== "reference") {
-                    setSelectedDocAnchorKey("");
+        <div
+          id="sidebar-drawer-content"
+          className={`drawer-content ${isMobileDrawerOpen ? "open" : ""}`}
+        >
+          <p className="muted drawer-subtitle">
+            Interactive docs + local runner
+          </p>
+          <div className="global-search-wrap">
+            <input
+              id="global-search-input"
+              className="search global-search"
+              placeholder="Search everything (/ to focus)"
+              value={globalSearch}
+              onChange={(e) => setGlobalSearch(e.target.value)}
+              onKeyDown={(event) => {
+                if (!globalSearch.trim()) return;
+
+                if (event.key === "ArrowDown") {
+                  event.preventDefault();
+                  setActiveGlobalResultIndex((prev) => {
+                    if (globalResults.length === 0) return -1;
+                    return (
+                      (prev + 1 + globalResults.length) % globalResults.length
+                    );
+                  });
+                  return;
+                }
+
+                if (event.key === "ArrowUp") {
+                  event.preventDefault();
+                  setActiveGlobalResultIndex((prev) => {
+                    if (globalResults.length === 0) return -1;
+                    return (
+                      (prev - 1 + globalResults.length) % globalResults.length
+                    );
+                  });
+                  return;
+                }
+
+                if (event.key === "Enter") {
+                  if (activeGlobalResultIndex < 0) return;
+                  event.preventDefault();
+                  const selected = globalResults[activeGlobalResultIndex];
+                  if (selected) {
+                    activateGlobalResult(selected);
                   }
+                  return;
+                }
+
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  setGlobalSearch("");
+                  setActiveGlobalResultIndex(-1);
                 }
               }}
-              className={
-                tab === t.key
-                  ? "active" + (t.disabled ? " disabled" : "")
-                  : t.disabled
-                    ? "disabled"
-                    : ""
-              }
-              disabled={!!t.disabled}
-              title={t.tooltip}
-              style={t.disabled ? { opacity: 0.6, cursor: "not-allowed" } : {}}
+            />
+            {globalSearch.trim() && (
+              <div className="global-results">
+                {globalResults.length === 0 ? (
+                  <div className="muted small">No results</div>
+                ) : (
+                  (
+                    [
+                      {
+                        key: "docs",
+                        label: "Docs",
+                        items: groupedGlobalResults.docs,
+                      },
+                      {
+                        key: "stdlib",
+                        label: "Standard Library",
+                        items: groupedGlobalResults.stdlib,
+                      },
+                      {
+                        key: "samples",
+                        label: "Playground Samples",
+                        items: groupedGlobalResults.samples,
+                      },
+                    ] as const
+                  ).map((section) => {
+                    if (section.items.length === 0) return null;
+
+                    return (
+                      <section
+                        key={section.key}
+                        className="global-result-group"
+                      >
+                        <div className="global-result-group-title muted small">
+                          {section.label}
+                        </div>
+                        {section.items.map((result) => {
+                          const absoluteIndex = globalResults.findIndex(
+                            (item) => item.id === result.id,
+                          );
+
+                          return (
+                            <button
+                              key={result.id}
+                              type="button"
+                              className={`global-result-item ${
+                                absoluteIndex === activeGlobalResultIndex
+                                  ? "active"
+                                  : ""
+                              }`}
+                              onMouseEnter={() => {
+                                setActiveGlobalResultIndex(absoluteIndex);
+                              }}
+                              onClick={() => {
+                                activateGlobalResult(result);
+                              }}
+                            >
+                              <div className="global-result-title">
+                                {result.title}
+                              </div>
+                              <div className="global-result-subtitle muted small">
+                                {result.subtitle}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </section>
+                    );
+                  })
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="version-controls">
+            <label htmlFor="version-select" className="muted small">
+              Docs version
+            </label>
+            <select
+              id="version-select"
+              value={selectedVersion}
+              onChange={(event) => {
+                setSelectedVersion(event.target.value);
+                setSearch("");
+                setSelectedModulePath("");
+                setSelectedSymbolKey("");
+                setIsStdlibModalOpen(false);
+                setIsMobileDrawerOpen(false);
+              }}
             >
-              {t.label}
-            </button>
-          ))}
-        </nav>
-        <div className="meta muted">
-          <a href={releaseUrl} target="_blank" rel="noreferrer">
-            Fun v{content.funVersion}
-          </a>
-        </div>
-        <div className="meta muted">
-          Generated {new Date(content.generatedAt).toLocaleString()}
+              {versionList.map((version) => (
+                <option key={version} value={version}>
+                  v{version}
+                  {version === (versionList[0] ?? version) ? " (latest)" : ""}
+                </option>
+              ))}
+            </select>
+            {isVersionLoading && (
+              <div className="muted small">Loading version...</div>
+            )}
+          </div>
+
+          <nav>
+            {TABS.map((t) => (
+              <button
+                key={t.key}
+                onClick={() => {
+                  if (!t.disabled) {
+                    setTab(t.key);
+                    if (t.key !== "language" && t.key !== "reference") {
+                      setSelectedDocAnchorKey("");
+                    }
+                    setIsMobileDrawerOpen(false);
+                  }
+                }}
+                className={
+                  tab === t.key
+                    ? "active" + (t.disabled ? " disabled" : "")
+                    : t.disabled
+                      ? "disabled"
+                      : ""
+                }
+                disabled={!!t.disabled}
+                title={t.tooltip}
+                style={
+                  t.disabled ? { opacity: 0.6, cursor: "not-allowed" } : {}
+                }
+              >
+                {t.label}
+              </button>
+            ))}
+          </nav>
+          <div className="meta muted">
+            <a href={releaseUrl} target="_blank" rel="noreferrer">
+              Fun v{content.funVersion}
+            </a>
+          </div>
+          <div className="meta muted">
+            Generated {new Date(content.generatedAt).toLocaleString()}
+          </div>
         </div>
       </aside>
 
@@ -1305,7 +1376,6 @@ export default function App() {
                     ))}
                 </aside>
               )}
-              scrollToDocAnchor(heading.id, "smooth", heading.title);
             </div>
           </section>
         )}
@@ -1349,7 +1419,6 @@ export default function App() {
                     ))}
                 </aside>
               )}
-              scrollToDocAnchor(heading.id, "smooth", heading.title);
             </div>
           </section>
         )}
@@ -1390,7 +1459,7 @@ export default function App() {
                       std/{m.module.replace(/\.fn$/, "")}
                     </div>
                     <div className="module-summary">
-                      {m.summary || "No summary found."}
+                      {normalizeModuleSummary(m.summary)}
                     </div>
                     <div className="module-meta muted small">
                       {m.symbols.filter((s) => s.kind !== "method").length}{" "}
@@ -1459,7 +1528,7 @@ export default function App() {
                       <div className="modal-eyebrow">Std Module</div>
                       <h2>std/{activeModule.module.replace(/\.fn$/, "")}</h2>
                       <p className="muted">
-                        {activeModule.summary || "No summary found."}
+                        {normalizeModuleSummary(activeModule.summary)}
                       </p>
                     </div>
                     <div className="modal-actions">
