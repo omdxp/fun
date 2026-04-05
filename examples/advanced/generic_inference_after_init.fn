@@ -1,0 +1,49 @@
+imp std.c.io;
+
+compound Box<T> {
+  T value;
+}
+
+compound Pair<L, R> {
+  L left;
+  R right;
+}
+
+fun make_box<T>(T x) Box<T> {
+  ret Box<T>{value = x};
+}
+
+fun make_pair<L, R>(L left, R right) Pair<L, R> {
+  ret Pair<L, R>{left = left, right = right};
+}
+
+fun pick_left<L, R>(Pair<L, R> p) L {
+  ret p.left;
+}
+
+fun swap_pair<L, R>(Pair<L, R> p) Pair<R, L> {
+  ret Pair<R, L>{left = p.right, right = p.left};
+}
+
+fun main() {
+  // Inferred from generic compound initializer.
+  let nbox = Box{value = 7};
+  nbox.value += 1;
+
+  // Inferred from generic function return type.
+  let sbox = make_box("hi");
+  sbox.value = "bye";
+
+  // Inferred from a generic function with multiple type parameters.
+  let pair = make_pair(nbox.value, sbox.value);
+
+  // Inferred from a generic function whose return swaps type parameters.
+  let swapped = swap_pair(pair);
+
+  let left_num = pick_left(pair);
+  let left_str = pick_left(swapped);
+
+  printf("nbox=%lld sbox=%s\n", nbox.value, sbox.value);
+  printf("pair=(%lld,%s) swapped=(%s,%lld)\n", pair.left, pair.right, swapped.left, swapped.right);
+  printf("picks=(%lld,%s)\n", left_num, left_str);
+}

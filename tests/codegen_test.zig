@@ -901,6 +901,61 @@ test "async quirk pointer generic receiver await transpiles and runs" {
     try std.testing.expectEqualStrings("42", stdout);
 }
 
+test "async quirk helper pointer generic receiver await transpiles and runs" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_async_quirk_helper_ptr_generic_receiver_await.fn";
+    const c_path = "codegen_async_quirk_helper_ptr_generic_receiver_await.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_async_quirk_helper_ptr_generic_receiver_await.exe" else "codegen_async_quirk_helper_ptr_generic_receiver_await";
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(c_path) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.c.io;\n" ++
+        "compound Counter {\n" ++
+        "  num base;\n" ++
+        "}\n" ++
+        "quirk AsyncCounter {\n" ++
+        "  async add(num x) num;\n" ++
+        "}\n" ++
+        "compound Box<T> {\n" ++
+        "  T v;\n" ++
+        "}\n" ++
+        "impl Counter as AsyncCounter {\n" ++
+        "  async add(num x) num { ret self.base + x; }\n" ++
+        "}\n" ++
+        "fun ptr(Box<AsyncCounter>* b) Box<AsyncCounter>* {\n" ++
+        "  ret b;\n" ++
+        "}\n" ++
+        "fun box(Box<AsyncCounter>* b) Box<AsyncCounter> {\n" ++
+        "  ret *b;\n" ++
+        "}\n" ++
+        "async fun main() {\n" ++
+        "  Counter c;\n" ++
+        "  c.base = 41;\n" ++
+        "  AsyncCounter q = &c;\n" ++
+        "  Box<AsyncCounter> b = Box<AsyncCounter>{ v = q };\n" ++
+        "  num out = await (box(ptr(&b)).v).add(1);\n" ++
+        "  printf(\"%lld\", out);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, ".vtable->add(") != null);
+
+    {
+        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("42", stdout);
+}
+
 test "async quirk indexed generic receiver await transpiles and runs" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_async_quirk_indexed_generic_receiver_await.fn";
@@ -4024,6 +4079,87 @@ test "generic function specialization emits concrete names" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "id__T") == null);
 
     try fs.cwd().deleteFile(ifilepath);
+}
+
+test "generic inference after init transpiles with concrete specializations and runs" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_generic_inference_after_init_regression.fn";
+    const c_path = "codegen_generic_inference_after_init_regression.c";
+    const exe_path = if (builtin.os.tag == .windows)
+        "codegen_generic_inference_after_init_regression.exe"
+    else
+        "codegen_generic_inference_after_init_regression";
+
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(c_path) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.c.io;\n" ++
+        "\n" ++
+        "compound Box<T> {\n" ++
+        "  T value;\n" ++
+        "}\n" ++
+        "\n" ++
+        "compound Pair<L, R> {\n" ++
+        "  L left;\n" ++
+        "  R right;\n" ++
+        "}\n" ++
+        "\n" ++
+        "fun make_box<T>(T x) Box<T> {\n" ++
+        "  ret Box<T>{value = x};\n" ++
+        "}\n" ++
+        "\n" ++
+        "fun make_pair<L, R>(L left, R right) Pair<L, R> {\n" ++
+        "  ret Pair<L, R>{left = left, right = right};\n" ++
+        "}\n" ++
+        "\n" ++
+        "fun pick_left<L, R>(Pair<L, R> p) L {\n" ++
+        "  ret p.left;\n" ++
+        "}\n" ++
+        "\n" ++
+        "fun swap_pair<L, R>(Pair<L, R> p) Pair<R, L> {\n" ++
+        "  ret Pair<R, L>{left = p.right, right = p.left};\n" ++
+        "}\n" ++
+        "\n" ++
+        "fun main() {\n" ++
+        "  let nbox = Box{value = 7};\n" ++
+        "  nbox.value += 1;\n" ++
+        "  let sbox = make_box(\"hi\");\n" ++
+        "  let pair = make_pair(nbox.value, sbox.value);\n" ++
+        "  let swapped = swap_pair(pair);\n" ++
+        "  let left_num = pick_left(pair);\n" ++
+        "  let left_str = pick_left(swapped);\n" ++
+        "  printf(\"nbox=%lld sbox=%s\\n\", nbox.value, sbox.value);\n" ++
+        "  printf(\"pair=(%lld,%s) swapped=(%s,%lld)\\n\", pair.left, pair.right, swapped.left, swapped.right);\n" ++
+        "  printf(\"picks=(%lld,%s)\\n\", left_num, left_str);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "make_pair__num__str") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "swap_pair__num__str") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Pair__num__str") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Pair__str__num") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "make_pair__L__R") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Pair__L__R") == null);
+
+    {
+        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings(
+        "nbox=8 sbox=hi\n" ++
+            "pair=(8,hi) swapped=(hi,8)\n" ++
+            "picks=(8,hi)\n",
+        stdout,
+    );
 }
 
 test "assert emits abort and message" {

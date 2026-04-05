@@ -44,6 +44,7 @@ zig-out/bin/fun -in examples/<example>.fn
 - advanced/asm_arch_specific.fn
 - advanced/async_quirk_await_function_receiver.fn
 - advanced/async_quirk_await_generic_wrapper.fn
+- advanced/generic_inference_after_init.fn
 - advanced/async_quirk_await_indexed_receiver.fn
 - advanced/async_quirk_await_nested_receiver.fn
 - advanced/async_quirk_await_parenthesized_receiver.fn

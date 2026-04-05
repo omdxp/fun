@@ -472,6 +472,37 @@ test "typecheck await async quirk generic wrapper receiver method call is ok" {
     try runTranspileExpectOk(std.testing.allocator, "typecheck_await_async_quirk_generic_wrapper_receiver_ok.fn", input);
 }
 
+test "typecheck await async quirk helper pointer generic wrapper receiver method call is ok" {
+    const input =
+        "compound Counter {\n" ++
+        "  num base;\n" ++
+        "}\n" ++
+        "quirk AsyncCounter {\n" ++
+        "  async add(num x) num;\n" ++
+        "}\n" ++
+        "compound Box<T> {\n" ++
+        "  T v;\n" ++
+        "}\n" ++
+        "impl Counter as AsyncCounter {\n" ++
+        "  async add(num x) num { ret self.base + x; }\n" ++
+        "}\n" ++
+        "fun ptr(Box<AsyncCounter>* b) Box<AsyncCounter>* {\n" ++
+        "  ret b;\n" ++
+        "}\n" ++
+        "fun box(Box<AsyncCounter>* b) Box<AsyncCounter> {\n" ++
+        "  ret *b;\n" ++
+        "}\n" ++
+        "async fun main() {\n" ++
+        "  Counter c;\n" ++
+        "  c.base = 1;\n" ++
+        "  AsyncCounter q = &c;\n" ++
+        "  Box<AsyncCounter> b = Box<AsyncCounter>{ v = q };\n" ++
+        "  num out = await (box(ptr(&b)).v).add(2);\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_await_async_quirk_helper_ptr_generic_wrapper_receiver_ok.fn", input);
+}
+
 test "typecheck generic wrapper non-quirk receiver method call errors" {
     const input =
         "compound Box<T> {\n" ++
@@ -1075,6 +1106,64 @@ test "typecheck let inference covers compounds methods function returns and gene
         "}\n";
 
     try runTranspileExpectOk(std.testing.allocator, "typecheck_let_infer_full_ok.fn", input);
+}
+
+test "typecheck generic inference after init regression is ok" {
+    const input =
+        "imp std.c.io;\n" ++
+        "\n" ++
+        "compound Box<T> {\n" ++
+        "  T value;\n" ++
+        "}\n" ++
+        "\n" ++
+        "compound Pair<L, R> {\n" ++
+        "  L left;\n" ++
+        "  R right;\n" ++
+        "}\n" ++
+        "\n" ++
+        "fun make_box<T>(T x) Box<T> {\n" ++
+        "  ret Box<T>{value = x};\n" ++
+        "}\n" ++
+        "\n" ++
+        "fun make_pair<L, R>(L left, R right) Pair<L, R> {\n" ++
+        "  ret Pair<L, R>{left = left, right = right};\n" ++
+        "}\n" ++
+        "\n" ++
+        "fun pick_left<L, R>(Pair<L, R> p) L {\n" ++
+        "  ret p.left;\n" ++
+        "}\n" ++
+        "\n" ++
+        "fun swap_pair<L, R>(Pair<L, R> p) Pair<R, L> {\n" ++
+        "  ret Pair<R, L>{left = p.right, right = p.left};\n" ++
+        "}\n" ++
+        "\n" ++
+        "fun main() {\n" ++
+        "  let nbox = Box{value = 7};\n" ++
+        "  nbox.value += 1;\n" ++
+        "  let sbox = make_box(\"hi\");\n" ++
+        "  let pair = make_pair(nbox.value, sbox.value);\n" ++
+        "  let swapped = swap_pair(pair);\n" ++
+        "  let left_num = pick_left(pair);\n" ++
+        "  let left_str = pick_left(swapped);\n" ++
+        "  printf(\"nbox=%lld sbox=%s\\n\", nbox.value, sbox.value);\n" ++
+        "  printf(\"pair=(%lld,%s) swapped=(%s,%lld)\\n\", pair.left, pair.right, swapped.left, swapped.right);\n" ++
+        "  printf(\"picks=(%lld,%s)\\n\", left_num, left_str);\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_generic_inference_after_init_regression_ok.fn", input);
+}
+
+test "typecheck inferred generic field assignment mismatch errors" {
+    const input =
+        "compound Box<T> {\n" ++
+        "  T value;\n" ++
+        "}\n" ++
+        "fun main() {\n" ++
+        "  let nbox = Box{value = 7};\n" ++
+        "  nbox.value = true;\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_generic_field_assign_mismatch_err.fn", input);
 }
 
 test "typecheck let inference edge cases ok" {

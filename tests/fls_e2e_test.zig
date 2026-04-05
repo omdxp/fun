@@ -1665,6 +1665,162 @@ test "fls e2e: generic type member completion (Vec<T>)" {
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: generic function call let inference" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "compound Box<T> {\n" ++
+        "  T v;\n" ++
+        "}\n\n" ++
+        "fun id<T>(T value) T {\n" ++
+        "  ret value;\n" ++
+        "}\n\n" ++
+        "fun wrap<T>(T value) Box<T> {\n" ++
+        "  ret Box<T>{v = value};\n" ++
+        "}\n\n" ++
+        "fun first<T, U>(T a, U b) T {\n" ++
+        "  _ = b;\n" ++
+        "  ret a;\n" ++
+        "}\n\n" ++
+        "fun second<T, U>(T a, U b) U {\n" ++
+        "  _ = a;\n" ++
+        "  ret b;\n" ++
+        "}\n\n" ++
+        "fun main() {\n" ++
+        "  let a = id(7);\n" ++
+        "  let b = id<str>(\"x\");\n" ++
+        "  let c = wrap(9);\n" ++
+        "  let d = first(5, \"ok\");\n" ++
+        "  let e = second(5, \"ok\");\n" ++
+        "  let f = second<num, str>(1, \"z\");\n" ++
+        "  let g = first<Box<num>, str>(Box<num>{v = 2}, \"q\");\n" ++
+        "  let h = second<Box<num>, Box<str>>(Box<num>{v = 1}, Box<str>{v = \"a\"});\n" ++
+        "  c.\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-generic-fun-let-infer.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const Case = struct { name: []const u8, expect: []const u8 };
+    const cases = [_]Case{
+        .{ .name = "a", .expect = "num a" },
+        .{ .name = "b", .expect = "str b" },
+        .{ .name = "c", .expect = "Box<num> c" },
+        .{ .name = "d", .expect = "num d" },
+        .{ .name = "e", .expect = "str e" },
+        .{ .name = "f", .expect = "str f" },
+        .{ .name = "g", .expect = "Box<num> g" },
+        .{ .name = "h", .expect = "Box<str> h" },
+    };
+
+    for (cases) |cinfo| {
+        const needle = try std.fmt.allocPrint(allocator, "let {s}", .{cinfo.name});
+        defer allocator.free(needle);
+        const pos = try findPosition(doc_text, needle, 0);
+        const hover_params = try std.fmt.allocPrint(
+            allocator,
+            "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+            .{ doc_uri, pos.line, pos.col + 4 },
+        );
+        defer allocator.free(hover_params);
+        const hover_id = try lsp.request("textDocument/hover", hover_params);
+        var hover_res = try lsp.waitResponse(hover_id, 15000);
+        defer hover_res.deinit();
+        const hover_val = try jsonResultFromResponseObj(hover_res.parsed.value.object);
+        try expectHoverContains(allocator, hover_val, cinfo.expect);
+    }
+
+    const dot_pos = try findPosition(doc_text, "  c.\n", 0);
+    const comp_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, dot_pos.line, dot_pos.col + @as(i64, @intCast("  c.".len)) },
+    );
+    defer allocator.free(comp_params);
+    const comp_id = try lsp.request("textDocument/completion", comp_params);
+    var comp_res = try lsp.waitResponse(comp_id, 15000);
+    defer comp_res.deinit();
+    const comp_val = try jsonResultFromResponseObj(comp_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, comp_val, "v");
+    try expectCompletionLabelDetailContains(allocator, comp_val, "v", "num");
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: generic compound init member detail specializes field type" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "compound Box<T> {\n" ++
+        "  T value;\n" ++
+        "}\n\n" ++
+        "fun main() {\n" ++
+        "  let nbox = Box{value = 7};\n" ++
+        "  let x = nbox.value;\n" ++
+        "  nbox.\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-generic-member-detail.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const dot_pos = try findPosition(doc_text, "  nbox.\n", 0);
+    const comp_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, dot_pos.line, dot_pos.col + @as(i64, @intCast("  nbox.".len)) },
+    );
+    defer allocator.free(comp_params);
+
+    const comp_id = try lsp.request("textDocument/completion", comp_params);
+    var comp_res = try lsp.waitResponse(comp_id, 15000);
+    defer comp_res.deinit();
+    const comp_val = try jsonResultFromResponseObj(comp_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, comp_val, "value");
+    try expectCompletionLabelDetailContains(allocator, comp_val, "value", "num");
+
+    const value_pos = try findPosition(doc_text, "let x = nbox.value;", 0);
+    const value_hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, value_pos.line, value_pos.col + @as(i64, @intCast("let x = nbox.".len)) },
+    );
+    defer allocator.free(value_hover_params);
+
+    const value_hover_id = try lsp.request("textDocument/hover", value_hover_params);
+    var value_hover_res = try lsp.waitResponse(value_hover_id, 15000);
+    defer value_hover_res.deinit();
+    const value_hover_val = try jsonResultFromResponseObj(value_hover_res.parsed.value.object);
+    try expectHoverContains(allocator, value_hover_val, "num value");
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: custom import namespace hover shows README" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -2557,6 +2713,96 @@ test "fls e2e: signatureHelp for plain function call" {
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: signatureHelp specializes generic calls" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "compound Box<T> {\n" ++
+        "  T v;\n" ++
+        "}\n\n" ++
+        "fun first<T, U>(T a, U b) T {\n" ++
+        "  _ = b;\n" ++
+        "  ret a;\n" ++
+        "}\n\n" ++
+        "fun second<T, U>(T a, U b) U {\n" ++
+        "  _ = a;\n" ++
+        "  ret b;\n" ++
+        "}\n\n" ++
+        "fun main() {\n" ++
+        "  second(5, \"ok\"\n" ++
+        "  second<num, str>(1, \"z\"\n" ++
+        "  first<Box<num>, str>(Box<num>{v = 2}, \"q\"\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-sighelp-generic.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // Implicit generic inference from literal arguments.
+    const implicit_pos = try findPosition(doc_text, "second(5, \"ok\"", 0);
+    const implicit_sig_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, implicit_pos.line, implicit_pos.col + @as(i64, @intCast("second(5, ".len)) },
+    );
+    defer allocator.free(implicit_sig_params);
+    const implicit_sig_id = try lsp.request("textDocument/signatureHelp", implicit_sig_params);
+    var implicit_sig_res = try lsp.waitResponse(implicit_sig_id, 15000);
+    defer implicit_sig_res.deinit();
+    const implicit_sig_val = try jsonResultFromResponseObj(implicit_sig_res.parsed.value.object);
+    try expectSignatureHelpLabelContains(allocator, implicit_sig_val, "second<num, str>");
+    try expectSignatureHelpHasParameter(allocator, implicit_sig_val, "num a");
+    try expectSignatureHelpHasParameter(allocator, implicit_sig_val, "str b");
+    try expectSignatureHelpActiveParameter(allocator, implicit_sig_val, 1);
+
+    // Explicit type args should specialize signature label and params.
+    const explicit_pos = try findPosition(doc_text, "second<num, str>(1, \"z\"", 0);
+    const explicit_sig_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, explicit_pos.line, explicit_pos.col + @as(i64, @intCast("second<num, str>(1, ".len)) },
+    );
+    defer allocator.free(explicit_sig_params);
+    const explicit_sig_id = try lsp.request("textDocument/signatureHelp", explicit_sig_params);
+    var explicit_sig_res = try lsp.waitResponse(explicit_sig_id, 15000);
+    defer explicit_sig_res.deinit();
+    const explicit_sig_val = try jsonResultFromResponseObj(explicit_sig_res.parsed.value.object);
+    try expectSignatureHelpLabelContains(allocator, explicit_sig_val, "second<num, str>");
+    try expectSignatureHelpHasParameter(allocator, explicit_sig_val, "num a");
+    try expectSignatureHelpHasParameter(allocator, explicit_sig_val, "str b");
+    try expectSignatureHelpActiveParameter(allocator, explicit_sig_val, 1);
+
+    const nested_pos = try findPosition(doc_text, "first<Box<num>, str>(Box<num>{v = 2}, \"q\"", 0);
+    const nested_sig_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, nested_pos.line, nested_pos.col + @as(i64, @intCast("first<Box<num>, str>(Box<num>{v = 2}, ".len)) },
+    );
+    defer allocator.free(nested_sig_params);
+    const nested_sig_id = try lsp.request("textDocument/signatureHelp", nested_sig_params);
+    var nested_sig_res = try lsp.waitResponse(nested_sig_id, 15000);
+    defer nested_sig_res.deinit();
+    const nested_sig_val = try jsonResultFromResponseObj(nested_sig_res.parsed.value.object);
+    try expectSignatureHelpLabelContains(allocator, nested_sig_val, "first<Box<num>, str>");
+    try expectSignatureHelpHasParameter(allocator, nested_sig_val, "Box<num> a");
+    try expectSignatureHelpHasParameter(allocator, nested_sig_val, "str b");
+    try expectSignatureHelpActiveParameter(allocator, nested_sig_val, 1);
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: builtin sizeof completion + hover + signatureHelp" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -3017,7 +3263,7 @@ test "fls e2e: let await pointer chain inference" {
         "  Counter c;\n" ++
         "  c.base = 41;\n" ++
         "  AsyncCounter q = &c;\n" ++
-        "  let b = Box<AsyncCounter>{v = q};\n" ++
+        "  let b = Box{v = q};\n" ++
         "  let boxed = *ptr(&b);\n" ++
         "  let out = await (*ptr(&b)).v.add(1);\n" ++
         "  let out2 = await (*ptr(&b)).v.add(1);\n" ++
@@ -3028,6 +3274,19 @@ test "fls e2e: let await pointer chain inference" {
     const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-let-await-pointer-chain.fn");
     defer allocator.free(doc_uri);
     try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const b_pos = try findPosition(doc_text, "let b = Box{v = q}", 0);
+    const b_hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, b_pos.line, b_pos.col + 4 },
+    );
+    defer allocator.free(b_hover_params);
+    const b_hover_id = try lsp.request("textDocument/hover", b_hover_params);
+    var b_hover_res = try lsp.waitResponse(b_hover_id, 15000);
+    defer b_hover_res.deinit();
+    const b_hover_val = try jsonResultFromResponseObj(b_hover_res.parsed.value.object);
+    try expectHoverContains(allocator, b_hover_val, "Box<AsyncCounter> b");
 
     const boxed_pos = try findPosition(doc_text, "let boxed = *ptr(&b)", 0);
     const boxed_hover_params = try std.fmt.allocPrint(

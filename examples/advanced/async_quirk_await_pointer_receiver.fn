@@ -22,14 +22,20 @@ fun ptr(Box<AsyncCounter>* b) Box<AsyncCounter>* {
   ret b;
 }
 
+fun box(Box<AsyncCounter>* b) Box<AsyncCounter> {
+  ret *b;
+}
+
 async fun main() {
   Counter c;
   c.base = 41;
   AsyncCounter q = &c;
   let b = Box<AsyncCounter>{v = q};
-  let boxed = *ptr(&b);
-  _ = boxed;
-  let out = await (*ptr(&b)).v.add(1);
-  let out2 = await (*ptr(&b)).v.add(1);
-  printf("%lld %lld\n", out, out2);
+  let pb = ptr(&b);
+  let boxed = *pb;
+  let out = await boxed.v.add(1);
+  let out2 = await (*pb).v.add(1);
+  let out3 = await ((*ptr(&b)).v).add(1);
+  let out4 = await (box(ptr(&b)).v).add(1);
+  printf("%lld %lld %lld %lld\n", out, out2, out3, out4);
 }
