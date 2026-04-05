@@ -26,6 +26,6 @@ async fun main() {
   Counter c;
   c.base = 41;
   AsyncCounter q = &c;
-  num out = await(pack(q).v).add(1);
+  let out = await (pack(q).v).add(1);
   printf("%lld\n", out);
 }

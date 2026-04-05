@@ -2983,6 +2983,97 @@ test "fls e2e: let await parity hover completion definition signatureHelp" {
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: let await pointer chain inference" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "compound Counter {\n" ++
+        "  num base;\n" ++
+        "}\n\n" ++
+        "quirk AsyncCounter {\n" ++
+        "  async add(num x) num;\n" ++
+        "}\n\n" ++
+        "compound Box<T> {\n" ++
+        "  T v;\n" ++
+        "}\n\n" ++
+        "impl Counter as AsyncCounter {\n" ++
+        "  async add(num x) num {\n" ++
+        "    ret self.base + x;\n" ++
+        "  }\n" ++
+        "}\n\n" ++
+        "fun ptr(Box<AsyncCounter>* b) Box<AsyncCounter>* {\n" ++
+        "  ret b;\n" ++
+        "}\n\n" ++
+        "async fun main() num {\n" ++
+        "  Counter c;\n" ++
+        "  c.base = 41;\n" ++
+        "  AsyncCounter q = &c;\n" ++
+        "  let b = Box<AsyncCounter>{v = q};\n" ++
+        "  let boxed = *ptr(&b);\n" ++
+        "  let out = await (*ptr(&b)).v.add(1);\n" ++
+        "  let out2 = await (*ptr(&b)).v.add(1);\n" ++
+        "  _ = boxed;\n" ++
+        "  ret out + out2;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-let-await-pointer-chain.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const boxed_pos = try findPosition(doc_text, "let boxed = *ptr(&b)", 0);
+    const boxed_hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, boxed_pos.line, boxed_pos.col + 5 },
+    );
+    defer allocator.free(boxed_hover_params);
+    const boxed_hover_id = try lsp.request("textDocument/hover", boxed_hover_params);
+    var boxed_hover_res = try lsp.waitResponse(boxed_hover_id, 15000);
+    defer boxed_hover_res.deinit();
+    const boxed_hover_val = try jsonResultFromResponseObj(boxed_hover_res.parsed.value.object);
+    try expectHoverContains(allocator, boxed_hover_val, "Box<AsyncCounter> boxed");
+
+    const out_pos = try findPosition(doc_text, "let out = await (*ptr(&b)).v.add", 0);
+    const out_hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, out_pos.line, out_pos.col + 5 },
+    );
+    defer allocator.free(out_hover_params);
+    const out_hover_id = try lsp.request("textDocument/hover", out_hover_params);
+    var out_hover_res = try lsp.waitResponse(out_hover_id, 15000);
+    defer out_hover_res.deinit();
+    const out_hover_val = try jsonResultFromResponseObj(out_hover_res.parsed.value.object);
+    try expectHoverContains(allocator, out_hover_val, "num out");
+
+    const out2_pos = try findPosition(doc_text, "let out2 = await (*ptr(&b)).v.add", 0);
+    const out2_hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, out2_pos.line, out2_pos.col + 5 },
+    );
+    defer allocator.free(out2_hover_params);
+    const out2_hover_id = try lsp.request("textDocument/hover", out2_hover_params);
+    var out2_hover_res = try lsp.waitResponse(out2_hover_id, 15000);
+    defer out2_hover_res.deinit();
+    const out2_hover_val = try jsonResultFromResponseObj(out2_hover_res.parsed.value.object);
+    try expectHoverContains(allocator, out2_hover_val, "num out2");
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: std.channel async forwarding completion + hover" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();

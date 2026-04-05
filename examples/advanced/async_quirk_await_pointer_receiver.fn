@@ -26,7 +26,10 @@ async fun main() {
   Counter c;
   c.base = 41;
   AsyncCounter q = &c;
-  Box<AsyncCounter> b = Box<AsyncCounter>{v = q};
-  num out = await(*ptr(&b)).v.add(1);
-  printf("%lld\n", out);
+  let b = Box<AsyncCounter>{v = q};
+  let boxed = *ptr(&b);
+  _ = boxed;
+  let out = await (*ptr(&b)).v.add(1);
+  let out2 = await (*ptr(&b)).v.add(1);
+  printf("%lld %lld\n", out, out2);
 }
