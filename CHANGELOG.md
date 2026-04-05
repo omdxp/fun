@@ -1,3 +1,17 @@
+## [0.28.1] - 2026-04-05
+
+### Chore
+
+- Update CHANGELOG for version 0.28.0 and improve formatting
+- Add tests for async quirks, generic inference, and typechecking
+
+### Feat
+
+- *(tests)* Add end-to-end tests for let await pointer chain inference
+- *(tests)* Add test for async await statement transpilation and execution
+- Enhance module summary normalization and improve mobile drawer functionality
+- Implement CRLF normalization in output for consistency
+
 ## [0.28.0] - 2026-04-05
 
 ### Chore
