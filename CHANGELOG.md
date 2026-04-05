@@ -1,4 +1,4 @@
-## [unreleased]
+## [0.28.0] - 2026-04-05
 
 ### Chore
 
@@ -6,6 +6,8 @@
 - Update CHANGELOG with recent enhancements, fixes, and documentation updates
 - *(deps-dev)* Bump lodash
 - *(deps-dev)* Bump lodash from 4.17.23 to 4.18.1 in /editors/vscode in the npm_and_yarn group across 1 directory (#82)
+- Update CHANGELOG with recent enhancements, fixes, and documentation updates
+- Improve code formatting and spacing across multiple files
 
 ### Docs
 
@@ -65,6 +67,7 @@
 - Add async file and network APIs, enhance examples, and update documentation
 - Add async spawn and join handle example, enhance net async APIs with offload support, and update related tests
 - Add tests for async task handle behavior and net offload edge return codes across backend selectors
+- Enhance network compatibility for Windows in transpiler and add timeout handling in tests
 
 ### Fix
 
