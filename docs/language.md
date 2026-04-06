@@ -74,12 +74,16 @@
     - Common in stdlib (for example `std/string.fn`, `std/net.fn`, and `std/fs.fn`).
 
 ### Defer
-- **Purpose**: Run cleanup logic automatically before a function returns.
+- **Purpose**: Run cleanup logic automatically when the current lexical scope exits.
 - **Order**: LIFO (last `defer` runs first).
 - **Forms**:
     - Expression: `defer close(fd);`
     - Block: `defer { log("done"); cleanup(); }`
-- **Scope**: Defers execute before any `ret`, and before a function ends without an explicit `ret`.
+- **Scope semantics**:
+    - A `defer` runs when the scope where it appears exits.
+    - Function-scope defers run before `ret` and before implicit function end.
+    - Loop-body defers run at the end of each iteration.
+    - On `continue`/`break`, defers in the current loop iteration run before control leaves that iteration.
 
 ### Inline Assembly
 - **Block form**: `asm { ... };`

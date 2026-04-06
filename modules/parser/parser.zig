@@ -3927,9 +3927,10 @@ pub const ParseProcess = struct {
                 .statement = .{ .fit_stmt = undefined },
             },
         };
-        hist.*.flags.in_fit_statement = true;
         try self.expect_keyword("fit");
-        var new_hist = utils.History.init(self.transpile_proc.allocator, .{ .in_fit_statement = true });
+        // Preserve ambient parsing context (notably inside_function_body) while
+        // enabling fit-specific parsing behavior.
+        var new_hist = utils.History.down(self.transpile_proc.allocator, hist, .{ .in_fit_statement = true });
         defer new_hist.deinit();
         try self.parse_expressionable_root(&new_hist);
         const condition_node = self.node_pop();

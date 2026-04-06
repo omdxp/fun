@@ -296,7 +296,10 @@ fun main() {
 ## Defer
 - Expression: `defer close(fd);`
 - Block: `defer { cleanup(); }`
-- Runs in LIFO order before function exit.
+- Runs in LIFO order when the current lexical scope exits.
+- Function-scope defer runs before `ret` and before implicit function end.
+- Loop-body defer runs at the end of each iteration.
+- `continue` and `break` run defers from the current iteration before transferring control.
 
 ## Inline Assembly
 ```fun

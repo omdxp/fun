@@ -191,6 +191,21 @@ pub const TypeRegistry = struct {
 };
 
 pub const TranspileProcess = struct {
+    const DeferScopeKind = enum {
+        normal,
+        loop,
+        function,
+    };
+
+    const DeferEntry = struct {
+        body: *ast.Node,
+    };
+
+    const DeferScopeFrame = struct {
+        start_index: usize,
+        kind: DeferScopeKind,
+    };
+
     /// Transpilation flags for this process.
     flags: TranspileProcessFlags,
 
@@ -210,7 +225,8 @@ pub const TranspileProcess = struct {
     pending_warning_expects: std.ArrayList(PendingWarningControl),
     owned_nodes: std.ArrayList(*ast.Node),
     owned_scope_entities: std.ArrayList(*scope.ScopeEntity),
-    defer_stack: std.ArrayList(*ast.Node),
+    defer_stack: std.ArrayList(DeferEntry),
+    defer_scope_stack: std.ArrayList(DeferScopeFrame),
 
     /// Scope tracking.
     scope: ?struct {
@@ -3106,7 +3122,8 @@ pub const TranspileProcess = struct {
             .pending_warning_expects = std.ArrayList(PendingWarningControl).init(a),
             .owned_nodes = std.ArrayList(*ast.Node).init(a),
             .owned_scope_entities = std.ArrayList(*scope.ScopeEntity).init(a),
-            .defer_stack = std.ArrayList(*ast.Node).init(a),
+            .defer_stack = std.ArrayList(DeferEntry).init(a),
+            .defer_scope_stack = std.ArrayList(DeferScopeFrame).init(a),
             .scope = null,
             .symbols = .{
                 .active_table = initial_table,
@@ -7957,6 +7974,7 @@ pub const TranspileProcess = struct {
         self.owned_scope_entities.deinit();
         self.owned_nodes.deinit();
         self.defer_stack.deinit();
+        self.defer_scope_stack.deinit();
         if (self.symbols.active_table) |table| {
             table.symbols.deinit();
         }
@@ -8060,14 +8078,133 @@ pub const TranspileProcess = struct {
         }
     }
 
-    fn emit_defers(self: *Self) TranspileError!void {
-        if (self.defer_stack.items.len == 0) return;
+    fn reset_function_defer_state(self: *Self) void {
+        self.defer_stack.clearRetainingCapacity();
+        self.defer_scope_stack.clearRetainingCapacity();
+    }
+
+    fn push_defer_scope(self: *Self, kind: DeferScopeKind) TranspileError!void {
+        self.defer_scope_stack.append(.{
+            .start_index = self.defer_stack.items.len,
+            .kind = kind,
+        }) catch return TranspileError.MemoryAllocationFailed;
+    }
+
+    fn pop_defer_scope(self: *Self) void {
+        if (self.defer_scope_stack.items.len == 0) return;
+        const frame = self.defer_scope_stack.pop().?;
+        self.defer_stack.shrinkRetainingCapacity(frame.start_index);
+    }
+
+    fn register_scope_defer(self: *Self, body: *ast.Node) TranspileError!void {
+        if (self.defer_scope_stack.items.len == 0) return;
+        self.defer_stack.append(.{ .body = body }) catch return TranspileError.MemoryAllocationFailed;
+    }
+
+    fn emit_defers_from_index(self: *Self, start_index: usize) TranspileError!void {
+        if (self.defer_stack.items.len <= start_index) return;
         var i: usize = self.defer_stack.items.len;
-        while (i > 0) : (i -= 1) {
+        while (i > start_index) : (i -= 1) {
             const d = self.defer_stack.items[i - 1];
             try self.write_indent();
-            try self.emit_defer_body(d);
+            try self.emit_defer_body(d.body);
         }
+    }
+
+    fn emit_current_scope_defers(self: *Self) TranspileError!void {
+        if (self.defer_scope_stack.items.len == 0) return;
+        const frame = self.defer_scope_stack.items[self.defer_scope_stack.items.len - 1];
+        try self.emit_defers_from_index(frame.start_index);
+    }
+
+    fn emit_function_scope_defers(self: *Self) TranspileError!void {
+        if (self.defer_scope_stack.items.len == 0) return;
+
+        var i: usize = self.defer_scope_stack.items.len;
+        while (i > 0) : (i -= 1) {
+            const frame = self.defer_scope_stack.items[i - 1];
+            if (frame.kind == .function) {
+                try self.emit_defers_from_index(frame.start_index);
+                return;
+            }
+        }
+
+        // Safety fallback for malformed scope stacks.
+        try self.emit_defers_from_index(0);
+    }
+
+    fn emit_loop_scope_defers(self: *Self) TranspileError!void {
+        if (self.defer_scope_stack.items.len == 0) return;
+
+        var i: usize = self.defer_scope_stack.items.len;
+        while (i > 0) : (i -= 1) {
+            const frame = self.defer_scope_stack.items[i - 1];
+            if (frame.kind == .loop) {
+                try self.emit_defers_from_index(frame.start_index);
+                return;
+            }
+        }
+    }
+
+    fn transpile_statement_in_current_scope(self: *Self, statement: *ast.Node) TranspileError!void {
+        if (statement.type == .Variable) {
+            try self.register_scope_variable(statement);
+        }
+        if (statement.type != .StatementReturn and statement.type != .StatementDefer) {
+            try self.write_indent();
+        }
+        try self.transpile_node(statement.*);
+        if (self.node_needs_trailing_semicolon(statement.*)) {
+            try self.write(";");
+        }
+    }
+
+    fn transpile_block_contents(self: *Self, body_node: *ast.Node) TranspileError!void {
+        if (body_node.type == .Body) {
+            const body = body_node.node_variant.?.body;
+            for (body.statements.items()) |statement| {
+                try self.transpile_statement_in_current_scope(statement);
+            }
+            return;
+        }
+
+        try self.transpile_statement_in_current_scope(body_node);
+    }
+
+    fn node_is_scope_terminator(node: *ast.Node) bool {
+        return switch (node.type) {
+            .StatementReturn, .StatementBreak, .StatementContinue => true,
+            else => false,
+        };
+    }
+
+    fn block_ends_with_scope_terminator(self: *Self, body_node: *ast.Node) bool {
+        _ = self;
+        if (body_node.type == .Body) {
+            const statements = body_node.node_variant.?.body.statements.items();
+            if (statements.len == 0) return false;
+            return node_is_scope_terminator(statements[statements.len - 1]);
+        }
+        return node_is_scope_terminator(body_node);
+    }
+
+    fn transpile_scoped_block(self: *Self, body_node: *ast.Node, kind: DeferScopeKind) TranspileError!void {
+        try self.write("{");
+        self.indent();
+        _ = try self.new_scope();
+        defer self.finish_scope();
+
+        try self.push_defer_scope(kind);
+        defer self.pop_defer_scope();
+
+        try self.transpile_block_contents(body_node);
+        if (!self.block_ends_with_scope_terminator(body_node)) {
+            try self.emit_current_scope_defers();
+        }
+
+        self.dedent();
+        try self.write_indent();
+        try self.write("}");
     }
 
     /// Write to output (either file or buffer)
@@ -12092,8 +12229,8 @@ pub const TranspileProcess = struct {
                     return;
                 }
 
-                // Reset defer stack for this function.
-                self.defer_stack.clearRetainingCapacity();
+                // Reset per-function defer state before emitting this function.
+                self.reset_function_defer_state();
 
                 const prev_fn_return = self.current_fn_return;
                 defer self.current_fn_return = prev_fn_return;
@@ -12232,6 +12369,7 @@ pub const TranspileProcess = struct {
                 const body = node.node_variant.?.body;
 
                 const is_fn_body = self.in_function_body and self.function_body_depth == 0;
+                const scope_kind: DeferScopeKind = if (is_fn_body) .function else .normal;
                 if (self.in_function_body) self.function_body_depth += 1;
                 defer {
                     if (self.in_function_body) self.function_body_depth -= 1;
@@ -12240,6 +12378,9 @@ pub const TranspileProcess = struct {
                 // Each body introduces a new scope.
                 _ = try self.new_scope();
                 defer self.finish_scope();
+
+                try self.push_defer_scope(scope_kind);
+                defer self.pop_defer_scope();
 
                 try self.write("{");
                 self.indent();
@@ -12309,24 +12450,12 @@ pub const TranspileProcess = struct {
                     try self.write("}\n");
                 }
                 for (body.statements.items()) |statement| {
-                    if (statement.type == .Variable) {
-                        try self.register_scope_variable(statement);
-                    }
-                    if (statement.type != .StatementReturn and statement.type != .StatementDefer) {
-                        try self.write_indent();
-                    }
-                    try self.transpile_node(statement.*);
-                    if (self.node_needs_trailing_semicolon(statement.*)) {
-                        try self.write(";");
-                    }
+                    try self.transpile_statement_in_current_scope(statement);
                 }
                 self.dedent();
-                if (is_fn_body) {
-                    const stmts = body.statements.items();
-                    const last_is_return = stmts.len > 0 and stmts[stmts.len - 1].*.type == .StatementReturn;
-                    if (!last_is_return) {
-                        try self.emit_defers();
-                    }
+                const body_statements = body.statements.items();
+                if (body_statements.len == 0 or !node_is_scope_terminator(body_statements[body_statements.len - 1])) {
+                    try self.emit_current_scope_defers();
                 }
                 try self.write_indent();
                 try self.write("}");
@@ -12334,7 +12463,7 @@ pub const TranspileProcess = struct {
             .StatementReturn, .StatementDefer, .StatementAsm, .StatementIf, .StatementElseIf, .StatementElse, .StatementFit, .StatementFor, .StatementAssert, .StatementWarningControl => {
                 // `ret;` is represented as StatementReturn with no node_variant.
                 if (node.type == .StatementReturn and node.node_variant == null) {
-                    try self.emit_defers();
+                    try self.emit_function_scope_defers();
                     try self.write_indent();
                     if (self.in_main) {
                         // `main` always emits as `int main(...)` in C.
@@ -12350,8 +12479,7 @@ pub const TranspileProcess = struct {
                 const statement = node.node_variant.?.statement;
                 switch (statement) {
                     .defer_stmt => |d| {
-                        // Record defer for later emission; do not emit now.
-                        self.defer_stack.append(d.body) catch return TranspileError.MemoryAllocationFailed;
+                        try self.register_scope_defer(d.body);
                     },
                     .asm_stmt => |a| {
                         // Validate optional arch selection.
@@ -12463,81 +12591,22 @@ pub const TranspileProcess = struct {
                     .if_stmt => |if_s| {
                         try self.write("if (");
                         try self.transpile_node(if_s.condition.*);
-                        try self.write(") {");
-                        self.indent();
-                        if (if_s.body.type == .Body) {
-                            const body = if_s.body.node_variant.?.body;
-                            for (body.statements.items()) |body_stmt| {
-                                try self.write_indent();
-                                try self.transpile_node(body_stmt.*);
-                                if (self.node_needs_trailing_semicolon(body_stmt.*)) {
-                                    try self.write(";");
-                                }
-                            }
-                        } else {
-                            try self.write_indent();
-                            try self.transpile_node(if_s.body.*);
-                            if (self.node_needs_trailing_semicolon(if_s.body.*)) {
-                                try self.write(";");
-                            }
-                        }
-                        self.dedent();
-                        try self.write_indent();
-                        try self.write("}");
+                        try self.write(") ");
+                        try self.transpile_scoped_block(if_s.body, .normal);
                     },
                     .elif_stmt => |elif| {
                         try self.write("else if (");
                         try self.transpile_node(elif.condition.*);
-                        try self.write(") {");
-                        self.indent();
-                        if (elif.body.type == .Body) {
-                            const body = elif.body.node_variant.?.body;
-                            for (body.statements.items()) |body_stmt| {
-                                try self.write_indent();
-                                try self.transpile_node(body_stmt.*);
-                                if (self.node_needs_trailing_semicolon(body_stmt.*)) {
-                                    try self.write(";");
-                                }
-                            }
-                        } else {
-                            try self.write_indent();
-                            try self.transpile_node(elif.body.*);
-                            if (self.node_needs_trailing_semicolon(elif.body.*)) {
-                                try self.write(";");
-                            }
-                        }
-
-                        self.dedent();
-                        try self.write_indent();
-                        try self.write("}");
+                        try self.write(") ");
+                        try self.transpile_scoped_block(elif.body, .normal);
                     },
                     .else_stmt => |else_s| {
-                        try self.write("else {");
-                        self.indent();
-                        if (else_s.body.type == .Body) {
-                            const body = else_s.body.node_variant.?.body;
-                            for (body.statements.items()) |body_stmt| {
-                                try self.write_indent();
-                                try self.transpile_node(body_stmt.*);
-                                if (self.node_needs_trailing_semicolon(body_stmt.*)) {
-                                    try self.write(";");
-                                }
-                            }
-                        } else {
-                            try self.write_indent();
-                            try self.transpile_node(else_s.body.*);
-                            if (self.node_needs_trailing_semicolon(else_s.body.*)) {
-                                try self.write(";");
-                            }
-                        }
-
-                        self.dedent();
-                        try self.write_indent();
-                        try self.write("}");
+                        try self.write("else ");
+                        try self.transpile_scoped_block(else_s.body, .normal);
                     },
                     .return_stmt => |rn| {
                         self.warn_if_returning_address_of_local(rn.*);
-                        try self.emit_defers();
+                        try self.emit_function_scope_defers();
                         try self.write_indent();
                         if (self.in_main) {
                             const main_ret = self.current_fn_return orelse CheckedType{ .base = .Void };
@@ -12613,32 +12682,11 @@ pub const TranspileProcess = struct {
                                 if (fc.condition) |cond| {
                                     try self.write("while (");
                                     try self.transpile_node(cond.*);
-                                    try self.write(") {");
+                                    try self.write(") ");
                                 } else {
-                                    try self.write("while (1) {");
+                                    try self.write("while (1) ");
                                 }
-                                self.indent();
-
-                                if (fc.body.type == .Body) {
-                                    const body = fc.body.node_variant.?.body;
-                                    for (body.statements.items()) |body_stmt| {
-                                        try self.write_indent();
-                                        try self.transpile_node(body_stmt.*);
-                                        if (self.node_needs_trailing_semicolon(body_stmt.*)) {
-                                            try self.write(";");
-                                        }
-                                    }
-                                } else {
-                                    try self.write_indent();
-                                    try self.transpile_node(fc.body.*);
-                                    if (self.node_needs_trailing_semicolon(fc.body.*)) {
-                                        try self.write(";");
-                                    }
-                                }
-
-                                self.dedent();
-                                try self.write_indent();
-                                try self.write("}");
+                                try self.transpile_scoped_block(fc.body, .loop);
                             },
                             .range => |fr| {
                                 if (fr.range.type != .Expression or !mem.eql(u8, fr.range.node_variant.?.exp.op, "..")) {
@@ -12658,29 +12706,8 @@ pub const TranspileProcess = struct {
                                 try self.transpile_node(end.*);
                                 try self.write("; ");
                                 try self.write(fr.index_name);
-                                try self.write("++) {");
-                                self.indent();
-
-                                if (fr.body.type == .Body) {
-                                    const body = fr.body.node_variant.?.body;
-                                    for (body.statements.items()) |body_stmt| {
-                                        try self.write_indent();
-                                        try self.transpile_node(body_stmt.*);
-                                        if (self.node_needs_trailing_semicolon(body_stmt.*)) {
-                                            try self.write(";");
-                                        }
-                                    }
-                                } else {
-                                    try self.write_indent();
-                                    try self.transpile_node(fr.body.*);
-                                    if (self.node_needs_trailing_semicolon(fr.body.*)) {
-                                        try self.write(";");
-                                    }
-                                }
-
-                                self.dedent();
-                                try self.write_indent();
-                                try self.write("}");
+                                try self.write("++) ");
+                                try self.transpile_scoped_block(fr.body, .loop);
                             },
                             .iter => |fi| {
                                 // We only support iterating array identifiers for now.
@@ -12705,12 +12732,21 @@ pub const TranspileProcess = struct {
                                 try self.write("++) {");
                                 self.indent();
 
+                                try self.push_defer_scope(.loop);
+                                defer self.pop_defer_scope();
+
+                                // Loop body has its own scope. Register the synthetic
+                                // item variable with element dtype so method lowering
+                                // (e.g. `item.greet()`) can resolve plain impl methods.
+                                _ = try self.new_scope();
+                                defer self.finish_scope();
+
                                 // Declare the item binding each iteration.
                                 // If we can find the array type in scope, use it.
                                 var item_c_type: []const u8 = "int64_t";
-                                if (self.get_scope_entity(arr_name)) |ent| {
-                                    if (ent.node) |arr_node| {
-                                        if (arr_node.type == .Variable) {
+                                if (self.get_scope_entity(arr_name)) |arr_ent_for_type| {
+                                    if (arr_ent_for_type.node) |arr_node| {
+                                        if (arr_node.type == .Variable and arr_node.node_variant != null) {
                                             const dt = arr_node.node_variant.?.variable.type.*;
                                             item_c_type = map_type_to_c(dt.type_str.items);
                                         }
@@ -12724,13 +12760,7 @@ pub const TranspileProcess = struct {
                                 try self.write(arr_name);
                                 try self.write("[");
                                 try self.write(idx_name);
-                                try self.write("];");
-
-                                // Loop body has its own scope. Register the synthetic
-                                // item variable with element dtype so method lowering
-                                // (e.g. `item.greet()`) can resolve plain impl methods.
-                                _ = try self.new_scope();
-                                defer self.finish_scope();
+                                try self.write("];\n");
 
                                 if (self.get_scope_entity(arr_name)) |arr_ent| {
                                     if (arr_ent.node) |arr_node| {
@@ -12761,21 +12791,9 @@ pub const TranspileProcess = struct {
                                     }
                                 }
 
-                                if (fi.body.type == .Body) {
-                                    const body = fi.body.node_variant.?.body;
-                                    for (body.statements.items()) |body_stmt| {
-                                        try self.write_indent();
-                                        try self.transpile_node(body_stmt.*);
-                                        if (self.node_needs_trailing_semicolon(body_stmt.*)) {
-                                            try self.write(";");
-                                        }
-                                    }
-                                } else {
-                                    try self.write_indent();
-                                    try self.transpile_node(fi.body.*);
-                                    if (self.node_needs_trailing_semicolon(fi.body.*)) {
-                                        try self.write(";");
-                                    }
+                                try self.transpile_block_contents(fi.body);
+                                if (!self.block_ends_with_scope_terminator(fi.body)) {
+                                    try self.emit_current_scope_defers();
                                 }
 
                                 self.dedent();
@@ -12834,9 +12852,11 @@ pub const TranspileProcess = struct {
                 }
             },
             .StatementBreak => {
+                try self.emit_loop_scope_defers();
                 try self.write("break;");
             },
             .StatementContinue => {
+                try self.emit_loop_scope_defers();
                 try self.write("continue;");
             },
             .Unary => {

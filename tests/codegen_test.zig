@@ -274,6 +274,203 @@ test "if/elif/else transpiles" {
     try fs.cwd().deleteFile(ifilepath);
 }
 
+test "defer inside false if branch does not run" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_defer_if_branch.fn";
+    const c_path = "codegen_defer_if_branch.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_defer_if_branch.exe" else "codegen_defer_if_branch";
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(c_path) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.c.io;\n" ++
+        "fun logLine(str msg) { printf(\"%s\\n\", msg); }\n" ++
+        "fun main() num {\n" ++
+        "  num x = 43;\n" ++
+        "  if x == 42 {\n" ++
+        "    defer logLine(\"defer inside if\");\n" ++
+        "  }\n" ++
+        "  defer logLine(\"always\");\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+
+    try std.testing.expectEqualStrings("always\n", stdout);
+}
+
+test "defer inside fit branch runs only for matched branch" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_defer_fit_branch.fn";
+    const c_path = "codegen_defer_fit_branch.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_defer_fit_branch.exe" else "codegen_defer_fit_branch";
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(c_path) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.c.io;\n" ++
+        "fun logLine(str msg) { printf(\"%s\\n\", msg); }\n" ++
+        "fun runCase(num x) {\n" ++
+        "  printf(\"case=%lld\\n\", x);\n" ++
+        "  defer logLine(\"defer always\");\n" ++
+        "  fit x {\n" ++
+        "    1 -> {\n" ++
+        "      logLine(\"body1\");\n" ++
+        "      defer logLine(\"defer branch1\");\n" ++
+        "    },\n" ++
+        "    2 -> {\n" ++
+        "      logLine(\"body2\");\n" ++
+        "    },\n" ++
+        "    _ -> {\n" ++
+        "      logLine(\"body_\");\n" ++
+        "      defer logLine(\"defer branch_\");\n" ++
+        "    }\n" ++
+        "  }\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  runCase(1);\n" ++
+        "  runCase(2);\n" ++
+        "  runCase(3);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+
+    const expected =
+        "case=1\n" ++
+        "body1\n" ++
+        "defer branch1\n" ++
+        "defer always\n" ++
+        "case=2\n" ++
+        "body2\n" ++
+        "defer always\n" ++
+        "case=3\n" ++
+        "body_\n" ++
+        "defer branch_\n" ++
+        "defer always\n";
+    try std.testing.expectEqualStrings(expected, stdout);
+}
+
+test "defer in range loop runs at each iteration end" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_defer_range_loop.fn";
+    const c_path = "codegen_defer_range_loop.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_defer_range_loop.exe" else "codegen_defer_range_loop";
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(c_path) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.c.io;\n" ++
+        "fun logLine(str msg) { printf(\"%s\\n\", msg); }\n" ++
+        "fun main() num {\n" ++
+        "  for i : 0..3 {\n" ++
+        "    printf(\"body=%lld\\n\", i);\n" ++
+        "    defer logLine(\"defer iter\");\n" ++
+        "  }\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+
+    const expected =
+        "body=0\n" ++
+        "defer iter\n" ++
+        "body=1\n" ++
+        "defer iter\n" ++
+        "body=2\n" ++
+        "defer iter\n";
+    try std.testing.expectEqualStrings(expected, stdout);
+}
+
+test "defer in loop runs on continue and break" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_defer_loop_continue_break.fn";
+    const c_path = "codegen_defer_loop_continue_break.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_defer_loop_continue_break.exe" else "codegen_defer_loop_continue_break";
+    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer fs.cwd().deleteFile(c_path) catch {};
+    defer fs.cwd().deleteFile(exe_path) catch {};
+
+    const input =
+        "imp std.c.io;\n" ++
+        "fun logLine(str msg) { printf(\"%s\\n\", msg); }\n" ++
+        "fun main() num {\n" ++
+        "  num i = 0;\n" ++
+        "  for i < 4 {\n" ++
+        "    defer logLine(\"defer iter\");\n" ++
+        "    i = i + 1;\n" ++
+        "    if i == 2 {\n" ++
+        "      logLine(\"continue\");\n" ++
+        "      continue;\n" ++
+        "    }\n" ++
+        "    if i == 3 {\n" ++
+        "      logLine(\"break\");\n" ++
+        "      break;\n" ++
+        "    }\n" ++
+        "    logLine(\"tail\");\n" ++
+        "  }\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
+        defer c_file.close();
+        try c_file.writeAll(out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+
+    const expected =
+        "tail\n" ++
+        "defer iter\n" ++
+        "continue\n" ++
+        "defer iter\n" ++
+        "break\n" ++
+        "defer iter\n";
+    try std.testing.expectEqualStrings(expected, stdout);
+}
+
 test "array indexing expression transpiles" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_index.fn";
