@@ -1,3 +1,19 @@
+## [0.28.3] - 2026-04-06
+
+### Feat
+
+- *(tests)* Add end-to-end test for let inference with async call and address argument
+
+## [0.28.2] - 2026-04-06
+
+### Chore
+
+- Update CHANGELOG for version 0.28.1 and improve formatting
+
+### Feat
+
+- Add async thread clock ticks example and update README
+
 ## [0.28.1] - 2026-04-05
 
 ### Chore
