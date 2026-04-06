@@ -2,6 +2,7 @@
 // 
 // Notes:
 // - This module defines the POSIX backend contract used by std.thread_runtime.
+// - Functions are thin forwards to std.thread helpers.
 
 imp std.thread;
 
@@ -11,16 +12,25 @@ pub fun thread_backend_posix_new() Thread {
 }
 
 // Start a POSIX backend thread handle.
+// 
+// Returns:
+// - same return codes as thread_start
 pub fun thread_backend_posix_start(Thread* thread, raw* entry, raw* arg) num {
   ret thread_start(thread, entry, arg);
 }
 
 // Join a POSIX backend thread handle.
+// 
+// Returns:
+// - same return codes as thread_join
 pub fun thread_backend_posix_join(Thread* thread, raw* out_ret) num {
   ret thread_join(thread, out_ret);
 }
 
 // Detach a POSIX backend thread handle.
+// 
+// Returns:
+// - same return codes as thread_detach
 pub fun thread_backend_posix_detach(Thread* thread) num {
   ret thread_detach(thread);
 }

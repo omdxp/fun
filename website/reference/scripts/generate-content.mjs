@@ -317,24 +317,9 @@ function escapeRegExp(text) {
 function ensureDocs(docs, signature, kind, name) {
   if (docs.raw && docs.raw.trim()) return docs;
 
-  const summary = `Auto-generated docs for ${kind} '${name}'.`;
-  const description = [
-    summary,
-    "",
-    "No source comment docs were found for this declaration.",
-    "",
-    "### Signature",
-    "```fun",
-    signature,
-    "```",
-  ].join("\n");
-
-  return {
-    ...docs,
-    summary,
-    description,
-    raw: description,
-  };
+  // Keep docs empty when no authored comment is present.
+  // The explorer can then distinguish undocumented symbols from documented ones.
+  return docs;
 }
 
 function countChar(text, ch) {

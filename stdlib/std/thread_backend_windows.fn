@@ -3,6 +3,7 @@
 // Notes:
 // - This module defines the Windows backend contract used by std.thread_runtime.
 // - It talks directly to pthread-shaped primitives from std.c.thread_windows.
+// - Return codes follow the Windows compatibility backend.
 
 imp std.c.def;
 imp std.c.thread_windows;
@@ -21,6 +22,13 @@ pub fun thread_backend_windows_new() Thread {
 }
 
 // Start a Windows backend thread handle.
+// 
+// Returns:
+// - 0 on success
+// - 0 when already started (no-op)
+// - -1 when thread is null
+// - -2 when entry is null
+// - nonzero backend error code on failure
 pub fun thread_backend_windows_start(Thread* thread, raw* entry, raw* arg) num {
   if thread == NULL {
     ret -1;
@@ -43,6 +51,12 @@ pub fun thread_backend_windows_start(Thread* thread, raw* entry, raw* arg) num {
 }
 
 // Join a Windows backend thread handle.
+// 
+// Returns:
+// - 0 on success
+// - 0 when not started (no-op)
+// - -1 when thread is null
+// - nonzero backend error code on failure
 pub fun thread_backend_windows_join(Thread* thread, raw* out_ret) num {
   if thread == NULL {
     ret -1;
@@ -62,6 +76,12 @@ pub fun thread_backend_windows_join(Thread* thread, raw* out_ret) num {
 }
 
 // Detach a Windows backend thread handle.
+// 
+// Returns:
+// - 0 on success
+// - 0 when not started (no-op)
+// - -1 when thread is null
+// - nonzero backend error code on failure
 pub fun thread_backend_windows_detach(Thread* thread) num {
   if thread == NULL {
     ret -1;

@@ -163,7 +163,7 @@ impl ThreadPool {
     ret 0;
   }
 
-  // Free worker storage.
+  // Free worker storage and reset the pool to an empty ready state.
   // 
   // Returns:
   // - 0 always

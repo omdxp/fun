@@ -7,6 +7,7 @@ type Props = {
   markdown: string;
   sourcePath?: string;
   headingPrefix?: string;
+  enableRunnableFunBlocks?: boolean;
 };
 
 const REPO_URL = (
@@ -121,6 +122,7 @@ export default function MarkdownWithPlayground({
   markdown,
   sourcePath,
   headingPrefix,
+  enableRunnableFunBlocks = true,
 }: Props) {
   const headingCounts = new Map<string, number>();
 
@@ -196,7 +198,7 @@ export default function MarkdownWithPlayground({
           const isBlock = Boolean(className);
           const isFun = className?.includes("language-fun");
 
-          if (isBlock && isFun) {
+          if (isBlock && isFun && enableRunnableFunBlocks) {
             return <RunCodeBlock initialCode={text} />;
           }
 

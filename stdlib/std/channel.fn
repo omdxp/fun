@@ -2,6 +2,10 @@
 // 
 // This module provides a minimal channel primitive suitable as a runtime
 // building block for higher-level concurrency features.
+// 
+// Notes:
+// - Synchronization is dispatched through std.sync_runtime backends.
+// - Async wrappers are await-friendly APIs over the same blocking semantics.
 
 imp std.sync;
 imp std.sync_runtime;
@@ -323,6 +327,7 @@ fun channel_is_cancelled(num* cancel_flag) bin {
 
 // Dedicated cancellation token for channel APIs.
 pub compound ChannelCancelToken {
+  // Cancellation flag (0 = active, nonzero = cancelled).
   num flag;
 }
 
@@ -1458,7 +1463,7 @@ impl Channel<T> {
     ret self.select_recv_with_cancel(other, out, out_index, channel_cancel_token_flag_ptr(cancel_token));
   }
 
-  // Receive from self or another channel, polling until one is ready.
+  // Receive from self or another channel, polling until one is ready,
   // with an explicit wait-slice override.
   // 
   // Params:
@@ -1993,8 +1998,12 @@ impl Channel<T> {
 
   // Close channel and wake blocked senders/receivers.
   // 
+  // Notes:
+  // - Idempotent: calling close() multiple times keeps the channel closed.
+  // 
   // Returns:
-  // - 0 on success, nonzero pthread error codes on sync failures
+  // - 0 on success
+  // - nonzero backend sync/init code on failure
   pub close() num {
     num rc = self.init();
     if rc != 0 {
@@ -2013,25 +2022,35 @@ impl Channel<T> {
     ret channel_rc_ok();
   }
 
-  // Read closed state.
+  // Read closed state as an unsynchronized snapshot.
+  // 
+  // Note:
+  // - For coordinated checks, guard state with the channel mutex.
   pub is_closed() bin {
     ret self.closed;
   }
 
-  // Number of queued values.
+  // Current queued value count as an unsynchronized snapshot.
+  // 
+  // Note:
+  // - For coordinated checks, guard state with the channel mutex.
   pub len() num {
     ret self.count;
   }
 
-  // Channel capacity.
+  // Configured channel capacity.
   pub capacity() num {
     ret self.cap;
   }
 
-  // Destroy channel synchronization primitives.
+  // Destroy channel storage and synchronization primitives.
+  // 
+  // Note:
+  // - Call only after all send/recv activity has stopped.
   // 
   // Returns:
-  // - 0 on success, nonzero pthread error code on failure
+  // - 0 on success
+  // - nonzero backend sync destroy code on failure
   pub destroy() num {
     if self.has_buffer == true {
       free(self.data);

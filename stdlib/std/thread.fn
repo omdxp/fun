@@ -37,7 +37,9 @@ impl Thread {
   // - arg: user data passed to entry
   // 
   // Returns:
-  // - pthread return code (0 on success)
+  // - 0 on success
+  // - 0 when already started (no-op)
+  // - nonzero backend error code on failure
   pub start(raw* entry, raw* arg) num {
     if self.started == true {
       ret 0;
@@ -55,7 +57,9 @@ impl Thread {
   // - out_ret: optional output pointer for entry return value
   // 
   // Returns:
-  // - pthread return code (0 on success)
+  // - 0 on success
+  // - 0 when not started (no-op)
+  // - nonzero backend error code on failure
   pub join(raw* out_ret) num {
     if self.started == false {
       ret 0;
@@ -70,7 +74,9 @@ impl Thread {
   // Detach this thread.
   // 
   // Returns:
-  // - pthread return code (0 on success)
+  // - 0 on success
+  // - 0 when not started (no-op)
+  // - nonzero backend error code on failure
   pub detach() num {
     if self.started == false {
       ret 0;
@@ -92,8 +98,9 @@ impl Thread {
 // 
 // Returns:
 // - 0 on success
+// - 0 when already started (no-op)
 // - -1 when thread is null
-// - pthread return code on start failure
+// - nonzero backend error code on failure
 pub fun thread_start(Thread* thread, raw* entry, raw* arg) num {
   if thread == NULL {
     ret -1;
@@ -113,8 +120,9 @@ pub fun thread_start(Thread* thread, raw* entry, raw* arg) num {
 // 
 // Returns:
 // - 0 on success
+// - 0 when not started (no-op)
 // - -1 when thread is null
-// - pthread return code on join failure
+// - nonzero backend error code on failure
 pub fun thread_join(Thread* thread, raw* out_ret) num {
   if thread == NULL {
     ret -1;
@@ -133,8 +141,9 @@ pub fun thread_join(Thread* thread, raw* out_ret) num {
 // 
 // Returns:
 // - 0 on success
+// - 0 when not started (no-op)
 // - -1 when thread is null
-// - pthread return code on detach failure
+// - nonzero backend error code on failure
 pub fun thread_detach(Thread* thread) num {
   if thread == NULL {
     ret -1;

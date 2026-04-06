@@ -3,6 +3,7 @@
 // Notes:
 // - This module defines the Windows backend contract used by std.sync_runtime.
 // - It talks directly to pthread-shaped primitives from std.c.thread_windows.
+// - Return codes follow the Windows compatibility backend.
 
 imp std.c.def;
 imp std.c.thread_windows;
@@ -28,6 +29,12 @@ pub fun sync_backend_windows_condvar_new() CondVar {
 }
 
 // Initialize a Windows backend mutex.
+// 
+// Returns:
+// - 0 on success
+// - 0 when already initialized (no-op)
+// - -1 when mutex is null
+// - nonzero backend error code on failure
 pub fun sync_backend_windows_mutex_init(Mutex* mutex) num {
   if mutex == NULL {
     ret -1;
@@ -47,6 +54,11 @@ pub fun sync_backend_windows_mutex_init(Mutex* mutex) num {
 }
 
 // Lock a Windows backend mutex.
+// 
+// Returns:
+// - 0 on success
+// - -1 when mutex is null
+// - nonzero backend error code on failure
 pub fun sync_backend_windows_mutex_lock(Mutex* mutex) num {
   if mutex == NULL {
     ret -1;
@@ -67,6 +79,11 @@ pub fun sync_backend_windows_mutex_lock(Mutex* mutex) num {
 }
 
 // Try lock a Windows backend mutex.
+// 
+// Returns:
+// - 0 on success
+// - -1 when mutex is null
+// - nonzero backend error code on failure
 pub fun sync_backend_windows_mutex_try_lock(Mutex* mutex) num {
   if mutex == NULL {
     ret -1;
@@ -87,6 +104,12 @@ pub fun sync_backend_windows_mutex_try_lock(Mutex* mutex) num {
 }
 
 // Unlock a Windows backend mutex.
+// 
+// Returns:
+// - 0 on success
+// - 0 when uninitialized (no-op)
+// - -1 when mutex is null
+// - nonzero backend error code on failure
 pub fun sync_backend_windows_mutex_unlock(Mutex* mutex) num {
   if mutex == NULL {
     ret -1;
@@ -103,6 +126,12 @@ pub fun sync_backend_windows_mutex_unlock(Mutex* mutex) num {
 }
 
 // Destroy a Windows backend mutex.
+// 
+// Returns:
+// - 0 on success
+// - 0 when uninitialized (no-op)
+// - -1 when mutex is null
+// - nonzero backend error code on failure
 pub fun sync_backend_windows_mutex_destroy(Mutex* mutex) num {
   if mutex == NULL {
     ret -1;
@@ -122,6 +151,12 @@ pub fun sync_backend_windows_mutex_destroy(Mutex* mutex) num {
 }
 
 // Initialize a Windows backend condition variable.
+// 
+// Returns:
+// - 0 on success
+// - 0 when already initialized (no-op)
+// - -1 when cond is null
+// - nonzero backend error code on failure
 pub fun sync_backend_windows_condvar_init(CondVar* cond) num {
   if cond == NULL {
     ret -1;
@@ -141,6 +176,11 @@ pub fun sync_backend_windows_condvar_init(CondVar* cond) num {
 }
 
 // Wait on a Windows backend condition variable.
+// 
+// Returns:
+// - 0 on success
+// - -1 when cond or mutex is null
+// - nonzero backend error code on failure
 pub fun sync_backend_windows_condvar_wait(CondVar* cond, Mutex* mutex) num {
   if cond == NULL || mutex == NULL {
     ret -1;
@@ -175,6 +215,12 @@ pub fun sync_backend_windows_condvar_wait(CondVar* cond, Mutex* mutex) num {
 }
 
 // Timed wait on a Windows backend condition variable.
+// 
+// Returns:
+// - 0 on success
+// - -1 when cond or mutex is null
+// - -2 when abs_time is null
+// - nonzero backend error code on timeout/failure
 pub fun sync_backend_windows_condvar_timed_wait(CondVar* cond, Mutex* mutex, raw* abs_time) num {
   if cond == NULL || mutex == NULL {
     ret -1;
@@ -212,6 +258,12 @@ pub fun sync_backend_windows_condvar_timed_wait(CondVar* cond, Mutex* mutex, raw
 }
 
 // Signal one Windows backend condition variable waiter.
+// 
+// Returns:
+// - 0 on success
+// - 0 when uninitialized (no-op)
+// - -1 when cond is null
+// - nonzero backend error code on failure
 pub fun sync_backend_windows_condvar_signal(CondVar* cond) num {
   if cond == NULL {
     ret -1;
@@ -228,6 +280,12 @@ pub fun sync_backend_windows_condvar_signal(CondVar* cond) num {
 }
 
 // Broadcast to all Windows backend condition variable waiters.
+// 
+// Returns:
+// - 0 on success
+// - 0 when uninitialized (no-op)
+// - -1 when cond is null
+// - nonzero backend error code on failure
 pub fun sync_backend_windows_condvar_broadcast(CondVar* cond) num {
   if cond == NULL {
     ret -1;
@@ -244,6 +302,12 @@ pub fun sync_backend_windows_condvar_broadcast(CondVar* cond) num {
 }
 
 // Destroy a Windows backend condition variable.
+// 
+// Returns:
+// - 0 on success
+// - 0 when uninitialized (no-op)
+// - -1 when cond is null
+// - nonzero backend error code on failure
 pub fun sync_backend_windows_condvar_destroy(CondVar* cond) num {
   if cond == NULL {
     ret -1;

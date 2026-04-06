@@ -1011,6 +1011,27 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
   }
   .stdlib-grid {
     grid-template-columns: 1fr;
+    gap: 10px;
+  }
+  .module-card {
+    border-radius: 14px;
+    padding: 10px;
+  }
+  .module-select {
+    padding: 8px;
+    gap: 8px;
+  }
+  .module-summary {
+    -webkit-line-clamp: 2;
+    margin-bottom: 6px;
+  }
+  .symbol-row {
+    padding: 8px;
+    gap: 4px;
+  }
+  .symbol-row code {
+    font-size: 12px;
+    line-height: 1.35;
   }
   .modal-head {
     flex-direction: column;
@@ -1021,18 +1042,32 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
     justify-content: flex-start;
   }
   .modal-card {
-    max-height: 92vh;
-    padding: 16px;
+    width: 100%;
+    max-height: min(100dvh - 20px, 980px);
+    height: min(100dvh - 20px, 980px);
+    padding: 14px;
+    border-radius: 14px;
   }
   .modal-body {
     grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+    gap: 10px;
   }
   .modal-sidebar {
     border-radius: 12px;
-    max-height: 34vh;
+    max-height: 28vh;
+    padding: 10px;
   }
   .modal-content {
     max-height: none;
+    padding-right: 0;
+  }
+  .symbol-detail {
+    margin-top: 10px;
+    padding: 10px;
+  }
+  .compound-field-item {
+    padding: 12px;
   }
   .detail-head {
     flex-direction: column;
@@ -1053,6 +1088,97 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
   .compound-field-head {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .module-title {
+    font-size: 0.98rem;
+    line-height: 1.3;
+  }
+
+  .module-meta {
+    font-size: 11px;
+  }
+
+  .module-card ul li:nth-child(n + 3) {
+    display: none;
+  }
+
+  .module-card > .muted.small {
+    display: inline-block;
+    margin-top: 8px;
+  }
+
+  .symbol-row code {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .modal-backdrop {
+    padding: 0;
+  }
+
+  .modal-card {
+    height: 100dvh;
+    max-height: 100dvh;
+    border-radius: 0;
+    border-left: none;
+    border-right: none;
+    padding: 12px;
+  }
+
+  .modal-head {
+    gap: 10px;
+  }
+
+  .modal-head h2 {
+    margin: 0;
+    font-size: 1.05rem;
+    line-height: 1.3;
+  }
+
+  .modal-actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+
+  .modal-sidebar {
+    max-height: 32vh;
+  }
+
+  .symbol-pills {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 6px;
+    margin-top: 8px;
+    margin-bottom: 8px;
+  }
+
+  .symbol-pill {
+    width: 100%;
+    border-radius: 10px;
+    min-height: 40px;
+    font-size: 12px;
+  }
+
+  .copy-link-btn,
+  .modal-close {
+    min-height: 42px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .compound-field-meta {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .detail-link-btn {
+    min-height: 32px;
   }
 
   .copy-link-btn,
@@ -1083,12 +1209,12 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
   }
 
   .modal-backdrop {
-    padding: 12px;
+    padding: 0;
   }
 
   .modal-card {
-    padding: 14px;
-    border-radius: 14px;
+    padding: 12px;
+    border-radius: 0;
   }
 
   .modal-actions {
@@ -1146,6 +1272,209 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
   .symbol-row,
   nav button {
     width: 100%;
+  }
+}
+
+@media (max-width: 380px) {
+  main {
+    padding: 10px;
+  }
+
+  .panel {
+    padding: 10px;
+  }
+
+  .stdlib-toolbar {
+    padding: 8px;
+    gap: 6px;
+    margin-bottom: 10px;
+  }
+
+  .stdlib-count {
+    font-size: 11px;
+    padding: 4px 8px;
+  }
+
+  .module-card {
+    padding: 8px;
+    border-radius: 12px;
+  }
+
+  .module-select {
+    padding: 6px;
+    gap: 6px;
+  }
+
+  .module-title {
+    font-size: 0.94rem;
+  }
+
+  .module-summary {
+    display: none;
+  }
+
+  .module-meta {
+    margin-bottom: 4px;
+    font-size: 11px;
+  }
+
+  .module-card ul {
+    gap: 6px;
+  }
+
+  .module-card ul li:nth-child(n + 2) {
+    display: none;
+  }
+
+  .symbol-row {
+    padding: 8px;
+    gap: 3px;
+    border-radius: 10px;
+  }
+
+  .symbol-row .badge {
+    font-size: 10px;
+    padding: 1px 5px;
+  }
+
+  .symbol-row .muted {
+    display: none;
+  }
+
+  .symbol-row code {
+    font-size: 11px;
+    line-height: 1.3;
+    -webkit-line-clamp: 1;
+  }
+
+  .modal-card {
+    padding: 10px;
+  }
+
+  .modal-eyebrow,
+  .modal-head > div > p.muted {
+    display: none;
+  }
+
+  .modal-head h2 {
+    font-size: 1rem;
+    line-height: 1.25;
+  }
+
+  .modal-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .modal-sidebar {
+    max-height: 28vh;
+    padding: 8px;
+  }
+
+  .symbol-group-collapsible {
+    padding: 7px 8px;
+  }
+
+  .symbol-pill {
+    min-height: 42px;
+    font-size: 11px;
+    padding: 5px 8px;
+  }
+
+  .symbol-detail {
+    padding: 8px;
+    border-radius: 8px;
+  }
+
+  .compound-field-item {
+    padding: 10px;
+  }
+
+  .detail-link-btn {
+    font-size: 10px;
+  }
+}
+
+@media (min-width: 381px) and (max-width: 430px) {
+  .panel {
+    padding: 12px;
+  }
+
+  .stdlib-toolbar {
+    padding: 10px;
+    margin-bottom: 12px;
+  }
+
+  .module-card {
+    padding: 9px;
+  }
+
+  .module-select {
+    padding: 7px;
+    gap: 7px;
+  }
+
+  .module-summary {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    margin-bottom: 5px;
+  }
+
+  .module-card ul li:nth-child(n + 3) {
+    display: none;
+  }
+
+  .symbol-row {
+    padding: 8px;
+    min-height: 44px;
+  }
+
+  .symbol-row code {
+    -webkit-line-clamp: 2;
+    font-size: 11.5px;
+  }
+
+  .modal-card {
+    padding: 11px;
+  }
+
+  .modal-actions {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .copy-link-btn,
+  .modal-close {
+    min-height: 42px;
+    justify-content: center;
+  }
+
+  .modal-sidebar {
+    max-height: 30vh;
+  }
+}
+
+@media (max-width: 340px) {
+  .search {
+    font-size: 14px;
+  }
+
+  .module-title {
+    font-size: 0.9rem;
+  }
+
+  .module-meta,
+  .symbol-row code {
+    font-size: 10.5px;
+  }
+
+  .copy-link-btn,
+  .modal-close,
+  .symbol-pill,
+  .module-select,
+  .symbol-row,
+  nav button {
+    min-height: 42px;
   }
 }
 

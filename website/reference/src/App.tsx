@@ -1597,6 +1597,7 @@ export default function App() {
                         <MarkdownWithPlayground
                           markdown={activeModule.docsMarkdown}
                           sourcePath={`stdlib/std/${activeModule.module}`}
+                          enableRunnableFunBlocks={false}
                         />
                       ) : (
                         <p className="muted">No module-level docs found.</p>
@@ -1617,6 +1618,7 @@ export default function App() {
                             <MarkdownWithPlayground
                               markdown={activeSymbol.docsMarkdown}
                               sourcePath={`stdlib/std/${activeModule.module}`}
+                              enableRunnableFunBlocks={false}
                             />
                           ) : (
                             <p className="muted">
@@ -1677,6 +1679,7 @@ export default function App() {
                                         <MarkdownWithPlayground
                                           markdown={field.docsMarkdown}
                                           sourcePath={`stdlib/std/${activeModule.module}`}
+                                          enableRunnableFunBlocks={false}
                                         />
                                       ) : field.inlineDoc ? (
                                         <p className="muted">
@@ -1747,6 +1750,7 @@ export default function App() {
                                           <MarkdownWithPlayground
                                             markdown={member.docsMarkdown}
                                             sourcePath={`stdlib/std/${activeModule.module}`}
+                                            enableRunnableFunBlocks={false}
                                           />
                                         ) : member.inlineDoc ? (
                                           <p className="muted">

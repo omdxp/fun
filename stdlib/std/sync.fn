@@ -1,6 +1,10 @@
 // Synchronization helpers built on POSIX pthread APIs.
 // 
 // Provides mutex and condition variable wrappers with lazy init.
+// 
+// Notes:
+// - lock/wait helpers auto-initialize wrappers on first use.
+// - unlock/signal/destroy on uninitialized wrappers are treated as no-ops.
 
 imp std.c.thread;
 imp std.c.def;
@@ -59,6 +63,9 @@ impl Mutex {
 
   // Lock the mutex.
   // 
+  // Note:
+  // - Auto-initializes on first use.
+  // 
   // Returns:
   // - pthread return code (0 on success)
   pub lock() num {
@@ -72,6 +79,9 @@ impl Mutex {
   }
 
   // Try locking the mutex without blocking.
+  // 
+  // Note:
+  // - Auto-initializes on first use.
   // 
   // Returns:
   // - pthread return code (0 on success)
@@ -87,6 +97,9 @@ impl Mutex {
 
   // Unlock the mutex.
   // 
+  // Note:
+  // - Returns 0 when called before initialization (no-op).
+  // 
   // Returns:
   // - pthread return code (0 on success)
   pub unlock() num {
@@ -97,6 +110,9 @@ impl Mutex {
   }
 
   // Destroy the mutex.
+  // 
+  // Note:
+  // - Returns 0 when called before initialization (no-op).
   // 
   // Returns:
   // - pthread return code (0 on success)
@@ -134,7 +150,9 @@ impl CondVar {
   // - mutex: associated mutex wrapper
   // 
   // Returns:
-  // - pthread return code (0 on success)
+  // - 0 on success
+  // - -1 when mutex is null
+  // - nonzero pthread error code on failure
   pub wait(Mutex* mutex) num {
     if self.initialized == false {
       num init_rc = self.init();
@@ -161,7 +179,10 @@ impl CondVar {
   // - abs_time: absolute timeout pointer (`struct timespec*`, C semantics)
   // 
   // Returns:
-  // - pthread return code (0 on success, nonzero on timeout/failure)
+  // - 0 on success
+  // - -1 when mutex is null
+  // - -2 when abs_time is null
+  // - nonzero pthread error code on timeout/failure
   pub timed_wait(Mutex* mutex, raw* abs_time) num {
     if self.initialized == false {
       num init_rc = self.init();
@@ -186,6 +207,9 @@ impl CondVar {
 
   // Wake one waiter.
   // 
+  // Note:
+  // - Returns 0 when called before initialization (no-op).
+  // 
   // Returns:
   // - pthread return code (0 on success)
   pub signal() num {
@@ -197,6 +221,9 @@ impl CondVar {
 
   // Wake all waiters.
   // 
+  // Note:
+  // - Returns 0 when called before initialization (no-op).
+  // 
   // Returns:
   // - pthread return code (0 on success)
   pub broadcast() num {
@@ -207,6 +234,9 @@ impl CondVar {
   }
 
   // Destroy the condition variable.
+  // 
+  // Note:
+  // - Returns 0 when called before initialization (no-op).
   // 
   // Returns:
   // - pthread return code (0 on success)
