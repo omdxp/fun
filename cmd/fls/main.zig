@@ -12646,6 +12646,29 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
         }
     }.call;
 
+    const isAsyncToken = struct {
+        fn call(t: token.Token) bool {
+            if (t.type != .Keyword and t.type != .Identifier) return false;
+            return std.mem.eql(u8, tokenString(t), "async");
+        }
+    }.call;
+
+    const hasPubModifierBefore = struct {
+        fn call(tokens_: []const token.Token, start_index: usize) bool {
+            const prev_i = prevNonTrivialToken(tokens_, start_index) orelse return false;
+            if (isPubToken(tokens_[prev_i])) return true;
+
+            // Allow `pub async ...` declarations where the anchor token is
+            // either `fun` (top-level) or the method name (impl methods).
+            if (isAsyncToken(tokens_[prev_i])) {
+                const prev2_i = prevNonTrivialToken(tokens_, prev_i) orelse return false;
+                if (isPubToken(tokens_[prev2_i])) return true;
+            }
+
+            return false;
+        }
+    }.call;
+
     const parseParamsAfterLParen = struct {
         fn call(allocator_: Allocator, tokens_: []const token.Token, lparen_i: usize, params: *std.ArrayList(ParamLite), is_variadic: *bool) void {
             // Parse `Type name` pairs until the matching ')'. Best-effort; ignore failures.
@@ -12865,10 +12888,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
         if (isKeyword(t, "fun")) {
             resetPendingBody(&pending_body, &pending_params, &pending_impl_owner, &pending_is_variadic);
             pending_body = .fun_decl;
-            const is_public = blk: {
-                const prev = prevNonTrivialToken(tokens, i) orelse break :blk false;
-                break :blk isPubToken(tokens[prev]);
-            };
+            const is_public = hasPubModifierBefore(tokens, i);
             const name_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
             if (!isIdent(tokens[name_i])) continue;
             const name = tokenString(tokens[name_i]);
@@ -13275,10 +13295,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
 
                         const sig = try buildSignatureFromTokens(allocator, tokens, k, false);
 
-                        const is_public = blk: {
-                            const prev = prevNonTrivialToken(tokens, k) orelse break :blk false;
-                            break :blk isPubToken(tokens[prev]);
-                        };
+                        const is_public = hasPubModifierBefore(tokens, k);
 
                         const mname = tokenString(tk);
                         const r = rangeFromTokenPos(tk.pos);

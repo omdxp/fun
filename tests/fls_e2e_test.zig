@@ -3052,6 +3052,21 @@ test "fls e2e: async/await completion details + hover + signatureHelp" {
     try expectSignatureHelpLabelContains(allocator, sig_val, "async inc(num by) num");
     try expectSignatureHelpActiveParameter(allocator, sig_val, 0);
 
+    // Definition on async member call should jump to method declaration.
+    const inc_def_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, inc_use.line, inc_use.col + 3 },
+    );
+    defer allocator.free(inc_def_params);
+    const inc_def_id = try lsp.request("textDocument/definition", inc_def_params);
+    var inc_def_res = try lsp.waitResponse(inc_def_id, 15000);
+    defer inc_def_res.deinit();
+    const inc_def_val = try jsonResultFromResponseObj(inc_def_res.parsed.value.object);
+
+    const inc_decl = try findPosition(doc_text, "async inc(num by) num", 0);
+    try expectDefinitionPointsTo(allocator, inc_def_val, doc_uri, inc_decl.line, inc_decl.col + @as(i64, @intCast("async ".len)));
+
     const shutdown_id = try lsp.request("shutdown", "{}");
     var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
     shutdown_res.deinit();
@@ -3387,8 +3402,8 @@ test "fls e2e: std.channel async forwarding completion + hover" {
     var comp_res = try lsp.waitResponse(comp_id, 15000);
     defer comp_res.deinit();
     const comp_val = try jsonResultFromResponseObj(comp_res.parsed.value.object);
-    try expectCompletionMissingLabel(allocator, comp_val, "forward_one_to_async");
-    try expectCompletionMissingLabel(allocator, comp_val, "select_forward_one_to_async");
+    try expectCompletionHasLabel(allocator, comp_val, "forward_one_to_async");
+    try expectCompletionHasLabel(allocator, comp_val, "select_forward_one_to_async");
 
     const channel_type_pos = try findPosition(doc_text, "Channel<num> src", 0);
     const channel_type_hover_params = try std.fmt.allocPrint(
@@ -3886,7 +3901,7 @@ test "fls e2e: enum variant dot completion + hover" {
     try lsp.notify("exit", "{}");
 }
 
-test "fls e2e: dot completion finds impl methods across imported files" {
+test "fls e2e: dot completion + definition find async impl methods across imported files" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -3912,18 +3927,18 @@ test "fls e2e: dot completion finds impl methods across imported files" {
                 "}\n",
         );
     }
+    const impl_source =
+        "imp __fls_implsep_user;\n\n" ++
+        "impl User {\n" ++
+        "  pub async wave_async_implsep() str {\n" ++
+        "    ret self.name;\n" ++
+        "  }\n" ++
+        "}\n";
+
     {
         const f = try std.fs.cwd().createFile(impl_path, .{ .truncate = true });
         defer f.close();
-        try f.writeAll(
-            "imp std.c.io;\n" ++
-                "imp __fls_implsep_user;\n\n" ++
-                "impl User {\n" ++
-                "  greet() {\n" ++
-                "    printf(\"hi %s\\n\", self.name);\n" ++
-                "  }\n" ++
-                "}\n",
-        );
+        try f.writeAll(impl_source);
     }
 
     var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
@@ -3933,11 +3948,13 @@ test "fls e2e: dot completion finds impl methods across imported files" {
     const doc_text =
         "imp __fls_implsep_user;\n" ++
         "imp __fls_implsep_user_impl;\n\n" ++
-        "fun main() void {\n" ++
+        "async fun main() num {\n" ++
         "  User user;\n" ++
         "  user.name = \"Alice\";\n" ++
         "  User* u = &user;\n" ++
+        "  let msg = await u.wave_async_implsep();\n" ++
         "  u.\n" ++
+        "  ret 0;\n" ++
         "}\n";
 
     const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-implsep.fn");
@@ -3961,7 +3978,29 @@ test "fls e2e: dot completion finds impl methods across imported files" {
     const result_val = try jsonResultFromResponseObj(comp_obj);
 
     // Expect method completion from `impl User` living in a different imported file.
-    try expectCompletionHasLabel(allocator, result_val, "greet");
+    try expectCompletionHasLabel(allocator, result_val, "wave_async_implsep");
+    try expectCompletionLabelDetailContains(allocator, result_val, "wave_async_implsep", "async wave_async_implsep() str");
+
+    // Definition should jump from async member call to the imported impl method declaration.
+    const call_pos = try findPosition(doc_text, "u.wave_async_implsep()", 0);
+    const def_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, call_pos.line, call_pos.col + @as(i64, @intCast("u.".len)) },
+    );
+    defer allocator.free(def_params);
+    const def_id = try lsp.request("textDocument/definition", def_params);
+    var def_res = try lsp.waitResponse(def_id, 15000);
+    defer def_res.deinit();
+    const def_val = try jsonResultFromResponseObj(def_res.parsed.value.object);
+
+    const method_decl = try findPosition(impl_source, "wave_async_implsep() str", 0);
+    try expectDefinitionPointsTo(allocator, def_val, impl_path, method_decl.line, method_decl.col);
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
 }
 
 test "fls e2e: quirks across folders complete + missing methods diagnose" {
