@@ -3390,6 +3390,15 @@ test "fls e2e: std.channel async forwarding completion + hover" {
     try expectCompletionMissingLabel(allocator, comp_val, "forward_one_to_async");
     try expectCompletionMissingLabel(allocator, comp_val, "select_forward_one_to_async");
 
+    const channel_type_pos = try findPosition(doc_text, "Channel<num> src", 0);
+    const channel_type_hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, channel_type_pos.line, channel_type_pos.col + 2 },
+    );
+    defer allocator.free(channel_type_hover_params);
+    try waitForHoverContains(allocator, &lsp, channel_type_hover_params, "compound Channel<num>", 15000);
+
     const fwd_pos = try findPosition(doc_text, "forward_one_to_async", 0);
     const fwd_hover_params = try std.fmt.allocPrint(
         allocator,
@@ -3407,6 +3416,121 @@ test "fls e2e: std.channel async forwarding completion + hover" {
     );
     defer allocator.free(select_fwd_hover_params);
     try waitForHoverContains(allocator, &lsp, select_fwd_hover_params, "select_forward_one_to_async", 15000);
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: let inference from imported generic call" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "imp std.channel;\n\n" ++
+        "fun main() {\n" ++
+        "  let ticks = channel_new_cap(0, 4);\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-let-infer-imported-generic.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const ticks_pos = try findPosition(doc_text, "let ticks", 0);
+    const hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, ticks_pos.line, ticks_pos.col + 5 },
+    );
+    defer allocator.free(hover_params);
+
+    try waitForHoverContains(allocator, &lsp, hover_params, "Channel<num> ticks", 15000);
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: let inference from chained member initializers" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "imp std.channel;\n\n" ++
+        "fun main() {\n" ++
+        "  let src = channel_new_cap(0, 4);\n" ++
+        "  let wait_a = src.get_select_wait_slice_ms();\n" ++
+        "  let wait_b = channel_new_cap(0, 4).get_select_wait_slice_ms();\n" ++
+        "  let backoff_a = src.select_wait_backoff_steps;\n" ++
+        "  let backoff_b = channel_new_cap(0, 4).select_wait_backoff_steps;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-let-infer-chained-member.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const src_pos = try findPosition(doc_text, "let src", 0);
+    const src_hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, src_pos.line, src_pos.col + 5 },
+    );
+    defer allocator.free(src_hover_params);
+    try waitForHoverContains(allocator, &lsp, src_hover_params, "Channel<num> src", 15000);
+
+    const wait_a_pos = try findPosition(doc_text, "let wait_a", 0);
+    const wait_a_hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, wait_a_pos.line, wait_a_pos.col + 5 },
+    );
+    defer allocator.free(wait_a_hover_params);
+    try waitForHoverContains(allocator, &lsp, wait_a_hover_params, "num wait_a", 15000);
+
+    const wait_b_pos = try findPosition(doc_text, "let wait_b", 0);
+    const wait_b_hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, wait_b_pos.line, wait_b_pos.col + 5 },
+    );
+    defer allocator.free(wait_b_hover_params);
+    try waitForHoverContains(allocator, &lsp, wait_b_hover_params, "num wait_b", 15000);
+
+    const backoff_a_pos = try findPosition(doc_text, "let backoff_a", 0);
+    const backoff_a_hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, backoff_a_pos.line, backoff_a_pos.col + 5 },
+    );
+    defer allocator.free(backoff_a_hover_params);
+    try waitForHoverContains(allocator, &lsp, backoff_a_hover_params, "num backoff_a", 15000);
+
+    const backoff_b_pos = try findPosition(doc_text, "let backoff_b", 0);
+    const backoff_b_hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, backoff_b_pos.line, backoff_b_pos.col + 5 },
+    );
+    defer allocator.free(backoff_b_hover_params);
+    try waitForHoverContains(allocator, &lsp, backoff_b_hover_params, "num backoff_b", 15000);
 
     const shutdown_id = try lsp.request("shutdown", "{}");
     var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);

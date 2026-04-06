@@ -1,4 +1,8 @@
-// Thread helpers built on POSIX pthread APIs.
+// Thread helpers using pthread-shaped APIs.
+// 
+// Notes:
+// - On POSIX, these map to native pthread APIs.
+// - On Windows, backend compatibility layers provide equivalent behavior.
 // 
 // Usage:
 // Thread t = thread_new();

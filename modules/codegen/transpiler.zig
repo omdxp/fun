@@ -9087,7 +9087,18 @@ pub const TranspileProcess = struct {
             try self.write(c.name.items);
             try self.write(";\n");
         }
-        if (compound_nodes.items.len > 0) try self.write("\n");
+
+        // Forward declare concrete generic specializations so pointer-typed fields
+        // can reference them before their full definitions are emitted.
+        for (specs.items) |s| {
+            try self.write("typedef struct ");
+            try self.write(s.mangled);
+            try self.write(" ");
+            try self.write(s.mangled);
+            try self.write(";\n");
+        }
+
+        if (compound_nodes.items.len > 0 or specs.items.len > 0) try self.write("\n");
 
         // Emit quirk object structs early so compounds can store quirks by-value.
         // Vtable structs are forward-declared here and defined later once all

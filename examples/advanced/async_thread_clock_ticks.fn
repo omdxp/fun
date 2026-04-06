@@ -1,0 +1,109 @@
+// Async + thread + channel clock-tick style example.
+// 
+// The worker thread uses recv_timeout as a pacing mechanism:
+// if no stop signal arrives within interval_ms, it emits the next tick.
+
+imp std.c.io;
+imp std.thread;
+imp std.channel;
+
+compound ClockWorker {
+  Channel<num>* ticks;
+  Channel<num>* stop;
+  num interval;
+  num limit;
+}
+
+fun clock_worker_main(raw* arg) raw* {
+  ClockWorker* worker = arg;
+  num sent = 0;
+
+  for sent < worker.limit {
+    num stop_signal = 0;
+    num rc_wait = worker.stop.recv_timeout_into(&stop_signal, worker.interval);
+
+    if rc_wait == channel_rc_ok() {
+      break;
+    }
+
+    if rc_wait == channel_rc_timeout() {
+      sent = sent + 1;
+      num rc_send = worker.ticks.send(sent);
+      if rc_send != channel_rc_ok() {
+        break;
+      }
+      continue;
+    }
+
+    if rc_wait == channel_rc_closed() {
+      break;
+    }
+
+    break;
+  }
+
+  _ = worker.ticks.close();
+  ret 0;
+}
+
+async fun main() {
+  let ticks = channel_new_cap(0, 4);
+  Channel<num> stop = channel_new_cap(0, 1);
+
+  ClockWorker worker;
+  worker.ticks = &ticks;
+  worker.stop = &stop;
+  worker.interval = 150;
+  worker.limit = 12;
+
+  Thread clock = thread_new();
+  num rc_start = thread_start(&clock, clock_worker_main, &worker);
+
+  if rc_start != 0 {
+    printf("clock start failed: %lld\n", rc_start);
+    _ = ticks.destroy();
+    _ = stop.destroy();
+    ret;
+  }
+
+  num observed = 0;
+  num last_tick = 0;
+  bin stop_sent = false;
+
+  for {
+    num tick = 0;
+    num rc = await ticks.recv_timeout_into_async(&tick, 400);
+
+    if rc == channel_rc_ok() {
+      observed = observed + 1;
+      last_tick = tick;
+      printf("tick %lld\n", tick);
+
+      if stop_sent == false && tick >= 5 {
+        stop_sent = true;
+        _ = await stop.send_async(1);
+      }
+
+      continue;
+    }
+
+    if rc == channel_rc_closed() {
+      break;
+    }
+
+    if rc == channel_rc_timeout() {
+      printf("no tick yet...\n");
+      continue;
+    }
+
+    printf("tick stream ended with rc=%lld\n", rc);
+    break;
+  }
+
+  num rc_join = thread_join(&clock, 0);
+  printf("summary observed=%lld last=%lld start=%lld join=%lld\n", observed, last_tick, rc_start, rc_join);
+
+  _ = stop.close();
+  _ = ticks.destroy();
+  _ = stop.destroy();
+}

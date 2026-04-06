@@ -1231,6 +1231,17 @@ const LspServer = struct {
         if (def_local_opt == null and def_import == null) {
             if (try self.trySendAliasHover(id_val, uri, idx, tok.text, tok.range)) return;
         }
+
+        var concrete_hover_type_owned: ?[]u8 = null;
+        defer if (concrete_hover_type_owned) |s| self.allocator.free(s);
+        var concrete_hover_type: ?[]const u8 = concreteGenericTypeSliceAtPosition(doc.text, pos);
+        if (findTokenIndexAt(idx.tokens, pos)) |tok_i| {
+            concrete_hover_type_owned = try concreteGenericTypeAtToken(self.allocator, idx.tokens, tok_i);
+            if (concrete_hover_type_owned) |owned| {
+                concrete_hover_type = owned;
+            }
+        }
+
         var buf = std.ArrayList(u8).init(self.allocator);
         defer buf.deinit();
 
@@ -1322,7 +1333,10 @@ const LspServer = struct {
                 if (let_infer_detail) {
                     // Skip placeholder let inference details; fall back to value_type/guess.
                 } else {
-                    if (d.kind == .function and d.value_type != null) {
+                    if (d.kind == .struct_ or d.kind == .interface or d.kind == .enum_) {
+                        // Render type symbols in the kind-specific branch below so we can
+                        // include concrete generic arguments from the hover site.
+                    } else if (d.kind == .function and d.value_type != null) {
                         const det_trim = std.mem.trimRight(u8, det, " \t\r\n");
                         if (det_trim.len != 0 and det_trim[det_trim.len - 1] == ')') {
                             try buf.writer().print("```\n{s} {s}\n```\n", .{ det_trim, d.value_type.? });
@@ -1352,7 +1366,13 @@ const LspServer = struct {
                 }
             } else if ((d.kind == .struct_ or d.kind == .interface or d.kind == .enum_)) {
                 const kw = if (d.kind == .struct_) "compound" else if (d.kind == .interface) "quirk" else "enum";
-                try buf.writer().print("```\n{s} {s}\n```\n", .{ kw, tok.text });
+                if (concrete_hover_type) |concrete| {
+                    try buf.writer().print("```\n{s} {s}\n```\n", .{ kw, concrete });
+                } else if (d.detail) |det| {
+                    try buf.writer().print("```\n{s}\n```\n", .{det});
+                } else {
+                    try buf.writer().print("```\n{s} {s}\n```\n", .{ kw, tok.text });
+                }
             } else {
                 try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
             }
@@ -1360,36 +1380,50 @@ const LspServer = struct {
         } else if (def_import) |hit| {
             const d = hit.sym;
             try buf.writer().print("**{s}**\n\n", .{tok.text});
+
+            var printed_detail = false;
             if (d.detail) |det| {
-                if (d.kind == .function and d.value_type != null) {
-                    const det_trim = std.mem.trimRight(u8, det, " \t\r\n");
-                    if (det_trim.len != 0 and det_trim[det_trim.len - 1] == ')') {
-                        try buf.writer().print("```\n{s} {s}\n```\n", .{ det_trim, d.value_type.? });
+                if (!(d.kind == .struct_ or d.kind == .interface or d.kind == .enum_)) {
+                    if (d.kind == .function and d.value_type != null) {
+                        const det_trim = std.mem.trimRight(u8, det, " \t\r\n");
+                        if (det_trim.len != 0 and det_trim[det_trim.len - 1] == ')') {
+                            try buf.writer().print("```\n{s} {s}\n```\n", .{ det_trim, d.value_type.? });
+                        } else {
+                            try buf.writer().print("```\n{s}\n```\n", .{det});
+                        }
                     } else {
                         try buf.writer().print("```\n{s}\n```\n", .{det});
                     }
-                } else {
-                    try buf.writer().print("```\n{s}\n```\n", .{det});
+                    printed_detail = true;
                 }
-            } else if (d.kind == .variable) {
-                const vt = d.value_type orelse self.guessVariableType(idx, uri, tok.text, pos);
-                if (vt) |vts| {
-                    try buf.writer().print("```\n{s} {s}\n```\n", .{ vts, tok.text });
+            }
+            if (!printed_detail) {
+                if (d.kind == .variable) {
+                    const vt = d.value_type orelse self.guessVariableType(idx, uri, tok.text, pos);
+                    if (vt) |vts| {
+                        try buf.writer().print("```\n{s} {s}\n```\n", .{ vts, tok.text });
+                    } else {
+                        try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
+                    }
+                } else if (d.kind == .enumMember) {
+                    const recv_type = d.container_type orelse d.value_type orelse "";
+                    if (recv_type.len != 0) {
+                        try buf.writer().print("```\n{s}.{s}\n```\n", .{ recv_type, tok.text });
+                    } else {
+                        try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
+                    }
+                } else if ((d.kind == .struct_ or d.kind == .interface or d.kind == .enum_)) {
+                    const kw = if (d.kind == .struct_) "compound" else if (d.kind == .interface) "quirk" else "enum";
+                    if (concrete_hover_type) |concrete| {
+                        try buf.writer().print("```\n{s} {s}\n```\n", .{ kw, concrete });
+                    } else if (d.detail) |det| {
+                        try buf.writer().print("```\n{s}\n```\n", .{det});
+                    } else {
+                        try buf.writer().print("```\n{s} {s}\n```\n", .{ kw, tok.text });
+                    }
                 } else {
                     try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
                 }
-            } else if (d.kind == .enumMember) {
-                const recv_type = d.container_type orelse d.value_type orelse "";
-                if (recv_type.len != 0) {
-                    try buf.writer().print("```\n{s}.{s}\n```\n", .{ recv_type, tok.text });
-                } else {
-                    try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
-                }
-            } else if ((d.kind == .struct_ or d.kind == .interface or d.kind == .enum_)) {
-                const kw = if (d.kind == .struct_) "compound" else if (d.kind == .interface) "quirk" else "enum";
-                try buf.writer().print("```\n{s} {s}\n```\n", .{ kw, tok.text });
-            } else {
-                try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
             }
             if (self.docs.get(hit.uri)) |idoc| {
                 _ = try appendDocCommentAboveLine(self.allocator, &buf, idoc.text, d.decl_range.start.line);
@@ -3303,6 +3337,32 @@ const LspServer = struct {
         }
         if (t.len == 0) return null;
         return t;
+    }
+
+    fn parseReturnTypeFromSignatureLabel(self: *LspServer, label: []const u8) ?[]const u8 {
+        _ = self;
+        const open_i = std.mem.indexOfScalar(u8, label, '(') orelse return null;
+        var depth: i64 = 0;
+        var close_i: ?usize = null;
+        var i = open_i;
+        while (i < label.len) : (i += 1) {
+            const ch = label[i];
+            if (ch == '(') {
+                depth += 1;
+                continue;
+            }
+            if (ch == ')') {
+                depth -= 1;
+                if (depth == 0) {
+                    close_i = i;
+                    break;
+                }
+            }
+        }
+        const ci = close_i orelse return null;
+        const tail = std.mem.trim(u8, label[ci + 1 ..], " \t\r\n");
+        if (tail.len == 0) return null;
+        return tail;
     }
 
     fn inferDeclTypeBeforeName(self: *LspServer, idx: *const Index, name_i: usize) ?[]const u8 {
@@ -6804,7 +6864,7 @@ const LspServer = struct {
             }
         }.call;
 
-        const findMatchingRParenLite = struct {
+        const findMatchingRParenSig = struct {
             fn call(tokens: []const TokenLite, lparen_i2: usize) ?usize {
                 var depth: i64 = 0;
                 var i = lparen_i2;
@@ -7015,7 +7075,7 @@ const LspServer = struct {
 
         const cursor_end = @min(cursor_tok_i + 1, idx.tokens.len);
         var end_excl = cursor_end;
-        if (findMatchingRParenLite(idx.tokens, lparen_i)) |rp| {
+        if (findMatchingRParenSig(idx.tokens, lparen_i)) |rp| {
             if (rp < end_excl) end_excl = rp;
         }
         if (end_excl > lparen_i + 1) {
@@ -7166,6 +7226,219 @@ const LspServer = struct {
         if (doc_ptr.index) |idx| idx.deinit();
         doc_ptr.index = new_idx;
         self.ensureImportsIndexed(uri);
+        self.refineLetVariableTypesFromDirectImports(uri);
+    }
+
+    fn refineLetVariableTypesFromDirectImports(self: *LspServer, uri: []const u8) void {
+        const doc_ptr = self.docs.getPtr(uri) orelse return;
+        const idx = doc_ptr.index orelse return;
+        const arena_alloc = idx.arena.allocator();
+
+        var pass: usize = 0;
+        while (pass < 3) : (pass += 1) {
+            var changed = false;
+
+            for (idx.symbols) |*s| {
+                if (s.kind != .variable) continue;
+
+                const existing_vt_opt = s.value_type;
+                if (existing_vt_opt) |existing_vt| {
+                    if (!isLetInferTypeName(existing_vt) and !isBuiltinTypeName(existing_vt)) continue;
+                }
+
+                const inferred = self.tryInferLetInitializerCallReturnType(idx, uri, s, arena_alloc) orelse continue;
+                if (isLetInferTypeName(inferred)) continue;
+                if (existing_vt_opt) |existing_vt| {
+                    if (std.mem.eql(u8, inferred, existing_vt)) continue;
+                    if (isBuiltinTypeName(existing_vt) and isBuiltinTypeName(inferred)) continue;
+                }
+
+                s.value_type = inferred;
+
+                var det_buf = std.ArrayList(u8).init(arena_alloc);
+                defer det_buf.deinit();
+                det_buf.writer().print("{s} {s}", .{ inferred, s.name }) catch continue;
+                s.detail = det_buf.toOwnedSlice() catch continue;
+                changed = true;
+            }
+
+            if (!changed) break;
+        }
+    }
+
+    fn tryInferLetInitializerCallReturnType(self: *LspServer, idx: *const Index, uri: []const u8, sym: *const SymbolLite, arena_alloc: Allocator) ?[]const u8 {
+        const tokenHasChar = struct {
+            fn call(text: []const u8, ch: u8) bool {
+                return std.mem.indexOfScalar(u8, text, ch) != null;
+            }
+        }.call;
+
+        const isDelimiterOnlyToken = struct {
+            fn call(text: []const u8) bool {
+                if (text.len == 0) return false;
+                for (text) |ch| {
+                    if (ch != ';' and ch != ',') return false;
+                }
+                return true;
+            }
+        }.call;
+
+        const findExprEnd = struct {
+            fn call(tokens: []const TokenLite, start_i: usize) usize {
+                var paren_depth: i64 = 0;
+                var brack_depth: i64 = 0;
+                var brace_depth: i64 = 0;
+
+                var i = start_i;
+                while (i < tokens.len) : (i += 1) {
+                    const t = tokens[i];
+                    if (t.kind == .comment) continue;
+
+                    var saw_end = false;
+                    for (t.text) |ch| {
+                        switch (ch) {
+                            '(' => paren_depth += 1,
+                            ')' => {
+                                if (paren_depth > 0) paren_depth -= 1;
+                            },
+                            '[' => brack_depth += 1,
+                            ']' => {
+                                if (brack_depth > 0) brack_depth -= 1;
+                            },
+                            '{' => brace_depth += 1,
+                            '}' => {
+                                if (brace_depth > 0) brace_depth -= 1;
+                            },
+                            ';', ',' => {
+                                if (paren_depth == 0 and brack_depth == 0 and brace_depth == 0) {
+                                    saw_end = true;
+                                }
+                            },
+                            else => {},
+                        }
+                    }
+
+                    if (saw_end) return i;
+                }
+
+                return tokens.len;
+            }
+        }.call;
+
+        const inferFromTerminalCall = struct {
+            fn call(self_: *LspServer, idx_: *const Index, uri_: []const u8, expr_start_i: usize, expr_last_i: usize, arena_alloc_: Allocator) ?[]const u8 {
+                const last_i = expr_last_i;
+                if (last_i < expr_start_i) return null;
+                if (!tokenHasChar(idx_.tokens[last_i].text, ')')) return null;
+
+                const lparen_i = findMatchingLParenLite(idx_.tokens, last_i) orelse return null;
+                if (lparen_i < expr_start_i) return null;
+
+                const before_rparen_i = prevNonTrivialTokenLite(idx_.tokens, last_i) orelse lparen_i;
+                const sig_pos = if (before_rparen_i == lparen_i)
+                    idx_.tokens[lparen_i].range.start
+                else
+                    idx_.tokens[before_rparen_i].range.start;
+
+                const sig = self_.guessCallSignatureAt(uri_, idx_, sig_pos) orelse return null;
+
+                var label = sig.label;
+                var specialized_owned: ?[]u8 = null;
+                defer if (specialized_owned) |s| self_.allocator.free(s);
+
+                if (self_.specializeGenericSignatureHelpLabel(uri_, idx_, sig_pos, sig) catch null) |specialized| {
+                    specialized_owned = specialized;
+                    label = specialized;
+                }
+
+                const rt = self_.parseReturnTypeFromSignatureLabel(label) orelse return null;
+                return arena_alloc_.dupe(u8, rt) catch null;
+            }
+        }.call;
+
+        var name_i_opt: ?usize = null;
+        for (idx.tokens, 0..) |t, i| {
+            if (t.kind != .identifier) continue;
+            if (!std.mem.eql(u8, t.text, sym.name)) continue;
+            if (!rangeEqual(t.range, sym.selection_range)) continue;
+            name_i_opt = i;
+            break;
+        }
+        const name_i = name_i_opt orelse return null;
+
+        const let_kw_i = prevNonTrivialTokenLite(idx.tokens, name_i) orelse return null;
+        if (idx.tokens[let_kw_i].kind != .keyword or !std.mem.eql(u8, idx.tokens[let_kw_i].text, "let")) return null;
+
+        const eq_i = nextNonTrivialTokenLite(idx.tokens, name_i + 1) orelse return null;
+        if (!(idx.tokens[eq_i].kind == .operator or idx.tokens[eq_i].kind == .symbol) or !std.mem.eql(u8, idx.tokens[eq_i].text, "=")) return null;
+
+        var expr_i = nextNonTrivialTokenLite(idx.tokens, eq_i + 1) orelse return null;
+        if (idx.tokens[expr_i].kind == .keyword and std.mem.eql(u8, idx.tokens[expr_i].text, "await")) {
+            expr_i = nextNonTrivialTokenLite(idx.tokens, expr_i + 1) orelse return null;
+        }
+
+        const expr_end_i = findExprEnd(idx.tokens, expr_i);
+        if (expr_end_i <= expr_i) return null;
+
+        const expr_last_i = blk: {
+            if (expr_end_i >= idx.tokens.len) {
+                break :blk prevNonTrivialTokenLite(idx.tokens, idx.tokens.len) orelse return null;
+            }
+            if (isDelimiterOnlyToken(idx.tokens[expr_end_i].text)) {
+                break :blk prevNonTrivialTokenLite(idx.tokens, expr_end_i) orelse return null;
+            }
+            break :blk expr_end_i;
+        };
+        if (expr_last_i < expr_i) return null;
+
+        if (inferFromTerminalCall(self, idx, uri, expr_i, expr_last_i, arena_alloc)) |rt| {
+            if (rt.len != 0) return rt;
+        }
+
+        const last_i = expr_last_i;
+        if (last_i >= expr_i and idx.tokens[last_i].kind == .identifier) {
+            // Chain/field expression ending with an identifier.
+            var saw_dot = false;
+            var i = expr_i;
+            while (i <= last_i) : (i += 1) {
+                if (isDotToken(idx.tokens[i])) {
+                    saw_dot = true;
+                    break;
+                }
+            }
+
+            if (saw_dot) {
+                if (self.resolveTypeOfChainUpTo(idx, uri, idx.tokens[last_i].range.start, last_i)) |tname| {
+                    if (tname.len != 0) return arena_alloc.dupe(u8, tname) catch null;
+                }
+            } else {
+                // Only treat plain single-identifier initializers (`let y = x;`) as variable references.
+                // For compound expressions, this fallback can pick unrelated symbols by name.
+                if (last_i == expr_i) {
+                    if (self.guessVariableType(idx, uri, idx.tokens[last_i].text, idx.tokens[last_i].range.start)) |vt| {
+                        if (vt.len != 0) return arena_alloc.dupe(u8, vt) catch null;
+                    }
+                }
+            }
+        }
+
+        // Compound initializer: `Type{...}` or `Type<...>{...}`.
+        if (idx.tokens[expr_i].kind == .identifier) {
+            var probe_i = nextNonTrivialTokenLite(idx.tokens, expr_i + 1) orelse idx.tokens.len;
+            if (probe_i < idx.tokens.len and (idx.tokens[probe_i].kind == .symbol or idx.tokens[probe_i].kind == .operator) and std.mem.eql(u8, idx.tokens[probe_i].text, "<")) {
+                const after_generic = skipGenericArgsLite(idx.tokens, probe_i);
+                if (after_generic < idx.tokens.len and (idx.tokens[after_generic].kind == .symbol or idx.tokens[after_generic].kind == .operator) and std.mem.eql(u8, idx.tokens[after_generic].text, "{")) {
+                    if (concreteGenericTypeAtToken(arena_alloc, idx.tokens, expr_i) catch null) |gt| return gt;
+                }
+                probe_i = after_generic;
+            }
+
+            if (probe_i < idx.tokens.len and (idx.tokens[probe_i].kind == .symbol or idx.tokens[probe_i].kind == .operator) and std.mem.eql(u8, idx.tokens[probe_i].text, "{")) {
+                return arena_alloc.dupe(u8, idx.tokens[expr_i].text) catch null;
+            }
+        }
+
+        return null;
     }
 
     fn ensureImportsIndexed(self: *LspServer, uri: []const u8) void {
@@ -8080,6 +8353,18 @@ test "fls: byteIndexForPosition clamps past end-of-text" {
     try std.testing.expectEqual(text.len, byteIndexForPosition(text, .{ .line = 99, .character = 99 }));
 }
 
+test "fls: concreteGenericTypeSliceAtPosition extracts generic usage" {
+    if (_skip_lsp_tests_in_ci) return;
+    const text =
+        "imp std.channel;\n\n" ++
+        "async fun main() num {\n" ++
+        "  Channel<num> src = channel_new_cap(0, 1);\n" ++
+        "}\n";
+
+    const got = concreteGenericTypeSliceAtPosition(text, .{ .line = 3, .character = 4 }) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("Channel<num>", got);
+}
+
 test "fls: tryApplyRangedEdit rejects invalid ranges" {
     if (_skip_lsp_tests_in_ci) return;
     const allocator = std.testing.allocator;
@@ -8550,6 +8835,57 @@ fn nextNonTrivialTokenLite(tokens: []const TokenLite, start_index: usize) ?usize
     return null;
 }
 
+fn prevNonTrivialTokenLite(tokens: []const TokenLite, start_index: usize) ?usize {
+    if (start_index == 0) return null;
+    var i: isize = @as(isize, @intCast(start_index)) - 1;
+    while (i >= 0) : (i -= 1) {
+        const t = tokens[@intCast(i)];
+        if (t.kind == .comment) continue;
+        return @intCast(i);
+    }
+    return null;
+}
+
+fn findMatchingRParenLite(tokens: []const TokenLite, lparen_i: usize) ?usize {
+    var depth: i64 = 0;
+    var i = lparen_i;
+    while (i < tokens.len) : (i += 1) {
+        const t = tokens[i];
+        if (t.kind == .comment) continue;
+        for (t.text) |ch| {
+            if (ch == '(') depth += 1;
+            if (ch == ')') {
+                depth -= 1;
+                if (depth == 0) return i;
+            }
+        }
+    }
+    return null;
+}
+
+fn findMatchingLParenLite(tokens: []const TokenLite, rparen_i: usize) ?usize {
+    var depth: i64 = 0;
+    var i: isize = @as(isize, @intCast(rparen_i));
+    while (i >= 0) : (i -= 1) {
+        const t = tokens[@intCast(i)];
+        if (t.kind == .comment) continue;
+        var j: isize = @as(isize, @intCast(t.text.len));
+        while (j > 0) {
+            j -= 1;
+            const ch = t.text[@intCast(j)];
+            if (ch == ')') {
+                depth += 1;
+                continue;
+            }
+            if (ch == '(') {
+                depth -= 1;
+                if (depth == 0) return @intCast(i);
+            }
+        }
+    }
+    return null;
+}
+
 fn skipGenericArgsLite(tokens: []const TokenLite, start_index: usize) usize {
     if (start_index >= tokens.len) return start_index;
     const t0 = tokens[start_index];
@@ -8566,6 +8902,100 @@ fn skipGenericArgsLite(tokens: []const TokenLite, start_index: usize) usize {
         }
     }
     return i;
+}
+
+fn concreteGenericTypeAtToken(allocator: Allocator, tokens: []const TokenLite, tok_i: usize) !?[]u8 {
+    if (tok_i >= tokens.len) return null;
+    const base_tok = tokens[tok_i];
+    if (base_tok.kind != .identifier) return null;
+
+    const lt_i = nextNonTrivialTokenLite(tokens, tok_i + 1) orelse return null;
+    const lt_tok = tokens[lt_i];
+    if (!((lt_tok.kind == .symbol or lt_tok.kind == .operator) and std.mem.eql(u8, lt_tok.text, "<"))) {
+        return null;
+    }
+
+    var out = std.ArrayList(u8).init(allocator);
+    errdefer out.deinit();
+    try out.appendSlice(base_tok.text);
+
+    var depth: i64 = 0;
+    var i = lt_i;
+    while (i < tokens.len) : (i += 1) {
+        const t = tokens[i];
+        if (t.kind == .comment) continue;
+
+        if ((t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, "<")) {
+            depth += 1;
+            try out.append('<');
+            continue;
+        }
+
+        if ((t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, ">")) {
+            if (depth <= 0) break;
+            depth -= 1;
+            try out.append('>');
+            if (depth == 0) {
+                return try out.toOwnedSlice();
+            }
+            continue;
+        }
+
+        if (depth <= 0) break;
+        if ((t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, ",")) {
+            try out.appendSlice(", ");
+            continue;
+        }
+
+        try out.appendSlice(t.text);
+    }
+
+    out.deinit();
+    return null;
+}
+
+fn concreteGenericTypeSliceAtPosition(text: []const u8, p: Position) ?[]const u8 {
+    if (text.len == 0) return null;
+
+    const isIdentChar = struct {
+        fn call(ch: u8) bool {
+            return (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_';
+        }
+    }.call;
+
+    var idx = byteIndexForPosition(text, p);
+    if (idx >= text.len or !isIdentChar(text[idx])) {
+        if (idx == 0 or !isIdentChar(text[idx - 1])) return null;
+        idx -= 1;
+    }
+
+    var start_b = idx;
+    while (start_b > 0 and isIdentChar(text[start_b - 1])) : (start_b -= 1) {}
+    var name_end = idx + 1;
+    while (name_end < text.len and isIdentChar(text[name_end])) : (name_end += 1) {}
+    if (name_end <= start_b) return null;
+
+    var lt_i = name_end;
+    while (lt_i < text.len and (text[lt_i] == ' ' or text[lt_i] == '\t')) : (lt_i += 1) {}
+    if (lt_i >= text.len or text[lt_i] != '<') return null;
+
+    var depth: i64 = 0;
+    var i = lt_i;
+    while (i < text.len) : (i += 1) {
+        const ch = text[i];
+        if (ch == '\n' or ch == '\r') return null;
+        if (ch == '<') {
+            depth += 1;
+            continue;
+        }
+        if (ch == '>') {
+            if (depth <= 0) return null;
+            depth -= 1;
+            if (depth == 0) return text[start_b .. i + 1];
+        }
+    }
+
+    return null;
 }
 
 fn findLastTokenIndexBeforeOrAt(tokens: []const TokenLite, p: Position) ?usize {
