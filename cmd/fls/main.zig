@@ -12402,17 +12402,21 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                         }
                         var next_i = next_i_opt.?;
 
-                        // Unary address-of: `&name` -> `Type*`.
+                        // Unary address-of root expression: `&name` -> `Type*`.
+                        // Avoid applying this to nested call arguments like `foo(&x, ...)`.
                         if (i > start_i) {
                             const prev_i = prevNonTrivialToken(tokens_, i) orelse null;
                             if (prev_i != null and isPunctChar(tokens_[prev_i.?], '&')) {
-                                if (resolveIdentType(name, locals_map, globals_map)) |tname| {
-                                    if (!isArrayTypeName(tname)) {
-                                        const ptr_name = std.mem.concat(allocator_, u8, &[_][]const u8{ tname, "*" }) catch tname;
-                                        updateCandidate(&candidate, &candidate_rank, ptr_name);
+                                const before_addr_i = prevNonTrivialToken(tokens_, prev_i.?);
+                                if (before_addr_i == null or before_addr_i.? < start_i) {
+                                    if (resolveIdentType(name, locals_map, globals_map)) |tname| {
+                                        if (!isArrayTypeName(tname)) {
+                                            const ptr_name = std.mem.concat(allocator_, u8, &[_][]const u8{ tname, "*" }) catch tname;
+                                            updateCandidate(&candidate, &candidate_rank, ptr_name);
+                                        }
                                     }
+                                    continue;
                                 }
-                                continue;
                             }
                         }
 

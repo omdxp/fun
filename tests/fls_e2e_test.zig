@@ -3538,6 +3538,45 @@ test "fls e2e: let inference from chained member initializers" {
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: let inference await async call with address arg" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "imp std.channel;\n\n" ++
+        "async fun main() {\n" ++
+        "  let ch = channel_new_cap(0, 1);\n" ++
+        "  num out = 0;\n" ++
+        "  let rc = await ch.recv_timeout_into_async(&out, 10);\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-let-infer-await-address-arg.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const rc_pos = try findPosition(doc_text, "let rc", 0);
+    const rc_hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, rc_pos.line, rc_pos.col + 5 },
+    );
+    defer allocator.free(rc_hover_params);
+    try waitForHoverContains(allocator, &lsp, rc_hover_params, "num rc", 15000);
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: references and rename baseline" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
