@@ -10245,6 +10245,13 @@ fn buildSignatureFromAst(
         }
     }
 
+    if (@hasField(@TypeOf(fnv), "is_variadic") and fnv.is_variadic) {
+        if (fnv.args) |args| {
+            if (args.items().len != 0) try buf.appendSlice(", ");
+        }
+        try buf.appendSlice("...");
+    }
+
     try buf.append(')');
     if (fnv.rtype) |rt| {
         try buf.append(' ');
@@ -10526,6 +10533,29 @@ test "fls index: generic function signature includes params" {
         found = true;
         try std.testing.expect(s.detail != null);
         try std.testing.expect(std.mem.indexOf(u8, s.detail.?, "id<T>") != null);
+        break;
+    }
+    try std.testing.expect(found);
+}
+
+test "fls index: variadic function signature includes ellipsis" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const text =
+        "fun log(str fmt, ...) num { ret 0; }\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found = false;
+    for (idx.symbols) |s| {
+        if (s.kind != .function) continue;
+        if (!std.mem.eql(u8, s.name, "log")) continue;
+        found = true;
+        try std.testing.expect(s.detail != null);
+        try std.testing.expect(std.mem.indexOf(u8, s.detail.?, "(str fmt, ...)") != null);
         break;
     }
     try std.testing.expect(found);
@@ -10917,6 +10947,13 @@ fn buildSignatureFromTokens(
         if (isPunctChar(pt, ',')) {
             pi += 1;
             continue;
+        }
+
+        if (pt.type == .Operator and std.mem.eql(u8, tokenString(pt), "...")) {
+            if (!first) try buf.appendSlice(", ");
+            first = false;
+            try buf.appendSlice("...");
+            break;
         }
 
         if (!isTypeToken(pt)) {
