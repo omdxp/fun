@@ -98,7 +98,7 @@
         "punctuation.accessor"
       ],
       "settings": {
-        "foreground": "#D4DEFF"
+        "foreground": "#8FB3FF"
       }
     },
     {
@@ -211,7 +211,7 @@
       "foreground": "#7AA2FF",
       "bold": true
     },
-    "operator": "#D4DEFF",
+    "operator": "#8FB3FF",
     "namespace": "#7FE0C1",
     "type": "#B6A6FF",
     "type.defaultLibrary": "#9BDC8A",
@@ -220,7 +220,8 @@
     "interface": "#B6A6FF",
     "struct": "#B6A6FF",
     "enum": "#B6A6FF",
-    "enumMember": "#FFB3C0",
+    "enumMember": "#E8EDFF",
+    "boolean": "#FFB3C0",
     "function": "#A9E4FF",
     "method": "#A9E4FF",
     "macro": "#7FE0C1",

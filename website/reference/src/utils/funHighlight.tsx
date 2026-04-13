@@ -100,6 +100,7 @@ function buildTokenRegex(code: string) {
       "(?<comment>//.*$)",
       "(?<string>\"(?:[^\\\"\\\\]|\\\\.)*\"|'(?:[^'\\\\]|\\\\.)*')",
       "(?<number>\\b(?:0x[0-9a-fA-F]+|\\d+(?:\\.\\d+)?)\\b)",
+      "(?<operator>(?:->|::|\\+\\=|\\-\\=|\\*\\=|\\/\\=|\\%\\=|\\=\\=|\\!\\=|\\<\\=|\\>\\=|\\&\\&|\\|\\||\\<\\<|\\>\\>|\\+\\+|\\-\\-|[+\\-*/%=<>!&|^~.,;:]))",
       `(?<keyword>\\b(?:${FUN_KEYWORDS.join("|")})\\b)`,
       `(?<type>\\b(?:${FUN_BUILTIN_TYPES.join("|")}|i[1-9][0-9]*|u[1-9][0-9]*)\\b)`,
       `(?<support>\\b(?:${FUN_SUPPORT_TYPES.join("|")})\\b)`,
@@ -129,6 +130,7 @@ export function highlightFun(code: string): ReactNode[] {
     if (groups.comment) className = "tok-comment";
     else if (groups.string) className = "tok-string";
     else if (groups.number) className = "tok-number";
+    else if (groups.operator) className = "tok-operator";
     else if (groups.customType) className = "tok-custom-type";
     else if (groups.function) className = "tok-function";
     else if (groups.keyword) className = "tok-keyword";

@@ -34,8 +34,14 @@
   '((t :inherit font-lock-type-face))
   "Face used for Fun custom type names.")
 
+(defface fun-operator-face
+  '((t :inherit font-lock-builtin-face))
+  "Face used for Fun operators and separators.")
+
 (defvar fun-font-lock-keywords
   `((,(regexp-opt fun-keywords 'words) . font-lock-keyword-face)
+    ("\\(->\\|::\\|\\+=\\|-=\\|\\*=\\|/=\\|%=\\|==\\|!=\\|<=\\|>=\\|&&\\|[|][|]\\|<<\\|>>\\|\\+\\+\\|--\\|[+\\-*/%=<>!&|^~.:;,]\\)"
+     . fun-operator-face)
     ("\\_<\\(compound\\|quirk\\|enum\\|impl\\)\\_>\\s-+\\([A-Za-z_][A-Za-z0-9_]*\\)"
      (1 font-lock-keyword-face)
      (2 fun-custom-type-face))

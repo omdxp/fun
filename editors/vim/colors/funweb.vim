@@ -21,7 +21,7 @@ hi Typedef      guifg=#B6A6FF ctermfg=183
 hi Special      guifg=#7FE0C1 ctermfg=122
 hi Function     guifg=#A9E4FF ctermfg=159
 hi Identifier   guifg=#A9E4FF ctermfg=159
-hi Operator     guifg=#E8EDFF ctermfg=231
+hi Operator     guifg=#8FB3FF ctermfg=111
 
 hi CursorLine   guibg=#0D1630 ctermbg=18
 hi Visual       guibg=#355AAD ctermbg=25

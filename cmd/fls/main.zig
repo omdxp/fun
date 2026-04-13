@@ -791,8 +791,11 @@ const LspServer = struct {
                             "variable",
                             "type",
                             "enumMember",
+                            "boolean",
                         },
-                        .tokenModifiers = &[_][]const u8{},
+                        .tokenModifiers = &[_][]const u8{
+                            "defaultLibrary",
+                        },
                     },
                     .full = true,
                 },
@@ -14016,12 +14019,37 @@ fn classifyIdentifierTokenType(idx: *const Index, name: []const u8) u32 {
         return switch (s.kind) {
             .function, .method => 5,
             .struct_, .interface, .enum_, .class, .typeParameter => 7,
+            .enumMember => 8,
             .variable => 6,
             .field, .property, .constant => 6,
             else => 6,
         };
     }
     return 6;
+}
+
+fn isAllUpperTypeLikeName(name: []const u8) bool {
+    var saw_alpha = false;
+    for (name) |c| {
+        if (std.ascii.isAlphabetic(c)) {
+            saw_alpha = true;
+            if (std.ascii.isLower(c)) return false;
+            continue;
+        }
+        if (std.ascii.isDigit(c) or c == '_') continue;
+        return false;
+    }
+    return saw_alpha;
+}
+
+fn isDefaultLibraryTypeName(name: []const u8) bool {
+    if (utils.keyword_is_datatype(name)) return true;
+    if (utils.get_c_typedef_alias_datatype_type(name) != null) {
+        // Keep all-caps C object-like types (for example FILE) on custom-type color.
+        if (isAllUpperTypeLikeName(name)) return false;
+        return true;
+    }
+    return false;
 }
 
 fn buildSemanticTokens(allocator: Allocator, idx: *const Index) ![]u32 {
@@ -14047,7 +14075,7 @@ fn buildSemanticTokens(allocator: Allocator, idx: *const Index) ![]u32 {
             .comment => 1,
             .string => 2,
             .number => 3,
-            .boolean => 8,
+            .boolean => 9,
             .operator, .symbol => 4,
             .identifier => blk: {
                 // Member access: `.name` => variable/function depending on call usage.
@@ -14079,18 +14107,67 @@ fn buildSemanticTokens(allocator: Allocator, idx: *const Index) ![]u32 {
                     }
                     break :blk_next null;
                 };
-                if (prev_non_comment) |pi| {
-                    const pt = idx.tokens[pi];
-                    if ((pt.kind == .symbol or pt.kind == .operator) and
-                        (std.mem.eql(u8, pt.text, "<") or std.mem.eql(u8, pt.text, ",")))
-                    {
-                        if (next_non_comment) |ni| {
-                            const nt = idx.tokens[ni];
-                            if ((nt.kind == .symbol or nt.kind == .operator) and
-                                (std.mem.eql(u8, nt.text, ",") or std.mem.eql(u8, nt.text, ">")))
-                            {
-                                break :blk 7;
+                const looks_type_like_ident = t.text.len != 0 and std.ascii.isUpper(t.text[0]);
+
+                // Type slots in impl clauses: `impl Type as Quirk`.
+                if (looks_type_like_ident) {
+                    if (prev_non_comment) |pi| {
+                        const pt = idx.tokens[pi];
+                        if (pt.kind == .keyword and std.mem.eql(u8, pt.text, "as")) {
+                            break :blk 7;
+                        }
+                        if (pt.kind == .keyword and std.mem.eql(u8, pt.text, "impl")) {
+                            if (next_non_comment) |ni| {
+                                const nt = idx.tokens[ni];
+                                if (nt.kind == .keyword and std.mem.eql(u8, nt.text, "as")) {
+                                    break :blk 7;
+                                }
                             }
+                        }
+                    }
+                }
+
+                const in_generic_parameter_list = blk_generic: {
+                    if (!looks_type_like_ident) break :blk_generic false;
+
+                    var depth: i64 = 0;
+                    var p = ti;
+                    while (p > 0) {
+                        p -= 1;
+                        const bt = idx.tokens[p];
+                        if (bt.kind == .comment) continue;
+                        if (!(bt.kind == .symbol or bt.kind == .operator)) continue;
+
+                        if (std.mem.eql(u8, bt.text, ">")) {
+                            depth += 1;
+                            continue;
+                        }
+                        if (std.mem.eql(u8, bt.text, "<")) {
+                            if (depth == 0) break :blk_generic true;
+                            depth -= 1;
+                            continue;
+                        }
+
+                        if (depth == 0 and
+                            (std.mem.eql(u8, bt.text, "{") or
+                                std.mem.eql(u8, bt.text, "}") or
+                                std.mem.eql(u8, bt.text, "(") or
+                                std.mem.eql(u8, bt.text, ")") or
+                                std.mem.eql(u8, bt.text, ";") or
+                                std.mem.eql(u8, bt.text, "=")))
+                        {
+                            break :blk_generic false;
+                        }
+                    }
+                    break :blk_generic false;
+                };
+                if (in_generic_parameter_list) {
+                    if (next_non_comment) |ni| {
+                        const nt = idx.tokens[ni];
+                        if ((nt.kind == .symbol or nt.kind == .operator) and
+                            (std.mem.eql(u8, nt.text, ",") or std.mem.eql(u8, nt.text, ">")))
+                        {
+                            break :blk 7;
                         }
                     }
                 }
@@ -14119,17 +14196,52 @@ fn buildSemanticTokens(allocator: Allocator, idx: *const Index) ![]u32 {
                 // even if the type name isn't in this document's symbol table.
                 var j0: usize = ti + 1;
                 while (j0 < idx.tokens.len and idx.tokens[j0].kind == .comment) : (j0 += 1) {}
-                if (j0 < idx.tokens.len and idx.tokens[j0].kind == .identifier) {
-                    var k0: usize = j0 + 1;
+                var decl_name_i_opt: ?usize = null;
+                if (j0 < idx.tokens.len) {
+                    var probe = j0;
+
+                    // Support generic declarations like `Vec<num> v;`.
+                    if ((idx.tokens[probe].kind == .symbol or idx.tokens[probe].kind == .operator) and std.mem.eql(u8, idx.tokens[probe].text, "<")) {
+                        var depth: i64 = 0;
+                        var p = probe;
+                        while (p < idx.tokens.len) : (p += 1) {
+                            const pt = idx.tokens[p];
+                            if (pt.kind == .comment) continue;
+                            if (!(pt.kind == .symbol or pt.kind == .operator)) continue;
+                            if (std.mem.eql(u8, pt.text, "<")) {
+                                depth += 1;
+                            } else if (std.mem.eql(u8, pt.text, ">")) {
+                                depth -= 1;
+                                if (depth == 0) {
+                                    probe = p + 1;
+                                    break;
+                                }
+                            }
+                        }
+                        while (probe < idx.tokens.len and idx.tokens[probe].kind == .comment) : (probe += 1) {}
+                    }
+
+                    // Allow pointer declarations like `FILE* f;`.
+                    while (probe < idx.tokens.len and (idx.tokens[probe].kind == .symbol or idx.tokens[probe].kind == .operator) and std.mem.eql(u8, idx.tokens[probe].text, "*")) : (probe += 1) {
+                        while (probe < idx.tokens.len and idx.tokens[probe].kind == .comment) : (probe += 1) {}
+                    }
+
+                    if (probe < idx.tokens.len and idx.tokens[probe].kind == .identifier) {
+                        decl_name_i_opt = probe;
+                    }
+                }
+
+                if (decl_name_i_opt) |decl_name_i| {
+                    var k0: usize = decl_name_i + 1;
                     while (k0 < idx.tokens.len and idx.tokens[k0].kind == .comment) : (k0 += 1) {}
                     if (k0 < idx.tokens.len) {
                         const nt0 = idx.tokens[k0];
                         if ((nt0.kind == .symbol or nt0.kind == .operator) and
-                            (std.mem.eql(u8, nt0.text, ";") or std.mem.eql(u8, nt0.text, "=") or std.mem.eql(u8, nt0.text, ",")))
+                            (std.mem.eql(u8, nt0.text, ";") or std.mem.eql(u8, nt0.text, "=") or std.mem.eql(u8, nt0.text, ",") or std.mem.eql(u8, nt0.text, ")")))
                         {
-                            // Check if the type is a known struct/compound/interface in the symbol table.
                             const type_by_symbol = classifyIdentifierTokenType(idx, t.text);
-                            if (type_by_symbol == 7) {
+                            const type_by_shape = looks_type_like_ident or utils.get_c_typedef_alias_datatype_type(t.text) != null;
+                            if (type_by_symbol == 7 or type_by_shape) {
                                 break :blk 7; // type
                             }
                         }
@@ -14138,7 +14250,7 @@ fn buildSemanticTokens(allocator: Allocator, idx: *const Index) ![]u32 {
 
                 // Prefer symbol-table classification.
                 const by_symbol = classifyIdentifierTokenType(idx, t.text);
-                if (by_symbol == 5 or by_symbol == 7) break :blk by_symbol;
+                if (by_symbol == 5 or by_symbol == 7 or by_symbol == 8) break :blk by_symbol;
 
                 // Heuristic for call-sites: identifier followed by '(' => function.
                 var j: usize = ti + 1;
@@ -14153,7 +14265,11 @@ fn buildSemanticTokens(allocator: Allocator, idx: *const Index) ![]u32 {
                 break :blk by_symbol;
             },
         };
-        const modifiers: u32 = 0;
+        const default_library_modifier: u32 = 1 << 0;
+        const modifiers: u32 = if (token_type == 7 and isDefaultLibraryTypeName(t.text))
+            default_library_modifier
+        else
+            0;
 
         try data.appendSlice(&[_]u32{ delta_line, delta_start, length, token_type, modifiers });
         last_line = start_line;

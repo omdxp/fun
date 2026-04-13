@@ -8,6 +8,7 @@
     "string": "#F1C38F",
     "number": "#9DE0FF",
     "keyword": "#7AA2FF",
+    "operator": "#8FB3FF",
     "type_builtin": "#9BDC8A",
     "type_custom": "#B6A6FF",
     "support_type": "#7FE0C1",
@@ -41,6 +42,10 @@
       "scope": "keyword",
       "foreground": "var(keyword)",
       "font_style": "bold",
+    },
+    {
+      "scope": "keyword.operator, punctuation.separator",
+      "foreground": "var(operator)",
     },
     {
       "scope": "storage.type",
