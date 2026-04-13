@@ -119,6 +119,13 @@ const EMPTY_CONTENT: ReferenceContent = {
 
 type TabKey = "language" | "reference" | "stdlib" | "playground";
 
+function withBasePath(relativePath: string) {
+  const base = import.meta.env.BASE_URL || "/";
+  const normalizedBase = base.endsWith("/") ? base : `${base}/`;
+  const normalizedPath = relativePath.replace(/^\/+/, "");
+  return `${normalizedBase}${normalizedPath}`;
+}
+
 const isGithubPages =
   typeof window !== "undefined" &&
   window.location.hostname.endsWith("github.io");
@@ -342,7 +349,7 @@ function extractDocSections(
 }
 
 async function tryLoadVersionContent(version: string) {
-  const res = await fetch(`./versions/${version}/content.json`, {
+  const res = await fetch(withBasePath(`versions/${version}/content.json`), {
     cache: "no-store",
   });
   if (!res.ok) {
@@ -368,6 +375,7 @@ export default function App() {
     DEFAULT_FUN_VERSION,
   ]);
   const [selectedVersion, setSelectedVersion] = useState(getInitialVersion());
+  const [versionsReady, setVersionsReady] = useState(false);
   const [tab, setTab] = useState<TabKey>(initial.tab);
   const [search, setSearch] = useState("");
   const [globalSearch, setGlobalSearch] = useState("");
@@ -781,12 +789,22 @@ export default function App() {
   useEffect(() => {
     if (typeof window === "undefined") return;
 
+    let isCancelled = false;
+
     const load = async () => {
       try {
-        const res = await fetch("./versions/index.json", { cache: "no-store" });
-        if (!res.ok) return;
+        const res = await fetch(withBasePath("versions/index.json"), {
+          cache: "no-store",
+        });
+        if (!res.ok) {
+          throw new Error(`Failed to load versions index: ${res.status}`);
+        }
         const index = (await res.json()) as VersionsIndex;
-        if (!index.available || index.available.length === 0) return;
+        if (!index.available || index.available.length === 0) {
+          throw new Error("Versions index is empty");
+        }
+
+        if (isCancelled) return;
 
         setVersionList(index.available);
 
@@ -800,6 +818,7 @@ export default function App() {
       } catch {
         try {
           const fallbackContent = await tryLoadBundledContent();
+          if (isCancelled) return;
           setContent(fallbackContent);
 
           const fallbackVersions = fallbackContent.versions?.available?.length
@@ -815,17 +834,27 @@ export default function App() {
               : fallbackContent.funVersion;
           setSelectedVersion(nextVersion);
         } catch {
+          if (isCancelled) return;
           setContent(EMPTY_CONTENT);
           setVersionList([DEFAULT_FUN_VERSION]);
+          setSelectedVersion(DEFAULT_FUN_VERSION);
+        }
+      } finally {
+        if (!isCancelled) {
+          setVersionsReady(true);
         }
       }
     };
 
     void load();
+
+    return () => {
+      isCancelled = true;
+    };
   }, []);
 
   useEffect(() => {
-    if (!selectedVersion) return;
+    if (!versionsReady || !selectedVersion) return;
 
     const run = async () => {
       setIsVersionLoading(true);
@@ -840,10 +869,12 @@ export default function App() {
           const fallbackVersions = fallbackContent.versions?.available?.length
             ? fallbackContent.versions.available
             : [fallbackContent.funVersion];
-          setVersionList(fallbackVersions);
+          setVersionList((prev) => (prev.length > 1 ? prev : fallbackVersions));
         } catch {
           setContent(EMPTY_CONTENT);
-          setVersionList([DEFAULT_FUN_VERSION]);
+          setVersionList((prev) =>
+            prev.length > 1 ? prev : [DEFAULT_FUN_VERSION],
+          );
         }
       } finally {
         setIsVersionLoading(false);
@@ -851,7 +882,7 @@ export default function App() {
     };
 
     void run();
-  }, [selectedVersion]);
+  }, [selectedVersion, versionsReady]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
