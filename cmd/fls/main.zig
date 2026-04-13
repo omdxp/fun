@@ -790,6 +790,7 @@ const LspServer = struct {
                             "function",
                             "variable",
                             "type",
+                            "enumMember",
                         },
                         .tokenModifiers = &[_][]const u8{},
                     },
@@ -14014,7 +14015,7 @@ fn classifyIdentifierTokenType(idx: *const Index, name: []const u8) u32 {
         if (!std.mem.eql(u8, s.name, name)) continue;
         return switch (s.kind) {
             .function, .method => 5,
-            .struct_, .interface => 7,
+            .struct_, .interface, .enum_, .class, .typeParameter => 7,
             .variable => 6,
             .field, .property, .constant => 6,
             else => 6,
@@ -14046,7 +14047,7 @@ fn buildSemanticTokens(allocator: Allocator, idx: *const Index) ![]u32 {
             .comment => 1,
             .string => 2,
             .number => 3,
-            .boolean => 0,
+            .boolean => 8,
             .operator, .symbol => 4,
             .identifier => blk: {
                 // Member access: `.name` => variable/function depending on call usage.
@@ -14060,6 +14061,58 @@ fn buildSemanticTokens(allocator: Allocator, idx: *const Index) ![]u32 {
                         }
                     }
                     break :blk 6; // variable
+                }
+
+                // Generic parameter slots: `<T>`, `<T, U>`.
+                const prev_non_comment: ?usize = blk_prev: {
+                    var p = ti;
+                    while (p > 0) {
+                        p -= 1;
+                        if (idx.tokens[p].kind != .comment) break :blk_prev p;
+                    }
+                    break :blk_prev null;
+                };
+                const next_non_comment: ?usize = blk_next: {
+                    var n = ti + 1;
+                    while (n < idx.tokens.len) : (n += 1) {
+                        if (idx.tokens[n].kind != .comment) break :blk_next n;
+                    }
+                    break :blk_next null;
+                };
+                if (prev_non_comment) |pi| {
+                    const pt = idx.tokens[pi];
+                    if ((pt.kind == .symbol or pt.kind == .operator) and
+                        (std.mem.eql(u8, pt.text, "<") or std.mem.eql(u8, pt.text, ",")))
+                    {
+                        if (next_non_comment) |ni| {
+                            const nt = idx.tokens[ni];
+                            if ((nt.kind == .symbol or nt.kind == .operator) and
+                                (std.mem.eql(u8, nt.text, ",") or std.mem.eql(u8, nt.text, ">")))
+                            {
+                                break :blk 7;
+                            }
+                        }
+                    }
+                }
+
+                // Return type slot: `fun name(...) T {` and quirk signatures `name(...) T;`.
+                if (prev_non_comment) |pi| {
+                    const pt = idx.tokens[pi];
+                    if ((pt.kind == .symbol or pt.kind == .operator) and std.mem.eql(u8, pt.text, ")")) {
+                        var ri: usize = ti + 1;
+                        while (ri < idx.tokens.len and idx.tokens[ri].kind == .comment) : (ri += 1) {}
+                        while (ri < idx.tokens.len and (idx.tokens[ri].kind == .symbol or idx.tokens[ri].kind == .operator) and std.mem.eql(u8, idx.tokens[ri].text, "*")) : (ri += 1) {
+                            while (ri < idx.tokens.len and idx.tokens[ri].kind == .comment) : (ri += 1) {}
+                        }
+                        if (ri < idx.tokens.len) {
+                            const rt = idx.tokens[ri];
+                            if ((rt.kind == .symbol or rt.kind == .operator) and
+                                (std.mem.eql(u8, rt.text, "{") or std.mem.eql(u8, rt.text, ";")))
+                            {
+                                break :blk 7;
+                            }
+                        }
+                    }
                 }
 
                 // Heuristic: treat `Type name;` / `Type name =` / `Type name,` as a type position,

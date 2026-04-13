@@ -1,0 +1,66 @@
+{
+  "name": "Fun Web",
+  "author": "Fun language contributors",
+  "variables": {
+    "bg": "#0A1228",
+    "fg": "#E8EDFF",
+    "comment": "#7F8DB8",
+    "string": "#F1C38F",
+    "number": "#9DE0FF",
+    "keyword": "#7AA2FF",
+    "type_builtin": "#9BDC8A",
+    "type_custom": "#B6A6FF",
+    "support_type": "#7FE0C1",
+    "boolean": "#FFB3C0",
+    "func": "#A9E4FF",
+    "accent": "#6AA4FF",
+  },
+  "globals": {
+    "background": "var(bg)",
+    "foreground": "var(fg)",
+    "selection": "color(var(accent) alpha(0.35))",
+    "caret": "#E9EEFF",
+    "line_highlight": "#0D1630",
+    "inactive_selection": "color(var(accent) alpha(0.2))",
+    "gutter_foreground": "#5A6EA8",
+  },
+  "rules": [
+    {
+      "scope": "comment",
+      "foreground": "var(comment)",
+    },
+    {
+      "scope": "string, constant.character.escape",
+      "foreground": "var(string)",
+    },
+    {
+      "scope": "constant.numeric",
+      "foreground": "var(number)",
+    },
+    {
+      "scope": "keyword",
+      "foreground": "var(keyword)",
+      "font_style": "bold",
+    },
+    {
+      "scope": "storage.type",
+      "foreground": "var(type_builtin)",
+    },
+    {
+      "scope": "entity.name.type",
+      "foreground": "var(type_custom)",
+    },
+    {
+      "scope": "support.type",
+      "foreground": "var(support_type)",
+    },
+    {
+      "scope": "constant.language.boolean",
+      "foreground": "var(boolean)",
+    },
+    {
+      "scope": "entity.name.function, support.function",
+      "foreground": "var(func)",
+    },
+  ],
+}

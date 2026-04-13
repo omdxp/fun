@@ -61,6 +61,13 @@
         "path": "./syntaxes/fun.tmLanguage.json"
       }
     ],
+    "themes": [
+      {
+        "label": "Fun Web",
+        "uiTheme": "vs-dark",
+        "path": "./themes/fun-web-color-theme.json"
+      }
+    ],
     "configuration": {
       "title": "Fun",
       "properties": {
@@ -123,5 +130,8 @@
     "@types/vscode": "^1.74.0",
     "typescript": "^5.3.3",
     "@vscode/vsce": "^3.7.1"
+  },
+  "overrides": {
+    "cheerio": "1.0.0"
   }
 }

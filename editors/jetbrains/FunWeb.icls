@@ -1,0 +1,71 @@
+<scheme name="Fun Web" version="142" parent_scheme="Darcula">
+  <colors>
+    <option name="CARET_COLOR" value="E9EEFF" />
+    <option name="CARET_ROW_COLOR" value="0D1630" />
+    <option name="GUTTER_BACKGROUND" value="0A1228" />
+    <option name="LINE_NUMBERS_COLOR" value="5A6EA8" />
+    <option name="LINE_NUMBER_ON_CARET_ROW_COLOR" value="9CB1E9" />
+    <option name="SELECTION_BACKGROUND" value="355AAD" />
+    <option name="INDENT_GUIDE" value="22315F" />
+    <option name="SELECTED_INDENT_GUIDE" value="37539A" />
+  </colors>
+  <attributes>
+    <option name="TEXT">
+      <value>
+        <option name="FOREGROUND" value="E8EDFF" />
+        <option name="BACKGROUND" value="0A1228" />
+      </value>
+    </option>
+    <option name="DEFAULT_LINE_COMMENT">
+      <value>
+        <option name="FOREGROUND" value="7F8DB8" />
+      </value>
+    </option>
+    <option name="DEFAULT_BLOCK_COMMENT">
+      <value>
+        <option name="FOREGROUND" value="7F8DB8" />
+      </value>
+    </option>
+    <option name="DEFAULT_STRING">
+      <value>
+        <option name="FOREGROUND" value="F1C38F" />
+      </value>
+    </option>
+    <option name="DEFAULT_VALID_STRING_ESCAPE">
+      <value>
+        <option name="FOREGROUND" value="F1C38F" />
+      </value>
+    </option>
+    <option name="DEFAULT_NUMBER">
+      <value>
+        <option name="FOREGROUND" value="9DE0FF" />
+      </value>
+    </option>
+    <option name="DEFAULT_KEYWORD">
+      <value>
+        <option name="FOREGROUND" value="7AA2FF" />
+        <option name="FONT_TYPE" value="1" />
+      </value>
+    </option>
+    <option name="DEFAULT_CLASS_NAME">
+      <value>
+        <option name="FOREGROUND" value="B6A6FF" />
+      </value>
+    </option>
+    <option name="DEFAULT_METADATA">
+      <value>
+        <option name="FOREGROUND" value="7FE0C1" />
+      </value>
+    </option>
+    <option name="DEFAULT_CONSTANT">
+      <value>
+        <option name="FOREGROUND" value="FFB3C0" />
+      </value>
+    </option>
+    <option name="DEFAULT_FUNCTION_DECLARATION">
+      <value>
+        <option name="FOREGROUND" value="A9E4FF" />
+      </value>
+    </option>
+  </attributes>
+</scheme>

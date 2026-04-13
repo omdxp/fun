@@ -8,6 +8,12 @@ Add this repo's vim files to your runtimepath:
 
 - Copy `editors/vim` into `~/.config/nvim` (or add it to `runtimepath`).
 
+Then enable the bundled website-matching colorscheme:
+
+```lua
+vim.cmd.colorscheme('funweb')
+```
+
 ## LSP (fls)
 
 If you use `nvim-lspconfig`:

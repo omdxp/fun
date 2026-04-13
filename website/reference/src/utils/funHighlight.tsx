@@ -59,24 +59,64 @@ const FUN_SUPPORT_TYPES = [
   "clock_t",
 ];
 
-const TOKEN_REGEX = new RegExp(
-  [
-    "(?<comment>//.*$)",
-    "(?<string>\"(?:[^\\\"\\\\]|\\\\.)*\"|'(?:[^'\\\\]|\\\\.)*')",
-    "(?<number>\\b(?:0x[0-9a-fA-F]+|\\d+(?:\\.\\d+)?)\\b)",
-    `(?<keyword>\\b(?:${FUN_KEYWORDS.join("|")})\\b)`,
-    `(?<type>\\b(?:${FUN_BUILTIN_TYPES.join("|")}|i[1-9][0-9]*|u[1-9][0-9]*)\\b)`,
-    `(?<support>\\b(?:${FUN_SUPPORT_TYPES.join("|")})\\b)`,
-    "(?<boolean>\\b(?:true|false)\\b)",
-  ].join("|"),
-  "gm",
-);
+const TYPE_DECL_REGEX =
+  /\b(?:compound|quirk|enum|impl)\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+const TYPE_REF_REGEX =
+  /\b([A-Z][A-Za-z0-9_]*)\b(?=\s*(?:\*+)?\s*[A-Za-z_][A-Za-z0-9_]*\b)/g;
+
+function escapeRegExp(text: string) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function collectCustomTypeNames(code: string) {
+  const out = new Set<string>();
+  for (const match of code.matchAll(TYPE_DECL_REGEX)) {
+    const name = match[1] ?? "";
+    if (name) out.add(name);
+  }
+  for (const match of code.matchAll(TYPE_REF_REGEX)) {
+    const name = match[1] ?? "";
+    if (name) out.add(name);
+  }
+  return [...out];
+}
+
+const FUN_NON_FUNCTION_IDENTIFIERS = [...FUN_KEYWORDS, "true", "false"];
+
+function buildTokenRegex(code: string) {
+  const customTypeNames = collectCustomTypeNames(code);
+  const escapedCustomTypeNames = customTypeNames.map(escapeRegExp);
+  const customTypePattern = escapedCustomTypeNames.length
+    ? `(?<customType>\\b(?:${escapedCustomTypeNames.join("|")})\\b)`
+    : "(?!)";
+
+  const nonFunctionIdentifiers = [
+    ...FUN_NON_FUNCTION_IDENTIFIERS,
+    ...customTypeNames,
+  ];
+
+  return new RegExp(
+    [
+      "(?<comment>//.*$)",
+      "(?<string>\"(?:[^\\\"\\\\]|\\\\.)*\"|'(?:[^'\\\\]|\\\\.)*')",
+      "(?<number>\\b(?:0x[0-9a-fA-F]+|\\d+(?:\\.\\d+)?)\\b)",
+      `(?<keyword>\\b(?:${FUN_KEYWORDS.join("|")})\\b)`,
+      `(?<type>\\b(?:${FUN_BUILTIN_TYPES.join("|")}|i[1-9][0-9]*|u[1-9][0-9]*)\\b)`,
+      `(?<support>\\b(?:${FUN_SUPPORT_TYPES.join("|")})\\b)`,
+      customTypePattern,
+      `(?<function>\\b(?!${nonFunctionIdentifiers.map((keyword) => `${escapeRegExp(keyword)}\\b`).join("|")})(?:[A-Za-z_][A-Za-z0-9_]*)\\b(?=\\s*\\())`,
+      "(?<boolean>\\b(?:true|false)\\b)",
+    ].join("|"),
+    "gm",
+  );
+}
 
 export function highlightFun(code: string): ReactNode[] {
+  const tokenRegex = buildTokenRegex(code);
   const nodes: ReactNode[] = [];
   let lastIndex = 0;
 
-  for (const match of code.matchAll(TOKEN_REGEX)) {
+  for (const match of code.matchAll(tokenRegex)) {
     const index = match.index ?? 0;
     if (index > lastIndex) {
       nodes.push(code.slice(lastIndex, index));
@@ -89,6 +129,8 @@ export function highlightFun(code: string): ReactNode[] {
     if (groups.comment) className = "tok-comment";
     else if (groups.string) className = "tok-string";
     else if (groups.number) className = "tok-number";
+    else if (groups.customType) className = "tok-custom-type";
+    else if (groups.function) className = "tok-function";
     else if (groups.keyword) className = "tok-keyword";
     else if (groups.type) className = "tok-type";
     else if (groups.support) className = "tok-support-type";

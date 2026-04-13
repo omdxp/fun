@@ -338,6 +338,8 @@ h1 { margin-top: 0; }
 .tok-comment { color: #7f8db8; }
 .tok-string { color: #f1c38f; }
 .tok-number { color: #9de0ff; }
+.tok-custom-type { color: #b6a6ff; }
+.tok-function { color: #a9e4ff; }
 .tok-keyword { color: #7aa2ff; font-weight: 600; }
 .tok-type { color: #9bdc8a; }
 .tok-support-type { color: #7fe0c1; }

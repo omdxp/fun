@@ -10,6 +10,7 @@
     { "include": "#typeDeclarations" },
     { "include": "#genericTypes" },
     { "include": "#types" },
+    { "include": "#customTypeReferences" },
     { "include": "#functions" },
     { "include": "#booleans" },
     { "include": "#keywords" }
@@ -107,6 +108,14 @@
         {
           "name": "support.type.fun",
           "match": "\\b(size_t|ptrdiff_t|ssize_t|intptr_t|uintptr_t|int8_t|uint8_t|int16_t|uint16_t|int32_t|uint32_t|int64_t|uint64_t|time_t|clock_t)\\b"
+        }
+      ]
+    },
+    "customTypeReferences": {
+      "patterns": [
+        {
+          "name": "entity.name.type.fun",
+          "match": "\\b([A-Z][A-Za-z0-9_]*)\\b(?=\\s*(?:\\*+)?\\s*[A-Za-z_][A-Za-z0-9_]*\\b)"
         }
       ]
     },

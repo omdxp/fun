@@ -9,6 +9,18 @@ contexts:
   main:
     - match: //.*$
       scope: comment.line.double-slash.fun
+    - match: \b(compound|quirk|enum|impl)\s+([A-Za-z_][A-Za-z0-9_]*)(\s*<[^>]+>)?
+      captures:
+        1: keyword.control.fun
+        2: entity.name.type.fun
+        3: entity.name.type.parameters.fun
+    - match: \b([A-Za-z_][A-Za-z0-9_]*)\s*(<[^>]+>)
+      captures:
+        1: entity.name.type.fun
+        2: entity.name.type.parameters.fun
+    - match: \b([A-Z][A-Za-z0-9_]*)\b(?=\s*(?:\*+)?\s*[A-Za-z_][A-Za-z0-9_]*\b)
+      captures:
+        1: entity.name.type.fun
     - match: '"'
       scope: punctuation.definition.string.begin.fun
       push: double_quoted
@@ -17,8 +29,12 @@ contexts:
       push: single_quoted
     - match: \b(imp|as|pub|fun|compound|quirk|impl|enum|let|asm|volatile|arch|defer|ret|if|elif|else|for|fit|async|await|break|continue|assert|allow|expect)\b
       scope: keyword.control.fun
-    - match: \b(void|raw|num|dec|f32|f64|str|bin|chr|i[1-9][0-9]*|u[1-9][0-9]*|true|false)\b
-      scope: constant.language.fun
+    - match: \b(void|raw|num|dec|f32|f64|str|bin|chr|i[1-9][0-9]*|u[1-9][0-9]*)\b
+      scope: storage.type.fun
+    - match: \b(size_t|ptrdiff_t|ssize_t|intptr_t|uintptr_t|int8_t|uint8_t|int16_t|uint16_t|int32_t|uint32_t|int64_t|uint64_t|time_t|clock_t)\b
+      scope: support.type.fun
+    - match: \b(true|false)\b
+      scope: constant.language.boolean.fun
     - match: \b\d+(\.\d+)?\b
       scope: constant.numeric.fun
 

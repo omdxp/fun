@@ -9,6 +9,15 @@ Load `fun-mode.el`:
 (require 'fun-mode)
 ```
 
+## Theme
+
+Load the bundled website-matching theme:
+
+```elisp
+(add-to-list 'custom-theme-load-path "/path/to/fun/editors/emacs")
+(load-theme 'fun-web t)
+```
+
 ## LSP (lsp-mode)
 
 ```elisp

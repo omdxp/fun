@@ -7,6 +7,7 @@ Official VS Code support for the Fun language. This extension provides syntax hi
 - Syntax highlighting for `.fn` files
 - Language Server support via `fls` (hover, completion, diagnostics, go-to-definition, formatting, etc. as provided by `fls`)
 - Output channel: **Fun Language Server** (useful for debugging startup issues)
+- Bundled color theme: **Fun Web** (matches the reference website palette)
 
 ## Requirements
 
@@ -25,6 +26,8 @@ By default the extension will try, in order:
 1. Install the extension.
 2. Open a `.fn` file.
 3. If the server doesn’t start, open **View → Output** and select **Fun Language Server**.
+
+Optional: set **Preferences → Theme → Color Theme → Fun Web** to use the same code palette as the website.
 
 ## Settings
 

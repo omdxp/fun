@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import MarkdownWithPlayground from "./components/MarkdownWithPlayground";
 import RunCodeBlock from "./components/RunCodeBlock";
 import { highlightFun } from "./utils/funHighlight";
-import bundledContent from "./generated/content.json";
+import bundledContentUrl from "./generated/content.json?url";
 
 type DocsSections = {
   params: string[];
@@ -99,7 +99,23 @@ type TocHeading = {
   level: number;
 };
 
-const initialContent = bundledContent as ReferenceContent;
+const DEFAULT_FUN_VERSION = "0.0.0";
+
+const EMPTY_CONTENT: ReferenceContent = {
+  generatedAt: new Date().toISOString(),
+  funVersion: DEFAULT_FUN_VERSION,
+  versions: {
+    latest: DEFAULT_FUN_VERSION,
+    available: [DEFAULT_FUN_VERSION],
+  },
+  docs: {
+    language: "",
+    reference: "",
+    stdlibReadme: "",
+  },
+  stdlib: [],
+  samples: [],
+};
 
 type TabKey = "language" | "reference" | "stdlib" | "playground";
 
@@ -212,11 +228,11 @@ function getInitialHashState() {
 
 function getInitialVersion() {
   if (typeof window === "undefined") {
-    return initialContent.funVersion;
+    return DEFAULT_FUN_VERSION;
   }
 
   const params = new URLSearchParams(window.location.search);
-  return params.get("v") || initialContent.funVersion;
+  return params.get("v") || DEFAULT_FUN_VERSION;
 }
 
 function formatSnippet(text: string, q: string) {
@@ -335,14 +351,22 @@ async function tryLoadVersionContent(version: string) {
   return (await res.json()) as ReferenceContent;
 }
 
+async function tryLoadBundledContent() {
+  const res = await fetch(bundledContentUrl, {
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    throw new Error("Failed to load bundled content");
+  }
+  return (await res.json()) as ReferenceContent;
+}
+
 export default function App() {
   const initial = getInitialHashState();
-  const [content, setContent] = useState<ReferenceContent>(initialContent);
-  const [versionList, setVersionList] = useState<string[]>(
-    initialContent.versions?.available?.length
-      ? initialContent.versions.available
-      : [initialContent.funVersion],
-  );
+  const [content, setContent] = useState<ReferenceContent>(EMPTY_CONTENT);
+  const [versionList, setVersionList] = useState<string[]>([
+    DEFAULT_FUN_VERSION,
+  ]);
   const [selectedVersion, setSelectedVersion] = useState(getInitialVersion());
   const [tab, setTab] = useState<TabKey>(initial.tab);
   const [search, setSearch] = useState("");
@@ -774,7 +798,26 @@ export default function App() {
             : index.latest;
         setSelectedVersion(nextVersion);
       } catch {
-        // Fall back to bundled content when versions index is unavailable.
+        try {
+          const fallbackContent = await tryLoadBundledContent();
+          setContent(fallbackContent);
+
+          const fallbackVersions = fallbackContent.versions?.available?.length
+            ? fallbackContent.versions.available
+            : [fallbackContent.funVersion];
+          setVersionList(fallbackVersions);
+
+          const params = new URLSearchParams(window.location.search);
+          const requested = params.get("v");
+          const nextVersion =
+            requested && fallbackVersions.includes(requested)
+              ? requested
+              : fallbackContent.funVersion;
+          setSelectedVersion(nextVersion);
+        } catch {
+          setContent(EMPTY_CONTENT);
+          setVersionList([DEFAULT_FUN_VERSION]);
+        }
       }
     };
 
@@ -790,7 +833,18 @@ export default function App() {
         const nextContent = await tryLoadVersionContent(selectedVersion);
         setContent(nextContent);
       } catch {
-        setContent(initialContent);
+        try {
+          const fallbackContent = await tryLoadBundledContent();
+          setContent(fallbackContent);
+
+          const fallbackVersions = fallbackContent.versions?.available?.length
+            ? fallbackContent.versions.available
+            : [fallbackContent.funVersion];
+          setVersionList(fallbackVersions);
+        } catch {
+          setContent(EMPTY_CONTENT);
+          setVersionList([DEFAULT_FUN_VERSION]);
+        }
       } finally {
         setIsVersionLoading(false);
       }

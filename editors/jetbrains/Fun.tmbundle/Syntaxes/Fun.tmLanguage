@@ -20,6 +20,127 @@
       </dict>
       <dict>
         <key>name</key>
+        <string>meta.type.declaration.struct.fun</string>
+        <key>match</key>
+        <string>\b(compound)\s+([A-Za-z_][A-Za-z0-9_]*)(\s*&lt;[^&gt;]+&gt;)?</string>
+        <key>captures</key>
+        <dict>
+          <key>1</key>
+          <dict>
+            <key>name</key>
+            <string>storage.type.struct.fun</string>
+          </dict>
+          <key>2</key>
+          <dict>
+            <key>name</key>
+            <string>entity.name.type.struct.fun</string>
+          </dict>
+          <key>3</key>
+          <dict>
+            <key>name</key>
+            <string>entity.name.type.parameters.fun</string>
+          </dict>
+        </dict>
+      </dict>
+      <dict>
+        <key>name</key>
+        <string>meta.type.declaration.enum.fun</string>
+        <key>match</key>
+        <string>\b(enum)\s+([A-Za-z_][A-Za-z0-9_]*)(\s*&lt;[^&gt;]+&gt;)?</string>
+        <key>captures</key>
+        <dict>
+          <key>1</key>
+          <dict>
+            <key>name</key>
+            <string>storage.type.enum.fun</string>
+          </dict>
+          <key>2</key>
+          <dict>
+            <key>name</key>
+            <string>entity.name.type.enum.fun</string>
+          </dict>
+          <key>3</key>
+          <dict>
+            <key>name</key>
+            <string>entity.name.type.parameters.fun</string>
+          </dict>
+        </dict>
+      </dict>
+      <dict>
+        <key>name</key>
+        <string>meta.type.declaration.interface.fun</string>
+        <key>match</key>
+        <string>\b(quirk)\s+([A-Za-z_][A-Za-z0-9_]*)(\s*&lt;[^&gt;]+&gt;)?</string>
+        <key>captures</key>
+        <dict>
+          <key>1</key>
+          <dict>
+            <key>name</key>
+            <string>storage.type.interface.fun</string>
+          </dict>
+          <key>2</key>
+          <dict>
+            <key>name</key>
+            <string>entity.name.type.interface.fun</string>
+          </dict>
+          <key>3</key>
+          <dict>
+            <key>name</key>
+            <string>entity.name.type.parameters.fun</string>
+          </dict>
+        </dict>
+      </dict>
+      <dict>
+        <key>name</key>
+        <string>meta.type.implementation.fun</string>
+        <key>match</key>
+        <string>\b(impl)\s+([A-Za-z_][A-Za-z0-9_]*)(\s*&lt;[^&gt;]+&gt;)?</string>
+        <key>captures</key>
+        <dict>
+          <key>1</key>
+          <dict>
+            <key>name</key>
+            <string>keyword.control.fun</string>
+          </dict>
+          <key>2</key>
+          <dict>
+            <key>name</key>
+            <string>entity.name.type.interface.fun</string>
+          </dict>
+          <key>3</key>
+          <dict>
+            <key>name</key>
+            <string>entity.name.type.parameters.fun</string>
+          </dict>
+        </dict>
+      </dict>
+      <dict>
+        <key>name</key>
+        <string>meta.type.generic.fun</string>
+        <key>match</key>
+        <string>\b([A-Za-z_][A-Za-z0-9_]*)\s*(&lt;[^&gt;]+&gt;)</string>
+        <key>captures</key>
+        <dict>
+          <key>1</key>
+          <dict>
+            <key>name</key>
+            <string>entity.name.type.fun</string>
+          </dict>
+          <key>2</key>
+          <dict>
+            <key>name</key>
+            <string>entity.name.type.parameters.fun</string>
+          </dict>
+        </dict>
+      </dict>
+      <dict>
+        <key>name</key>
+        <string>entity.name.type.fun</string>
+        <key>match</key>
+        <string>\b([A-Z][A-Za-z0-9_]*)\b(?=\s*(?:\*+)?\s*[A-Za-z_][A-Za-z0-9_]*\b)</string>
+      </dict>
+      <dict>
+        <key>name</key>
         <string>string.quoted.double.fun</string>
         <key>begin</key>
         <string>"</string>
@@ -61,9 +182,22 @@
       </dict>
       <dict>
         <key>name</key>
-        <string>constant.language.fun</string>
+        <string>storage.type.fun</string>
         <key>match</key>
-        <string>\b(void|raw|num|dec|f32|f64|str|bin|chr|i[1-9][0-9]*|u[1-9][0-9]*|true|false)\b</string>
+        <string>\b(void|raw|num|dec|f32|f64|str|bin|chr|i[1-9][0-9]*|u[1-9][0-9]*)\b</string>
+      </dict>
+      <dict>
+        <key>name</key>
+        <string>support.type.fun</string>
+        <key>match</key>
+        <string>
+          \b(size_t|ptrdiff_t|ssize_t|intptr_t|uintptr_t|int8_t|uint8_t|int16_t|uint16_t|int32_t|uint32_t|int64_t|uint64_t|time_t|clock_t)\b</string>
+      </dict>
+      <dict>
+        <key>name</key>
+        <string>constant.language.boolean.fun</string>
+        <key>match</key>
+        <string>\b(true|false)\b</string>
       </dict>
       <dict>
         <key>name</key>
