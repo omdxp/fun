@@ -59,7 +59,9 @@
   :syntax-table fun-mode-syntax-table
   (setq font-lock-defaults '(fun-font-lock-keywords))
   (setq-local comment-start "// ")
-  (setq-local comment-end ""))
+  (setq-local comment-end "")
+  (setq-local indent-tabs-mode nil)
+  (setq-local tab-width 2))
 
 ;;;###autoload
 (add-to-list 'auto-mode-alist '("\\.fn\\'" . fun-mode))
