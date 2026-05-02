@@ -1123,7 +1123,7 @@ const LspServer = struct {
             defer buf.deinit();
             try buf.writer().writeAll(
                 "**sizeof**\n\n" ++
-                    "```\n" ++
+                    "```fun\n" ++
                     "sizeof(Type) num\n" ++
                     "```\n" ++
                     "Returns the size in bytes of `Type`.\n" ++
@@ -1150,7 +1150,7 @@ const LspServer = struct {
                         var buf = std.ArrayList(u8).init(self.allocator);
                         defer buf.deinit();
                         try buf.writer().print("**{s}**\n\n", .{variant_name});
-                        try buf.writer().print("```\n{s}.{s}\n```\n", .{ enum_name, variant_name });
+                        try buf.writer().print("```fun\n{s}.{s}\n```\n", .{ enum_name, variant_name });
                         if (self.docs.get(h.uri)) |hdoc| {
                             _ = try appendDocCommentAboveLine(self.allocator, &buf, hdoc.text, h.sym.decl_range.start.line);
                         }
@@ -1194,17 +1194,17 @@ const LspServer = struct {
                                             break :blk vt;
                                         };
 
-                                        try buf.writer().print("```\n{s} {s}\n```\n", .{ shown_vt, name });
+                                        try buf.writer().print("```fun\n{s} {s}\n```\n", .{ shown_vt, name });
                                     } else {
                                         try buf.writer().print("_field_\n", .{});
                                     }
                                 },
                                 .enumMember => {
-                                    try buf.writer().print("```\n{s}.{s}\n```\n", .{ recv_type, name });
+                                    try buf.writer().print("```fun\n{s}.{s}\n```\n", .{ recv_type, name });
                                 },
                                 .method => {
                                     if (h.sym.detail) |det| {
-                                        try buf.writer().print("```\n{s}\n```\n", .{det});
+                                        try buf.writer().print("```fun\n{s}\n```\n", .{det});
                                     } else {
                                         try buf.writer().print("_method on {s}_\n", .{recv_type});
                                     }
@@ -1343,12 +1343,12 @@ const LspServer = struct {
                     } else if (d.kind == .function and d.value_type != null) {
                         const det_trim = std.mem.trimRight(u8, det, " \t\r\n");
                         if (det_trim.len != 0 and det_trim[det_trim.len - 1] == ')') {
-                            try buf.writer().print("```\n{s} {s}\n```\n", .{ det_trim, d.value_type.? });
+                            try buf.writer().print("```fun\n{s} {s}\n```\n", .{ det_trim, d.value_type.? });
                         } else {
-                            try buf.writer().print("```\n{s}\n```\n", .{det});
+                            try buf.writer().print("```fun\n{s}\n```\n", .{det});
                         }
                     } else {
-                        try buf.writer().print("```\n{s}\n```\n", .{det});
+                        try buf.writer().print("```fun\n{s}\n```\n", .{det});
                     }
                 }
             }
@@ -1356,7 +1356,7 @@ const LspServer = struct {
                 const vt = d.value_type orelse self.guessVariableType(idx, uri, tok.text, pos);
                 if (vt) |vts| {
                     if (!isLetInferTypeName(vts)) {
-                        try buf.writer().print("```\n{s} {s}\n```\n", .{ vts, tok.text });
+                        try buf.writer().print("```fun\n{s} {s}\n```\n", .{ vts, tok.text });
                     }
                 } else {
                     try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
@@ -1364,18 +1364,18 @@ const LspServer = struct {
             } else if (d.kind == .enumMember) {
                 const recv_type = d.container_type orelse d.value_type orelse "";
                 if (recv_type.len != 0) {
-                    try buf.writer().print("```\n{s}.{s}\n```\n", .{ recv_type, tok.text });
+                    try buf.writer().print("```fun\n{s}.{s}\n```\n", .{ recv_type, tok.text });
                 } else {
                     try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
                 }
             } else if ((d.kind == .struct_ or d.kind == .interface or d.kind == .enum_)) {
                 const kw = if (d.kind == .struct_) "compound" else if (d.kind == .interface) "quirk" else "enum";
                 if (concrete_hover_type) |concrete| {
-                    try buf.writer().print("```\n{s} {s}\n```\n", .{ kw, concrete });
+                    try buf.writer().print("```fun\n{s} {s}\n```\n", .{ kw, concrete });
                 } else if (d.detail) |det| {
-                    try buf.writer().print("```\n{s}\n```\n", .{det});
+                    try buf.writer().print("```fun\n{s}\n```\n", .{det});
                 } else {
-                    try buf.writer().print("```\n{s} {s}\n```\n", .{ kw, tok.text });
+                    try buf.writer().print("```fun\n{s} {s}\n```\n", .{ kw, tok.text });
                 }
             } else {
                 try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
@@ -1391,12 +1391,12 @@ const LspServer = struct {
                     if (d.kind == .function and d.value_type != null) {
                         const det_trim = std.mem.trimRight(u8, det, " \t\r\n");
                         if (det_trim.len != 0 and det_trim[det_trim.len - 1] == ')') {
-                            try buf.writer().print("```\n{s} {s}\n```\n", .{ det_trim, d.value_type.? });
+                            try buf.writer().print("```fun\n{s} {s}\n```\n", .{ det_trim, d.value_type.? });
                         } else {
-                            try buf.writer().print("```\n{s}\n```\n", .{det});
+                            try buf.writer().print("```fun\n{s}\n```\n", .{det});
                         }
                     } else {
-                        try buf.writer().print("```\n{s}\n```\n", .{det});
+                        try buf.writer().print("```fun\n{s}\n```\n", .{det});
                     }
                     printed_detail = true;
                 }
@@ -1405,25 +1405,25 @@ const LspServer = struct {
                 if (d.kind == .variable) {
                     const vt = d.value_type orelse self.guessVariableType(idx, uri, tok.text, pos);
                     if (vt) |vts| {
-                        try buf.writer().print("```\n{s} {s}\n```\n", .{ vts, tok.text });
+                        try buf.writer().print("```fun\n{s} {s}\n```\n", .{ vts, tok.text });
                     } else {
                         try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
                     }
                 } else if (d.kind == .enumMember) {
                     const recv_type = d.container_type orelse d.value_type orelse "";
                     if (recv_type.len != 0) {
-                        try buf.writer().print("```\n{s}.{s}\n```\n", .{ recv_type, tok.text });
+                        try buf.writer().print("```fun\n{s}.{s}\n```\n", .{ recv_type, tok.text });
                     } else {
                         try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
                     }
                 } else if ((d.kind == .struct_ or d.kind == .interface or d.kind == .enum_)) {
                     const kw = if (d.kind == .struct_) "compound" else if (d.kind == .interface) "quirk" else "enum";
                     if (concrete_hover_type) |concrete| {
-                        try buf.writer().print("```\n{s} {s}\n```\n", .{ kw, concrete });
+                        try buf.writer().print("```fun\n{s} {s}\n```\n", .{ kw, concrete });
                     } else if (d.detail) |det| {
-                        try buf.writer().print("```\n{s}\n```\n", .{det});
+                        try buf.writer().print("```fun\n{s}\n```\n", .{det});
                     } else {
-                        try buf.writer().print("```\n{s} {s}\n```\n", .{ kw, tok.text });
+                        try buf.writer().print("```fun\n{s} {s}\n```\n", .{ kw, tok.text });
                     }
                 } else {
                     try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
@@ -1435,7 +1435,7 @@ const LspServer = struct {
         } else {
             try buf.writer().print("**{s}**\n\n", .{tok.text});
             if (self.guessVariableType(idx, uri, tok.text, pos)) |vt| {
-                try buf.writer().print("```\n{s} {s}\n```\n", .{ vt, tok.text });
+                try buf.writer().print("```fun\n{s} {s}\n```\n", .{ vt, tok.text });
             }
         }
 
@@ -5752,15 +5752,15 @@ const LspServer = struct {
 
             try buf.writer().print("**{s}**\n\n", .{symbol_name});
             if (sym.detail) |det| {
-                try buf.writer().print("```\n{s}\n```\n", .{det});
+                try buf.writer().print("```fun\n{s}\n```\n", .{det});
             } else if (sym.kind == .variable) {
                 if (sym.value_type) |vt| {
-                    try buf.writer().print("```\n{s} {s}\n```\n", .{ vt, symbol_name });
+                    try buf.writer().print("```fun\n{s} {s}\n```\n", .{ vt, symbol_name });
                 } else {
                     try buf.writer().print("_{s}_\n", .{@tagName(sym.kind)});
                 }
             } else if (sym.kind == .struct_ or sym.kind == .interface) {
-                try buf.writer().print("```\n{s} {s}\n```\n", .{ if (sym.kind == .struct_) "compound" else "quirk", symbol_name });
+                try buf.writer().print("```fun\n{s} {s}\n```\n", .{ if (sym.kind == .struct_) "compound" else "quirk", symbol_name });
             } else {
                 try buf.writer().print("_{s}_\n", .{@tagName(sym.kind)});
             }
@@ -14078,20 +14078,6 @@ fn buildSemanticTokens(allocator: Allocator, idx: *const Index) ![]u32 {
             .boolean => 9,
             .operator, .symbol => 4,
             .identifier => blk: {
-                // Member access: `.name` => variable/function depending on call usage.
-                if (ti > 0 and isDotToken(idx.tokens[ti - 1])) {
-                    var j1: usize = ti + 1;
-                    while (j1 < idx.tokens.len and idx.tokens[j1].kind == .comment) : (j1 += 1) {}
-                    if (j1 < idx.tokens.len) {
-                        const nt1 = idx.tokens[j1];
-                        if ((nt1.kind == .symbol or nt1.kind == .operator) and std.mem.eql(u8, nt1.text, "(")) {
-                            break :blk 5; // function
-                        }
-                    }
-                    break :blk 6; // variable
-                }
-
-                // Generic parameter slots: `<T>`, `<T, U>`.
                 const prev_non_comment: ?usize = blk_prev: {
                     var p = ti;
                     while (p > 0) {
@@ -14107,6 +14093,16 @@ fn buildSemanticTokens(allocator: Allocator, idx: *const Index) ![]u32 {
                     }
                     break :blk_next null;
                 };
+
+                // Function declaration name: `fun name(...)` and `fun name<T>(...)`.
+                if (prev_non_comment) |pi| {
+                    const pt = idx.tokens[pi];
+                    if (pt.kind == .keyword and std.mem.eql(u8, pt.text, "fun")) {
+                        break :blk 5;
+                    }
+                }
+
+                // Generic parameter slots: `<T>`, `<T, U>`.
                 const looks_type_like_ident = t.text.len != 0 and std.ascii.isUpper(t.text[0]);
 
                 // Type slots in impl clauses: `impl Type as Quirk`.
@@ -14221,9 +14217,35 @@ fn buildSemanticTokens(allocator: Allocator, idx: *const Index) ![]u32 {
                         while (probe < idx.tokens.len and idx.tokens[probe].kind == .comment) : (probe += 1) {}
                     }
 
-                    // Allow pointer declarations like `FILE* f;`.
-                    while (probe < idx.tokens.len and (idx.tokens[probe].kind == .symbol or idx.tokens[probe].kind == .operator) and std.mem.eql(u8, idx.tokens[probe].text, "*")) : (probe += 1) {
-                        while (probe < idx.tokens.len and idx.tokens[probe].kind == .comment) : (probe += 1) {}
+                    // Allow suffixes in declarations like `Type* name`, `Type[] name`, `Type[16] name`.
+                    var scanning_suffix = true;
+                    while (scanning_suffix and probe < idx.tokens.len) {
+                        scanning_suffix = false;
+
+                        while (probe < idx.tokens.len and (idx.tokens[probe].kind == .symbol or idx.tokens[probe].kind == .operator) and std.mem.eql(u8, idx.tokens[probe].text, "*")) : (probe += 1) {
+                            while (probe < idx.tokens.len and idx.tokens[probe].kind == .comment) : (probe += 1) {}
+                            scanning_suffix = true;
+                        }
+
+                        if (probe < idx.tokens.len and (idx.tokens[probe].kind == .symbol or idx.tokens[probe].kind == .operator) and std.mem.eql(u8, idx.tokens[probe].text, "[")) {
+                            var depth: i64 = 0;
+                            while (probe < idx.tokens.len) : (probe += 1) {
+                                const at = idx.tokens[probe];
+                                if (at.kind == .comment) continue;
+                                if (!(at.kind == .symbol or at.kind == .operator)) continue;
+                                if (std.mem.eql(u8, at.text, "[")) {
+                                    depth += 1;
+                                } else if (std.mem.eql(u8, at.text, "]")) {
+                                    depth -= 1;
+                                    if (depth == 0) {
+                                        probe += 1;
+                                        while (probe < idx.tokens.len and idx.tokens[probe].kind == .comment) : (probe += 1) {}
+                                        break;
+                                    }
+                                }
+                            }
+                            scanning_suffix = true;
+                        }
                     }
 
                     if (probe < idx.tokens.len and idx.tokens[probe].kind == .identifier) {
