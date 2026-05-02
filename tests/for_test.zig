@@ -147,3 +147,167 @@ test "for infinite transpiles to while(1)" {
 
     fs.cwd().deleteFile(ifilepath) catch {};
 }
+
+test "2D matrix declaration transpiles" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "matrix_decl.fn";
+
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  num[][] matrix = [[1, 2, 3], [4, 5, 6]];\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    // Outer dim unsized, inner dim = 3
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t matrix[][3]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "{{1, 2, 3}, {4, 5, 6}}") != null);
+
+    fs.cwd().deleteFile(ifilepath) catch {};
+}
+
+test "2D matrix for-iter outer loop transpiles" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "matrix_iter_outer.fn";
+
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  num[][] matrix = [[1, 2, 3], [4, 5, 6]];\n" ++
+        "  for row : matrix {\n" ++
+        "    printf(\"%p\\n\", row);\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    // Outer loop uses sizeof(matrix)/sizeof(matrix[0])
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sizeof(matrix)/sizeof(matrix[0])") != null);
+    // Row is declared as pointer
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t * row = matrix[__fun_i]") != null);
+
+    fs.cwd().deleteFile(ifilepath) catch {};
+}
+
+test "2D matrix nested for-iter transpiles" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "matrix_nested_iter.fn";
+
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  num[][] matrix = [[1, 2, 3], [4, 5, 6]];\n" ++
+        "  for row : matrix {\n" ++
+        "    for item : row {\n" ++
+        "      printf(\"%lld\\n\", item);\n" ++
+        "    }\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    // Outer loop: sizeof(matrix)/sizeof(matrix[0])
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sizeof(matrix)/sizeof(matrix[0])") != null);
+    // Inner loop: sizeof(matrix[0])/sizeof(matrix[0][0])
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sizeof(matrix[0])/sizeof(matrix[0][0])") != null);
+    // Inner item is a scalar
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t item = row[__fun_i]") != null);
+
+    fs.cwd().deleteFile(ifilepath) catch {};
+}
+
+test "2D matrix let inference transpiles" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "matrix_let.fn";
+
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  let m = [[10, 20], [30, 40]];\n" ++
+        "  for row : m {\n" ++
+        "    for val : row {\n" ++
+        "      printf(\"%lld\\n\", val);\n" ++
+        "    }\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    // Matrix inferred as int64_t m[][2]
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t m[][2]") != null);
+    // Outer loop: sizeof(m)/sizeof(m[0])
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sizeof(m)/sizeof(m[0])") != null);
+    // Inner loop: sizeof(m[0])/sizeof(m[0][0])
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sizeof(m[0])/sizeof(m[0][0])") != null);
+
+    fs.cwd().deleteFile(ifilepath) catch {};
+}
+
+test "3D tensor nested for-iter transpiles" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "tensor_3d_nested_iter.fn";
+
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  num[][][] tensor = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]];\n" ++
+        "  for plane : tensor {\n" ++
+        "    for row : plane {\n" ++
+        "      for item : row {\n" ++
+        "        printf(\"%lld\\n\", item);\n" ++
+        "      }\n" ++
+        "    }\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    // Outer loop: sizeof(matrix)/sizeof(matrix[0])
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sizeof(matrix)/sizeof(matrix[0])") != null);
+    // Middle loop: sizeof(matrix[0])/sizeof(matrix[0][0])
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sizeof(matrix[0])/sizeof(matrix[0][0])") != null);
+    // Inner loop: sizeof(matrix[0][0])/sizeof(matrix[0][0][0])
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sizeof(matrix[0][0])/sizeof(matrix[0][0][0])") != null);
+    // Innermost item is a scalar
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t item = row[__fun_i]") != null);
+
+    fs.cwd().deleteFile(ifilepath) catch {};
+}
+
+test "3D tensor let inference transpiles" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "tensor_3d_let.fn";
+
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  let m = [[[10, 20], [30, 40]], [[50, 60], [70, 80]]];\n" ++
+        "  for plane : m {\n" ++
+        "    for row : plane {\n" ++
+        "      for val : row {\n" ++
+        "        printf(\"%lld\\n\", val);\n" ++
+        "      }\n" ++
+        "    }\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    // Matrix inferred as int64_t m[][2][2]
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t m[][2][2]") != null);
+    // Outer loop: sizeof(m)/sizeof(m[0])
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sizeof(m)/sizeof(m[0])") != null);
+    // Middle loop: sizeof(m[0])/sizeof(m[0][0])
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sizeof(m[0])/sizeof(m[0][0])") != null);
+    // Inner loop: sizeof(m[0][0])/sizeof(m[0][0][0])
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sizeof(m[0][0])/sizeof(m[0][0][0])") != null);
+
+    fs.cwd().deleteFile(ifilepath) catch {};
+}

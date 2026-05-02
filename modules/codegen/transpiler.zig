@@ -2011,6 +2011,7 @@ pub const TranspileProcess = struct {
             .pointer_depth = normalized.pointer_depth,
             .array = null,
             .generic_args = null,
+            .array_depth = normalized.array_depth,
         };
         if (normalized.is_array) {
             var flags = out.flags orelse dtype.DataTypeFlags{};
@@ -3475,6 +3476,8 @@ pub const TranspileProcess = struct {
     const CheckedType = struct {
         base: dtype.DataTypeType,
         is_array: bool = false,
+        /// Number of array dimensions (e.g. 1 for num[], 2 for num[][], etc.).
+        array_depth: usize = 0,
         pointer_depth: usize = 0,
         /// True when this value is the integer literal 0 (C null pointer constant).
         is_null_literal: bool = false,
@@ -3488,6 +3491,7 @@ pub const TranspileProcess = struct {
         fn eql(a: CheckedType, b: CheckedType) bool {
             if (a.base != b.base) return false;
             if (a.is_array != b.is_array) return false;
+            if (a.array_depth != b.array_depth) return false;
             if (a.pointer_depth != b.pointer_depth) return false;
             const a_name = a.mangled_name orelse a.name;
             const b_name = b.mangled_name orelse b.name;
@@ -3676,9 +3680,13 @@ pub const TranspileProcess = struct {
 
     fn type_from_dtype(dt: *const dtype.DataType) CheckedType {
         const base = dt.type orelse .Unknown;
+        const is_arr = (dt.flags != null and dt.flags.?.is_array);
+        // Backward compat: if is_array is set but array_depth wasn't populated (legacy), treat as depth 1.
+        const depth = if (is_arr and dt.array_depth == 0) 1 else dt.array_depth;
         return .{
             .base = base,
-            .is_array = (dt.flags != null and dt.flags.?.is_array),
+            .is_array = is_arr,
+            .array_depth = depth,
             .pointer_depth = dt.pointer_depth,
             .name = if (base == .Unknown and dt.type_str.items.len > 0) dt.type_str.items else null,
             .dtype_ref = dt,
@@ -4878,6 +4886,7 @@ pub const TranspileProcess = struct {
                 var out: CheckedType = .{
                     .base = if (elem_type) |et| et.base else .Unknown,
                     .is_array = true,
+                    .array_depth = if (elem_type) |et| et.array_depth + 1 else 1,
                     .pointer_depth = 0,
                 };
                 if (elem_type) |et| {
@@ -6176,7 +6185,9 @@ pub const TranspileProcess = struct {
                             defer env.pop();
                             if (fi.index_name) |iname| try env.put_current(iname, .{ .base = .Num });
                             var item_t = it_t;
-                            item_t.is_array = false;
+                            // Element is one dimension fewer than the iterable.
+                            item_t.array_depth = if (it_t.array_depth > 0) it_t.array_depth - 1 else 0;
+                            item_t.is_array = item_t.array_depth > 0;
                             try env.put_current(fi.item_name, item_t);
                             try self.check_body(fi.body, env, fns, fn_rtype);
                         },
@@ -11241,8 +11252,40 @@ pub const TranspileProcess = struct {
     }
 
     /// Transpiles a node to C code
+    /// Emit inner dimension specifiers `[N1][N2]...` for a multi-dimensional array
+    /// literal. `outer_lit` is the Bracket node at the current level, `remaining`
+    /// is how many inner dimensions still need to be emitted.
+    fn emit_multidim_inner_declarators(self: *Self, outer_lit: *ast.Node, remaining: usize) TranspileError!void {
+        if (remaining == 0 or outer_lit.type != .Bracket) return;
+
+        var outer_elems = std.ArrayList(*ast.Node).init(self.allocator);
+        defer outer_elems.deinit();
+        try self.flatten_call_args_ptr(outer_lit.node_variant.?.bracket.inner, &outer_elems);
+
+        if (outer_elems.items.len == 0 or outer_elems.items[0].type != .Bracket) return;
+
+        const first_elem = outer_elems.items[0];
+        var inner_elems = std.ArrayList(*ast.Node).init(self.allocator);
+        defer inner_elems.deinit();
+        try self.flatten_call_args_ptr(first_elem.node_variant.?.bracket.inner, &inner_elems);
+
+        try self.write("[");
+        try self.print("{d}", .{inner_elems.items.len});
+        try self.write("]");
+
+        if (remaining > 1) {
+            try self.emit_multidim_inner_declarators(first_elem, remaining - 1);
+        }
+    }
+
     fn transpile_node(self: *Self, node: ast.Node) TranspileError!void {
         switch (node.type) {
+            .Bracket => {
+                // Nested array literal (e.g. inner row of a 2D array): emit as `{...}`.
+                try self.write("{");
+                try self.transpile_node(node.node_variant.?.bracket.inner.*);
+                try self.write("}");
+            },
             .CompoundInit => {
                 const ci = node.node_variant.?.compound_init;
                 const dt = ci.dtype orelse {
@@ -12153,6 +12196,22 @@ pub const TranspileProcess = struct {
                         } else {
                             try self.write("[]");
                         }
+                    } else if (variable.type.array_depth > 1) {
+                        // Multi-dimensional unsized array: emit [][N1][N2]...
+                        // The outer dim is always unsized (C deduces from initializer).
+                        // Inner dims are derived from the literal.
+                        try self.write("[]");
+                        if (variable.val) |val| {
+                            if (val.type == .Bracket) {
+                                try self.emit_multidim_inner_declarators(val, variable.type.array_depth - 1);
+                            } else {
+                                var d: usize = 1;
+                                while (d < variable.type.array_depth) : (d += 1) try self.write("[]");
+                            }
+                        } else {
+                            var d: usize = 1;
+                            while (d < variable.type.array_depth) : (d += 1) try self.write("[]");
+                        }
                     } else {
                         try self.write("[]");
                     }
@@ -12719,15 +12778,46 @@ pub const TranspileProcess = struct {
 
                                 const idx_name = fi.index_name orelse "__fun_i";
 
+                                // Determine array depth and multidim info from scope.
+                                var arr_depth: usize = 1;
+                                var mdim_root: ?[]const u8 = null;
+                                var mdim_depth: usize = 0;
+                                if (self.get_scope_entity(arr_name)) |arr_ent| {
+                                    mdim_root = arr_ent.multidim_root;
+                                    mdim_depth = arr_ent.multidim_depth;
+                                    if (arr_ent.node) |arr_node| {
+                                        if (arr_node.type == .Variable and arr_node.node_variant != null) {
+                                            const adepth = arr_node.node_variant.?.variable.type.array_depth;
+                                            if (adepth > 0) arr_depth = adepth;
+                                        }
+                                    }
+                                }
+
+                                // The length expression root and offset:
+                                // - For regular arrays: root=arr_name, offset=0
+                                //   → sizeof(arr_name)/sizeof(arr_name[0])
+                                // - For multi-dim elements (mdim_root set): use root and offset
+                                //   → sizeof(root[0]*offset)/sizeof(root[0]*(offset+1))
+                                const len_root = mdim_root orelse arr_name;
+                                const len_offset = if (mdim_root != null) mdim_depth else 0;
+
                                 try self.write("for (int64_t ");
                                 try self.write(idx_name);
                                 try self.write(" = 0; ");
                                 try self.write(idx_name);
                                 try self.write(" < (int64_t)(sizeof(");
-                                try self.write(arr_name);
+                                try self.write(len_root);
+                                {
+                                    var d: usize = 0;
+                                    while (d < len_offset) : (d += 1) try self.write("[0]");
+                                }
                                 try self.write(")/sizeof(");
-                                try self.write(arr_name);
-                                try self.write("[0])); ");
+                                try self.write(len_root);
+                                {
+                                    var d: usize = 0;
+                                    while (d <= len_offset) : (d += 1) try self.write("[0]");
+                                }
+                                try self.write(")); ");
                                 try self.write(idx_name);
                                 try self.write("++) {");
                                 self.indent();
@@ -12735,14 +12825,10 @@ pub const TranspileProcess = struct {
                                 try self.push_defer_scope(.loop);
                                 defer self.pop_defer_scope();
 
-                                // Loop body has its own scope. Register the synthetic
-                                // item variable with element dtype so method lowering
-                                // (e.g. `item.greet()`) can resolve plain impl methods.
                                 _ = try self.new_scope();
                                 defer self.finish_scope();
 
-                                // Declare the item binding each iteration.
-                                // If we can find the array type in scope, use it.
+                                // Determine base C type for the element.
                                 var item_c_type: []const u8 = "int64_t";
                                 if (self.get_scope_entity(arr_name)) |arr_ent_for_type| {
                                     if (arr_ent_for_type.node) |arr_node| {
@@ -12752,26 +12838,53 @@ pub const TranspileProcess = struct {
                                         }
                                     }
                                 }
-                                try self.write_indent();
-                                try self.write(item_c_type);
-                                try self.write(" ");
-                                try self.write(fi.item_name);
-                                try self.write(" = ");
-                                try self.write(arr_name);
-                                try self.write("[");
-                                try self.write(idx_name);
-                                try self.write("];\n");
 
+                                // element_depth = arr_depth - 1: number of pointer stars for the element.
+                                const element_depth = if (arr_depth > 0) arr_depth - 1 else 0;
+
+                                // Emit item declaration.
+                                // For elements that are themselves arrays (element_depth >= 2), use
+                                // __auto_type so the compiler infers the correct array-pointer type
+                                // (e.g. int64_t (*layer)[4] for a 3D tensor), avoiding the invalid
+                                // int64_t ** that would result from naive pointer-star expansion.
+                                try self.write_indent();
+                                if (element_depth >= 2) {
+                                    try self.write("__auto_type ");
+                                    try self.write(fi.item_name);
+                                    try self.write(" = ");
+                                    try self.write(arr_name);
+                                    try self.write("[");
+                                    try self.write(idx_name);
+                                    try self.write("];\n");
+                                } else {
+                                    try self.write(item_c_type);
+                                    {
+                                        var d: usize = 0;
+                                        while (d < element_depth) : (d += 1) try self.write(" *");
+                                    }
+                                    try self.write(" ");
+                                    try self.write(fi.item_name);
+                                    try self.write(" = ");
+                                    try self.write(arr_name);
+                                    try self.write("[");
+                                    try self.write(idx_name);
+                                    try self.write("];\n");
+                                }
+
+                                // Register item in scope with multidim info if it is still an array.
                                 if (self.get_scope_entity(arr_name)) |arr_ent| {
                                     if (arr_ent.node) |arr_node| {
                                         if (arr_node.type == .Variable and arr_node.node_variant != null) {
                                             const arr_dt = arr_node.node_variant.?.variable.type;
                                             const item_dt = self.allocator.create(dtype.DataType) catch return TranspileError.MemoryAllocationFailed;
                                             item_dt.* = arr_dt.*;
-                                            if (item_dt.flags) |flags| {
-                                                var fcopy = flags;
-                                                fcopy.is_array = false;
-                                                item_dt.flags = fcopy;
+                                            item_dt.array_depth = if (arr_dt.array_depth > 0) arr_dt.array_depth - 1 else 0;
+                                            if (item_dt.array_depth == 0) {
+                                                if (item_dt.flags) |flags| {
+                                                    var fcopy = flags;
+                                                    fcopy.is_array = false;
+                                                    item_dt.flags = fcopy;
+                                                }
                                             }
                                             item_dt.array = null;
 
@@ -12786,7 +12899,20 @@ pub const TranspileProcess = struct {
                                                     .val = null,
                                                 } },
                                             };
-                                            try self.register_scope_variable(item_node);
+
+                                            // Create scope entity with multidim info if element is still an array.
+                                            const item_ent = self.allocator.create(scope.ScopeEntity) catch return TranspileError.MemoryAllocationFailed;
+                                            item_ent.* = .{
+                                                .flags = .{ .on_stack = false },
+                                                .node = item_node,
+                                                .name = fi.item_name,
+                                            };
+                                            if (element_depth > 0) {
+                                                item_ent.multidim_root = len_root;
+                                                item_ent.multidim_depth = len_offset + 1;
+                                            }
+                                            try self.push_scope_entity(item_ent);
+                                            self.owned_scope_entities.append(item_ent) catch return TranspileError.MemoryAllocationFailed;
                                         }
                                     }
                                 }

@@ -53,6 +53,9 @@ pub const DataType = struct {
         brackets: utils.Vector(ast.Node),
     } = null,
 
+    /// The depth of array dimensions (e.g. 1 for num[], 2 for num[][], etc.).
+    array_depth: usize = 0,
+
     /// Optional generic arguments (e.g. Vec<num> -> [num]).
     generic_args: ?utils.Vector(*DataType) = null,
 };

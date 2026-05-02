@@ -3117,13 +3117,15 @@ pub const ParseProcess = struct {
     /// - Logs an error message if any expected token is not found.
     fn parse_array_brackets(self: *Self, dt: *dtype.DataType, hist: *utils.History) ParseError!void {
         var brackets = utils.Vector(ast.Node).init(self.transpile_proc.allocator);
+        var depth: usize = 0;
         while (self.next_token_is_operator("[")) {
             const lbracket_token = self.token_peek_next();
             try self.expect_op("[");
             dt.*.flags.?.is_array = true;
+            depth += 1;
             if (self.next_token_is_symbol(']')) {
                 try self.expect_sym(']');
-                break;
+                continue;
             }
             try self.parse_expressionable_root(hist);
             try self.expect_sym(']');
@@ -3148,6 +3150,7 @@ pub const ParseProcess = struct {
                 return ParseError.MemoryAllocationFailed;
             };
         }
+        dt.*.array_depth = depth;
         if (brackets.count > 0) {
             dt.*.array = .{ .brackets = brackets };
         }

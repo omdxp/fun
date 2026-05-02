@@ -10053,17 +10053,24 @@ fn appendDTypeFull(buf: *std.ArrayList(u8), dt: anytype) !void {
     if (@hasField(@TypeOf(dtype), "flags")) {
         if (dtype.flags) |flags| {
             if (flags.is_array) {
-                if (@hasField(@TypeOf(dtype), "array")) {
-                    if (dtype.array) |arr| {
-                        const count: usize = if (arr.brackets.is_empty()) 1 else arr.brackets.count;
-                        var j: usize = 0;
-                        while (j < count) : (j += 1) {
-                            try buf.appendSlice("[]");
-                        }
-                        return;
+                // Use array_depth for the count of [] to emit when available,
+                // falling back to bracket count or 1 for backward compatibility.
+                const bracket_count: usize = blk: {
+                    if (@hasField(@TypeOf(dtype), "array_depth") and dtype.array_depth > 0) {
+                        break :blk dtype.array_depth;
                     }
+                    if (@hasField(@TypeOf(dtype), "array")) {
+                        if (dtype.array) |arr| {
+                            break :blk if (arr.brackets.is_empty()) 1 else arr.brackets.count;
+                        }
+                    }
+                    break :blk 1;
+                };
+                var j: usize = 0;
+                while (j < bracket_count) : (j += 1) {
+                    try buf.appendSlice("[]");
                 }
-                try buf.appendSlice("[]");
+                return;
             }
         }
     }
@@ -11306,23 +11313,12 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 }
             }.callSyms;
 
-            const tokenHasChar = struct {
-                fn callTok(t: token.Token, ch: u8) bool {
-                    const s = tokenString(t);
-                    var i: usize = 0;
-                    while (i < s.len) : (i += 1) {
-                        if (s[i] == ch) return true;
-                    }
-                    return false;
-                }
-            }.callTok;
-
             var saw_str = false;
             var saw_bin = false;
             var saw_chr = false;
             var saw_dec = false;
             var saw_num = false;
-            var saw_array_literal = false;
+            var array_literal_depth: usize = 0;
             var candidate: ?[]const u8 = null;
             var candidate_rank: u8 = 0;
 
@@ -12397,13 +12393,33 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
 
             const first_i_opt = nextNonTrivialToken(tokens_, start_i);
             if (first_i_opt) |fi| {
-                if (isPunctChar(tokens_[fi], '(')) {
-                    const next_after = nextNonTrivialToken(tokens_, fi + 1) orelse fi;
-                    if (tokenHasChar(tokens_[next_after], '[')) saw_array_literal = true;
-                } else if (tokenHasChar(tokens_[fi], '[')) {
-                    saw_array_literal = true;
+                // Count how deeply nested the opening brackets are for multi-dim arrays.
+                // `[1,2]` → depth 1, `[[1,2],[3,4]]` → depth 2, etc.
+                var bracket_scan_i: usize = fi;
+                while (bracket_scan_i < end_i) {
+                    const bt = tokens_[bracket_scan_i];
+                    if (bt.type == .NewLine or bt.type == .Comment) {
+                        bracket_scan_i += 1;
+                        continue;
+                    }
+                    if (isPunctChar(bt, '(')) {
+                        // Wrapped in parens — check inside.
+                        bracket_scan_i += 1;
+                        continue;
+                    }
+                    if (isPunctChar(bt, '[')) {
+                        array_literal_depth += 1;
+                        // Peek at next non-trivial token; if it's also '[', recurse into it.
+                        const next_b = nextNonTrivialToken(tokens_, bracket_scan_i + 1) orelse break;
+                        if (isPunctChar(tokens_[next_b], '[')) {
+                            bracket_scan_i = next_b;
+                            continue;
+                        }
+                    }
+                    break;
                 }
             }
+            const saw_array_literal = array_literal_depth > 0;
 
             const exact_terminal_type = inferExactTerminalType(allocator_, tokens_, start_i, end_i, locals_map, globals_map, symbols);
 
@@ -12591,6 +12607,19 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 }
             }
 
+            // Build a type string with the correct number of `[]` suffixes for the
+            // detected array nesting depth (e.g. depth=2 → "num[][]").
+            const appendArraySuffix = struct {
+                fn call(a: Allocator, base: []const u8, depth: usize) []const u8 {
+                    if (depth == 0) return a.dupe(u8, base) catch base;
+                    var buf = std.ArrayList(u8).init(a);
+                    buf.appendSlice(base) catch return base;
+                    var d: usize = 0;
+                    while (d < depth) : (d += 1) buf.appendSlice("[]") catch return base;
+                    return buf.toOwnedSlice() catch base;
+                }
+            }.call;
+
             if (exact_terminal_type) |et| {
                 if (!isLetInferTypeName(et)) {
                     return allocator_.dupe(u8, et) catch et;
@@ -12600,41 +12629,40 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
             if (candidate) |cand| {
                 if (!isLetInferTypeName(cand) and !isBuiltinTypeName(cand)) {
                     if (saw_array_literal and !isArrayTypeName(cand)) {
-                        const arr_name = std.mem.concat(allocator_, u8, &[_][]const u8{ cand, "[]" }) catch cand;
-                        return arr_name;
+                        return appendArraySuffix(allocator_, cand, array_literal_depth);
                     }
                     return allocator_.dupe(u8, cand) catch cand;
                 }
             }
             if (saw_str) {
                 const base = "str";
-                if (saw_array_literal) return std.mem.concat(allocator_, u8, &[_][]const u8{ base, "[]" }) catch base;
+                if (saw_array_literal) return appendArraySuffix(allocator_, base, array_literal_depth);
                 return allocator_.dupe(u8, base) catch base;
             }
             if (saw_bin) {
                 const base = "bin";
-                if (saw_array_literal) return std.mem.concat(allocator_, u8, &[_][]const u8{ base, "[]" }) catch base;
+                if (saw_array_literal) return appendArraySuffix(allocator_, base, array_literal_depth);
                 return allocator_.dupe(u8, base) catch base;
             }
             if (saw_chr) {
                 const base = "chr";
-                if (saw_array_literal) return std.mem.concat(allocator_, u8, &[_][]const u8{ base, "[]" }) catch base;
+                if (saw_array_literal) return appendArraySuffix(allocator_, base, array_literal_depth);
                 return allocator_.dupe(u8, base) catch base;
             }
             if (saw_dec or (candidate != null and std.mem.eql(u8, candidate.?, "dec"))) {
                 const base = "dec";
-                if (saw_array_literal) return std.mem.concat(allocator_, u8, &[_][]const u8{ base, "[]" }) catch base;
+                if (saw_array_literal) return appendArraySuffix(allocator_, base, array_literal_depth);
                 return allocator_.dupe(u8, base) catch base;
             }
             if (saw_num or (candidate != null and std.mem.eql(u8, candidate.?, "num"))) {
                 const base = "num";
-                if (saw_array_literal) return std.mem.concat(allocator_, u8, &[_][]const u8{ base, "[]" }) catch base;
+                if (saw_array_literal) return appendArraySuffix(allocator_, base, array_literal_depth);
                 return allocator_.dupe(u8, base) catch base;
             }
             if (candidate) |cand2| {
                 if (!isLetInferTypeName(cand2)) {
                     if (saw_array_literal and !isArrayTypeName(cand2)) {
-                        return std.mem.concat(allocator_, u8, &[_][]const u8{ cand2, "[]" }) catch cand2;
+                        return appendArraySuffix(allocator_, cand2, array_literal_depth);
                     }
                     return allocator_.dupe(u8, cand2) catch cand2;
                 }
@@ -13548,6 +13576,15 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                     if (ts.len != 0) vtype_buf.appendSlice(ts) catch {};
                 }
             }
+            // Consume array dimension brackets `[][]...` that are part of the type.
+            while (name_i < tokens.len and isPunctChar(tokens[name_i], '[')) {
+                const rbr_i = nextNonTrivialToken(tokens, name_i + 1) orelse break;
+                if (rbr_i < tokens.len and isPunctChar(tokens[rbr_i], ']')) {
+                    vtype_buf.appendSlice("[]") catch {};
+                    name_i = nextNonTrivialToken(tokens, rbr_i + 1) orelse break;
+                } else break;
+            }
+
             var markers = std.ArrayList(u8).init(allocator);
             defer markers.deinit();
             while (name_i < tokens.len and (isPunctChar(tokens[name_i], '*') or isPunctChar(tokens[name_i], '&'))) {
@@ -13653,6 +13690,15 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                     const ts = tokenString(gtok);
                     if (ts.len != 0) vtype_buf.appendSlice(ts) catch {};
                 }
+            }
+
+            // Consume array dimension brackets `[][]...` that follow the base type (or generic).
+            while (name_i < tokens.len and isPunctChar(tokens[name_i], '[')) {
+                const rbr_i = nextNonTrivialToken(tokens, name_i + 1) orelse break;
+                if (rbr_i < tokens.len and isPunctChar(tokens[rbr_i], ']')) {
+                    vtype_buf.appendSlice("[]") catch {};
+                    name_i = nextNonTrivialToken(tokens, rbr_i + 1) orelse break;
+                } else break;
             }
 
             var markers = std.ArrayList(u8).init(allocator);

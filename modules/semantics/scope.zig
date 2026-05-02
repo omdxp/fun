@@ -18,6 +18,11 @@ pub const ScopeEntity = struct {
     node: ?*ast.Node,
     /// Entity name.
     name: []const u8,
+    /// For multi-dimensional array elements: the root array name used to compute
+    /// sizeof chain bounds for nested for-iter loops. Null for non-multidim entities.
+    multidim_root: ?[]const u8 = null,
+    /// How many dimensions deep this element is from multidim_root (0 = root itself).
+    multidim_depth: usize = 0,
 };
 
 /// Represents a scope structure used in the transpiler.

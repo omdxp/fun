@@ -1,0 +1,31 @@
+imp std.c.io;
+
+fun main() {
+  // 3D tensor with explicit type: 2 layers, 3 rows, 4 columns
+  num[][][] tensor = [[[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]], [[13, 14, 15, 16], [17, 18, 19, 20], [21, 22, 23, 24]]];
+
+  printf("Tensor layers:\n");
+  for layer : tensor {
+    printf("  Layer:\n");
+    for row : layer {
+      printf("    ");
+      for val : row {
+        printf("%lld ", val);
+      }
+      printf("\n");
+    }
+  }
+
+  // let inference on a 3D literal
+  let t2 = [[[1, 0], [0, 1]], [[2, 0], [0, 2]]];
+
+  printf("t2 layers:\n");
+  for layer : t2 {
+    for row : layer {
+      for val : row {
+        printf("%lld ", val);
+      }
+      printf("\n");
+    }
+  }
+}

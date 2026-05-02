@@ -1,0 +1,25 @@
+imp std.c.io;
+
+fun main() {
+  // 2D matrix with explicit type annotation
+  num[][] matrix = [[1, 2, 3], [4, 5, 6], [7, 8, 9]];
+
+  printf("Matrix rows:\n");
+  for row : matrix {
+    for item : row {
+      printf("%lld ", item);
+    }
+    printf("\n");
+  }
+
+  // 2D matrix using let inference
+  let m2 = [[10, 20], [30, 40]];
+
+  printf("m2:\n");
+  for r : m2 {
+    for v : r {
+      printf("%lld ", v);
+    }
+    printf("\n");
+  }
+}
