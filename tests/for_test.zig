@@ -268,12 +268,12 @@ test "3D tensor nested for-iter transpiles" {
     const out_owned = try runTranspile(allocator, ifilepath, input);
     defer allocator.free(out_owned);
 
-    // Outer loop: sizeof(matrix)/sizeof(matrix[0])
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sizeof(matrix)/sizeof(matrix[0])") != null);
-    // Middle loop: sizeof(matrix[0])/sizeof(matrix[0][0])
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sizeof(matrix[0])/sizeof(matrix[0][0])") != null);
-    // Inner loop: sizeof(matrix[0][0])/sizeof(matrix[0][0][0])
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sizeof(matrix[0][0])/sizeof(matrix[0][0][0])") != null);
+    // Outer loop: sizeof(tensor)/sizeof(tensor[0])
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sizeof(tensor)/sizeof(tensor[0])") != null);
+    // Middle loop: sizeof(tensor[0])/sizeof(tensor[0][0])
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sizeof(tensor[0])/sizeof(tensor[0][0])") != null);
+    // Inner loop: sizeof(tensor[0][0])/sizeof(tensor[0][0][0])
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sizeof(tensor[0][0])/sizeof(tensor[0][0][0])") != null);
     // Innermost item is a scalar
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t item = row[__fun_i]") != null);
 

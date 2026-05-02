@@ -639,6 +639,17 @@ pub const TranspileProcess = struct {
         return try self.make_alias_qualified_symbol_name(alias, name);
     }
 
+    /// Build a C name for a helper function that lives in the same module as the current call.
+    /// When the call was `alias.fn(...)`, `module_alias` is `"alias"` and the result is
+    /// `"alias__fn_name"`.  When there is no module alias (bare `fn(...)`), returns `fn_name`.
+    /// Caller must free the returned slice with self.allocator.
+    fn prefixed_fn_name(self: *Self, module_alias: ?[]const u8, fn_name: []const u8) TranspileError![]const u8 {
+        if (module_alias) |alias| {
+            return std.fmt.allocPrint(self.allocator, "{s}__{s}", .{ alias, fn_name }) catch TranspileError.MemoryAllocationFailed;
+        }
+        return self.allocator.dupe(u8, fn_name) catch TranspileError.MemoryAllocationFailed;
+    }
+
     fn ensure_type_registry(self: *Self) *TypeRegistry {
         const root = self.get_root();
         if (root.type_registry == null) {
@@ -1683,7 +1694,7 @@ pub const TranspileProcess = struct {
         }
     }
 
-    fn emit_print_fmt_literal(self: *Self, node: ast.Node, is_newline: bool, args_node: ?*ast.Node) TranspileError!bool {
+    fn emit_print_fmt_literal(self: *Self, node: ast.Node, is_newline: bool, args_node: ?*ast.Node, module_alias: ?[]const u8) TranspileError!bool {
         if (args_node == null) return false;
 
         var args_nodes = std.ArrayList(*ast.Node).init(self.allocator);
@@ -1727,6 +1738,21 @@ pub const TranspileProcess = struct {
         const vec_name = try self.next_tmp_name("fmt_args");
         const out_name = try self.next_tmp_name("fmt_out");
 
+        // Resolve alias-qualified names for all inlined helper functions.
+        // The alias is taken directly from the call expression (e.g. `io2.print_fmt` → alias = "io2").
+        const c_fmt_num = try self.prefixed_fn_name(module_alias, "fmt_num");
+        defer self.allocator.free(c_fmt_num);
+        const c_fmt_dec = try self.prefixed_fn_name(module_alias, "fmt_dec");
+        defer self.allocator.free(c_fmt_dec);
+        const c_fmt_bin = try self.prefixed_fn_name(module_alias, "fmt_bin");
+        defer self.allocator.free(c_fmt_bin);
+        const c_fmt_chr = try self.prefixed_fn_name(module_alias, "fmt_chr");
+        defer self.allocator.free(c_fmt_chr);
+        const c_fmt_raw = try self.prefixed_fn_name(module_alias, "fmt_raw");
+        defer self.allocator.free(c_fmt_raw);
+        const c_format_impl = try self.prefixed_fn_name(module_alias, "format_impl");
+        defer self.allocator.free(c_format_impl);
+
         try self.write("{ ");
         try self.write("Vec__str ");
         try self.write(vec_name);
@@ -1758,27 +1784,32 @@ pub const TranspileProcess = struct {
                     .any => unreachable,
                     .str => try self.transpile_node(arg_node),
                     .num => {
-                        try self.write("fmt_num((long long)(");
+                        try self.write(c_fmt_num);
+                        try self.write("((long long)(");
                         try self.transpile_node(arg_node);
                         try self.write("))");
                     },
                     .dec => {
-                        try self.write("fmt_dec((double)(");
+                        try self.write(c_fmt_dec);
+                        try self.write("((double)(");
                         try self.transpile_node(arg_node);
                         try self.write("))");
                     },
                     .bin => {
-                        try self.write("fmt_bin((bool)(");
+                        try self.write(c_fmt_bin);
+                        try self.write("((bool)(");
                         try self.transpile_node(arg_node);
                         try self.write("))");
                     },
                     .chr => {
-                        try self.write("fmt_chr((char)(");
+                        try self.write(c_fmt_chr);
+                        try self.write("((char)(");
                         try self.transpile_node(arg_node);
                         try self.write("))");
                     },
                     .ptr, .raw => {
-                        try self.write("fmt_raw((void*)(");
+                        try self.write(c_fmt_raw);
+                        try self.write("((void*)(");
                         try self.transpile_node(arg_node);
                         try self.write("))");
                     },
@@ -1792,7 +1823,9 @@ pub const TranspileProcess = struct {
 
         try self.write("char* ");
         try self.write(out_name);
-        try self.write(" = format_impl(\"");
+        try self.write(" = ");
+        try self.write(c_format_impl);
+        try self.write("(\"");
         try self.write(escaped.items);
         try self.write("\", &");
         try self.write(vec_name);
@@ -1834,7 +1867,7 @@ pub const TranspileProcess = struct {
         return true;
     }
 
-    fn emit_format_literal(self: *Self, node: ast.Node, args_node: ?*ast.Node) TranspileError!bool {
+    fn emit_format_literal(self: *Self, node: ast.Node, args_node: ?*ast.Node, module_alias: ?[]const u8) TranspileError!bool {
         if (args_node == null) return false;
 
         var args_nodes = std.ArrayList(*ast.Node).init(self.allocator);
@@ -1874,6 +1907,20 @@ pub const TranspileProcess = struct {
         const vec_name = try self.next_tmp_name("fmt_args");
         const out_name = try self.next_tmp_name("fmt_out");
 
+        // Resolve alias-qualified names for all inlined helper functions.
+        const c_fmt_num = try self.prefixed_fn_name(module_alias, "fmt_num");
+        defer self.allocator.free(c_fmt_num);
+        const c_fmt_dec = try self.prefixed_fn_name(module_alias, "fmt_dec");
+        defer self.allocator.free(c_fmt_dec);
+        const c_fmt_bin = try self.prefixed_fn_name(module_alias, "fmt_bin");
+        defer self.allocator.free(c_fmt_bin);
+        const c_fmt_chr = try self.prefixed_fn_name(module_alias, "fmt_chr");
+        defer self.allocator.free(c_fmt_chr);
+        const c_fmt_raw = try self.prefixed_fn_name(module_alias, "fmt_raw");
+        defer self.allocator.free(c_fmt_raw);
+        const c_format_impl = try self.prefixed_fn_name(module_alias, "format_impl");
+        defer self.allocator.free(c_format_impl);
+
         try self.write("({ ");
         try self.write("Vec__str ");
         try self.write(vec_name);
@@ -1905,27 +1952,32 @@ pub const TranspileProcess = struct {
                     .any => unreachable,
                     .str => try self.transpile_node(arg_node),
                     .num => {
-                        try self.write("fmt_num((long long)(");
+                        try self.write(c_fmt_num);
+                        try self.write("((long long)(");
                         try self.transpile_node(arg_node);
                         try self.write("))");
                     },
                     .dec => {
-                        try self.write("fmt_dec((double)(");
+                        try self.write(c_fmt_dec);
+                        try self.write("((double)(");
                         try self.transpile_node(arg_node);
                         try self.write("))");
                     },
                     .bin => {
-                        try self.write("fmt_bin((bool)(");
+                        try self.write(c_fmt_bin);
+                        try self.write("((bool)(");
                         try self.transpile_node(arg_node);
                         try self.write("))");
                     },
                     .chr => {
-                        try self.write("fmt_chr((char)(");
+                        try self.write(c_fmt_chr);
+                        try self.write("((char)(");
                         try self.transpile_node(arg_node);
                         try self.write("))");
                     },
                     .ptr, .raw => {
-                        try self.write("fmt_raw((void*)(");
+                        try self.write(c_fmt_raw);
+                        try self.write("((void*)(");
                         try self.transpile_node(arg_node);
                         try self.write("))");
                     },
@@ -1939,7 +1991,9 @@ pub const TranspileProcess = struct {
 
         try self.write("char* ");
         try self.write(out_name);
-        try self.write(" = format_impl(\"");
+        try self.write(" = ");
+        try self.write(c_format_impl);
+        try self.write("(\"");
         try self.write(escaped.items);
         try self.write("\", &");
         try self.write(vec_name);
@@ -2477,8 +2531,35 @@ pub const TranspileProcess = struct {
         const canon = canon_path orelse (self.allocator.dupe(u8, full_path) catch return TranspileError.MemoryAllocationFailed);
         errdefer self.allocator.free(canon);
 
-        // Avoid duplicate imports.
+        // When the file is already imported, we may still need to register a new alias.
+        // If so, create a minimal stub child process (no lex/parse) so that
+        // transpile_children_recursive can emit #define stubs for the new alias.
         if (self.imported_files.contains(canon)) {
+            if (import_alias) |alias| {
+                var stub_proc = self.backing_allocator.create(TranspileProcess) catch {
+                    self.allocator.free(canon);
+                    return TranspileError.MemoryAllocationFailed;
+                };
+                stub_proc.* = TranspileProcess.init_with_stdlib_dir(self.backing_allocator, canon, "temp.c", .{ .outf = false }, self.stdlib_dir) catch {
+                    self.backing_allocator.destroy(stub_proc);
+                    self.allocator.free(canon);
+                    return TranspileError.MemoryAllocationFailed;
+                };
+                stub_proc.parent = self;
+                stub_proc.is_importing = true;
+                stub_proc.import_alias = stub_proc.allocator.dupe(u8, alias) catch {
+                    stub_proc.deinit();
+                    self.backing_allocator.destroy(stub_proc);
+                    self.allocator.free(canon);
+                    return TranspileError.MemoryAllocationFailed;
+                };
+                self.children.append(stub_proc) catch {
+                    stub_proc.deinit();
+                    self.backing_allocator.destroy(stub_proc);
+                    self.allocator.free(canon);
+                    return TranspileError.MemoryAllocationFailed;
+                };
+            }
             self.allocator.free(canon);
             return;
         }
@@ -10680,7 +10761,7 @@ pub const TranspileProcess = struct {
 
         // Output content from child imports recursively
         if (!self.is_importing) {
-            var seen_children = std.StringHashMap(bool).init(self.backing_allocator);
+            var seen_children = std.StringHashMap(?[]const u8).init(self.backing_allocator);
             defer seen_children.deinit();
             try self.transpile_children_recursive(self, &seen_children);
         }
@@ -11143,11 +11224,79 @@ pub const TranspileProcess = struct {
         try self.write_async_function_support_prototypes(node);
     }
 
-    // Helper function to recursively transpile children
-    fn transpile_children_recursive(self: *Self, parent_proc: *TranspileProcess, seen: *std.StringHashMap(bool)) TranspileError!void {
+    // Emit C `#define` stubs so that `new_alias__funcName` resolves to the already-emitted
+    // `canonical_alias__funcName` (or the bare name when canonical has no alias).
+    // This handles any module — stdlib or user-defined — that appears under two different
+    // aliases in the import tree.
+    fn emit_module_alias_stubs(self: *Self, child: *TranspileProcess, canonical_alias: ?[]const u8) TranspileError!void {
+        const new_alias = child.import_alias;
+
+        // If both aliases are the same (including both-null), nothing to do.
+        const same = blk: {
+            if (new_alias == null and canonical_alias == null) break :blk true;
+            if (new_alias != null and canonical_alias != null)
+                break :blk mem.eql(u8, new_alias.?, canonical_alias.?);
+            break :blk false;
+        };
+        if (same) return;
+
+        // `child` may be a lightweight alias-stub with no nodes (created when a module is
+        // re-imported under a different alias).  Find the canonical process to enumerate
+        // the module's public functions.
+        const source_proc: *TranspileProcess = blk: {
+            if (child.nodes.items().len > 0) break :blk child;
+            if (self.get_root().find_process_for_file(child.input_file_path)) |p| break :blk p;
+            return; // Can't find node list — skip.
+        };
+
+        var wrote_header = false;
+        for (source_proc.nodes.items()) |node| {
+            if (node.type != .Function or node.node_variant == null) continue;
+            const f = node.node_variant.?.function;
+            if (f.body == null or f.name == null) continue;
+            if (f.type_params != null) continue;
+            const fname = f.name.?.items;
+            if (mem.eql(u8, fname, "main")) continue;
+
+            if (!wrote_header) {
+                try self.write("\n// Alias stubs: ");
+                try self.write(if (new_alias) |a| a else "(unaliased)");
+                try self.write(" -> ");
+                try self.write(if (canonical_alias) |a| a else "(unaliased)");
+                try self.write("\n");
+                wrote_header = true;
+            }
+            try self.write("#define ");
+            if (new_alias) |na| {
+                try self.write(na);
+                try self.write("__");
+            }
+            try self.write(fname);
+            try self.write(" ");
+            if (canonical_alias) |ca| {
+                try self.write(ca);
+                try self.write("__");
+            }
+            try self.write(fname);
+            try self.write("\n");
+        }
+    }
+
+    // Helper function to recursively transpile children.
+    // `seen` maps file path -> the alias the module was first emitted under (null = no alias).
+    // When a module is re-encountered under a different alias, C #define stubs are emitted
+    // instead of re-emitting the full implementation.  This works for any module —
+    // stdlib or user-defined.
+    fn transpile_children_recursive(self: *Self, parent_proc: *TranspileProcess, seen: *std.StringHashMap(?[]const u8)) TranspileError!void {
         for (parent_proc.children.items) |child| {
-            if (seen.contains(child.input_file_path)) continue;
-            seen.put(child.input_file_path, true) catch return TranspileError.MemoryAllocationFailed;
+            if (seen.get(child.input_file_path)) |canonical_alias| {
+                // Module already emitted under `canonical_alias`.  If the current import
+                // uses a different alias, emit #define stubs and recurse for sub-children.
+                try self.emit_module_alias_stubs(child, canonical_alias);
+                try self.transpile_children_recursive(child, seen);
+                continue;
+            }
+            seen.put(child.input_file_path, child.import_alias) catch return TranspileError.MemoryAllocationFailed;
             // Recursively transpile the child's children first
             try self.transpile_children_recursive(child, seen);
 
@@ -11352,6 +11501,7 @@ pub const TranspileProcess = struct {
                 if (mem.eql(u8, exp.op, "()")) {
                     if (exp.left) |left| {
                         var callee_base_name: ?[]const u8 = null;
+                        var callee_module_alias: ?[]const u8 = null;
                         if (left.type == .Identifier and left.data != null) {
                             callee_base_name = left.data.?.sval.items;
                         } else if (left.type == .Expression and left.node_variant != null and mem.eql(u8, left.node_variant.?.exp.op, ".")) {
@@ -11361,18 +11511,24 @@ pub const TranspileProcess = struct {
                                     callee_base_name = rhs.data.?.sval.items;
                                 }
                             }
+                            // Extract module alias from the left side of the dot (e.g. `io2` in `io2.print_fmt`).
+                            if (dot.left) |lhs| {
+                                if (lhs.type == .Identifier and lhs.data != null) {
+                                    callee_module_alias = lhs.data.?.sval.items;
+                                }
+                            }
                         }
 
                         if (callee_base_name) |fname| {
                             const fname_base = if (std.mem.lastIndexOf(u8, fname, "__")) |sep| fname[sep + 2 ..] else fname;
                             if (mem.eql(u8, fname_base, "print_fmt") or mem.eql(u8, fname_base, "println_fmt")) {
                                 const is_newline = mem.eql(u8, fname_base, "println_fmt");
-                                if (try self.emit_print_fmt_literal(node, is_newline, exp.right)) {
+                                if (try self.emit_print_fmt_literal(node, is_newline, exp.right, callee_module_alias)) {
                                     return;
                                 }
                             }
                             if (mem.eql(u8, fname_base, "format")) {
-                                if (try self.emit_format_literal(node, exp.right)) {
+                                if (try self.emit_format_literal(node, exp.right, callee_module_alias)) {
                                     return;
                                 }
                             }
@@ -13378,9 +13534,36 @@ pub const TranspileProcess = struct {
             return TranspileError.CircularImport;
         }
 
-        // Mark this file as imported
+        // Mark this file as imported.
         // Avoid importing the same file under different relative paths.
+        // If the file is already imported but a new alias is being introduced, create
+        // a minimal stub child process so transpile_children_recursive can emit #define stubs.
         if (self.imported_files.contains(canon)) {
+            if (import_alias) |alias| {
+                var stub_proc = self.backing_allocator.create(TranspileProcess) catch {
+                    self.allocator.free(canon);
+                    return TranspileError.MemoryAllocationFailed;
+                };
+                stub_proc.* = TranspileProcess.init_with_stdlib_dir(self.backing_allocator, canon, "temp.c", .{ .outf = false }, self.stdlib_dir) catch {
+                    self.backing_allocator.destroy(stub_proc);
+                    self.allocator.free(canon);
+                    return TranspileError.MemoryAllocationFailed;
+                };
+                stub_proc.parent = self;
+                stub_proc.is_importing = true;
+                stub_proc.import_alias = stub_proc.allocator.dupe(u8, alias) catch {
+                    stub_proc.deinit();
+                    self.backing_allocator.destroy(stub_proc);
+                    self.allocator.free(canon);
+                    return TranspileError.MemoryAllocationFailed;
+                };
+                self.children.append(stub_proc) catch {
+                    stub_proc.deinit();
+                    self.backing_allocator.destroy(stub_proc);
+                    self.allocator.free(canon);
+                    return TranspileError.MemoryAllocationFailed;
+                };
+            }
             self.allocator.free(canon);
             return;
         }

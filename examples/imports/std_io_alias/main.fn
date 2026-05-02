@@ -1,0 +1,10 @@
+// Demonstrates: the same module (std.io) used under different aliases
+// in the main file (io2) and in an imported module (io1).
+// Both aliases should resolve correctly.
+imp std.io as io2;
+imp helper as h;
+
+fun main() {
+  io2.println("Using std.io aliased as 'io2' directly");
+  h.greet("world");
+}
