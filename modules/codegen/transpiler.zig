@@ -6329,9 +6329,10 @@ pub const TranspileProcess = struct {
             owned_args.append(args_slice) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
-            const fn_rtype: CheckedType = if (fnv.rtype) |*rt| blk: {
-                try self.register_generic_instantiations_from_dtype(rt);
-                break :blk try self.type_from_dtype_with_mangled(rt);
+            const fn_rtype: CheckedType = if (fnv.rtype) |rt| blk: {
+                const rt_heap = try self.clone_dtype(&rt);
+                try self.register_generic_instantiations_from_dtype(rt_heap);
+                break :blk try self.type_from_dtype_with_mangled(rt_heap);
             } else .{ .base = .Void };
             try self.register_generic_instantiation_from_checked_type(fn_rtype);
             fns.put(name, .{
@@ -6395,9 +6396,10 @@ pub const TranspileProcess = struct {
             owned_args.append(args_slice) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
-            const fn_rtype: CheckedType = if (fnv.rtype) |*rt| blk: {
-                try self.register_generic_instantiations_from_dtype(rt);
-                break :blk try self.type_from_dtype_with_mangled(rt);
+            const fn_rtype: CheckedType = if (fnv.rtype) |rt| blk: {
+                const rt_heap = try self.clone_dtype(&rt);
+                try self.register_generic_instantiations_from_dtype(rt_heap);
+                break :blk try self.type_from_dtype_with_mangled(rt_heap);
             } else .{ .base = .Void };
             try self.register_generic_instantiation_from_checked_type(fn_rtype);
             fns.put(name, .{
@@ -6499,9 +6501,10 @@ pub const TranspileProcess = struct {
                         owned_args.append(args_slice) catch {
                             return TranspileError.MemoryAllocationFailed;
                         };
-                        const fn_rtype: CheckedType = if (fnv.rtype) |*rt| blk: {
-                            try self.register_generic_instantiations_from_dtype(rt);
-                            break :blk try self.type_from_dtype_with_subst(rt, params.*, gargs);
+                        const fn_rtype: CheckedType = if (fnv.rtype) |rt| blk: {
+                            const rt_heap = try self.clone_dtype(&rt);
+                            try self.register_generic_instantiations_from_dtype(rt_heap);
+                            break :blk try self.type_from_dtype_with_subst(rt_heap, params.*, gargs);
                         } else .{ .base = .Void };
                         try self.register_generic_instantiation_from_checked_type(fn_rtype);
                         fns.put(spec_name, .{
@@ -6549,9 +6552,10 @@ pub const TranspileProcess = struct {
                 owned_args.append(args_slice) catch {
                     return TranspileError.MemoryAllocationFailed;
                 };
-                const fn_rtype: CheckedType = if (fnv.rtype) |*rt| blk: {
-                    try self.register_generic_instantiations_from_dtype(rt);
-                    break :blk try self.type_from_dtype_with_mangled(rt);
+                const fn_rtype: CheckedType = if (fnv.rtype) |rt| blk: {
+                    const rt_heap = try self.clone_dtype(&rt);
+                    try self.register_generic_instantiations_from_dtype(rt_heap);
+                    break :blk try self.type_from_dtype_with_mangled(rt_heap);
                 } else .{ .base = .Void };
                 try self.register_generic_instantiation_from_checked_type(fn_rtype);
                 fns.put(name, .{
@@ -10187,11 +10191,11 @@ pub const TranspileProcess = struct {
     }
 
     fn collect_generic_instantiations(self: *Self, proc: *Self, name: []const u8, keys: *std.StringHashMap(bool), out: *ArrayList(*const dtype.DataType)) TranspileError!void {
-        for (proc.nodes.items()) |node| {
+        for (proc.nodes.items()) |*node| {
             try self.collect_generic_instantiations_node(node, name, keys, out);
         }
         for (proc.owned_nodes.items) |node| {
-            try self.collect_generic_instantiations_node(node.*, name, keys, out);
+            try self.collect_generic_instantiations_node(node, name, keys, out);
         }
     }
 
@@ -10252,11 +10256,11 @@ pub const TranspileProcess = struct {
         return false;
     }
 
-    fn collect_generic_instantiations_node(self: *Self, node: ast.Node, name: []const u8, keys: *std.StringHashMap(bool), out: *ArrayList(*const dtype.DataType)) TranspileError!void {
+    fn collect_generic_instantiations_node(self: *Self, node: *const ast.Node, name: []const u8, keys: *std.StringHashMap(bool), out: *ArrayList(*const dtype.DataType)) TranspileError!void {
         switch (node.type) {
-            .Variable => if (node.node_variant) |v| try self.collect_generic_instantiations_dtype(v.variable.type, name, keys, out),
-            .Function => if (node.node_variant) |f| {
-                if (f.function.rtype) |rt| try self.collect_generic_instantiations_dtype(&rt, name, keys, out);
+            .Variable => if (node.node_variant) |*v| try self.collect_generic_instantiations_dtype(v.variable.type, name, keys, out),
+            .Function => if (node.node_variant) |*f| {
+                if (f.function.rtype) |*rt| try self.collect_generic_instantiations_dtype(rt, name, keys, out);
                 if (f.function.args) |args| {
                     for (args.items()) |a| {
                         if (a.node_variant) |av| {
@@ -10268,12 +10272,12 @@ pub const TranspileProcess = struct {
                     try self.collect_generic_instantiations_in_body(body, name, keys, out);
                 }
             },
-            .Compound => if (node.node_variant) |c| {
+            .Compound => if (node.node_variant) |*c| {
                 for (c.compound.fields.items()) |f| {
                     try self.collect_generic_instantiations_dtype(f.dtype, name, keys, out);
                 }
             },
-            .Body => if (node.node_variant) |b| {
+            .Body => if (node.node_variant) |*b| {
                 const body_node = ast.Node{ .type = .Body, .node_variant = .{ .body = b.body } };
                 try self.collect_generic_instantiations_in_body(&body_node, name, keys, out);
             },
