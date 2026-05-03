@@ -42,9 +42,11 @@ fn fileReadAlloc(allocator: Allocator, f: std.Io.File, max: usize) ![]u8 {
 
 pub fn main(init: std.process.Init) !void {
     g_runtime_io = init.io;
+    const allocator = init.gpa;
     // CLI helpers (used by installers / debugging PATH mismatches).
     // Note: fls is normally launched by the VS Code extension with no args (stdio mode).
-    var args_it = init.minimal.args.iterate();
+    var args_it = try init.minimal.args.iterateAllocator(allocator);
+    defer args_it.deinit();
     _ = args_it.next(); // skip executable name
 
     if (args_it.next()) |first_arg| {
@@ -65,8 +67,6 @@ pub fn main(init: std.process.Init) !void {
             return;
         }
     }
-
-    const allocator = init.gpa;
 
     var server = try LspServer.init(allocator, init.io);
     defer server.deinit();

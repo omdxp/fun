@@ -53,12 +53,14 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("modules/codegen/codegen.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
 
     const cli_module = b.createModule(.{
         .root_source_file = b.path("modules/cli/cli.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
 
     ast_module.addImport("utils", utils_module);
@@ -98,6 +100,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("cmd/fun/main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
 
     // --- Link Modules to Executable ---
@@ -122,6 +125,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("cmd/fls/main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
 
     fls_module.addImport("utils", utils_module);
@@ -174,6 +178,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("tests/main_test.zig"),
         .target = target,
         .optimize = .Debug,
+        .link_libc = true,
     });
 
     // Add all modules as imports to the test module
@@ -213,6 +218,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("cmd/fls/main.zig"),
         .target = target,
         .optimize = .Debug,
+        .link_libc = true,
     });
     fls_test_module.addImport("utils", utils_module);
     fls_test_module.addImport("ast", ast_module);
