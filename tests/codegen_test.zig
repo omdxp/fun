@@ -6,6 +6,11 @@ const ParseProcess = @import("parser").ParseProcess;
 const codegen = @import("codegen");
 const cli = @import("cli");
 
+/// Compatibility shim: ArrayList with embedded allocator (old-style managed API).
+fn ArrayList(comptime T: type) type {
+    return std.array_list.Managed(T);
+}
+
 const EnvOverride = struct {
     key: []const u8,
     value: []const u8,
@@ -13,14 +18,14 @@ const EnvOverride = struct {
 
 fn runTranspile(allocator: std.mem.Allocator, input_path: []const u8, input: []const u8) ![]const u8 {
     {
-        const file = try fs.cwd().createFile(input_path, .{ .read = true, .truncate = true });
-        defer file.close();
-        try file.writeAll(input);
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, input_path, .{ .read = true, .truncate = true });
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     const out_path = try std.fmt.allocPrint(allocator, "{s}.out.c", .{input_path});
     defer allocator.free(out_path);
-    defer fs.cwd().deleteFile(out_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, out_path) catch {};
 
     var transpile_proc = try codegen.TranspileProcess.init(allocator, input_path, out_path, .{
         .outf = false,
@@ -47,16 +52,16 @@ fn runTranspile(allocator: std.mem.Allocator, input_path: []const u8, input: []c
 
 fn runTranspileExpectFailure(allocator: std.mem.Allocator, input_path: []const u8, input: []const u8) !void {
     const out_owned = runTranspile(allocator, input_path, input) catch {
-        fs.cwd().deleteFile(input_path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, input_path) catch {};
         return;
     };
     defer allocator.free(out_owned);
-    fs.cwd().deleteFile(input_path) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, input_path) catch {};
     return error.ExpectedFailure;
 }
 
 fn compileWithZigCc(allocator: std.mem.Allocator, c_path: []const u8, exe_path: []const u8) !void {
-    var argv = std.ArrayList([]const u8).init(allocator);
+    var argv = ArrayList([]const u8).init(allocator);
     defer argv.deinit();
 
     try argv.append("zig");
@@ -71,8 +76,7 @@ fn compileWithZigCc(allocator: std.mem.Allocator, c_path: []const u8, exe_path: 
         try argv.append("-lm");
     }
 
-    const result = try std.process.Child.run(.{
-        .allocator = allocator,
+    const result = try std.process.run(allocator, std.testing.io, .{
         .argv = argv.items,
     });
     defer {
@@ -81,7 +85,7 @@ fn compileWithZigCc(allocator: std.mem.Allocator, c_path: []const u8, exe_path: 
     }
 
     switch (result.term) {
-        .Exited => |code| {
+        .exited => |code| {
             if (code != 0) {
                 if (result.stderr.len != 0) {
                     std.debug.print("{s}\n", .{result.stderr});
@@ -128,25 +132,30 @@ fn normalizeCrLfOwned(allocator: std.mem.Allocator, owned: []u8) ![]u8 {
 }
 
 fn runExeWithEnv(allocator: std.mem.Allocator, exe_path: []const u8, overrides: []const EnvOverride) ![]const u8 {
-    const exe_abs = try fs.cwd().realpathAlloc(allocator, exe_path);
+    const exe_abs = blk: {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const n = try std.Io.Dir.cwd().realPathFile(std.testing.io, exe_path, &buf);
+        break :blk try allocator.dupe(u8, buf[0..n]);
+    };
     defer allocator.free(exe_abs);
 
-    var env_map = try std.process.getEnvMap(allocator);
+    var env_map = try std.testing.environ.createMap(allocator);
     defer env_map.deinit();
 
     for (overrides) |ov| {
         try env_map.put(ov.key, ov.value);
     }
 
-    const result = try std.process.Child.run(.{
-        .allocator = allocator,
+    const result = try std.process.run(allocator, std.testing.io, .{
         .argv = &.{exe_abs},
-        .env_map = &env_map,
+        .environ_map = &env_map,
+        .stdout_limit = .limited(10 * 1024 * 1024),
+        .stderr_limit = .limited(10 * 1024 * 1024),
     });
     defer allocator.free(result.stderr);
 
     switch (result.term) {
-        .Exited => |code| {
+        .exited => |code| {
             if (code != 0) {
                 allocator.free(result.stdout);
                 return error.ExecutionFailed;
@@ -167,74 +176,55 @@ fn runExeWithEnvTimeout(
     overrides: []const EnvOverride,
     timeout_ms: u32,
 ) ![]const u8 {
-    const exe_abs = try fs.cwd().realpathAlloc(allocator, exe_path);
+    const exe_abs = blk: {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const n = try std.Io.Dir.cwd().realPathFile(std.testing.io, exe_path, &buf);
+        break :blk try allocator.dupe(u8, buf[0..n]);
+    };
     defer allocator.free(exe_abs);
 
-    var env_map = try std.process.getEnvMap(allocator);
+    var env_map = try std.testing.environ.createMap(allocator);
     defer env_map.deinit();
 
     for (overrides) |ov| {
         try env_map.put(ov.key, ov.value);
     }
 
-    var child = std.process.Child.init(&.{exe_abs}, allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
-    child.env_map = &env_map;
+    const result = std.process.run(allocator, std.testing.io, .{
+        .argv = &.{exe_abs},
+        .environ_map = &env_map,
+        .stdout_limit = .limited(1024 * 1024),
+        .stderr_limit = .limited(1024 * 1024),
+        .timeout = .{ .duration = .{ .raw = std.Io.Duration.fromMilliseconds(@intCast(timeout_ms)), .clock = .real } },
+    }) catch |err| switch (err) {
+        error.Timeout => return error.ExecutionTimedOut,
+        else => return err,
+    };
+    defer allocator.free(result.stderr);
 
-    try child.spawn();
-    errdefer {
-        _ = child.kill() catch {};
-    }
-
-    if (builtin.os.tag == .windows) {
-        std.os.windows.WaitForSingleObjectEx(child.id, timeout_ms, false) catch |err| switch (err) {
-            error.WaitTimeOut => {
-                _ = child.kill() catch {};
-                _ = child.wait() catch {};
-                return error.ExecutionTimedOut;
-            },
-            else => return err,
-        };
-    }
-
-    var stdout_list: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer stdout_list.deinit(allocator);
-
-    var stderr_list: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer stderr_list.deinit(allocator);
-
-    try child.collectOutput(allocator, &stdout_list, &stderr_list, 1024 * 1024);
-
-    const term = try child.wait();
-    const stderr_owned = try stderr_list.toOwnedSlice(allocator);
-    defer allocator.free(stderr_owned);
-
-    switch (term) {
-        .Exited => |code| {
+    switch (result.term) {
+        .exited => |code| {
             if (code != 0) {
-                stdout_list.deinit(allocator);
-                if (stderr_owned.len != 0) {
-                    std.debug.print("{s}\n", .{stderr_owned});
+                if (result.stderr.len != 0) {
+                    std.debug.print("{s}\n", .{result.stderr});
                 }
+                allocator.free(result.stdout);
                 return error.ExecutionFailed;
             }
         },
         else => {
-            stdout_list.deinit(allocator);
+            allocator.free(result.stdout);
             return error.ExecutionFailed;
         },
     }
 
-    const stdout_owned = try stdout_list.toOwnedSlice(allocator);
-    return normalizeCrLfOwned(allocator, stdout_owned);
+    return normalizeCrLfOwned(allocator, result.stdout);
 }
 
 fn parseMetricValue(stdout: []const u8, key: []const u8) ![]const u8 {
     var lines = std.mem.tokenizeScalar(u8, stdout, '\n');
     while (lines.next()) |raw_line| {
-        const line = std.mem.trimRight(u8, raw_line, "\r");
+        const line = std.mem.trimEnd(u8, raw_line, "\r");
         if (line.len <= key.len) continue;
         if (line[key.len] != '=') continue;
         if (std.mem.eql(u8, line[0..key.len], key)) {
@@ -271,7 +261,7 @@ test "if/elif/else transpiles" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "else if (x == 2)") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "else {") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "defer inside false if branch does not run" {
@@ -279,9 +269,9 @@ test "defer inside false if branch does not run" {
     const ifilepath = "codegen_defer_if_branch.fn";
     const c_path = "codegen_defer_if_branch.c";
     const exe_path = if (builtin.os.tag == .windows) "codegen_defer_if_branch.exe" else "codegen_defer_if_branch";
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(c_path) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.c.io;\n" ++
@@ -299,9 +289,9 @@ test "defer inside false if branch does not run" {
     defer allocator.free(out_owned);
 
     {
-        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, c_path, exe_path);
@@ -316,9 +306,9 @@ test "defer inside fit branch runs only for matched branch" {
     const ifilepath = "codegen_defer_fit_branch.fn";
     const c_path = "codegen_defer_fit_branch.c";
     const exe_path = if (builtin.os.tag == .windows) "codegen_defer_fit_branch.exe" else "codegen_defer_fit_branch";
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(c_path) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.c.io;\n" ++
@@ -351,9 +341,9 @@ test "defer inside fit branch runs only for matched branch" {
     defer allocator.free(out_owned);
 
     {
-        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, c_path, exe_path);
@@ -380,9 +370,9 @@ test "defer in range loop runs at each iteration end" {
     const ifilepath = "codegen_defer_range_loop.fn";
     const c_path = "codegen_defer_range_loop.c";
     const exe_path = if (builtin.os.tag == .windows) "codegen_defer_range_loop.exe" else "codegen_defer_range_loop";
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(c_path) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.c.io;\n" ++
@@ -399,9 +389,9 @@ test "defer in range loop runs at each iteration end" {
     defer allocator.free(out_owned);
 
     {
-        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, c_path, exe_path);
@@ -423,9 +413,9 @@ test "defer in loop runs on continue and break" {
     const ifilepath = "codegen_defer_loop_continue_break.fn";
     const c_path = "codegen_defer_loop_continue_break.c";
     const exe_path = if (builtin.os.tag == .windows) "codegen_defer_loop_continue_break.exe" else "codegen_defer_loop_continue_break";
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(c_path) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.c.io;\n" ++
@@ -452,9 +442,9 @@ test "defer in loop runs on continue and break" {
     defer allocator.free(out_owned);
 
     {
-        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, c_path, exe_path);
@@ -489,7 +479,7 @@ test "array indexing expression transpiles" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t arr[] = {1, 2, 3};") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "arr[1]") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "compound assignment transpiles" {
@@ -507,7 +497,7 @@ test "compound assignment transpiles" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "x += 2") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "raw pointer maps to void*" {
@@ -523,7 +513,7 @@ test "raw pointer maps to void*" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "void* id(void* p)") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "async and await surface transpiles and runs" {
@@ -531,9 +521,9 @@ test "async and await surface transpiles and runs" {
     const ifilepath = "codegen_async_await_surface.fn";
     const c_path = "codegen_async_await_surface.c";
     const exe_path = if (builtin.os.tag == .windows) "codegen_async_await_surface.exe" else "codegen_async_await_surface";
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(c_path) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.c.io;\n" ++
@@ -549,9 +539,9 @@ test "async and await surface transpiles and runs" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t inc(int64_t x)") != null);
 
     {
-        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, c_path, exe_path);
@@ -565,9 +555,9 @@ test "async and await let surface transpiles and runs" {
     const ifilepath = "codegen_async_await_let_surface.fn";
     const c_path = "codegen_async_await_let_surface.c";
     const exe_path = if (builtin.os.tag == .windows) "codegen_async_await_let_surface.exe" else "codegen_async_await_let_surface";
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(c_path) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.c.io;\n" ++
@@ -583,9 +573,9 @@ test "async and await let surface transpiles and runs" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "__fun_async_call_inc") != null);
 
     {
-        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, c_path, exe_path);
@@ -599,9 +589,9 @@ test "async await statement form transpiles and runs" {
     const ifilepath = "codegen_async_await_statement_surface.fn";
     const c_path = "codegen_async_await_statement_surface.c";
     const exe_path = if (builtin.os.tag == .windows) "codegen_async_await_statement_surface.exe" else "codegen_async_await_statement_surface";
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(c_path) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.c.io;\n" ++
@@ -618,9 +608,9 @@ test "async await statement form transpiles and runs" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "__fun_async_call_inc(40);") != null);
 
     {
-        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, c_path, exe_path);
@@ -660,9 +650,9 @@ test "async impl method await transpiles and runs" {
     const ifilepath = "codegen_async_impl_method_await.fn";
     const c_path = "codegen_async_impl_method_await.c";
     const exe_path = if (builtin.os.tag == .windows) "codegen_async_impl_method_await.exe" else "codegen_async_impl_method_await";
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(c_path) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.c.io;\n" ++
@@ -685,9 +675,9 @@ test "async impl method await transpiles and runs" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "__fun_async_call_Counter__add(") != null);
 
     {
-        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, c_path, exe_path);
@@ -701,9 +691,9 @@ test "async field method await transpiles and runs" {
     const ifilepath = "codegen_async_field_method_await.fn";
     const c_path = "codegen_async_field_method_await.c";
     const exe_path = if (builtin.os.tag == .windows) "codegen_async_field_method_await.exe" else "codegen_async_field_method_await";
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(c_path) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.c.io;\n" ++
@@ -729,9 +719,9 @@ test "async field method await transpiles and runs" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "__fun_async_call_Counter__add(") != null);
 
     {
-        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, c_path, exe_path);
@@ -745,9 +735,9 @@ test "async generic function await transpiles and runs" {
     const ifilepath = "codegen_async_generic_fn_await.fn";
     const c_path = "codegen_async_generic_fn_await.c";
     const exe_path = if (builtin.os.tag == .windows) "codegen_async_generic_fn_await.exe" else "codegen_async_generic_fn_await";
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(c_path) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.c.io;\n" ++
@@ -763,9 +753,9 @@ test "async generic function await transpiles and runs" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "__fun_async_call_id__num(") != null);
 
     {
-        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, c_path, exe_path);
@@ -779,9 +769,9 @@ test "async generic impl method await transpiles and runs" {
     const ifilepath = "codegen_async_generic_method_await.fn";
     const c_path = "codegen_async_generic_method_await.c";
     const exe_path = if (builtin.os.tag == .windows) "codegen_async_generic_method_await.exe" else "codegen_async_generic_method_await";
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(c_path) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.c.io;\n" ++
@@ -803,9 +793,9 @@ test "async generic impl method await transpiles and runs" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "__fun_async_call_Box__num__forty_two(") != null);
 
     {
-        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, c_path, exe_path);
@@ -819,9 +809,9 @@ test "async quirk dispatch await transpiles and runs" {
     const ifilepath = "codegen_async_quirk_dispatch_await.fn";
     const c_path = "codegen_async_quirk_dispatch_await.c";
     const exe_path = if (builtin.os.tag == .windows) "codegen_async_quirk_dispatch_await.exe" else "codegen_async_quirk_dispatch_await";
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(c_path) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.c.io;\n" ++
@@ -849,9 +839,9 @@ test "async quirk dispatch await transpiles and runs" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "__fun_async_call_Counter__AsyncCounter__add") != null);
 
     {
-        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, c_path, exe_path);
@@ -865,9 +855,9 @@ test "async quirk field dispatch await transpiles and runs" {
     const ifilepath = "codegen_async_quirk_field_dispatch_await.fn";
     const c_path = "codegen_async_quirk_field_dispatch_await.c";
     const exe_path = if (builtin.os.tag == .windows) "codegen_async_quirk_field_dispatch_await.exe" else "codegen_async_quirk_field_dispatch_await";
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(c_path) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.c.io;\n" ++
@@ -898,9 +888,9 @@ test "async quirk field dispatch await transpiles and runs" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "h.q") != null);
 
     {
-        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, c_path, exe_path);
@@ -914,9 +904,9 @@ test "async quirk function-returned receiver await transpiles and runs" {
     const ifilepath = "codegen_async_quirk_function_receiver_await.fn";
     const c_path = "codegen_async_quirk_function_receiver_await.c";
     const exe_path = if (builtin.os.tag == .windows) "codegen_async_quirk_function_receiver_await.exe" else "codegen_async_quirk_function_receiver_await";
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(c_path) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.c.io;\n" ++
@@ -947,9 +937,9 @@ test "async quirk function-returned receiver await transpiles and runs" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "passthrough") != null);
 
     {
-        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, c_path, exe_path);
@@ -963,9 +953,9 @@ test "async quirk nested composite receiver await transpiles and runs" {
     const ifilepath = "codegen_async_quirk_nested_receiver_await.fn";
     const c_path = "codegen_async_quirk_nested_receiver_await.c";
     const exe_path = if (builtin.os.tag == .windows) "codegen_async_quirk_nested_receiver_await.exe" else "codegen_async_quirk_nested_receiver_await";
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(c_path) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.c.io;\n" ++
@@ -1002,9 +992,9 @@ test "async quirk nested composite receiver await transpiles and runs" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "wrap") != null);
 
     {
-        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, c_path, exe_path);
@@ -1018,9 +1008,9 @@ test "async quirk generic wrapper receiver await transpiles and runs" {
     const ifilepath = "codegen_async_quirk_generic_wrapper_receiver_await.fn";
     const c_path = "codegen_async_quirk_generic_wrapper_receiver_await.c";
     const exe_path = if (builtin.os.tag == .windows) "codegen_async_quirk_generic_wrapper_receiver_await.exe" else "codegen_async_quirk_generic_wrapper_receiver_await";
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(c_path) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.c.io;\n" ++
@@ -1054,9 +1044,9 @@ test "async quirk generic wrapper receiver await transpiles and runs" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Box") != null);
 
     {
-        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, c_path, exe_path);
@@ -1070,9 +1060,9 @@ test "async quirk parenthesized generic receiver await transpiles and runs" {
     const ifilepath = "codegen_async_quirk_paren_generic_receiver_await.fn";
     const c_path = "codegen_async_quirk_paren_generic_receiver_await.c";
     const exe_path = if (builtin.os.tag == .windows) "codegen_async_quirk_paren_generic_receiver_await.exe" else "codegen_async_quirk_paren_generic_receiver_await";
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(c_path) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.c.io;\n" ++
@@ -1105,9 +1095,9 @@ test "async quirk parenthesized generic receiver await transpiles and runs" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, ".vtable->add(") != null);
 
     {
-        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, c_path, exe_path);
@@ -1121,9 +1111,9 @@ test "async quirk pointer generic receiver await transpiles and runs" {
     const ifilepath = "codegen_async_quirk_ptr_generic_receiver_await.fn";
     const c_path = "codegen_async_quirk_ptr_generic_receiver_await.c";
     const exe_path = if (builtin.os.tag == .windows) "codegen_async_quirk_ptr_generic_receiver_await.exe" else "codegen_async_quirk_ptr_generic_receiver_await";
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(c_path) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.c.io;\n" ++
@@ -1157,9 +1147,9 @@ test "async quirk pointer generic receiver await transpiles and runs" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, ".vtable->add(") != null);
 
     {
-        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, c_path, exe_path);
@@ -1173,9 +1163,9 @@ test "async quirk helper pointer generic receiver await transpiles and runs" {
     const ifilepath = "codegen_async_quirk_helper_ptr_generic_receiver_await.fn";
     const c_path = "codegen_async_quirk_helper_ptr_generic_receiver_await.c";
     const exe_path = if (builtin.os.tag == .windows) "codegen_async_quirk_helper_ptr_generic_receiver_await.exe" else "codegen_async_quirk_helper_ptr_generic_receiver_await";
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(c_path) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.c.io;\n" ++
@@ -1212,9 +1202,9 @@ test "async quirk helper pointer generic receiver await transpiles and runs" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, ".vtable->add(") != null);
 
     {
-        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, c_path, exe_path);
@@ -1228,9 +1218,9 @@ test "async quirk indexed generic receiver await transpiles and runs" {
     const ifilepath = "codegen_async_quirk_indexed_generic_receiver_await.fn";
     const c_path = "codegen_async_quirk_indexed_generic_receiver_await.c";
     const exe_path = if (builtin.os.tag == .windows) "codegen_async_quirk_indexed_generic_receiver_await.exe" else "codegen_async_quirk_indexed_generic_receiver_await";
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(c_path) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.c.io;\n" ++
@@ -1257,9 +1247,9 @@ test "async quirk indexed generic receiver await transpiles and runs" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "[1]") != null);
 
     {
-        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, c_path, exe_path);
@@ -1274,15 +1264,16 @@ test "aliased module async quirk generic receiver await transpiles and runs" {
     const main_path = "codegen_alias_async_quirk_main.fn";
     const c_path = "codegen_alias_async_quirk_main.c";
     const exe_path = if (builtin.os.tag == .windows) "codegen_alias_async_quirk_main.exe" else "codegen_alias_async_quirk_main";
-    defer fs.cwd().deleteFile(mod_path) catch {};
-    defer fs.cwd().deleteFile(main_path) catch {};
-    defer fs.cwd().deleteFile(c_path) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, mod_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, main_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     {
-        const mod_file = try fs.cwd().createFile(mod_path, .{ .read = true });
-        defer mod_file.close();
-        try mod_file.writeAll(
+        const mod_file = try std.Io.Dir.cwd().createFile(std.testing.io, mod_path, .{ .read = true });
+        defer mod_file.close(std.testing.io);
+        try mod_file.writeStreamingAll(
+            std.testing.io,
             "pub compound Counter {\n" ++
                 "  num base;\n" ++
                 "}\n" ++
@@ -1315,9 +1306,9 @@ test "aliased module async quirk generic receiver await transpiles and runs" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "m__to_async") != null);
 
     {
-        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, c_path, exe_path);
@@ -1346,13 +1337,13 @@ test "function definitions can be out of order (prototypes emitted)" {
     const main_idx = std.mem.indexOf(u8, out_owned, "int main") orelse return error.TestExpectedMain;
     try std.testing.expect(proto_idx < main_idx);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "aliased import calls transpile to qualified symbols" {
     const allocator = std.testing.allocator;
     const ifilepath = "examples/imports/alias_collision/main_codegen_alias.fn";
-    defer fs.cwd().deleteFile(ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 
     const input =
         "imp mod1 as one;\n" ++
@@ -1376,13 +1367,14 @@ test "aliased import supports public type and value access" {
     const allocator = std.testing.allocator;
     const mod_path = "codegen_alias_exports_mod.fn";
     const main_path = "codegen_alias_exports_main.fn";
-    defer fs.cwd().deleteFile(mod_path) catch {};
-    defer fs.cwd().deleteFile(main_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, mod_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, main_path) catch {};
 
     {
-        const mod_file = try fs.cwd().createFile(mod_path, .{ .read = true });
-        defer mod_file.close();
-        try mod_file.writeAll(
+        const mod_file = try std.Io.Dir.cwd().createFile(std.testing.io, mod_path, .{ .read = true });
+        defer mod_file.close(std.testing.io);
+        try mod_file.writeStreamingAll(
+            std.testing.io,
             "pub compound User {\n" ++
                 "  num id;\n" ++
                 "}\n" ++
@@ -1412,13 +1404,14 @@ test "aliased compound method calls use canonical impl" {
     const allocator = std.testing.allocator;
     const mod_path = "codegen_alias_compound_mod.fn";
     const main_path = "codegen_alias_compound_main.fn";
-    defer fs.cwd().deleteFile(mod_path) catch {};
-    defer fs.cwd().deleteFile(main_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, mod_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, main_path) catch {};
 
     {
-        const mod_file = try fs.cwd().createFile(mod_path, .{ .read = true });
-        defer mod_file.close();
-        try mod_file.writeAll(
+        const mod_file = try std.Io.Dir.cwd().createFile(std.testing.io, mod_path, .{ .read = true });
+        defer mod_file.close(std.testing.io);
+        try mod_file.writeStreamingAll(
+            std.testing.io,
             "pub compound Vec2 {\n" ++
                 "  dec x;\n" ++
                 "  dec y;\n" ++
@@ -1452,9 +1445,9 @@ test "aliased io.format with bare placeholder renders values" {
     const input_path = "codegen_alias_io_format_main.fn";
     const c_path = "codegen_alias_io_format_main.c";
     const out_path = "codegen_alias_io_format_out.txt";
-    defer fs.cwd().deleteFile(input_path) catch {};
-    defer fs.cwd().deleteFile(c_path) catch {};
-    defer fs.cwd().deleteFile(out_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, input_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, out_path) catch {};
 
     const input =
         "imp std.io as io;\n" ++
@@ -1467,14 +1460,14 @@ test "aliased io.format with bare placeholder renders values" {
     defer allocator.free(out_owned);
 
     {
-        const c_file = try fs.cwd().createFile(c_path, .{});
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{});
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
-    try cli.compile_and_run(allocator, c_path, true, input_path, &.{});
+    try cli.compile_and_run(allocator, std.testing.io, c_path, true, input_path, &.{});
 
-    const got = try fs.cwd().readFileAlloc(allocator, out_path, 1024 * 1024);
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, out_path, allocator, .limited(1024 * 1024));
     defer allocator.free(got);
     try std.testing.expectEqualStrings("Hello, Alice!", got);
 }
@@ -1507,7 +1500,7 @@ test "defer emits in LIFO order before return" {
     try std.testing.expect(b_pos < a_pos);
     try std.testing.expect(a_pos < ret_pos);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "defer block emits before function end" {
@@ -1530,7 +1523,7 @@ test "defer block emits before function end" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "a();") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "b();") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "enum types can be referenced before declaration" {
@@ -1561,7 +1554,7 @@ test "enum types can be referenced before declaration" {
     // Ensure the enum variant constant made it through lowering/codegen.
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Color_Blue") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.time import adds time.h include" {
@@ -1577,7 +1570,7 @@ test "std.time import adds time.h include" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <time.h>") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.c.thread import emits portable thread include layer" {
@@ -1595,7 +1588,7 @@ test "std.c.thread import emits portable thread include layer" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <pthread.h>") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "long long pthread_create(") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.c.thread symbols are callable after import" {
@@ -1613,7 +1606,7 @@ test "std.c.thread symbols are callable after import" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "pthread_self()") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.c.thread_windows import emits portable thread include layer" {
@@ -1631,7 +1624,7 @@ test "std.c.thread_windows import emits portable thread include layer" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <pthread.h>") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "long long pthread_cond_timedwait(") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.c.thread_windows symbols are callable after import" {
@@ -1649,7 +1642,7 @@ test "std.c.thread_windows symbols are callable after import" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "pthread_self()") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "transitive std.thread import emits pthread headers" {
@@ -1665,7 +1658,7 @@ test "transitive std.thread import emits pthread headers" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <pthread.h>") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.thread helper lifecycle APIs transpile" {
@@ -1688,7 +1681,7 @@ test "std.thread helper lifecycle APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_join(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_detach(") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.thread accepts named function callbacks" {
@@ -1711,7 +1704,7 @@ test "std.thread accepts named function callbacks" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_start(&t, worker, NULL)") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.sync helper lifecycle APIs transpile" {
@@ -1751,7 +1744,7 @@ test "std.sync helper lifecycle APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "condvar_broadcast(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "condvar_destroy(") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "transitive std.sync_runtime import emits pthread headers" {
@@ -1767,7 +1760,7 @@ test "transitive std.sync_runtime import emits pthread headers" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <pthread.h>") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.sync_runtime lifecycle APIs transpile" {
@@ -1809,7 +1802,7 @@ test "std.sync_runtime lifecycle APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_condvar_broadcast(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_condvar_destroy(") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.sync_runtime backend selector APIs transpile" {
@@ -1837,7 +1830,7 @@ test "std.sync_runtime backend selector APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_runtime_backend_is_posix(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_runtime_backend_is_windows(") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.runtime_backend selector APIs transpile" {
@@ -1869,7 +1862,7 @@ test "std.runtime_backend selector APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_backend_posix_id(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_backend_windows_id(") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.sync_backend_windows native APIs transpile" {
@@ -1915,7 +1908,7 @@ test "std.sync_backend_windows native APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "pthread_mutex_init(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_posix_mutex_init(") == null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.sync_backend_posix lifecycle APIs transpile" {
@@ -1957,7 +1950,7 @@ test "std.sync_backend_posix lifecycle APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_posix_condvar_broadcast(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "sync_backend_posix_condvar_destroy(") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.thread_backend_windows native APIs transpile" {
@@ -1985,7 +1978,7 @@ test "std.thread_backend_windows native APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "pthread_create(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_backend_posix_start(") == null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.thread_backend_posix lifecycle APIs transpile" {
@@ -2009,7 +2002,7 @@ test "std.thread_backend_posix lifecycle APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_backend_posix_join(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_backend_posix_detach(") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "runtime backend honors FUN_RUNTIME_BACKEND override" {
@@ -2021,9 +2014,9 @@ test "runtime backend honors FUN_RUNTIME_BACKEND override" {
     else
         "codegen_runtime_backend_override_windows";
 
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(cpath) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, cpath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.runtime_backend;\n" ++
@@ -2036,9 +2029,9 @@ test "runtime backend honors FUN_RUNTIME_BACKEND override" {
     defer allocator.free(out_owned);
 
     {
-        const c_file = try fs.cwd().createFile(cpath, .{});
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, cpath, .{});
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, cpath, exe_path);
@@ -2061,9 +2054,9 @@ test "runtime backend FUN_RUNTIME_BACKEND wins over FUN_RUNTIME_OS" {
     else
         "codegen_runtime_backend_precedence";
 
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(cpath) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, cpath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.runtime_backend;\n" ++
@@ -2076,9 +2069,9 @@ test "runtime backend FUN_RUNTIME_BACKEND wins over FUN_RUNTIME_OS" {
     defer allocator.free(out_owned);
 
     {
-        const c_file = try fs.cwd().createFile(cpath, .{});
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, cpath, .{});
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, cpath, exe_path);
@@ -2102,9 +2095,9 @@ test "runtime backend uses FUN_RUNTIME_OS when backend override is unknown" {
     else
         "codegen_runtime_backend_os_override";
 
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(cpath) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, cpath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.runtime_backend;\n" ++
@@ -2117,9 +2110,9 @@ test "runtime backend uses FUN_RUNTIME_OS when backend override is unknown" {
     defer allocator.free(out_owned);
 
     {
-        const c_file = try fs.cwd().createFile(cpath, .{});
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, cpath, .{});
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, cpath, exe_path);
@@ -2142,9 +2135,9 @@ test "thread and sync runtime selectors align with runtime backend" {
     else
         "codegen_runtime_backend_alignment";
 
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(cpath) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, cpath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.runtime_backend;\n" ++
@@ -2159,9 +2152,9 @@ test "thread and sync runtime selectors align with runtime backend" {
     defer allocator.free(out_owned);
 
     {
-        const c_file = try fs.cwd().createFile(cpath, .{});
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, cpath, .{});
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, cpath, exe_path);
@@ -2183,9 +2176,9 @@ test "windows-selected sync runtime lifecycle operations execute" {
     else
         "codegen_runtime_windows_sync_ops";
 
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(cpath) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, cpath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.sync_runtime;\n" ++
@@ -2209,9 +2202,9 @@ test "windows-selected sync runtime lifecycle operations execute" {
     defer allocator.free(out_owned);
 
     {
-        const c_file = try fs.cwd().createFile(cpath, .{});
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, cpath, .{});
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, cpath, exe_path);
@@ -2233,9 +2226,9 @@ test "windows-selected thread runtime null-pointer behavior is non-stub" {
     else
         "codegen_runtime_windows_thread_null_ops";
 
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(cpath) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, cpath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.thread_runtime;\n" ++
@@ -2251,9 +2244,9 @@ test "windows-selected thread runtime null-pointer behavior is non-stub" {
     defer allocator.free(out_owned);
 
     {
-        const c_file = try fs.cwd().createFile(cpath, .{});
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, cpath, .{});
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, cpath, exe_path);
@@ -2279,7 +2272,7 @@ test "transitive std.thread_runtime import emits pthread headers" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <pthread.h>") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.thread_runtime lifecycle APIs transpile" {
@@ -2303,7 +2296,7 @@ test "std.thread_runtime lifecycle APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_thread_join(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_thread_detach(") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.thread_runtime async task handle APIs transpile" {
@@ -2330,7 +2323,7 @@ test "std.thread_runtime async task handle APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "RuntimeAsyncTask__join(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "RuntimeAsyncTask__detach(") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.thread_runtime async task handle behavior is stable across backend selectors" {
@@ -2342,9 +2335,9 @@ test "std.thread_runtime async task handle behavior is stable across backend sel
     else
         "codegen_std_thread_runtime_async_task_behavior";
 
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(cpath) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, cpath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.thread_runtime;\n" ++
@@ -2393,9 +2386,9 @@ test "std.thread_runtime async task handle behavior is stable across backend sel
     defer allocator.free(out_owned);
 
     {
-        const c_file = try fs.cwd().createFile(cpath, .{});
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, cpath, .{});
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, cpath, exe_path);
@@ -2455,7 +2448,7 @@ test "std.thread_runtime backend selector APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_runtime_backend_is_posix(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "thread_runtime_backend_is_windows(") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.channel runtime conformance matrix is stable across backend selectors" {
@@ -2467,9 +2460,9 @@ test "std.channel runtime conformance matrix is stable across backend selectors"
     else
         "codegen_channel_runtime_conformance";
 
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(cpath) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, cpath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.channel;\n" ++
@@ -2538,9 +2531,9 @@ test "std.channel runtime conformance matrix is stable across backend selectors"
     defer allocator.free(out_owned);
 
     {
-        const c_file = try fs.cwd().createFile(cpath, .{});
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, cpath, .{});
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, cpath, exe_path);
@@ -2591,9 +2584,9 @@ test "std.channel fairness and timeout benchmark stays within backend thresholds
     else
         "codegen_channel_runtime_benchmark";
 
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(cpath) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, cpath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.channel;\n" ++
@@ -2697,9 +2690,9 @@ test "std.channel fairness and timeout benchmark stays within backend thresholds
     defer allocator.free(out_owned);
 
     {
-        const c_file = try fs.cwd().createFile(cpath, .{});
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, cpath, .{});
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, cpath, exe_path);
@@ -2712,9 +2705,9 @@ test "std.channel fairness and timeout benchmark stays within backend thresholds
             .{ .key = "FUN_RUNTIME_BACKEND", .value = backend_name },
         };
 
-        const started_ms = std.time.milliTimestamp();
+        const started_ms: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds, std.time.ns_per_ms));
         const stdout = try runExeWithEnvTimeout(allocator, exe_path, &overrides, 12_000);
-        const finished_ms = std.time.milliTimestamp();
+        const finished_ms: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds, std.time.ns_per_ms));
         defer allocator.free(stdout);
 
         try std.testing.expectEqualStrings(backend_name, try parseMetricValue(stdout, "backend"));
@@ -2758,7 +2751,7 @@ test "transitive std.channel import emits pthread headers" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <pthread.h>") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "transitive std.thread_pool import emits pthread headers" {
@@ -2774,7 +2767,7 @@ test "transitive std.thread_pool import emits pthread headers" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <pthread.h>") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.thread_pool lifecycle APIs transpile" {
@@ -2804,7 +2797,7 @@ test "std.thread_pool lifecycle APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "ThreadPool__is_ready(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "ThreadPool__destroy(") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.channel send and recv transpile for num" {
@@ -2826,7 +2819,7 @@ test "std.channel send and recv transpile for num" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__send(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__recv(") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.channel buffered constructor and try_send transpile" {
@@ -2850,7 +2843,7 @@ test "std.channel buffered constructor and try_send transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "channel_new_cap__num") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__try_send(") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.channel timeout send and recv transpile" {
@@ -2876,7 +2869,7 @@ test "std.channel timeout send and recv transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__recv_timeout_into(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__recv_timeout(") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.channel async wrapper APIs await and run" {
@@ -2888,9 +2881,9 @@ test "std.channel async wrapper APIs await and run" {
     else
         "codegen_std_channel_async_wrappers";
 
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(cpath) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, cpath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.channel;\n" ++
@@ -2936,9 +2929,9 @@ test "std.channel async wrapper APIs await and run" {
     defer allocator.free(out_owned);
 
     {
-        const c_file = try fs.cwd().createFile(cpath, .{});
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, cpath, .{});
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, cpath, exe_path);
@@ -2958,9 +2951,9 @@ test "std.channel async forwarding APIs await and run" {
     else
         "codegen_std_channel_async_forwarding";
 
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(cpath) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, cpath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.channel;\n" ++
@@ -2997,9 +2990,9 @@ test "std.channel async forwarding APIs await and run" {
     defer allocator.free(out_owned);
 
     {
-        const c_file = try fs.cwd().createFile(cpath, .{});
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, cpath, .{});
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, cpath, exe_path);
@@ -3033,7 +3026,7 @@ test "std.io APIs usable in async function transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "read_bytes(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "read_all(") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.net async APIs transpile" {
@@ -3058,7 +3051,7 @@ test "std.net async APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "tcp_roundtrip_async") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "tcp_roundtrip_offload_async") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.net offload async edge return codes are stable across backend selectors" {
@@ -3070,9 +3063,9 @@ test "std.net offload async edge return codes are stable across backend selector
     else
         "codegen_std_net_offload_edge_codes";
 
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(cpath) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, cpath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.net;\n" ++
@@ -3118,9 +3111,9 @@ test "std.net offload async edge return codes are stable across backend selector
     defer allocator.free(out_owned);
 
     {
-        const c_file = try fs.cwd().createFile(cpath, .{});
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, cpath, .{});
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, cpath, exe_path);
@@ -3170,7 +3163,7 @@ test "std.channel cancel-aware send and recv APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__recv_timeout_with_cancel(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__recv_with_cancel(") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.channel cancel token APIs transpile" {
@@ -3227,7 +3220,7 @@ test "std.channel cancel token APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with_tuning_token(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_tuning_token(") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.channel select recv2 timeout transpile" {
@@ -3252,7 +3245,7 @@ test "std.channel select recv2 timeout transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_try_recv_with(") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.channel select recv3 fair timeout transpile" {
@@ -3279,7 +3272,7 @@ test "std.channel select recv3 fair timeout transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_try_recv3_rr_with(") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.channel select default branch APIs transpile" {
@@ -3305,7 +3298,7 @@ test "std.channel select default branch APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_default_with(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv3_rr_default_with(") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.channel select cancel-aware APIs transpile" {
@@ -3336,7 +3329,7 @@ test "std.channel select cancel-aware APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_cancel(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv3_rr_with_cancel(") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.channel select wait-slice tuning transpile" {
@@ -3358,7 +3351,7 @@ test "std.channel select wait-slice tuning transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__set_select_wait_slice_ms(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__get_select_wait_slice_ms(") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.channel select explicit wait-slice override transpile" {
@@ -3384,7 +3377,7 @@ test "std.channel select explicit wait-slice override transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with_slice(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_slice(") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.channel select explicit wait-slice and backoff override transpile" {
@@ -3410,7 +3403,7 @@ test "std.channel select explicit wait-slice and backoff override transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with_tuning(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_tuning(") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.channel select blocking tuning overrides transpile" {
@@ -3440,7 +3433,7 @@ test "std.channel select blocking tuning overrides transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv3_rr_with_slice(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv3_rr_with_tuning(") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.channel select adaptive wait backoff transpile" {
@@ -3462,7 +3455,7 @@ test "std.channel select adaptive wait backoff transpile" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "channel_compute_wait_slice_ms(") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "std.channel select backoff-step tuning transpile" {
@@ -3484,7 +3477,7 @@ test "std.channel select backoff-step tuning transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__set_select_wait_backoff_steps(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__get_select_wait_backoff_steps(") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "channel select default returns default branch when empty" {
@@ -3496,9 +3489,9 @@ test "channel select default returns default branch when empty" {
     else
         "codegen_channel_select_default_runtime";
 
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(cpath) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, cpath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.channel;\n" ++
@@ -3532,9 +3525,9 @@ test "channel select default returns default branch when empty" {
     defer allocator.free(out_owned);
 
     {
-        const c_file = try fs.cwd().createFile(cpath, .{});
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, cpath, .{});
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, cpath, exe_path);
@@ -3554,9 +3547,9 @@ test "channel select cancel returns cancelled status" {
     else
         "codegen_channel_select_cancel_runtime";
 
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(cpath) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, cpath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.channel;\n" ++
@@ -3591,9 +3584,9 @@ test "channel select cancel returns cancelled status" {
     defer allocator.free(out_owned);
 
     {
-        const c_file = try fs.cwd().createFile(cpath, .{});
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, cpath, .{});
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, cpath, exe_path);
@@ -3613,9 +3606,9 @@ test "channel cancel-aware send and recv return cancelled status" {
     else
         "codegen_channel_cancel_send_recv_runtime";
 
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(cpath) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, cpath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.channel;\n" ++
@@ -3640,9 +3633,9 @@ test "channel cancel-aware send and recv return cancelled status" {
     defer allocator.free(out_owned);
 
     {
-        const c_file = try fs.cwd().createFile(cpath, .{});
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, cpath, .{});
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, cpath, exe_path);
@@ -3662,9 +3655,9 @@ test "channel cancel-aware send and recv succeed when not cancelled" {
     else
         "codegen_channel_cancel_send_recv_success_runtime";
 
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(cpath) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, cpath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.channel;\n" ++
@@ -3695,9 +3688,9 @@ test "channel cancel-aware send and recv succeed when not cancelled" {
     defer allocator.free(out_owned);
 
     {
-        const c_file = try fs.cwd().createFile(cpath, .{});
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, cpath, .{});
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, cpath, exe_path);
@@ -3717,9 +3710,9 @@ test "channel cancel token controls cancel and reset behavior" {
     else
         "codegen_channel_cancel_token_runtime";
 
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(cpath) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, cpath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.channel;\n" ++
@@ -3753,9 +3746,9 @@ test "channel cancel token controls cancel and reset behavior" {
     defer allocator.free(out_owned);
 
     {
-        const c_file = try fs.cwd().createFile(cpath, .{});
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, cpath, .{});
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, cpath, exe_path);
@@ -3775,9 +3768,9 @@ test "channel select3 rr stress drains all values with expected statuses" {
     else
         "codegen_channel_select_rr_stress_runtime";
 
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(cpath) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, cpath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.channel;\n" ++
@@ -3845,9 +3838,9 @@ test "channel select3 rr stress drains all values with expected statuses" {
     defer allocator.free(out_owned);
 
     {
-        const c_file = try fs.cwd().createFile(cpath, .{});
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, cpath, .{});
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, cpath, exe_path);
@@ -3867,9 +3860,9 @@ test "channel default and cancel select stress stays stable" {
     else
         "codegen_channel_select_default_cancel_stress_runtime";
 
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(cpath) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, cpath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.channel;\n" ++
@@ -3911,9 +3904,9 @@ test "channel default and cancel select stress stays stable" {
     defer allocator.free(out_owned);
 
     {
-        const c_file = try fs.cwd().createFile(cpath, .{});
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, cpath, .{});
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, cpath, exe_path);
@@ -3934,10 +3927,10 @@ test "channel pthread close race under contention" {
     else
         "codegen_channel_thread_close_race";
 
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(cpath) catch {};
-    defer fs.cwd().deleteFile(hpath) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, cpath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, hpath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.channel;\n" ++
@@ -3955,9 +3948,9 @@ test "channel pthread close race under contention" {
     defer allocator.free(out_owned);
 
     {
-        const c_file = try fs.cwd().createFile(cpath, .{});
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, cpath, .{});
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     const harness =
@@ -4121,9 +4114,9 @@ test "channel pthread close race under contention" {
         "}\n";
 
     {
-        const h_file = try fs.cwd().createFile(hpath, .{});
-        defer h_file.close();
-        try h_file.writeAll(harness);
+        const h_file = try std.Io.Dir.cwd().createFile(std.testing.io, hpath, .{});
+        defer h_file.close(std.testing.io);
+        try h_file.writeStreamingAll(std.testing.io, harness);
     }
 
     try compileWithZigCc(allocator, hpath, exe_path);
@@ -4144,10 +4137,10 @@ test "channel pthread cancelled-token contention is stable" {
     else
         "codegen_channel_thread_cancel_token_contention";
 
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(cpath) catch {};
-    defer fs.cwd().deleteFile(hpath) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, cpath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, hpath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.channel;\n" ++
@@ -4165,9 +4158,9 @@ test "channel pthread cancelled-token contention is stable" {
     defer allocator.free(out_owned);
 
     {
-        const c_file = try fs.cwd().createFile(cpath, .{});
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, cpath, .{});
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     const harness =
@@ -4314,9 +4307,9 @@ test "channel pthread cancelled-token contention is stable" {
         "}\n";
 
     {
-        const h_file = try fs.cwd().createFile(hpath, .{});
-        defer h_file.close();
-        try h_file.writeAll(harness);
+        const h_file = try std.Io.Dir.cwd().createFile(std.testing.io, hpath, .{});
+        defer h_file.close(std.testing.io);
+        try h_file.writeStreamingAll(std.testing.io, harness);
     }
 
     try compileWithZigCc(allocator, hpath, exe_path);
@@ -4345,7 +4338,7 @@ test "generic function specialization emits concrete names" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "id__str") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "id__T") == null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "generic inference after init transpiles with concrete specializations and runs" {
@@ -4357,9 +4350,9 @@ test "generic inference after init transpiles with concrete specializations and 
     else
         "codegen_generic_inference_after_init_regression";
 
-    defer fs.cwd().deleteFile(ifilepath) catch {};
-    defer fs.cwd().deleteFile(c_path) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     const input =
         "imp std.c.io;\n" ++
@@ -4413,9 +4406,9 @@ test "generic inference after init transpiles with concrete specializations and 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Pair__L__R") == null);
 
     {
-        const c_file = try fs.cwd().createFile(c_path, .{ .truncate = true });
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, c_path, exe_path);
@@ -4444,7 +4437,7 @@ test "assert emits abort and message" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "fprintf(stderr, \"Assertion failed at ") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "abort()") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "compounds + quirks + impl vtables transpile" {
@@ -4482,7 +4475,7 @@ test "compounds + quirks + impl vtables transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "h.vtable->getX") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "h.self") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "pointer field access uses arrow" {
@@ -4502,7 +4495,7 @@ test "pointer field access uses arrow" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "pp->x") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 fn extractFirstQuirkBaseName(out: []const u8) ?[]const u8 {
@@ -4551,7 +4544,7 @@ test "structural quirks share canonical C type" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "a.vtable->getX") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "b.vtable->getX") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "asm statement transpiles" {
@@ -4572,7 +4565,7 @@ test "asm statement transpiles" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "\"=r\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "\"memory\"") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "asm block preserves newlines" {
@@ -4595,7 +4588,7 @@ test "asm block preserves newlines" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "mov x8, 93\\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "svc 0\\n") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "transitive std.net import emits socket headers" {
@@ -4619,7 +4612,7 @@ test "transitive std.net import emits socket headers" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <arpa/inet.h>") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "#include <unistd.h>") != null);
 
-    fs.cwd().deleteFile(ifilepath) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "main num return emits exit status" {
@@ -4637,7 +4630,7 @@ test "main num return emits exit status" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "int main") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "return (int)(7);") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "map compound key specialization symbols emit" {
@@ -4672,7 +4665,7 @@ test "map compound key specialization symbols emit" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Map__UserKey__str__has") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Map__UserKey__str__remove") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "stdlib hot path stress transpiles" {
@@ -4710,7 +4703,7 @@ test "stdlib hot path stress transpiles" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Map__num__str__has") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Map__num__str__remove") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "generic specialization plus net offload async regression stays stable" {
@@ -4754,7 +4747,7 @@ test "generic specialization plus net offload async regression stays stable" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Map__UserKey__str__get") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "tcp_roundtrip_offload_async") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "nested import generic impl specialization prototypes emit and run" {
@@ -4768,16 +4761,17 @@ test "nested import generic impl specialization prototypes emit and run" {
     else
         "codegen_nested_generic_main";
 
-    defer fs.cwd().deleteFile(leaf_path) catch {};
-    defer fs.cwd().deleteFile(mid_path) catch {};
-    defer fs.cwd().deleteFile(main_path) catch {};
-    defer fs.cwd().deleteFile(cpath) catch {};
-    defer fs.cwd().deleteFile(exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, leaf_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, mid_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, main_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, cpath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     {
-        const leaf_file = try fs.cwd().createFile(leaf_path, .{ .read = true, .truncate = true });
-        defer leaf_file.close();
-        try leaf_file.writeAll(
+        const leaf_file = try std.Io.Dir.cwd().createFile(std.testing.io, leaf_path, .{ .read = true, .truncate = true });
+        defer leaf_file.close(std.testing.io);
+        try leaf_file.writeStreamingAll(
+            std.testing.io,
             "pub compound Box<T> {\n" ++
                 "  T value;\n" ++
                 "}\n" ++
@@ -4788,9 +4782,10 @@ test "nested import generic impl specialization prototypes emit and run" {
     }
 
     {
-        const mid_file = try fs.cwd().createFile(mid_path, .{ .read = true, .truncate = true });
-        defer mid_file.close();
-        try mid_file.writeAll(
+        const mid_file = try std.Io.Dir.cwd().createFile(std.testing.io, mid_path, .{ .read = true, .truncate = true });
+        defer mid_file.close(std.testing.io);
+        try mid_file.writeStreamingAll(
+            std.testing.io,
             "imp codegen_nested_generic_leaf;\n" ++
                 "pub fun calc_num() num {\n" ++
                 "  Box<num> b = Box<num>{value = 42};\n" ++
@@ -4820,9 +4815,9 @@ test "nested import generic impl specialization prototypes emit and run" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Box__T__id") == null);
 
     {
-        const c_file = try fs.cwd().createFile(cpath, .{});
-        defer c_file.close();
-        try c_file.writeAll(out_owned);
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, cpath, .{});
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
     try compileWithZigCc(allocator, cpath, exe_path);

@@ -6,9 +6,9 @@ const codegen = @import("codegen");
 
 fn runTranspileExpectError(allocator: std.mem.Allocator, input_path: []const u8, input: []const u8) !void {
     {
-        const file = try fs.cwd().createFile(input_path, .{ .read = true });
-        defer file.close();
-        try file.writeAll(input);
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, input_path, .{ .read = true });
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     var transpile_proc = try codegen.TranspileProcess.init(allocator, input_path, "_ignored.c", .{ .outf = false });
@@ -18,7 +18,7 @@ fn runTranspileExpectError(allocator: std.mem.Allocator, input_path: []const u8,
     defer {
         lex_proc.deinit();
         transpile_proc.deinit();
-        fs.cwd().deleteFile(input_path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, input_path) catch {};
     }
 
     try lex_proc.lex();
@@ -32,9 +32,9 @@ fn runTranspileExpectError(allocator: std.mem.Allocator, input_path: []const u8,
 
 fn runTranspileExpectOk(allocator: std.mem.Allocator, input_path: []const u8, input: []const u8) !void {
     {
-        const file = try fs.cwd().createFile(input_path, .{ .read = true });
-        defer file.close();
-        try file.writeAll(input);
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, input_path, .{ .read = true });
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     var transpile_proc = try codegen.TranspileProcess.init(allocator, input_path, "_ignored.c", .{ .outf = false });
@@ -44,7 +44,7 @@ fn runTranspileExpectOk(allocator: std.mem.Allocator, input_path: []const u8, in
     defer {
         lex_proc.deinit();
         transpile_proc.deinit();
-        fs.cwd().deleteFile(input_path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, input_path) catch {};
     }
 
     try lex_proc.lex();
@@ -702,11 +702,11 @@ test "pub allows access across modules" {
 
     const lib_path = "typecheck_pub_lib.fn";
     {
-        const file = try fs.cwd().createFile(lib_path, .{ .read = true });
-        defer file.close();
-        try file.writeAll(lib_input);
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, lib_path, .{ .read = true });
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, lib_input);
     }
-    defer fs.cwd().deleteFile(lib_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, lib_path) catch {};
 
     const input =
         "imp typecheck_pub_lib;\n" ++
@@ -729,11 +729,11 @@ test "pub compound from import works in compound init expression" {
 
     const lib_path = "typecheck_pub_compound_lib.fn";
     {
-        const file = try fs.cwd().createFile(lib_path, .{ .read = true });
-        defer file.close();
-        try file.writeAll(lib_input);
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, lib_path, .{ .read = true });
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, lib_input);
     }
-    defer fs.cwd().deleteFile(lib_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, lib_path) catch {};
 
     const input =
         "imp typecheck_pub_compound_lib;\n" ++
@@ -755,11 +755,11 @@ test "private declarations are not visible across modules" {
 
     const lib_path = "typecheck_priv_lib.fn";
     {
-        const file = try fs.cwd().createFile(lib_path, .{ .read = true });
-        defer file.close();
-        try file.writeAll(lib_input);
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, lib_path, .{ .read = true });
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, lib_input);
     }
-    defer fs.cwd().deleteFile(lib_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, lib_path) catch {};
 
     const input =
         "imp typecheck_priv_lib;\n" ++

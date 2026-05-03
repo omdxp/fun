@@ -6,9 +6,9 @@ const codegen = @import("codegen");
 
 fn runTranspileWithWarnings(allocator: std.mem.Allocator, input_path: []const u8, input: []const u8) !struct { out: []const u8, warnings: ?[]const u8 } {
     {
-        const file = try fs.cwd().createFile(input_path, .{ .read = true });
-        defer file.close();
-        try file.writeAll(input);
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, input_path, .{ .read = true });
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     var transpile_proc = try codegen.TranspileProcess.init(allocator, input_path, "_ignored.c", .{ .outf = false });
@@ -55,7 +55,7 @@ test "diagnostic: returning address of local warns" {
     try std.testing.expect(res.warnings != null);
     try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "returning address of local variable") != null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "diagnostic: returning pointer local does not warn" {
@@ -76,7 +76,7 @@ test "diagnostic: returning pointer local does not warn" {
 
     try std.testing.expect(res.warnings == null);
 
-    try fs.cwd().deleteFile(ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
 test "diagnostic: allow return_local_ptr suppresses warning" {
@@ -97,7 +97,7 @@ test "diagnostic: allow return_local_ptr suppresses warning" {
     }
 
     try std.testing.expect(res.warnings == null);
-    fs.cwd().deleteFile(ifilepath) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "diagnostic: expect return_local_ptr suppresses warning" {
@@ -118,7 +118,7 @@ test "diagnostic: expect return_local_ptr suppresses warning" {
     }
 
     try std.testing.expect(res.warnings == null);
-    fs.cwd().deleteFile(ifilepath) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "diagnostic: unmet expect return_local_ptr fails" {
@@ -134,7 +134,7 @@ test "diagnostic: unmet expect return_local_ptr fails" {
 
     const res = runTranspileWithWarnings(allocator, ifilepath, input) catch |err| {
         try std.testing.expectEqual(codegen.TranspileError.UnmetWarningExpectation, err);
-        fs.cwd().deleteFile(ifilepath) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
         return;
     };
     defer {

@@ -268,9 +268,9 @@ test "print_node writes something" {
     };
 
     var buf: [1024]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try utils.print_node(expr_node, fbs.writer(), 0);
-    const out = fbs.getWritten();
+    var writer: std.Io.Writer = .fixed(&buf);
+    try utils.print_node(expr_node, &writer, 0);
+    const out = writer.buffered();
     try std.testing.expect(out.len > 0);
     try std.testing.expect(std.mem.indexOf(u8, out, "Node Type") != null);
 }
@@ -296,9 +296,9 @@ test "print_node handles newly covered node kinds" {
 
     for (nodes) |n| {
         var buf: [1024]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&buf);
-        try utils.print_node(n, fbs.writer(), 0);
-        const out = fbs.getWritten();
+        var writer: std.Io.Writer = .fixed(&buf);
+        try utils.print_node(n, &writer, 0);
+        const out = writer.buffered();
         try std.testing.expect(out.len > 0);
         try std.testing.expect(std.mem.indexOf(u8, out, "Unhandled node type details") == null);
         const expected = try std.fmt.allocPrint(std.testing.allocator, "Node Type: {s}", .{@tagName(n.type)});

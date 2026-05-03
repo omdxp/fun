@@ -2,21 +2,21 @@ const std = @import("std");
 const cli = @import("cli");
 
 fn cleanupCliTestArtifacts() void {
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
 
     // Nested Zig cache dirs created by cli.compile_and_run during tests.
-    cwd.deleteTree(".zig-cache/fun_cli_global_cache") catch {};
-    cwd.deleteTree(".zig-cache/fun_cli_local_cache") catch {};
+    std.Io.Dir.cwd().deleteTree(std.testing.io, ".zig-cache/fun_cli_global_cache") catch {};
+    std.Io.Dir.cwd().deleteTree(std.testing.io, ".zig-cache/fun_cli_local_cache") catch {};
 
     // Legacy per-invocation cache dirs from earlier iterations.
-    var dir = cwd.openDir(".", .{ .iterate = true }) catch return;
-    defer dir.close();
+    var dir = cwd.openDir(std.testing.io, ".", .{ .iterate = true }) catch return;
+    defer dir.close(std.testing.io);
     var it = dir.iterate();
-    while (it.next() catch null) |entry| {
+    while (it.next(std.testing.io) catch null) |entry| {
         switch (entry.kind) {
             .directory => {
                 if (std.mem.startsWith(u8, entry.name, ".fun_zig_cache_")) {
-                    cwd.deleteTree(entry.name) catch {};
+                    std.Io.Dir.cwd().deleteTree(std.testing.io, entry.name) catch {};
                 }
             },
             .file => {
@@ -26,14 +26,14 @@ fn cleanupCliTestArtifacts() void {
                         std.mem.startsWith(u8, entry.name, "cli_bad_") or
                         std.mem.startsWith(u8, entry.name, "temp_")))
                 {
-                    cwd.deleteFile(entry.name) catch {};
+                    cwd.deleteFile(std.testing.io, entry.name) catch {};
                 }
 
                 // Stray exe/pdbs from interrupted runs.
                 if ((std.mem.endsWith(u8, entry.name, ".exe") or std.mem.endsWith(u8, entry.name, ".pdb")) and
                     std.mem.startsWith(u8, entry.name, "cli_compile_and_run_"))
                 {
-                    cwd.deleteFile(entry.name) catch {};
+                    cwd.deleteFile(std.testing.io, entry.name) catch {};
                 }
             },
             else => {},
@@ -42,13 +42,13 @@ fn cleanupCliTestArtifacts() void {
 }
 
 fn writeTempCFile(allocator: std.mem.Allocator, prefix: []const u8, contents: []const u8) ![]const u8 {
-    const ts = std.time.nanoTimestamp();
+    const ts = std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds;
     const name = try std.fmt.allocPrint(allocator, "{s}_{d}.c", .{ prefix, ts });
     errdefer allocator.free(name);
 
-    const f = try std.fs.cwd().createFile(name, .{ .read = true });
-    defer f.close();
-    try f.writeAll(contents);
+    const f = try std.Io.Dir.cwd().createFile(std.testing.io, name, .{ .read = true });
+    defer f.close(std.testing.io);
+    try f.writeStreamingAll(std.testing.io, contents);
     return name;
 }
 
@@ -64,12 +64,12 @@ test "compile_and_run succeeds with valid C (file)" {
 
     const c_path = try writeTempCFile(allocator, "cli_ok", c_src);
     defer {
-        std.fs.cwd().deleteFile(c_path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
         allocator.free(c_path);
     }
 
     // Should compile and execute without error.
-    try cli.compile_and_run(allocator, c_path, true, "cli_compile_and_run_ok.fn", &.{});
+    try cli.compile_and_run(allocator, std.testing.io, c_path, true, "cli_compile_and_run_ok.fn", &.{});
 }
 
 test "compile_and_run reports compilation failure for invalid C (file)" {
@@ -79,9 +79,9 @@ test "compile_and_run reports compilation failure for invalid C (file)" {
 
     const c_path = try writeTempCFile(allocator, "cli_bad", bad_c_src);
     defer {
-        std.fs.cwd().deleteFile(c_path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
         allocator.free(c_path);
     }
 
-    try std.testing.expectError(cli.CliError.CompilationFailed, cli.compile_and_run(allocator, c_path, true, "cli_compile_and_run_bad.fn", &.{}));
+    try std.testing.expectError(cli.CliError.CompilationFailed, cli.compile_and_run(allocator, std.testing.io, c_path, true, "cli_compile_and_run_bad.fn", &.{}));
 }

@@ -6,9 +6,14 @@ pub fn main() !void {
 
 const Allocator = std.mem.Allocator;
 
+/// Compatibility shim: ArrayList with embedded allocator (old-style managed API).
+fn ArrayList(comptime T: type) type {
+    return std.array_list.Managed(T);
+}
+
 const ReaderCtx = struct {
     allocator: Allocator,
-    stdout_file: *std.fs.File,
+    stdout_file: *std.Io.File,
     q: *MsgQueue,
 };
 
@@ -20,22 +25,23 @@ fn platformExeName(base: []const u8) []const u8 {
 }
 
 fn fileExists(path: []const u8) bool {
-    std.fs.cwd().access(path, .{}) catch return false;
+    std.Io.Dir.cwd().access(std.testing.io, path, .{}) catch return false;
     return true;
 }
 
-fn writeLspMessageRaw(w: anytype, json: []const u8) !void {
-    try w.print("Content-Length: {d}\r\n\r\n", .{json.len});
-    try w.writeAll(json);
+fn writeLspMessageRaw(file: std.Io.File, io: std.Io, json: []const u8) !void {
+    var header_buf: [64]u8 = undefined;
+    const header = try std.fmt.bufPrint(&header_buf, "Content-Length: {d}\r\n\r\n", .{json.len});
+    try file.writeStreamingAll(io, header);
+    try file.writeStreamingAll(io, json);
 }
 
-fn readLspMessage(allocator: Allocator, r: anytype) ![]u8 {
+fn readLspMessage(allocator: Allocator, r: *std.Io.Reader) ![]u8 {
     var content_length: ?usize = null;
     while (true) {
-        const line_opt = try r.readUntilDelimiterOrEofAlloc(allocator, '\n', 16 * 1024);
-        if (line_opt == null) return error.EndOfStream;
-        defer allocator.free(line_opt.?);
-        const line = std.mem.trim(u8, line_opt.?, "\r\n");
+        const line_raw = try r.takeDelimiterInclusive('\n');
+        if (line_raw.len == 0) return error.EndOfStream;
+        const line = std.mem.trim(u8, line_raw, "\r\n");
         if (line.len == 0) break;
         if (std.ascii.startsWithIgnoreCase(line, "Content-Length:")) {
             const rest = std.mem.trim(u8, line["Content-Length:".len..], " ");
@@ -46,19 +52,19 @@ fn readLspMessage(allocator: Allocator, r: anytype) ![]u8 {
     const len = content_length orelse return error.MissingContentLength;
     const msg = try allocator.alloc(u8, len);
     errdefer allocator.free(msg);
-    try r.readNoEof(msg);
+    try r.readSliceAll(msg);
     return msg;
 }
 
 const MsgQueue = struct {
     allocator: Allocator,
-    mu: std.Thread.Mutex = .{},
-    cv: std.Thread.Condition = .{},
+    mu: std.Io.Mutex = .init,
+    cv: std.Io.Condition = .init,
     closed: bool = false,
-    items: std.ArrayList([]u8),
+    items: ArrayList([]u8),
 
     fn init(allocator: Allocator) MsgQueue {
-        return .{ .allocator = allocator, .items = std.ArrayList([]u8).init(allocator) };
+        return .{ .allocator = allocator, .items = ArrayList([]u8).init(allocator) };
     }
 
     fn deinit(self: *MsgQueue) void {
@@ -67,20 +73,22 @@ const MsgQueue = struct {
     }
 
     fn push(self: *MsgQueue, msg: []u8) void {
-        self.mu.lock();
-        defer self.mu.unlock();
+        const io = std.testing.io;
+        self.mu.lockUncancelable(io);
+        defer self.mu.unlock(io);
         self.items.append(msg) catch {
             self.allocator.free(msg);
             return;
         };
-        self.cv.signal();
+        self.cv.signal(io);
     }
 
     fn setClosed(self: *MsgQueue) void {
-        self.mu.lock();
-        defer self.mu.unlock();
+        const io = std.testing.io;
+        self.mu.lockUncancelable(io);
+        defer self.mu.unlock(io);
         self.closed = true;
-        self.cv.broadcast();
+        self.cv.broadcast(io);
     }
 
     const ParsedMsg = struct {
@@ -95,8 +103,9 @@ const MsgQueue = struct {
     };
 
     fn popMatchingResponse(self: *MsgQueue, allocator: Allocator, id: i64) ?ParsedMsg {
-        self.mu.lock();
-        defer self.mu.unlock();
+        const io = std.testing.io;
+        self.mu.lockUncancelable(io);
+        defer self.mu.unlock(io);
 
         var i: usize = 0;
         while (i < self.items.items.len) : (i += 1) {
@@ -125,8 +134,9 @@ const MsgQueue = struct {
     }
 
     fn popMatchingNotification(self: *MsgQueue, allocator: Allocator, method: []const u8) ?ParsedMsg {
-        self.mu.lock();
-        defer self.mu.unlock();
+        const io = std.testing.io;
+        self.mu.lockUncancelable(io);
+        defer self.mu.unlock(io);
 
         var i: usize = 0;
         while (i < self.items.items.len) : (i += 1) {
@@ -148,10 +158,11 @@ const MsgQueue = struct {
 };
 
 fn readerThread(ctx: *ReaderCtx) void {
-    var br = std.io.bufferedReader(ctx.stdout_file.reader());
-    const r = br.reader();
+    const io = std.testing.io;
+    var read_buf: [65536]u8 = undefined;
+    var reader = ctx.stdout_file.*.reader(io, &read_buf);
     while (true) {
-        const msg = readLspMessage(ctx.allocator, r) catch {
+        const msg = readLspMessage(ctx.allocator, &reader.interface) catch {
             ctx.q.setClosed();
             return;
         };
@@ -162,29 +173,30 @@ fn readerThread(ctx: *ReaderCtx) void {
 const LspProc = struct {
     allocator: Allocator,
     child: std.process.Child,
-    stdin_box: *std.fs.File,
-    stdout_box: *std.fs.File,
+    stdin_box: *std.Io.File,
+    stdout_box: *std.Io.File,
     q: *MsgQueue,
     reader: std.Thread,
     reader_ctx: *ReaderCtx,
     next_id: i64 = 1,
 
     fn start(allocator: Allocator, exe_path: []const u8, root_cwd: []const u8, fun_abs_path: []const u8) !LspProc {
-        var child = std.process.Child.init(&[_][]const u8{exe_path}, allocator);
-        child.stdin_behavior = .Pipe;
-        child.stdout_behavior = .Pipe;
-        // Don't pipe stderr unless we read it: a full pipe can deadlock the child.
-        child.stderr_behavior = .Inherit;
-        child.cwd = root_cwd;
+        const io = std.testing.io;
 
-        var env_map = try std.process.getEnvMap(allocator);
+        var env_map = try std.testing.environ.createMap(allocator);
         errdefer env_map.deinit();
         try env_map.put("FLS_FUN_PATH", fun_abs_path);
         // Ensure stdlib resolution uses the repo stdlib when tests index temp docs.
         try env_map.put("FUN_STDLIB_DIR", "stdlib");
-        child.env_map = &env_map;
 
-        try child.spawn();
+        var child = try std.process.spawn(io, .{
+            .argv = &.{exe_path},
+            .stdin = .pipe,
+            .stdout = .pipe,
+            .stderr = .inherit,
+            .cwd = .{ .path = root_cwd },
+            .environ_map = &env_map,
+        });
         // env_map is cloned by the OS at spawn; safe to deinit after.
         env_map.deinit();
 
@@ -195,11 +207,11 @@ const LspProc = struct {
         const stdout_file = child.stdout orelse return error.MissingChildStdout;
         child.stdout = null;
 
-        const stdin_box = try allocator.create(std.fs.File);
+        const stdin_box = try allocator.create(std.Io.File);
         errdefer allocator.destroy(stdin_box);
         stdin_box.* = stdin_file;
 
-        const stdout_box = try allocator.create(std.fs.File);
+        const stdout_box = try allocator.create(std.Io.File);
         errdefer allocator.destroy(stdout_box);
         stdout_box.* = stdout_file;
 
@@ -224,16 +236,17 @@ const LspProc = struct {
     }
 
     fn stop(self: *LspProc) void {
+        const io = std.testing.io;
         // Best-effort shutdown of the child.
         // Close stdin first to signal EOF; don't close stdout until the reader thread is done.
-        self.stdin_box.*.close();
+        self.stdin_box.*.close(io);
 
         // Force-unblock the reader thread even if the OS doesn't immediately
         // deliver EOF on the pipe after killing the child.
-        self.stdout_box.*.close();
+        self.stdout_box.*.close(io);
 
-        _ = self.child.kill() catch {};
-        _ = self.child.wait() catch {};
+        self.child.kill(io);
+        // kill() already reaps the process (sets child.id = null); no wait() needed.
 
         self.reader.join();
         self.q.setClosed();
@@ -246,8 +259,8 @@ const LspProc = struct {
     }
 
     fn sendRaw(self: *LspProc, json: []const u8) !void {
-        const w = self.stdin_box.*.writer();
-        try writeLspMessageRaw(w, json);
+        const io = std.testing.io;
+        try writeLspMessageRaw(self.stdin_box.*, io, json);
     }
 
     fn request(self: *LspProc, method: []const u8, params_json: []const u8) !i64 {
@@ -277,39 +290,45 @@ const LspProc = struct {
     }
 
     fn waitResponse(self: *LspProc, id: i64, timeout_ms: i64) !MsgQueue.ParsedMsg {
-        const start_ms = std.time.milliTimestamp();
+        const io = std.testing.io;
+        const start_ms: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds, std.time.ns_per_ms));
         while (true) {
             if (self.q.popMatchingResponse(self.allocator, id)) |msg| return msg;
 
-            const elapsed = std.time.milliTimestamp() - start_ms;
-            if (elapsed > timeout_ms) return error.Timeout;
+            const now_ms: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds, std.time.ns_per_ms));
+            if (now_ms - start_ms > timeout_ms) return error.Timeout;
 
-            self.q.mu.lock();
-            defer self.q.mu.unlock();
-            if (self.q.closed) return error.EndOfStream;
+            {
+                self.q.mu.lockUncancelable(io);
+                defer self.q.mu.unlock(io);
+                if (self.q.closed) return error.EndOfStream;
+            }
             // Wait a little; wakeups come from reader thread.
-            self.q.cv.timedWait(&self.q.mu, 50 * std.time.ns_per_ms) catch {};
+            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(50), .real) catch {};
         }
     }
 
     fn waitNotification(self: *LspProc, method: []const u8, timeout_ms: i64) !MsgQueue.ParsedMsg {
-        const start_ms = std.time.milliTimestamp();
+        const io = std.testing.io;
+        const start_ms: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds, std.time.ns_per_ms));
         while (true) {
             if (self.q.popMatchingNotification(self.allocator, method)) |msg| return msg;
 
-            const elapsed = std.time.milliTimestamp() - start_ms;
-            if (elapsed > timeout_ms) return error.Timeout;
+            const now_ms: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds, std.time.ns_per_ms));
+            if (now_ms - start_ms > timeout_ms) return error.Timeout;
 
-            self.q.mu.lock();
-            defer self.q.mu.unlock();
-            if (self.q.closed) return error.EndOfStream;
-            self.q.cv.timedWait(&self.q.mu, 50 * std.time.ns_per_ms) catch {};
+            {
+                self.q.mu.lockUncancelable(io);
+                defer self.q.mu.unlock(io);
+                if (self.q.closed) return error.EndOfStream;
+            }
+            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(50), .real) catch {};
         }
     }
 };
 
 fn escapeJsonAlloc(allocator: Allocator, s: []const u8) ![]u8 {
-    var out = std.ArrayList(u8).init(allocator);
+    var out = ArrayList(u8).init(allocator);
     errdefer out.deinit();
 
     for (s) |c| {
@@ -329,7 +348,7 @@ fn escapeJsonAlloc(allocator: Allocator, s: []const u8) ![]u8 {
 fn pathToFileUriAlloc(allocator: Allocator, abs_path: []const u8) ![]u8 {
     // Minimal file URI encoder for Windows/posix paths. We keep it simple and only
     // encode spaces (enough for our workspace paths).
-    var out = std.ArrayList(u8).init(allocator);
+    var out = ArrayList(u8).init(allocator);
     errdefer out.deinit();
 
     try out.appendSlice("file:///");
@@ -441,7 +460,7 @@ fn resolveTestSetup(allocator: Allocator) !TestSetup {
 
     const exe_names = struct {
         fn pickPath(allocator_: Allocator, name: []const u8, exe_dir: ?[]const u8) ![]u8 {
-            var candidates = std.ArrayList([]const u8).init(allocator_);
+            var candidates = ArrayList([]const u8).init(allocator_);
             defer candidates.deinit();
 
             if (exe_dir) |dir| {
@@ -473,10 +492,18 @@ fn resolveTestSetup(allocator: Allocator) !TestSetup {
     const fun_path_rel_or_abs = try exe_names.pickPath(allocator, "fun", exe_dir_opt);
     defer allocator.free(fun_path_rel_or_abs);
     try std.testing.expect(fileExists(fun_path_rel_or_abs));
-    const fun_abs = try std.fs.cwd().realpathAlloc(allocator, fun_path_rel_or_abs);
+    const fun_abs = blk: {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const n = try std.Io.Dir.cwd().realPathFile(std.testing.io, fun_path_rel_or_abs, &buf);
+        break :blk try allocator.dupe(u8, buf[0..n]);
+    };
     errdefer allocator.free(fun_abs);
 
-    const root_abs = try std.fs.cwd().realpathAlloc(allocator, ".");
+    const root_abs = blk: {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const n = try std.Io.Dir.cwd().realPathFile(std.testing.io, ".", &buf);
+        break :blk try allocator.dupe(u8, buf[0..n]);
+    };
     errdefer allocator.free(root_abs);
     const root_uri = try pathToFileUriAlloc(allocator, root_abs);
     errdefer allocator.free(root_uri);
@@ -526,7 +553,7 @@ fn lspOpenDoc(allocator: Allocator, lsp: *LspProc, doc_uri: []const u8, version:
 
 fn lspMakeDocUri(allocator: Allocator, root_abs: []const u8, name: []const u8) ![]u8 {
     // Put synthetic docs under `.zig-cache/` so fls can create per-doc temp files next to it.
-    std.fs.cwd().makePath(".zig-cache") catch {};
+    std.Io.Dir.cwd().createDirPath(std.testing.io, ".zig-cache") catch {};
     const doc_abs = try std.fs.path.join(allocator, &[_][]const u8{ root_abs, ".zig-cache", name });
     defer allocator.free(doc_abs);
     return try pathToFileUriAlloc(allocator, doc_abs);
@@ -596,7 +623,13 @@ fn definitionResultHasLocation(result_val: std.json.Value, uri_contains: []const
 fn expectDefinitionPointsTo(allocator: Allocator, result_val: std.json.Value, uri_contains: []const u8, line: i64, character: i64) !void {
     if (definitionResultHasLocation(result_val, uri_contains, line, character)) return;
 
-    const dumped = std.json.stringifyAlloc(allocator, result_val, .{}) catch null;
+    const dumped = blk: {
+        var _aw = std.Io.Writer.Allocating.init(allocator);
+        defer _aw.deinit();
+        std.json.fmt(result_val, .{}).format(&_aw.writer) catch break :blk null;
+        const _s = _aw.toOwnedSlice() catch break :blk null;
+        break :blk _s;
+    };
     if (dumped) |s| {
         defer allocator.free(s);
         std.debug.print(
@@ -612,7 +645,13 @@ fn expectDefinitionPointsTo(allocator: Allocator, result_val: std.json.Value, ur
 fn expectLocationsContain(allocator: Allocator, result_val: std.json.Value, uri_contains: []const u8, line: i64, character: i64) !void {
     if (definitionResultHasLocation(result_val, uri_contains, line, character)) return;
 
-    const dumped = std.json.stringifyAlloc(allocator, result_val, .{}) catch null;
+    const dumped = blk: {
+        var _aw = std.Io.Writer.Allocating.init(allocator);
+        defer _aw.deinit();
+        std.json.fmt(result_val, .{}).format(&_aw.writer) catch break :blk null;
+        const _s = _aw.toOwnedSlice() catch break :blk null;
+        break :blk _s;
+    };
     if (dumped) |s| {
         defer allocator.free(s);
         std.debug.print(
@@ -653,7 +692,13 @@ fn expectRenameEditCountForUri(
     const count = workspaceEditCountUriNewText(result_val, uri, new_text);
     if (count >= expected_min_count) return;
 
-    const dumped = std.json.stringifyAlloc(allocator, result_val, .{}) catch null;
+    const dumped = blk: {
+        var _aw = std.Io.Writer.Allocating.init(allocator);
+        defer _aw.deinit();
+        std.json.fmt(result_val, .{}).format(&_aw.writer) catch break :blk null;
+        const _s = _aw.toOwnedSlice() catch break :blk null;
+        break :blk _s;
+    };
     if (dumped) |s| {
         defer allocator.free(s);
         std.debug.print(
@@ -698,7 +743,13 @@ fn completionHasLabel(result_val: std.json.Value, label: []const u8) bool {
 fn expectCompletionHasLabel(allocator: Allocator, result_val: std.json.Value, label: []const u8) !void {
     if (completionHasLabel(result_val, label)) return;
 
-    const dumped = std.json.stringifyAlloc(allocator, result_val, .{}) catch null;
+    const dumped = blk: {
+        var _aw = std.Io.Writer.Allocating.init(allocator);
+        defer _aw.deinit();
+        std.json.fmt(result_val, .{}).format(&_aw.writer) catch break :blk null;
+        const _s = _aw.toOwnedSlice() catch break :blk null;
+        break :blk _s;
+    };
     if (dumped) |s| {
         defer allocator.free(s);
         std.debug.print("\n[fls_e2e] completion missing '{s}'\n{s}\n", .{ label, s });
@@ -712,7 +763,13 @@ fn expectCompletionHasLabel(allocator: Allocator, result_val: std.json.Value, la
 fn expectCompletionMissingLabel(allocator: Allocator, result_val: std.json.Value, label: []const u8) !void {
     if (!completionHasLabel(result_val, label)) return;
 
-    const dumped = std.json.stringifyAlloc(allocator, result_val, .{}) catch null;
+    const dumped = blk: {
+        var _aw = std.Io.Writer.Allocating.init(allocator);
+        defer _aw.deinit();
+        std.json.fmt(result_val, .{}).format(&_aw.writer) catch break :blk null;
+        const _s = _aw.toOwnedSlice() catch break :blk null;
+        break :blk _s;
+    };
     if (dumped) |s| {
         defer allocator.free(s);
         std.debug.print("\n[fls_e2e] completion unexpectedly contains '{s}'\n{s}\n", .{ label, s });
@@ -759,7 +816,13 @@ fn completionLabelDetailContains(result_val: std.json.Value, label: []const u8, 
 fn expectCompletionLabelDetailContains(allocator: Allocator, result_val: std.json.Value, label: []const u8, needle: []const u8) !void {
     if (completionLabelDetailContains(result_val, label, needle)) return;
 
-    const dumped = std.json.stringifyAlloc(allocator, result_val, .{}) catch null;
+    const dumped = blk: {
+        var _aw = std.Io.Writer.Allocating.init(allocator);
+        defer _aw.deinit();
+        std.json.fmt(result_val, .{}).format(&_aw.writer) catch break :blk null;
+        const _s = _aw.toOwnedSlice() catch break :blk null;
+        break :blk _s;
+    };
     if (dumped) |s| {
         defer allocator.free(s);
         std.debug.print("\n[fls_e2e] completion detail for '{s}' missing '{s}'\n{s}\n", .{ label, needle, s });
@@ -782,7 +845,13 @@ fn expectSignatureHelpLabelContains(allocator: Allocator, result_val: std.json.V
     if (label_val != .string) return error.TestUnexpectedResult;
     if (std.mem.indexOf(u8, label_val.string, needle) != null) return;
 
-    const dumped = std.json.stringifyAlloc(allocator, result_val, .{}) catch null;
+    const dumped = blk: {
+        var _aw = std.Io.Writer.Allocating.init(allocator);
+        defer _aw.deinit();
+        std.json.fmt(result_val, .{}).format(&_aw.writer) catch break :blk null;
+        const _s = _aw.toOwnedSlice() catch break :blk null;
+        break :blk _s;
+    };
     if (dumped) |s| {
         defer allocator.free(s);
         std.debug.print("\n[fls_e2e] signatureHelp label missing '{s}'\n{s}\n", .{ needle, s });
@@ -798,7 +867,13 @@ fn expectSignatureHelpActiveParameter(allocator: Allocator, result_val: std.json
     if (ap != .integer) return error.TestUnexpectedResult;
     if (ap.integer == active_param) return;
 
-    const dumped = std.json.stringifyAlloc(allocator, result_val, .{}) catch null;
+    const dumped = blk: {
+        var _aw = std.Io.Writer.Allocating.init(allocator);
+        defer _aw.deinit();
+        std.json.fmt(result_val, .{}).format(&_aw.writer) catch break :blk null;
+        const _s = _aw.toOwnedSlice() catch break :blk null;
+        break :blk _s;
+    };
     if (dumped) |s| {
         defer allocator.free(s);
         std.debug.print("\n[fls_e2e] signatureHelp activeParameter expected {d}\n{s}\n", .{ active_param, s });
@@ -823,7 +898,13 @@ fn expectSignatureHelpHasParameter(allocator: Allocator, result_val: std.json.Va
         if (lbl == .string and std.mem.indexOf(u8, lbl.string, needle) != null) return;
     }
 
-    const dumped = std.json.stringifyAlloc(allocator, result_val, .{}) catch null;
+    const dumped = blk: {
+        var _aw = std.Io.Writer.Allocating.init(allocator);
+        defer _aw.deinit();
+        std.json.fmt(result_val, .{}).format(&_aw.writer) catch break :blk null;
+        const _s = _aw.toOwnedSlice() catch break :blk null;
+        break :blk _s;
+    };
     if (dumped) |s| {
         defer allocator.free(s);
         std.debug.print("\n[fls_e2e] signatureHelp parameters missing '{s}'\n{s}\n", .{ needle, s });
@@ -834,7 +915,13 @@ fn expectSignatureHelpHasParameter(allocator: Allocator, result_val: std.json.Va
 fn expectHoverContains(allocator: Allocator, result_val: std.json.Value, needle: []const u8) !void {
     if (hoverContains(result_val, needle)) return;
 
-    const dumped = std.json.stringifyAlloc(allocator, result_val, .{}) catch null;
+    const dumped = blk: {
+        var _aw = std.Io.Writer.Allocating.init(allocator);
+        defer _aw.deinit();
+        std.json.fmt(result_val, .{}).format(&_aw.writer) catch break :blk null;
+        const _s = _aw.toOwnedSlice() catch break :blk null;
+        break :blk _s;
+    };
     if (dumped) |s| {
         defer allocator.free(s);
         std.debug.print("\n[fls_e2e] hover missing '{s}'\n{s}\n", .{ needle, s });
@@ -854,13 +941,13 @@ fn hoverContains(result_val: std.json.Value, needle: []const u8) bool {
 }
 
 fn waitForCompletionLabel(allocator: Allocator, lsp: *LspProc, params_json: []const u8, label: []const u8, timeout_ms: i64) !void {
-    const deadline_ms = std.time.milliTimestamp() + timeout_ms;
+    const deadline_ms = @as(i64, @intCast(@divFloor(std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds, std.time.ns_per_ms))) + timeout_ms;
 
     while (true) {
         const req_id = try lsp.request("textDocument/completion", params_json);
         var res = lsp.waitResponse(req_id, 5000) catch |err| switch (err) {
             error.Timeout => {
-                if (std.time.milliTimestamp() >= deadline_ms) return err;
+                if (@as(i64, @intCast(@divFloor(std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds, std.time.ns_per_ms))) >= deadline_ms) return err;
                 continue;
             },
             else => return err,
@@ -869,22 +956,22 @@ fn waitForCompletionLabel(allocator: Allocator, lsp: *LspProc, params_json: []co
 
         const result_val = try jsonResultFromResponseObj(res.parsed.value.object);
         if (completionHasLabel(result_val, label)) return;
-        if (std.time.milliTimestamp() >= deadline_ms) {
+        if (@as(i64, @intCast(@divFloor(std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds, std.time.ns_per_ms))) >= deadline_ms) {
             return expectCompletionHasLabel(allocator, result_val, label);
         }
 
-        std.time.sleep(100 * std.time.ns_per_ms);
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(100 * std.time.ns_per_ms)), .real) catch {};
     }
 }
 
 fn waitForHoverContains(allocator: Allocator, lsp: *LspProc, params_json: []const u8, needle: []const u8, timeout_ms: i64) !void {
-    const deadline_ms = std.time.milliTimestamp() + timeout_ms;
+    const deadline_ms = @as(i64, @intCast(@divFloor(std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds, std.time.ns_per_ms))) + timeout_ms;
 
     while (true) {
         const req_id = try lsp.request("textDocument/hover", params_json);
         var res = lsp.waitResponse(req_id, 5000) catch |err| switch (err) {
             error.Timeout => {
-                if (std.time.milliTimestamp() >= deadline_ms) return err;
+                if (@as(i64, @intCast(@divFloor(std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds, std.time.ns_per_ms))) >= deadline_ms) return err;
                 continue;
             },
             else => return err,
@@ -893,11 +980,11 @@ fn waitForHoverContains(allocator: Allocator, lsp: *LspProc, params_json: []cons
 
         const result_val = try jsonResultFromResponseObj(res.parsed.value.object);
         if (hoverContains(result_val, needle)) return;
-        if (std.time.milliTimestamp() >= deadline_ms) {
+        if (@as(i64, @intCast(@divFloor(std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds, std.time.ns_per_ms))) >= deadline_ms) {
             return expectHoverContains(allocator, result_val, needle);
         }
 
-        std.time.sleep(100 * std.time.ns_per_ms);
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(100 * std.time.ns_per_ms)), .real) catch {};
     }
 }
 
@@ -934,7 +1021,13 @@ fn codeActionHasTitleWithNewText(result_val: std.json.Value, title: []const u8, 
 fn expectCodeActionHasTitleWithNewText(allocator: Allocator, result_val: std.json.Value, title: []const u8, new_text: []const u8) !void {
     if (codeActionHasTitleWithNewText(result_val, title, new_text)) return;
 
-    const dumped = std.json.stringifyAlloc(allocator, result_val, .{}) catch null;
+    const dumped = blk: {
+        var _aw = std.Io.Writer.Allocating.init(allocator);
+        defer _aw.deinit();
+        std.json.fmt(result_val, .{}).format(&_aw.writer) catch break :blk null;
+        const _s = _aw.toOwnedSlice() catch break :blk null;
+        break :blk _s;
+    };
     if (dumped) |s| {
         defer allocator.free(s);
         std.debug.print("\n[fls_e2e] codeAction missing title '{s}' with newText '{s}'\n{s}\n", .{ title, new_text, s });
@@ -950,7 +1043,13 @@ fn expectSemanticTokensNonEmpty(allocator: Allocator, result_val: std.json.Value
     if (data_val != .array) return error.TestUnexpectedResult;
     if (data_val.array.items.len != 0) return;
 
-    const dumped = std.json.stringifyAlloc(allocator, result_val, .{}) catch null;
+    const dumped = blk: {
+        var _aw = std.Io.Writer.Allocating.init(allocator);
+        defer _aw.deinit();
+        std.json.fmt(result_val, .{}).format(&_aw.writer) catch break :blk null;
+        const _s = _aw.toOwnedSlice() catch break :blk null;
+        break :blk _s;
+    };
     if (dumped) |s| {
         defer allocator.free(s);
         std.debug.print("\n[fls_e2e] semantic tokens unexpectedly empty\n{s}\n", .{s});
@@ -970,7 +1069,7 @@ fn symbolInfosHasName(result_val: std.json.Value, name: []const u8) bool {
 }
 
 test "fls e2e: initialize, open, typing didChange, completion + definition do not crash" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -1039,7 +1138,7 @@ test "fls e2e: initialize, open, typing didChange, completion + definition do no
 
     // Build the expected post-change text so we can compute correct positions after didChange.
     const insert_index = try byteIndexFromLineCol(doc_text, insert_pos.line, end_col);
-    var new_doc = std.ArrayList(u8).init(allocator);
+    var new_doc = ArrayList(u8).init(allocator);
     defer new_doc.deinit();
     try new_doc.appendSlice(doc_text[0..insert_index]);
     try new_doc.appendSlice(change_text);
@@ -1089,7 +1188,7 @@ test "fls e2e: initialize, open, typing didChange, completion + definition do no
 }
 
 test "fls e2e: indexing edge-case workspace files does not crash server" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -1110,9 +1209,13 @@ test "fls e2e: indexing edge-case workspace files does not crash server" {
         defer allocator.free(abs);
 
         const src = blk: {
-            var f = try std.fs.openFileAbsolute(abs, .{});
-            defer f.close();
-            break :blk try f.readToEndAlloc(allocator, 512 * 1024);
+            var f = try std.Io.Dir.openFileAbsolute(std.testing.io, abs, .{});
+            defer f.close(std.testing.io);
+            break :blk try blk2: {
+                var _rb: [65536]u8 = undefined;
+                var _fr = f.reader(std.testing.io, &_rb);
+                break :blk2 _fr.interface.allocRemaining(allocator, .limited(512 * 1024));
+            };
         };
         defer allocator.free(src);
 
@@ -1149,7 +1252,7 @@ test "fls e2e: indexing edge-case workspace files does not crash server" {
 }
 
 test "fls e2e: workspace indexing survives multiple malformed files" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -1157,8 +1260,8 @@ test "fls e2e: workspace indexing survives multiple malformed files" {
     defer freeTestSetup(allocator, &setup);
 
     const tmp_rel_dir = "tests/_fls_e2e_index_regress";
-    std.fs.cwd().makePath(tmp_rel_dir) catch {};
-    defer std.fs.cwd().deleteTree(tmp_rel_dir) catch {};
+    std.Io.Dir.cwd().createDirPath(std.testing.io, tmp_rel_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, tmp_rel_dir) catch {};
 
     const malformed = [_]struct { rel: []const u8, text: []const u8 }{
         .{
@@ -1187,9 +1290,9 @@ test "fls e2e: workspace indexing survives multiple malformed files" {
     };
 
     for (malformed) |mf| {
-        const f = try std.fs.cwd().createFile(mf.rel, .{ .read = true, .truncate = true });
-        defer f.close();
-        try f.writeAll(mf.text);
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, mf.rel, .{ .read = true, .truncate = true });
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(std.testing.io, mf.text);
     }
 
     var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
@@ -1231,7 +1334,7 @@ test "fls e2e: workspace indexing survives multiple malformed files" {
 }
 
 test "fls e2e: formatting never returns empty output" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -1286,7 +1389,7 @@ test "fls e2e: formatting never returns empty output" {
 }
 
 test "fls e2e: C macro completion for std.c.limits and std.c.def" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -1336,7 +1439,7 @@ test "fls e2e: C macro completion for std.c.limits and std.c.def" {
 }
 
 test "fls e2e: std namespace hover shows README and module docs" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -1391,7 +1494,7 @@ test "fls e2e: std namespace hover shows README and module docs" {
 }
 
 test "fls e2e: enum dot shorthand completion/hover/definition" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -1623,7 +1726,7 @@ test "fls e2e: enum dot shorthand completion/hover/definition" {
 }
 
 test "fls e2e: generic type member completion (Vec<T>)" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -1666,7 +1769,7 @@ test "fls e2e: generic type member completion (Vec<T>)" {
 }
 
 test "fls e2e: generic function call let inference" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -1761,7 +1864,7 @@ test "fls e2e: generic function call let inference" {
 }
 
 test "fls e2e: generic compound init member detail specializes field type" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -1822,7 +1925,7 @@ test "fls e2e: generic compound init member detail specializes field type" {
 }
 
 test "fls e2e: custom import namespace hover shows README" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -1832,27 +1935,28 @@ test "fls e2e: custom import namespace hover shows README" {
     // Create a custom module directory with a README.
     const mod_dir_abs = try std.fs.path.join(allocator, &[_][]const u8{ setup.root_abs, "mylib" });
     defer allocator.free(mod_dir_abs);
-    std.fs.makeDirAbsolute(mod_dir_abs) catch |err| switch (err) {
+    std.Io.Dir.createDirAbsolute(std.testing.io, mod_dir_abs, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
-    defer std.fs.deleteTreeAbsolute(mod_dir_abs) catch {};
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, mod_dir_abs) catch {};
 
     const readme_abs = try std.fs.path.join(allocator, &[_][]const u8{ mod_dir_abs, "README.md" });
     defer allocator.free(readme_abs);
     {
-        const f = try std.fs.createFileAbsolute(readme_abs, .{ .truncate = true });
-        defer f.close();
-        try f.writeAll("# MyLib\n\nCustom module README hover works.\n");
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, readme_abs, .{ .truncate = true });
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(std.testing.io, "# MyLib\n\nCustom module README hover works.\n");
     }
 
     // Create a module file so `imp mylib.foo;` is a valid import.
     const foo_abs = try std.fs.path.join(allocator, &[_][]const u8{ mod_dir_abs, "foo.fn" });
     defer allocator.free(foo_abs);
     {
-        const f = try std.fs.createFileAbsolute(foo_abs, .{ .truncate = true });
-        defer f.close();
-        try f.writeAll(
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, foo_abs, .{ .truncate = true });
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(
+            std.testing.io,
             "// Foo module\n" ++
                 "fun add(num a, num b) num {\n" ++
                 "  ret a + b;\n" ++
@@ -1893,7 +1997,7 @@ test "fls e2e: custom import namespace hover shows README" {
 }
 
 test "fls e2e: typing with CRLF positions stays consistent" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -1952,7 +2056,7 @@ test "fls e2e: typing with CRLF positions stays consistent" {
 }
 
 test "fls e2e: import completion + go-to-definition works" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -2017,7 +2121,7 @@ test "fls e2e: import completion + go-to-definition works" {
 }
 
 test "fls e2e: alias namespace completion shows module publics" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -2036,11 +2140,11 @@ test "fls e2e: alias namespace completion shows module publics" {
 
     const doc_abs = try std.fs.path.join(allocator, &[_][]const u8{ setup.root_abs, "fls-e2e-alias-namespace.fn" });
     defer allocator.free(doc_abs);
-    defer std.fs.deleteFileAbsolute(doc_abs) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, doc_abs) catch {};
     {
-        const f = try std.fs.createFileAbsolute(doc_abs, .{ .truncate = true });
-        defer f.close();
-        try f.writeAll(doc_text);
+        const f = try std.Io.Dir.createFileAbsolute(std.testing.io, doc_abs, .{ .truncate = true });
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(std.testing.io, doc_text);
     }
 
     const doc_uri = try pathToFileUriAlloc(allocator, doc_abs);
@@ -2070,7 +2174,7 @@ test "fls e2e: alias namespace completion shows module publics" {
 }
 
 test "fls e2e: locals, dot completion, member signatureHelp" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -2246,7 +2350,7 @@ test "fls e2e: locals, dot completion, member signatureHelp" {
 }
 
 test "fls e2e: let inference hover types" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -2404,7 +2508,7 @@ test "fls e2e: let inference hover types" {
 }
 
 test "fls e2e: for range loop locals support" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -2562,7 +2666,7 @@ test "fls e2e: for range loop locals support" {
 }
 
 test "fls e2e: let inference in incomplete file" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -2624,7 +2728,7 @@ test "fls e2e: let inference in incomplete file" {
 }
 
 test "fls e2e: let inference for imported enum member" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -2667,7 +2771,7 @@ test "fls e2e: let inference for imported enum member" {
 }
 
 test "fls e2e: signatureHelp for plain function call" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -2714,7 +2818,7 @@ test "fls e2e: signatureHelp for plain function call" {
 }
 
 test "fls e2e: signatureHelp specializes generic calls" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -2804,7 +2908,7 @@ test "fls e2e: signatureHelp specializes generic calls" {
 }
 
 test "fls e2e: builtin sizeof completion + hover + signatureHelp" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -2879,7 +2983,7 @@ test "fls e2e: builtin sizeof completion + hover + signatureHelp" {
 }
 
 test "fls e2e: warning control keywords completion" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -2933,7 +3037,7 @@ test "fls e2e: warning control keywords completion" {
 }
 
 test "fls e2e: async/await completion details + hover + signatureHelp" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -3074,7 +3178,7 @@ test "fls e2e: async/await completion details + hover + signatureHelp" {
 }
 
 test "fls e2e: async diagnostics map to code actions" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -3151,7 +3255,7 @@ test "fls e2e: async diagnostics map to code actions" {
 }
 
 test "fls e2e: let await parity hover completion definition signatureHelp" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -3245,7 +3349,7 @@ test "fls e2e: let await parity hover completion definition signatureHelp" {
 }
 
 test "fls e2e: let await pointer chain inference" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -3349,7 +3453,7 @@ test "fls e2e: let await pointer chain inference" {
 }
 
 test "fls e2e: std.channel async forwarding completion + hover" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -3364,9 +3468,13 @@ test "fls e2e: std.channel async forwarding completion + hover" {
     const channel_abs = try std.fs.path.join(allocator, &[_][]const u8{ setup.root_abs, "stdlib", "std", "channel.fn" });
     defer allocator.free(channel_abs);
     const channel_src = blk: {
-        var f = try std.fs.openFileAbsolute(channel_abs, .{});
-        defer f.close();
-        break :blk try f.readToEndAlloc(allocator, 1024 * 1024);
+        var f = try std.Io.Dir.openFileAbsolute(std.testing.io, channel_abs, .{});
+        defer f.close(std.testing.io);
+        break :blk try blk2: {
+            var _rb: [65536]u8 = undefined;
+            var _fr = f.reader(std.testing.io, &_rb);
+            break :blk2 _fr.interface.allocRemaining(allocator, .limited(1024 * 1024));
+        };
     };
     defer allocator.free(channel_src);
     const channel_uri = try pathToFileUriAlloc(allocator, channel_abs);
@@ -3439,7 +3547,7 @@ test "fls e2e: std.channel async forwarding completion + hover" {
 }
 
 test "fls e2e: let inference from imported generic call" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -3477,7 +3585,7 @@ test "fls e2e: let inference from imported generic call" {
 }
 
 test "fls e2e: let inference from chained member initializers" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -3554,7 +3662,7 @@ test "fls e2e: let inference from chained member initializers" {
 }
 
 test "fls e2e: let inference await async call with address arg" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -3593,7 +3701,7 @@ test "fls e2e: let inference await async call with address arg" {
 }
 
 test "fls e2e: references and rename baseline" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -3653,7 +3761,7 @@ test "fls e2e: references and rename baseline" {
 }
 
 test "fls e2e: references and rename with let await async calls" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -3718,7 +3826,7 @@ test "fls e2e: references and rename with let await async calls" {
 }
 
 test "fls e2e: warning ids completion for allow and expect" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -3772,7 +3880,7 @@ test "fls e2e: warning ids completion for allow and expect" {
 }
 
 test "fls e2e: publishDiagnostics includes warning from ID-tagged warning output" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -3793,10 +3901,10 @@ test "fls e2e: publishDiagnostics includes warning from ID-tagged warning output
     defer allocator.free(doc_uri);
     try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
 
-    const deadline_ms = std.time.milliTimestamp() + 15000;
+    const deadline_ms = @as(i64, @intCast(@divFloor(std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds, std.time.ns_per_ms))) + 15000;
     var saw_expected_warning = false;
 
-    while (std.time.milliTimestamp() < deadline_ms and !saw_expected_warning) {
+    while (@as(i64, @intCast(@divFloor(std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds, std.time.ns_per_ms))) < deadline_ms and !saw_expected_warning) {
         var notif = lsp.waitNotification("textDocument/publishDiagnostics", 1000) catch |err| {
             if (err == error.Timeout) continue;
             return err;
@@ -3838,7 +3946,7 @@ test "fls e2e: publishDiagnostics includes warning from ID-tagged warning output
 }
 
 test "fls e2e: enum variant dot completion + hover" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -3902,7 +4010,7 @@ test "fls e2e: enum variant dot completion + hover" {
 }
 
 test "fls e2e: dot completion + definition find async impl methods across imported files" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -3911,17 +4019,18 @@ test "fls e2e: dot completion + definition find async impl methods across import
 
     // Create a tiny multi-file project under `.zig-cache/` so import resolution matches
     // what fls does for in-editor unsaved buffers.
-    std.fs.cwd().makePath(".zig-cache") catch {};
+    std.Io.Dir.cwd().createDirPath(std.testing.io, ".zig-cache") catch {};
 
     const user_path = ".zig-cache/__fls_implsep_user.fn";
     const impl_path = ".zig-cache/__fls_implsep_user_impl.fn";
-    defer std.fs.cwd().deleteFile(user_path) catch {};
-    defer std.fs.cwd().deleteFile(impl_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, user_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, impl_path) catch {};
 
     {
-        const f = try std.fs.cwd().createFile(user_path, .{ .truncate = true });
-        defer f.close();
-        try f.writeAll(
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, user_path, .{ .truncate = true });
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(
+            std.testing.io,
             "pub compound User {\n" ++
                 "  str name;\n" ++
                 "}\n",
@@ -3936,9 +4045,9 @@ test "fls e2e: dot completion + definition find async impl methods across import
         "}\n";
 
     {
-        const f = try std.fs.cwd().createFile(impl_path, .{ .truncate = true });
-        defer f.close();
-        try f.writeAll(impl_source);
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, impl_path, .{ .truncate = true });
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(std.testing.io, impl_source);
     }
 
     var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
@@ -4004,40 +4113,42 @@ test "fls e2e: dot completion + definition find async impl methods across import
 }
 
 test "fls e2e: quirks across folders complete + missing methods diagnose" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     var setup = try resolveTestSetup(allocator);
     defer freeTestSetup(allocator, &setup);
 
-    std.fs.cwd().makePath(".zig-cache") catch {};
-    std.fs.cwd().makePath(".zig-cache/qaf/defs") catch {};
-    std.fs.cwd().makePath(".zig-cache/qaf/impls") catch {};
+    std.Io.Dir.cwd().createDirPath(std.testing.io, ".zig-cache") catch {};
+    std.Io.Dir.cwd().createDirPath(std.testing.io, ".zig-cache/qaf/defs") catch {};
+    std.Io.Dir.cwd().createDirPath(std.testing.io, ".zig-cache/qaf/impls") catch {};
 
     const user_path = ".zig-cache/qaf/defs/user.fn";
     const greeter_path = ".zig-cache/qaf/defs/greeter.fn";
     const impl_ok_path = ".zig-cache/qaf/impls/user_greeter_ok.fn";
     const impl_bad_path = ".zig-cache/qaf/impls/user_greeter_bad.fn";
 
-    defer std.fs.cwd().deleteFile(user_path) catch {};
-    defer std.fs.cwd().deleteFile(greeter_path) catch {};
-    defer std.fs.cwd().deleteFile(impl_ok_path) catch {};
-    defer std.fs.cwd().deleteFile(impl_bad_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, user_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, greeter_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, impl_ok_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, impl_bad_path) catch {};
 
     {
-        const f = try std.fs.cwd().createFile(user_path, .{ .truncate = true });
-        defer f.close();
-        try f.writeAll(
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, user_path, .{ .truncate = true });
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(
+            std.testing.io,
             "compound User {\n" ++
                 "  str name;\n" ++
                 "}\n",
         );
     }
     {
-        const f = try std.fs.cwd().createFile(greeter_path, .{ .truncate = true });
-        defer f.close();
-        try f.writeAll(
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, greeter_path, .{ .truncate = true });
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(
+            std.testing.io,
             "pub quirk Greeter {\n" ++
                 "  pub greet(str prefix) void;\n" ++
                 "  pub bye() void;\n" ++
@@ -4045,9 +4156,10 @@ test "fls e2e: quirks across folders complete + missing methods diagnose" {
         );
     }
     {
-        const f = try std.fs.cwd().createFile(impl_ok_path, .{ .truncate = true });
-        defer f.close();
-        try f.writeAll(
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, impl_ok_path, .{ .truncate = true });
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(
+            std.testing.io,
             "imp std.c.io;\n" ++
                 "imp ..defs.user;\n" ++
                 "imp ..defs.greeter;\n\n" ++
@@ -4071,10 +4183,10 @@ test "fls e2e: quirks across folders complete + missing methods diagnose" {
         "  }\n" ++
         "}\n";
     {
-        const f = try std.fs.cwd().createFile(impl_bad_path, .{ .truncate = true });
-        defer f.close();
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, impl_bad_path, .{ .truncate = true });
+        defer f.close(std.testing.io);
         // Intentionally missing `bye()`.
-        try f.writeAll(impl_bad_source);
+        try f.writeStreamingAll(std.testing.io, impl_bad_source);
     }
 
     var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
@@ -4152,7 +4264,7 @@ test "fls e2e: quirks across folders complete + missing methods diagnose" {
 }
 
 test "fls e2e: didChange before didOpen is ignored unless full replace" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -4225,7 +4337,7 @@ test "fls e2e: didChange before didOpen is ignored unless full replace" {
 }
 
 test "fls e2e: didChange multi-edit order applies correctly" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -4285,7 +4397,7 @@ test "fls e2e: didChange multi-edit order applies correctly" {
 }
 
 test "fls e2e: invalid ranged edit does not wipe document" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -4335,7 +4447,7 @@ test "fls e2e: invalid ranged edit does not wipe document" {
 }
 
 test "fls e2e: didClose clears doc; requests remain safe" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -4388,7 +4500,7 @@ test "fls e2e: didClose clears doc; requests remain safe" {
 }
 
 test "fls e2e: unknown request method responds null and stays alive" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -4436,7 +4548,7 @@ test "fls e2e: unknown request method responds null and stays alive" {
 }
 
 test "fls e2e: torture - extreme positions + most handlers" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

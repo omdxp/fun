@@ -10,10 +10,10 @@ test "ParseProcess parse_function" {
     const ofilepath = "ParseProcess_parse_function.c";
     // Mock input file
     {
-        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
-        defer file.close();
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
+        defer file.close(std.testing.io);
         const input = "fun test() { ret; }";
-        try file.writeAll(input);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     const allocator = std.testing.allocator;
@@ -34,18 +34,18 @@ test "ParseProcess parse_function" {
     try std.testing.expectEqualStrings("test", nodes[0].node_variant.?.function.name.?.items);
 
     // Delete test files
-    try fs.cwd().deleteFile(ifilepath);
-    try fs.cwd().deleteFile(ofilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
 }
 
 test "ParseProcess parse_async_function" {
     const ifilepath = "ParseProcess_parse_async_function.fn";
     const ofilepath = "ParseProcess_parse_async_function.c";
     {
-        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
-        defer file.close();
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
+        defer file.close(std.testing.io);
         const input = "async fun test() { ret; }";
-        try file.writeAll(input);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     const allocator = std.testing.allocator;
@@ -65,22 +65,22 @@ test "ParseProcess parse_async_function" {
     try std.testing.expectEqual(ast.NodeType.Function, nodes[0].type);
     try std.testing.expect(nodes[0].node_variant.?.function.is_async);
 
-    try fs.cwd().deleteFile(ifilepath);
-    try fs.cwd().deleteFile(ofilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
 }
 
 test "ParseProcess parse_async_impl_method" {
     const ifilepath = "ParseProcess_parse_async_impl_method.fn";
     const ofilepath = "ParseProcess_parse_async_impl_method.c";
     {
-        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
-        defer file.close();
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
+        defer file.close(std.testing.io);
         const input =
             "compound Counter { num base; }\n" ++
             "impl Counter {\n" ++
             "  async add(num x) num { ret self.base + x; }\n" ++
             "}\n";
-        try file.writeAll(input);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     const allocator = std.testing.allocator;
@@ -106,21 +106,21 @@ test "ParseProcess parse_async_impl_method" {
     try std.testing.expectEqual(ast.NodeType.Function, methods[0].type);
     try std.testing.expect(methods[0].node_variant.?.function.is_async);
 
-    try fs.cwd().deleteFile(ifilepath);
-    try fs.cwd().deleteFile(ofilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
 }
 
 test "ParseProcess parse_async_quirk_method" {
     const ifilepath = "ParseProcess_parse_async_quirk_method.fn";
     const ofilepath = "ParseProcess_parse_async_quirk_method.c";
     {
-        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
-        defer file.close();
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
+        defer file.close(std.testing.io);
         const input =
             "quirk AsyncQ {\n" ++
             "  async get() num;\n" ++
             "}\n";
-        try file.writeAll(input);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     const allocator = std.testing.allocator;
@@ -144,23 +144,23 @@ test "ParseProcess parse_async_quirk_method" {
     try std.testing.expectEqual(@as(usize, 1), methods.len);
     try std.testing.expect(methods[0].is_async);
 
-    try fs.cwd().deleteFile(ifilepath);
-    try fs.cwd().deleteFile(ofilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
 }
 
 test "ParseProcess parse_await_expression" {
     const ifilepath = "ParseProcess_parse_await_expression.fn";
     const ofilepath = "ParseProcess_parse_await_expression.c";
     {
-        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
-        defer file.close();
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
+        defer file.close(std.testing.io);
         const input =
             "fun inc(num x) num { ret x + 1; }\n" ++
             "fun main() {\n" ++
             "  num y = await inc(41);\n" ++
             "  ret y;\n" ++
             "}\n";
-        try file.writeAll(input);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     const allocator = std.testing.allocator;
@@ -191,8 +191,8 @@ test "ParseProcess parse_await_expression" {
     try std.testing.expectEqual(ast.NodeType.Expression, awaited.type);
     try std.testing.expectEqualStrings("()", awaited.node_variant.?.exp.op);
 
-    try fs.cwd().deleteFile(ifilepath);
-    try fs.cwd().deleteFile(ofilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
 }
 
 test "ParseProcess parses variadic function declaration" {
@@ -200,10 +200,10 @@ test "ParseProcess parses variadic function declaration" {
     const ofilepath = "ParseProcess_parse_variadic_function.c";
     // Mock input file
     {
-        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
-        defer file.close();
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
+        defer file.close(std.testing.io);
         const input = "fun v(num a, ...) num;";
-        try file.writeAll(input);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     const allocator = std.testing.allocator;
@@ -224,8 +224,8 @@ test "ParseProcess parses variadic function declaration" {
     try std.testing.expect(nodes[0].node_variant.?.function.is_variadic);
 
     // Delete test files
-    try fs.cwd().deleteFile(ifilepath);
-    try fs.cwd().deleteFile(ofilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
 }
 
 test "ParseProcess parse_return" {
@@ -233,10 +233,10 @@ test "ParseProcess parse_return" {
     const ofilepath = "ParseProcess_parse_return.c";
     // Mock input file
     {
-        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
-        defer file.close();
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
+        defer file.close(std.testing.io);
         const input = "ret 42;";
-        try file.writeAll(input);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     // const allocator = std.testing.allocator;
@@ -257,8 +257,8 @@ test "ParseProcess parse_return" {
     try std.testing.expectEqual(nodes[0].type, .StatementReturn);
 
     // Delete test files
-    try fs.cwd().deleteFile(ifilepath);
-    try fs.cwd().deleteFile(ofilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
 }
 
 test "ParseProcess parse_expression" {
@@ -266,10 +266,10 @@ test "ParseProcess parse_expression" {
     const ofilepath = "ParseProcess_parse_expression.c";
     // Mock input file
     {
-        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
-        defer file.close();
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
+        defer file.close(std.testing.io);
         const input = "1 + 2 * 3";
-        try file.writeAll(input);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     // const allocator = std.testing.allocator;
@@ -290,8 +290,8 @@ test "ParseProcess parse_expression" {
     try std.testing.expectEqual(nodes[0].type, .Expression);
 
     // Delete test files
-    try fs.cwd().deleteFile(ifilepath);
-    try fs.cwd().deleteFile(ofilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
 }
 
 test "ParseProcess parses array literal vs indexing" {
@@ -299,14 +299,14 @@ test "ParseProcess parses array literal vs indexing" {
     const ofilepath = "ParseProcess_array_literal_vs_index.c";
 
     {
-        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
-        defer file.close();
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
+        defer file.close(std.testing.io);
         const input =
             "fun main() {\n" ++
             "  num[] arr = [1, 2, 3];\n" ++
             "  num x = arr[0];\n" ++
             "}\n";
-        try file.writeAll(input);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     const allocator = std.testing.allocator;
@@ -343,8 +343,8 @@ test "ParseProcess parses array literal vs indexing" {
     try std.testing.expectEqual(ast.NodeType.Expression, x_val.type);
     try std.testing.expectEqualStrings("[]", x_val.node_variant.?.exp.op);
 
-    try fs.cwd().deleteFile(ifilepath);
-    try fs.cwd().deleteFile(ofilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
 }
 
 test "ParseProcess parses if condition with == operator" {
@@ -352,14 +352,14 @@ test "ParseProcess parses if condition with == operator" {
     const ofilepath = "ParseProcess_if_condition_eq.c";
 
     {
-        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
-        defer file.close();
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
+        defer file.close(std.testing.io);
         const input =
             "fun main() {\n" ++
             "  num n = 0;\n" ++
             "  if n == 0 { ret; }\n" ++
             "}\n";
-        try file.writeAll(input);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     const allocator = std.testing.allocator;
@@ -385,8 +385,8 @@ test "ParseProcess parses if condition with == operator" {
     try std.testing.expectEqual(ast.NodeType.Expression, cond.type);
     try std.testing.expectEqualStrings("==", cond.node_variant.?.exp.op);
 
-    try fs.cwd().deleteFile(ifilepath);
-    try fs.cwd().deleteFile(ofilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
 }
 
 test "ParseProcess parse returns error on malformed input (no crash)" {
@@ -394,15 +394,15 @@ test "ParseProcess parse returns error on malformed input (no crash)" {
     const ofilepath = "ParseProcess_parse_malformed_missing_semicolon.c";
 
     {
-        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
-        defer file.close();
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
+        defer file.close(std.testing.io);
         // Missing ';' after variable declaration.
         const input =
             "fun main() {\n" ++
             "  num x = 1\n" ++
             "  ret;\n" ++
             "}\n";
-        try file.writeAll(input);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     const allocator = std.testing.allocator;
@@ -422,8 +422,8 @@ test "ParseProcess parse returns error on malformed input (no crash)" {
         // Any parse error is acceptable; the key requirement is that we do not crash.
     }
 
-    try fs.cwd().deleteFile(ifilepath);
-    try fs.cwd().deleteFile(ofilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
 }
 
 test "ParseProcess parse returns error on malformed dot (no crash)" {
@@ -431,15 +431,15 @@ test "ParseProcess parse returns error on malformed dot (no crash)" {
     const ofilepath = "ParseProcess_parse_malformed_dot.c";
 
     {
-        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
-        defer file.close();
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
+        defer file.close(std.testing.io);
         // Missing identifier after '.'
         const input =
             "imp std.;\n" ++
             "fun main() {\n" ++
             "  ret;\n" ++
             "}\n";
-        try file.writeAll(input);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     const allocator = std.testing.allocator;
@@ -459,8 +459,8 @@ test "ParseProcess parse returns error on malformed dot (no crash)" {
         // Any parse error is acceptable; the key requirement is that we do not crash.
     }
 
-    try fs.cwd().deleteFile(ifilepath);
-    try fs.cwd().deleteFile(ofilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
 }
 
 test "ParseProcess parse returns error on malformed binary expression rhs (no crash)" {
@@ -468,14 +468,14 @@ test "ParseProcess parse returns error on malformed binary expression rhs (no cr
     const ofilepath = "ParseProcess_parse_malformed_binary_rhs.c";
 
     {
-        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
-        defer file.close();
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
+        defer file.close(std.testing.io);
         const input =
             "fun main() {\n" ++
             "  num x = 1 + ;\n" ++
             "  ret;\n" ++
             "}\n";
-        try file.writeAll(input);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     const allocator = std.testing.allocator;
@@ -495,8 +495,8 @@ test "ParseProcess parse returns error on malformed binary expression rhs (no cr
         // Any parse error is acceptable; the key requirement is that we do not crash.
     }
 
-    try fs.cwd().deleteFile(ifilepath);
-    try fs.cwd().deleteFile(ofilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
 }
 
 test "ParseProcess parse returns error on malformed fit dot branch (no crash)" {
@@ -504,8 +504,8 @@ test "ParseProcess parse returns error on malformed fit dot branch (no crash)" {
     const ofilepath = "ParseProcess_parse_malformed_fit_dot_branch.c";
 
     {
-        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
-        defer file.close();
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
+        defer file.close(std.testing.io);
         const input =
             "fun main() {\n" ++
             "  num x = 1;\n" ++
@@ -513,7 +513,7 @@ test "ParseProcess parse returns error on malformed fit dot branch (no crash)" {
             "    . -> { ret; },\n" ++
             "  }\n" ++
             "}\n";
-        try file.writeAll(input);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     const allocator = std.testing.allocator;
@@ -533,6 +533,6 @@ test "ParseProcess parse returns error on malformed fit dot branch (no crash)" {
         // Any parse error is acceptable; the key requirement is that we do not crash.
     }
 
-    try fs.cwd().deleteFile(ifilepath);
-    try fs.cwd().deleteFile(ofilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
 }

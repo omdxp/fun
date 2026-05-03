@@ -1,13 +1,16 @@
 const std = @import("std");
 const mem = std.mem;
-const fs = std.fs;
 const process = std.process;
-const Child = std.process.Child;
 const codegen = @import("codegen");
 const lexer = @import("lexer");
 const token = lexer.token;
 const utils = @import("utils");
 const builtin = @import("builtin");
+
+/// Compatibility shim: ArrayList with embedded allocator (old API style).
+fn ArrayList(comptime T: type) type {
+    return std.array_list.Managed(T);
+}
 
 /// Errors that can occur during CLI operations.
 pub const CliError = error{
@@ -66,8 +69,8 @@ pub const CliOptions = struct {
 ///
 /// Returns:
 /// - Might return an error if writing to the output fails.
-fn print_usage(writer: anytype) !void {
-    try writer.writeAll(
+fn print_usage() void {
+    std.debug.print(
         \\Usage:
         \\  fun -in <input_file> [-fmt | -fmt-all] [-out <output_file>] [-no-exec] [-outf] [-ast] [-help] [-- <program args...>]
         \\  fun -version
@@ -84,7 +87,7 @@ fn print_usage(writer: anytype) !void {
         \\  -ast              Print AST nodes (optional, disabled by default)
         \\  --                All following args are passed to the compiled program
         \\
-    );
+    , .{});
 }
 
 /// Parses command-line arguments and returns a CliOptions structure.
@@ -102,30 +105,13 @@ fn print_usage(writer: anytype) !void {
 ///
 /// Errors:
 /// - Returns an error if argument parsing or memory allocation fails.
-pub fn parse_args(allocator: mem.Allocator) !CliOptions {
-    // First check for no arguments
-    {
-        var args = try std.process.argsWithAllocator(allocator);
-        defer args.deinit();
-        // Skip executable name
-        _ = args.skip();
-        if (args.next() == null) {
-            const stderr = std.io.getStdErr().writer();
-            try print_usage(stderr);
-            return CliError.ShowHelp;
-        }
+pub fn parse_args(allocator: mem.Allocator, argv: []const []const u8) !CliOptions {
+    // argv is everything after the executable name.
+    if (argv.len == 0) {
+        print_usage();
+        return CliError.ShowHelp;
     }
 
-    // Now parse the actual arguments
-    var args = try std.process.argsWithAllocator(allocator);
-    defer args.deinit();
-
-    // Skip executable name
-    _ = args.skip();
-
-    // NOTE: `argsWithAllocator` can yield slices whose backing storage does not
-    // outlive the iterator (platform dependent). Always dupe any argv slices we
-    // intend to keep.
     var input_file: ?[]const u8 = null;
     var output_file: ?[]const u8 = null;
     var exec = true;
@@ -133,32 +119,39 @@ pub fn parse_args(allocator: mem.Allocator) !CliOptions {
     var print_ast = false;
     var fmt = false;
     var fmt_all = false;
-    var program_args = std.ArrayList([]const u8).init(allocator);
+    var program_args = ArrayList([]const u8).init(allocator);
     errdefer {
         for (program_args.items) |p| allocator.free(p);
         program_args.deinit();
     }
 
-    while (args.next()) |arg| {
+    var i: usize = 0;
+    while (i < argv.len) {
+        const arg = argv[i];
+        i += 1;
         if (std.mem.eql(u8, arg, "--")) {
-            while (args.next()) |p| {
-                try program_args.append(try allocator.dupe(u8, p));
+            while (i < argv.len) {
+                try program_args.append(try allocator.dupe(u8, argv[i]));
+                i += 1;
             }
             break;
         }
         if (std.mem.eql(u8, arg, "-help")) {
-            const stderr = std.io.getStdErr().writer();
-            try print_usage(stderr);
+            print_usage();
             return CliError.ShowHelp;
         } else if (std.mem.eql(u8, arg, "-in")) {
-            const file = args.next() orelse return CliError.MissingInputFile;
+            if (i >= argv.len) return CliError.MissingInputFile;
+            const file = argv[i];
+            i += 1;
             // Validate file extension
             if (!std.mem.endsWith(u8, file, ".fn")) {
                 return CliError.InvalidInputExtension;
             }
             input_file = try allocator.dupe(u8, file);
         } else if (std.mem.eql(u8, arg, "-out")) {
-            const file = args.next() orelse return CliError.MissingOutputFile;
+            if (i >= argv.len) return CliError.MissingOutputFile;
+            const file = argv[i];
+            i += 1;
             // Validate output file extension
             if (!std.mem.endsWith(u8, file, ".c")) {
                 return CliError.InvalidOutputExtension;
@@ -203,7 +196,7 @@ pub fn parse_args(allocator: mem.Allocator) !CliOptions {
 }
 
 fn build_full_import_path_for_formatter(allocator: mem.Allocator, input_file_path: []const u8, import_path: []const u8) ![]const u8 {
-    var file_path = std.ArrayList(u8).init(allocator);
+    var file_path = ArrayList(u8).init(allocator);
     defer file_path.deinit();
 
     const dir_path = std.fs.path.dirname(input_file_path) orelse ".";
@@ -252,8 +245,8 @@ fn freeOwnedStringMap(allocator: mem.Allocator, map: *std.StringHashMap(void)) v
     map.deinit();
 }
 
-fn parse_local_import_paths(allocator: mem.Allocator, input_file: []const u8) !std.ArrayList([]const u8) {
-    var result = std.ArrayList([]const u8).init(allocator);
+fn parse_local_import_paths(allocator: mem.Allocator, input_file: []const u8) !ArrayList([]const u8) {
+    var result = ArrayList([]const u8).init(allocator);
     errdefer {
         for (result.items) |p| allocator.free(p);
         result.deinit();
@@ -319,7 +312,7 @@ fn parse_local_import_paths(allocator: mem.Allocator, input_file: []const u8) !s
                 continue;
             }
 
-            var import_name = std.ArrayList(u8).init(allocator);
+            var import_name = ArrayList(u8).init(allocator);
             defer import_name.deinit();
             if (leading_dots > 0) try import_name.appendNTimes('.', leading_dots);
             try import_name.appendSlice(tokens[j].data.sval.items);
@@ -393,11 +386,16 @@ fn parse_local_import_paths(allocator: mem.Allocator, input_file: []const u8) !s
 
 fn format_file_and_imports_recursive(
     allocator: mem.Allocator,
+    io: std.Io,
     file_path: []const u8,
     visiting: *std.StringHashMap(void),
     visited: *std.StringHashMap(void),
 ) !void {
-    const canonical = try std.fs.cwd().realpathAlloc(allocator, file_path);
+    const canonical = blk: {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const n = try std.Io.Dir.cwd().realPathFile(io, file_path, &buf);
+        break :blk try allocator.dupe(u8, buf[0..n]);
+    };
     errdefer allocator.free(canonical);
 
     if (visited.contains(canonical)) {
@@ -414,7 +412,7 @@ fn format_file_and_imports_recursive(
     try visiting.put(canonical, {});
 
     // Format current file.
-    try format_file_in_place(allocator, canonical);
+    try format_file_in_place(allocator, io, canonical);
 
     // Discover local imports and recurse.
     var imports = try parse_local_import_paths(allocator, canonical);
@@ -426,7 +424,7 @@ fn format_file_and_imports_recursive(
     for (imports.items) |imp| {
         const rel = try build_full_import_path_for_formatter(allocator, canonical, imp);
         defer allocator.free(rel);
-        try format_file_and_imports_recursive(allocator, rel, visiting, visited);
+        try format_file_and_imports_recursive(allocator, io, rel, visiting, visited);
     }
 
     // Move from visiting -> visited.
@@ -434,14 +432,14 @@ fn format_file_and_imports_recursive(
     try visited.put(canonical, {});
 }
 
-pub fn format_file_and_imports_in_place(allocator: mem.Allocator, input_file: []const u8) !void {
+pub fn format_file_and_imports_in_place(allocator: mem.Allocator, io: std.Io, input_file: []const u8) !void {
     var visiting = std.StringHashMap(void).init(allocator);
     defer freeOwnedStringMap(allocator, &visiting);
 
     var visited = std.StringHashMap(void).init(allocator);
     defer freeOwnedStringMap(allocator, &visited);
 
-    try format_file_and_imports_recursive(allocator, input_file, &visiting, &visited);
+    try format_file_and_imports_recursive(allocator, io, input_file, &visiting, &visited);
 }
 
 fn token_text(allocator: mem.Allocator, t: token.Token, source: []const u8, line_starts: []const usize) ![]const u8 {
@@ -465,7 +463,7 @@ fn token_text(allocator: mem.Allocator, t: token.Token, source: []const u8, line
             // Note: char literals are currently tokenized as Number with `cval`.
             if (t.data == .cval) {
                 const c = t.data.cval;
-                var out = std.ArrayList(u8).init(allocator);
+                var out = ArrayList(u8).init(allocator);
                 errdefer out.deinit();
 
                 try out.append('\'');
@@ -491,14 +489,7 @@ fn token_text(allocator: mem.Allocator, t: token.Token, source: []const u8, line
             }
 
             const base = switch (t.data) {
-                .dnum => blk: {
-                    // Fun doesn't support scientific notation (e.g. `3.14159e0`).
-                    // Use a decimal formatter that never emits exponent notation.
-                    var buf = std.ArrayList(u8).init(allocator);
-                    errdefer buf.deinit();
-                    try std.fmt.format(buf.writer(), "{d}", .{t.data.dnum});
-                    break :blk try buf.toOwnedSlice();
-                },
+                .dnum => try std.fmt.allocPrint(allocator, "{d}", .{t.data.dnum}),
                 .llnum => try std.fmt.allocPrint(allocator, "{d}", .{t.data.llnum}),
                 .lnum => try std.fmt.allocPrint(allocator, "{d}", .{t.data.lnum}),
                 .inum => try std.fmt.allocPrint(allocator, "{d}", .{t.data.inum}),
@@ -631,7 +622,7 @@ fn isPointerTypeStarContext(toks: []const token.Token, idx: usize, prev: token.T
     return false;
 }
 
-fn appendAll(dst: *std.ArrayList(token.Token), src: []const token.Token) !void {
+fn appendAll(dst: *ArrayList(token.Token), src: []const token.Token) !void {
     for (src) |t| {
         try dst.append(t);
     }
@@ -641,7 +632,7 @@ const EmitState = struct {
     indent: *usize,
     at_line_start: *bool,
     prev_token: *?token.Token,
-    out: *std.ArrayList(u8),
+    out: *ArrayList(u8),
     allocator: mem.Allocator,
 };
 
@@ -656,14 +647,14 @@ fn free_arg_list(allocator: mem.Allocator, args: []const []const u8) void {
     for (args) |a| allocator.free(a);
 }
 
-fn parse_command_line(allocator: mem.Allocator, text: []const u8) !std.ArrayList([]const u8) {
-    var out = std.ArrayList([]const u8).init(allocator);
+fn parse_command_line(allocator: mem.Allocator, text: []const u8) !ArrayList([]const u8) {
+    var out = ArrayList([]const u8).init(allocator);
     var i: usize = 0;
     while (i < text.len) {
         while (i < text.len and std.ascii.isWhitespace(text[i])) : (i += 1) {}
         if (i >= text.len) break;
 
-        var buf = std.ArrayList(u8).init(allocator);
+        var buf = ArrayList(u8).init(allocator);
         errdefer buf.deinit();
 
         const quote: ?u8 = if (text[i] == '"' or text[i] == '\'') blk: {
@@ -698,7 +689,7 @@ fn parse_command_line(allocator: mem.Allocator, text: []const u8) !std.ArrayList
 }
 
 fn replace_placeholders(allocator: mem.Allocator, text: []const u8, src: []const u8, out_path: []const u8) ![]const u8 {
-    var buf = std.ArrayList(u8).init(allocator);
+    var buf = ArrayList(u8).init(allocator);
     errdefer buf.deinit();
 
     var i: usize = 0;
@@ -734,7 +725,7 @@ fn detect_compiler_flavor(argv0: []const u8) CompilerFlavor {
     return .unknown;
 }
 
-fn append_default_compile_args(allocator: mem.Allocator, argv_list: *std.ArrayList([]const u8), flavor: CompilerFlavor, c_path: []const u8, exe_file: []const u8) !void {
+fn append_default_compile_args(allocator: mem.Allocator, argv_list: *ArrayList([]const u8), flavor: CompilerFlavor, c_path: []const u8, exe_file: []const u8) !void {
     switch (flavor) {
         .cl => {
             try argv_list.append(try allocator.dupe(u8, c_path));
@@ -760,7 +751,7 @@ fn append_default_compile_args(allocator: mem.Allocator, argv_list: *std.ArrayLi
 
 fn append_fun_cc_extra_args(
     allocator: mem.Allocator,
-    argv_list: *std.ArrayList([]const u8),
+    argv_list: *ArrayList([]const u8),
     extra_items: []const []const u8,
     using_zig: bool,
     used_template: bool,
@@ -813,7 +804,7 @@ pub fn default_compiler_hint() []const u8 {
 
 test "FUN_CC_ARGS stale cc is ignored for non-zig compilers" {
     const allocator = std.testing.allocator;
-    var argv_list = std.ArrayList([]const u8).init(allocator);
+    var argv_list = ArrayList([]const u8).init(allocator);
     defer argv_list.deinit();
     defer free_arg_list(allocator, argv_list.items);
 
@@ -833,7 +824,7 @@ test "FUN_CC_ARGS stale cc is ignored for non-zig compilers" {
 
 test "FUN_CC=zig with FUN_CC_ARGS=cc keeps zig cc ordering" {
     const allocator = std.testing.allocator;
-    var argv_list = std.ArrayList([]const u8).init(allocator);
+    var argv_list = ArrayList([]const u8).init(allocator);
     defer argv_list.deinit();
     defer free_arg_list(allocator, argv_list.items);
 
@@ -852,7 +843,7 @@ test "default gcc-like args include pthread on non-windows" {
     if (builtin.target.os.tag == .windows) return;
 
     const allocator = std.testing.allocator;
-    var argv_list = std.ArrayList([]const u8).init(allocator);
+    var argv_list = ArrayList([]const u8).init(allocator);
     defer argv_list.deinit();
     defer free_arg_list(allocator, argv_list.items);
 
@@ -871,7 +862,7 @@ test "default gcc-like args include pthread on non-windows" {
 
 test "default cl args do not include pthread" {
     const allocator = std.testing.allocator;
-    var argv_list = std.ArrayList([]const u8).init(allocator);
+    var argv_list = ArrayList([]const u8).init(allocator);
     defer argv_list.deinit();
     defer free_arg_list(allocator, argv_list.items);
 
@@ -1053,7 +1044,7 @@ fn pos_to_index(line_starts: []const usize, pos: token.Pos, use_end: bool) usize
 
 const fmt_indent_width: usize = 2;
 
-fn ensureBlankLine(out: *std.ArrayList(u8)) !void {
+fn ensureBlankLine(out: *ArrayList(u8)) !void {
     // Ensure output ends with at least two '\n' characters.
     const n = out.items.len;
     if (n >= 2 and out.items[n - 1] == '\n' and out.items[n - 2] == '\n') return;
@@ -1090,7 +1081,7 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
     var function_body_depth: isize = 0;
     var generic_angle_depth: usize = 0;
     var asm_raw: ?AsmRawRange = null;
-    var brace_stack = std.ArrayList(bool).init(state.allocator);
+    var brace_stack = ArrayList(bool).init(state.allocator);
     defer brace_stack.deinit();
     while (idx < toks.len) : (idx += 1) {
         const t2 = toks[idx];
@@ -1781,11 +1772,11 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
     }
 }
 
-pub fn format_file_in_place(allocator: mem.Allocator, input_file: []const u8) !void {
-    const source = try std.fs.cwd().readFileAlloc(allocator, input_file, 16 * 1024 * 1024);
+pub fn format_file_in_place(allocator: mem.Allocator, io: std.Io, input_file: []const u8) !void {
+    const source = try std.Io.Dir.cwd().readFileAlloc(io, input_file, allocator, .limited(16 * 1024 * 1024));
     defer allocator.free(source);
 
-    var line_starts = std.ArrayList(usize).init(allocator);
+    var line_starts = ArrayList(usize).init(allocator);
     defer line_starts.deinit();
     try line_starts.append(0);
     for (source, 0..) |c, i| {
@@ -1806,7 +1797,7 @@ pub fn format_file_in_place(allocator: mem.Allocator, input_file: []const u8) !v
     defer lp.deinit();
     try lp.lex();
 
-    var out = std.ArrayList(u8).init(allocator);
+    var out = ArrayList(u8).init(allocator);
     defer out.deinit();
 
     var indent: usize = 0;
@@ -1816,13 +1807,13 @@ pub fn format_file_in_place(allocator: mem.Allocator, input_file: []const u8) !v
     const tokens = tp.tokens.items();
 
     // Partition top-level imports + global vars into groups.
-    var imports = std.ArrayList(token.Token).init(allocator);
+    var imports = ArrayList(token.Token).init(allocator);
     defer imports.deinit();
-    var globals = std.ArrayList(token.Token).init(allocator);
+    var globals = ArrayList(token.Token).init(allocator);
     defer globals.deinit();
-    var rest = std.ArrayList(token.Token).init(allocator);
+    var rest = ArrayList(token.Token).init(allocator);
     defer rest.deinit();
-    var pending_comments = std.ArrayList(token.Token).init(allocator);
+    var pending_comments = ArrayList(token.Token).init(allocator);
     defer pending_comments.deinit();
 
     var brace_depth: isize = 0;
@@ -1859,7 +1850,7 @@ pub fn format_file_in_place(allocator: mem.Allocator, input_file: []const u8) !v
 
         if (starts_import_stmt or starts_global_stmt) {
             // Collect up to ';'
-            var stmt = std.ArrayList(token.Token).init(allocator);
+            var stmt = ArrayList(token.Token).init(allocator);
             defer stmt.deinit();
             try appendAll(&stmt, pending_comments.items);
             pending_comments.clearRetainingCapacity();
@@ -1952,9 +1943,8 @@ pub fn format_file_in_place(allocator: mem.Allocator, input_file: []const u8) !v
     }
 
     // Overwrite input file in-place.
-    try tp.ifile.seekTo(0);
-    try tp.ifile.setEndPos(0);
-    _ = try tp.ifile.writeAll(out.items);
+    try tp.ifile.writePositionalAll(io, out.items, 0);
+    try tp.ifile.setLength(io, out.items.len);
 }
 
 /// Compiles and runs the generated C code.
@@ -1972,7 +1962,7 @@ pub fn format_file_in_place(allocator: mem.Allocator, input_file: []const u8) !v
 /// Returns:
 /// - Might return error.CompilationFailed if GCC compilation fails.
 /// - Might return other errors from file operations or process execution.
-pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, is_file: bool, input_file: []const u8, program_args: []const []const u8) !void {
+pub fn compile_and_run(allocator: mem.Allocator, io: std.Io, c_file_or_content: []const u8, is_file: bool, input_file: []const u8, program_args: []const []const u8) !void {
     const input_path = std.fs.path.basename(input_file);
     const extension_index = std.mem.lastIndexOf(u8, input_path, ".");
     var exe_file_name: []const u8 = input_path;
@@ -1982,7 +1972,12 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
 
     // Multiple runs can collide on the same output exe/pdb name, and on Windows
     // that can lead to file-lock stalls. Make the output name unique.
-    const exe_file_name_owned = try std.fmt.allocPrint(allocator, "{s}_{d}", .{ exe_file_name, std.time.nanoTimestamp() });
+    const exe_file_name_owned = blk: {
+        const S = struct {
+            var uid: std.atomic.Value(u64) = .init(0);
+        };
+        break :blk try std.fmt.allocPrint(allocator, "{s}_{d}", .{ exe_file_name, S.uid.fetchAdd(1, .monotonic) });
+    };
     defer allocator.free(exe_file_name_owned);
     exe_file_name = exe_file_name_owned;
     const exe_file = blk: {
@@ -1993,7 +1988,7 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
     };
     defer allocator.free(exe_file);
     // Always attempt cleanup even on early returns.
-    defer fs.cwd().deleteFile(exe_file) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, exe_file) catch {};
 
     const pdb_file: ?[]const u8 = if (builtin.target.os.tag == .windows)
         try std.fmt.allocPrint(allocator, "{s}.pdb", .{exe_file_name})
@@ -2001,25 +1996,22 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
         null;
     defer if (pdb_file) |p| allocator.free(p);
     defer if (pdb_file) |p| {
-        fs.cwd().deleteFile(p) catch {};
+        std.Io.Dir.cwd().deleteFile(io, p) catch {};
     };
-
-    // When `zig build test` runs tests with `--listen=-`, stdout is used for the
-    // test runner protocol. Also, noisy test stderr makes it look like failures.
-    // Keep tests quiet, but preserve normal CLI output.
-    const stdout = if (builtin.is_test) std.io.null_writer else std.io.getStdOut().writer();
-    const stderr = std.io.getStdErr().writer();
 
     // If content is provided instead of a file, write it to a temporary file first
     var c_path: []const u8 = undefined;
     var temp_name: ?[]const u8 = null;
     if (!is_file) {
-        temp_name = try std.fmt.allocPrint(allocator, "temp_{d}.c", .{std.time.timestamp()});
+        const S = struct {
+            var uid: std.atomic.Value(u64) = .init(0);
+        };
+        temp_name = try std.fmt.allocPrint(allocator, "temp_{d}.c", .{S.uid.fetchAdd(1, .monotonic)});
         errdefer if (temp_name) |name| allocator.free(name);
 
-        const temp_file = try fs.cwd().createFile(temp_name.?, .{});
-        try temp_file.writeAll(c_file_or_content);
-        temp_file.close();
+        const temp_file = try std.Io.Dir.cwd().createFile(io, temp_name.?, .{});
+        try temp_file.writeStreamingAll(io, c_file_or_content);
+        temp_file.close(io);
 
         c_path = temp_name.?;
     } else {
@@ -2028,7 +2020,7 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
 
     // Make sure to clean up temp file in all cases when it's not a permanent file
     defer if (!is_file and temp_name != null) {
-        fs.cwd().deleteFile(temp_name.?) catch {};
+        std.Io.Dir.cwd().deleteFile(io, temp_name.?) catch {};
         allocator.free(temp_name.?);
     };
 
@@ -2036,20 +2028,20 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
     {
         var fun_cc: ?[]const u8 = null;
         var fun_cc_args: ?[]const u8 = null;
-        fun_cc = process.getEnvVarOwned(allocator, "FUN_CC") catch |err| switch (err) {
-            error.EnvironmentVariableNotFound => null,
-            else => return err,
-        };
+        if (std.c.getenv("FUN_CC")) |z| {
+            const s = std.mem.sliceTo(z, 0);
+            if (s.len > 0) fun_cc = try allocator.dupe(u8, s);
+        }
         defer if (fun_cc) |v| allocator.free(v);
 
-        fun_cc_args = process.getEnvVarOwned(allocator, "FUN_CC_ARGS") catch |err| switch (err) {
-            error.EnvironmentVariableNotFound => null,
-            else => return err,
-        };
+        if (std.c.getenv("FUN_CC_ARGS")) |z| {
+            const s = std.mem.sliceTo(z, 0);
+            if (s.len > 0) fun_cc_args = try allocator.dupe(u8, s);
+        }
         defer if (fun_cc_args) |v| allocator.free(v);
 
         if (fun_cc != null and fun_cc.?.len > 0) {
-            var argv_list = std.ArrayList([]const u8).init(allocator);
+            var argv_list = ArrayList([]const u8).init(allocator);
             defer argv_list.deinit();
             defer free_arg_list(allocator, argv_list.items);
             var used_template = false;
@@ -2090,37 +2082,8 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
                 try append_fun_cc_extra_args(allocator, &argv_list, extra.items, using_zig, used_template, non_template_base_argc);
             }
 
-            var env_map_opt: ?process.EnvMap = null;
-            defer if (env_map_opt) |*m| m.deinit();
-            if (using_zig) {
-                // Avoid Zig cache lock contention by using dedicated cache dirs.
-                // Place caches next to the input file under `.fun-cache/`.
-                const cache_root = std.fs.path.dirname(input_file) orelse ".";
-                const cache_base = try std.fs.path.join(allocator, &.{ cache_root, ".fun-cache" });
-                defer allocator.free(cache_base);
-                const global_cache_dir_rel = try std.fs.path.join(allocator, &.{ cache_base, "fun_cli_global_cache" });
-                defer allocator.free(global_cache_dir_rel);
-                const local_cache_dir_rel = try std.fs.path.join(allocator, &.{ cache_base, "fun_cli_local_cache" });
-                defer allocator.free(local_cache_dir_rel);
-
-                try fs.cwd().makePath(global_cache_dir_rel);
-                try fs.cwd().makePath(local_cache_dir_rel);
-
-                const global_cache_dir_abs = try fs.cwd().realpathAlloc(allocator, global_cache_dir_rel);
-                defer allocator.free(global_cache_dir_abs);
-                const local_cache_dir_abs = try fs.cwd().realpathAlloc(allocator, local_cache_dir_rel);
-                defer allocator.free(local_cache_dir_abs);
-
-                var env_map = try process.getEnvMap(allocator);
-                try env_map.put("ZIG_GLOBAL_CACHE_DIR", global_cache_dir_abs);
-                try env_map.put("ZIG_LOCAL_CACHE_DIR", local_cache_dir_abs);
-                env_map_opt = env_map;
-            }
-
-            const result = process.Child.run(.{
-                .allocator = allocator,
+            const result = std.process.run(allocator, io, .{
                 .argv = argv_list.items,
-                .env_map = if (env_map_opt) |*m| m else null,
             }) catch |err| switch (err) {
                 error.FileNotFound => return CliError.MissingCCompiler,
                 else => return err,
@@ -2130,10 +2093,8 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
                 allocator.free(result.stderr);
             }
 
-            if (result.term.Exited != 0) {
-                if (!builtin.is_test) {
-                    try stderr.print("Compilation error:\n{s}", .{result.stderr});
-                }
+            if (result.term.exited != 0) {
+                std.debug.print("Compilation error:\n{s}", .{result.stderr});
                 return CliError.CompilationFailed;
             }
         } else {
@@ -2141,7 +2102,7 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
             var any_compiler_found = false;
 
             for (candidates) |candidate| {
-                var argv_list = std.ArrayList([]const u8).init(allocator);
+                var argv_list = ArrayList([]const u8).init(allocator);
                 defer argv_list.deinit();
                 defer free_arg_list(allocator, argv_list.items);
 
@@ -2151,35 +2112,8 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
                 }
                 try append_default_compile_args(allocator, &argv_list, candidate.flavor, c_path, exe_file);
 
-                var env_map_opt: ?process.EnvMap = null;
-                defer if (env_map_opt) |*m| m.deinit();
-                if (candidate.flavor == .zig) {
-                    const cache_root = std.fs.path.dirname(input_file) orelse ".";
-                    const cache_base = try std.fs.path.join(allocator, &.{ cache_root, ".fun-cache" });
-                    defer allocator.free(cache_base);
-                    const global_cache_dir_rel = try std.fs.path.join(allocator, &.{ cache_base, "fun_cli_global_cache" });
-                    defer allocator.free(global_cache_dir_rel);
-                    const local_cache_dir_rel = try std.fs.path.join(allocator, &.{ cache_base, "fun_cli_local_cache" });
-                    defer allocator.free(local_cache_dir_rel);
-
-                    try fs.cwd().makePath(global_cache_dir_rel);
-                    try fs.cwd().makePath(local_cache_dir_rel);
-
-                    const global_cache_dir_abs = try fs.cwd().realpathAlloc(allocator, global_cache_dir_rel);
-                    defer allocator.free(global_cache_dir_abs);
-                    const local_cache_dir_abs = try fs.cwd().realpathAlloc(allocator, local_cache_dir_rel);
-                    defer allocator.free(local_cache_dir_abs);
-
-                    var env_map = try process.getEnvMap(allocator);
-                    try env_map.put("ZIG_GLOBAL_CACHE_DIR", global_cache_dir_abs);
-                    try env_map.put("ZIG_LOCAL_CACHE_DIR", local_cache_dir_abs);
-                    env_map_opt = env_map;
-                }
-
-                const result = process.Child.run(.{
-                    .allocator = allocator,
+                const result = std.process.run(allocator, io, .{
                     .argv = argv_list.items,
-                    .env_map = if (env_map_opt) |*m| m else null,
                 }) catch |err| switch (err) {
                     error.FileNotFound => continue,
                     else => return err,
@@ -2190,10 +2124,8 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
                 }
 
                 any_compiler_found = true;
-                if (result.term.Exited != 0) {
-                    if (!builtin.is_test) {
-                        try stderr.print("Compilation error:\n{s}", .{result.stderr});
-                    }
+                if (result.term.exited != 0) {
+                    std.debug.print("Compilation error:\n{s}", .{result.stderr});
                     return CliError.CompilationFailed;
                 }
 
@@ -2225,8 +2157,7 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
         for (program_args, 0..) |a, i| argv_all[i + 1] = a;
 
         if (builtin.is_test) {
-            const result = try process.Child.run(.{
-                .allocator = allocator,
+            const result = try std.process.run(allocator, io, .{
                 .argv = argv_all,
             });
             defer {
@@ -2235,22 +2166,23 @@ pub fn compile_and_run(allocator: mem.Allocator, c_file_or_content: []const u8, 
             }
 
             switch (result.term) {
-                .Exited => |code| if (code != 0) return CliError.ExecutionFailed,
+                .exited => |code| if (code != 0) return CliError.ExecutionFailed,
                 else => return CliError.ExecutionFailed,
             }
 
-            try stdout.print("{s}", .{result.stdout});
+            std.debug.print("{s}", .{result.stdout});
         } else {
             // In normal CLI usage we want the compiled program to behave like a normal
             // executable: inherit stdin/stdout/stderr so interactive programs work.
-            var child = process.Child.init(argv_all, allocator);
-            child.stdin_behavior = .Inherit;
-            child.stdout_behavior = .Inherit;
-            child.stderr_behavior = .Inherit;
-            try child.spawn();
-            const term = try child.wait();
+            var child = try std.process.spawn(io, .{
+                .argv = argv_all,
+                .stdin = .inherit,
+                .stdout = .inherit,
+                .stderr = .inherit,
+            });
+            const term = try child.wait(io);
             switch (term) {
-                .Exited => |code| {
+                .exited => |code| {
                     if (code != 0) {
                         // Preserve program exit status for callers/shell scripts.
                         std.process.exit(code);

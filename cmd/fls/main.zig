@@ -7,38 +7,68 @@ const utils = @import("utils");
 const build_options = @import("build_options");
 const token = lexer.token;
 
+/// Compatibility shim: ArrayList with embedded allocator (old-style managed API).
+fn ArrayList(comptime T: type) type {
+    return std.array_list.Managed(T);
+}
+
 const Allocator = std.mem.Allocator;
 
-pub fn main() !void {
+/// Runtime io set from init.io in main(). Fallback keeps comptime paths working
+/// but operations that need an allocator (process spawn) must be called after main() sets this.
+var g_runtime_io: ?std.Io = null;
+
+fn globalIo() std.Io {
+    return g_runtime_io orelse std.Io.Threaded.global_single_threaded.io();
+}
+
+/// Returns milliseconds since Unix epoch (cross-platform replacement for std.time.milliTimestamp).
+fn nowMs() i64 {
+    const ts = std.Io.Clock.Timestamp.now(globalIo(), .real);
+    return @intCast(@divFloor(ts.raw.nanoseconds, std.time.ns_per_ms));
+}
+
+/// Returns nanoseconds since Unix epoch (cross-platform replacement for std.time.nanoTimestamp).
+fn nowNs() i128 {
+    const ts = std.Io.Clock.Timestamp.now(globalIo(), .real);
+    return ts.raw.nanoseconds;
+}
+
+fn fileReadAlloc(allocator: Allocator, f: std.Io.File, max: usize) ![]u8 {
+    var read_buf: [65536]u8 = undefined;
+    var fr = f.reader(globalIo(), &read_buf);
+    return fr.interface.allocRemaining(allocator, .limited(max));
+}
+
+pub fn main(init: std.process.Init) !void {
+    g_runtime_io = init.io;
     // CLI helpers (used by installers / debugging PATH mismatches).
     // Note: fls is normally launched by the VS Code extension with no args (stdio mode).
-    const argv = try std.process.argsAlloc(std.heap.page_allocator);
-    defer std.process.argsFree(std.heap.page_allocator, argv);
+    var args_it = init.minimal.args.iterate();
+    _ = args_it.next(); // skip executable name
 
-    if (argv.len >= 2) {
-        if (std.mem.eql(u8, argv[1], "--version") or std.mem.eql(u8, argv[1], "-v")) {
-            const out = std.io.getStdOut().writer();
-            try out.print("fls {s}\n", .{build_options.version});
+    if (args_it.next()) |first_arg| {
+        if (std.mem.eql(u8, first_arg, "--version") or std.mem.eql(u8, first_arg, "-v")) {
+            const ver_str = "fls " ++ build_options.version ++ "\n";
+            std.Io.File.stdout().writeStreamingAll(init.io, ver_str) catch {};
             return;
         }
-        if (std.mem.eql(u8, argv[1], "--help") or std.mem.eql(u8, argv[1], "-h")) {
-            const out = std.io.getStdOut().writer();
-            try out.writeAll(
+        if (std.mem.eql(u8, first_arg, "--help") or std.mem.eql(u8, first_arg, "-h")) {
+            std.Io.File.stdout().writeStreamingAll(
+                init.io,
                 "Fun Language Server (fls)\n\n" ++
                     "Usage:\n" ++
                     "  fls            Run language server over stdio (LSP)\n" ++
                     "  fls --version  Print version\n" ++
                     "  fls --help     Show this help\n",
-            );
+            ) catch {};
             return;
         }
     }
 
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator = init.gpa;
 
-    var server = try LspServer.init(allocator);
+    var server = try LspServer.init(allocator, init.io);
     defer server.deinit();
     try server.run();
 }
@@ -209,8 +239,9 @@ const Index = struct {
 const LspServer = struct {
     allocator: Allocator,
     docs: std.StringHashMap(Doc),
-    stdin: std.fs.File,
-    stdout: std.fs.File,
+    io: std.Io,
+    stdin: std.Io.File,
+    stdout: std.Io.File,
     fun_exe_path: []const u8,
     fls_exe_path: ?[]u8 = null,
     published_diag_uris: std.StringHashMap(void),
@@ -222,9 +253,9 @@ const LspServer = struct {
     debug_definitions: bool = false,
     did_log_stdlib_root_resolution: bool = false,
 
-    fn envFlag(allocator: Allocator, name: []const u8) bool {
-        const v = std.process.getEnvVarOwned(allocator, name) catch return false;
-        defer allocator.free(v);
+    fn envFlag(name: [:0]const u8) bool {
+        const z = std.c.getenv(name) orelse return false;
+        const v = std.mem.sliceTo(z, 0);
         const s = std.mem.trim(u8, v, " \t\r\n");
         if (s.len == 0) return false;
         if (std.ascii.eqlIgnoreCase(s, "0")) return false;
@@ -241,17 +272,18 @@ const LspServer = struct {
         std.debug.print("\n", .{});
     }
 
-    fn init(allocator: Allocator) !LspServer {
-        const dbg_all = envFlag(allocator, "FLS_DEBUG");
-        const dbg_imports = dbg_all or envFlag(allocator, "FLS_DEBUG_IMPORTS");
-        const dbg_defs = dbg_all or envFlag(allocator, "FLS_DEBUG_DEFINITIONS");
+    fn init(allocator: Allocator, io: std.Io) !LspServer {
+        const dbg_all = envFlag("FLS_DEBUG");
+        const dbg_imports = dbg_all or envFlag("FLS_DEBUG_IMPORTS");
+        const dbg_defs = dbg_all or envFlag("FLS_DEBUG_DEFINITIONS");
         return .{
             .allocator = allocator,
+            .io = io,
             .docs = std.StringHashMap(Doc).init(allocator),
-            .stdin = std.io.getStdIn(),
-            .stdout = std.io.getStdOut(),
-            .fun_exe_path = try findSiblingOrPathExe(allocator, "fun"),
-            .fls_exe_path = std.fs.selfExePathAlloc(allocator) catch null,
+            .stdin = std.Io.File.stdin(),
+            .stdout = std.Io.File.stdout(),
+            .fun_exe_path = try findSiblingOrPathExe(allocator, io, "fun"),
+            .fls_exe_path = std.process.executablePathAlloc(io, allocator) catch null,
             .published_diag_uris = std.StringHashMap(void).init(allocator),
             .root_uri = null,
             .root_path = null,
@@ -367,8 +399,8 @@ const LspServer = struct {
         // Defensive: `openDirAbsolute` asserts that its input is absolute on this OS.
         if (!std.fs.path.isAbsolute(std_dir)) return false;
 
-        var d = std.fs.openDirAbsolute(std_dir, .{}) catch return false;
-        d.close();
+        var d = std.Io.Dir.openDirAbsolute(globalIo(), std_dir, .{}) catch return false;
+        d.close(globalIo());
         return true;
     }
 
@@ -379,11 +411,11 @@ const LspServer = struct {
         defer std.heap.page_allocator.free(std_dir);
 
         if (!std.fs.path.isAbsolute(std_dir)) return false;
-        var d = std.fs.openDirAbsolute(std_dir, .{}) catch |err| {
+        var d = std.Io.Dir.openDirAbsolute(globalIo(), std_dir, .{}) catch |err| {
             if (self.debug_imports) dbg(true, "imports", "stdlib root check failed: root={s} std_dir={s} err={s}", .{ root_abs, std_dir, @errorName(err) });
             return false;
         };
-        d.close();
+        d.close(globalIo());
         return true;
     }
 
@@ -394,7 +426,7 @@ const LspServer = struct {
         var abs = if (std.fs.path.isAbsolute(path))
             (self.allocator.dupe(u8, path) catch return false)
         else
-            (std.fs.cwd().realpathAlloc(self.allocator, path) catch return false);
+            (std.Io.Dir.cwd().realPathFileAlloc(globalIo(), path, self.allocator) catch return false);
 
         // Normalize/derive: accept a variety of installed layouts.
         // We ultimately store `<root>` such that `<root>/std/...` exists.
@@ -497,9 +529,9 @@ const LspServer = struct {
         return true;
     }
 
-    fn tryStdlibRootFromEnv(self: *LspServer, name: []const u8) bool {
-        const v = std.process.getEnvVarOwned(self.allocator, name) catch return false;
-        defer self.allocator.free(v);
+    fn tryStdlibRootFromEnv(self: *LspServer, comptime name: [:0]const u8) bool {
+        const z = std.c.getenv(name) orelse return false;
+        const v = std.mem.sliceTo(z, 0);
         const trimmed = std.mem.trim(u8, v, " \t\r\n");
         if (trimmed.len == 0) return false;
         const unquoted = blk: {
@@ -566,11 +598,12 @@ const LspServer = struct {
     }
 
     fn run(self: *LspServer) !void {
-        var br = std.io.bufferedReader(self.stdin.reader());
-        const inr = br.reader();
+        var stdin_buf: [65536]u8 = undefined;
+        var reader = self.stdin.reader(self.io, &stdin_buf);
+        const inr = &reader;
 
         while (true) {
-            const msg_bytes = readLspMessage(self.allocator, inr) catch |err| switch (err) {
+            const msg_bytes = readLspMessage(self.allocator, &inr.interface) catch |err| switch (err) {
                 error.EndOfStream => return,
                 else => return err,
             };
@@ -802,7 +835,11 @@ const LspServer = struct {
             },
         };
 
-        const json = try std.json.stringifyAlloc(self.allocator, res, .{});
+        const json = blk: {
+            var aw = std.Io.Writer.Allocating.init(self.allocator);
+            try std.json.fmt(res, .{}).format(&aw.writer);
+            break :blk try aw.toOwnedSlice();
+        };
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
 
@@ -858,13 +895,13 @@ const LspServer = struct {
 
     fn indexWorkspace(self: *LspServer) !void {
         const root_path = self.root_path orelse return;
-        var dir = try std.fs.openDirAbsolute(root_path, .{ .iterate = true });
-        defer dir.close();
+        var dir = try std.Io.Dir.openDirAbsolute(globalIo(), root_path, .{ .iterate = true });
+        defer dir.close(globalIo());
 
         var walker = try dir.walk(self.allocator);
         defer walker.deinit();
 
-        while (try walker.next()) |entry| {
+        while (try walker.next(globalIo())) |entry| {
             if (entry.kind != .file) continue;
             if (!std.mem.endsWith(u8, entry.path, ".fn")) continue;
 
@@ -1040,7 +1077,7 @@ const LspServer = struct {
             .newText = formatted,
         }};
 
-        const json = try std.json.stringifyAlloc(self.allocator, edits, .{});
+        const json = try jsonStringifyAlloc(self.allocator, edits);
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
     }
@@ -1067,11 +1104,11 @@ const LspServer = struct {
             return;
         };
         if (tok.kind == .keyword) {
-            var buf = std.ArrayList(u8).init(self.allocator);
+            var buf = ArrayList(u8).init(self.allocator);
             defer buf.deinit();
 
             if (std.mem.eql(u8, tok.text, "async")) {
-                try buf.writer().writeAll(
+                try buf.appendSlice(
                     "**async**\n\n" ++
                         "```fun\n" ++
                         "async fun name(...) Type { ... }\n" ++
@@ -1080,7 +1117,7 @@ const LspServer = struct {
                         "Calls to async functions must use `await`.\n",
                 );
             } else if (std.mem.eql(u8, tok.text, "await")) {
-                try buf.writer().writeAll(
+                try buf.appendSlice(
                     "**await**\n\n" ++
                         "```fun\n" ++
                         "await some_async_call();\n" ++
@@ -1094,7 +1131,7 @@ const LspServer = struct {
             }
 
             const hover: Hover = .{ .contents = .{ .value = buf.items }, .range = tok.range };
-            const json = try std.json.stringifyAlloc(self.allocator, hover, .{});
+            const json = try jsonStringifyAlloc(self.allocator, hover);
             defer self.allocator.free(json);
             try self.sendResponseJson(id_val, json);
             return;
@@ -1119,9 +1156,9 @@ const LspServer = struct {
 
         // Builtin hover.
         if (std.mem.eql(u8, tok.text, "sizeof")) {
-            var buf = std.ArrayList(u8).init(self.allocator);
+            var buf = ArrayList(u8).init(self.allocator);
             defer buf.deinit();
-            try buf.writer().writeAll(
+            try buf.appendSlice(
                 "**sizeof**\n\n" ++
                     "```fun\n" ++
                     "sizeof(Type) num\n" ++
@@ -1131,7 +1168,7 @@ const LspServer = struct {
             );
 
             const hover: Hover = .{ .contents = .{ .value = buf.items }, .range = tok.range };
-            const json = try std.json.stringifyAlloc(self.allocator, hover, .{});
+            const json = try jsonStringifyAlloc(self.allocator, hover);
             defer self.allocator.free(json);
             try self.sendResponseJson(id_val, json);
             return;
@@ -1147,15 +1184,15 @@ const LspServer = struct {
                 const variant_name = if (merged) t.text[1..] else tok.text;
                 if (self.guessEnumTypeForDotShorthand(uri, idx, tok_i)) |enum_name| {
                     if (self.findMemberByContainer(uri, enum_name, variant_name, .enumMember)) |h| {
-                        var buf = std.ArrayList(u8).init(self.allocator);
+                        var buf = ArrayList(u8).init(self.allocator);
                         defer buf.deinit();
-                        try buf.writer().print("**{s}**\n\n", .{variant_name});
-                        try buf.writer().print("```fun\n{s}.{s}\n```\n", .{ enum_name, variant_name });
+                        try buf.print("**{s}**\n\n", .{variant_name});
+                        try buf.print("```fun\n{s}.{s}\n```\n", .{ enum_name, variant_name });
                         if (self.docs.get(h.uri)) |hdoc| {
                             _ = try appendDocCommentAboveLine(self.allocator, &buf, hdoc.text, h.sym.decl_range.start.line);
                         }
                         const hover: Hover = .{ .contents = .{ .value = buf.items }, .range = tok.range };
-                        const json = try std.json.stringifyAlloc(self.allocator, hover, .{});
+                        const json = try jsonStringifyAlloc(self.allocator, hover);
                         defer self.allocator.free(json);
                         try self.sendResponseJson(id_val, json);
                         return;
@@ -1175,9 +1212,9 @@ const LspServer = struct {
                             self.findMemberByContainer(uri, recv_type, name, .enumMember) orelse
                             self.findMemberByContainer(uri, recv_type, name, .method);
                         if (hit) |h| {
-                            var buf = std.ArrayList(u8).init(self.allocator);
+                            var buf = ArrayList(u8).init(self.allocator);
                             defer buf.deinit();
-                            try buf.writer().print("**{s}**\n\n", .{name});
+                            try buf.print("**{s}**\n\n", .{name});
                             switch (h.sym.kind) {
                                 .field, .property => {
                                     if (h.sym.value_type) |vt| {
@@ -1194,23 +1231,23 @@ const LspServer = struct {
                                             break :blk vt;
                                         };
 
-                                        try buf.writer().print("```fun\n{s} {s}\n```\n", .{ shown_vt, name });
+                                        try buf.print("```fun\n{s} {s}\n```\n", .{ shown_vt, name });
                                     } else {
-                                        try buf.writer().print("_field_\n", .{});
+                                        try buf.print("_field_\n", .{});
                                     }
                                 },
                                 .enumMember => {
-                                    try buf.writer().print("```fun\n{s}.{s}\n```\n", .{ recv_type, name });
+                                    try buf.print("```fun\n{s}.{s}\n```\n", .{ recv_type, name });
                                 },
                                 .method => {
                                     if (h.sym.detail) |det| {
-                                        try buf.writer().print("```fun\n{s}\n```\n", .{det});
+                                        try buf.print("```fun\n{s}\n```\n", .{det});
                                     } else {
-                                        try buf.writer().print("_method on {s}_\n", .{recv_type});
+                                        try buf.print("_method on {s}_\n", .{recv_type});
                                     }
                                 },
                                 else => {
-                                    try buf.writer().print("_{s}_\n", .{@tagName(h.sym.kind)});
+                                    try buf.print("_{s}_\n", .{@tagName(h.sym.kind)});
                                 },
                             }
 
@@ -1219,7 +1256,7 @@ const LspServer = struct {
                             }
 
                             const hover: Hover = .{ .contents = .{ .value = buf.items }, .range = tok.range };
-                            const json = try std.json.stringifyAlloc(self.allocator, hover, .{});
+                            const json = try jsonStringifyAlloc(self.allocator, hover);
                             defer self.allocator.free(json);
                             try self.sendResponseJson(id_val, json);
                             return;
@@ -1246,7 +1283,7 @@ const LspServer = struct {
             }
         }
 
-        var buf = std.ArrayList(u8).init(self.allocator);
+        var buf = ArrayList(u8).init(self.allocator);
         defer buf.deinit();
 
         const pickBestLocal = struct {
@@ -1330,7 +1367,7 @@ const LspServer = struct {
         }
 
         if (def_local_opt) |d| {
-            try buf.writer().print("**{s}**\n\n", .{tok.text});
+            try buf.print("**{s}**\n\n", .{tok.text});
             const let_infer_detail = d.kind == .variable and ((d.value_type != null and isLetInferTypeName(d.value_type.?)) or
                 (d.detail != null and std.mem.startsWith(u8, d.detail.?, "__let_infer__")));
             if (d.detail) |det| {
@@ -1341,14 +1378,14 @@ const LspServer = struct {
                         // Render type symbols in the kind-specific branch below so we can
                         // include concrete generic arguments from the hover site.
                     } else if (d.kind == .function and d.value_type != null) {
-                        const det_trim = std.mem.trimRight(u8, det, " \t\r\n");
+                        const det_trim = std.mem.trimEnd(u8, det, " \t\r\n");
                         if (det_trim.len != 0 and det_trim[det_trim.len - 1] == ')') {
-                            try buf.writer().print("```fun\n{s} {s}\n```\n", .{ det_trim, d.value_type.? });
+                            try buf.print("```fun\n{s} {s}\n```\n", .{ det_trim, d.value_type.? });
                         } else {
-                            try buf.writer().print("```fun\n{s}\n```\n", .{det});
+                            try buf.print("```fun\n{s}\n```\n", .{det});
                         }
                     } else {
-                        try buf.writer().print("```fun\n{s}\n```\n", .{det});
+                        try buf.print("```fun\n{s}\n```\n", .{det});
                     }
                 }
             }
@@ -1356,47 +1393,47 @@ const LspServer = struct {
                 const vt = d.value_type orelse self.guessVariableType(idx, uri, tok.text, pos);
                 if (vt) |vts| {
                     if (!isLetInferTypeName(vts)) {
-                        try buf.writer().print("```fun\n{s} {s}\n```\n", .{ vts, tok.text });
+                        try buf.print("```fun\n{s} {s}\n```\n", .{ vts, tok.text });
                     }
                 } else {
-                    try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
+                    try buf.print("_{s}_\n", .{@tagName(d.kind)});
                 }
             } else if (d.kind == .enumMember) {
                 const recv_type = d.container_type orelse d.value_type orelse "";
                 if (recv_type.len != 0) {
-                    try buf.writer().print("```fun\n{s}.{s}\n```\n", .{ recv_type, tok.text });
+                    try buf.print("```fun\n{s}.{s}\n```\n", .{ recv_type, tok.text });
                 } else {
-                    try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
+                    try buf.print("_{s}_\n", .{@tagName(d.kind)});
                 }
             } else if ((d.kind == .struct_ or d.kind == .interface or d.kind == .enum_)) {
                 const kw = if (d.kind == .struct_) "compound" else if (d.kind == .interface) "quirk" else "enum";
                 if (concrete_hover_type) |concrete| {
-                    try buf.writer().print("```fun\n{s} {s}\n```\n", .{ kw, concrete });
+                    try buf.print("```fun\n{s} {s}\n```\n", .{ kw, concrete });
                 } else if (d.detail) |det| {
-                    try buf.writer().print("```fun\n{s}\n```\n", .{det});
+                    try buf.print("```fun\n{s}\n```\n", .{det});
                 } else {
-                    try buf.writer().print("```fun\n{s} {s}\n```\n", .{ kw, tok.text });
+                    try buf.print("```fun\n{s} {s}\n```\n", .{ kw, tok.text });
                 }
             } else {
-                try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
+                try buf.print("_{s}_\n", .{@tagName(d.kind)});
             }
             _ = try appendDocCommentAboveLine(self.allocator, &buf, doc.text, d.decl_range.start.line);
         } else if (def_import) |hit| {
             const d = hit.sym;
-            try buf.writer().print("**{s}**\n\n", .{tok.text});
+            try buf.print("**{s}**\n\n", .{tok.text});
 
             var printed_detail = false;
             if (d.detail) |det| {
                 if (!(d.kind == .struct_ or d.kind == .interface or d.kind == .enum_)) {
                     if (d.kind == .function and d.value_type != null) {
-                        const det_trim = std.mem.trimRight(u8, det, " \t\r\n");
+                        const det_trim = std.mem.trimEnd(u8, det, " \t\r\n");
                         if (det_trim.len != 0 and det_trim[det_trim.len - 1] == ')') {
-                            try buf.writer().print("```fun\n{s} {s}\n```\n", .{ det_trim, d.value_type.? });
+                            try buf.print("```fun\n{s} {s}\n```\n", .{ det_trim, d.value_type.? });
                         } else {
-                            try buf.writer().print("```fun\n{s}\n```\n", .{det});
+                            try buf.print("```fun\n{s}\n```\n", .{det});
                         }
                     } else {
-                        try buf.writer().print("```fun\n{s}\n```\n", .{det});
+                        try buf.print("```fun\n{s}\n```\n", .{det});
                     }
                     printed_detail = true;
                 }
@@ -1405,37 +1442,37 @@ const LspServer = struct {
                 if (d.kind == .variable) {
                     const vt = d.value_type orelse self.guessVariableType(idx, uri, tok.text, pos);
                     if (vt) |vts| {
-                        try buf.writer().print("```fun\n{s} {s}\n```\n", .{ vts, tok.text });
+                        try buf.print("```fun\n{s} {s}\n```\n", .{ vts, tok.text });
                     } else {
-                        try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
+                        try buf.print("_{s}_\n", .{@tagName(d.kind)});
                     }
                 } else if (d.kind == .enumMember) {
                     const recv_type = d.container_type orelse d.value_type orelse "";
                     if (recv_type.len != 0) {
-                        try buf.writer().print("```fun\n{s}.{s}\n```\n", .{ recv_type, tok.text });
+                        try buf.print("```fun\n{s}.{s}\n```\n", .{ recv_type, tok.text });
                     } else {
-                        try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
+                        try buf.print("_{s}_\n", .{@tagName(d.kind)});
                     }
                 } else if ((d.kind == .struct_ or d.kind == .interface or d.kind == .enum_)) {
                     const kw = if (d.kind == .struct_) "compound" else if (d.kind == .interface) "quirk" else "enum";
                     if (concrete_hover_type) |concrete| {
-                        try buf.writer().print("```fun\n{s} {s}\n```\n", .{ kw, concrete });
+                        try buf.print("```fun\n{s} {s}\n```\n", .{ kw, concrete });
                     } else if (d.detail) |det| {
-                        try buf.writer().print("```fun\n{s}\n```\n", .{det});
+                        try buf.print("```fun\n{s}\n```\n", .{det});
                     } else {
-                        try buf.writer().print("```fun\n{s} {s}\n```\n", .{ kw, tok.text });
+                        try buf.print("```fun\n{s} {s}\n```\n", .{ kw, tok.text });
                     }
                 } else {
-                    try buf.writer().print("_{s}_\n", .{@tagName(d.kind)});
+                    try buf.print("_{s}_\n", .{@tagName(d.kind)});
                 }
             }
             if (self.docs.get(hit.uri)) |idoc| {
                 _ = try appendDocCommentAboveLine(self.allocator, &buf, idoc.text, d.decl_range.start.line);
             }
         } else {
-            try buf.writer().print("**{s}**\n\n", .{tok.text});
+            try buf.print("**{s}**\n\n", .{tok.text});
             if (self.guessVariableType(idx, uri, tok.text, pos)) |vt| {
-                try buf.writer().print("```fun\n{s} {s}\n```\n", .{ vt, tok.text });
+                try buf.print("```fun\n{s} {s}\n```\n", .{ vt, tok.text });
             }
         }
 
@@ -1443,7 +1480,7 @@ const LspServer = struct {
             .contents = .{ .value = buf.items },
             .range = tok.range,
         };
-        const json = try std.json.stringifyAlloc(self.allocator, hover, .{});
+        const json = try jsonStringifyAlloc(self.allocator, hover);
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
     }
@@ -1466,7 +1503,7 @@ const LspServer = struct {
         }
 
         // Collect identifier indices from start_i to last_ident_i.
-        var ids = std.ArrayList(usize).init(self.allocator);
+        var ids = ArrayList(usize).init(self.allocator);
         defer ids.deinit();
         var j: usize = start_i;
         while (j <= last_ident_i) {
@@ -1580,7 +1617,7 @@ const LspServer = struct {
         }.call;
 
         const splitTopLevelCsv = struct {
-            fn call(text: []const u8, out_list: *std.ArrayList([]const u8)) !void {
+            fn call(text: []const u8, out_list: *ArrayList([]const u8)) !void {
                 var start: usize = 0;
                 var angle_depth: i64 = 0;
                 var paren_depth: i64 = 0;
@@ -1674,7 +1711,7 @@ const LspServer = struct {
                 return null;
             }
 
-            var receiver_args_only = std.ArrayList([]const u8).init(self.allocator);
+            var receiver_args_only = ArrayList([]const u8).init(self.allocator);
             defer receiver_args_only.deinit();
             try splitTopLevelCsv(receiver_core.inner, &receiver_args_only);
             if (receiver_args_only.items.len != 1) return null;
@@ -1696,9 +1733,9 @@ const LspServer = struct {
             return null;
         }
 
-        var declared_params = std.ArrayList([]const u8).init(self.allocator);
+        var declared_params = ArrayList([]const u8).init(self.allocator);
         defer declared_params.deinit();
-        var receiver_args = std.ArrayList([]const u8).init(self.allocator);
+        var receiver_args = ArrayList([]const u8).init(self.allocator);
         defer receiver_args.deinit();
 
         try splitTopLevelCsv(declared_core.inner, &declared_params);
@@ -1716,16 +1753,16 @@ const LspServer = struct {
         }
 
         if (parseGenericCore(member.core)) |member_core| {
-            var member_args = std.ArrayList([]const u8).init(self.allocator);
+            var member_args = ArrayList([]const u8).init(self.allocator);
             defer member_args.deinit();
             try splitTopLevelCsv(member_core.inner, &member_args);
             if (member_args.items.len == 0) return null;
 
             var changed = false;
-            var out = std.ArrayList(u8).init(self.allocator);
+            var out = ArrayList(u8).init(self.allocator);
             errdefer out.deinit();
 
-            try out.writer().print("{s}<", .{member_core.base});
+            try out.print("{s}<", .{member_core.base});
             for (member_args.items, 0..) |arg, ai| {
                 const arg_trim = std.mem.trim(u8, arg, " \t\r\n");
                 const use_arg = if (mapTemplateParam(declared_params.items, receiver_args.items, arg_trim)) |mapped_arg| blk: {
@@ -1802,7 +1839,7 @@ const LspServer = struct {
 
     fn appendMemberCompletionsForType(
         self: *LspServer,
-        items: *std.ArrayList(CompletionItem),
+        items: *ArrayList(CompletionItem),
         seen: *std.StringHashMap(void),
         preferred_uri: []const u8,
         container_type: []const u8,
@@ -1838,9 +1875,9 @@ const LspServer = struct {
                     if (prefix.len != 0 and !std.mem.startsWith(u8, s.name, prefix)) continue;
                     if (!self.isSymbolVisibleFromUri(preferred_uri, sym_uri, s)) continue;
 
-                    var key_buf = std.ArrayList(u8).init(self.allocator);
+                    var key_buf = ArrayList(u8).init(self.allocator);
                     defer key_buf.deinit();
-                    try key_buf.writer().print("method:{s}", .{s.name});
+                    try key_buf.print("method:{s}", .{s.name});
                     const key = try self.allocator.dupe(u8, key_buf.items);
                     if (seen.contains(key)) {
                         self.allocator.free(key);
@@ -1851,9 +1888,9 @@ const LspServer = struct {
                     const detail: ?[]u8 = if (s.detail) |d|
                         try self.allocator.dupe(u8, d)
                     else blk: {
-                        var db = std.ArrayList(u8).init(self.allocator);
+                        var db = ArrayList(u8).init(self.allocator);
                         defer db.deinit();
-                        try db.writer().print("{s}.{s}", .{ container_type, s.name });
+                        try db.print("{s}.{s}", .{ container_type, s.name });
                         break :blk try self.allocator.dupe(u8, db.items);
                     };
 
@@ -1875,7 +1912,7 @@ const LspServer = struct {
 
     fn appendMemberCompletionsFromUriForType(
         self: *LspServer,
-        items: *std.ArrayList(CompletionItem),
+        items: *ArrayList(CompletionItem),
         seen: *std.StringHashMap(void),
         preferred_uri: []const u8,
         sym_uri: []const u8,
@@ -1902,9 +1939,9 @@ const LspServer = struct {
             };
 
             // Dedup members by name+kind.
-            var key_buf = std.ArrayList(u8).init(self.allocator);
+            var key_buf = ArrayList(u8).init(self.allocator);
             defer key_buf.deinit();
-            try key_buf.writer().print("{s}:{s}", .{ @tagName(s.kind), s.name });
+            try key_buf.print("{s}:{s}", .{ @tagName(s.kind), s.name });
             const key = try self.allocator.dupe(u8, key_buf.items);
             if (seen.contains(key)) {
                 self.allocator.free(key);
@@ -1924,16 +1961,16 @@ const LspServer = struct {
                     }
                 }
                 if (s.kind == .enumMember) {
-                    var db = std.ArrayList(u8).init(self.allocator);
+                    var db = ArrayList(u8).init(self.allocator);
                     defer db.deinit();
-                    try db.writer().print("{s}.{s}", .{ container_type, s.name });
+                    try db.print("{s}.{s}", .{ container_type, s.name });
                     break :blk try self.allocator.dupe(u8, db.items);
                 }
                 if (s.kind == .method) {
                     if (s.detail) |d| break :blk try self.allocator.dupe(u8, d);
-                    var db = std.ArrayList(u8).init(self.allocator);
+                    var db = ArrayList(u8).init(self.allocator);
                     defer db.deinit();
-                    try db.writer().print("{s}.{s}", .{ container_type, s.name });
+                    try db.print("{s}.{s}", .{ container_type, s.name });
                     break :blk try self.allocator.dupe(u8, db.items);
                 }
                 break :blk null;
@@ -1949,7 +1986,7 @@ const LspServer = struct {
 
     fn appendMemberFieldCompletionsFromTokens(
         self: *LspServer,
-        items: *std.ArrayList(CompletionItem),
+        items: *ArrayList(CompletionItem),
         seen: *std.StringHashMap(void),
         idx: *const Index,
         container_type: []const u8,
@@ -2023,9 +2060,9 @@ const LspServer = struct {
                         continue;
                     }
 
-                    var key_buf = std.ArrayList(u8).init(self.allocator);
+                    var key_buf = ArrayList(u8).init(self.allocator);
                     defer key_buf.deinit();
-                    try key_buf.writer().print("field:{s}", .{fname});
+                    try key_buf.print("field:{s}", .{fname});
                     const key = try self.allocator.dupe(u8, key_buf.items);
                     if (seen.contains(key)) {
                         self.allocator.free(key);
@@ -2081,9 +2118,9 @@ const LspServer = struct {
                     const vname = tk.text;
                     if (prefix.len != 0 and !std.mem.startsWith(u8, vname, prefix)) continue;
 
-                    var key_buf = std.ArrayList(u8).init(self.allocator);
+                    var key_buf = ArrayList(u8).init(self.allocator);
                     defer key_buf.deinit();
-                    try key_buf.writer().print("enumMember:{s}", .{vname});
+                    try key_buf.print("enumMember:{s}", .{vname});
                     const key = try self.allocator.dupe(u8, key_buf.items);
                     if (seen.contains(key)) {
                         self.allocator.free(key);
@@ -2091,9 +2128,9 @@ const LspServer = struct {
                     }
                     try seen.put(key, {});
 
-                    var db = std.ArrayList(u8).init(self.allocator);
+                    var db = ArrayList(u8).init(self.allocator);
                     defer db.deinit();
-                    try db.writer().print("{s}.{s}", .{ container_type, vname });
+                    try db.print("{s}.{s}", .{ container_type, vname });
 
                     try items.append(.{
                         .label = try self.allocator.dupe(u8, vname),
@@ -2142,9 +2179,9 @@ const LspServer = struct {
                     const mname = tk.text;
                     if (prefix.len != 0 and !std.mem.startsWith(u8, mname, prefix)) continue;
 
-                    var key_buf = std.ArrayList(u8).init(self.allocator);
+                    var key_buf = ArrayList(u8).init(self.allocator);
                     defer key_buf.deinit();
-                    try key_buf.writer().print("method:{s}", .{mname});
+                    try key_buf.print("method:{s}", .{mname});
                     const key = try self.allocator.dupe(u8, key_buf.items);
                     if (seen.contains(key)) {
                         self.allocator.free(key);
@@ -2152,9 +2189,9 @@ const LspServer = struct {
                     }
                     try seen.put(key, {});
 
-                    var db = std.ArrayList(u8).init(self.allocator);
+                    var db = ArrayList(u8).init(self.allocator);
                     defer db.deinit();
-                    try db.writer().print("{s}.{s}", .{ container_type, mname });
+                    try db.print("{s}.{s}", .{ container_type, mname });
 
                     try items.append(.{
                         .label = try self.allocator.dupe(u8, mname),
@@ -2169,7 +2206,7 @@ const LspServer = struct {
 
     fn filterMemberCompletionItemsToLocalType(
         self: *LspServer,
-        items: *std.ArrayList(CompletionItem),
+        items: *ArrayList(CompletionItem),
         idx: *const Index,
         doc_text: []const u8,
         container_type: []const u8,
@@ -2374,7 +2411,7 @@ const LspServer = struct {
             if (self.isKnownTypeName(uri, tok.text)) {
                 if (self.findTypeDefinitionAnyDoc(uri, tok.text)) |hit| {
                     const locs = [_]Location{.{ .uri = hit.uri, .range = hit.sym.selection_range }};
-                    const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
+                    const json = try jsonStringifyAlloc(self.allocator, locs);
                     defer self.allocator.free(json);
                     try self.sendResponseJson(id_val, json);
                     return;
@@ -2389,7 +2426,7 @@ const LspServer = struct {
                 if (self.isKnownTypeName(uri, vt)) {
                     if (self.findTypeDefinitionAnyDoc(uri, vt)) |hit| {
                         const locs = [_]Location{.{ .uri = hit.uri, .range = hit.sym.selection_range }};
-                        const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
+                        const json = try jsonStringifyAlloc(self.allocator, locs);
                         defer self.allocator.free(json);
                         try self.sendResponseJson(id_val, json);
                         return;
@@ -2423,7 +2460,7 @@ const LspServer = struct {
                 if (self.guessEnumTypeForDotShorthand(uri, idx, tok_i)) |enum_name| {
                     if (self.findMemberByContainer(uri, enum_name, variant_name, .enumMember)) |h| {
                         const locs = [_]Location{.{ .uri = h.uri, .range = h.sym.selection_range }};
-                        const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
+                        const json = try jsonStringifyAlloc(self.allocator, locs);
                         defer self.allocator.free(json);
                         try self.sendResponseJson(id_val, json);
                         return;
@@ -2454,7 +2491,7 @@ const LspServer = struct {
         // Prefer definition in the current document.
         if (findBestDefinition(idx.symbols, tok.text, pos)) |def| {
             const locs = [_]Location{.{ .uri = uri, .range = def.selection_range }};
-            const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
+            const json = try jsonStringifyAlloc(self.allocator, locs);
             defer self.allocator.free(json);
             try self.sendResponseJson(id_val, json);
             return;
@@ -2463,7 +2500,7 @@ const LspServer = struct {
         // Fall back to global definition in direct imports.
         if (self.findAnyGlobalDefinitionInDirectImports(uri, tok.text)) |hit| {
             const locs = [_]Location{.{ .uri = hit.uri, .range = hit.sym.selection_range }};
-            const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
+            const json = try jsonStringifyAlloc(self.allocator, locs);
             defer self.allocator.free(json);
             try self.sendResponseJson(id_val, json);
             return;
@@ -2474,7 +2511,7 @@ const LspServer = struct {
         if (self.isKnownTypeName(uri, tok.text)) {
             if (self.findTypeDefinitionAnyDoc(uri, tok.text)) |hit| {
                 const locs = [_]Location{.{ .uri = hit.uri, .range = hit.sym.selection_range }};
-                const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
+                const json = try jsonStringifyAlloc(self.allocator, locs);
                 defer self.allocator.free(json);
                 try self.sendResponseJson(id_val, json);
                 return;
@@ -2501,7 +2538,7 @@ const LspServer = struct {
         const imp_i = imp_i_opt.?;
 
         // Parse import segments: `imp <ident> ('.' <ident>)* ';'`
-        var segs = std.ArrayList(struct { name: []const u8, tok_i: usize }).init(self.allocator);
+        var segs = ArrayList(struct { name: []const u8, tok_i: usize }).init(self.allocator);
         defer segs.deinit();
 
         var i: usize = imp_i + 1;
@@ -2582,16 +2619,16 @@ const LspServer = struct {
             if (self.tryOpenExistingFile(readme_path_fast)) {
                 const readme_text = blk: {
                     if (std.fs.path.isAbsolute(readme_path_fast)) {
-                        var f = std.fs.openFileAbsolute(readme_path_fast, .{}) catch return false;
-                        defer f.close();
-                        break :blk f.readToEndAlloc(self.allocator, 128 * 1024) catch return false;
+                        var f = std.Io.Dir.openFileAbsolute(globalIo(), readme_path_fast, .{}) catch return false;
+                        defer f.close(globalIo());
+                        break :blk fileReadAlloc(self.allocator, f, 128 * 1024) catch return false;
                     }
-                    break :blk std.fs.cwd().readFileAlloc(self.allocator, readme_path_fast, 128 * 1024) catch return false;
+                    break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), readme_path_fast, self.allocator, .limited(128 * 1024)) catch return false;
                 };
                 defer self.allocator.free(readme_text);
 
                 const hover: Hover = .{ .contents = .{ .value = readme_text }, .range = idx.tokens[tok_i].range };
-                const json = try std.json.stringifyAlloc(self.allocator, hover, .{});
+                const json = try jsonStringifyAlloc(self.allocator, hover);
                 defer self.allocator.free(json);
                 try self.sendResponseJson(id_val, json);
                 return true;
@@ -2599,7 +2636,7 @@ const LspServer = struct {
         }
 
         // Resolve filesystem base and relative segments.
-        var base_segs = std.ArrayList([]const u8).init(self.allocator);
+        var base_segs = ArrayList([]const u8).init(self.allocator);
         defer base_segs.deinit();
 
         var rel_from: usize = 0;
@@ -2616,10 +2653,10 @@ const LspServer = struct {
                 const readme_path = try std.fs.path.join(self.allocator, &.{ root, "README.md" });
                 defer self.allocator.free(readme_path);
                 if (std.fs.path.isAbsolute(readme_path)) {
-                    var f = std.fs.openFileAbsolute(readme_path, .{}) catch return false;
-                    f.close();
+                    var f = std.Io.Dir.openFileAbsolute(globalIo(), readme_path, .{}) catch return false;
+                    f.close(globalIo());
                 } else {
-                    std.fs.cwd().access(readme_path, .{}) catch return false;
+                    std.Io.Dir.cwd().access(globalIo(), readme_path, .{}) catch return false;
                 }
                 const target_uri = try pathToUri(self.allocator, readme_path);
                 defer self.allocator.free(target_uri);
@@ -2627,7 +2664,7 @@ const LspServer = struct {
                     .uri = target_uri,
                     .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 0 } },
                 }};
-                const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
+                const json = try jsonStringifyAlloc(self.allocator, locs);
                 defer self.allocator.free(json);
                 try self.sendResponseJson(id_val, json);
                 return true;
@@ -2643,7 +2680,7 @@ const LspServer = struct {
         }
 
         // Build a directory path for the selected segment.
-        var sel_path_segs = std.ArrayList([]const u8).init(self.allocator);
+        var sel_path_segs = ArrayList([]const u8).init(self.allocator);
         defer sel_path_segs.deinit();
         try sel_path_segs.appendSlice(base_segs.items);
         {
@@ -2670,7 +2707,7 @@ const LspServer = struct {
                     .uri = target_uri,
                     .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 0 } },
                 }};
-                const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
+                const json = try jsonStringifyAlloc(self.allocator, locs);
                 defer self.allocator.free(json);
                 try self.sendResponseJson(id_val, json);
                 return true;
@@ -2688,7 +2725,7 @@ const LspServer = struct {
                 .uri = target_uri,
                 .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 0 } },
             }};
-            const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
+            const json = try jsonStringifyAlloc(self.allocator, locs);
             defer self.allocator.free(json);
             try self.sendResponseJson(id_val, json);
             return true;
@@ -2696,19 +2733,19 @@ const LspServer = struct {
 
         // Directory segment: return a list of modules in this directory.
         var dir = if (std.fs.path.isAbsolute(sel_joined))
-            (std.fs.openDirAbsolute(sel_joined, .{ .iterate = true }) catch return false)
+            (std.Io.Dir.openDirAbsolute(globalIo(), sel_joined, .{ .iterate = true }) catch return false)
         else
-            (std.fs.cwd().openDir(sel_joined, .{ .iterate = true }) catch return false);
-        defer dir.close();
+            (std.Io.Dir.cwd().openDir(globalIo(), sel_joined, .{ .iterate = true }) catch return false);
+        defer dir.close(globalIo());
 
-        var locs_list = std.ArrayList(Location).init(self.allocator);
+        var locs_list = ArrayList(Location).init(self.allocator);
         defer {
             for (locs_list.items) |l| self.allocator.free(l.uri);
             locs_list.deinit();
         }
 
         var it = dir.iterate();
-        while (try it.next()) |entry| {
+        while (try it.next(globalIo())) |entry| {
             if (entry.kind != .file) continue;
             if (!std.mem.endsWith(u8, entry.name, ".fn")) continue;
             const full_path = try std.fs.path.join(self.allocator, &[_][]const u8{ sel_joined, entry.name });
@@ -2725,7 +2762,7 @@ const LspServer = struct {
             self.ensureDocIndexedFromDisk(l.uri) catch {};
         }
 
-        const json = try std.json.stringifyAlloc(self.allocator, locs_list.items, .{});
+        const json = try jsonStringifyAlloc(self.allocator, locs_list.items);
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
         return true;
@@ -2738,7 +2775,7 @@ const LspServer = struct {
         const info = self.findAliasedImportSpecAndRange(idx, alias_name) orelse return false;
         defer self.allocator.free(info.spec);
 
-        var locs = std.ArrayList(Location).init(self.allocator);
+        var locs = ArrayList(Location).init(self.allocator);
         defer locs.deinit();
 
         try locs.append(.{ .uri = current_uri, .range = info.range });
@@ -2750,7 +2787,7 @@ const LspServer = struct {
             try locs.append(.{ .uri = target_uri, .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 0 } } });
         }
 
-        const json = try std.json.stringifyAlloc(self.allocator, locs.items, .{});
+        const json = try jsonStringifyAlloc(self.allocator, locs.items);
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
 
@@ -2783,7 +2820,7 @@ const LspServer = struct {
         if (std.mem.startsWith(u8, spec, "std") and (spec.len == 3 or spec[3] == '.')) return false;
 
         const parsed = struct {
-            fn addSegments(out: *std.ArrayList([]const u8), s: []const u8) !void {
+            fn addSegments(out: *ArrayList([]const u8), s: []const u8) !void {
                 var start: usize = 0;
                 var i: usize = 0;
                 while (i < s.len) {
@@ -2819,13 +2856,13 @@ const LspServer = struct {
             }
         };
 
-        var parts = std.ArrayList([]const u8).init(self.allocator);
+        var parts = ArrayList([]const u8).init(self.allocator);
         defer parts.deinit();
         try parsed.addSegments(&parts, spec);
         if (parts.items.len == 0) return false;
 
         // Collect identifier tokens in the import statement and locate which one is hovered.
-        var ident_toks = std.ArrayList(usize).init(self.allocator);
+        var ident_toks = ArrayList(usize).init(self.allocator);
         defer ident_toks.deinit();
         var scan_tok_i: usize = imp_i + 1;
         while (scan_tok_i < idx.tokens.len) : (scan_tok_i += 1) {
@@ -2845,7 +2882,7 @@ const LspServer = struct {
         var selected_ident_ord: usize = selected_ident_ord_opt orelse 0;
 
         // Map identifier ordinal -> part index (skip parent segments "..").
-        var non_parent_part_indices = std.ArrayList(usize).init(self.allocator);
+        var non_parent_part_indices = ArrayList(usize).init(self.allocator);
         defer non_parent_part_indices.deinit();
         for (parts.items, 0..) |p, pi| {
             if (!std.mem.eql(u8, p, "..")) try non_parent_part_indices.append(pi);
@@ -2900,7 +2937,7 @@ const LspServer = struct {
         const base_dir = if (!has_parent_segments and self.root_path != null) self.root_path.? else current_dir;
 
         // Build the filesystem path (no extension) for the selected segment.
-        var path_segs = std.ArrayList([]const u8).init(self.allocator);
+        var path_segs = ArrayList([]const u8).init(self.allocator);
         defer path_segs.deinit();
         try path_segs.append(base_dir);
         var si: usize = 0;
@@ -2917,16 +2954,16 @@ const LspServer = struct {
         if (self.tryOpenExistingFile(readme_path)) {
             const readme_text = blk: {
                 if (std.fs.path.isAbsolute(readme_path)) {
-                    var f = std.fs.openFileAbsolute(readme_path, .{}) catch return false;
-                    defer f.close();
-                    break :blk f.readToEndAlloc(self.allocator, 128 * 1024) catch return false;
+                    var f = std.Io.Dir.openFileAbsolute(globalIo(), readme_path, .{}) catch return false;
+                    defer f.close(globalIo());
+                    break :blk fileReadAlloc(self.allocator, f, 128 * 1024) catch return false;
                 }
-                break :blk std.fs.cwd().readFileAlloc(self.allocator, readme_path, 128 * 1024) catch return false;
+                break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), readme_path, self.allocator, .limited(128 * 1024)) catch return false;
             };
             defer self.allocator.free(readme_text);
 
             const hover: Hover = .{ .contents = .{ .value = readme_text }, .range = idx.tokens[tok_i].range };
-            const json = try std.json.stringifyAlloc(self.allocator, hover, .{});
+            const json = try jsonStringifyAlloc(self.allocator, hover);
             defer self.allocator.free(json);
             try self.sendResponseJson(id_val, json);
             return true;
@@ -2939,26 +2976,26 @@ const LspServer = struct {
 
         const module_text = blk: {
             if (std.fs.path.isAbsolute(module_file)) {
-                var f = std.fs.openFileAbsolute(module_file, .{}) catch return false;
-                defer f.close();
-                break :blk f.readToEndAlloc(self.allocator, 128 * 1024) catch return false;
+                var f = std.Io.Dir.openFileAbsolute(globalIo(), module_file, .{}) catch return false;
+                defer f.close(globalIo());
+                break :blk fileReadAlloc(self.allocator, f, 128 * 1024) catch return false;
             }
-            break :blk std.fs.cwd().readFileAlloc(self.allocator, module_file, 128 * 1024) catch return false;
+            break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), module_file, self.allocator, .limited(128 * 1024)) catch return false;
         };
         defer self.allocator.free(module_text);
 
-        var buf = std.ArrayList(u8).init(self.allocator);
+        var buf = ArrayList(u8).init(self.allocator);
         defer buf.deinit();
 
         const name = idx.tokens[tok_i].text;
-        try buf.writer().print("**{s}**\n\n", .{name});
+        try buf.print("**{s}**\n\n", .{name});
 
         var wrote_doc: bool = false;
         var li: usize = 0;
         while (li < module_text.len) {
             const line_start = li;
             while (li < module_text.len and module_text[li] != '\n') : (li += 1) {}
-            const line = std.mem.trimRight(u8, module_text[line_start..@min(li, module_text.len)], "\r");
+            const line = std.mem.trimEnd(u8, module_text[line_start..@min(li, module_text.len)], "\r");
             if (line.len < 2 or line[0] != '/' or line[1] != '/') break;
             var content = line[2..];
             if (content.len != 0 and content[0] == ' ') content = content[1..];
@@ -2968,11 +3005,11 @@ const LspServer = struct {
             if (li < module_text.len and module_text[li] == '\n') li += 1;
         }
         if (!wrote_doc) {
-            try buf.writer().print("_module_\n", .{});
+            try buf.print("_module_\n", .{});
         }
 
         const hover: Hover = .{ .contents = .{ .value = buf.items }, .range = idx.tokens[tok_i].range };
-        const json = try std.json.stringifyAlloc(self.allocator, hover, .{});
+        const json = try jsonStringifyAlloc(self.allocator, hover);
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
         return true;
@@ -2994,7 +3031,7 @@ const LspServer = struct {
         if (start_i == tok_i) return false; // not part of a member chain
 
         // Collect identifier token indices in chain order.
-        var ids = std.ArrayList(usize).init(self.allocator);
+        var ids = ArrayList(usize).init(self.allocator);
         defer ids.deinit();
         var j: usize = start_i;
         while (j <= tok_i) {
@@ -3064,7 +3101,7 @@ const LspServer = struct {
 
         if (found) |hit| {
             const locs = [_]Location{.{ .uri = hit.uri, .range = hit.sym.selection_range }};
-            const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
+            const json = try jsonStringifyAlloc(self.allocator, locs);
             defer self.allocator.free(json);
             try self.sendResponseJson(id_val, json);
             return true;
@@ -3489,7 +3526,7 @@ const LspServer = struct {
         _ = self;
         // Track brace depth and active `impl <Type> {` blocks.
         const Ctx = struct { type_name: []const u8, depth_at_start: i64 };
-        var stack = std.ArrayList(Ctx).init(std.heap.page_allocator);
+        var stack = ArrayList(Ctx).init(std.heap.page_allocator);
         defer stack.deinit();
 
         var pending_impl_type: ?[]const u8 = null;
@@ -3556,7 +3593,7 @@ const LspServer = struct {
             return;
         }
 
-        var out = std.ArrayList(Location).init(self.allocator);
+        var out = ArrayList(Location).init(self.allocator);
         defer out.deinit();
         var it = self.docs.iterator();
         while (it.next()) |entry| {
@@ -3569,7 +3606,7 @@ const LspServer = struct {
             }
         }
 
-        const json = try std.json.stringifyAlloc(self.allocator, out.items, .{});
+        const json = try jsonStringifyAlloc(self.allocator, out.items);
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
     }
@@ -3602,11 +3639,10 @@ const LspServer = struct {
 
         // WorkspaceEdit needs dynamic map keys (URIs), so we build JSON manually.
         // Best-effort rename across all indexed documents.
-        var json_buf = std.ArrayList(u8).init(self.allocator);
+        var json_buf = ArrayList(u8).init(self.allocator);
         defer json_buf.deinit();
-        var w = json_buf.writer();
 
-        try w.writeAll("{\"changes\":{");
+        try json_buf.appendSlice("{\"changes\":{");
         var first: bool = true;
 
         var it = self.docs.iterator();
@@ -3614,7 +3650,7 @@ const LspServer = struct {
             const this_uri = entry.value_ptr.uri;
             const this_idx = entry.value_ptr.index orelse continue;
 
-            var edits = std.ArrayList(TextEdit).init(self.allocator);
+            var edits = ArrayList(TextEdit).init(self.allocator);
             defer edits.deinit();
             for (this_idx.tokens) |t| {
                 if (t.kind == .identifier and std.mem.eql(u8, t.text, tok.text)) {
@@ -3623,15 +3659,15 @@ const LspServer = struct {
             }
             if (edits.items.len == 0) continue;
 
-            if (!first) try w.writeAll(",");
+            if (!first) try json_buf.appendSlice(",");
             first = false;
-            try writeJsonString(w, this_uri);
-            try w.writeAll(":");
-            const edits_json = try std.json.stringifyAlloc(self.allocator, edits.items, .{});
+            try writeJsonString(&json_buf, this_uri);
+            try json_buf.appendSlice(":");
+            const edits_json = try jsonStringifyAlloc(self.allocator, edits.items);
             defer self.allocator.free(edits_json);
-            try w.writeAll(edits_json);
+            try json_buf.appendSlice(edits_json);
         }
-        try w.writeAll("}}");
+        try json_buf.appendSlice("}}");
 
         try self.sendResponseJson(id_val, json_buf.items);
     }
@@ -3660,7 +3696,7 @@ const LspServer = struct {
             is_preferred: bool = true,
         };
 
-        var fixes = std.ArrayList(CodeActionFix).init(self.allocator);
+        var fixes = ArrayList(CodeActionFix).init(self.allocator);
         defer fixes.deinit();
 
         for (parsed.?.diagnostics) |diag_val| {
@@ -3727,27 +3763,26 @@ const LspServer = struct {
             return;
         }
 
-        var json_buf = std.ArrayList(u8).init(self.allocator);
+        var json_buf = ArrayList(u8).init(self.allocator);
         defer json_buf.deinit();
-        var w = json_buf.writer();
 
-        try w.writeByte('[');
+        try json_buf.append('[');
         for (fixes.items, 0..) |fix, i| {
-            if (i != 0) try w.writeByte(',');
+            if (i != 0) try json_buf.append(',');
 
-            try w.writeAll("{\"title\":");
-            try writeJsonString(w, fix.title);
-            try w.writeAll(",\"kind\":\"quickfix\",\"isPreferred\":");
-            try w.writeAll(if (fix.is_preferred) "true" else "false");
-            try w.writeAll(",\"edit\":{\"changes\":{");
-            try writeJsonString(w, uri);
-            try w.writeAll(":[{\"range\":");
-            try writeRangeJson(w, fix.range);
-            try w.writeAll(",\"newText\":");
-            try writeJsonString(w, fix.new_text);
-            try w.writeAll("}]}}}");
+            try json_buf.appendSlice("{\"title\":");
+            try writeJsonString(&json_buf, fix.title);
+            try json_buf.appendSlice(",\"kind\":\"quickfix\",\"isPreferred\":");
+            try json_buf.appendSlice(if (fix.is_preferred) "true" else "false");
+            try json_buf.appendSlice(",\"edit\":{\"changes\":{");
+            try writeJsonString(&json_buf, uri);
+            try json_buf.appendSlice(":[{\"range\":");
+            try writeRangeJson(&json_buf, fix.range);
+            try json_buf.appendSlice(",\"newText\":");
+            try writeJsonString(&json_buf, fix.new_text);
+            try json_buf.appendSlice("}]}}}");
         }
-        try w.writeByte(']');
+        try json_buf.append(']');
 
         try self.sendResponseJson(id_val, json_buf.items);
     }
@@ -3776,7 +3811,7 @@ const LspServer = struct {
 
         // If indexing failed (common while typing / for incomplete files), still return keyword completions.
         const idx = doc.index orelse {
-            var items = std.ArrayList(CompletionItem).init(self.allocator);
+            var items = ArrayList(CompletionItem).init(self.allocator);
             defer {
                 for (items.items) |it| {
                     self.allocator.free(it.label);
@@ -3808,13 +3843,13 @@ const LspServer = struct {
             }
 
             const list: CompletionList = .{ .items = items.items };
-            const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+            const json = try jsonStringifyAlloc(self.allocator, list);
             defer self.allocator.free(json);
             try self.sendResponseJson(id_val, json);
             return;
         };
 
-        var items = std.ArrayList(CompletionItem).init(self.allocator);
+        var items = ArrayList(CompletionItem).init(self.allocator);
         defer {
             for (items.items) |it| {
                 self.allocator.free(it.label);
@@ -3867,7 +3902,7 @@ const LspServer = struct {
                 try self.filterMemberCompletionItemsToLocalType(&items, idx, doc.text, rt);
                 if (items.items.len != 0) {
                     const list: CompletionList = .{ .items = items.items };
-                    const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+                    const json = try jsonStringifyAlloc(self.allocator, list);
                     defer self.allocator.free(json);
                     try self.sendResponseJson(id_val, json);
                     return;
@@ -3937,7 +3972,7 @@ const LspServer = struct {
                         try self.filterMemberCompletionItemsToLocalType(&items, idx, doc.text, rt);
                         if (items.items.len != 0) {
                             const list: CompletionList = .{ .items = items.items };
-                            const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+                            const json = try jsonStringifyAlloc(self.allocator, list);
                             defer self.allocator.free(json);
                             try self.sendResponseJson(id_val, json);
                             return;
@@ -4014,7 +4049,7 @@ const LspServer = struct {
                                 try self.filterMemberCompletionItemsToLocalType(&items, idx, doc.text, rt);
                                 if (items.items.len != 0) {
                                     const list: CompletionList = .{ .items = items.items };
-                                    const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+                                    const json = try jsonStringifyAlloc(self.allocator, list);
                                     defer self.allocator.free(json);
                                     try self.sendResponseJson(id_val, json);
                                     return;
@@ -4044,7 +4079,7 @@ const LspServer = struct {
                     try self.filterMemberCompletionItemsToLocalType(&items, idx, doc.text, recv_type);
                     if (items.items.len != 0) {
                         const list: CompletionList = .{ .items = items.items };
-                        const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+                        const json = try jsonStringifyAlloc(self.allocator, list);
                         defer self.allocator.free(json);
                         try self.sendResponseJson(id_val, json);
                         return;
@@ -4063,7 +4098,7 @@ const LspServer = struct {
                         try self.filterMemberCompletionItemsToLocalType(&items, idx, doc.text, rt);
                         if (items.items.len != 0) {
                             const list: CompletionList = .{ .items = items.items };
-                            const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+                            const json = try jsonStringifyAlloc(self.allocator, list);
                             defer self.allocator.free(json);
                             try self.sendResponseJson(id_val, json);
                             return;
@@ -4100,7 +4135,7 @@ const LspServer = struct {
                         try self.filterMemberCompletionItemsToLocalType(&items, idx, doc.text, rt);
                         if (items.items.len != 0) {
                             const list: CompletionList = .{ .items = items.items };
-                            const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+                            const json = try jsonStringifyAlloc(self.allocator, list);
                             defer self.allocator.free(json);
                             try self.sendResponseJson(id_val, json);
                             return;
@@ -4227,7 +4262,7 @@ const LspServer = struct {
                     }
 
                     // Direct imports.
-                    var import_uris = std.ArrayList([]u8).init(self.allocator);
+                    var import_uris = ArrayList([]u8).init(self.allocator);
                     defer {
                         for (import_uris.items) |u| self.allocator.free(u);
                         import_uris.deinit();
@@ -4253,14 +4288,14 @@ const LspServer = struct {
                     }
 
                     const list: CompletionList = .{ .items = items.items };
-                    const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+                    const json = try jsonStringifyAlloc(self.allocator, list);
                     defer self.allocator.free(json);
                     try self.sendResponseJson(id_val, json);
                     return;
                 }
             }
             // Fallback: offer members of all enums in scope.
-            var enums = std.ArrayList(struct { name: []const u8, uri: []const u8 }).init(self.allocator);
+            var enums = ArrayList(struct { name: []const u8, uri: []const u8 }).init(self.allocator);
             defer {
                 for (enums.items) |e| self.allocator.free(e.name);
                 enums.deinit();
@@ -4270,7 +4305,7 @@ const LspServer = struct {
                     try enums.append(.{ .name = try self.allocator.dupe(u8, s.name), .uri = uri });
                 }
             }
-            var import_uris = std.ArrayList([]u8).init(self.allocator);
+            var import_uris = ArrayList([]u8).init(self.allocator);
             defer {
                 for (import_uris.items) |u| self.allocator.free(u);
                 import_uris.deinit();
@@ -4304,7 +4339,7 @@ const LspServer = struct {
                 }
             }
             const list: CompletionList = .{ .items = items.items };
-            const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+            const json = try jsonStringifyAlloc(self.allocator, list);
             defer self.allocator.free(json);
             try self.sendResponseJson(id_val, json);
             return;
@@ -4400,7 +4435,7 @@ const LspServer = struct {
         }
 
         // Direct imports.
-        var import_uris = std.ArrayList([]u8).init(self.allocator);
+        var import_uris = ArrayList([]u8).init(self.allocator);
         defer {
             for (import_uris.items) |u| self.allocator.free(u);
             import_uris.deinit();
@@ -4455,7 +4490,7 @@ const LspServer = struct {
         }
 
         const list: CompletionList = .{ .items = items.items };
-        const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+        const json = try jsonStringifyAlloc(self.allocator, list);
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
     }
@@ -4464,22 +4499,22 @@ const LspServer = struct {
         const info = self.findAliasedImportSpecAndRange(idx, alias_name) orelse return false;
         defer self.allocator.free(info.spec);
 
-        var buf = std.ArrayList(u8).init(self.allocator);
+        var buf = ArrayList(u8).init(self.allocator);
         defer buf.deinit();
 
-        try buf.writer().print("**{s}**\n\n", .{alias_name});
-        try buf.writer().print("_alias for `{s}`_\n", .{info.spec});
+        try buf.print("**{s}**\n\n", .{alias_name});
+        try buf.print("_alias for `{s}`_\n", .{info.spec});
 
         if (self.resolveImportUri(current_uri, info.spec) catch null) |target_uri| {
             defer self.allocator.free(target_uri);
             if (uriToPath(self.allocator, target_uri) catch null) |target_path| {
                 defer self.allocator.free(target_path);
-                try buf.writer().print("\n`{s}`\n", .{target_path});
+                try buf.print("\n`{s}`\n", .{target_path});
             }
         }
 
         const hover: Hover = .{ .contents = .{ .value = buf.items }, .range = range };
-        const json = try std.json.stringifyAlloc(self.allocator, hover, .{});
+        const json = try jsonStringifyAlloc(self.allocator, hover);
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
         return true;
@@ -4579,7 +4614,7 @@ const LspServer = struct {
 
     fn appendCompoundInitFieldCompletionsForType(
         self: *LspServer,
-        items: *std.ArrayList(CompletionItem),
+        items: *ArrayList(CompletionItem),
         seen: *std.StringHashMap(void),
         preferred_uri: []const u8,
         container_type: []const u8,
@@ -4607,9 +4642,9 @@ const LspServer = struct {
 
                 const detail = if (s.value_type) |vt| try self.allocator.dupe(u8, vt) else null;
 
-                var insert_buf = std.ArrayList(u8).init(self.allocator);
+                var insert_buf = ArrayList(u8).init(self.allocator);
                 defer insert_buf.deinit();
-                try insert_buf.writer().print("{s} = ", .{s.name});
+                try insert_buf.print("{s} = ", .{s.name});
 
                 try items.append(.{
                     .label = try self.allocator.dupe(u8, s.name),
@@ -4623,7 +4658,7 @@ const LspServer = struct {
 
     fn appendCompoundInitFieldCompletionsFromTokens(
         self: *LspServer,
-        items: *std.ArrayList(CompletionItem),
+        items: *ArrayList(CompletionItem),
         seen: *std.StringHashMap(void),
         idx: *const Index,
         container_type: []const u8,
@@ -4703,9 +4738,9 @@ const LspServer = struct {
                     }
                     try seen.put(key, {});
 
-                    var insert_buf = std.ArrayList(u8).init(self.allocator);
+                    var insert_buf = ArrayList(u8).init(self.allocator);
                     defer insert_buf.deinit();
-                    try insert_buf.writer().print("{s} = ", .{fname});
+                    try insert_buf.print("{s} = ", .{fname});
 
                     try items.append(.{
                         .label = try self.allocator.dupe(u8, fname),
@@ -4724,7 +4759,7 @@ const LspServer = struct {
 
     fn appendCompoundInitFieldCompletionsFromText(
         self: *LspServer,
-        items: *std.ArrayList(CompletionItem),
+        items: *ArrayList(CompletionItem),
         seen: *std.StringHashMap(void),
         text: []const u8,
         container_type: []const u8,
@@ -4784,9 +4819,9 @@ const LspServer = struct {
                     }
                     try seen.put(key, {});
 
-                    var insert_buf = std.ArrayList(u8).init(self.allocator);
+                    var insert_buf = ArrayList(u8).init(self.allocator);
                     defer insert_buf.deinit();
-                    try insert_buf.writer().print("{s} = ", .{field_name});
+                    try insert_buf.print("{s} = ", .{field_name});
 
                     try items.append(.{
                         .label = try self.allocator.dupe(u8, field_name),
@@ -4897,7 +4932,7 @@ const LspServer = struct {
     ) !bool {
         const container_type = self.detectCompoundInitTypeAtCursor(uri, idx, text, pos) orelse return false;
 
-        var items = std.ArrayList(CompletionItem).init(self.allocator);
+        var items = ArrayList(CompletionItem).init(self.allocator);
         defer {
             for (items.items) |it| {
                 self.allocator.free(it.label);
@@ -4928,7 +4963,7 @@ const LspServer = struct {
         if (items.items.len == 0) return false;
 
         const list: CompletionList = .{ .items = items.items };
-        const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+        const json = try jsonStringifyAlloc(self.allocator, list);
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
         return true;
@@ -4945,7 +4980,7 @@ const LspServer = struct {
             break :blk didx;
         };
 
-        var items = std.ArrayList(CompletionItem).init(self.allocator);
+        var items = ArrayList(CompletionItem).init(self.allocator);
         defer {
             for (items.items) |it| {
                 self.allocator.free(it.label);
@@ -4979,9 +5014,9 @@ const LspServer = struct {
                     else => 6,
                 };
 
-                var key_buf = std.ArrayList(u8).init(self.allocator);
+                var key_buf = ArrayList(u8).init(self.allocator);
                 defer key_buf.deinit();
-                try key_buf.writer().print("{s}:{d}", .{ s.name, ck });
+                try key_buf.print("{s}:{d}", .{ s.name, ck });
                 const key = try self.allocator.dupe(u8, key_buf.items);
                 if (seen.contains(key)) {
                     self.allocator.free(key);
@@ -5005,13 +5040,13 @@ const LspServer = struct {
             if (target_path) |p| {
                 defer self.allocator.free(p);
                 const module_text = if (std.fs.path.isAbsolute(p))
-                    (std.fs.openFileAbsolute(p, .{}) catch null)
+                    (std.Io.Dir.openFileAbsolute(globalIo(), p, .{}) catch null)
                 else
-                    (std.fs.cwd().openFile(p, .{}) catch null);
+                    (std.Io.Dir.cwd().openFile(globalIo(), p, .{}) catch null);
 
                 if (module_text) |f| {
-                    defer f.close();
-                    const text = f.readToEndAlloc(self.allocator, 512 * 1024) catch null;
+                    defer f.close(globalIo());
+                    const text = fileReadAlloc(self.allocator, f, 512 * 1024) catch null;
                     if (text) |src| {
                         defer self.allocator.free(src);
 
@@ -5110,13 +5145,13 @@ const LspServer = struct {
         }
 
         const list: CompletionList = .{ .items = items.items };
-        const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+        const json = try jsonStringifyAlloc(self.allocator, list);
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
         return true;
     }
 
-    fn appendCMacroCompletionsForImports(self: *LspServer, items: *std.ArrayList(CompletionItem), idx: *const Index, prefix: []const u8) !void {
+    fn appendCMacroCompletionsForImports(self: *LspServer, items: *ArrayList(CompletionItem), idx: *const Index, prefix: []const u8) !void {
         // Avoid noisy global completion: only suggest macros when user is typing an
         // ALL_CAPS-ish prefix.
         if (prefix.len == 0) return;
@@ -5217,7 +5252,7 @@ const LspServer = struct {
         _ = pos;
 
         // Reconstruct the identifier chain for the receiver (e.g. `std.io` in `std.io.<cursor>`).
-        var ids = std.ArrayList(usize).init(self.allocator);
+        var ids = ArrayList(usize).init(self.allocator);
         defer ids.deinit();
 
         var start_i: usize = receiver_last_ident_i;
@@ -5253,7 +5288,7 @@ const LspServer = struct {
         }
         const root = stdlib_root orelse return false;
 
-        var items = std.ArrayList(CompletionItem).init(self.allocator);
+        var items = ArrayList(CompletionItem).init(self.allocator);
         defer {
             for (items.items) |ci| {
                 self.allocator.free(ci.label);
@@ -5265,7 +5300,7 @@ const LspServer = struct {
         }
 
         // Build the path under stdlib.
-        var segs = std.ArrayList([]const u8).init(self.allocator);
+        var segs = ArrayList([]const u8).init(self.allocator);
         defer segs.deinit();
         try segs.append(root);
         try segs.append("std");
@@ -5287,13 +5322,13 @@ const LspServer = struct {
         // Use openFile rather than access(): it differentiates files from directories.
         var is_file: bool = false;
         if (std.fs.path.isAbsolute(receiver_file)) {
-            if (std.fs.openFileAbsolute(receiver_file, .{}) catch null) |f| {
-                f.close();
+            if (std.Io.Dir.openFileAbsolute(globalIo(), receiver_file, .{}) catch null) |f| {
+                f.close(globalIo());
                 is_file = true;
             }
         } else {
-            if (std.fs.cwd().openFile(receiver_file, .{}) catch null) |f| {
-                f.close();
+            if (std.Io.Dir.cwd().openFile(globalIo(), receiver_file, .{}) catch null) |f| {
+                f.close(globalIo());
                 is_file = true;
             }
         }
@@ -5327,7 +5362,7 @@ const LspServer = struct {
             }
 
             const list: CompletionList = .{ .items = items.items };
-            const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+            const json = try jsonStringifyAlloc(self.allocator, list);
             defer self.allocator.free(json);
             try self.sendResponseJson(id_val, json);
             return true;
@@ -5335,14 +5370,14 @@ const LspServer = struct {
 
         // 2) Otherwise treat receiver as a directory and list modules/subfolders.
         if (std.fs.path.isAbsolute(receiver_path_no_ext)) {
-            if (std.fs.openDirAbsolute(receiver_path_no_ext, .{ .iterate = true }) catch null) |dir| {
+            if (std.Io.Dir.openDirAbsolute(globalIo(), receiver_path_no_ext, .{ .iterate = true }) catch null) |dir| {
                 var dir_mut = dir;
-                defer dir_mut.close();
+                defer dir_mut.close(globalIo());
                 var it = dir_mut.iterate();
 
                 var saw_c_dir: bool = false;
                 var saw_any_fn: bool = false;
-                while (it.next() catch null) |entry| {
+                while (it.next(globalIo()) catch null) |entry| {
                     if (entry.kind == .directory) {
                         if (prefix.len != 0 and !std.mem.startsWith(u8, entry.name, prefix)) continue;
                         try items.append(.{ .label = try self.allocator.dupe(u8, entry.name), .kind = 19 });
@@ -5360,11 +5395,11 @@ const LspServer = struct {
                 if (ids.items.len == 1 and saw_c_dir and !saw_any_fn) {
                     const c_dir = try std.fs.path.join(self.allocator, &[_][]const u8{ receiver_path_no_ext, "c" });
                     defer self.allocator.free(c_dir);
-                    if (std.fs.openDirAbsolute(c_dir, .{ .iterate = true }) catch null) |cdir| {
+                    if (std.Io.Dir.openDirAbsolute(globalIo(), c_dir, .{ .iterate = true }) catch null) |cdir| {
                         var cdir_mut = cdir;
-                        defer cdir_mut.close();
+                        defer cdir_mut.close(globalIo());
                         var it2 = cdir_mut.iterate();
-                        while (it2.next() catch null) |e2| {
+                        while (it2.next(globalIo()) catch null) |e2| {
                             if (e2.kind != .file) continue;
                             if (!std.mem.endsWith(u8, e2.name, ".fn")) continue;
                             const base_name = e2.name[0 .. e2.name.len - 3];
@@ -5377,7 +5412,7 @@ const LspServer = struct {
         }
 
         const list: CompletionList = .{ .items = items.items };
-        const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+        const json = try jsonStringifyAlloc(self.allocator, list);
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
         return true;
@@ -5396,7 +5431,7 @@ const LspServer = struct {
         self: *LspServer,
         idx: *const Index,
         ident_i: usize,
-        ids: *std.ArrayList(usize),
+        ids: *ArrayList(usize),
     ) !bool {
         _ = self;
         if (idx.tokens[ident_i].kind != .identifier) return false;
@@ -5449,7 +5484,7 @@ const LspServer = struct {
 
         const root = self.getStdlibRootForNamespace(current_uri) orelse return null;
 
-        var segs = std.ArrayList([]const u8).init(self.allocator);
+        var segs = ArrayList([]const u8).init(self.allocator);
         defer segs.deinit();
         try segs.append(root);
         try segs.append("std");
@@ -5471,15 +5506,15 @@ const LspServer = struct {
     fn tryOpenExistingFile(self: *LspServer, abs_or_rel_path: []const u8) bool {
         _ = self;
         if (std.fs.path.isAbsolute(abs_or_rel_path)) {
-            if (std.fs.openFileAbsolute(abs_or_rel_path, .{}) catch null) |f| {
-                f.close();
+            if (std.Io.Dir.openFileAbsolute(globalIo(), abs_or_rel_path, .{}) catch null) |f| {
+                f.close(globalIo());
                 return true;
             }
             return false;
         }
 
-        if (std.fs.cwd().openFile(abs_or_rel_path, .{}) catch null) |f| {
-            f.close();
+        if (std.Io.Dir.cwd().openFile(globalIo(), abs_or_rel_path, .{}) catch null) |f| {
+            f.close(globalIo());
             return true;
         }
         return false;
@@ -5504,7 +5539,7 @@ const LspServer = struct {
     ) !bool {
         if (idx.tokens[tok_i].kind != .identifier) return false;
 
-        var ids = std.ArrayList(usize).init(self.allocator);
+        var ids = ArrayList(usize).init(self.allocator);
         defer ids.deinit();
         if (!try self.collectDotChainIdentifiersAround(idx, tok_i, &ids)) return false;
         if (ids.items.len == 0) return false;
@@ -5532,7 +5567,7 @@ const LspServer = struct {
                 .uri = target_uri,
                 .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 0 } },
             }};
-            const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
+            const json = try jsonStringifyAlloc(self.allocator, locs);
             defer self.allocator.free(json);
             try self.sendResponseJson(id_val, json);
             return true;
@@ -5562,7 +5597,7 @@ const LspServer = struct {
 
             if (findTopLevelSymbol(didx, symbol_name)) |sym| {
                 const locs = [_]Location{.{ .uri = module_uri, .range = sym.selection_range }};
-                const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
+                const json = try jsonStringifyAlloc(self.allocator, locs);
                 defer self.allocator.free(json);
                 try self.sendResponseJson(id_val, json);
                 return true;
@@ -5572,7 +5607,7 @@ const LspServer = struct {
                 .uri = module_uri,
                 .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 0 } },
             }};
-            const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
+            const json = try jsonStringifyAlloc(self.allocator, locs);
             defer self.allocator.free(json);
             try self.sendResponseJson(id_val, json);
             return true;
@@ -5581,7 +5616,7 @@ const LspServer = struct {
         // Otherwise treat the selected identifier as a module/directory segment.
         const root = self.getStdlibRootForNamespace(current_uri) orelse return false;
 
-        var segs = std.ArrayList([]const u8).init(self.allocator);
+        var segs = ArrayList([]const u8).init(self.allocator);
         defer segs.deinit();
         try segs.append(root);
         try segs.append("std");
@@ -5602,7 +5637,7 @@ const LspServer = struct {
                 .uri = target_uri,
                 .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 0 } },
             }};
-            const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
+            const json = try jsonStringifyAlloc(self.allocator, locs);
             defer self.allocator.free(json);
             try self.sendResponseJson(id_val, json);
             return true;
@@ -5619,7 +5654,7 @@ const LspServer = struct {
                 .uri = module_uri,
                 .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 0 } },
             }};
-            const json = try std.json.stringifyAlloc(self.allocator, locs, .{});
+            const json = try jsonStringifyAlloc(self.allocator, locs);
             defer self.allocator.free(json);
             try self.sendResponseJson(id_val, json);
             return true;
@@ -5627,19 +5662,19 @@ const LspServer = struct {
 
         // If it's a directory, return definitions for contained modules.
         var dir = if (std.fs.path.isAbsolute(selected_path_no_ext))
-            (std.fs.openDirAbsolute(selected_path_no_ext, .{ .iterate = true }) catch return false)
+            (std.Io.Dir.openDirAbsolute(globalIo(), selected_path_no_ext, .{ .iterate = true }) catch return false)
         else
-            (std.fs.cwd().openDir(selected_path_no_ext, .{ .iterate = true }) catch return false);
-        defer dir.close();
+            (std.Io.Dir.cwd().openDir(globalIo(), selected_path_no_ext, .{ .iterate = true }) catch return false);
+        defer dir.close(globalIo());
 
-        var locs_list = std.ArrayList(Location).init(self.allocator);
+        var locs_list = ArrayList(Location).init(self.allocator);
         defer {
             for (locs_list.items) |l| self.allocator.free(l.uri);
             locs_list.deinit();
         }
 
         var it = dir.iterate();
-        while (try it.next()) |entry| {
+        while (try it.next(globalIo())) |entry| {
             if (entry.kind != .file) continue;
             if (!std.mem.endsWith(u8, entry.name, ".fn")) continue;
             const full_path = try std.fs.path.join(self.allocator, &[_][]const u8{ selected_path_no_ext, entry.name });
@@ -5649,7 +5684,7 @@ const LspServer = struct {
         }
 
         if (locs_list.items.len == 0) return false;
-        const json = try std.json.stringifyAlloc(self.allocator, locs_list.items, .{});
+        const json = try jsonStringifyAlloc(self.allocator, locs_list.items);
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
         return true;
@@ -5664,7 +5699,7 @@ const LspServer = struct {
     ) !bool {
         if (idx.tokens[tok_i].kind != .identifier) return false;
 
-        var ids = std.ArrayList(usize).init(self.allocator);
+        var ids = ArrayList(usize).init(self.allocator);
         defer ids.deinit();
         if (!try self.collectDotChainIdentifiersAround(idx, tok_i, &ids)) return false;
         if (ids.items.len == 0) return false;
@@ -5685,7 +5720,7 @@ const LspServer = struct {
         // `last_inclusive` is an index into `ids.items` (identifier index within the chain).
         const PathBuild = struct {
             fn moduleNoExt(allocator: Allocator, root_path: []const u8, idx2: *const Index, ids2: []const usize, last_inclusive: usize) ![]u8 {
-                var segs = std.ArrayList([]const u8).init(allocator);
+                var segs = ArrayList([]const u8).init(allocator);
                 defer segs.deinit();
                 try segs.append(root_path);
                 try segs.append("std");
@@ -5705,16 +5740,16 @@ const LspServer = struct {
 
             const readme_text = blk: {
                 if (std.fs.path.isAbsolute(readme_path)) {
-                    var f = std.fs.openFileAbsolute(readme_path, .{}) catch return false;
-                    defer f.close();
-                    break :blk f.readToEndAlloc(self.allocator, 128 * 1024) catch return false;
+                    var f = std.Io.Dir.openFileAbsolute(globalIo(), readme_path, .{}) catch return false;
+                    defer f.close(globalIo());
+                    break :blk fileReadAlloc(self.allocator, f, 128 * 1024) catch return false;
                 }
-                break :blk std.fs.cwd().readFileAlloc(self.allocator, readme_path, 128 * 1024) catch return false;
+                break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), readme_path, self.allocator, .limited(128 * 1024)) catch return false;
             };
             defer self.allocator.free(readme_text);
 
             const hover: Hover = .{ .contents = .{ .value = readme_text }, .range = idx.tokens[tok_i].range };
-            const json = try std.json.stringifyAlloc(self.allocator, hover, .{});
+            const json = try jsonStringifyAlloc(self.allocator, hover);
             defer self.allocator.free(json);
             try self.sendResponseJson(id_val, json);
             return true;
@@ -5732,7 +5767,7 @@ const LspServer = struct {
         const is_last = selected_idx == chain_last;
         const is_symbol = is_last and !full_chain_is_module and ids.items.len >= 3;
 
-        var buf = std.ArrayList(u8).init(self.allocator);
+        var buf = ArrayList(u8).init(self.allocator);
         defer buf.deinit();
 
         if (is_symbol) {
@@ -5750,25 +5785,25 @@ const LspServer = struct {
 
             const sym = findTopLevelSymbol(didx, symbol_name) orelse return false;
 
-            try buf.writer().print("**{s}**\n\n", .{symbol_name});
+            try buf.print("**{s}**\n\n", .{symbol_name});
             if (sym.detail) |det| {
-                try buf.writer().print("```fun\n{s}\n```\n", .{det});
+                try buf.print("```fun\n{s}\n```\n", .{det});
             } else if (sym.kind == .variable) {
                 if (sym.value_type) |vt| {
-                    try buf.writer().print("```fun\n{s} {s}\n```\n", .{ vt, symbol_name });
+                    try buf.print("```fun\n{s} {s}\n```\n", .{ vt, symbol_name });
                 } else {
-                    try buf.writer().print("_{s}_\n", .{@tagName(sym.kind)});
+                    try buf.print("_{s}_\n", .{@tagName(sym.kind)});
                 }
             } else if (sym.kind == .struct_ or sym.kind == .interface) {
-                try buf.writer().print("```fun\n{s} {s}\n```\n", .{ if (sym.kind == .struct_) "compound" else "quirk", symbol_name });
+                try buf.print("```fun\n{s} {s}\n```\n", .{ if (sym.kind == .struct_) "compound" else "quirk", symbol_name });
             } else {
-                try buf.writer().print("_{s}_\n", .{@tagName(sym.kind)});
+                try buf.print("_{s}_\n", .{@tagName(sym.kind)});
             }
 
             _ = try appendDocCommentAboveLine(self.allocator, &buf, doc.text, sym.decl_range.start.line);
 
             const hover: Hover = .{ .contents = .{ .value = buf.items }, .range = idx.tokens[tok_i].range };
-            const json = try std.json.stringifyAlloc(self.allocator, hover, .{});
+            const json = try jsonStringifyAlloc(self.allocator, hover);
             defer self.allocator.free(json);
             try self.sendResponseJson(id_val, json);
             return true;
@@ -5784,16 +5819,16 @@ const LspServer = struct {
         if (self.tryOpenExistingFile(readme_path)) {
             const readme_text = blk: {
                 if (std.fs.path.isAbsolute(readme_path)) {
-                    var f = std.fs.openFileAbsolute(readme_path, .{}) catch return false;
-                    defer f.close();
-                    break :blk f.readToEndAlloc(self.allocator, 128 * 1024) catch return false;
+                    var f = std.Io.Dir.openFileAbsolute(globalIo(), readme_path, .{}) catch return false;
+                    defer f.close(globalIo());
+                    break :blk fileReadAlloc(self.allocator, f, 128 * 1024) catch return false;
                 }
-                break :blk std.fs.cwd().readFileAlloc(self.allocator, readme_path, 128 * 1024) catch return false;
+                break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), readme_path, self.allocator, .limited(128 * 1024)) catch return false;
             };
             defer self.allocator.free(readme_text);
 
             const hover: Hover = .{ .contents = .{ .value = readme_text }, .range = idx.tokens[tok_i].range };
-            const json = try std.json.stringifyAlloc(self.allocator, hover, .{});
+            const json = try jsonStringifyAlloc(self.allocator, hover);
             defer self.allocator.free(json);
             try self.sendResponseJson(id_val, json);
             return true;
@@ -5807,16 +5842,16 @@ const LspServer = struct {
         // For module files, prefer showing the leading `//` doc block.
         const module_text = blk: {
             if (std.fs.path.isAbsolute(module_file)) {
-                var f = std.fs.openFileAbsolute(module_file, .{}) catch return false;
-                defer f.close();
-                break :blk f.readToEndAlloc(self.allocator, 128 * 1024) catch return false;
+                var f = std.Io.Dir.openFileAbsolute(globalIo(), module_file, .{}) catch return false;
+                defer f.close(globalIo());
+                break :blk fileReadAlloc(self.allocator, f, 128 * 1024) catch return false;
             }
-            break :blk std.fs.cwd().readFileAlloc(self.allocator, module_file, 128 * 1024) catch return false;
+            break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), module_file, self.allocator, .limited(128 * 1024)) catch return false;
         };
         defer self.allocator.free(module_text);
 
         const name = idx.tokens[tok_i].text;
-        try buf.writer().print("**{s}**\n\n", .{name});
+        try buf.print("**{s}**\n\n", .{name});
 
         // Extract the leading line-comment block and render it as markdown.
         var wrote_doc: bool = false;
@@ -5825,7 +5860,7 @@ const LspServer = struct {
             // Find line end.
             const line_start = i;
             while (i < module_text.len and module_text[i] != '\n') : (i += 1) {}
-            const line = std.mem.trimRight(u8, module_text[line_start..@min(i, module_text.len)], "\r");
+            const line = std.mem.trimEnd(u8, module_text[line_start..@min(i, module_text.len)], "\r");
             if (line.len < 2 or line[0] != '/' or line[1] != '/') break;
             var content = line[2..];
             if (content.len != 0 and content[0] == ' ') content = content[1..];
@@ -5836,11 +5871,11 @@ const LspServer = struct {
         }
 
         if (!wrote_doc) {
-            try buf.writer().print("_module_\n", .{});
+            try buf.print("_module_\n", .{});
         }
 
         const hover: Hover = .{ .contents = .{ .value = buf.items }, .range = idx.tokens[tok_i].range };
-        const json = try std.json.stringifyAlloc(self.allocator, hover, .{});
+        const json = try jsonStringifyAlloc(self.allocator, hover);
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
         return true;
@@ -5855,7 +5890,7 @@ const LspServer = struct {
     ) ?GuessedCallSignature {
         if (idx.tokens[callee_i].kind != .identifier) return null;
 
-        var ids = std.ArrayList(usize).init(self.allocator);
+        var ids = ArrayList(usize).init(self.allocator);
         defer ids.deinit();
         if (!(self.collectDotChainIdentifiersAround(idx, callee_i, &ids) catch false)) return null;
         if (ids.items.len == 0) return null;
@@ -5891,7 +5926,7 @@ const LspServer = struct {
         if (imp_i + 1 >= idx.tokens.len) return null;
         var i = imp_i + 1;
 
-        var buf = std.ArrayList(u8).init(self.allocator);
+        var buf = ArrayList(u8).init(self.allocator);
         errdefer buf.deinit();
 
         const parsed = struct {
@@ -5935,7 +5970,7 @@ const LspServer = struct {
         return try buf.toOwnedSlice();
     }
 
-    fn collectDirectImportUris(self: *LspServer, out: *std.ArrayList([]u8), current_uri: []const u8, idx: *const Index) !void {
+    fn collectDirectImportUris(self: *LspServer, out: *ArrayList([]u8), current_uri: []const u8, idx: *const Index) !void {
         for (idx.tokens, 0..) |t, i| {
             if (t.kind != .keyword or !std.mem.eql(u8, t.text, "imp")) continue;
             const spec = try self.parseImportSpecFromTokens(idx, i) orelse continue;
@@ -5954,7 +5989,7 @@ const LspServer = struct {
         const doc = self.docs.get(current_uri) orelse return null;
         const idx = doc.index orelse return null;
 
-        var import_uris = std.ArrayList([]u8).init(self.allocator);
+        var import_uris = ArrayList([]u8).init(self.allocator);
         defer {
             for (import_uris.items) |u| self.allocator.free(u);
             import_uris.deinit();
@@ -6007,7 +6042,7 @@ const LspServer = struct {
 
         // Parse segments; treat dot-runs as parent traversal steps.
         const parsed = struct {
-            fn addSegments(out: *std.ArrayList([]const u8), s: []const u8) !void {
+            fn addSegments(out: *ArrayList([]const u8), s: []const u8) !void {
                 var start: usize = 0;
                 var i: usize = 0;
                 while (i < s.len) {
@@ -6043,7 +6078,7 @@ const LspServer = struct {
             }
         };
 
-        var parts = std.ArrayList([]const u8).init(self.allocator);
+        var parts = ArrayList([]const u8).init(self.allocator);
         defer parts.deinit();
         try parsed.addSegments(&parts, after_imp);
         if (parts.items.len == 0) return false;
@@ -6051,7 +6086,7 @@ const LspServer = struct {
         const ends_with_dot = after_imp.len != 0 and after_imp[after_imp.len - 1] == '.';
         const partial: []const u8 = if (ends_with_dot) "" else parts.items[parts.items.len - 1];
         const parent_count: usize = if (ends_with_dot) parts.items.len else (if (parts.items.len >= 1) parts.items.len - 1 else 0);
-        var items = std.ArrayList(CompletionItem).init(self.allocator);
+        var items = ArrayList(CompletionItem).init(self.allocator);
         defer {
             for (items.items) |ci| {
                 self.allocator.free(ci.label);
@@ -6076,7 +6111,7 @@ const LspServer = struct {
                 stdlib_root = self.getStdlibRootPath() orelse null;
             }
             if (stdlib_root) |root| {
-                var segs = std.ArrayList([]const u8).init(self.allocator);
+                var segs = ArrayList([]const u8).init(self.allocator);
                 defer segs.deinit();
                 try segs.append(root);
                 try segs.append("std");
@@ -6093,7 +6128,7 @@ const LspServer = struct {
                 defer self.allocator.free(cp);
                 const current_dir = std.fs.path.dirname(cp) orelse null;
                 if (current_dir) |cd| {
-                    var segs = std.ArrayList([]const u8).init(self.allocator);
+                    var segs = ArrayList([]const u8).init(self.allocator);
                     defer segs.deinit();
                     try segs.append(cd);
                     var si: usize = 0;
@@ -6107,14 +6142,14 @@ const LspServer = struct {
         defer if (base_dir_path_opt) |p| self.allocator.free(p);
 
         if (base_dir_path_opt) |base_dir_path| {
-            if (std.fs.openDirAbsolute(base_dir_path, .{ .iterate = true }) catch null) |dir| {
+            if (std.Io.Dir.openDirAbsolute(globalIo(), base_dir_path, .{ .iterate = true }) catch null) |dir| {
                 var dir_mut = dir;
-                defer dir_mut.close();
+                defer dir_mut.close(globalIo());
 
                 var iter = dir_mut.iterate();
                 var saw_c_dir: bool = false;
                 var saw_any_fn: bool = false;
-                while (iter.next() catch null) |entry| {
+                while (iter.next(globalIo()) catch null) |entry| {
                     if (entry.kind == .directory) {
                         if (partial.len != 0 and !std.mem.startsWith(u8, entry.name, partial)) continue;
                         try items.append(.{ .label = try self.allocator.dupe(u8, entry.name), .kind = 19 });
@@ -6132,11 +6167,11 @@ const LspServer = struct {
                 if (parent_count == 1 and std.mem.eql(u8, parts.items[0], "std") and saw_c_dir and !saw_any_fn) {
                     const c_dir = try std.fs.path.join(self.allocator, &[_][]const u8{ base_dir_path, "c" });
                     defer self.allocator.free(c_dir);
-                    if (std.fs.openDirAbsolute(c_dir, .{ .iterate = true }) catch null) |cdir| {
+                    if (std.Io.Dir.openDirAbsolute(globalIo(), c_dir, .{ .iterate = true }) catch null) |cdir| {
                         var cdir_mut = cdir;
-                        defer cdir_mut.close();
+                        defer cdir_mut.close(globalIo());
                         var it2 = cdir_mut.iterate();
-                        while (it2.next() catch null) |e2| {
+                        while (it2.next(globalIo()) catch null) |e2| {
                             if (e2.kind != .file) continue;
                             if (!std.mem.endsWith(u8, e2.name, ".fn")) continue;
                             const base_name = e2.name[0 .. e2.name.len - 3];
@@ -6149,7 +6184,7 @@ const LspServer = struct {
         }
 
         const list: CompletionList = .{ .items = items.items };
-        const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+        const json = try jsonStringifyAlloc(self.allocator, list);
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
         return true;
@@ -6190,7 +6225,7 @@ const LspServer = struct {
             if (!is_ident_char(ch)) return false;
         }
 
-        var items = std.ArrayList(CompletionItem).init(self.allocator);
+        var items = ArrayList(CompletionItem).init(self.allocator);
         defer {
             for (items.items) |it| self.allocator.free(it.label);
             items.deinit();
@@ -6207,7 +6242,7 @@ const LspServer = struct {
         }
 
         const list: CompletionList = .{ .items = items.items };
-        const json = try std.json.stringifyAlloc(self.allocator, list, .{});
+        const json = try jsonStringifyAlloc(self.allocator, list);
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
         return true;
@@ -6266,16 +6301,16 @@ const LspServer = struct {
 
         const readme_text = blk: {
             if (std.fs.path.isAbsolute(readme_path)) {
-                var f = std.fs.openFileAbsolute(readme_path, .{}) catch return false;
-                defer f.close();
-                break :blk f.readToEndAlloc(self.allocator, 128 * 1024) catch return false;
+                var f = std.Io.Dir.openFileAbsolute(globalIo(), readme_path, .{}) catch return false;
+                defer f.close(globalIo());
+                break :blk fileReadAlloc(self.allocator, f, 128 * 1024) catch return false;
             }
-            break :blk std.fs.cwd().readFileAlloc(self.allocator, readme_path, 128 * 1024) catch return false;
+            break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), readme_path, self.allocator, .limited(128 * 1024)) catch return false;
         };
         defer self.allocator.free(readme_text);
 
         const hover: Hover = .{ .contents = .{ .value = readme_text }, .range = .{ .start = pos, .end = pos } };
-        const json = try std.json.stringifyAlloc(self.allocator, hover, .{});
+        const json = try jsonStringifyAlloc(self.allocator, hover);
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
         return true;
@@ -6495,7 +6530,7 @@ const LspServer = struct {
 
         const infos = [_]SignatureInformation{.{ .label = sig_label, .parameters = parsed_params.items }};
         const help: SignatureHelp = .{ .signatures = &infos, .activeParameter = active_param };
-        const json = try std.json.stringifyAlloc(self.allocator, help, .{});
+        const json = try jsonStringifyAlloc(self.allocator, help);
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
     }
@@ -6505,8 +6540,8 @@ const LspServer = struct {
         return std.mem.indexOf(u8, label, "...") != null;
     }
 
-    fn parseParamsFromSignatureLabel(self: *LspServer, label: []const u8) !std.ArrayList(ParameterInformation) {
-        var out = std.ArrayList(ParameterInformation).init(self.allocator);
+    fn parseParamsFromSignatureLabel(self: *LspServer, label: []const u8) !ArrayList(ParameterInformation) {
+        var out = ArrayList(ParameterInformation).init(self.allocator);
 
         const open_i = std.mem.indexOfScalar(u8, label, '(') orelse return out;
         const close_i = std.mem.lastIndexOfScalar(u8, label, ')') orelse return out;
@@ -6582,7 +6617,7 @@ const LspServer = struct {
         }.call;
 
         const splitTopLevelCsv = struct {
-            fn call(text: []const u8, out: *std.ArrayList([]const u8)) !void {
+            fn call(text: []const u8, out: *ArrayList([]const u8)) !void {
                 var angle_depth: i64 = 0;
                 var paren_depth: i64 = 0;
                 var brack_depth: i64 = 0;
@@ -6627,7 +6662,7 @@ const LspServer = struct {
         }.call;
 
         const parseGenericParamNamesFromLabel = struct {
-            fn call(label: []const u8, out: *std.ArrayList([]const u8)) !void {
+            fn call(label: []const u8, out: *ArrayList([]const u8)) !void {
                 const bounds = findSignatureParenBounds(label) orelse return;
                 const head = label[0..bounds.open];
 
@@ -6652,7 +6687,7 @@ const LspServer = struct {
                 }
                 if (lt_i == null or gt_i == null or gt_i.? <= lt_i.?) return;
 
-                var raw = std.ArrayList([]const u8).init(std.heap.page_allocator);
+                var raw = ArrayList([]const u8).init(std.heap.page_allocator);
                 defer raw.deinit();
                 splitTopLevelCsv(head[lt_i.? + 1 .. gt_i.?], &raw) catch return;
 
@@ -6676,13 +6711,13 @@ const LspServer = struct {
         }.call;
 
         const parseParamTypesFromLabel = struct {
-            fn call(label: []const u8, out: *std.ArrayList([]const u8)) !void {
+            fn call(label: []const u8, out: *ArrayList([]const u8)) !void {
                 const bounds = findSignatureParenBounds(label) orelse return;
                 if (bounds.close <= bounds.open + 1) return;
                 const inner = std.mem.trim(u8, label[bounds.open + 1 .. bounds.close], " \t\r\n");
                 if (inner.len == 0) return;
 
-                var raw = std.ArrayList([]const u8).init(std.heap.page_allocator);
+                var raw = ArrayList([]const u8).init(std.heap.page_allocator);
                 defer raw.deinit();
                 splitTopLevelCsv(inner, &raw) catch return;
 
@@ -6721,7 +6756,7 @@ const LspServer = struct {
         }.call;
 
         const bindIfMissing = struct {
-            fn call(bindings: *std.ArrayList(TypeBinding), param: []const u8, arg: []const u8) !void {
+            fn call(bindings: *ArrayList(TypeBinding), param: []const u8, arg: []const u8) !void {
                 if (lookupBinding(bindings.items, param) != null) return;
                 try bindings.append(.{ .param = param, .arg = arg });
             }
@@ -6767,7 +6802,7 @@ const LspServer = struct {
         }.call;
 
         const bindFromParamType = struct {
-            fn call(gparams: []const []const u8, bindings: *std.ArrayList(TypeBinding), ptype_raw: []const u8, atype_raw: []const u8) !void {
+            fn call(gparams: []const []const u8, bindings: *ArrayList(TypeBinding), ptype_raw: []const u8, atype_raw: []const u8) !void {
                 const ptype = std.mem.trim(u8, ptype_raw, " \t\r\n");
                 const atype = std.mem.trim(u8, atype_raw, " \t\r\n");
                 if (ptype.len == 0 or atype.len == 0) return;
@@ -6786,9 +6821,9 @@ const LspServer = struct {
                     if (parseGenericCore(atype)) |ac| {
                         if (!std.mem.eql(u8, pc.base, ac.base)) return;
 
-                        var pinner = std.ArrayList([]const u8).init(std.heap.page_allocator);
+                        var pinner = ArrayList([]const u8).init(std.heap.page_allocator);
                         defer pinner.deinit();
-                        var ainner = std.ArrayList([]const u8).init(std.heap.page_allocator);
+                        var ainner = ArrayList([]const u8).init(std.heap.page_allocator);
                         defer ainner.deinit();
 
                         splitTopLevelCsv(pc.inner, &pinner) catch return;
@@ -6805,13 +6840,13 @@ const LspServer = struct {
         }.call;
 
         const parseCallExplicitTypeArgsLite = struct {
-            fn call(allocator_: Allocator, tokens: []const TokenLite, l_angle_i: usize, out: *std.ArrayList([]u8)) !void {
+            fn call(allocator_: Allocator, tokens: []const TokenLite, l_angle_i: usize, out: *ArrayList([]u8)) !void {
                 var depth: i64 = 0;
-                var cur = std.ArrayList(u8).init(allocator_);
+                var cur = ArrayList(u8).init(allocator_);
                 defer cur.deinit();
 
                 const flush = struct {
-                    fn call2(allocator2: Allocator, cur_buf: *std.ArrayList(u8), out_buf: *std.ArrayList([]u8)) !void {
+                    fn call2(allocator2: Allocator, cur_buf: *ArrayList(u8), out_buf: *ArrayList([]u8)) !void {
                         const seg = std.mem.trim(u8, cur_buf.items, " \t\r\n");
                         if (seg.len != 0) {
                             try out_buf.append(try allocator2.dupe(u8, seg));
@@ -6899,7 +6934,7 @@ const LspServer = struct {
         }.call;
 
         const collectCallArgRangesLite = struct {
-            fn call(tokens: []const TokenLite, lparen_i2: usize, end_excl: usize, out: *std.ArrayList(ArgRange)) !void {
+            fn call(tokens: []const TokenLite, lparen_i2: usize, end_excl: usize, out: *ArrayList(ArgRange)) !void {
                 var seg_start = nextNonComment(tokens, lparen_i2 + 1) orelse return;
                 if (seg_start >= end_excl) return;
 
@@ -7017,7 +7052,7 @@ const LspServer = struct {
             fn call(allocator_: Allocator, label: []const u8, bindings: []const TypeBinding) ?[]u8 {
                 if (bindings.len == 0) return null;
 
-                var out = std.ArrayList(u8).init(allocator_);
+                var out = ArrayList(u8).init(allocator_);
                 defer out.deinit();
 
                 var changed = false;
@@ -7047,15 +7082,15 @@ const LspServer = struct {
             }
         }.call;
 
-        var generic_params = std.ArrayList([]const u8).init(self.allocator);
+        var generic_params = ArrayList([]const u8).init(self.allocator);
         defer generic_params.deinit();
         try parseGenericParamNamesFromLabel(sig.label, &generic_params);
         if (generic_params.items.len == 0) return null;
 
-        var bindings = std.ArrayList(TypeBinding).init(self.allocator);
+        var bindings = ArrayList(TypeBinding).init(self.allocator);
         defer bindings.deinit();
 
-        var explicit_args = std.ArrayList([]u8).init(self.allocator);
+        var explicit_args = ArrayList([]u8).init(self.allocator);
         defer {
             for (explicit_args.items) |a| self.allocator.free(a);
             explicit_args.deinit();
@@ -7070,11 +7105,11 @@ const LspServer = struct {
             }
         }
 
-        var param_types = std.ArrayList([]const u8).init(self.allocator);
+        var param_types = ArrayList([]const u8).init(self.allocator);
         defer param_types.deinit();
         try parseParamTypesFromLabel(sig.label, &param_types);
 
-        var arg_ranges = std.ArrayList(ArgRange).init(self.allocator);
+        var arg_ranges = ArrayList(ArgRange).init(self.allocator);
         defer arg_ranges.deinit();
 
         const cursor_end = @min(cursor_tok_i + 1, idx.tokens.len);
@@ -7114,7 +7149,7 @@ const LspServer = struct {
         // Return flat `SymbolInformation[]` (LSP allows either SymbolInformation[] or DocumentSymbol[]).
         // Some clients/modes will interpret the response as SymbolInformation[]; if we return
         // DocumentSymbol[] without `location`, those clients can crash during protocol conversion.
-        var syms = std.ArrayList(SymbolInformation).init(self.allocator);
+        var syms = ArrayList(SymbolInformation).init(self.allocator);
         defer {
             for (syms.items) |s| self.allocator.free(s.name);
             syms.deinit();
@@ -7131,7 +7166,7 @@ const LspServer = struct {
             });
         }
 
-        const json = try std.json.stringifyAlloc(self.allocator, syms.items, .{});
+        const json = try jsonStringifyAlloc(self.allocator, syms.items);
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
     }
@@ -7140,7 +7175,7 @@ const LspServer = struct {
         const query = (try parseWorkspaceSymbolQuery(self.allocator, params_val)) orelse "";
         defer if (query.len != 0) self.allocator.free(query);
 
-        var out = std.ArrayList(SymbolInformation).init(self.allocator);
+        var out = ArrayList(SymbolInformation).init(self.allocator);
         defer {
             for (out.items) |s| self.allocator.free(s.name);
             out.deinit();
@@ -7161,7 +7196,7 @@ const LspServer = struct {
             }
         }
 
-        const json = try std.json.stringifyAlloc(self.allocator, out.items, .{});
+        const json = try jsonStringifyAlloc(self.allocator, out.items);
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
     }
@@ -7183,7 +7218,7 @@ const LspServer = struct {
         const data = try buildSemanticTokens(self.allocator, idx);
         defer self.allocator.free(data);
         const st = SemanticTokens{ .data = data };
-        const json = try std.json.stringifyAlloc(self.allocator, st, .{});
+        const json = try jsonStringifyAlloc(self.allocator, st);
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
     }
@@ -7203,7 +7238,7 @@ const LspServer = struct {
     }
 
     fn maybePublishDiagnostics(self: *LspServer, uri: []const u8, text: []const u8, force: bool) !void {
-        const now = std.time.milliTimestamp();
+        const now = nowMs();
         const doc_ptr = self.docs.getPtr(uri) orelse return;
 
         if (!force and doc_ptr.last_diag_ms != 0) {
@@ -7259,9 +7294,9 @@ const LspServer = struct {
 
                 s.value_type = inferred;
 
-                var det_buf = std.ArrayList(u8).init(arena_alloc);
+                var det_buf = ArrayList(u8).init(arena_alloc);
                 defer det_buf.deinit();
-                det_buf.writer().print("{s} {s}", .{ inferred, s.name }) catch continue;
+                det_buf.print("{s} {s}", .{ inferred, s.name }) catch continue;
                 s.detail = det_buf.toOwnedSlice() catch continue;
                 changed = true;
             }
@@ -7474,15 +7509,15 @@ const LspServer = struct {
         defer self.allocator.free(path);
 
         // `uriToPath()` yields an absolute path for `file:` URIs.
-        // On Windows, using `std.fs.cwd().readFileAlloc()` with an absolute path can fail,
+        // On Windows, using `readFileAlloc_DONE` with an absolute path can fail,
         // which breaks stdlib indexing when the stdlib lives outside the workspace.
         const text = blk: {
             if (std.fs.path.isAbsolute(path)) {
-                var f = try std.fs.openFileAbsolute(path, .{});
-                defer f.close();
-                break :blk try f.readToEndAlloc(self.allocator, 25 * 1024 * 1024);
+                var f = try std.Io.Dir.openFileAbsolute(globalIo(), path, .{});
+                defer f.close(globalIo());
+                break :blk try fileReadAlloc(self.allocator, f, 25 * 1024 * 1024);
             }
-            break :blk try std.fs.cwd().readFileAlloc(self.allocator, path, 25 * 1024 * 1024);
+            break :blk try std.Io.Dir.cwd().readFileAlloc(globalIo(), path, self.allocator, .limited(25 * 1024 * 1024));
         };
         defer self.allocator.free(text);
 
@@ -7506,7 +7541,7 @@ const LspServer = struct {
         const current_dir = std.fs.path.dirname(current_path) orelse return null;
 
         const parsed = struct {
-            fn addSegments(out: *std.ArrayList([]const u8), s: []const u8) !void {
+            fn addSegments(out: *ArrayList([]const u8), s: []const u8) !void {
                 var start: usize = 0;
                 var i: usize = 0;
                 while (i < s.len) {
@@ -7543,12 +7578,12 @@ const LspServer = struct {
             }
         };
 
-        var parts = std.ArrayList([]const u8).init(self.allocator);
+        var parts = ArrayList([]const u8).init(self.allocator);
         defer parts.deinit();
         try parsed.addSegments(&parts, spec);
         if (parts.items.len == 0) return null;
 
-        var segs = std.ArrayList([]const u8).init(self.allocator);
+        var segs = ArrayList([]const u8).init(self.allocator);
         defer segs.deinit();
 
         if (std.mem.eql(u8, parts.items[0], "std")) {
@@ -7582,11 +7617,11 @@ const LspServer = struct {
         // Use absolute file APIs so installed stdlib works on Windows.
         const full_exists = blk: {
             if (std.fs.path.isAbsolute(full)) {
-                var f = std.fs.openFileAbsolute(full, .{}) catch break :blk false;
-                f.close();
+                var f = std.Io.Dir.openFileAbsolute(globalIo(), full, .{}) catch break :blk false;
+                f.close(globalIo());
                 break :blk true;
             } else {
-                std.fs.cwd().access(full, .{}) catch break :blk false;
+                std.Io.Dir.cwd().access(globalIo(), full, .{}) catch break :blk false;
                 break :blk true;
             }
         };
@@ -7599,7 +7634,7 @@ const LspServer = struct {
         // lookup fails.
         if (!std.mem.eql(u8, parts.items[0], "std")) {
             if (self.root_path) |root| {
-                var segs_root = std.ArrayList([]const u8).init(self.allocator);
+                var segs_root = ArrayList([]const u8).init(self.allocator);
                 defer segs_root.deinit();
                 try segs_root.append(root);
                 for (parts.items) |p| try segs_root.append(p);
@@ -7611,11 +7646,11 @@ const LspServer = struct {
 
                 const root_exists = blk: {
                     if (std.fs.path.isAbsolute(full_root)) {
-                        var f = std.fs.openFileAbsolute(full_root, .{}) catch break :blk false;
-                        f.close();
+                        var f = std.Io.Dir.openFileAbsolute(globalIo(), full_root, .{}) catch break :blk false;
+                        f.close(globalIo());
                         break :blk true;
                     } else {
-                        std.fs.cwd().access(full_root, .{}) catch break :blk false;
+                        std.Io.Dir.cwd().access(globalIo(), full_root, .{}) catch break :blk false;
                         break :blk true;
                     }
                 };
@@ -7642,7 +7677,7 @@ const LspServer = struct {
         var new_uris = std.StringHashMap(void).init(self.allocator);
         defer new_uris.deinit();
 
-        var grouped = std.StringHashMap(std.ArrayList(Diagnostic)).init(self.allocator);
+        var grouped = std.StringHashMap(ArrayList(Diagnostic)).init(self.allocator);
         defer {
             var git = grouped.iterator();
             while (git.next()) |e| {
@@ -7656,7 +7691,7 @@ const LspServer = struct {
             if (grouped.getPtr(d.uri)) |list| {
                 try list.append(d.diag);
             } else {
-                var list = std.ArrayList(Diagnostic).init(self.allocator);
+                var list = ArrayList(Diagnostic).init(self.allocator);
                 try list.append(d.diag);
                 try grouped.put(d.uri, list);
             }
@@ -7693,21 +7728,21 @@ const LspServer = struct {
         // Create the temp file next to the current document, so relative `imp "..."` resolution
         // and diagnostic file paths match the user's project layout.
         var tmp_name_buf: [80]u8 = undefined;
-        const tmp_name = try std.fmt.bufPrint(&tmp_name_buf, ".__fls_{d}_{d}.fn", .{ std.time.milliTimestamp(), std.time.nanoTimestamp() });
+        const tmp_name = try std.fmt.bufPrint(&tmp_name_buf, ".__fls_{d}_{d}.fn", .{ nowMs(), nowNs() });
 
         const current_path_opt = uriToPath(self.allocator, current_uri) catch null;
         defer if (current_path_opt) |p| self.allocator.free(p);
         const current_dir_opt = if (current_path_opt) |p| std.fs.path.dirname(p) else null;
 
-        var base_dir = if (current_dir_opt) |d| try std.fs.openDirAbsolute(d, .{}) else std.fs.cwd();
-        defer if (current_dir_opt != null) base_dir.close();
+        var base_dir = if (current_dir_opt) |d| try std.Io.Dir.openDirAbsolute(globalIo(), d, .{}) else std.Io.Dir.cwd();
+        defer if (current_dir_opt != null) base_dir.close(globalIo());
 
         {
-            const f = try base_dir.createFile(tmp_name, .{ .read = true, .truncate = true });
-            defer f.close();
-            try f.writeAll(text);
+            const f = try base_dir.createFile(globalIo(), tmp_name, .{ .read = true, .truncate = true });
+            defer f.close(globalIo());
+            try f.writeStreamingAll(globalIo(), text);
         }
-        defer base_dir.deleteFile(tmp_name) catch {};
+        defer base_dir.deleteFile(globalIo(), tmp_name) catch {};
 
         const tmp_path_for_fun = blk: {
             if (current_dir_opt) |d| {
@@ -7717,7 +7752,7 @@ const LspServer = struct {
         };
         defer self.allocator.free(tmp_path_for_fun);
 
-        var stderr_buf = std.ArrayList(u8).init(self.allocator);
+        var stderr_buf = ArrayList(u8).init(self.allocator);
         defer stderr_buf.deinit();
 
         const argv = [_][]const u8{ self.fun_exe_path, "-in", tmp_path_for_fun, "-no-exec" };
@@ -7727,7 +7762,7 @@ const LspServer = struct {
     }
 
     fn formatText(self: *LspServer, text: []const u8) ![]u8 {
-        var tmp_dir = std.fs.cwd();
+        var tmp_dir = std.Io.Dir.cwd();
         var tmp_abs_path: ?[]u8 = null;
         defer if (tmp_abs_path) |p| self.allocator.free(p);
 
@@ -7736,20 +7771,20 @@ const LspServer = struct {
         }
 
         var tmp_name_buf: [64]u8 = undefined;
-        const tmp_name = try std.fmt.bufPrint(&tmp_name_buf, ".__fls_fmt_{d}.fn", .{std.time.milliTimestamp()});
+        const tmp_name = try std.fmt.bufPrint(&tmp_name_buf, ".__fls_fmt_{d}.fn", .{nowMs()});
 
         if (getOrInitFlsTempDirCached()) |res2| {
             tmp_abs_path = try std.fs.path.join(self.allocator, &[_][]const u8{ res2.abs_path, tmp_name });
         }
 
         {
-            const f = try tmp_dir.createFile(tmp_name, .{ .read = true, .truncate = true });
-            defer f.close();
-            try f.writeAll(text);
+            const f = try tmp_dir.createFile(globalIo(), tmp_name, .{ .read = true, .truncate = true });
+            defer f.close(globalIo());
+            try f.writeStreamingAll(globalIo(), text);
         }
-        defer tmp_dir.deleteFile(tmp_name) catch {};
+        defer tmp_dir.deleteFile(globalIo(), tmp_name) catch {};
 
-        var stderr_buf = std.ArrayList(u8).init(self.allocator);
+        var stderr_buf = ArrayList(u8).init(self.allocator);
         defer stderr_buf.deinit();
 
         const in_path = if (tmp_abs_path) |p| p else tmp_name;
@@ -7757,7 +7792,7 @@ const LspServer = struct {
         const code = try runCaptureStderr(self.allocator, &argv, &stderr_buf);
         if (code != 0) return error.FormatFailed;
 
-        const out = try tmp_dir.readFileAlloc(self.allocator, tmp_name, 10 * 1024 * 1024);
+        const out = try tmp_dir.readFileAlloc(globalIo(), tmp_name, self.allocator, .limited(10 * 1024 * 1024));
         // Defensive: never send an edit that wipes the doc unless the input was empty.
         if (out.len == 0 and text.len != 0) {
             self.allocator.free(out);
@@ -7773,7 +7808,7 @@ const LspServer = struct {
         };
 
         const params: Params = .{ .uri = uri, .diagnostics = diagnostics };
-        const params_json = try std.json.stringifyAlloc(self.allocator, params, .{});
+        const params_json = try jsonStringifyAlloc(self.allocator, params);
         defer self.allocator.free(params_json);
         try self.sendNotificationJson("textDocument/publishDiagnostics", params_json);
     }
@@ -7782,37 +7817,46 @@ const LspServer = struct {
         const id_json = try stringifyId(self.allocator, id_val);
         defer self.allocator.free(id_json);
 
-        var msg = std.ArrayList(u8).init(self.allocator);
+        var msg = ArrayList(u8).init(self.allocator);
         defer msg.deinit();
-        try msg.writer().print("{{\"jsonrpc\":\"2.0\",\"id\":{s},\"result\":{s}}}", .{ id_json, result_json });
-        try writeLspMessageRaw(self.stdout.writer(), msg.items);
+        try msg.print("{{\"jsonrpc\":\"2.0\",\"id\":{s},\"result\":{s}}}", .{ id_json, result_json });
+        try writeLspMessageRaw(self.stdout, self.io, msg.items);
     }
 
     fn sendNotificationJson(self: *LspServer, method: []const u8, params_json: []const u8) !void {
-        var msg = std.ArrayList(u8).init(self.allocator);
+        var msg = ArrayList(u8).init(self.allocator);
         defer msg.deinit();
-        try msg.writer().print("{{\"jsonrpc\":\"2.0\",\"method\":\"{s}\",\"params\":{s}}}", .{ method, params_json });
-        try writeLspMessageRaw(self.stdout.writer(), msg.items);
+        try msg.print("{{\"jsonrpc\":\"2.0\",\"method\":\"{s}\",\"params\":{s}}}", .{ method, params_json });
+        try writeLspMessageRaw(self.stdout, self.io, msg.items);
     }
 };
 
 fn stringifyId(allocator: Allocator, id_val: ?std.json.Value) ![]u8 {
     if (id_val == null) return allocator.dupe(u8, "null");
-    return std.json.stringifyAlloc(allocator, id_val.?, .{});
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    try std.json.fmt(id_val.?, .{}).format(&aw.writer);
+    return aw.toOwnedSlice();
 }
 
-fn writeLspMessageRaw(w: anytype, json: []const u8) !void {
-    try w.print("Content-Length: {d}\r\n\r\n", .{json.len});
-    try w.writeAll(json);
+fn jsonStringifyAlloc(allocator: Allocator, value: anytype) ![]u8 {
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    try std.json.fmt(value, .{}).format(&aw.writer);
+    return aw.toOwnedSlice();
 }
 
-fn readLspMessage(allocator: Allocator, r: anytype) ![]u8 {
+fn writeLspMessageRaw(file: std.Io.File, io: std.Io, json: []const u8) !void {
+    var header_buf: [64]u8 = undefined;
+    const header = try std.fmt.bufPrint(&header_buf, "Content-Length: {d}\r\n\r\n", .{json.len});
+    try file.writeStreamingAll(io, header);
+    try file.writeStreamingAll(io, json);
+}
+
+fn readLspMessage(allocator: Allocator, r: *std.Io.Reader) ![]u8 {
     var content_length: ?usize = null;
     while (true) {
-        const line_opt = try r.readUntilDelimiterOrEofAlloc(allocator, '\n', 16 * 1024);
-        if (line_opt == null) return error.EndOfStream;
-        defer allocator.free(line_opt.?);
-        const line = std.mem.trim(u8, line_opt.?, "\r\n");
+        const line_raw = try r.takeDelimiterInclusive('\n');
+        if (line_raw.len == 0) return error.EndOfStream;
+        const line = std.mem.trim(u8, line_raw, "\r\n");
         if (line.len == 0) break;
         if (std.ascii.startsWithIgnoreCase(line, "Content-Length:")) {
             const rest = std.mem.trim(u8, line["Content-Length:".len..], " ");
@@ -7823,15 +7867,16 @@ fn readLspMessage(allocator: Allocator, r: anytype) ![]u8 {
     const len = content_length orelse return error.MissingContentLength;
     const msg = try allocator.alloc(u8, len);
     errdefer allocator.free(msg);
-    try r.readNoEof(msg);
+    try r.readSliceAll(msg);
     return msg;
 }
 
-fn runCaptureStderr(allocator: Allocator, argv: []const []const u8, stderr_out: *std.ArrayList(u8)) !u8 {
-    const res = try std.process.Child.run(.{
-        .allocator = allocator,
+fn runCaptureStderr(allocator: Allocator, argv: []const []const u8, stderr_out: *ArrayList(u8)) !u8 {
+    const io = globalIo();
+    const res = try std.process.run(allocator, io, .{
         .argv = argv,
-        .max_output_bytes = 10 * 1024 * 1024,
+        .stderr_limit = .limited(10 * 1024 * 1024),
+        .stdout_limit = .limited(10 * 1024 * 1024),
     });
     defer allocator.free(res.stdout);
     defer allocator.free(res.stderr);
@@ -7842,7 +7887,7 @@ fn runCaptureStderr(allocator: Allocator, argv: []const []const u8, stderr_out: 
     try stderr_out.appendSlice(res.stdout);
 
     return switch (res.term) {
-        .Exited => |code| @intCast(code),
+        .exited => |code| @intCast(code),
         else => 1,
     };
 }
@@ -7887,7 +7932,7 @@ fn parseFunDiagnosticsByUri(allocator: Allocator, stderr_text: []const u8, curre
     defer if (current_path_opt) |p| allocator.free(p);
     const current_dir_opt = if (current_path_opt) |p| std.fs.path.dirname(p) else null;
 
-    var diags = std.ArrayList(DiagnosticWithUri).init(allocator);
+    var diags = ArrayList(DiagnosticWithUri).init(allocator);
     errdefer {
         for (diags.items) |d| {
             allocator.free(d.uri);
@@ -7899,7 +7944,7 @@ fn parseFunDiagnosticsByUri(allocator: Allocator, stderr_text: []const u8, curre
 
     var it = std.mem.splitScalar(u8, stderr_text, '\n');
     var pending_severity: ?i64 = null;
-    var pending_message: ?std.ArrayList(u8) = null;
+    var pending_message: ?ArrayList(u8) = null;
     var pending_code: ?[]u8 = null;
     errdefer if (pending_message) |*m| m.deinit();
     errdefer if (pending_code) |c| allocator.free(c);
@@ -7921,7 +7966,7 @@ fn parseFunDiagnosticsByUri(allocator: Allocator, stderr_text: []const u8, curre
         }
 
         if (pending_severity != null and pending_message == null and !std.mem.startsWith(u8, line, "Location:")) {
-            var msg = std.ArrayList(u8).init(allocator);
+            var msg = ArrayList(u8).init(allocator);
             errdefer msg.deinit();
             try msg.appendSlice(line);
             pending_message = msg;
@@ -7972,7 +8017,7 @@ fn parseFunDiagnosticsByUri(allocator: Allocator, stderr_text: []const u8, curre
 
                     // Absolute path? Convert directly.
                     if (std.fs.path.isAbsolute(file_part) or (file_part.len >= 2 and file_part[1] == ':')) {
-                        const ap = std.fs.cwd().realpathAlloc(allocator, file_part) catch null;
+                        const ap = std.Io.Dir.cwd().realPathFileAlloc(globalIo(), file_part, allocator) catch null;
                         if (ap) |abs_real| {
                             defer allocator.free(abs_real);
                             break :blk pathToUri(allocator, abs_real) catch try allocator.dupe(u8, current_uri);
@@ -7985,7 +8030,7 @@ fn parseFunDiagnosticsByUri(allocator: Allocator, stderr_text: []const u8, curre
                         const joined = std.fs.path.join(allocator, &[_][]const u8{ d, file_part }) catch null;
                         if (joined) |j| {
                             defer allocator.free(j);
-                            const ap2 = std.fs.cwd().realpathAlloc(allocator, j) catch null;
+                            const ap2 = std.Io.Dir.cwd().realPathFileAlloc(globalIo(), j, allocator) catch null;
                             if (ap2) |abs_real2| {
                                 defer allocator.free(abs_real2);
                                 break :blk pathToUri(allocator, abs_real2) catch try allocator.dupe(u8, current_uri);
@@ -8108,7 +8153,7 @@ fn tryApplyRangedEdit(allocator: Allocator, text: []const u8, start_pos: Positio
     const end_b = byteIndexForPosition(text, end_pos);
     if (start_b > end_b or end_b > text.len) return null;
 
-    var out = std.ArrayList(u8).init(allocator);
+    var out = ArrayList(u8).init(allocator);
     errdefer out.deinit();
     try out.appendSlice(text[0..start_b]);
     try out.appendSlice(new_text);
@@ -8146,9 +8191,10 @@ test "fls: parse import spec from tokens" {
 
     var server: LspServer = .{
         .allocator = allocator,
+        .io = globalIo(),
         .docs = std.StringHashMap(Doc).init(allocator),
-        .stdin = std.io.getStdIn(),
-        .stdout = std.io.getStdOut(),
+        .stdin = std.Io.File.stdin(),
+        .stdout = std.Io.File.stdout(),
         .fun_exe_path = try allocator.dupe(u8, "fun"),
         .published_diag_uris = std.StringHashMap(void).init(allocator),
         .root_uri = null,
@@ -8186,26 +8232,26 @@ test "fls: resolve std import to stdlib" {
     defer tmp.cleanup();
 
     // Create: <root>/stdlib/std/c/io.fn
-    try tmp.dir.makePath("stdlib/std/c");
+    try tmp.dir.createDirPath(std.testing.io, "stdlib/std/c");
     {
-        var f = try tmp.dir.createFile("stdlib/std/c/io.fn", .{ .read = true, .truncate = true });
-        defer f.close();
-        try f.writeAll("// std io\n");
+        var f = try tmp.dir.createFile(std.testing.io, "stdlib/std/c/io.fn", .{ .read = true, .truncate = true });
+        defer f.close(globalIo());
+        try f.writeStreamingAll(globalIo(), "// std io\n");
     }
 
     // Create: <root>/examples/main.fn
-    try tmp.dir.makePath("examples");
+    try tmp.dir.createDirPath(std.testing.io, "examples");
     {
-        var f2 = try tmp.dir.createFile("examples/main.fn", .{ .read = true, .truncate = true });
-        defer f2.close();
-        try f2.writeAll("imp std.c.io;\n");
+        var f2 = try tmp.dir.createFile(std.testing.io, "examples/main.fn", .{ .read = true, .truncate = true });
+        defer f2.close(globalIo());
+        try f2.writeStreamingAll(globalIo(), "imp std.c.io;\n");
     }
 
-    const root_abs = try tmp.dir.realpathAlloc(allocator, ".");
+    const root_abs = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(root_abs);
-    const current_abs = try tmp.dir.realpathAlloc(allocator, "examples/main.fn");
+    const current_abs = try tmp.dir.realPathFileAlloc(std.testing.io, "examples/main.fn", allocator);
     defer allocator.free(current_abs);
-    const std_abs = try tmp.dir.realpathAlloc(allocator, "stdlib/std/c/io.fn");
+    const std_abs = try tmp.dir.realPathFileAlloc(std.testing.io, "stdlib/std/c/io.fn", allocator);
     defer allocator.free(std_abs);
 
     const current_uri = try pathToUri(allocator, current_abs);
@@ -8215,9 +8261,10 @@ test "fls: resolve std import to stdlib" {
 
     var server: LspServer = .{
         .allocator = allocator,
+        .io = globalIo(),
         .docs = std.StringHashMap(Doc).init(allocator),
-        .stdin = std.io.getStdIn(),
-        .stdout = std.io.getStdOut(),
+        .stdin = std.Io.File.stdin(),
+        .stdout = std.Io.File.stdout(),
         .fun_exe_path = try allocator.dupe(u8, "fun"),
         .published_diag_uris = std.StringHashMap(void).init(allocator),
         .root_uri = null,
@@ -8236,14 +8283,14 @@ test "fls: parseFunDiagnosticsByUri maps tmp file to current uri" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("src");
+    try tmp.dir.createDirPath(std.testing.io, "src");
     {
-        var f = try tmp.dir.createFile("src/main.fn", .{ .read = true, .truncate = true });
-        defer f.close();
-        try f.writeAll("// file\n");
+        var f = try tmp.dir.createFile(std.testing.io, "src/main.fn", .{ .read = true, .truncate = true });
+        defer f.close(globalIo());
+        try f.writeStreamingAll(globalIo(), "// file\n");
     }
 
-    const current_abs = try tmp.dir.realpathAlloc(allocator, "src/main.fn");
+    const current_abs = try tmp.dir.realPathFileAlloc(std.testing.io, "src/main.fn", allocator);
     defer allocator.free(current_abs);
     const current_uri = try pathToUri(allocator, current_abs);
     defer allocator.free(current_uri);
@@ -8274,14 +8321,14 @@ test "fls: parseFunDiagnosticsByUri supports warning IDs" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("src");
+    try tmp.dir.createDirPath(std.testing.io, "src");
     {
-        var f = try tmp.dir.createFile("src/main.fn", .{ .read = true, .truncate = true });
-        defer f.close();
-        try f.writeAll("// file\n");
+        var f = try tmp.dir.createFile(std.testing.io, "src/main.fn", .{ .read = true, .truncate = true });
+        defer f.close(globalIo());
+        try f.writeStreamingAll(globalIo(), "// file\n");
     }
 
-    const current_abs = try tmp.dir.realpathAlloc(allocator, "src/main.fn");
+    const current_abs = try tmp.dir.realPathFileAlloc(std.testing.io, "src/main.fn", allocator);
     defer allocator.free(current_abs);
     const current_uri = try pathToUri(allocator, current_abs);
     defer allocator.free(current_uri);
@@ -8313,14 +8360,14 @@ test "fls: parseFunDiagnosticsByUri infers async diagnostic code" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("src");
+    try tmp.dir.createDirPath(std.testing.io, "src");
     {
-        var f = try tmp.dir.createFile("src/main.fn", .{ .read = true, .truncate = true });
-        defer f.close();
-        try f.writeAll("// file\n");
+        var f = try tmp.dir.createFile(std.testing.io, "src/main.fn", .{ .read = true, .truncate = true });
+        defer f.close(globalIo());
+        try f.writeStreamingAll(globalIo(), "// file\n");
     }
 
-    const current_abs = try tmp.dir.realpathAlloc(allocator, "src/main.fn");
+    const current_abs = try tmp.dir.realPathFileAlloc(std.testing.io, "src/main.fn", allocator);
     defer allocator.free(current_abs);
     const current_uri = try pathToUri(allocator, current_abs);
     defer allocator.free(current_uri);
@@ -8401,19 +8448,19 @@ test "fls: parseFunDiagnosticsByUri supports multiline messages and Location spl
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("src");
+    try tmp.dir.createDirPath(std.testing.io, "src");
     {
-        var f = try tmp.dir.createFile("src/main.fn", .{ .read = true, .truncate = true });
-        defer f.close();
-        try f.writeAll("// file\n");
+        var f = try tmp.dir.createFile(std.testing.io, "src/main.fn", .{ .read = true, .truncate = true });
+        defer f.close(globalIo());
+        try f.writeStreamingAll(globalIo(), "// file\n");
     }
     {
-        var f2 = try tmp.dir.createFile("src/other.fn", .{ .read = true, .truncate = true });
-        defer f2.close();
-        try f2.writeAll("// other\n");
+        var f2 = try tmp.dir.createFile(std.testing.io, "src/other.fn", .{ .read = true, .truncate = true });
+        defer f2.close(globalIo());
+        try f2.writeStreamingAll(globalIo(), "// other\n");
     }
 
-    const current_abs = try tmp.dir.realpathAlloc(allocator, "src/main.fn");
+    const current_abs = try tmp.dir.realPathFileAlloc(std.testing.io, "src/main.fn", allocator);
     defer allocator.free(current_abs);
     const current_uri = try pathToUri(allocator, current_abs);
     defer allocator.free(current_uri);
@@ -8468,26 +8515,26 @@ test "fls: resolveImportUri relative imports" {
     const sep = std.fs.path.sep;
     const examples_dir = try std.fmt.allocPrint(allocator, "examples{c}utils", .{sep});
     defer allocator.free(examples_dir);
-    try tmp.dir.makePath(examples_dir);
+    try tmp.dir.createDirPath(std.testing.io, examples_dir);
     const main_fn = try std.fmt.allocPrint(allocator, "examples{c}main.fn", .{sep});
     defer allocator.free(main_fn);
     const math_fn = try std.fmt.allocPrint(allocator, "examples{c}utils{c}math.fn", .{ sep, sep });
     defer allocator.free(math_fn);
     {
-        var f = try tmp.dir.createFile(main_fn, .{ .read = true, .truncate = true });
-        defer f.close();
-        try f.writeAll("imp utils.math;\n");
+        var f = try tmp.dir.createFile(std.testing.io, main_fn, .{ .read = true, .truncate = true });
+        defer f.close(globalIo());
+        try f.writeStreamingAll(globalIo(), "imp utils.math;\n");
     }
     {
-        var f2 = try tmp.dir.createFile(math_fn, .{ .read = true, .truncate = true });
-        defer f2.close();
-        try f2.writeAll("// math\n");
+        var f2 = try tmp.dir.createFile(std.testing.io, math_fn, .{ .read = true, .truncate = true });
+        defer f2.close(globalIo());
+        try f2.writeStreamingAll(globalIo(), "// math\n");
     }
-    const root_abs = try tmp.dir.realpathAlloc(allocator, ".");
+    const root_abs = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(root_abs);
-    const current_abs = try tmp.dir.realpathAlloc(allocator, main_fn);
+    const current_abs = try tmp.dir.realPathFileAlloc(std.testing.io, main_fn, allocator);
     defer allocator.free(current_abs);
-    const expected_abs = try tmp.dir.realpathAlloc(allocator, math_fn);
+    const expected_abs = try tmp.dir.realPathFileAlloc(std.testing.io, math_fn, allocator);
     defer allocator.free(expected_abs);
 
     const current_uri = try pathToUri(allocator, current_abs);
@@ -8497,9 +8544,10 @@ test "fls: resolveImportUri relative imports" {
 
     var server: LspServer = .{
         .allocator = allocator,
+        .io = globalIo(),
         .docs = std.StringHashMap(Doc).init(allocator),
-        .stdin = std.io.getStdIn(),
-        .stdout = std.io.getStdOut(),
+        .stdin = std.Io.File.stdin(),
+        .stdout = std.Io.File.stdout(),
         .fun_exe_path = try allocator.dupe(u8, "fun"),
         .published_diag_uris = std.StringHashMap(void).init(allocator),
         .root_uri = null,
@@ -8540,28 +8588,29 @@ test "fls: resolveImportUri std fails without stdlib" {
     defer tmp.cleanup();
 
     // Create a dummy current document.
-    try tmp.dir.makePath("src");
+    try tmp.dir.createDirPath(std.testing.io, "src");
     {
-        var f = try tmp.dir.createFile("src/main.fn", .{ .read = true, .truncate = true });
-        defer f.close();
-        try f.writeAll("imp std.c.io;\n");
+        var f = try tmp.dir.createFile(std.testing.io, "src/main.fn", .{ .read = true, .truncate = true });
+        defer f.close(globalIo());
+        try f.writeStreamingAll(globalIo(), "imp std.c.io;\n");
     }
-    const current_abs = try tmp.dir.realpathAlloc(allocator, "src/main.fn");
+    const current_abs = try tmp.dir.realPathFileAlloc(std.testing.io, "src/main.fn", allocator);
     defer allocator.free(current_abs);
     const current_uri = try pathToUri(allocator, current_abs);
     defer allocator.free(current_uri);
 
     // Seed an invalid stdlib root so resolution can't succeed via env/workspace/cwd.
-    const tmp_root_abs = try tmp.dir.realpathAlloc(allocator, ".");
+    const tmp_root_abs = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(tmp_root_abs);
     const bogus_stdlib = try std.fs.path.join(allocator, &.{ tmp_root_abs, "__not_a_stdlib__" });
     defer allocator.free(bogus_stdlib);
 
     var server: LspServer = .{
         .allocator = allocator,
+        .io = globalIo(),
         .docs = std.StringHashMap(Doc).init(allocator),
-        .stdin = std.io.getStdIn(),
-        .stdout = std.io.getStdOut(),
+        .stdin = std.Io.File.stdin(),
+        .stdout = std.Io.File.stdout(),
         .fun_exe_path = try allocator.dupe(u8, "fun"),
         .published_diag_uris = std.StringHashMap(void).init(allocator),
         .root_uri = null,
@@ -8606,14 +8655,15 @@ test "fls: byteIndexForPosition reference bounds (table)" {
     }
 }
 
-fn findSiblingOrPathExe(allocator: Allocator, base_name: []const u8) ![]u8 {
+fn findSiblingOrPathExe(allocator: Allocator, io: std.Io, base_name: []const u8) ![]u8 {
     // 1) If `FLS_FUN_PATH` is set, use that.
-    if (std.process.getEnvVarOwned(allocator, "FLS_FUN_PATH")) |p| {
-        return p;
-    } else |_| {}
+    if (std.c.getenv("FLS_FUN_PATH")) |z| {
+        const p = std.mem.sliceTo(z, 0);
+        if (p.len > 0) return allocator.dupe(u8, p);
+    }
 
     // 2) Try sibling next to fls exe.
-    const exe_dir = std.fs.selfExeDirPathAlloc(allocator) catch null;
+    const exe_dir = std.process.executableDirPathAlloc(io, allocator) catch null;
     if (exe_dir) |dir| {
         defer allocator.free(dir);
 
@@ -8627,7 +8677,7 @@ fn findSiblingOrPathExe(allocator: Allocator, base_name: []const u8) ![]u8 {
         errdefer allocator.free(full);
 
         sibling_check: {
-            std.fs.cwd().access(full, .{}) catch {
+            std.Io.Dir.cwd().access(globalIo(), full, .{}) catch {
                 allocator.free(full);
                 break :sibling_check;
             };
@@ -8640,8 +8690,8 @@ fn findSiblingOrPathExe(allocator: Allocator, base_name: []const u8) ![]u8 {
 }
 
 fn findOnPath(allocator: Allocator, base_name: []const u8) ![]u8 {
-    const path_env = std.process.getEnvVarOwned(allocator, "PATH") catch return error.FileNotFound;
-    defer allocator.free(path_env);
+    const path_env_ptr = std.c.getenv("PATH") orelse return error.FileNotFound;
+    const path_env = std.mem.sliceTo(path_env_ptr, 0);
 
     const exe_name = if (@import("builtin").target.os.tag == .windows)
         try std.fmt.allocPrint(allocator, "{s}.exe", .{base_name})
@@ -8658,7 +8708,7 @@ fn findOnPath(allocator: Allocator, base_name: []const u8) ![]u8 {
         const full = try std.fs.path.join(allocator, &[_][]const u8{ dir, exe_name });
         errdefer allocator.free(full);
 
-        std.fs.cwd().access(full, .{}) catch {
+        std.Io.Dir.cwd().access(globalIo(), full, .{}) catch {
             allocator.free(full);
             continue;
         };
@@ -8668,12 +8718,15 @@ fn findOnPath(allocator: Allocator, base_name: []const u8) ![]u8 {
     return error.FileNotFound;
 }
 
-fn writeJsonString(w: anytype, s: []const u8) !void {
-    try std.json.stringify(s, .{}, w);
+fn writeJsonString(buf: *ArrayList(u8), s: []const u8) !void {
+    var aw = std.Io.Writer.Allocating.init(buf.allocator);
+    defer aw.deinit();
+    try std.json.fmt(s, .{}).format(&aw.writer);
+    try buf.appendSlice(aw.written());
 }
 
-fn writeRangeJson(w: anytype, r: Range) !void {
-    try w.print(
+fn writeRangeJson(buf: *ArrayList(u8), r: Range) !void {
+    try buf.print(
         "{{\"start\":{{\"line\":{d},\"character\":{d}}},\"end\":{{\"line\":{d},\"character\":{d}}}}}",
         .{ r.start.line, r.start.character, r.end.line, r.end.character },
     );
@@ -8702,7 +8755,7 @@ fn pathToUri(allocator: Allocator, path_raw: []const u8) ![]u8 {
         ((tmp[0] >= 'A' and tmp[0] <= 'Z') or (tmp[0] >= 'a' and tmp[0] <= 'z')) and
         tmp[1] == ':' and tmp[2] == '/';
 
-    var out = std.ArrayList(u8).init(allocator);
+    var out = ArrayList(u8).init(allocator);
     errdefer out.deinit();
     try out.appendSlice("file:///");
 
@@ -8721,7 +8774,7 @@ fn pathToUri(allocator: Allocator, path_raw: []const u8) ![]u8 {
         if (isUriUnreserved(ch)) {
             try out.append(ch);
         } else {
-            try out.writer().print("%{X:0>2}", .{ch});
+            try out.print("%{X:0>2}", .{ch});
         }
     }
 
@@ -8759,7 +8812,7 @@ fn uriToPath(allocator: Allocator, uri: []const u8) ![]u8 {
         ((path_no_leading[0] >= 'A' and path_no_leading[0] <= 'Z') or (path_no_leading[0] >= 'a' and path_no_leading[0] <= 'z')) and
         path_no_leading[1] == ':' and path_no_leading[2] == '/';
 
-    var out = std.ArrayList(u8).init(allocator);
+    var out = ArrayList(u8).init(allocator);
     errdefer out.deinit();
 
     if (!is_windows_drive and builtin.os.tag != .windows) {
@@ -8919,7 +8972,7 @@ fn concreteGenericTypeAtToken(allocator: Allocator, tokens: []const TokenLite, t
         return null;
     }
 
-    var out = std.ArrayList(u8).init(allocator);
+    var out = ArrayList(u8).init(allocator);
     errdefer out.deinit();
     try out.appendSlice(base_tok.text);
 
@@ -9607,7 +9660,7 @@ var fls_temp_dir_cache_init_done: bool = false;
 var fls_temp_dir_cache: ?FlsTempDir = null;
 
 const FlsTempDir = struct {
-    dir: std.fs.Dir,
+    dir: std.Io.Dir,
     abs_path: []const u8,
 };
 
@@ -9616,18 +9669,18 @@ fn tryOpenFlsTempDir(alloc: Allocator) !?FlsTempDir {
 
     const Try = struct {
         fn openSub(alloc_inner: Allocator, root_path: []const u8) !?FlsTempDir {
-            const base_dir_opt = std.fs.openDirAbsolute(root_path, .{}) catch null;
+            const base_dir_opt = std.Io.Dir.openDirAbsolute(globalIo(), root_path, .{}) catch null;
             if (base_dir_opt) |bd| {
                 var bd_mut = bd;
-                defer bd_mut.close();
+                defer bd_mut.close(globalIo());
 
-                bd_mut.makeDir("fun-fls") catch |e| switch (e) {
+                bd_mut.createDir(globalIo(), "fun-fls", .default_dir) catch |e| switch (e) {
                     error.PathAlreadyExists => {},
                     else => return null,
                 };
 
                 const abs_path = try std.fs.path.join(alloc_inner, &.{ root_path, "fun-fls" });
-                const d = std.fs.openDirAbsolute(abs_path, .{ .iterate = true }) catch return null;
+                const d = std.Io.Dir.openDirAbsolute(globalIo(), abs_path, .{ .iterate = true }) catch return null;
                 return .{ .dir = d, .abs_path = abs_path };
             }
             return null;
@@ -9635,8 +9688,10 @@ fn tryOpenFlsTempDir(alloc: Allocator) !?FlsTempDir {
     };
 
     const env_try = struct {
-        fn get(alloc_inner: Allocator, name: []const u8) ?[]const u8 {
-            return std.process.getEnvVarOwned(alloc_inner, name) catch null;
+        fn get(alloc_inner: Allocator, comptime name: [:0]const u8) ?[]const u8 {
+            const z = std.c.getenv(name) orelse return null;
+            const s = std.mem.sliceTo(z, 0);
+            return alloc_inner.dupe(u8, s) catch null;
         }
     };
 
@@ -9679,8 +9734,11 @@ fn getOrInitFlsTempDirCached() ?FlsTempDir {
     const cache_alloc = std.heap.page_allocator;
     fls_temp_dir_cache = tryOpenFlsTempDir(cache_alloc) catch null;
 
-    const debug_env = std.process.getEnvVarOwned(cache_alloc, "FUN_FLS_DEBUG") catch null;
-    const debug_on = if (debug_env) |v| std.mem.eql(u8, v, "1") else false;
+    const debug_on = blk: {
+        const z = std.c.getenv("FUN_FLS_DEBUG") orelse break :blk false;
+        const v = std.mem.sliceTo(z, 0);
+        break :blk std.mem.eql(u8, v, "1");
+    };
 
     if (fls_temp_dir_cache) |res| {
         if (debug_on and !fls_temp_dir_announced) {
@@ -9698,17 +9756,17 @@ fn getOrInitFlsTempDirCached() ?FlsTempDir {
     return fls_temp_dir_cache;
 }
 
-fn maybeCleanupFlsTempDir(dir: *std.fs.Dir) void {
+fn maybeCleanupFlsTempDir(dir: *std.Io.Dir) void {
     if (fls_temp_cleanup_done) return;
     fls_temp_cleanup_done = true;
 
-    const now_ns: i128 = std.time.nanoTimestamp();
+    const now_ns: i128 = nowNs();
     // Delete only sufficiently old leftovers to avoid interfering with another running instance.
     // Files are normally deleted immediately; these are only meant to catch crash/kill residue.
     const max_age_ns: i128 = 30 * std.time.ns_per_min;
 
     var it = dir.iterate();
-    while (it.next() catch null) |entry| {
+    while (it.next(globalIo()) catch null) |entry| {
         if (entry.kind != .file) continue;
         const name = entry.name;
 
@@ -9734,7 +9792,7 @@ fn maybeCleanupFlsTempDir(dir: *std.fs.Dir) void {
         const stamp_ns = std.fmt.parseInt(i128, s, 10) catch continue;
         const age = now_ns - stamp_ns;
         if (age > max_age_ns) {
-            dir.deleteFile(name) catch {};
+            dir.deleteFile(globalIo(), name) catch {};
         }
     }
 }
@@ -9760,13 +9818,13 @@ fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path_opt
     // NOTE: This function may run very frequently while typing.
     // If a directory path is provided, create the temp file in that directory so
     // relative imports resolve correctly. Otherwise, best-effort use OS temp.
-    var tmp_dir = std.fs.cwd();
+    var tmp_dir = std.Io.Dir.cwd();
     var tmp_dir_path: ?[]const u8 = null;
 
     if (tmp_dir_path_opt) |p| {
         if (std.fs.path.isAbsolute(p)) {
-            tmp_dir = try std.fs.openDirAbsolute(p, .{});
-            defer tmp_dir.close();
+            tmp_dir = try std.Io.Dir.openDirAbsolute(globalIo(), p, .{});
+            defer tmp_dir.close(globalIo());
             tmp_dir_path = p;
         }
     } else if (getOrInitFlsTempDirCached()) |res| {
@@ -9774,8 +9832,13 @@ fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path_opt
         tmp_dir_path = res.abs_path;
     }
     var tmp_name_buf: [96]u8 = undefined;
-    const stamp = std.time.nanoTimestamp();
-    const nonce: u64 = std.crypto.random.int(u64);
+    var rng_buf: [8]u8 = undefined;
+    globalIo().random(&rng_buf);
+    const nonce = std.mem.readInt(u64, &rng_buf, .little);
+    const S = struct {
+        var uid: std.atomic.Value(u64) = .init(0);
+    };
+    const stamp = S.uid.fetchAdd(1, .monotonic);
     const tmp_name = try std.fmt.bufPrint(&tmp_name_buf, "_fls_idx_{d}_{x}.fn", .{ stamp, nonce });
 
     var out_name_buf: [96]u8 = undefined;
@@ -9791,12 +9854,12 @@ fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path_opt
         out_name;
 
     {
-        const f = try tmp_dir.createFile(tmp_name, .{ .read = true, .truncate = true });
-        defer f.close();
-        try f.writeAll(text);
+        const f = try tmp_dir.createFile(globalIo(), tmp_name, .{ .read = true, .truncate = true });
+        defer f.close(globalIo());
+        try f.writeStreamingAll(globalIo(), text);
     }
-    defer tmp_dir.deleteFile(tmp_name) catch {};
-    defer tmp_dir.deleteFile(out_name) catch {};
+    defer tmp_dir.deleteFile(globalIo(), tmp_name) catch {};
+    defer tmp_dir.deleteFile(globalIo(), out_name) catch {};
 
     // For LSP indexing, avoid preloading imports during parsing.
     // This prevents noisy "Import file not found" errors when indexing from a temp file path,
@@ -9813,7 +9876,7 @@ fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path_opt
     defer lp.deinit();
     try lp.lex();
 
-    var tokens_out = std.ArrayList(TokenLite).init(tmp_alloc);
+    var tokens_out = ArrayList(TokenLite).init(tmp_alloc);
     for (tp.tokens.items()) |t| {
         if (t.type == .NewLine) continue;
 
@@ -9881,19 +9944,19 @@ fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path_opt
             }
         }.call;
 
-        if (std.process.getEnvVarOwned(tmp_alloc, "FLS_ENABLE_INPROC_PARSE")) |raw_global| {
-            defer tmp_alloc.free(raw_global);
+        if (std.c.getenv("FLS_ENABLE_INPROC_PARSE")) |z| {
+            const raw_global = std.mem.sliceTo(z, 0);
             break :blk isTruthy(raw_global);
-        } else |_| {}
+        }
 
-        if (std.process.getEnvVarOwned(tmp_alloc, "FLS_PARSE_SCOPE")) |raw_scope| {
-            defer tmp_alloc.free(raw_scope);
+        if (std.c.getenv("FLS_PARSE_SCOPE")) |z| {
+            const raw_scope = std.mem.sliceTo(z, 0);
             const s = std.mem.trim(u8, raw_scope, " \t\r\n");
             if (s.len == 0) break :blk false;
             if (std.ascii.eqlIgnoreCase(s, "none")) break :blk false;
             if (std.ascii.eqlIgnoreCase(s, "all")) break :blk true;
             if (std.ascii.eqlIgnoreCase(s, "open")) break :blk scope == .open_document;
-        } else |_| {}
+        }
 
         // Default to token-only indexing unless explicitly opted into parser-backed indexing.
         break :blk false;
@@ -9912,11 +9975,11 @@ fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path_opt
         }
     }
 
-    var symbols_out = std.ArrayList(SymbolLite).init(tmp_alloc);
+    var symbols_out = ArrayList(SymbolLite).init(tmp_alloc);
 
     // Always do lexer-driven indexing first (robust while typing), then optionally
     // overlay/replace globals+locals with AST-backed symbols.
-    var symbols_token = std.ArrayList(SymbolLite).init(tmp_alloc);
+    var symbols_token = ArrayList(SymbolLite).init(tmp_alloc);
     try collectSymbolsFromTokens(tmp_alloc, &symbols_token, tp.tokens.items());
 
     if (parse_ok) {
@@ -9987,7 +10050,7 @@ fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path_opt
     return idx;
 }
 
-fn fixAstVariableRanges(tokens: []const TokenLite, symbols: *std.ArrayList(SymbolLite)) void {
+fn fixAstVariableRanges(tokens: []const TokenLite, symbols: *ArrayList(SymbolLite)) void {
     for (symbols.items) |*s| {
         if (s.kind != .variable) continue;
 
@@ -10033,7 +10096,7 @@ const AstEnrichment = struct {
     }
 };
 
-fn appendDTypeFull(buf: *std.ArrayList(u8), dt: anytype) !void {
+fn appendDTypeFull(buf: *ArrayList(u8), dt: anytype) !void {
     const dtype = if (@typeInfo(@TypeOf(dt)) == .pointer) dt.* else dt;
     try buf.appendSlice(dtype.type_str.items);
     if (@hasField(@TypeOf(dtype), "generic_args")) {
@@ -10076,12 +10139,12 @@ fn appendDTypeFull(buf: *std.ArrayList(u8), dt: anytype) !void {
     }
 }
 
-fn enrichSymbolsFromAst(allocator: Allocator, symbols: *std.ArrayList(SymbolLite), tp: *codegen.TranspileProcess) !void {
+fn enrichSymbolsFromAst(allocator: Allocator, symbols: *ArrayList(SymbolLite), tp: *codegen.TranspileProcess) !void {
     var enrich = AstEnrichment.init(allocator);
 
     const dtypeStringOwned = struct {
         fn build(a: Allocator, dt: anytype) ![]u8 {
-            var buf = std.ArrayList(u8).init(a);
+            var buf = ArrayList(u8).init(a);
             errdefer buf.deinit();
             try appendDTypeFull(&buf, dt);
             return try buf.toOwnedSlice();
@@ -10218,7 +10281,7 @@ fn buildSignatureFromAst(
     fnv: anytype,
     include_fun_prefix: bool,
 ) ![]const u8 {
-    var buf = std.ArrayList(u8).init(allocator);
+    var buf = ArrayList(u8).init(allocator);
     errdefer buf.deinit();
 
     const is_async_fn = @hasField(@TypeOf(fnv), "is_async") and fnv.is_async;
@@ -10227,9 +10290,9 @@ fn buildSignatureFromAst(
     }
 
     if (include_fun_prefix) {
-        try buf.writer().print("fun {s}", .{name});
+        try buf.print("fun {s}", .{name});
     } else {
-        try buf.writer().print("{s}", .{name});
+        try buf.print("{s}", .{name});
     }
     if (@hasField(@TypeOf(fnv), "type_params")) {
         if (fnv.type_params) |params| {
@@ -10252,7 +10315,7 @@ fn buildSignatureFromAst(
             if (!first) try buf.appendSlice(", ");
             first = false;
             try appendDTypeFull(&buf, av.type);
-            try buf.writer().print(" {s}", .{av.name.items});
+            try buf.print(" {s}", .{av.name.items});
         }
     }
 
@@ -10272,19 +10335,19 @@ fn buildSignatureFromAst(
 }
 
 fn buildQuirkMethodSignatureFromAst(allocator: Allocator, m: ast.QuirkMethodSig) ![]const u8 {
-    var buf = std.ArrayList(u8).init(allocator);
+    var buf = ArrayList(u8).init(allocator);
     errdefer buf.deinit();
 
     if (m.is_async) {
         try buf.appendSlice("async ");
     }
-    try buf.writer().print("{s}(", .{m.name.items});
+    try buf.print("{s}(", .{m.name.items});
     var first: bool = true;
     for (m.args.items()) |a| {
         if (!first) try buf.appendSlice(", ");
         first = false;
         try appendDTypeFull(&buf, a.dtype);
-        try buf.writer().print(" {s}", .{a.name.items});
+        try buf.print(" {s}", .{a.name.items});
     }
     try buf.append(')');
     try buf.append(' ');
@@ -10300,7 +10363,7 @@ fn makeGenericTypeInsertText(allocator: Allocator, name: []const u8, detail_opt:
     if (close_idx <= open_opt + 1) return null;
 
     const params = std.mem.trim(u8, det[open_opt + 1 .. close_idx], " \t\r\n");
-    var buf = std.ArrayList(u8).init(allocator);
+    var buf = ArrayList(u8).init(allocator);
     errdefer buf.deinit();
     try buf.appendSlice(name);
     try buf.append('<');
@@ -10310,7 +10373,7 @@ fn makeGenericTypeInsertText(allocator: Allocator, name: []const u8, detail_opt:
 }
 
 test "fls hover: signatures include custom return types" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -10340,7 +10403,7 @@ test "fls hover: signatures include custom return types" {
 }
 
 test "fls index: locals are indexed inside fun bodies" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -10374,7 +10437,7 @@ test "fls index: locals are indexed inside fun bodies" {
 }
 
 test "fls index: generic locals are indexed" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -10402,7 +10465,7 @@ test "fls index: generic locals are indexed" {
 }
 
 test "fls index: let locals infer types" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -10438,7 +10501,7 @@ test "fls index: let locals infer types" {
 }
 
 test "fls index: let locals inferred in token-only index" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -10473,7 +10536,7 @@ test "fls index: let locals inferred in token-only index" {
 }
 
 test "fls index: let uses prior let in expression" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -10498,7 +10561,7 @@ test "fls index: let uses prior let in expression" {
 }
 
 test "fls index: let from member access" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -10526,7 +10589,7 @@ test "fls index: let from member access" {
 }
 
 test "fls index: generic function signature includes params" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -10550,7 +10613,7 @@ test "fls index: generic function signature includes params" {
 }
 
 test "fls index: variadic function signature includes ellipsis" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -10591,7 +10654,7 @@ test "fls completion: generic insert text helper" {
 }
 
 test "fls index: impl methods include self, params, locals" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -10640,7 +10703,7 @@ fn trimRightCR(s: []const u8) []const u8 {
     return s;
 }
 
-fn appendDocCommentAboveLine(allocator: Allocator, out: *std.ArrayList(u8), text: []const u8, decl_line: i64) !bool {
+fn appendDocCommentAboveLine(allocator: Allocator, out: *ArrayList(u8), text: []const u8, decl_line: i64) !bool {
     // Collect contiguous `//...` lines immediately above `decl_line`.
     // Stop on the first blank or non-comment line.
     if (decl_line <= 0) return false;
@@ -10649,7 +10712,7 @@ fn appendDocCommentAboveLine(allocator: Allocator, out: *std.ArrayList(u8), text
     var cur_start: usize = decl_start;
     if (cur_start == 0) return false;
 
-    var lines = std.ArrayList([]const u8).init(allocator);
+    var lines = ArrayList([]const u8).init(allocator);
     defer lines.deinit();
 
     while (cur_start > 0) {
@@ -10682,7 +10745,7 @@ fn appendDocCommentAboveLine(allocator: Allocator, out: *std.ArrayList(u8), text
     var i: isize = @intCast(lines.items.len);
     while (i > 0) : (i -= 1) {
         const l = lines.items[@intCast(i - 1)];
-        try out.writer().print("{s}\n", .{l});
+        try out.print("{s}\n", .{l});
     }
     try out.appendSlice("\n");
     return true;
@@ -10802,7 +10865,7 @@ fn buildSignatureFromTokens(
 
     var after_name_i = nextNonTrivialToken(tokens, name_i + 1) orelse return .{ .detail = null, .return_type = null };
 
-    var name_buf = std.ArrayList(u8).init(allocator);
+    var name_buf = ArrayList(u8).init(allocator);
     errdefer name_buf.deinit();
     try name_buf.appendSlice(tokenString(tokens[name_i]));
 
@@ -10811,7 +10874,7 @@ fn buildSignatureFromTokens(
         var depth: i64 = 0;
         var i: usize = after_name_i;
         var first_param = true;
-        var params_buf = std.ArrayList(u8).init(allocator);
+        var params_buf = ArrayList(u8).init(allocator);
         defer params_buf.deinit();
 
         while (i < tokens.len) : (i += 1) {
@@ -10861,7 +10924,7 @@ fn buildSignatureFromTokens(
     }
     if (rparen_i == null) return .{ .detail = null, .return_type = null };
 
-    var buf = std.ArrayList(u8).init(allocator);
+    var buf = ArrayList(u8).init(allocator);
     errdefer buf.deinit();
 
     const is_async_decl = blk: {
@@ -10879,9 +10942,9 @@ fn buildSignatureFromTokens(
     }
 
     if (include_fun_prefix) {
-        try buf.writer().print("fun {s}(", .{name_buf.items});
+        try buf.print("fun {s}(", .{name_buf.items});
     } else {
-        try buf.writer().print("{s}(", .{name_buf.items});
+        try buf.print("{s}(", .{name_buf.items});
     }
 
     const parsed = struct {
@@ -10891,7 +10954,7 @@ fn buildSignatureFromTokens(
             return false;
         }
 
-        fn appendGenericSuffix(out_buf: *std.ArrayList(u8), all_tokens: []const token.Token, start_i: usize) !usize {
+        fn appendGenericSuffix(out_buf: *ArrayList(u8), all_tokens: []const token.Token, start_i: usize) !usize {
             if (start_i >= all_tokens.len) return start_i;
             if (!isPunctChar(all_tokens[start_i], '<')) return start_i;
 
@@ -10931,7 +10994,7 @@ fn buildSignatureFromTokens(
             return i;
         }
 
-        fn appendPointerSuffix(out_buf: *std.ArrayList(u8), all_tokens: []const token.Token, start_i: usize) !usize {
+        fn appendPointerSuffix(out_buf: *ArrayList(u8), all_tokens: []const token.Token, start_i: usize) !usize {
             var i = start_i;
             while (i < all_tokens.len and isStarToken(all_tokens[i])) : (i += 1) {
                 try out_buf.append('*');
@@ -10973,7 +11036,7 @@ fn buildSignatureFromTokens(
         }
         const ptype_raw = tokenString(pt);
         const ptype = allocator.dupe(u8, ptype_raw) catch ptype_raw;
-        var ptype_buf = std.ArrayList(u8).init(allocator);
+        var ptype_buf = ArrayList(u8).init(allocator);
         defer ptype_buf.deinit();
         try ptype_buf.appendSlice(ptype);
         var after_type_i = nextNonTrivialToken(tokens, pi + 1) orelse break;
@@ -10989,7 +11052,7 @@ fn buildSignatureFromTokens(
         const pname = allocator.dupe(u8, pname_raw) catch pname_raw;
         if (!first) try buf.appendSlice(", ");
         first = false;
-        try buf.writer().print("{s} {s}", .{ ptype_buf.items, pname });
+        try buf.print("{s} {s}", .{ ptype_buf.items, pname });
         pi = pname_i + 1;
     }
 
@@ -11004,7 +11067,7 @@ fn buildSignatureFromTokens(
             const rts_raw = tokenString(rt);
             const rts = allocator.dupe(u8, rts_raw) catch rts_raw;
 
-            var rt_buf = std.ArrayList(u8).init(allocator);
+            var rt_buf = ArrayList(u8).init(allocator);
             errdefer rt_buf.deinit();
             try rt_buf.appendSlice(rts);
 
@@ -11017,14 +11080,14 @@ fn buildSignatureFromTokens(
                 try rt_buf.append('*');
             }
             rtype_owned = try rt_buf.toOwnedSlice();
-            try buf.writer().print(" {s}", .{rtype_owned.?});
+            try buf.print(" {s}", .{rtype_owned.?});
         }
     }
 
     return .{ .detail = try buf.toOwnedSlice(), .return_type = rtype_owned };
 }
 
-fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite), tokens: []const token.Token) !void {
+fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite), tokens: []const token.Token) !void {
     var brace_depth: i64 = 0;
     var paren_depth: i64 = 0;
 
@@ -11041,7 +11104,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
     const PendingBodyKind = enum { none, fun_decl, impl_method };
 
     var pending_body: PendingBodyKind = .none;
-    var pending_params = std.ArrayList(ParamLite).init(allocator);
+    var pending_params = ArrayList(ParamLite).init(allocator);
     defer pending_params.deinit();
     var pending_impl_owner: ?[]const u8 = null;
     var pending_is_variadic: bool = false;
@@ -11072,7 +11135,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
     }.call;
 
     const resetPendingBody = struct {
-        fn call(kind: *PendingBodyKind, params: *std.ArrayList(ParamLite), owner: *?[]const u8, is_variadic: *bool) void {
+        fn call(kind: *PendingBodyKind, params: *ArrayList(ParamLite), owner: *?[]const u8, is_variadic: *bool) void {
             kind.* = .none;
             params.clearRetainingCapacity();
             owner.* = null;
@@ -11482,11 +11545,11 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                     var trimmed = std.mem.trim(u8, type_name, " \t\r\n");
                     var n = levels;
                     while (n > 0) : (n -= 1) {
-                        trimmed = std.mem.trimRight(u8, trimmed, " \t\r\n");
+                        trimmed = std.mem.trimEnd(u8, trimmed, " \t\r\n");
                         if (trimmed.len == 0 or trimmed[trimmed.len - 1] != '*') return null;
                         trimmed = trimmed[0 .. trimmed.len - 1];
                     }
-                    trimmed = std.mem.trimRight(u8, trimmed, " \t\r\n");
+                    trimmed = std.mem.trimEnd(u8, trimmed, " \t\r\n");
                     if (trimmed.len == 0) return null;
                     return trimmed;
                 }
@@ -11519,7 +11582,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                     return std.ascii.isAlphanumeric(ch) or ch == '_';
                 }
 
-                fn splitTopLevelCsv(allocator_a: Allocator, text: []const u8, out_list: *std.ArrayList([]const u8)) void {
+                fn splitTopLevelCsv(allocator_a: Allocator, text: []const u8, out_list: *ArrayList([]const u8)) void {
                     var csv_angle_depth: i64 = 0;
                     var csv_paren_depth: i64 = 0;
                     var csv_brack_depth: i64 = 0;
@@ -11565,7 +11628,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                     }
                 }
 
-                fn parseFunctionGenericParams(allocator_a: Allocator, detail: []const u8, out_params: *std.ArrayList([]const u8)) void {
+                fn parseFunctionGenericParams(allocator_a: Allocator, detail: []const u8, out_params: *ArrayList([]const u8)) void {
                     const lparen = std.mem.indexOfScalar(u8, detail, '(') orelse return;
 
                     var depth: i64 = 0;
@@ -11589,7 +11652,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                     }
                     if (lt_i == null or gt_i == null or gt_i.? <= lt_i.?) return;
 
-                    var raw_params = std.ArrayList([]const u8).init(allocator_a);
+                    var raw_params = ArrayList([]const u8).init(allocator_a);
                     defer raw_params.deinit();
                     splitTopLevelCsv(allocator_a, detail[lt_i.? + 1 .. gt_i.?], &raw_params);
                     for (raw_params.items) |rp| {
@@ -11610,7 +11673,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                     }
                 }
 
-                fn parseFunctionParamTypes(allocator_a: Allocator, detail: []const u8, out_types: *std.ArrayList([]const u8)) void {
+                fn parseFunctionParamTypes(allocator_a: Allocator, detail: []const u8, out_types: *ArrayList([]const u8)) void {
                     const lparen = std.mem.indexOfScalar(u8, detail, '(') orelse return;
                     var depth: i64 = 0;
                     var rparen: ?usize = null;
@@ -11628,7 +11691,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                     }
                     if (rparen == null or rparen.? <= lparen) return;
 
-                    var raw_params = std.ArrayList([]const u8).init(allocator_a);
+                    var raw_params = ArrayList([]const u8).init(allocator_a);
                     defer raw_params.deinit();
                     splitTopLevelCsv(allocator_a, detail[lparen + 1 .. rparen.?], &raw_params);
 
@@ -11657,13 +11720,13 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                     }
                 }
 
-                fn parseCallExplicitTypeArgs(allocator_a: Allocator, tokens_a: []const token.Token, l_angle_i: usize, out_args: *std.ArrayList([]const u8)) void {
+                fn parseCallExplicitTypeArgs(allocator_a: Allocator, tokens_a: []const token.Token, l_angle_i: usize, out_args: *ArrayList([]const u8)) void {
                     var depth: i64 = 0;
-                    var cur = std.ArrayList(u8).init(allocator_a);
+                    var cur = ArrayList(u8).init(allocator_a);
                     defer cur.deinit();
 
                     const flush = struct {
-                        fn call(allocator_b: Allocator, cur_buf: *std.ArrayList(u8), out_buf: *std.ArrayList([]const u8)) void {
+                        fn call(allocator_b: Allocator, cur_buf: *ArrayList(u8), out_buf: *ArrayList([]const u8)) void {
                             const seg = std.mem.trim(u8, cur_buf.items, " \t\r\n");
                             if (seg.len != 0) {
                                 out_buf.append(allocator_b.dupe(u8, seg) catch seg) catch {};
@@ -11718,7 +11781,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                     return .{ .start = s, .end = e };
                 }
 
-                fn collectCallArgRanges(tokens_a: []const token.Token, lparen_i: usize, rparen_i: usize, out_ranges: *std.ArrayList(CallArgRange)) void {
+                fn collectCallArgRanges(tokens_a: []const token.Token, lparen_i: usize, rparen_i: usize, out_ranges: *ArrayList(CallArgRange)) void {
                     var seg_start = nextNonTrivialToken(tokens_a, lparen_i + 1) orelse return;
 
                     var p_depth: i64 = 0;
@@ -11779,7 +11842,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                     }
                 }
 
-                fn collectInitArgRanges(tokens_a: []const token.Token, lbrace_i: usize, rbrace_i: usize, out_ranges: *std.ArrayList(CallArgRange)) void {
+                fn collectInitArgRanges(tokens_a: []const token.Token, lbrace_i: usize, rbrace_i: usize, out_ranges: *ArrayList(CallArgRange)) void {
                     var seg_start = nextNonTrivialToken(tokens_a, lbrace_i + 1) orelse return;
 
                     var p_depth: i64 = 0;
@@ -11855,13 +11918,13 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 }
 
                 fn countPtrRefSuffix(type_name_raw: []const u8) usize {
-                    var tname = std.mem.trimRight(u8, type_name_raw, " \t\r\n");
+                    var tname = std.mem.trimEnd(u8, type_name_raw, " \t\r\n");
                     var n: usize = 0;
                     while (tname.len != 0) {
                         const ch = tname[tname.len - 1];
                         if (ch == '*' or ch == '&') {
                             n += 1;
-                            tname = std.mem.trimRight(u8, tname[0 .. tname.len - 1], " \t\r\n");
+                            tname = std.mem.trimEnd(u8, tname[0 .. tname.len - 1], " \t\r\n");
                             continue;
                         }
                         break;
@@ -11925,8 +11988,8 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                     if (p_ptr != 0) {
                         const a_ptr = countPtrRefSuffix(arg_type);
                         if (a_ptr >= p_ptr and arg_type.len >= p_ptr and param_type.len >= p_ptr) {
-                            const p_core = std.mem.trimRight(u8, param_type[0 .. param_type.len - p_ptr], " \t\r\n");
-                            const a_core = std.mem.trimRight(u8, arg_type[0 .. arg_type.len - p_ptr], " \t\r\n");
+                            const p_core = std.mem.trimEnd(u8, param_type[0 .. param_type.len - p_ptr], " \t\r\n");
+                            const a_core = std.mem.trimEnd(u8, arg_type[0 .. arg_type.len - p_ptr], " \t\r\n");
                             inferGenericBindings(allocator_a, p_core, a_core, generic_params, map);
                             return;
                         }
@@ -11936,9 +11999,9 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                         if (parseGenericCore(arg_type)) |ag| {
                             if (!std.mem.eql(u8, pg.base, ag.base)) return;
 
-                            var p_args = std.ArrayList([]const u8).init(allocator_a);
+                            var p_args = ArrayList([]const u8).init(allocator_a);
                             defer p_args.deinit();
-                            var a_args = std.ArrayList([]const u8).init(allocator_a);
+                            var a_args = ArrayList([]const u8).init(allocator_a);
                             defer a_args.deinit();
 
                             splitTopLevelCsv(allocator_a, pg.inner, &p_args);
@@ -12039,7 +12102,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 fn buildSpecializedTypeName(allocator_a: Allocator, base_name: []const u8, args: []const []const u8) []const u8 {
                     if (args.len == 0) return allocator_a.dupe(u8, base_name) catch base_name;
 
-                    var out_buf = std.ArrayList(u8).init(allocator_a);
+                    var out_buf = ArrayList(u8).init(allocator_a);
                     defer out_buf.deinit();
 
                     out_buf.appendSlice(base_name) catch return allocator_a.dupe(u8, base_name) catch base_name;
@@ -12072,14 +12135,14 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                     syms: []const SymbolLite,
                 ) ?[]const u8 {
                     if (explicit_generic_start_i) |gi| {
-                        var explicit_args = std.ArrayList([]const u8).init(allocator_a);
+                        var explicit_args = ArrayList([]const u8).init(allocator_a);
                         defer explicit_args.deinit();
                         parseCallExplicitTypeArgs(allocator_a, tokens_a, gi, &explicit_args);
                         if (explicit_args.items.len == 0) return allocator_a.dupe(u8, ident_name) catch ident_name;
                         return buildSpecializedTypeName(allocator_a, ident_name, explicit_args.items);
                     }
 
-                    var fields = std.ArrayList(CompoundFieldInfo).init(allocator_a);
+                    var fields = ArrayList(CompoundFieldInfo).init(allocator_a);
                     defer fields.deinit();
 
                     var owner_template: ?[]const u8 = null;
@@ -12107,7 +12170,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                     if (owner_template == null) return allocator_a.dupe(u8, ident_name) catch ident_name;
                     const generic_core = parseGenericCore(owner_template.?) orelse return allocator_a.dupe(u8, ident_name) catch ident_name;
 
-                    var generic_params = std.ArrayList([]const u8).init(allocator_a);
+                    var generic_params = ArrayList([]const u8).init(allocator_a);
                     defer generic_params.deinit();
                     splitTopLevelCsv(allocator_a, generic_core.inner, &generic_params);
                     if (generic_params.items.len == 0) return allocator_a.dupe(u8, ident_name) catch ident_name;
@@ -12115,7 +12178,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                     var bindings = std.StringHashMap([]const u8).init(allocator_a);
                     defer bindings.deinit();
 
-                    var arg_ranges = std.ArrayList(CallArgRange).init(allocator_a);
+                    var arg_ranges = ArrayList(CallArgRange).init(allocator_a);
                     defer arg_ranges.deinit();
                     collectInitArgRanges(tokens_a, lbrace_i, rbrace_i, &arg_ranges);
 
@@ -12139,7 +12202,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                         inferGenericBindings(allocator_a, target_field_type.?, arg_t, generic_params.items, &bindings);
                     }
 
-                    var specialized_args = std.ArrayList([]const u8).init(allocator_a);
+                    var specialized_args = ArrayList([]const u8).init(allocator_a);
                     defer specialized_args.deinit();
 
                     var resolved_any = false;
@@ -12157,7 +12220,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 }
 
                 fn substituteTypeParams(allocator_a: Allocator, type_name: []const u8, map: *const std.StringHashMap([]const u8)) []const u8 {
-                    var out_buf = std.ArrayList(u8).init(allocator_a);
+                    var out_buf = ArrayList(u8).init(allocator_a);
                     defer out_buf.deinit();
 
                     var changed = false;
@@ -12210,7 +12273,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                     const base_rt = fn_sym.value_type orelse return null;
                     const sig_detail = fn_sym.detail orelse return base_rt;
 
-                    var generic_params = std.ArrayList([]const u8).init(allocator_a);
+                    var generic_params = ArrayList([]const u8).init(allocator_a);
                     defer generic_params.deinit();
                     parseFunctionGenericParams(allocator_a, sig_detail, &generic_params);
                     if (generic_params.items.len == 0) return base_rt;
@@ -12219,7 +12282,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                     defer bindings.deinit();
 
                     if (explicit_generic_start_i) |gi| {
-                        var explicit_args = std.ArrayList([]const u8).init(allocator_a);
+                        var explicit_args = ArrayList([]const u8).init(allocator_a);
                         defer explicit_args.deinit();
                         parseCallExplicitTypeArgs(allocator_a, tokens_a, gi, &explicit_args);
                         const map_n = @min(explicit_args.items.len, generic_params.items.len);
@@ -12229,11 +12292,11 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                         }
                     }
 
-                    var param_types = std.ArrayList([]const u8).init(allocator_a);
+                    var param_types = ArrayList([]const u8).init(allocator_a);
                     defer param_types.deinit();
                     parseFunctionParamTypes(allocator_a, sig_detail, &param_types);
 
-                    var arg_ranges = std.ArrayList(CallArgRange).init(allocator_a);
+                    var arg_ranges = ArrayList(CallArgRange).init(allocator_a);
                     defer arg_ranges.deinit();
                     collectCallArgRanges(tokens_a, lparen_i, rparen_i, &arg_ranges);
 
@@ -12612,7 +12675,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
             const appendArraySuffix = struct {
                 fn call(a: Allocator, base: []const u8, depth: usize) []const u8 {
                     if (depth == 0) return a.dupe(u8, base) catch base;
-                    var buf = std.ArrayList(u8).init(a);
+                    var buf = ArrayList(u8).init(a);
                     buf.appendSlice(base) catch return base;
                     var d: usize = 0;
                     while (d < depth) : (d += 1) buf.appendSlice("[]") catch return base;
@@ -12702,7 +12765,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
     }.call;
 
     const parseParamsAfterLParen = struct {
-        fn call(allocator_: Allocator, tokens_: []const token.Token, lparen_i: usize, params: *std.ArrayList(ParamLite), is_variadic: *bool) void {
+        fn call(allocator_: Allocator, tokens_: []const token.Token, lparen_i: usize, params: *ArrayList(ParamLite), is_variadic: *bool) void {
             // Parse `Type name` pairs until the matching ')'. Best-effort; ignore failures.
             var depth: i64 = 0;
             var rparen_i: ?usize = null;
@@ -12741,7 +12804,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 }
                 const ptype_base = tokenString(pt);
 
-                var ptype_buf = std.ArrayList(u8).init(allocator_);
+                var ptype_buf = ArrayList(u8).init(allocator_);
                 defer ptype_buf.deinit();
                 ptype_buf.appendSlice(ptype_base) catch {};
 
@@ -12778,7 +12841,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 }
 
                 // Allow pointer/reference markers between type and name: `Type* name` / `Type & name`.
-                var markers = std.ArrayList(u8).init(allocator_);
+                var markers = ArrayList(u8).init(allocator_);
                 defer markers.deinit();
                 while (name_i < tokens_.len and (isPunctChar(tokens_[name_i], '*') or isPunctChar(tokens_[name_i], '&'))) {
                     if (isPunctChar(tokens_[name_i], '*')) markers.append('*') catch {};
@@ -12883,9 +12946,9 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                     .container_type = null,
                     .value_type = try allocator.dupe(u8, pinfo.dtype_display),
                     .detail = blk: {
-                        var det_buf = std.ArrayList(u8).init(allocator);
+                        var det_buf = ArrayList(u8).init(allocator);
                         defer det_buf.deinit();
-                        try det_buf.writer().print("{s} {s}", .{ pinfo.dtype_display, pinfo.name });
+                        try det_buf.print("{s} {s}", .{ pinfo.dtype_display, pinfo.name });
                         break :blk try allocator.dupe(u8, det_buf.items);
                     },
                 });
@@ -12982,7 +13045,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
 
             // Best-effort field indexing inside `compound Name { Type field; ... }`.
             // This is lexer-driven to stay robust while typing.
-            var owner_name_buf = std.ArrayList(u8).init(allocator);
+            var owner_name_buf = ArrayList(u8).init(allocator);
             defer owner_name_buf.deinit();
             owner_name_buf.appendSlice(name) catch {};
 
@@ -13033,7 +13096,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                         if (!isTypeToken(tk)) continue;
 
                         const ftype_raw = tokenString(tk);
-                        var ftype_buf = std.ArrayList(u8).init(allocator);
+                        var ftype_buf = ArrayList(u8).init(allocator);
                         defer ftype_buf.deinit();
                         ftype_buf.appendSlice(ftype_raw) catch {};
 
@@ -13068,7 +13131,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                             }
                         }
 
-                        var markers = std.ArrayList(u8).init(allocator);
+                        var markers = ArrayList(u8).init(allocator);
                         defer markers.deinit();
                         while (field_name_i < tokens.len and (isPunctChar(tokens[field_name_i], '*') or isPunctChar(tokens[field_name_i], '&'))) {
                             if (isPunctChar(tokens[field_name_i], '*')) try markers.append('*');
@@ -13268,7 +13331,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
             }
 
             const owner_base = tokenString(tokens[type_i]);
-            var owner_buf = std.ArrayList(u8).init(allocator);
+            var owner_buf = ArrayList(u8).init(allocator);
             defer owner_buf.deinit();
             owner_buf.appendSlice(owner_base) catch {};
 
@@ -13445,9 +13508,9 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                     .container_type = null,
                     .value_type = try allocator.dupe(u8, "num"),
                     .detail = blk: {
-                        var det_buf = std.ArrayList(u8).init(allocator);
+                        var det_buf = ArrayList(u8).init(allocator);
                         defer det_buf.deinit();
-                        try det_buf.writer().print("num {s}", .{idx_name});
+                        try det_buf.print("num {s}", .{idx_name});
                         break :blk try allocator.dupe(u8, det_buf.items);
                     },
                 });
@@ -13459,9 +13522,9 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
             const item_r = rangeFromTokenPos(tokens[item_name_i].pos);
             const item_vt = if (item_type) |it| (allocator.dupe(u8, it) catch it) else null;
             const item_detail = if (item_type) |it| blk: {
-                var det_buf = std.ArrayList(u8).init(allocator);
+                var det_buf = ArrayList(u8).init(allocator);
                 defer det_buf.deinit();
-                try det_buf.writer().print("{s} {s}", .{ it, item_name });
+                try det_buf.print("{s} {s}", .{ it, item_name });
                 break :blk try allocator.dupe(u8, det_buf.items);
             } else null;
 
@@ -13513,9 +13576,9 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
             const inferred = inferExprTypeFromTokens(allocator, tokens, after_name_i + 1, end_i, &locals_type_map, &globals_type_map, out.items);
             const value_type = if (inferred) |tname| (allocator.dupe(u8, tname) catch tname) else null;
             const detail = if (inferred) |tname| blk: {
-                var det_buf = std.ArrayList(u8).init(allocator);
+                var det_buf = ArrayList(u8).init(allocator);
                 defer det_buf.deinit();
-                try det_buf.writer().print("{s} {s}", .{ tname, vname });
+                try det_buf.print("{s} {s}", .{ tname, vname });
                 break :blk try allocator.dupe(u8, det_buf.items);
             } else null;
 
@@ -13542,7 +13605,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
             }
 
             const vtype_base_raw = tokenString(t);
-            var vtype_buf = std.ArrayList(u8).init(allocator);
+            var vtype_buf = ArrayList(u8).init(allocator);
             defer vtype_buf.deinit();
             vtype_buf.appendSlice(vtype_base_raw) catch {};
 
@@ -13585,7 +13648,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 } else break;
             }
 
-            var markers = std.ArrayList(u8).init(allocator);
+            var markers = ArrayList(u8).init(allocator);
             defer markers.deinit();
             while (name_i < tokens.len and (isPunctChar(tokens[name_i], '*') or isPunctChar(tokens[name_i], '&'))) {
                 if (isPunctChar(tokens[name_i], '*')) try markers.append('*');
@@ -13614,9 +13677,9 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 const vname = allocator.dupe(u8, vname_raw) catch vname_raw;
                 const r = rangeFromTokenPos(tokens[cur_name_i].pos);
 
-                var det_buf = std.ArrayList(u8).init(allocator);
+                var det_buf = ArrayList(u8).init(allocator);
                 defer det_buf.deinit();
-                try det_buf.writer().print("{s} {s}", .{ vtype_display, vname });
+                try det_buf.print("{s} {s}", .{ vtype_display, vname });
 
                 try out.append(.{
                     .name = try allocator.dupe(u8, vname),
@@ -13657,7 +13720,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
             }
 
             const vtype_raw = tokenString(t);
-            var vtype_buf = std.ArrayList(u8).init(allocator);
+            var vtype_buf = ArrayList(u8).init(allocator);
             defer vtype_buf.deinit();
             vtype_buf.appendSlice(vtype_raw) catch {};
 
@@ -13701,7 +13764,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
                 } else break;
             }
 
-            var markers = std.ArrayList(u8).init(allocator);
+            var markers = ArrayList(u8).init(allocator);
             defer markers.deinit();
             while (name_i < tokens.len and (isPunctChar(tokens[name_i], '*') or isPunctChar(tokens[name_i], '&'))) {
                 if (isPunctChar(tokens[name_i], '*')) try markers.append('*');
@@ -13721,9 +13784,9 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
             const vname = allocator.dupe(u8, vname_raw) catch vname_raw;
             const r = rangeFromTokenPos(tokens[name_i].pos);
 
-            var det_buf = std.ArrayList(u8).init(allocator);
+            var det_buf = ArrayList(u8).init(allocator);
             defer det_buf.deinit();
-            try det_buf.writer().print("{s} {s}", .{ vtype, vname });
+            try det_buf.print("{s} {s}", .{ vtype, vname });
 
             try out.append(.{
                 .name = try allocator.dupe(u8, vname),
@@ -13744,7 +13807,7 @@ fn collectSymbolsFromTokens(allocator: Allocator, out: *std.ArrayList(SymbolLite
     }
 }
 
-fn collectSymbolsFromTopLevel(allocator: Allocator, out: *std.ArrayList(SymbolLite), n: ast.Node) !void {
+fn collectSymbolsFromTopLevel(allocator: Allocator, out: *ArrayList(SymbolLite), n: ast.Node) !void {
     if (n.node_variant == null) return;
     switch (n.type) {
         .Variable => {
@@ -13752,12 +13815,12 @@ fn collectSymbolsFromTopLevel(allocator: Allocator, out: *std.ArrayList(SymbolLi
             const name = v.name.items;
             const r = if (n.pos) |p| rangeFromTokenPos(p) else return;
 
-            var detail_buf = std.ArrayList(u8).init(allocator);
+            var detail_buf = ArrayList(u8).init(allocator);
             errdefer detail_buf.deinit();
             try appendDTypeFull(&detail_buf, v.type);
-            try detail_buf.writer().print(" {s}", .{name});
+            try detail_buf.print(" {s}", .{name});
 
-            var vtype_buf = std.ArrayList(u8).init(allocator);
+            var vtype_buf = ArrayList(u8).init(allocator);
             defer vtype_buf.deinit();
             try appendDTypeFull(&vtype_buf, v.type);
 
@@ -13799,9 +13862,9 @@ fn collectSymbolsFromTopLevel(allocator: Allocator, out: *std.ArrayList(SymbolLi
             const c = n.node_variant.?.compound;
             const name = c.name.items;
             const r = if (n.pos) |p| rangeFromTokenPos(p) else Range{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 0 } };
-            var detail_buf = std.ArrayList(u8).init(allocator);
+            var detail_buf = ArrayList(u8).init(allocator);
             errdefer detail_buf.deinit();
-            try detail_buf.writer().print("compound {s}", .{name});
+            try detail_buf.print("compound {s}", .{name});
             if (c.type_params) |params| {
                 try detail_buf.append('<');
                 for (params.items(), 0..) |p, i| {
@@ -13825,9 +13888,9 @@ fn collectSymbolsFromTopLevel(allocator: Allocator, out: *std.ArrayList(SymbolLi
             const q = n.node_variant.?.quirk;
             const name = q.name.items;
             const r = if (n.pos) |p| rangeFromTokenPos(p) else Range{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 0 } };
-            var detail_buf = std.ArrayList(u8).init(allocator);
+            var detail_buf = ArrayList(u8).init(allocator);
             errdefer detail_buf.deinit();
-            try detail_buf.writer().print("quirk {s}", .{name});
+            try detail_buf.print("quirk {s}", .{name});
             try out.append(.{
                 .name = try allocator.dupe(u8, name),
                 .kind = .interface,
@@ -13849,12 +13912,12 @@ fn collectSymbolsFromTopLevel(allocator: Allocator, out: *std.ArrayList(SymbolLi
 }
 
 fn formatFunctionSignature(allocator: Allocator, name: []const u8, fnv: anytype) ![]u8 {
-    var buf = std.ArrayList(u8).init(allocator);
+    var buf = ArrayList(u8).init(allocator);
     errdefer buf.deinit();
     if (@hasField(@TypeOf(fnv), "is_async") and fnv.is_async) {
         try buf.appendSlice("async ");
     }
-    try buf.writer().print("fun {s}", .{name});
+    try buf.print("fun {s}", .{name});
 
     if (@hasField(@TypeOf(fnv), "type_params")) {
         if (fnv.type_params) |params| {
@@ -13879,7 +13942,7 @@ fn formatFunctionSignature(allocator: Allocator, name: []const u8, fnv: anytype)
             if (!first) try buf.appendSlice(", ");
             first = false;
             try appendDTypeFull(&buf, dt);
-            try buf.writer().print(" {s}", .{arg_name});
+            try buf.print(" {s}", .{arg_name});
         }
     }
     if (fnv.is_variadic) {
@@ -13894,19 +13957,19 @@ fn formatFunctionSignature(allocator: Allocator, name: []const u8, fnv: anytype)
     return buf.toOwnedSlice();
 }
 
-fn collectLocalVars(allocator: Allocator, out: *std.ArrayList(SymbolLite), n: *ast.Node, container_fn_range: Range) Allocator.Error!void {
+fn collectLocalVars(allocator: Allocator, out: *ArrayList(SymbolLite), n: *ast.Node, container_fn_range: Range) Allocator.Error!void {
     if (n.node_variant == null) return;
     switch (n.type) {
         .Variable => {
             const v = n.node_variant.?.variable;
             const name = v.name.items;
             const r = if (n.pos) |p| rangeFromTokenPos(p) else return;
-            var detail_buf = std.ArrayList(u8).init(allocator);
+            var detail_buf = ArrayList(u8).init(allocator);
             errdefer detail_buf.deinit();
             try appendDTypeFull(&detail_buf, v.type);
-            try detail_buf.writer().print(" {s}", .{name});
+            try detail_buf.print(" {s}", .{name});
 
-            var vtype_buf = std.ArrayList(u8).init(allocator);
+            var vtype_buf = ArrayList(u8).init(allocator);
             defer vtype_buf.deinit();
             try appendDTypeFull(&vtype_buf, v.type);
 
@@ -13940,7 +14003,7 @@ fn collectLocalVars(allocator: Allocator, out: *std.ArrayList(SymbolLite), n: *a
     }
 }
 
-fn collectLocalVarsFromStatement(allocator: Allocator, out: *std.ArrayList(SymbolLite), n: *ast.Node, container_fn_range: Range) Allocator.Error!void {
+fn collectLocalVarsFromStatement(allocator: Allocator, out: *ArrayList(SymbolLite), n: *ast.Node, container_fn_range: Range) Allocator.Error!void {
     if (n.node_variant == null) return;
     switch (n.type) {
         .StatementReturn => try collectLocalVars(allocator, out, n.node_variant.?.statement.return_stmt, container_fn_range),
@@ -13986,7 +14049,7 @@ fn collectLocalVarsFromStatement(allocator: Allocator, out: *std.ArrayList(Symbo
     }
 }
 
-fn collectLocalVarsFromExpression(allocator: Allocator, out: *std.ArrayList(SymbolLite), n: *ast.Node, container_fn_range: Range) Allocator.Error!void {
+fn collectLocalVarsFromExpression(allocator: Allocator, out: *ArrayList(SymbolLite), n: *ast.Node, container_fn_range: Range) Allocator.Error!void {
     if (n.node_variant == null) return;
     switch (n.node_variant.?) {
         .exp => |e| {
@@ -14099,7 +14162,7 @@ fn isDefaultLibraryTypeName(name: []const u8) bool {
 }
 
 fn buildSemanticTokens(allocator: Allocator, idx: *const Index) ![]u32 {
-    var data = std.ArrayList(u32).init(allocator);
+    var data = ArrayList(u32).init(allocator);
     errdefer data.deinit();
 
     var last_line: i64 = 0;

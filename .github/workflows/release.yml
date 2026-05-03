@@ -36,7 +36,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'release'
     strategy:
       matrix:
-        zig_version: [0.14.0]
+        zig_version: [0.16.0]
         target:
           - x86_64-linux-gnu
           - x86_64-macos
@@ -94,7 +94,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'release'
     strategy:
       matrix:
-        zig_version: [0.14.0]
+        zig_version: [0.16.0]
         target:
           - x86_64-windows-gnu
           - aarch64-windows-gnu

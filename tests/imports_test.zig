@@ -7,9 +7,9 @@ const codegen = @import("codegen");
 
 fn runTranspile(allocator: std.mem.Allocator, input_path: []const u8, input: []const u8) ![]const u8 {
     {
-        const file = try fs.cwd().createFile(input_path, .{ .read = true, .truncate = true });
-        defer file.close();
-        try file.writeAll(input);
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, input_path, .{ .read = true, .truncate = true });
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     var transpile_proc = try codegen.TranspileProcess.init(allocator, input_path, "_ignored.c", .{
@@ -91,7 +91,7 @@ test "std.io aliased import: print_fmt uses alias-prefixed helpers" {
 
     const out = try runTranspile(allocator, ifilepath, input);
     defer allocator.free(out);
-    fs.cwd().deleteFile(ifilepath) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 
     // format_impl and fmt_num must be prefixed with the alias
     try std.testing.expect(std.mem.indexOf(u8, out, "myio__format_impl") != null);
@@ -113,7 +113,7 @@ test "std.io aliased import: format uses alias-prefixed helpers" {
 
     const out = try runTranspile(allocator, ifilepath, input);
     defer allocator.free(out);
-    fs.cwd().deleteFile(ifilepath) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 
     try std.testing.expect(std.mem.indexOf(u8, out, "myio__format_impl") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "myio__fmt_num") != null);
@@ -127,16 +127,17 @@ test "user module imported under two aliases: stubs emitted for second alias" {
     const main_path = "alias_stub_main.fn";
 
     {
-        const hf = try fs.cwd().createFile(helper_path, .{});
-        defer hf.close();
-        try hf.writeAll(
+        const hf = try std.Io.Dir.cwd().createFile(std.testing.io, helper_path, .{});
+        defer hf.close(std.testing.io);
+        try hf.writeStreamingAll(
+            std.testing.io,
             "imp std.c.io;\n" ++
                 "pub fun say_hello() {\n" ++
                 "  printf(\"hello\\n\");\n" ++
                 "}\n",
         );
     }
-    defer fs.cwd().deleteFile(helper_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, helper_path) catch {};
 
     const main_input =
         "imp alias_stub_helper as a;\n" ++
@@ -146,7 +147,7 @@ test "user module imported under two aliases: stubs emitted for second alias" {
 
     const out = try runTranspile(allocator, main_path, main_input);
     defer allocator.free(out);
-    fs.cwd().deleteFile(main_path) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, main_path) catch {};
 
     // The module is emitted once under alias 'a'
     try std.testing.expect(std.mem.indexOf(u8, out, "a__say_hello") != null);
@@ -164,7 +165,7 @@ test "same module imported without alias uses bare function names" {
 
     const out = try runTranspile(allocator, ifilepath, input);
     defer allocator.free(out);
-    fs.cwd().deleteFile(ifilepath) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 
     // Bare names expected when no alias is used
     try std.testing.expect(std.mem.indexOf(u8, out, "format_impl") != null);

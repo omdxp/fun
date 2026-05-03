@@ -4,15 +4,20 @@ const LexProcess = @import("lexer").LexProcess;
 const token = @import("lexer").token;
 const codegen = @import("codegen");
 
+/// Compatibility shim: ArrayList with embedded allocator (old-style managed API).
+fn ArrayList(comptime T: type) type {
+    return std.array_list.Managed(T);
+}
+
 test "LexProcess initialization" {
     const ifilepath = "LexProcess_initialization.fn";
     const ofilepath = "LexProcess_initialization.c";
     // Mock input file
     {
-        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
-        defer file.close();
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
+        defer file.close(std.testing.io);
         const input = "dummy";
-        try file.writeAll(input);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     const allocator = std.testing.allocator;
@@ -29,8 +34,8 @@ test "LexProcess initialization" {
     try std.testing.expect(lex_proc.arg_str_buf == null);
 
     // Delete test files
-    try fs.cwd().deleteFile(ifilepath);
-    try fs.cwd().deleteFile(ofilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
 }
 
 test "LexProcess next_char" {
@@ -38,10 +43,10 @@ test "LexProcess next_char" {
     const ofilepath = "LexProcess_next_char.c";
     // Mock input file
     {
-        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
-        defer file.close();
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
+        defer file.close(std.testing.io);
         const input = "abc\n";
-        try file.writeAll(input);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     const allocator = std.testing.allocator;
@@ -58,8 +63,8 @@ test "LexProcess next_char" {
     try std.testing.expect(try lex_proc.next_char() == null);
 
     // Delete test files
-    try fs.cwd().deleteFile(ifilepath);
-    try fs.cwd().deleteFile(ofilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
 }
 
 test "LexProcess peek_char" {
@@ -67,10 +72,10 @@ test "LexProcess peek_char" {
     const ofilepath = "LexProcess_peek_char.c";
     // Mock input file
     {
-        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
-        defer file.close();
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
+        defer file.close(std.testing.io);
         const input = "abc";
-        try file.writeAll(input);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     const allocator = std.testing.allocator;
@@ -86,8 +91,8 @@ test "LexProcess peek_char" {
     try std.testing.expectEqual('b', (try lex_proc.peek_char()).?);
 
     // Delete test files
-    try fs.cwd().deleteFile(ifilepath);
-    try fs.cwd().deleteFile(ofilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
 }
 
 test "LexProcess push_char" {
@@ -95,10 +100,10 @@ test "LexProcess push_char" {
     const ofilepath = "LexProcess_push_char.c";
     // Mock input file
     {
-        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
-        defer file.close();
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
+        defer file.close(std.testing.io);
         const input = "abc";
-        try file.writeAll(input);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     const allocator = std.testing.allocator;
@@ -114,8 +119,8 @@ test "LexProcess push_char" {
     try std.testing.expectEqual('b', (try lex_proc.next_char()).?);
 
     // Delete test files
-    try fs.cwd().deleteFile(ifilepath);
-    try fs.cwd().deleteFile(ofilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
 }
 
 test "LexProcess comment" {
@@ -123,10 +128,10 @@ test "LexProcess comment" {
     const ofilepath = "LexProcess_comment.c";
     // Mock input file
     {
-        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
-        defer file.close();
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
+        defer file.close(std.testing.io);
         const input = "// This is a comment\n";
-        try file.writeAll(input);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     const allocator = std.testing.allocator;
@@ -142,8 +147,8 @@ test "LexProcess comment" {
     try std.testing.expectEqualStrings(" This is a comment", t.data.sval.items);
 
     // Delete test files
-    try fs.cwd().deleteFile(ifilepath);
-    try fs.cwd().deleteFile(ofilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
 }
 
 test "LexProcess string" {
@@ -151,10 +156,10 @@ test "LexProcess string" {
     const ofilepath = "LexProcess_string.c";
     // Mock input file
     {
-        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
-        defer file.close();
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
+        defer file.close(std.testing.io);
         const input = "\"Hello, World!\"";
-        try file.writeAll(input);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     const allocator = std.testing.allocator;
@@ -170,8 +175,8 @@ test "LexProcess string" {
     try std.testing.expectEqualStrings("Hello, World!", t.data.sval.items);
 
     // Delete test files
-    try fs.cwd().deleteFile(ifilepath);
-    try fs.cwd().deleteFile(ofilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
 }
 
 test "LexProcess number" {
@@ -179,10 +184,10 @@ test "LexProcess number" {
     const ofilepath = "LexProcess_number.c";
     // Mock input file
     {
-        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
-        defer file.close();
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
+        defer file.close(std.testing.io);
         const input = "12345";
-        try file.writeAll(input);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     const allocator = std.testing.allocator;
@@ -198,8 +203,8 @@ test "LexProcess number" {
     try std.testing.expectEqual(t.data.llnum, 12345);
 
     // Delete test files
-    try fs.cwd().deleteFile(ifilepath);
-    try fs.cwd().deleteFile(ofilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
 }
 
 test "LexProcess lex" {
@@ -207,10 +212,10 @@ test "LexProcess lex" {
     const ofilepath = "LexProcess_lex.c";
     // Mock input file
     {
-        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
-        defer file.close();
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
+        defer file.close(std.testing.io);
         const input = "123 + 456 // comment\n\"string\"";
-        try file.writeAll(input);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     const allocator = std.testing.allocator;
@@ -230,18 +235,18 @@ test "LexProcess lex" {
     try std.testing.expectEqual(transpile_proc.tokens.items()[4].type, .NewLine);
     try std.testing.expectEqual(transpile_proc.tokens.items()[5].type, .String);
     // Delete test files
-    try fs.cwd().deleteFile(ifilepath);
-    try fs.cwd().deleteFile(ofilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
 }
 
 test "LexProcess lexes multi-character operators" {
     const ifilepath = "LexProcess_multi_ops.fn";
     const ofilepath = "LexProcess_multi_ops.c";
     {
-        const file = try fs.cwd().createFile(ifilepath, .{ .read = true });
-        defer file.close();
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, ifilepath, .{ .read = true });
+        defer file.close(std.testing.io);
         const input = "1==2!=3<=4>=5&&6||7..8...9->10";
-        try file.writeAll(input);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     const allocator = std.testing.allocator;
@@ -257,7 +262,7 @@ test "LexProcess lexes multi-character operators" {
 
     // Expected token stream: N op N op N op N op N op N op N op N op N op N
     // Validate the operators in order.
-    var ops = std.ArrayList([]const u8).init(allocator);
+    var ops = ArrayList([]const u8).init(allocator);
     defer ops.deinit();
     for (toks) |t| {
         if (t.type == .Operator) {
@@ -275,6 +280,6 @@ test "LexProcess lexes multi-character operators" {
     try std.testing.expectEqualStrings("...", ops.items[7]);
     try std.testing.expectEqualStrings("->", ops.items[8]);
 
-    try fs.cwd().deleteFile(ifilepath);
-    try fs.cwd().deleteFile(ofilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ofilepath);
 }

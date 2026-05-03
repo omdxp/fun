@@ -7,7 +7,7 @@ on:
       - main
 
 env:
-  zig_version: 0.14.0
+  zig_version: 0.16.0
 
 jobs:
   test:

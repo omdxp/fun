@@ -21,21 +21,21 @@ fn expectFileParses(allocator: std.mem.Allocator, path: []const u8) !void {
 }
 
 fn writeTempFnFile(allocator: std.mem.Allocator, prefix: []const u8, contents: []const u8) ![]const u8 {
-    const ts = std.time.nanoTimestamp();
+    const ts = std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds;
     const name = try std.fmt.allocPrint(allocator, "{s}_{d}.fn", .{ prefix, ts });
     errdefer allocator.free(name);
 
-    const f = try std.fs.cwd().createFile(name, .{ .read = true });
-    defer f.close();
-    try f.writeAll(contents);
+    const f = try std.Io.Dir.cwd().createFile(std.testing.io, name, .{ .read = true });
+    defer f.close(std.testing.io);
+    try f.writeStreamingAll(std.testing.io, contents);
     return name;
 }
 
 fn makeTempDir(allocator: std.mem.Allocator, prefix: []const u8) ![]const u8 {
-    const ts = std.time.nanoTimestamp();
+    const ts = std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds;
     const name = try std.fmt.allocPrint(allocator, "{s}_{d}", .{ prefix, ts });
     errdefer allocator.free(name);
-    try std.fs.cwd().makePath(name);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, name);
     return name;
 }
 
@@ -44,17 +44,17 @@ fn writeFileInDir(allocator: std.mem.Allocator, dir: []const u8, rel: []const u8
     errdefer allocator.free(path);
 
     if (std.fs.path.dirname(path)) |pdir| {
-        try std.fs.cwd().makePath(pdir);
+        try std.Io.Dir.cwd().createDirPath(std.testing.io, pdir);
     }
 
-    const f = try std.fs.cwd().createFile(path, .{ .read = true });
-    defer f.close();
-    try f.writeAll(contents);
+    const f = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{ .read = true });
+    defer f.close(std.testing.io);
+    try f.writeStreamingAll(std.testing.io, contents);
     return path;
 }
 
 fn deleteTreeIfExists(path: []const u8) void {
-    std.fs.cwd().deleteTree(path) catch {};
+    std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
 }
 
 test "-fmt formats file in-place" {
@@ -67,13 +67,13 @@ test "-fmt formats file in-place" {
 
     const path = try writeTempFnFile(allocator, "fmt", ugly);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
         allocator.free(path);
     }
 
-    try cli.format_file_in_place(allocator, path);
+    try cli.format_file_in_place(allocator, std.testing.io, path);
 
-    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
     defer allocator.free(got);
 
     const expected =
@@ -98,13 +98,13 @@ test "-fmt keeps a blank line between functions" {
 
     const path = try writeTempFnFile(allocator, "fmt_two", ugly);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
         allocator.free(path);
     }
 
-    try cli.format_file_in_place(allocator, path);
+    try cli.format_file_in_place(allocator, std.testing.io, path);
 
-    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
     defer allocator.free(got);
 
     const expected =
@@ -134,13 +134,13 @@ test "-fmt preserves blank lines in function bodies" {
 
     const path = try writeTempFnFile(allocator, "fmt_body_blank", ugly);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
         allocator.free(path);
     }
 
-    try cli.format_file_in_place(allocator, path);
+    try cli.format_file_in_place(allocator, std.testing.io, path);
 
-    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
     defer allocator.free(got);
 
     // Preserve blank lines between statements (normalize 2+ newlines to a blank line).
@@ -169,13 +169,13 @@ test "-fmt preserves blank lines between top-level constructs" {
 
     const path = try writeTempFnFile(allocator, "fmt_top_blank", ugly);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
         allocator.free(path);
     }
 
-    try cli.format_file_in_place(allocator, path);
+    try cli.format_file_in_place(allocator, std.testing.io, path);
 
-    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
     defer allocator.free(got);
 
     const expected =
@@ -207,13 +207,13 @@ test "-fmt formats pointer and address-of spacing" {
 
     const path = try writeTempFnFile(allocator, "fmt_ptr", ugly);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
         allocator.free(path);
     }
 
-    try cli.format_file_in_place(allocator, path);
+    try cli.format_file_in_place(allocator, std.testing.io, path);
 
-    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
     defer allocator.free(got);
 
     const expected =
@@ -245,13 +245,13 @@ test "-fmt groups imports and globals at top" {
 
     const path = try writeTempFnFile(allocator, "fmt_groups", ugly);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
         allocator.free(path);
     }
 
-    try cli.format_file_in_place(allocator, path);
+    try cli.format_file_in_place(allocator, std.testing.io, path);
 
-    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
     defer allocator.free(got);
 
     const expected =
@@ -280,13 +280,13 @@ test "-fmt formats parent traversal imports" {
 
     const path = try writeTempFnFile(allocator, "fmt_imp_parent", ugly);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
         allocator.free(path);
     }
 
-    try cli.format_file_in_place(allocator, path);
+    try cli.format_file_in_place(allocator, std.testing.io, path);
 
-    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
     defer allocator.free(got);
 
     const expected =
@@ -311,13 +311,13 @@ test "-fmt formats lowercase type pointers in signatures" {
 
     const path = try writeTempFnFile(allocator, "fmt_tm_ptr", ugly);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
         allocator.free(path);
     }
 
-    try cli.format_file_in_place(allocator, path);
+    try cli.format_file_in_place(allocator, std.testing.io, path);
 
-    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
     defer allocator.free(got);
 
     const expected =
@@ -341,13 +341,13 @@ test "-fmt keeps generic pointer signatures glued" {
 
     const path = try writeTempFnFile(allocator, "fmt_generic_ptr", ugly);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
         allocator.free(path);
     }
 
-    try cli.format_file_in_place(allocator, path);
+    try cli.format_file_in_place(allocator, std.testing.io, path);
 
-    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
     defer allocator.free(got);
 
     const expected =
@@ -371,13 +371,13 @@ test "-fmt keeps generic compound literals tight after ret" {
 
     const path = try writeTempFnFile(allocator, "fmt_generic_compound_ret", ugly);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
         allocator.free(path);
     }
 
-    try cli.format_file_in_place(allocator, path);
+    try cli.format_file_in_place(allocator, std.testing.io, path);
 
-    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
     defer allocator.free(got);
 
     const expected =
@@ -403,13 +403,13 @@ test "-fmt keeps space after await before parenthesized receiver" {
 
     const path = try writeTempFnFile(allocator, "fmt_await_paren", ugly);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
         allocator.free(path);
     }
 
-    try cli.format_file_in_place(allocator, path);
+    try cli.format_file_in_place(allocator, std.testing.io, path);
 
-    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
     defer allocator.free(got);
 
     const expected =
@@ -438,13 +438,13 @@ test "-fmt keeps pointer-to-pointer spacing and assignment spacing" {
 
     const path = try writeTempFnFile(allocator, "fmt_ptr_ptr", ugly);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
         allocator.free(path);
     }
 
-    try cli.format_file_in_place(allocator, path);
+    try cli.format_file_in_place(allocator, std.testing.io, path);
 
-    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
     defer allocator.free(got);
 
     const expected =
@@ -483,14 +483,14 @@ test "-fmt-all formats local imports recursively (skips std.*)" {
     );
     defer allocator.free(imported_path);
 
-    try cli.format_file_and_imports_in_place(allocator, main_path);
+    try cli.format_file_and_imports_in_place(allocator, std.testing.io, main_path);
 
-    const got_main = try std.fs.cwd().readFileAlloc(allocator, main_path, 1024 * 1024);
+    const got_main = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, main_path, allocator, .limited(1024 * 1024));
     defer allocator.free(got_main);
     try std.testing.expect(std.mem.indexOf(u8, got_main, "imp foo.bar;\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, got_main, "imp std.c.io;\n") != null);
 
-    const got_import = try std.fs.cwd().readFileAlloc(allocator, imported_path, 1024 * 1024);
+    const got_import = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, imported_path, allocator, .limited(1024 * 1024));
     defer allocator.free(got_import);
     const expected_imported =
         "fun add(num a, num b) num {\n" ++
@@ -512,11 +512,11 @@ test "-fmt output still parses (quirks/ops)" {
 
     const path = try writeTempFnFile(allocator, "fmt_parse", ugly);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
         allocator.free(path);
     }
 
-    try cli.format_file_in_place(allocator, path);
+    try cli.format_file_in_place(allocator, std.testing.io, path);
     try expectFileParses(allocator, path);
 }
 
@@ -533,13 +533,13 @@ test "-fmt removes if-condition parentheses" {
 
     const path = try writeTempFnFile(allocator, "fmt_if_paren", ugly);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
         allocator.free(path);
     }
 
-    try cli.format_file_in_place(allocator, path);
+    try cli.format_file_in_place(allocator, std.testing.io, path);
 
-    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
     defer allocator.free(got);
 
     // Outer parens are removed; ensure a space after `if`.
@@ -561,14 +561,14 @@ test "-fmt keeps parentheses for single-statement if" {
 
     const path = try writeTempFnFile(allocator, "fmt_if_single_stmt", ugly);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
         allocator.free(path);
     }
 
-    try cli.format_file_in_place(allocator, path);
+    try cli.format_file_in_place(allocator, std.testing.io, path);
     try expectFileParses(allocator, path);
 
-    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
     defer allocator.free(got);
 
     try std.testing.expect(std.mem.indexOf(u8, got, "if (") != null);
@@ -585,13 +585,13 @@ test "-fmt never introduces scientific notation" {
 
     const path = try writeTempFnFile(allocator, "fmt_float", ugly);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
         allocator.free(path);
     }
 
-    try cli.format_file_in_place(allocator, path);
+    try cli.format_file_in_place(allocator, std.testing.io, path);
 
-    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
     defer allocator.free(got);
 
     try std.testing.expect(std.mem.indexOf(u8, got, "3.14159") != null);
@@ -610,14 +610,14 @@ test "-fmt preserves explicit decimal literal spelling" {
 
     const path = try writeTempFnFile(allocator, "fmt_dec_spell", ugly);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
         allocator.free(path);
     }
 
-    try cli.format_file_in_place(allocator, path);
+    try cli.format_file_in_place(allocator, std.testing.io, path);
     try expectFileParses(allocator, path);
 
-    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
     defer allocator.free(got);
 
     try std.testing.expect(std.mem.indexOf(u8, got, "[1.0, 2.00, 3.0]") != null);
@@ -636,14 +636,14 @@ test "-fmt preserves explicit decimal literal spelling broadly" {
 
     const path = try writeTempFnFile(allocator, "fmt_dec_spell_broad", ugly);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
         allocator.free(path);
     }
 
-    try cli.format_file_in_place(allocator, path);
+    try cli.format_file_in_place(allocator, std.testing.io, path);
     try expectFileParses(allocator, path);
 
-    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
     defer allocator.free(got);
 
     try std.testing.expect(std.mem.indexOf(u8, got, "3.0 + 4.00") != null);
@@ -677,13 +677,13 @@ test "-fmt-all has cycle protection" {
     );
     defer allocator.free(b_path);
 
-    try cli.format_file_and_imports_in_place(allocator, a_path);
+    try cli.format_file_and_imports_in_place(allocator, std.testing.io, a_path);
 
-    const got_a = try std.fs.cwd().readFileAlloc(allocator, a_path, 1024 * 1024);
+    const got_a = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, a_path, allocator, .limited(1024 * 1024));
     defer allocator.free(got_a);
     try std.testing.expect(std.mem.indexOf(u8, got_a, "fun a() num") != null);
 
-    const got_b = try std.fs.cwd().readFileAlloc(allocator, b_path, 1024 * 1024);
+    const got_b = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, b_path, allocator, .limited(1024 * 1024));
     defer allocator.free(got_b);
     try std.testing.expect(std.mem.indexOf(u8, got_b, "fun b() num") != null);
 }
@@ -696,13 +696,13 @@ test "-fmt keeps space after ret before unary reference" {
 
     const path = try writeTempFnFile(allocator, "fmt_ret_ref", ugly);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
         allocator.free(path);
     }
 
-    try cli.format_file_in_place(allocator, path);
+    try cli.format_file_in_place(allocator, std.testing.io, path);
 
-    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
     defer allocator.free(got);
 
     const expected =
@@ -722,13 +722,13 @@ test "-fmt keeps space before unary minus after comparisons" {
 
     const path = try writeTempFnFile(allocator, "fmt_cmp_unary_minus", ugly);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
         allocator.free(path);
     }
 
-    try cli.format_file_in_place(allocator, path);
+    try cli.format_file_in_place(allocator, std.testing.io, path);
 
-    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
     defer allocator.free(got);
 
     const expected =
@@ -751,13 +751,13 @@ test "-fmt nested generics keep closing brackets tight" {
 
     const path = try writeTempFnFile(allocator, "fmt_generic_close", ugly);
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
         allocator.free(path);
     }
 
-    try cli.format_file_in_place(allocator, path);
+    try cli.format_file_in_place(allocator, std.testing.io, path);
 
-    const got = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
     defer allocator.free(got);
 
     try std.testing.expect(std.mem.indexOf(u8, got, "Result<Vec<str>>") != null);

@@ -6,9 +6,9 @@ const codegen = @import("codegen");
 
 fn runTranspile(allocator: std.mem.Allocator, input_path: []const u8, input: []const u8) ![]const u8 {
     {
-        const file = try fs.cwd().createFile(input_path, .{ .read = true, .truncate = true });
-        defer file.close();
-        try file.writeAll(input);
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, input_path, .{ .read = true, .truncate = true });
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     var transpile_proc = try codegen.TranspileProcess.init(allocator, input_path, "_ignored.c", .{
@@ -51,7 +51,7 @@ test "for range transpiles" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "for (int64_t i = 0; i < 3; i++)") != null);
 
-    fs.cwd().deleteFile(ifilepath) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "for array item transpiles" {
@@ -74,7 +74,7 @@ test "for array item transpiles" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "for (int64_t __fun_i = 0;") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t item = arr[__fun_i];") != null);
 
-    fs.cwd().deleteFile(ifilepath) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "for array index and item transpiles" {
@@ -96,7 +96,7 @@ test "for array index and item transpiles" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "for (int64_t i = 0;") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t item = arr[i];") != null);
 
-    fs.cwd().deleteFile(ifilepath) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "for array index and item method call transpiles" {
@@ -122,7 +122,7 @@ test "for condition transpiles to while" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "while (i < 3)") != null);
 
-    fs.cwd().deleteFile(ifilepath) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "for infinite transpiles to while(1)" {
@@ -145,7 +145,7 @@ test "for infinite transpiles to while(1)" {
 
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "while (1)") != null);
 
-    fs.cwd().deleteFile(ifilepath) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "2D matrix declaration transpiles" {
@@ -165,7 +165,7 @@ test "2D matrix declaration transpiles" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t matrix[][3]") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "{{1, 2, 3}, {4, 5, 6}}") != null);
 
-    fs.cwd().deleteFile(ifilepath) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "2D matrix for-iter outer loop transpiles" {
@@ -189,7 +189,7 @@ test "2D matrix for-iter outer loop transpiles" {
     // Row is declared as pointer
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t * row = matrix[__fun_i]") != null);
 
-    fs.cwd().deleteFile(ifilepath) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "2D matrix nested for-iter transpiles" {
@@ -217,7 +217,7 @@ test "2D matrix nested for-iter transpiles" {
     // Inner item is a scalar
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t item = row[__fun_i]") != null);
 
-    fs.cwd().deleteFile(ifilepath) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "2D matrix let inference transpiles" {
@@ -245,7 +245,7 @@ test "2D matrix let inference transpiles" {
     // Inner loop: sizeof(m[0])/sizeof(m[0][0])
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "sizeof(m[0])/sizeof(m[0][0])") != null);
 
-    fs.cwd().deleteFile(ifilepath) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "3D tensor nested for-iter transpiles" {
@@ -277,7 +277,7 @@ test "3D tensor nested for-iter transpiles" {
     // Innermost item is a scalar
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t item = row[__fun_i]") != null);
 
-    fs.cwd().deleteFile(ifilepath) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "3D tensor let inference transpiles" {
@@ -309,5 +309,5 @@ test "3D tensor let inference transpiles" {
     // Inner loop: sizeof(m[0][0])/sizeof(m[0][0][0])
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "sizeof(m[0][0])/sizeof(m[0][0][0])") != null);
 
-    fs.cwd().deleteFile(ifilepath) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }

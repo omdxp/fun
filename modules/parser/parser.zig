@@ -14,6 +14,11 @@ const dtype = semantics.dtype;
 const scope = semantics.scope;
 const symbol = semantics.symbol;
 
+/// Compatibility shim: ArrayList with embedded allocator (old-style managed API).
+fn ArrayList(comptime T: type) type {
+    return std.array_list.Managed(T);
+}
+
 /// Errors that can occur during parsing process.
 pub const ParseError = error{
     /// Error indicating an invalid symbol.
@@ -446,7 +451,7 @@ pub const ParseProcess = struct {
                         .array = null,
                         .pointer_depth = 0,
                         .type = .Unknown,
-                        .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
+                        .type_str = ArrayList(u8).init(self.transpile_proc.allocator),
                         .flags = .{},
                     };
                     try self.parse_datatype(dt);
@@ -710,7 +715,7 @@ pub const ParseProcess = struct {
         tok_ptr.data.sval.items.len = 0;
         tok_ptr.data.sval.append('>') catch return ParseError.MemoryAllocationFailed;
 
-        var new_sval = std.ArrayList(u8).init(self.transpile_proc.allocator);
+        var new_sval = ArrayList(u8).init(self.transpile_proc.allocator);
         errdefer new_sval.deinit();
         new_sval.append('>') catch return ParseError.MemoryAllocationFailed;
 
@@ -737,7 +742,7 @@ pub const ParseProcess = struct {
         tok_ptr.data.sval.items.len = 0;
         tok_ptr.data.sval.append('<') catch return ParseError.MemoryAllocationFailed;
 
-        var new_sval = std.ArrayList(u8).init(self.transpile_proc.allocator);
+        var new_sval = ArrayList(u8).init(self.transpile_proc.allocator);
         errdefer new_sval.deinit();
         new_sval.append('<') catch return ParseError.MemoryAllocationFailed;
 
@@ -795,12 +800,12 @@ pub const ParseProcess = struct {
         };
     }
 
-    fn parse_generic_type_params(self: *Self) ParseError!?utils.Vector(std.ArrayList(u8)) {
+    fn parse_generic_type_params(self: *Self) ParseError!?utils.Vector(ArrayList(u8)) {
         try self.split_angle_opener_token_if_needed();
         if (!self.next_token_is_angle_open()) return null;
         _ = self.token_next();
 
-        var params = utils.Vector(std.ArrayList(u8)).init(self.transpile_proc.allocator);
+        var params = utils.Vector(ArrayList(u8)).init(self.transpile_proc.allocator);
         errdefer {
             for (params.items()) |*p| p.deinit();
             params.deinit();
@@ -813,7 +818,7 @@ pub const ParseProcess = struct {
                 return ParseError.InvalidIdentifier;
             }
 
-            var name = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, tok.?.data.sval.items.len) catch {
+            var name = ArrayList(u8).initCapacity(self.transpile_proc.allocator, tok.?.data.sval.items.len) catch {
                 return ParseError.MemoryAllocationFailed;
             };
             errdefer name.deinit();
@@ -883,7 +888,7 @@ pub const ParseProcess = struct {
                 .array = null,
                 .pointer_depth = 0,
                 .type = .Unknown,
-                .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
+                .type_str = ArrayList(u8).init(self.transpile_proc.allocator),
                 .flags = .{},
                 .generic_args = null,
             };
@@ -915,7 +920,7 @@ pub const ParseProcess = struct {
         dt.generic_args = args;
     }
 
-    fn append_mangled_dtype_name(self: *Self, buf: *std.ArrayList(u8), dt: *const dtype.DataType) ParseError!void {
+    fn append_mangled_dtype_name(self: *Self, buf: *ArrayList(u8), dt: *const dtype.DataType) ParseError!void {
         buf.appendSlice(dt.type_str.items) catch return ParseError.MemoryAllocationFailed;
         if (dt.generic_args) |gargs| {
             for (gargs.items()) |ga| {
@@ -940,7 +945,7 @@ pub const ParseProcess = struct {
     fn parse_datatype(self: *Self, dt: *dtype.DataType) ParseError!void {
         const dt_token = self.token_next();
         if (dt_token == null or (dt_token.?.type != .Keyword and dt_token.?.type != .Identifier)) {
-            self.transpile_proc.err("expected datatype, got '{?}'", .{if (dt_token) |t| t.type else null});
+            self.transpile_proc.err("expected datatype, got '{s}'", .{if (dt_token) |t| @tagName(t.type) else "null"});
             return ParseError.InvalidDataType;
         }
         // Builtins use `dt.type`, user-defined types keep `.Unknown` and rely on `type_str`.
@@ -966,7 +971,7 @@ pub const ParseProcess = struct {
                 dt.*.type = .Unknown;
             }
         }
-        dt.*.type_str = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, dt_token.?.data.sval.items.len) catch |e| {
+        dt.*.type_str = ArrayList(u8).initCapacity(self.transpile_proc.allocator, dt_token.?.data.sval.items.len) catch |e| {
             std.debug.print("Error creating type string: {s}", .{@errorName(e)});
             return ParseError.MemoryAllocationFailed;
         };
@@ -1137,7 +1142,7 @@ pub const ParseProcess = struct {
                 try self.create_node(&bool_node);
             },
             else => {
-                self.transpile_proc.err("expected single token, got '{?}'", .{t.?.type});
+                self.transpile_proc.err("expected single token, got '{s}'", .{@tagName(t.?.type)});
                 return ParseError.InvalidToken;
             },
         }
@@ -1411,7 +1416,7 @@ pub const ParseProcess = struct {
                 return ParseError.InvalidIdentifier;
             }
 
-            var fname = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, field_tok.?.data.sval.items.len) catch {
+            var fname = ArrayList(u8).initCapacity(self.transpile_proc.allocator, field_tok.?.data.sval.items.len) catch {
                 return ParseError.MemoryAllocationFailed;
             };
             errdefer fname.deinit();
@@ -2074,7 +2079,7 @@ pub const ParseProcess = struct {
                 }
             }
 
-            self.transpile_proc.err("expected identifier, got '{?}'", .{t.?.type});
+            self.transpile_proc.err("expected identifier, got '{s}'", .{@tagName(t.?.type)});
             return ParseError.InvalidIdentifier;
         }
 
@@ -2100,7 +2105,7 @@ pub const ParseProcess = struct {
             return ParseError.InvalidString;
         }
         if (t.?.type != .String) {
-            self.transpile_proc.err("expected string, got '{?}'", .{t.?.type});
+            self.transpile_proc.err("expected string, got '{s}'", .{@tagName(t.?.type)});
             return ParseError.InvalidString;
         }
         return try self.parse_single_token_to_node();
@@ -2221,7 +2226,7 @@ pub const ParseProcess = struct {
                         .array = null,
                         .pointer_depth = 0,
                         .type = .Unknown,
-                        .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
+                        .type_str = ArrayList(u8).init(self.transpile_proc.allocator),
                         .flags = .{},
                     };
                     try self.parse_datatype(dt);
@@ -2305,7 +2310,7 @@ pub const ParseProcess = struct {
                         .array = null,
                         .pointer_depth = 0,
                         .type = .Unknown,
-                        .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
+                        .type_str = ArrayList(u8).init(self.transpile_proc.allocator),
                         .flags = .{},
                     };
                     try self.parse_datatype(dt);
@@ -2360,7 +2365,7 @@ pub const ParseProcess = struct {
             return ParseError.InvalidIdentifier;
         }
 
-        var name = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, name_tok.?.data.sval.items.len) catch {
+        var name = ArrayList(u8).initCapacity(self.transpile_proc.allocator, name_tok.?.data.sval.items.len) catch {
             return ParseError.MemoryAllocationFailed;
         };
         errdefer name.deinit();
@@ -2398,7 +2403,7 @@ pub const ParseProcess = struct {
                 .array = null,
                 .pointer_depth = 0,
                 .type = .Unknown,
-                .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
+                .type_str = ArrayList(u8).init(self.transpile_proc.allocator),
                 .flags = .{},
             };
             var hist_tmp = utils.History.init(self.transpile_proc.allocator, .{});
@@ -2417,7 +2422,7 @@ pub const ParseProcess = struct {
                     self.transpile_proc.err("expected field name", .{});
                     return ParseError.InvalidIdentifier;
                 }
-                var fname = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, field_tok.?.data.sval.items.len) catch {
+                var fname = ArrayList(u8).initCapacity(self.transpile_proc.allocator, field_tok.?.data.sval.items.len) catch {
                     return ParseError.MemoryAllocationFailed;
                 };
                 errdefer fname.deinit();
@@ -2437,7 +2442,7 @@ pub const ParseProcess = struct {
                 };
                 errdefer self.transpile_proc.allocator.destroy(field_dt);
                 field_dt.* = dt.*;
-                field_dt.*.type_str = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, dt.type_str.items.len) catch {
+                field_dt.*.type_str = ArrayList(u8).initCapacity(self.transpile_proc.allocator, dt.type_str.items.len) catch {
                     return ParseError.MemoryAllocationFailed;
                 };
                 field_dt.*.type_str.appendSlice(dt.type_str.items) catch {
@@ -2502,7 +2507,7 @@ pub const ParseProcess = struct {
             return ParseError.InvalidIdentifier;
         }
 
-        var name = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, name_tok.?.data.sval.items.len) catch {
+        var name = ArrayList(u8).initCapacity(self.transpile_proc.allocator, name_tok.?.data.sval.items.len) catch {
             return ParseError.MemoryAllocationFailed;
         };
         errdefer name.deinit();
@@ -2545,7 +2550,7 @@ pub const ParseProcess = struct {
                 self.transpile_proc.err("expected method name", .{});
                 return ParseError.InvalidIdentifier;
             }
-            var mname = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, mname_tok.?.data.sval.items.len) catch {
+            var mname = ArrayList(u8).initCapacity(self.transpile_proc.allocator, mname_tok.?.data.sval.items.len) catch {
                 return ParseError.MemoryAllocationFailed;
             };
             errdefer mname.deinit();
@@ -2562,7 +2567,7 @@ pub const ParseProcess = struct {
                     return ParseError.MemoryAllocationFailed;
                 };
                 errdefer self.transpile_proc.allocator.destroy(adt);
-                adt.* = dtype.DataType{ .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator), .flags = .{} };
+                adt.* = dtype.DataType{ .type_str = ArrayList(u8).init(self.transpile_proc.allocator), .flags = .{} };
                 var hist_tmp = utils.History.init(self.transpile_proc.allocator, .{});
                 defer hist_tmp.deinit();
                 try self.parse_datatype(adt);
@@ -2575,7 +2580,7 @@ pub const ParseProcess = struct {
                     self.transpile_proc.err("expected argument name", .{});
                     return ParseError.InvalidIdentifier;
                 }
-                var aname = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, aname_tok.?.data.sval.items.len) catch {
+                var aname = ArrayList(u8).initCapacity(self.transpile_proc.allocator, aname_tok.?.data.sval.items.len) catch {
                     return ParseError.MemoryAllocationFailed;
                 };
                 errdefer aname.deinit();
@@ -2593,7 +2598,7 @@ pub const ParseProcess = struct {
             try self.expect_sym(')');
 
             // Optional return type; default to void.
-            var rtype: dtype.DataType = .{ .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator) };
+            var rtype: dtype.DataType = .{ .type_str = ArrayList(u8).init(self.transpile_proc.allocator) };
             const rtok = self.token_peek_next();
             if (rtok != null and (rtok.?.type == .Keyword and utils.keyword_is_datatype(rtok.?.data.sval.items)) or rtok.?.type == .Identifier) {
                 try self.parse_datatype(&rtype);
@@ -2646,7 +2651,7 @@ pub const ParseProcess = struct {
             return ParseError.InvalidIdentifier;
         }
 
-        var name = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, name_tok.?.data.sval.items.len) catch {
+        var name = ArrayList(u8).initCapacity(self.transpile_proc.allocator, name_tok.?.data.sval.items.len) catch {
             return ParseError.MemoryAllocationFailed;
         };
         errdefer name.deinit();
@@ -2671,7 +2676,7 @@ pub const ParseProcess = struct {
                 return ParseError.InvalidIdentifier;
             }
 
-            var vname = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, vtok.?.data.sval.items.len) catch {
+            var vname = ArrayList(u8).initCapacity(self.transpile_proc.allocator, vtok.?.data.sval.items.len) catch {
                 return ParseError.MemoryAllocationFailed;
             };
             errdefer vname.deinit();
@@ -2749,12 +2754,12 @@ pub const ParseProcess = struct {
             return ParseError.InvalidIdentifier;
         }
 
-        var type_params: ?utils.Vector(std.ArrayList(u8)) = null;
+        var type_params: ?utils.Vector(ArrayList(u8)) = null;
 
         // `impl Type as Quirk { ... }` (quirk impl) OR `impl Type { ... }` (plain impl).
         var peek_after_type = self.token_peek_next();
         var quirk_tok: ?token.Token = null;
-        var type_name_override: ?std.ArrayList(u8) = null;
+        var type_name_override: ?ArrayList(u8) = null;
         errdefer if (type_name_override) |*o| o.deinit();
 
         if (self.next_token_is_angle_open()) {
@@ -2766,7 +2771,7 @@ pub const ParseProcess = struct {
                     .array = null,
                     .pointer_depth = 0,
                     .type = .Unknown,
-                    .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
+                    .type_str = ArrayList(u8).init(self.transpile_proc.allocator),
                     .flags = .{},
                     .generic_args = null,
                 };
@@ -2774,7 +2779,7 @@ pub const ParseProcess = struct {
                 dt.type_str.appendSlice(type_tok.?.data.sval.items) catch return ParseError.MemoryAllocationFailed;
                 try self.parse_generic_type_args(&dt);
 
-                var mangled = std.ArrayList(u8).init(self.transpile_proc.allocator);
+                var mangled = ArrayList(u8).init(self.transpile_proc.allocator);
                 errdefer mangled.deinit();
                 try self.append_mangled_dtype_name(&mangled, &dt);
                 type_name_override = mangled;
@@ -2803,7 +2808,7 @@ pub const ParseProcess = struct {
         var type_name = if (type_name_override) |o|
             o
         else
-            std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, type_tok.?.data.sval.items.len) catch {
+            ArrayList(u8).initCapacity(self.transpile_proc.allocator, type_tok.?.data.sval.items.len) catch {
                 return ParseError.MemoryAllocationFailed;
             };
         if (type_name_override == null) {
@@ -2813,10 +2818,10 @@ pub const ParseProcess = struct {
             };
         }
 
-        var quirk_name: ?std.ArrayList(u8) = null;
+        var quirk_name: ?ArrayList(u8) = null;
         errdefer if (quirk_name) |*qn| qn.deinit();
         if (quirk_tok) |qt| {
-            var qn = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, qt.data.sval.items.len) catch {
+            var qn = ArrayList(u8).initCapacity(self.transpile_proc.allocator, qt.data.sval.items.len) catch {
                 return ParseError.MemoryAllocationFailed;
             };
             qn.appendSlice(qt.data.sval.items) catch {
@@ -2886,7 +2891,7 @@ pub const ParseProcess = struct {
                     return ParseError.MemoryAllocationFailed;
                 });
             defer self.transpile_proc.allocator.free(gen_name);
-            fn_node.node_variant.?.function.name = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, gen_name.len) catch {
+            fn_node.node_variant.?.function.name = ArrayList(u8).initCapacity(self.transpile_proc.allocator, gen_name.len) catch {
                 return ParseError.MemoryAllocationFailed;
             };
             fn_node.node_variant.?.function.name.?.appendSlice(gen_name) catch {
@@ -2912,7 +2917,7 @@ pub const ParseProcess = struct {
                 .array = null,
                 .pointer_depth = 1,
                 .type = .Unknown,
-                .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
+                .type_str = ArrayList(u8).init(self.transpile_proc.allocator),
                 .flags = .{ .is_pointer = true },
                 .generic_args = null,
             };
@@ -2939,7 +2944,7 @@ pub const ParseProcess = struct {
                         .array = null,
                         .pointer_depth = 0,
                         .type = .Unknown,
-                        .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
+                        .type_str = ArrayList(u8).init(self.transpile_proc.allocator),
                         .flags = .{},
                         .generic_args = null,
                     };
@@ -2954,7 +2959,7 @@ pub const ParseProcess = struct {
                 self_dt.generic_args = gargs;
             }
 
-            var self_name = std.ArrayList(u8).init(self.transpile_proc.allocator);
+            var self_name = ArrayList(u8).init(self.transpile_proc.allocator);
             errdefer self_name.deinit();
             self_name.appendSlice("self") catch {
                 return ParseError.MemoryAllocationFailed;
@@ -3004,7 +3009,7 @@ pub const ParseProcess = struct {
             fn_node.node_variant.?.function.args = args;
 
             // Optional return type; default void.
-            var rtype: dtype.DataType = .{ .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator) };
+            var rtype: dtype.DataType = .{ .type_str = ArrayList(u8).init(self.transpile_proc.allocator) };
             const rtok = self.token_peek_next();
             if (rtok != null and ((rtok.?.type == .Keyword and utils.keyword_is_datatype(rtok.?.data.sval.items)) or rtok.?.type == .Identifier)) {
                 try self.parse_datatype(&rtype);
@@ -3181,7 +3186,7 @@ pub const ParseProcess = struct {
 
         // Variable nodes own their name string (and deinit it). Token strings are also deinitialized
         // by `TranspileProcess.deinit()`, so we must deep-copy here to avoid double-free.
-        var name = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, ident_token.?.data.sval.items.len) catch |e| {
+        var name = ArrayList(u8).initCapacity(self.transpile_proc.allocator, ident_token.?.data.sval.items.len) catch |e| {
             std.debug.print("Error creating variable name: {s}\n", .{@errorName(e)});
             return ParseError.MemoryAllocationFailed;
         };
@@ -3227,7 +3232,7 @@ pub const ParseProcess = struct {
                 },
             };
             // Ownership of `name` transferred to the node.
-            name = std.ArrayList(u8).init(self.transpile_proc.allocator);
+            name = ArrayList(u8).init(self.transpile_proc.allocator);
             const scope_entity = try self.new_scope_entity(node, .{});
             if (self.transpile_proc.get_scope_entity(scope_entity.name) != null) {
                 self.transpile_proc.err("variable '{s}' already declared", .{scope_entity.name});
@@ -3269,7 +3274,7 @@ pub const ParseProcess = struct {
                 },
             };
             // Ownership of `name` transferred to the node.
-            name = std.ArrayList(u8).init(self.transpile_proc.allocator);
+            name = ArrayList(u8).init(self.transpile_proc.allocator);
             const scope_entity = try self.new_scope_entity(node, .{});
             self.transpile_proc.nodes.push(node.*) catch |e| {
                 std.debug.print("Error pushing node: {s}\n", .{@errorName(e)});
@@ -3310,7 +3315,7 @@ pub const ParseProcess = struct {
             .array = null,
             .pointer_depth = 0,
             .type = .Unknown,
-            .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
+            .type_str = ArrayList(u8).init(self.transpile_proc.allocator),
             .flags = .{},
         };
         try self.parse_datatype(dt);
@@ -3332,7 +3337,7 @@ pub const ParseProcess = struct {
             .array = null,
             .pointer_depth = 0,
             .type = .Unknown,
-            .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
+            .type_str = ArrayList(u8).init(self.transpile_proc.allocator),
             .flags = .{},
         };
         dt.*.type_str.appendSlice("__let_infer__") catch {
@@ -3420,7 +3425,7 @@ pub const ParseProcess = struct {
         };
         // Initialize `dt` so optional fields are well-defined before `parse_datatype()`.
         // `parse_datatype()` will set `type`/`flags` and overwrite `type_str`.
-        var dt: dtype.DataType = .{ .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator) };
+        var dt: dtype.DataType = .{ .type_str = ArrayList(u8).init(self.transpile_proc.allocator) };
         const ident_token = self.token_next();
         if (ident_token == null) {
             self.transpile_proc.err("expected identifier after 'fun'", .{});
@@ -3434,7 +3439,7 @@ pub const ParseProcess = struct {
         function_node.pos = ident_token.?.pos;
         // Function nodes must own their name buffer. Token sval buffers are owned by the token stream
         // and are deinitialized in `TranspileProcess.deinit()`.
-        var fname = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, ident_token.?.data.sval.items.len) catch |e| {
+        var fname = ArrayList(u8).initCapacity(self.transpile_proc.allocator, ident_token.?.data.sval.items.len) catch |e| {
             std.debug.print("Error creating function name: {s}\n", .{@errorName(e)});
             return ParseError.MemoryAllocationFailed;
         };
@@ -3468,7 +3473,7 @@ pub const ParseProcess = struct {
                 .node_variant = .{
                     .variable = .{
                         .name = blk: {
-                            var name = std.ArrayList(u8).init(self.transpile_proc.allocator);
+                            var name = ArrayList(u8).init(self.transpile_proc.allocator);
                             name.appendSlice("vargs") catch |e| {
                                 std.debug.print("Error appending to vargs name: {s}\\n", .{@errorName(e)});
                                 return ParseError.MemoryAllocationFailed;
@@ -3480,7 +3485,7 @@ pub const ParseProcess = struct {
                                 std.debug.print("Error creating DataType: {s}\\n", .{@errorName(e)});
                                 return ParseError.MemoryAllocationFailed;
                             };
-                            vdt.* = .{ .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator) };
+                            vdt.* = .{ .type_str = ArrayList(u8).init(self.transpile_proc.allocator) };
                             vdt.type = .Unknown;
                             vdt.type_str.appendSlice("Vec") catch |e| {
                                 std.debug.print("Error appending to type_str: {s}\\n", .{@errorName(e)});
@@ -3509,7 +3514,7 @@ pub const ParseProcess = struct {
         if (rtype_token != null and ((rtype_token.?.type == .Keyword and utils.keyword_is_datatype(rtype_token.?.data.sval.items)) or rtype_token.?.type == .Identifier)) {
             try self.parse_datatype(&dt);
         } else {
-            var type_str = std.ArrayList(u8).init(self.transpile_proc.allocator);
+            var type_str = ArrayList(u8).init(self.transpile_proc.allocator);
             type_str.appendSlice("void") catch |e| {
                 std.debug.print("Error appending to type_str: {s}\n", .{@errorName(e)});
                 return ParseError.MemoryAllocationFailed;
@@ -4009,13 +4014,13 @@ pub const ParseProcess = struct {
             return ParseError.InvalidIdentifier;
         }
         if (folder_token.?.type != .Identifier) {
-            self.transpile_proc.err("expected folder identifier, got '{?}'", .{folder_token.?.type});
+            self.transpile_proc.err("expected folder identifier, got '{s}'", .{@tagName(folder_token.?.type)});
             return ParseError.InvalidIdentifier;
         }
 
         const import_pos = folder_token.?.pos;
 
-        var import_name = std.ArrayList(u8).init(self.transpile_proc.allocator);
+        var import_name = ArrayList(u8).init(self.transpile_proc.allocator);
         defer import_name.deinit();
         if (leading_dots > 0) {
             import_name.appendNTimes('.', leading_dots) catch |e| {
@@ -4041,7 +4046,7 @@ pub const ParseProcess = struct {
                 return ParseError.InvalidIdentifier;
             }
             if (part_token.?.type != .Identifier) {
-                self.transpile_proc.err("expected identifier after '.', got '{?}'", .{part_token.?.type});
+                self.transpile_proc.err("expected identifier after '.', got '{s}'", .{@tagName(part_token.?.type)});
                 return ParseError.InvalidIdentifier;
             }
             import_name.appendSlice(dot_op.data.sval.items) catch |e| {
@@ -4365,7 +4370,7 @@ pub const ParseProcess = struct {
                 .array = null,
                 .pointer_depth = 0,
                 .type = .Unknown,
-                .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
+                .type_str = ArrayList(u8).init(self.transpile_proc.allocator),
                 .flags = .{},
             };
             try self.parse_datatype(dt);
@@ -4591,7 +4596,7 @@ pub const ParseProcess = struct {
                     .array = null,
                     .pointer_depth = 0,
                     .type = .Unknown,
-                    .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
+                    .type_str = ArrayList(u8).init(self.transpile_proc.allocator),
                     .flags = .{},
                 };
                 var hist = utils.History.init(self.transpile_proc.allocator, .{});
@@ -4638,7 +4643,7 @@ pub const ParseProcess = struct {
                 .array = null,
                 .pointer_depth = 0,
                 .type = .Unknown,
-                .type_str = std.ArrayList(u8).init(self.transpile_proc.allocator),
+                .type_str = ArrayList(u8).init(self.transpile_proc.allocator),
                 .flags = .{},
             };
             var hist = utils.History.init(self.transpile_proc.allocator, .{});
@@ -4714,7 +4719,7 @@ pub const ParseProcess = struct {
         _ = self.token_next(); // skip asm
 
         var is_volatile = false;
-        var arch_name: ?std.ArrayList(u8) = null;
+        var arch_name: ?ArrayList(u8) = null;
 
         if (self.token_peek_next()) |t| {
             if ((t.type == .Keyword or t.type == .Identifier) and mem.eql(u8, t.data.sval.items, "volatile")) {
@@ -4731,7 +4736,7 @@ pub const ParseProcess = struct {
                     self.transpile_proc.err("expected architecture name after 'arch'", .{});
                     return ParseError.InvalidIdentifier;
                 }
-                arch_name = std.ArrayList(u8).initCapacity(self.transpile_proc.allocator, arch_tok.?.data.sval.items.len) catch {
+                arch_name = ArrayList(u8).initCapacity(self.transpile_proc.allocator, arch_tok.?.data.sval.items.len) catch {
                     return ParseError.MemoryAllocationFailed;
                 };
                 arch_name.?.appendSlice(arch_tok.?.data.sval.items) catch {
@@ -4742,7 +4747,7 @@ pub const ParseProcess = struct {
 
         var outputs = utils.Vector(ast.AsmOperand).init(self.transpile_proc.allocator);
         var inputs = utils.Vector(ast.AsmOperand).init(self.transpile_proc.allocator);
-        var clobbers = utils.Vector(std.ArrayList(u8)).init(self.transpile_proc.allocator);
+        var clobbers = utils.Vector(ArrayList(u8)).init(self.transpile_proc.allocator);
 
         const parse_operand_list = struct {
             fn call(self_: *Self, list: *utils.Vector(ast.AsmOperand), hist_: *utils.History) ParseError!void {
@@ -4755,7 +4760,7 @@ pub const ParseProcess = struct {
                         self_.transpile_proc.err("expected operand name", .{});
                         return ParseError.InvalidIdentifier;
                     }
-                    var name = std.ArrayList(u8).initCapacity(self_.transpile_proc.allocator, name_tok.?.data.sval.items.len) catch {
+                    var name = ArrayList(u8).initCapacity(self_.transpile_proc.allocator, name_tok.?.data.sval.items.len) catch {
                         return ParseError.MemoryAllocationFailed;
                     };
                     name.appendSlice(name_tok.?.data.sval.items) catch {
@@ -4773,7 +4778,7 @@ pub const ParseProcess = struct {
                         self_.transpile_proc.err("expected constraint string", .{});
                         return ParseError.InvalidString;
                     }
-                    var constraint = std.ArrayList(u8).initCapacity(self_.transpile_proc.allocator, constraint_tok.?.data.sval.items.len) catch {
+                    var constraint = ArrayList(u8).initCapacity(self_.transpile_proc.allocator, constraint_tok.?.data.sval.items.len) catch {
                         return ParseError.MemoryAllocationFailed;
                     };
                     constraint.appendSlice(constraint_tok.?.data.sval.items) catch {
@@ -4815,7 +4820,7 @@ pub const ParseProcess = struct {
         }.call;
 
         const parse_clobbers = struct {
-            fn call(self_: *Self, list: *utils.Vector(std.ArrayList(u8))) ParseError!void {
+            fn call(self_: *Self, list: *utils.Vector(ArrayList(u8))) ParseError!void {
                 while (true) {
                     while (token.is_nl_or_comment_or_newline_separator(self_.token_peek_next())) {
                         _ = self_.token_next();
@@ -4825,7 +4830,7 @@ pub const ParseProcess = struct {
                         self_.transpile_proc.err("expected clobber string", .{});
                         return ParseError.InvalidString;
                     }
-                    var cname = std.ArrayList(u8).initCapacity(self_.transpile_proc.allocator, ctok.?.data.sval.items.len) catch {
+                    var cname = ArrayList(u8).initCapacity(self_.transpile_proc.allocator, ctok.?.data.sval.items.len) catch {
                         return ParseError.MemoryAllocationFailed;
                     };
                     cname.appendSlice(ctok.?.data.sval.items) catch {
@@ -4886,7 +4891,7 @@ pub const ParseProcess = struct {
             }
         }
 
-        var template_buf = std.ArrayList(u8).init(self.transpile_proc.allocator);
+        var template_buf = ArrayList(u8).init(self.transpile_proc.allocator);
         var is_string_literal = false;
 
         while (token.is_nl_or_comment_or_newline_separator(self.token_peek_next())) {
@@ -4955,7 +4960,7 @@ pub const ParseProcess = struct {
         return idx;
     }
 
-    fn append_raw_asm_block_template(self: *Self, template_buf: *std.ArrayList(u8), open_brace_tok: token.Token) ParseError!void {
+    fn append_raw_asm_block_template(self: *Self, template_buf: *ArrayList(u8), open_brace_tok: token.Token) ParseError!void {
         var depth: usize = 1;
         var close_brace_tok: ?token.Token = null;
 

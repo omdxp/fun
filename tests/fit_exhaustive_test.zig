@@ -6,9 +6,9 @@ const codegen = @import("codegen");
 
 fn runTranspileWithWarnings(allocator: std.mem.Allocator, input_path: []const u8, input: []const u8) !struct { out: []const u8, warnings: ?[]const u8 } {
     {
-        const file = try fs.cwd().createFile(input_path, .{ .read = true });
-        defer file.close();
-        try file.writeAll(input);
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, input_path, .{ .read = true });
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, input);
     }
 
     var transpile_proc = try codegen.TranspileProcess.init(allocator, input_path, "_ignored.c", .{ .outf = false });
@@ -58,7 +58,7 @@ test "fit bin missing false warns" {
     try std.testing.expect(res.warnings != null);
     try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "fit statement is not exhausted for bin condition") != null);
 
-    fs.cwd().deleteFile(ifilepath) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "fit allow fit_non_exhaustive suppresses warning" {
@@ -82,7 +82,7 @@ test "fit allow fit_non_exhaustive suppresses warning" {
     }
 
     try std.testing.expect(res.warnings == null);
-    fs.cwd().deleteFile(ifilepath) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "fit expect fit_non_exhaustive suppresses warning" {
@@ -106,7 +106,7 @@ test "fit expect fit_non_exhaustive suppresses warning" {
     }
 
     try std.testing.expect(res.warnings == null);
-    fs.cwd().deleteFile(ifilepath) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "fit unmet expect fit_non_exhaustive fails" {
@@ -126,7 +126,7 @@ test "fit unmet expect fit_non_exhaustive fails" {
 
     const res = runTranspileWithWarnings(allocator, ifilepath, input) catch |err| {
         try std.testing.expectEqual(codegen.TranspileError.UnmetWarningExpectation, err);
-        fs.cwd().deleteFile(ifilepath) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
         return;
     };
     defer {
@@ -159,7 +159,7 @@ test "fit bin exhausted via default no warning" {
 
     try std.testing.expect(res.warnings == null);
 
-    fs.cwd().deleteFile(ifilepath) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "fit bin default only no warning" {
@@ -183,7 +183,7 @@ test "fit bin default only no warning" {
 
     try std.testing.expect(res.warnings == null);
 
-    fs.cwd().deleteFile(ifilepath) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "fit num missing default warns" {
@@ -209,7 +209,7 @@ test "fit num missing default warns" {
     try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "fit statement is not exhausted") != null);
     try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "missing catch-all '_' branch") != null);
 
-    fs.cwd().deleteFile(ifilepath) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "fit pointer missing default warns" {
@@ -236,7 +236,7 @@ test "fit pointer missing default warns" {
     try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "fit statement is not exhausted") != null);
     try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "missing catch-all '_' branch") != null);
 
-    fs.cwd().deleteFile(ifilepath) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "fit enum exhausted via all variants no warning" {
@@ -266,7 +266,7 @@ test "fit enum exhausted via all variants no warning" {
     }
 
     try std.testing.expect(res.warnings == null);
-    fs.cwd().deleteFile(ifilepath) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "fit enum missing variant warns" {
@@ -297,7 +297,7 @@ test "fit enum missing variant warns" {
     try std.testing.expect(res.warnings != null);
     try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "fit statement is not exhausted for enum") != null);
 
-    fs.cwd().deleteFile(ifilepath) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
 test "fit enum dot shorthand exhausted no warning" {
@@ -327,5 +327,5 @@ test "fit enum dot shorthand exhausted no warning" {
     }
 
     try std.testing.expect(res.warnings == null);
-    fs.cwd().deleteFile(ifilepath) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }

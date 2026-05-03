@@ -1,10 +1,14 @@
 const std = @import("std");
-const fs = std.fs;
 const mem = std.mem;
 const codegen = @import("codegen");
 const TranspileError = codegen.TranspileError;
 const utils = @import("utils");
 pub const token = @import("token.zig");
+
+/// Compatibility shim: ArrayList with embedded allocator (old-style managed API).
+fn ArrayList(comptime T: type) type {
+    return std.array_list.Managed(T);
+}
 
 /// Errors that can occur during lexical analysis process.
 pub const LexError = error{
@@ -31,9 +35,9 @@ pub const LexProcess = struct {
     /// `curr_exp_count` is the current expression count.
     curr_exp_count: isize,
     /// `parenthesis_buf` is a buffer for storing parenthesis characters.
-    parenthesis_buf: ?std.ArrayList(u8) = null,
+    parenthesis_buf: ?ArrayList(u8) = null,
     /// `arg_str_buf` is a buffer for storing argument strings.
-    arg_str_buf: ?std.ArrayList(u8) = null,
+    arg_str_buf: ?ArrayList(u8) = null,
 
     /// Tracks whether we're currently scanning an `asm` statement.
     asm_state: AsmLexState = .none,
@@ -84,7 +88,7 @@ pub const LexProcess = struct {
         const start_line = self.transpile_proc.pos.line;
         const start_col = self.transpile_proc.pos.col;
 
-        var buffer = std.ArrayList(u8).init(self.transpile_proc.allocator);
+        var buffer = ArrayList(u8).init(self.transpile_proc.allocator);
         var depth: usize = 1;
         var close_pos: ?token.Pos = null;
 
@@ -161,16 +165,14 @@ pub const LexProcess = struct {
     /// - Returns an error if reading from the input file fails.
     pub fn next_char(self: *Self) LexError!?u8 {
         var buffer: [1]u8 = undefined;
-        const readBytes = self.transpile_proc.ifile.read(buffer[0..]) catch |e| {
-            if (e == fs.File.ReadError.Unexpected) {
-                return null;
-            }
+        const readBytes = self.transpile_proc.ifile.readPositionalAll(self.transpile_proc.io, &buffer, self.transpile_proc.file_pos) catch |e| {
             std.debug.print("Error reading from file: {s}\n", .{@errorName(e)});
             return LexError.FileReadError;
         };
         if (readBytes == 0) {
             return null;
         }
+        self.transpile_proc.file_pos += 1;
 
         const c = buffer[0];
 
@@ -209,22 +211,12 @@ pub const LexProcess = struct {
     /// Errors:
     /// - Returns an error if reading from or seeking in the input file fails.
     pub fn peek_char(self: *Self) LexError!?u8 {
-        const pos = self.transpile_proc.ifile.seekableStream().getPos() catch |e| {
-            std.debug.print("Error getting position: {s}\n", .{@errorName(e)});
-            return LexError.FileSeekError;
-        };
         var buffer: [1]u8 = undefined;
-        const readBytes = self.transpile_proc.ifile.read(buffer[0..]) catch |e| {
-            if (e == fs.File.ReadError.Unexpected) {
-                return null;
-            }
+        const readBytes = self.transpile_proc.ifile.readPositionalAll(self.transpile_proc.io, &buffer, self.transpile_proc.file_pos) catch |e| {
             std.debug.print("Error reading from file: {s}\n", .{@errorName(e)});
             return LexError.FileReadError;
         };
-        self.transpile_proc.ifile.seekTo(pos) catch |e| {
-            std.debug.print("Error seeking in file: {s}\n", .{@errorName(e)});
-            return LexError.FileSeekError;
-        };
+        // file_pos is NOT advanced — this is a non-consuming peek.
         return if (readBytes == 0) null else buffer[0];
     }
 
@@ -239,14 +231,9 @@ pub const LexProcess = struct {
     /// Errors:
     /// - Returns an error if seeking or writing to the input file fails.
     pub fn push_char(self: *Self, c: u8) LexError!void {
-        const pos = self.transpile_proc.ifile.seekableStream().getPos() catch |e| {
-            std.debug.print("Error getting position: {s}\n", .{@errorName(e)});
-            return LexError.FileSeekError;
-        };
-        self.transpile_proc.ifile.seekTo(pos - 1) catch |e| {
-            std.debug.print("Error seeking in file: {s}\n", .{@errorName(e)});
-            return LexError.FileSeekError;
-        };
+        if (self.transpile_proc.file_pos > 0) {
+            self.transpile_proc.file_pos -= 1;
+        }
 
         // IMPORTANT: do not write back into the user's source file.
         // `push_char` is meant to implement a simple "unread" for lookahead.
@@ -273,7 +260,7 @@ pub const LexProcess = struct {
     ///
     /// Errors:
     /// - Returns an error if reading from the input file fails.
-    fn getc_if(self: *Self, buffer: *std.ArrayList(u8), exp: fn (u8) bool) LexError!void {
+    fn getc_if(self: *Self, buffer: *ArrayList(u8), exp: fn (u8) bool) LexError!void {
         while (true) {
             const c = try self.peek_char();
             if (c == null or !exp(c.?)) break;
@@ -295,7 +282,7 @@ pub const LexProcess = struct {
     /// Errors:
     /// - Returns an error if reading from the input file fails.
     fn token_make_comment(self: *Self) LexError!token.Token {
-        var buffer = std.ArrayList(u8).init(self.transpile_proc.allocator);
+        var buffer = ArrayList(u8).init(self.transpile_proc.allocator);
         try self.getc_if(&buffer, struct {
             fn call(_c: u8) bool {
                 return _c != '\n' and _c != '\r';
@@ -393,7 +380,7 @@ pub const LexProcess = struct {
     /// Errors:
     /// - Returns an error if reading characters or allocating memory fails.
     fn token_make_identifier_or_keyword(self: *Self) LexError!?token.Token {
-        var buffer = std.ArrayList(u8).init(self.transpile_proc.allocator);
+        var buffer = ArrayList(u8).init(self.transpile_proc.allocator);
         try self.getc_if(&buffer, struct {
             fn call(_c: u8) bool {
                 return utils.is_alpha(_c) or utils.is_number(_c) or _c == '_';
@@ -453,12 +440,12 @@ pub const LexProcess = struct {
     /// and stores them in a buffer.
     ///
     /// Returns:
-    /// - `!std.ArrayList(u8)`: The buffer containing the numeric string.
+    /// - `!ArrayList(u8)`: The buffer containing the numeric string.
     ///
     /// Errors:
     /// - Returns an error if reading characters or allocating the buffer fails.
-    fn read_number_str(self: *Self) LexError!std.ArrayList(u8) {
-        var buffer = std.ArrayList(u8).init(self.transpile_proc.allocator);
+    fn read_number_str(self: *Self) LexError!ArrayList(u8) {
+        var buffer = ArrayList(u8).init(self.transpile_proc.allocator);
         try self.getc_if(&buffer, struct {
             fn call(_c: u8) bool {
                 return utils.is_number(_c);
@@ -627,12 +614,12 @@ pub const LexProcess = struct {
     fn start_expression(self: *Self) void {
         self.curr_exp_count += 1;
         if (self.curr_exp_count == 1) {
-            self.parenthesis_buf = std.ArrayList(u8).init(self.transpile_proc.allocator);
+            self.parenthesis_buf = ArrayList(u8).init(self.transpile_proc.allocator);
         }
 
         const t = self.transpile_proc.tokens.back();
         if (t != null and (t.?.type == .Identifier or token.is_operator(t, ","))) {
-            self.arg_str_buf = std.ArrayList(u8).init(self.transpile_proc.allocator);
+            self.arg_str_buf = ArrayList(u8).init(self.transpile_proc.allocator);
         }
     }
 
@@ -708,8 +695,8 @@ pub const LexProcess = struct {
     /// - Returns an error if pushing a character back to the input file fails.
     ///
     /// Parameters:
-    /// - `buffer (*std.ArrayList(u8))`: The buffer containing the characters to be pushed back.
-    fn read_op_flush_back_keep_first(self: *Self, buffer: *std.ArrayList(u8)) LexError!void {
+    /// - `buffer (*ArrayList(u8))`: The buffer containing the characters to be pushed back.
+    fn read_op_flush_back_keep_first(self: *Self, buffer: *ArrayList(u8)) LexError!void {
         var i = buffer.items.len - 1;
         while (i > 0) {
             _ = try self.push_char(buffer.items[i]);
@@ -729,12 +716,12 @@ pub const LexProcess = struct {
     /// and validating them.
     ///
     /// Returns:
-    /// - `!std.ArrayList(u8)`: The buffer containing the operator string.
+    /// - `!ArrayList(u8)`: The buffer containing the operator string.
     ///
     /// Errors:
     /// - Returns an error if reading characters or validating the operator fails.
-    fn read_op(self: *Self) LexError!std.ArrayList(u8) {
-        var buffer = std.ArrayList(u8).init(self.transpile_proc.allocator);
+    fn read_op(self: *Self) LexError!ArrayList(u8) {
+        var buffer = ArrayList(u8).init(self.transpile_proc.allocator);
         var single_operator = true;
         const op0 = (try self.next_char()) orelse {
             self.transpile_proc.err("unexpected end of file while reading operator", .{});
@@ -879,12 +866,12 @@ pub const LexProcess = struct {
     /// and stores them in a buffer.
     ///
     /// Returns:
-    /// - `!std.ArrayList(u8)`: The buffer containing the hexadecimal string.
+    /// - `!ArrayList(u8)`: The buffer containing the hexadecimal string.
     ///
     /// Errors:
     /// - Returns an error if reading characters or allocating the buffer fails.
-    fn read_hex_number_str(self: *Self) LexError!std.ArrayList(u8) {
-        var buffer = std.ArrayList(u8).init(self.transpile_proc.allocator);
+    fn read_hex_number_str(self: *Self) LexError!ArrayList(u8) {
+        var buffer = ArrayList(u8).init(self.transpile_proc.allocator);
         try self.getc_if(&buffer, struct {
             fn call(_c: u8) bool {
                 return utils.is_hex_number(_c);
@@ -961,12 +948,12 @@ pub const LexProcess = struct {
     /// range of 0 to 255, and appends it to the buffer.
     ///
     /// Parameters:
-    /// - `buf (*std.ArrayList(u8))`: The buffer to append the number to.
+    /// - `buf (*ArrayList(u8))`: The buffer to append the number to.
     ///
     /// Errors:
     /// - Returns an error if reading the number or appending to the buffer fails.
     /// - Logs an error message if the number is outside the valid range (0 to 255).
-    fn handle_escape_number(self: *Self, buf: *std.ArrayList(u8)) LexError!void {
+    fn handle_escape_number(self: *Self, buf: *ArrayList(u8)) LexError!void {
         const num = try self.read_number();
         if (num > 255) {
             self.transpile_proc.err("characters must be between 0 and 255, got '{}'", .{num});
@@ -985,11 +972,11 @@ pub const LexProcess = struct {
     /// and appends the corresponding character to the buffer.
     ///
     /// Parameters:
-    /// - `buf (*std.ArrayList(u8))`: The buffer to append the character to.
+    /// - `buf (*ArrayList(u8))`: The buffer to append the character to.
     ///
     /// Errors:
     /// - Returns an error if reading the next character or appending to the buffer fails.
-    fn handle_escape(self: *Self, buf: *std.ArrayList(u8)) LexError!void {
+    fn handle_escape(self: *Self, buf: *ArrayList(u8)) LexError!void {
         const c = try self.peek_char();
         if (c == null) {
             self.transpile_proc.err("unexpected end of file while reading escape", .{});
@@ -1020,7 +1007,7 @@ pub const LexProcess = struct {
     /// - Returns an error if reading characters or appending to the buffer fails.
     /// - Logs an error message if the end of file is reached unexpectedly.
     fn token_make_string(self: *Self) LexError!?token.Token {
-        var buffer = std.ArrayList(u8).init(self.transpile_proc.allocator);
+        var buffer = ArrayList(u8).init(self.transpile_proc.allocator);
         _ = try self.next_char(); // skip '"'
         while (true) {
             const c = try self.next_char();

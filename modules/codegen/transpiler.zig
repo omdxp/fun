@@ -1,6 +1,5 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const fs = std.fs;
 const mem = std.mem;
 const assert = std.debug.assert;
 const parser = @import("parser");
@@ -14,6 +13,12 @@ const semantics = @import("semantics");
 const scope = semantics.scope;
 const symbol = semantics.symbol;
 const dtype = semantics.dtype;
+
+/// Compatibility shim: ArrayList with embedded allocator (old-style managed API).
+fn ArrayList(comptime T: type) type {
+    return std.array_list.Managed(T);
+}
+
 /// Errors that can occur during the transpilation process.
 pub const TranspileError = error{
     /// Error indicating that a file is not found.
@@ -161,7 +166,7 @@ pub const TypeRegistry = struct {
     impls_by_key: std.HashMap(ImplKey, *ast.Node, ImplKeyContext, 80),
 
     /// Owned allocations for registry-internal keys (quirk signatures, alias-qualified names).
-    owned_keys: std.ArrayList([]const u8),
+    owned_keys: ArrayList([]const u8),
 
     pub fn init(allocator: mem.Allocator) TypeRegistry {
         return .{
@@ -172,7 +177,7 @@ pub const TypeRegistry = struct {
             .quirks_by_sig = std.StringHashMap(*ast.Node).init(allocator),
             .quirk_hash_by_sig = std.StringHashMap(u64).init(allocator),
             .impls_by_key = std.HashMap(ImplKey, *ast.Node, ImplKeyContext, 80).init(allocator),
-            .owned_keys = std.ArrayList([]const u8).init(allocator),
+            .owned_keys = ArrayList([]const u8).init(allocator),
         };
     }
 
@@ -209,24 +214,30 @@ pub const TranspileProcess = struct {
     /// Transpilation flags for this process.
     flags: TranspileProcessFlags,
 
+    /// I/O handle used for all file system operations.
+    io: std.Io,
+
     /// Current token position for diagnostics.
     pos: token.Pos,
 
     /// Input/output file handles.
-    ifile: fs.File,
-    ofile: ?fs.File,
-    outbuf: ?std.ArrayList(u8),
+    ifile: std.Io.File,
+    ofile: ?std.Io.File,
+    outbuf: ?ArrayList(u8),
+
+    /// Tracked read offset for cross-platform positional file reads.
+    file_pos: u64 = 0,
 
     /// Token and node storage.
     tokens: utils.Vector(token.Token),
     nodes: utils.Vector(ast.Node),
-    warnings: std.ArrayList(u8),
-    pending_warning_allows: std.ArrayList(PendingWarningControl),
-    pending_warning_expects: std.ArrayList(PendingWarningControl),
-    owned_nodes: std.ArrayList(*ast.Node),
-    owned_scope_entities: std.ArrayList(*scope.ScopeEntity),
-    defer_stack: std.ArrayList(DeferEntry),
-    defer_scope_stack: std.ArrayList(DeferScopeFrame),
+    warnings: ArrayList(u8),
+    pending_warning_allows: ArrayList(PendingWarningControl),
+    pending_warning_expects: ArrayList(PendingWarningControl),
+    owned_nodes: ArrayList(*ast.Node),
+    owned_scope_entities: ArrayList(*scope.ScopeEntity),
+    defer_stack: ArrayList(DeferEntry),
+    defer_scope_stack: ArrayList(DeferScopeFrame),
 
     /// Scope tracking.
     scope: ?struct {
@@ -247,7 +258,7 @@ pub const TranspileProcess = struct {
     indent_level: u32 = 0,
 
     /// Generic type substitution during emission.
-    type_subst_params: ?*const utils.Vector(std.ArrayList(u8)) = null,
+    type_subst_params: ?*const utils.Vector(ArrayList(u8)) = null,
     type_subst_args: ?[]*dtype.DataType = null,
 
     /// Optional override for specialized function names during emission.
@@ -307,14 +318,14 @@ pub const TranspileProcess = struct {
     imported_files: std.StringHashMap(bool),
 
     /// Forced generic instantiations discovered during typecheck.
-    forced_generic_instantiations: std.ArrayList(*const dtype.DataType),
+    forced_generic_instantiations: ArrayList(*const dtype.DataType),
     forced_generic_instantiation_keys: std.StringHashMap(bool),
 
     /// Mangled names of emitted generic compound specializations.
     emitted_generic_spec_keys: std.StringHashMap(bool),
 
     /// Forced generic function instantiations discovered during typecheck.
-    generic_fn_instantiations: std.ArrayList(GenericFnInstantiation),
+    generic_fn_instantiations: ArrayList(GenericFnInstantiation),
     generic_fn_instantiation_keys: std.StringHashMap(bool),
 
     /// Call-site overrides for generic function names (keyed by position).
@@ -324,7 +335,7 @@ pub const TranspileProcess = struct {
     await_call_overrides: std.StringHashMap(AwaitCallOverride),
 
     /// Import chain to detect circular dependencies
-    import_chain: std.ArrayList([]const u8),
+    import_chain: ArrayList([]const u8),
 
     /// Track global symbols across all modules to detect duplicates
     global_symbols: std.StringHashMap(GlobalSymbolInfo),
@@ -354,10 +365,10 @@ pub const TranspileProcess = struct {
     parent: ?*TranspileProcess = null,
 
     /// Child import processes
-    children: std.ArrayList(*TranspileProcess),
+    children: ArrayList(*TranspileProcess),
 
     /// Standard library imports to be added at the beginning of the output
-    std_imports: std.ArrayList([]const u8),
+    std_imports: ArrayList([]const u8),
 
     /// True when `std.c.thread` or `std.c.thread_windows` is imported
     /// anywhere in this module tree.
@@ -393,14 +404,19 @@ pub const TranspileProcess = struct {
         return std.fs.path.isAbsolute(path);
     }
 
+    fn globalIo() std.Io {
+        return std.Io.Threaded.global_single_threaded.io();
+    }
+
     fn dir_exists(path: []const u8) bool {
+        const io = globalIo();
         if (is_abs_path(path)) {
-            var d = std.fs.openDirAbsolute(path, .{}) catch return false;
-            d.close();
+            var d = std.Io.Dir.openDirAbsolute(io, path, .{}) catch return false;
+            d.close(io);
             return true;
         }
-        var d = std.fs.cwd().openDir(path, .{}) catch return false;
-        d.close();
+        var d = std.Io.Dir.cwd().openDir(io, path, .{}) catch return false;
+        d.close(io);
         return true;
     }
 
@@ -413,19 +429,15 @@ pub const TranspileProcess = struct {
     }
 
     fn discover_stdlib_dir(backing: mem.Allocator, a: mem.Allocator) TranspileError!?[]const u8 {
+        const io = globalIo();
         // 1) Explicit override (best for installers and CI)
-        const env = std.process.getEnvVarOwned(backing, "FUN_STDLIB_DIR") catch |e| switch (e) {
-            error.EnvironmentVariableNotFound => null,
-            else => return TranspileError.MemoryAllocationFailed,
-        };
-        if (env) |p| {
-            defer backing.free(p);
-            // Even if it doesn't exist, keep the value for downstream tooling.
-            return try dupe_arena(a, p);
+        if (std.c.getenv("FUN_STDLIB_DIR")) |z| {
+            const p = std.mem.sliceTo(z, 0);
+            if (p.len > 0) return try dupe_arena(a, p);
         }
 
         // 2) Relative to executable: `<exe_dir>/../share/fun`
-        const exe_path = std.fs.selfExePathAlloc(backing) catch null;
+        const exe_path = std.process.executablePathAlloc(io, backing) catch null;
         if (exe_path) |exe| {
             defer backing.free(exe);
             const exe_dir = std.fs.path.dirname(exe) orelse null;
@@ -441,7 +453,7 @@ pub const TranspileProcess = struct {
         {
             const cand_workspace = "stdlib";
             if (dir_exists(cand_workspace)) {
-                const abs = std.fs.cwd().realpathAlloc(backing, cand_workspace) catch null;
+                const abs = std.Io.Dir.cwd().realPathFileAlloc(io, cand_workspace, backing) catch null;
                 if (abs) |p| {
                     defer backing.free(p);
                     return try dupe_arena(a, p);
@@ -451,7 +463,7 @@ pub const TranspileProcess = struct {
 
             const cand_install = "zig-out/share/fun";
             if (dir_exists(cand_install)) {
-                const abs = std.fs.cwd().realpathAlloc(backing, cand_install) catch null;
+                const abs = std.Io.Dir.cwd().realPathFileAlloc(io, cand_install, backing) catch null;
                 if (abs) |p| {
                     defer backing.free(p);
                     return try dupe_arena(a, p);
@@ -462,16 +474,14 @@ pub const TranspileProcess = struct {
 
         // 4) Common system locations
         if (builtin.target.os.tag == .windows) {
-            const local_app = std.process.getEnvVarOwned(backing, "LOCALAPPDATA") catch null;
-            if (local_app) |base| {
-                defer backing.free(base);
+            if (std.c.getenv("LOCALAPPDATA")) |z| {
+                const base = std.mem.sliceTo(z, 0);
                 const cand = try join_alloc(backing, &[_][]const u8{ base, "fun", "share", "fun" });
                 defer backing.free(cand);
                 if (dir_exists(cand)) return try dupe_arena(a, cand);
             }
-            const program_files = std.process.getEnvVarOwned(backing, "ProgramFiles") catch null;
-            if (program_files) |base| {
-                defer backing.free(base);
+            if (std.c.getenv("ProgramFiles")) |z| {
+                const base = std.mem.sliceTo(z, 0);
                 const cand = try join_alloc(backing, &[_][]const u8{ base, "fun", "share", "fun" });
                 defer backing.free(cand);
                 if (dir_exists(cand)) return try dupe_arena(a, cand);
@@ -482,9 +492,8 @@ pub const TranspileProcess = struct {
             const cand2 = "/usr/share/fun";
             if (dir_exists(cand2)) return try dupe_arena(a, cand2);
 
-            const home = std.process.getEnvVarOwned(backing, "HOME") catch null;
-            if (home) |h| {
-                defer backing.free(h);
+            if (std.c.getenv("HOME")) |z| {
+                const h = std.mem.sliceTo(z, 0);
                 const cand = try join_alloc(backing, &[_][]const u8{ h, ".local", "share", "fun" });
                 defer backing.free(cand);
                 if (dir_exists(cand)) return try dupe_arena(a, cand);
@@ -513,10 +522,11 @@ pub const TranspileProcess = struct {
     }
 
     fn discover_stdlib_dir_near_input(backing: mem.Allocator, a: mem.Allocator, ifilepath: []const u8) TranspileError!?[]const u8 {
+        const io = globalIo();
         const abs = if (std.fs.path.isAbsolute(ifilepath))
             (backing.dupe(u8, ifilepath) catch return TranspileError.MemoryAllocationFailed)
         else blk: {
-            const rp = std.fs.cwd().realpathAlloc(backing, ifilepath) catch return null;
+            const rp = std.Io.Dir.cwd().realPathFileAlloc(io, ifilepath, backing) catch return null;
             break :blk rp;
         };
         defer backing.free(abs);
@@ -527,7 +537,7 @@ pub const TranspileProcess = struct {
             const cand = try join_alloc(backing, &[_][]const u8{ cur_dir, "stdlib" });
             defer backing.free(cand);
             if (dir_exists(cand)) {
-                const resolved = std.fs.cwd().realpathAlloc(backing, cand) catch null;
+                const resolved = std.Io.Dir.cwd().realPathFileAlloc(io, cand, backing) catch null;
                 if (resolved) |r| {
                     defer backing.free(r);
                     return try dupe_arena(a, r);
@@ -592,7 +602,7 @@ pub const TranspileProcess = struct {
     }
 
     fn make_alias_qualified_symbol_name(self: *Self, alias: []const u8, name: []const u8) TranspileError![]const u8 {
-        var buf = std.ArrayList(u8).init(self.allocator);
+        var buf = ArrayList(u8).init(self.allocator);
         defer buf.deinit();
         buf.appendSlice(alias) catch return TranspileError.MemoryAllocationFailed;
         buf.appendSlice("__") catch return TranspileError.MemoryAllocationFailed;
@@ -658,7 +668,7 @@ pub const TranspileProcess = struct {
         return &root.type_registry.?;
     }
 
-    fn append_dtype_sig(self: *Self, buf: *std.ArrayList(u8), dt: *const dtype.DataType) TranspileError!void {
+    fn append_dtype_sig(self: *Self, buf: *ArrayList(u8), dt: *const dtype.DataType) TranspileError!void {
         buf.appendSlice(dt.type_str.items) catch {
             return TranspileError.MemoryAllocationFailed;
         };
@@ -692,7 +702,7 @@ pub const TranspileProcess = struct {
         if (qnode.node_variant == null) return TranspileError.UnsupportedNodeType;
         const q = qnode.node_variant.?.quirk;
 
-        var buf = std.ArrayList(u8).init(self.allocator);
+        var buf = ArrayList(u8).init(self.allocator);
         defer buf.deinit();
 
         const methods = q.methods.items();
@@ -977,7 +987,7 @@ pub const TranspileProcess = struct {
         }
 
         // Collect missing methods.
-        var missing = std.ArrayList(ast.QuirkMethodSig).init(self.backing_allocator);
+        var missing = ArrayList(ast.QuirkMethodSig).init(self.backing_allocator);
         defer missing.deinit();
 
         for (q.methods.items()) |qm| {
@@ -1000,10 +1010,10 @@ pub const TranspileProcess = struct {
         }
 
         if (missing.items.len != 0) {
-            var buf = std.ArrayList(u8).init(self.backing_allocator);
+            var buf = ArrayList(u8).init(self.backing_allocator);
             defer buf.deinit();
 
-            buf.writer().print(
+            buf.print(
                 "impl '{s}' for quirk '{s}' is missing {d} method(s):\n",
                 .{ type_name, quirk_name, missing.items.len },
             ) catch return TranspileError.MemoryAllocationFailed;
@@ -1054,7 +1064,7 @@ pub const TranspileProcess = struct {
             );
             return TranspileError.WrongArgCount;
         }
-        var impl_rtype: dtype.DataType = .{ .type_str = std.ArrayList(u8).init(self.backing_allocator) };
+        var impl_rtype: dtype.DataType = .{ .type_str = ArrayList(u8).init(self.backing_allocator) };
         defer impl_rtype.type_str.deinit();
         if (impl_fn.rtype) |rt| {
             impl_rtype.type_str.appendSlice(rt.type_str.items) catch return TranspileError.MemoryAllocationFailed;
@@ -1067,9 +1077,9 @@ pub const TranspileProcess = struct {
         }
 
         if (!dtype_sig_equal(&impl_rtype, &quirk_sig.rtype)) {
-            var want = std.ArrayList(u8).init(self.backing_allocator);
+            var want = ArrayList(u8).init(self.backing_allocator);
             defer want.deinit();
-            var got = std.ArrayList(u8).init(self.backing_allocator);
+            var got = ArrayList(u8).init(self.backing_allocator);
             defer got.deinit();
             try self.append_dtype_sig(&want, &quirk_sig.rtype);
             try self.append_dtype_sig(&got, &impl_rtype);
@@ -1089,9 +1099,9 @@ pub const TranspileProcess = struct {
             }
             const impl_dt = impl_arg_node.node_variant.?.variable.type;
             if (!dtype_sig_equal(impl_dt, qa.dtype)) {
-                var want = std.ArrayList(u8).init(self.backing_allocator);
+                var want = ArrayList(u8).init(self.backing_allocator);
                 defer want.deinit();
-                var got = std.ArrayList(u8).init(self.backing_allocator);
+                var got = ArrayList(u8).init(self.backing_allocator);
                 defer got.deinit();
                 try self.append_dtype_sig(&want, qa.dtype);
                 try self.append_dtype_sig(&got, impl_dt);
@@ -1139,7 +1149,7 @@ pub const TranspileProcess = struct {
         return null;
     }
 
-    fn impl_type_params(self: *Self, impl_node: *const ast.Node) ?*const utils.Vector(std.ArrayList(u8)) {
+    fn impl_type_params(self: *Self, impl_node: *const ast.Node) ?*const utils.Vector(ArrayList(u8)) {
         if (impl_node.node_variant == null) return null;
         const im = &impl_node.node_variant.?.impl;
         if (im.type_params) |*params| return params;
@@ -1212,7 +1222,7 @@ pub const TranspileProcess = struct {
         if (mem.indexOf(u8, type_name, "__") == null) return null;
         const reg = self.root_registry() orelse return null;
 
-        var segments = std.ArrayList([]const u8).init(self.allocator);
+        var segments = ArrayList([]const u8).init(self.allocator);
         defer segments.deinit();
         var it = mem.splitSequence(u8, type_name, "__");
         while (it.next()) |seg| {
@@ -1236,7 +1246,7 @@ pub const TranspileProcess = struct {
         out.* = .{
             .flags = null,
             .type = .Unknown,
-            .type_str = std.ArrayList(u8).init(self.allocator),
+            .type_str = ArrayList(u8).init(self.allocator),
             .pointer_depth = 0,
             .array = null,
             .generic_args = null,
@@ -1270,7 +1280,7 @@ pub const TranspileProcess = struct {
         return out;
     }
 
-    fn add_spec_from_dtype(self: *Self, registry: *TypeRegistry, dt: *const dtype.DataType, spec_keys: *std.StringHashMap(bool), specs: *std.ArrayList(GenericSpec)) TranspileError!void {
+    fn add_spec_from_dtype(self: *Self, registry: *TypeRegistry, dt: *const dtype.DataType, spec_keys: *std.StringHashMap(bool), specs: *ArrayList(GenericSpec)) TranspileError!void {
         var use_dt: *const dtype.DataType = dt;
         if (use_dt.generic_args == null and use_dt.type_str.items.len > 0 and mem.indexOf(u8, use_dt.type_str.items, "__") != null) {
             if (try self.dtype_from_mangled_type(use_dt.type_str.items)) |synthetic| {
@@ -1303,7 +1313,7 @@ pub const TranspileProcess = struct {
         }
     }
 
-    fn add_specs_from_dtype(self: *Self, registry: *TypeRegistry, dt: *const dtype.DataType, spec_keys: *std.StringHashMap(bool), specs: *std.ArrayList(GenericSpec)) TranspileError!void {
+    fn add_specs_from_dtype(self: *Self, registry: *TypeRegistry, dt: *const dtype.DataType, spec_keys: *std.StringHashMap(bool), specs: *ArrayList(GenericSpec)) TranspileError!void {
         try self.add_spec_from_dtype(registry, dt, spec_keys, specs);
         if (dt.generic_args) |gargs| {
             for (gargs.items()) |ga| {
@@ -1312,7 +1322,7 @@ pub const TranspileProcess = struct {
         }
     }
 
-    fn add_specs_from_body(self: *Self, registry: *TypeRegistry, body: *const ast.Node, spec_keys: *std.StringHashMap(bool), specs: *std.ArrayList(GenericSpec)) TranspileError!void {
+    fn add_specs_from_body(self: *Self, registry: *TypeRegistry, body: *const ast.Node, spec_keys: *std.StringHashMap(bool), specs: *ArrayList(GenericSpec)) TranspileError!void {
         if (body.type != .Body or body.node_variant == null) return;
         const stmts = body.node_variant.?.body.statements;
         for (stmts.items()) |stmt_ptr| {
@@ -1353,7 +1363,7 @@ pub const TranspileProcess = struct {
         }
     }
 
-    fn add_specs_from_node(self: *Self, registry: *TypeRegistry, node: *ast.Node, spec_keys: *std.StringHashMap(bool), specs: *std.ArrayList(GenericSpec)) TranspileError!void {
+    fn add_specs_from_node(self: *Self, registry: *TypeRegistry, node: *ast.Node, spec_keys: *std.StringHashMap(bool), specs: *ArrayList(GenericSpec)) TranspileError!void {
         switch (node.type) {
             .Function => if (node.node_variant) |f| {
                 if (f.function.rtype) |*rt| try self.add_specs_from_dtype(registry, rt, spec_keys, specs);
@@ -1369,7 +1379,7 @@ pub const TranspileProcess = struct {
         }
     }
 
-    fn add_specs_from_nodes_recursive(self: *Self, proc: *Self, registry: *TypeRegistry, spec_keys: *std.StringHashMap(bool), specs: *std.ArrayList(GenericSpec)) TranspileError!void {
+    fn add_specs_from_nodes_recursive(self: *Self, proc: *Self, registry: *TypeRegistry, spec_keys: *std.StringHashMap(bool), specs: *ArrayList(GenericSpec)) TranspileError!void {
         for (proc.nodes.items()) |*node| {
             try self.add_specs_from_node(registry, node, spec_keys, specs);
         }
@@ -1591,7 +1601,7 @@ pub const TranspileProcess = struct {
         raw,
     };
 
-    fn escape_printf_literal(buf: *std.ArrayList(u8), s: []const u8) TranspileError!void {
+    fn escape_printf_literal(buf: *ArrayList(u8), s: []const u8) TranspileError!void {
         for (s) |c| {
             switch (c) {
                 '"' => buf.appendSlice("\\\"") catch return TranspileError.MemoryAllocationFailed,
@@ -1614,7 +1624,7 @@ pub const TranspileProcess = struct {
         return self.allocator.dupe(u8, name) catch TranspileError.MemoryAllocationFailed;
     }
 
-    fn build_printf_format(fmt: []const u8, out_fmt: *std.ArrayList(u8), kinds: *std.ArrayList(PrintFmtArgKind)) TranspileError!void {
+    fn build_printf_format(fmt: []const u8, out_fmt: *ArrayList(u8), kinds: *ArrayList(PrintFmtArgKind)) TranspileError!void {
         var i: usize = 0;
         while (i < fmt.len) {
             const c = fmt[i];
@@ -1697,7 +1707,7 @@ pub const TranspileProcess = struct {
     fn emit_print_fmt_literal(self: *Self, node: ast.Node, is_newline: bool, args_node: ?*ast.Node, module_alias: ?[]const u8) TranspileError!bool {
         if (args_node == null) return false;
 
-        var args_nodes = std.ArrayList(*ast.Node).init(self.allocator);
+        var args_nodes = ArrayList(*ast.Node).init(self.allocator);
         defer args_nodes.deinit();
         try self.flatten_call_args_ptr(args_node.?, &args_nodes);
         if (args_nodes.items.len == 0) return false;
@@ -1706,10 +1716,10 @@ pub const TranspileProcess = struct {
         if (fmt_node.type != .String or fmt_node.data == null) return false;
 
         const fmt = fmt_node.data.?.sval.items;
-        var fmt_out = std.ArrayList(u8).init(self.allocator);
+        var fmt_out = ArrayList(u8).init(self.allocator);
         defer fmt_out.deinit();
 
-        var kinds = std.ArrayList(PrintFmtArgKind).init(self.allocator);
+        var kinds = ArrayList(PrintFmtArgKind).init(self.allocator);
         defer kinds.deinit();
 
         try build_printf_format(fmt, &fmt_out, &kinds);
@@ -1731,7 +1741,7 @@ pub const TranspileProcess = struct {
             return true;
         }
 
-        var escaped = std.ArrayList(u8).init(self.allocator);
+        var escaped = ArrayList(u8).init(self.allocator);
         defer escaped.deinit();
         try escape_printf_literal(&escaped, fmt);
 
@@ -1870,7 +1880,7 @@ pub const TranspileProcess = struct {
     fn emit_format_literal(self: *Self, node: ast.Node, args_node: ?*ast.Node, module_alias: ?[]const u8) TranspileError!bool {
         if (args_node == null) return false;
 
-        var args_nodes = std.ArrayList(*ast.Node).init(self.allocator);
+        var args_nodes = ArrayList(*ast.Node).init(self.allocator);
         defer args_nodes.deinit();
         try self.flatten_call_args_ptr(args_node.?, &args_nodes);
         if (args_nodes.items.len == 0) return false;
@@ -1879,10 +1889,10 @@ pub const TranspileProcess = struct {
         if (fmt_node.type != .String or fmt_node.data == null) return false;
 
         const fmt = fmt_node.data.?.sval.items;
-        var fmt_out = std.ArrayList(u8).init(self.allocator);
+        var fmt_out = ArrayList(u8).init(self.allocator);
         defer fmt_out.deinit();
 
-        var kinds = std.ArrayList(PrintFmtArgKind).init(self.allocator);
+        var kinds = ArrayList(PrintFmtArgKind).init(self.allocator);
         defer kinds.deinit();
 
         try build_printf_format(fmt, &fmt_out, &kinds);
@@ -1900,7 +1910,7 @@ pub const TranspileProcess = struct {
             return true;
         }
 
-        var escaped = std.ArrayList(u8).init(self.allocator);
+        var escaped = ArrayList(u8).init(self.allocator);
         defer escaped.deinit();
         try escape_printf_literal(&escaped, fmt);
 
@@ -2061,7 +2071,7 @@ pub const TranspileProcess = struct {
         out.* = .{
             .flags = null,
             .type = normalized.base,
-            .type_str = std.ArrayList(u8).init(self.allocator),
+            .type_str = ArrayList(u8).init(self.allocator),
             .pointer_depth = normalized.pointer_depth,
             .array = null,
             .generic_args = null,
@@ -2083,7 +2093,7 @@ pub const TranspileProcess = struct {
         out.* = .{
             .flags = null,
             .type = .Unknown,
-            .type_str = std.ArrayList(u8).init(self.allocator),
+            .type_str = ArrayList(u8).init(self.allocator),
             .pointer_depth = 0,
             .array = null,
             .generic_args = null,
@@ -2099,7 +2109,7 @@ pub const TranspileProcess = struct {
             return TranspileError.MemoryAllocationFailed;
         };
         out.* = dt.*;
-        out.type_str = std.ArrayList(u8).init(alloc);
+        out.type_str = ArrayList(u8).init(alloc);
         out.type_str.appendSlice(dt.type_str.items) catch return TranspileError.MemoryAllocationFailed;
         out.generic_args = null;
 
@@ -2259,7 +2269,7 @@ pub const TranspileProcess = struct {
                 dt.* = .{
                     .flags = null,
                     .type = .Unknown,
-                    .type_str = std.ArrayList(u8).init(self.allocator),
+                    .type_str = ArrayList(u8).init(self.allocator),
                     .pointer_depth = 0,
                     .array = null,
                     .generic_args = null,
@@ -2283,7 +2293,7 @@ pub const TranspileProcess = struct {
         dt_str.* = .{
             .flags = null,
             .type = .Str,
-            .type_str = std.ArrayList(u8).init(self.allocator),
+            .type_str = ArrayList(u8).init(self.allocator),
             .pointer_depth = 0,
             .array = null,
             .generic_args = null,
@@ -2299,7 +2309,7 @@ pub const TranspileProcess = struct {
         dt_vec.* = .{
             .flags = null,
             .type = .Unknown,
-            .type_str = std.ArrayList(u8).init(self.allocator),
+            .type_str = ArrayList(u8).init(self.allocator),
             .pointer_depth = 0,
             .array = null,
             .generic_args = gargs,
@@ -2319,7 +2329,7 @@ pub const TranspileProcess = struct {
             flags.is_pointer = true;
             out.flags = flags;
         }
-        out.type_str = std.ArrayList(u8).init(self.allocator);
+        out.type_str = ArrayList(u8).init(self.allocator);
         out.type_str.appendSlice(dt.type_str.items) catch return TranspileError.MemoryAllocationFailed;
         return out;
     }
@@ -2341,7 +2351,7 @@ pub const TranspileProcess = struct {
         return true;
     }
 
-    fn bind_generic_param(self: *Self, expected: *const dtype.DataType, actual: *const dtype.DataType, params: *const utils.Vector(std.ArrayList(u8)), out: *std.StringHashMap(*dtype.DataType)) TranspileError!bool {
+    fn bind_generic_param(self: *Self, expected: *const dtype.DataType, actual: *const dtype.DataType, params: *const utils.Vector(ArrayList(u8)), out: *std.StringHashMap(*dtype.DataType)) TranspileError!bool {
         // Type param match.
         if ((expected.type == null or expected.type == .Unknown) and expected.type_str.items.len > 0) {
             for (params.items()) |p| {
@@ -2379,7 +2389,7 @@ pub const TranspileProcess = struct {
     }
 
     fn mangle_generic_fn_name(self: *Self, fname: []const u8, gargs: []*dtype.DataType) TranspileError![]const u8 {
-        var buf = std.ArrayList(u8).init(self.allocator);
+        var buf = ArrayList(u8).init(self.allocator);
         errdefer buf.deinit();
         buf.appendSlice(fname) catch return TranspileError.MemoryAllocationFailed;
         for (gargs) |ga| {
@@ -2389,9 +2399,9 @@ pub const TranspileProcess = struct {
         return buf.toOwnedSlice() catch return TranspileError.MemoryAllocationFailed;
     }
 
-    fn register_generic_fn_instantiation(self: *Self, fn_node: *ast.Node, params: *const utils.Vector(std.ArrayList(u8)), gargs: []*dtype.DataType, name: []const u8) TranspileError!void {
+    fn register_generic_fn_instantiation(self: *Self, fn_node: *ast.Node, params: *const utils.Vector(ArrayList(u8)), gargs: []*dtype.DataType, name: []const u8) TranspileError!void {
         const root = self.get_root();
-        var key_buf = std.ArrayList(u8).init(self.allocator);
+        var key_buf = ArrayList(u8).init(self.allocator);
         defer key_buf.deinit();
         key_buf.appendSlice(name) catch return TranspileError.MemoryAllocationFailed;
         const key = key_buf.toOwnedSlice() catch return TranspileError.MemoryAllocationFailed;
@@ -2408,7 +2418,7 @@ pub const TranspileProcess = struct {
         }) catch return TranspileError.MemoryAllocationFailed;
     }
 
-    fn append_quirk_method_stub_sig(self: *Self, buf: *std.ArrayList(u8), m: ast.QuirkMethodSig) TranspileError!void {
+    fn append_quirk_method_stub_sig(self: *Self, buf: *ArrayList(u8), m: ast.QuirkMethodSig) TranspileError!void {
         if (m.is_async) {
             buf.appendSlice("async ") catch return TranspileError.MemoryAllocationFailed;
         }
@@ -2469,14 +2479,14 @@ pub const TranspileProcess = struct {
     fn find_fn_defining_decl(self: *Self, kind_kw: []const u8, name: []const u8) !?[]u8 {
         // Best-effort: scan workspace files for a `compound <Name>` or `quirk <Name>` declaration.
         // Returns a backing-allocator owned relative path like `parent/child/some.fn`.
-        var matches = std.ArrayList([]u8).init(self.backing_allocator);
+        var matches = ArrayList([]u8).init(self.backing_allocator);
         defer {
             for (matches.items) |m| self.backing_allocator.free(m);
             matches.deinit();
         }
 
-        var root_dir = try std.fs.cwd().openDir(".", .{ .iterate = true });
-        defer root_dir.close();
+        var root_dir = try std.Io.Dir.cwd().openDir(self.io, ".", .{ .iterate = true });
+        defer root_dir.close(self.io);
         var walker = try root_dir.walk(self.backing_allocator);
         defer walker.deinit();
 
@@ -2489,7 +2499,7 @@ pub const TranspileProcess = struct {
             }
         }.call;
 
-        while (try walker.next()) |entry| {
+        while (try walker.next(self.io)) |entry| {
             // Skip generated/vendor trees.
             if (mem.startsWith(u8, entry.path, ".zig-cache") or mem.startsWith(u8, entry.path, "zig-out") or mem.startsWith(u8, entry.path, ".git") or mem.startsWith(u8, entry.path, "stdlib")) {
                 continue;
@@ -2497,9 +2507,7 @@ pub const TranspileProcess = struct {
             if (entry.kind != .file) continue;
             if (!mem.endsWith(u8, entry.path, ".fn")) continue;
 
-            var f = try root_dir.openFile(entry.path, .{});
-            defer f.close();
-            const contents = f.readToEndAlloc(self.backing_allocator, 512 * 1024) catch continue;
+            const contents = root_dir.readFileAlloc(self.io, entry.path, self.backing_allocator, .limited(512 * 1024)) catch continue;
             defer self.backing_allocator.free(contents);
 
             var found = false;
@@ -2527,7 +2535,7 @@ pub const TranspileProcess = struct {
         // Minimal variant of `process_local_import()` that takes a resolved `.fn` path.
         // Used for auto-importing type definitions so entrypoint scripts can run unchanged.
 
-        const canon_path = std.fs.cwd().realpathAlloc(self.allocator, full_path) catch null;
+        const canon_path = std.Io.Dir.cwd().realPathFileAlloc(self.io, full_path, self.allocator) catch null;
         const canon = canon_path orelse (self.allocator.dupe(u8, full_path) catch return TranspileError.MemoryAllocationFailed);
         errdefer self.allocator.free(canon);
 
@@ -2564,7 +2572,7 @@ pub const TranspileProcess = struct {
             return;
         }
 
-        std.fs.cwd().access(canon, .{}) catch {
+        std.Io.Dir.cwd().access(self.io, canon, .{}) catch {
             self.report_error(null, "Import file not found: {s}", .{full_path});
             return TranspileError.ImportFileNotFound;
         };
@@ -2844,7 +2852,7 @@ pub const TranspileProcess = struct {
 
     fn build_full_import_path(self: *Self, import_path: []const u8) TranspileError![]const u8 {
         // This path is a temporary helper string; keep it off the arena.
-        var file_path = std.ArrayList(u8).init(self.backing_allocator);
+        var file_path = ArrayList(u8).init(self.backing_allocator);
         defer file_path.deinit();
 
         const dir_path = std.fs.path.dirname(self.input_file_path) orelse ".";
@@ -2921,11 +2929,11 @@ pub const TranspileProcess = struct {
         const full_path = try self.build_full_import_path(import_path);
         defer self.backing_allocator.free(full_path);
 
-        const canon_path = std.fs.cwd().realpathAlloc(self.allocator, full_path) catch null;
+        const canon_path = std.Io.Dir.cwd().realPathFileAlloc(self.io, full_path, self.allocator) catch null;
         const canon = canon_path orelse (self.allocator.dupe(u8, full_path) catch return TranspileError.MemoryAllocationFailed);
         defer self.allocator.free(canon);
 
-        std.fs.cwd().access(canon, .{}) catch {
+        std.Io.Dir.cwd().access(self.io, canon, .{}) catch {
             self.report_error(import_node, "Import file not found: {s}", .{full_path});
             return TranspileError.ImportFileNotFound;
         };
@@ -2933,14 +2941,14 @@ pub const TranspileProcess = struct {
         // Early direct circular import detection (A imports B, and B imports A).
         // This is intentionally lightweight and mirrors the check in process_local_import.
         {
-            const file_contents = fs.cwd().readFileAlloc(self.backing_allocator, full_path, 1024 * 1024) catch |read_err| {
+            const file_contents = std.Io.Dir.cwd().readFileAlloc(self.io, full_path, self.backing_allocator, .limited(1024 * 1024)) catch |read_err| {
                 self.report_error(import_node, "Failed to read import file '{s}': {any}", .{ full_path, read_err });
                 return TranspileError.FileReadError;
             };
             defer self.backing_allocator.free(file_contents);
 
             const our_name = std.fs.path.stem(self.input_file_path);
-            var import_line = std.ArrayList(u8).init(self.backing_allocator);
+            var import_line = ArrayList(u8).init(self.backing_allocator);
             defer import_line.deinit();
             import_line.appendSlice("imp ") catch |e| {
                 std.debug.print("Failed to allocate memory for import line: {s}\\n", .{@errorName(e)});
@@ -3079,22 +3087,23 @@ pub const TranspileProcess = struct {
         ofilepath: []const u8,
         flags: TranspileProcessFlags,
         stdlib_dir_override: ?[]const u8,
-        input_mode: fs.File.OpenMode,
+        input_mode: std.Io.Dir.OpenFileOptions.Mode,
     ) TranspileError!Self {
+        const io = globalIo();
         const ifile = blk: {
-            const is_abs = fs.path.isAbsolute(ifilepath) or (@import("builtin").target.os.tag == .windows and ifilepath.len >= 2 and ifilepath[1] == ':');
+            const is_abs = std.fs.path.isAbsolute(ifilepath) or (@import("builtin").target.os.tag == .windows and ifilepath.len >= 2 and ifilepath[1] == ':');
             if (is_abs) {
-                break :blk fs.openFileAbsolute(ifilepath, .{ .mode = input_mode }) catch |e| {
+                break :blk std.Io.Dir.openFileAbsolute(io, ifilepath, .{ .mode = input_mode }) catch |e| {
                     std.debug.print("Error opening input file '{s}': {s}\n", .{ ifilepath, @errorName(e) });
                     return TranspileError.FileOpenError;
                 };
             }
-            break :blk fs.cwd().openFile(ifilepath, .{ .mode = input_mode }) catch |e| {
+            break :blk std.Io.Dir.cwd().openFile(io, ifilepath, .{ .mode = input_mode }) catch |e| {
                 std.debug.print("Error opening input file '{s}': {s}\n", .{ ifilepath, @errorName(e) });
                 return TranspileError.FileOpenError;
             };
         };
-        errdefer ifile.close();
+        errdefer ifile.close(io);
 
         const arena_ptr = allocator.create(std.heap.ArenaAllocator) catch {
             return TranspileError.MemoryAllocationFailed;
@@ -3104,26 +3113,26 @@ pub const TranspileProcess = struct {
         errdefer arena_ptr.deinit();
         const a = arena_ptr.allocator();
 
-        var ofile: ?fs.File = null;
-        var outbuf: ?std.ArrayList(u8) = null;
+        var ofile: ?std.Io.File = null;
+        var outbuf: ?ArrayList(u8) = null;
 
         if (flags.outf) {
             ofile = blk: {
-                const is_abs = fs.path.isAbsolute(ofilepath) or (@import("builtin").target.os.tag == .windows and ofilepath.len >= 2 and ofilepath[1] == ':');
+                const is_abs = std.fs.path.isAbsolute(ofilepath) or (@import("builtin").target.os.tag == .windows and ofilepath.len >= 2 and ofilepath[1] == ':');
                 if (is_abs) {
-                    break :blk fs.createFileAbsolute(ofilepath, .{ .read = true }) catch |e| {
+                    break :blk std.Io.Dir.createFileAbsolute(io, ofilepath, .{ .read = true }) catch |e| {
                         std.debug.print("Error creating output file '{s}': {s}\n", .{ ofilepath, @errorName(e) });
                         return TranspileError.FileOpenError;
                     };
                 }
-                break :blk fs.cwd().createFile(ofilepath, .{ .read = true }) catch |e| {
+                break :blk std.Io.Dir.cwd().createFile(io, ofilepath, .{ .read = true }) catch |e| {
                     std.debug.print("Error creating output file '{s}': {s}\n", .{ ofilepath, @errorName(e) });
                     return TranspileError.FileOpenError;
                 };
             };
-            errdefer if (ofile) |f| f.close();
+            errdefer if (ofile) |f| f.close(io);
         } else {
-            outbuf = std.ArrayList(u8).init(a);
+            outbuf = ArrayList(u8).init(a);
         }
 
         // Create initial symbol table
@@ -3142,7 +3151,7 @@ pub const TranspileProcess = struct {
         var imported_files = std.StringHashMap(bool).init(a);
         errdefer imported_files.deinit();
 
-        var import_chain = std.ArrayList([]const u8).init(a);
+        var import_chain = ArrayList([]const u8).init(a);
         errdefer import_chain.deinit();
 
         const input_file_path = a.dupe(u8, ifilepath) catch |e| {
@@ -3152,19 +3161,11 @@ pub const TranspileProcess = struct {
         errdefer a.free(input_file_path);
 
         const input_source = blk: {
-            const stat = ifile.stat() catch |e| {
-                std.debug.print("Error stat'ing input file '{s}': {s}\\n", .{ ifilepath, @errorName(e) });
+            var read_buf: [65536]u8 = undefined;
+            var file_reader = ifile.reader(io, &read_buf);
+            const src = file_reader.interface.allocRemaining(a, .limited(64 * 1024 * 1024)) catch |e| {
+                std.debug.print("Error reading input file '{s}': {s}\n", .{ ifilepath, @errorName(e) });
                 return TranspileError.FileReadError;
-            };
-            const max_bytes_u64: u64 = if (stat.size == 0) 1 else stat.size;
-            const max_bytes: usize = @intCast(max_bytes_u64);
-            const src = ifile.readToEndAlloc(a, max_bytes) catch |e| {
-                std.debug.print("Error reading input file '{s}': {s}\\n", .{ ifilepath, @errorName(e) });
-                return TranspileError.FileReadError;
-            };
-            ifile.seekTo(0) catch |e| {
-                std.debug.print("Error rewinding input file '{s}': {s}\\n", .{ ifilepath, @errorName(e) });
-                return TranspileError.FileSeekError;
             };
             break :blk src;
         };
@@ -3199,13 +3200,13 @@ pub const TranspileProcess = struct {
             .outbuf = outbuf,
             .tokens = utils.Vector(token.Token).init(a),
             .nodes = utils.Vector(ast.Node).init(a),
-            .warnings = std.ArrayList(u8).init(a),
-            .pending_warning_allows = std.ArrayList(PendingWarningControl).init(a),
-            .pending_warning_expects = std.ArrayList(PendingWarningControl).init(a),
-            .owned_nodes = std.ArrayList(*ast.Node).init(a),
-            .owned_scope_entities = std.ArrayList(*scope.ScopeEntity).init(a),
-            .defer_stack = std.ArrayList(DeferEntry).init(a),
-            .defer_scope_stack = std.ArrayList(DeferScopeFrame).init(a),
+            .warnings = ArrayList(u8).init(a),
+            .pending_warning_allows = ArrayList(PendingWarningControl).init(a),
+            .pending_warning_expects = ArrayList(PendingWarningControl).init(a),
+            .owned_nodes = ArrayList(*ast.Node).init(a),
+            .owned_scope_entities = ArrayList(*scope.ScopeEntity).init(a),
+            .defer_stack = ArrayList(DeferEntry).init(a),
+            .defer_scope_stack = ArrayList(DeferScopeFrame).init(a),
             .scope = null,
             .symbols = .{
                 .active_table = initial_table,
@@ -3218,18 +3219,19 @@ pub const TranspileProcess = struct {
             .import_chain = import_chain,
             .global_symbols = std.StringHashMap(GlobalSymbolInfo).init(a),
             .import_aliases = std.StringHashMap([]const u8).init(a),
-            .children = std.ArrayList(*TranspileProcess).init(a),
-            .std_imports = std.ArrayList([]const u8).init(a),
-            .forced_generic_instantiations = std.ArrayList(*const dtype.DataType).init(a),
+            .children = ArrayList(*TranspileProcess).init(a),
+            .std_imports = ArrayList([]const u8).init(a),
+            .forced_generic_instantiations = ArrayList(*const dtype.DataType).init(a),
             .forced_generic_instantiation_keys = std.StringHashMap(bool).init(a),
             .emitted_generic_spec_keys = std.StringHashMap(bool).init(a),
-            .generic_fn_instantiations = std.ArrayList(GenericFnInstantiation).init(a),
+            .generic_fn_instantiations = ArrayList(GenericFnInstantiation).init(a),
             .generic_fn_instantiation_keys = std.StringHashMap(bool).init(a),
             .generic_call_overrides = std.StringHashMap([]const u8).init(a),
             .await_call_overrides = std.StringHashMap(AwaitCallOverride).init(a),
             .input_file_path = input_file_path,
             .input_source = input_source,
             .stdlib_dir = discovered_stdlib_dir,
+            .io = io,
         };
     }
 
@@ -3248,7 +3250,7 @@ pub const TranspileProcess = struct {
 
         const Builder = struct {
             fn build_with_root(self2: *Self, root: []const u8, rel2: []const u8, layout: StdPathLayout) TranspileError![]const u8 {
-                var tmp = std.ArrayList(u8).init(self2.backing_allocator);
+                var tmp = ArrayList(u8).init(self2.backing_allocator);
                 defer tmp.deinit();
 
                 tmp.appendSlice(root) catch return TranspileError.MemoryAllocationFailed;
@@ -3273,14 +3275,14 @@ pub const TranspileProcess = struct {
 
         const layout: StdPathLayout = if (has_c_prefix) .c else .pure;
         const full_path = try Builder.build_with_root(self, self.stdlib_dir.?, rel, layout);
-        std.fs.cwd().access(full_path, .{}) catch {
+        std.Io.Dir.cwd().access(self.io, full_path, .{}) catch {
             self.backing_allocator.free(full_path);
 
             if (try discover_stdlib_dir_near_input(self.backing_allocator, self.allocator, self.input_file_path)) |near| {
                 const near_norm = try normalize_stdlib_dir(self.backing_allocator, self.allocator, near);
                 if (!std.mem.eql(u8, near_norm, self.stdlib_dir.?)) {
                     const near_path = try Builder.build_with_root(self, near_norm, rel, layout);
-                    if (std.fs.cwd().access(near_path, .{})) |_| {
+                    if (std.Io.Dir.cwd().access(self.io, near_path, .{})) |_| {
                         self.stdlib_dir = near_norm;
                         return near_path;
                     } else |_| {
@@ -3293,7 +3295,7 @@ pub const TranspileProcess = struct {
                 const auto_norm = try normalize_stdlib_dir(self.backing_allocator, self.allocator, auto);
                 if (!std.mem.eql(u8, auto_norm, self.stdlib_dir.?)) {
                     const auto_path = try Builder.build_with_root(self, auto_norm, rel, layout);
-                    if (std.fs.cwd().access(auto_path, .{})) |_| {
+                    if (std.Io.Dir.cwd().access(self.io, auto_path, .{})) |_| {
                         self.stdlib_dir = auto_norm;
                         return auto_path;
                     } else |_| {
@@ -3318,9 +3320,9 @@ pub const TranspileProcess = struct {
         const full_path = full_path_opt.?;
         defer self.backing_allocator.free(full_path);
 
-        std.fs.cwd().access(full_path, .{}) catch return;
+        std.Io.Dir.cwd().access(self.io, full_path, .{}) catch return;
 
-        const canon_path = std.fs.cwd().realpathAlloc(self.backing_allocator, full_path) catch null;
+        const canon_path = std.Io.Dir.cwd().realPathFileAlloc(self.io, full_path, self.backing_allocator) catch null;
         defer if (canon_path) |p| self.backing_allocator.free(p);
         const canon = canon_path orelse full_path;
 
@@ -3396,24 +3398,24 @@ pub const TranspileProcess = struct {
     /// - `args`: The arguments for the format string.
     pub fn err(self: *Self, comptime fmt: []const u8, args: anytype) void {
         if (!self.flags.emit_stderr) return;
-        const stderr = std.io.getStdErr().writer();
-        stderr.print("\n[Error]\n", .{}) catch unreachable;
+
+        std.debug.print("\n[Error]\n", .{});
         // Defensive: if format string expects args but none provided, print fallback
         if (args.len == 0 and std.mem.indexOf(u8, fmt, "{") != null) {
-            stderr.print("[INTERNAL ERROR: format string '{s}' called with no arguments]", .{fmt}) catch unreachable;
+            std.debug.print("[INTERNAL ERROR: format string '{s}' called with no arguments]", .{fmt});
         } else {
-            stderr.print(fmt, args) catch unreachable;
+            std.debug.print(fmt, args);
         }
 
         if (self.current_token) |ct| {
             const end_line = if (ct.pos.end_line == 0) ct.pos.line else ct.pos.end_line;
             if (end_line == ct.pos.line) {
-                stderr.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, ct.pos.end_col }) catch unreachable;
+                std.debug.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, ct.pos.end_col });
             } else {
-                stderr.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, end_line, ct.pos.end_col }) catch unreachable;
+                std.debug.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, end_line, ct.pos.end_col });
             }
         } else {
-            stderr.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch unreachable;
+            std.debug.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col });
         }
         // Do not deinit here. Callers typically `defer tp.deinit()`; implicitly
         // deinitializing inside `err()` causes double-close crashes (especially on Windows).
@@ -3429,25 +3431,24 @@ pub const TranspileProcess = struct {
     /// - `fmt`: The format string for the warning message.
     /// - `args`: The arguments for the format string.
     pub fn warn(self: *Self, comptime fmt: []const u8, args: anytype) void {
-        const stderr = std.io.getStdErr().writer();
-        stderr.print("\n[Warning]\n", .{}) catch unreachable;
-        stderr.print(fmt, args) catch unreachable;
+        std.debug.print("\n[Warning]\n", .{});
+        std.debug.print(fmt, args);
 
-        self.warnings.writer().print("\n[Warning]\n", .{}) catch unreachable;
-        self.warnings.writer().print(fmt, args) catch unreachable;
+        self.warnings.print("\n[Warning]\n", .{});
+        self.warnings.print(fmt, args);
 
         if (self.current_token) |ct| {
             const end_line = if (ct.pos.end_line == 0) ct.pos.line else ct.pos.end_line;
             if (end_line == ct.pos.line) {
-                stderr.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, ct.pos.end_col }) catch unreachable;
-                self.warnings.writer().print("\nLocation: {s}:{d}:{d}-{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, ct.pos.end_col }) catch unreachable;
+                std.debug.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, ct.pos.end_col });
+                self.warnings.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, ct.pos.end_col });
             } else {
-                stderr.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, end_line, ct.pos.end_col }) catch unreachable;
-                self.warnings.writer().print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, end_line, ct.pos.end_col }) catch unreachable;
+                std.debug.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, end_line, ct.pos.end_col });
+                self.warnings.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, end_line, ct.pos.end_col });
             }
         } else {
-            stderr.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch unreachable;
-            self.warnings.writer().print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch unreachable;
+            std.debug.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col });
+            self.warnings.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col });
         }
     }
 
@@ -3481,24 +3482,21 @@ pub const TranspileProcess = struct {
 
     fn report_warning_expectation_error(self: *Self, pending: PendingWarningControl) void {
         if (!self.flags.emit_stderr) return;
-        const stderr = std.io.getStdErr().writer();
-        stderr.print("\n[Error]\n", .{}) catch unreachable;
-        stderr.print(
-            "expected warning '{s}' was not emitted; reason: \"{s}\"",
-            .{ ast.warning_id_to_string(pending.id), pending.reason },
-        ) catch unreachable;
+
+        std.debug.print("\n[Error]\n", .{});
+        std.debug.print("expected warning '{s}' was not emitted; reason: \"{s}\"", .{ ast.warning_id_to_string(pending.id), pending.reason });
 
         if (pending.pos) |p| {
             const end_line = if (p.end_line == 0) p.line else p.end_line;
             if (end_line == p.line) {
-                stderr.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col }) catch unreachable;
+                std.debug.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col });
             } else {
-                stderr.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col }) catch unreachable;
+                std.debug.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col });
             }
             return;
         }
 
-        stderr.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch unreachable;
+        std.debug.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col });
     }
 
     fn finalize_warning_expectations(self: *Self) TranspileError!void {
@@ -3587,7 +3585,7 @@ pub const TranspileProcess = struct {
         args: []CheckedType,
         is_variadic: bool = false,
         is_async: bool = false,
-        type_params: ?*const utils.Vector(std.ArrayList(u8)) = null,
+        type_params: ?*const utils.Vector(ArrayList(u8)) = null,
     };
 
     const AwaitLoweringInfo = struct {
@@ -3605,7 +3603,7 @@ pub const TranspileProcess = struct {
 
     const GenericFnInstantiation = struct {
         fn_node: *ast.Node,
-        params: *const utils.Vector(std.ArrayList(u8)),
+        params: *const utils.Vector(ArrayList(u8)),
         args: []*dtype.DataType,
         name: []const u8,
     };
@@ -3619,13 +3617,13 @@ pub const TranspileProcess = struct {
 
     const TypeEnv = struct {
         allocator: mem.Allocator,
-        scopes: std.ArrayList(std.StringHashMap(CheckedType)),
+        scopes: ArrayList(std.StringHashMap(CheckedType)),
         type_params: ?[]const []const u8 = null,
 
         fn init(allocator: mem.Allocator) TypeEnv {
             return .{
                 .allocator = allocator,
-                .scopes = std.ArrayList(std.StringHashMap(CheckedType)).init(allocator),
+                .scopes = ArrayList(std.StringHashMap(CheckedType)).init(allocator),
                 .type_params = null,
             };
         }
@@ -3682,81 +3680,80 @@ pub const TranspileProcess = struct {
 
     fn report_type_error(self: *Self, node: ?ast.Node, comptime fmt: []const u8, args: anytype) void {
         if (!self.flags.emit_stderr) return;
-        const stderr = std.io.getStdErr().writer();
-        stderr.print("\n[TypeError]\n", .{}) catch unreachable;
+
+        std.debug.print("\n[TypeError]\n", .{});
         if (args.len == 0 and std.mem.indexOf(u8, fmt, "{") != null) {
-            stderr.print("[INTERNAL ERROR: format string '{s}' called with no arguments]", .{fmt}) catch unreachable;
+            std.debug.print("[INTERNAL ERROR: format string '{s}' called with no arguments]", .{fmt});
         } else {
-            stderr.print(fmt, args) catch unreachable;
+            std.debug.print(fmt, args);
         }
 
         if (node) |n| {
             if (n.pos) |p| {
                 const end_line = if (p.end_line == 0) p.line else p.end_line;
                 if (end_line == p.line) {
-                    stderr.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col }) catch unreachable;
+                    std.debug.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col });
                 } else {
-                    stderr.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col }) catch unreachable;
+                    std.debug.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col });
                 }
                 return;
             }
         }
-        stderr.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch unreachable;
+        std.debug.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col });
     }
 
     fn report_warning(self: *Self, id: ast.WarningId, node: ?ast.Node, comptime fmt: []const u8, args: anytype) void {
         if (self.consume_warning_control(id)) return;
 
-        const stderr = std.io.getStdErr().writer();
         if (self.flags.emit_stderr) {
-            stderr.print("\n[Warning:{s}]\n", .{ast.warning_id_to_string(id)}) catch unreachable;
-            stderr.print(fmt, args) catch unreachable;
+            std.debug.print("\n[Warning:{s}]\n", .{ast.warning_id_to_string(id)});
+            std.debug.print(fmt, args);
         }
 
-        self.warnings.writer().print("\n[Warning:{s}]\n", .{ast.warning_id_to_string(id)}) catch unreachable;
-        self.warnings.writer().print(fmt, args) catch unreachable;
+        self.warnings.print("\n[Warning:{s}]\n", .{ast.warning_id_to_string(id)}) catch unreachable;
+        self.warnings.print(fmt, args) catch unreachable;
 
         if (node) |n| {
             if (n.pos) |p| {
                 const end_line = if (p.end_line == 0) p.line else p.end_line;
                 if (end_line == p.line) {
-                    if (self.flags.emit_stderr) stderr.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col }) catch unreachable;
-                    self.warnings.writer().print("\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col }) catch unreachable;
+                    if (self.flags.emit_stderr) std.debug.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col });
+                    self.warnings.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col }) catch unreachable;
                 } else {
-                    if (self.flags.emit_stderr) stderr.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col }) catch unreachable;
-                    self.warnings.writer().print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col }) catch unreachable;
+                    if (self.flags.emit_stderr) std.debug.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col });
+                    self.warnings.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col }) catch unreachable;
                 }
                 return;
             }
         }
 
-        if (self.flags.emit_stderr) stderr.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch unreachable;
-        self.warnings.writer().print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch unreachable;
+        if (self.flags.emit_stderr) std.debug.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col });
+        self.warnings.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch unreachable;
     }
 
     fn report_error(self: *Self, node: ?ast.Node, comptime fmt: []const u8, args: anytype) void {
         if (!self.flags.emit_stderr) return;
-        const stderr = std.io.getStdErr().writer();
-        stderr.print("\n[Error]\n", .{}) catch unreachable;
+
+        std.debug.print("\n[Error]\n", .{});
         if (args.len == 0 and std.mem.indexOf(u8, fmt, "{") != null) {
-            stderr.print("[INTERNAL ERROR: format string '{s}' called with no arguments]", .{fmt}) catch unreachable;
+            std.debug.print("[INTERNAL ERROR: format string '{s}' called with no arguments]", .{fmt});
         } else {
-            stderr.print(fmt, args) catch unreachable;
+            std.debug.print(fmt, args);
         }
 
         if (node) |n| {
             if (n.pos) |p| {
                 const end_line = if (p.end_line == 0) p.line else p.end_line;
                 if (end_line == p.line) {
-                    stderr.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col }) catch unreachable;
+                    std.debug.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col });
                 } else {
-                    stderr.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col }) catch unreachable;
+                    std.debug.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col });
                 }
                 return;
             }
         }
 
-        stderr.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch unreachable;
+        std.debug.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col });
     }
 
     fn type_from_dtype(dt: *const dtype.DataType) CheckedType {
@@ -4025,7 +4022,7 @@ pub const TranspileProcess = struct {
         // Rewrite `.Variant` into `Enum.Variant` by mutating the blank LHS node.
         const left_ptr = node.node_variant.?.exp.left.?;
         // AST nodes are arena-owned; allocate via `self.allocator` to keep ownership consistent.
-        var sval = std.ArrayList(u8).init(self.allocator);
+        var sval = ArrayList(u8).init(self.allocator);
         sval.appendSlice(enum_name) catch {
             return TranspileError.MemoryAllocationFailed;
         };
@@ -4763,7 +4760,7 @@ pub const TranspileProcess = struct {
         return inferred_t;
     }
 
-    fn flatten_call_args_ptr(self: *Self, node: *ast.Node, out: *std.ArrayList(*ast.Node)) TranspileError!void {
+    fn flatten_call_args_ptr(self: *Self, node: *ast.Node, out: *ArrayList(*ast.Node)) TranspileError!void {
         // Function call arguments are parsed as a parenthesis node that wraps an expression.
         // For zero-arg calls this inner expression is `.Blank`.
         if (node.type == .ExpressionParenthesis and node.node_variant != null) {
@@ -4947,7 +4944,7 @@ pub const TranspileProcess = struct {
             },
             .Bracket => {
                 // Array literal: `[a, b, c]`. The parser stores elements under `bracket.inner`.
-                var elems = std.ArrayList(*ast.Node).init(self.allocator);
+                var elems = ArrayList(*ast.Node).init(self.allocator);
                 defer elems.deinit();
                 try self.flatten_call_args_ptr(node.node_variant.?.bracket.inner, &elems);
 
@@ -5140,7 +5137,7 @@ pub const TranspileProcess = struct {
                         return TranspileError.NotCallable;
                     };
 
-                    var args_nodes = std.ArrayList(*ast.Node).init(self.allocator);
+                    var args_nodes = ArrayList(*ast.Node).init(self.allocator);
                     defer args_nodes.deinit();
                     if (exp.right) |right| {
                         try self.flatten_call_args_ptr(right, &args_nodes);
@@ -6300,7 +6297,7 @@ pub const TranspileProcess = struct {
         }
     }
 
-    fn collect_fn_sigs(self: *Self, proc: *Self, fns: *std.StringHashMap(FnSig), owned_args: *std.ArrayList([]CheckedType)) TranspileError!void {
+    fn collect_fn_sigs(self: *Self, proc: *Self, fns: *std.StringHashMap(FnSig), owned_args: *ArrayList([]CheckedType)) TranspileError!void {
         for (proc.nodes.items()) |node| {
             if (node.type != .Function or node.node_variant == null) continue;
             const fnv = node.node_variant.?.function;
@@ -6446,7 +6443,7 @@ pub const TranspileProcess = struct {
                     inst_keys.deinit();
                 }
 
-                var inst_list = std.ArrayList(*const dtype.DataType).init(self.allocator);
+                var inst_list = ArrayList(*const dtype.DataType).init(self.allocator);
                 defer inst_list.deinit();
                 const base_name = if (mem.indexOf(u8, im.type_name.items, "__")) |idx| im.type_name.items[0..idx] else im.type_name.items;
                 try self.collect_generic_instantiations_recursive(self, base_name, &inst_keys, &inst_list);
@@ -6577,7 +6574,7 @@ pub const TranspileProcess = struct {
     fn typecheck_all(self: *Self) TranspileError!void {
         var fns = std.StringHashMap(FnSig).init(self.allocator);
         defer fns.deinit();
-        var owned_args = std.ArrayList([]CheckedType).init(self.allocator);
+        var owned_args = ArrayList([]CheckedType).init(self.allocator);
         defer {
             for (owned_args.items) |slice| self.allocator.free(slice);
             owned_args.deinit();
@@ -6603,7 +6600,7 @@ pub const TranspileProcess = struct {
     pub fn infer_let_types_best_effort(self: *Self) void {
         var fns = std.StringHashMap(FnSig).init(self.allocator);
         defer fns.deinit();
-        var owned_args = std.ArrayList([]CheckedType).init(self.allocator);
+        var owned_args = ArrayList([]CheckedType).init(self.allocator);
         defer {
             for (owned_args.items) |slice| self.allocator.free(slice);
             owned_args.deinit();
@@ -6786,10 +6783,10 @@ pub const TranspileProcess = struct {
             const fn_rtype: CheckedType = if (fnv.rtype) |rt| try proc.type_from_dtype_with_mangled(&rt) else CheckedType{ .base = .Void };
 
             var allow_params: ?[]const []const u8 = null;
-            var allow_store: ?std.ArrayList([]const u8) = null;
+            var allow_store: ?ArrayList([]const u8) = null;
             defer if (allow_store) |*s| s.deinit();
             if (fnv.type_params) |params| {
-                var buf = std.ArrayList([]const u8).init(proc.allocator);
+                var buf = ArrayList([]const u8).init(proc.allocator);
                 for (params.items()) |p| {
                     buf.append(p.items) catch return TranspileError.MemoryAllocationFailed;
                 }
@@ -6847,17 +6844,17 @@ pub const TranspileProcess = struct {
             const self_type: CheckedType = .{ .base = .Unknown, .name = self_base, .mangled_name = im.type_name.items, .pointer_depth = 1 };
 
             var allow_params: ?[]const []const u8 = null;
-            var allow_store: ?std.ArrayList([]const u8) = null;
+            var allow_store: ?ArrayList([]const u8) = null;
             defer if (allow_store) |*s| s.deinit();
             if (im.type_params) |*params| {
-                var buf = std.ArrayList([]const u8).init(proc.allocator);
+                var buf = ArrayList([]const u8).init(proc.allocator);
                 for (params.items()) |p| {
                     buf.append(p.items) catch return TranspileError.MemoryAllocationFailed;
                 }
                 allow_store = buf;
                 allow_params = allow_store.?.items;
             } else if (proc.impl_type_params(n)) |params| {
-                var buf = std.ArrayList([]const u8).init(proc.allocator);
+                var buf = ArrayList([]const u8).init(proc.allocator);
                 for (params.items()) |p| {
                     buf.append(p.items) catch return TranspileError.MemoryAllocationFailed;
                 }
@@ -6867,7 +6864,7 @@ pub const TranspileProcess = struct {
 
             if (allow_params == null) {
                 if (mem.indexOf(u8, im.type_name.items, "__")) |_| {
-                    var buf = std.ArrayList([]const u8).init(proc.allocator);
+                    var buf = ArrayList([]const u8).init(proc.allocator);
                     var i: usize = 0;
                     var seg_start: usize = 0;
                     while (i + 1 < im.type_name.items.len) : (i += 1) {
@@ -7052,17 +7049,16 @@ pub const TranspileProcess = struct {
                             covered.put(right.data.?.sval.items, true) catch {};
                         }
 
-                        var missing = std.ArrayList(u8).init(self.backing_allocator);
+                        var missing = ArrayList(u8).init(self.backing_allocator);
                         defer missing.deinit();
-                        const mw = missing.writer();
 
                         var missing_count: usize = 0;
                         for (variants) |v| {
                             if (covered.contains(v.name.items)) continue;
                             if (missing_count > 0) {
-                                mw.writeAll(", ") catch {};
+                                missing.appendSlice(", ") catch {};
                             }
-                            mw.print("{s}.{s}", .{ enum_name, v.name.items }) catch {};
+                            missing.print("{s}.{s}", .{ enum_name, v.name.items }) catch {};
                             missing_count += 1;
                         }
 
@@ -8011,7 +8007,7 @@ pub const TranspileProcess = struct {
                                 allocator.destroy(msg);
                             }
                         },
-                        .warning_ctrl => |_| {
+                        .warning_ctrl => {
                             // reason points into token memory and is not owned by AST nodes.
                         },
                     }
@@ -8038,9 +8034,9 @@ pub const TranspileProcess = struct {
             reg.deinit();
             self.type_registry = null;
         }
-        self.ifile.close();
+        self.ifile.close(self.io);
         if (self.ofile) |f| {
-            f.close();
+            f.close(self.io);
         }
         if (self.outbuf) |*buf| {
             buf.deinit();
@@ -8139,13 +8135,15 @@ pub const TranspileProcess = struct {
     /// Helper function to format and write values
     fn print(self: *Self, comptime fmt: []const u8, args: anytype) TranspileError!void {
         if (self.flags.outf) {
-            std.fmt.format(self.ofile.?.writer(), fmt, args) catch |e| {
-                std.debug.print("Error writing to output file: {s}\\n", .{@errorName(e)});
+            const s = std.fmt.allocPrint(self.backing_allocator, fmt, args) catch return TranspileError.MemoryAllocationFailed;
+            defer self.backing_allocator.free(s);
+            self.ofile.?.writeStreamingAll(self.io, s) catch |e| {
+                std.debug.print("Error writing to output file: {s}\n", .{@errorName(e)});
                 return TranspileError.FileWriteError;
             };
         } else {
-            std.fmt.format(self.outbuf.?.writer(), fmt, args) catch |e| {
-                std.debug.print("Error writing to output buffer: {s}\\n", .{@errorName(e)});
+            self.outbuf.?.print(fmt, args) catch |e| {
+                std.debug.print("Error writing to output buffer: {s}\n", .{@errorName(e)});
                 return TranspileError.BufferWriteError;
             };
         }
@@ -8302,7 +8300,7 @@ pub const TranspileProcess = struct {
     /// Write to output (either file or buffer)
     pub fn write(self: *Self, bytes: []const u8) TranspileError!void {
         if (self.flags.outf) {
-            self.ofile.?.writeAll(bytes) catch |e| {
+            self.ofile.?.writeStreamingAll(self.io, bytes) catch |e| {
                 std.debug.print("Error writing to output file: {s}\\n", .{@errorName(e)});
                 return TranspileError.FileWriteError;
             };
@@ -8365,7 +8363,7 @@ pub const TranspileProcess = struct {
         }
     }
 
-    fn append_mangled_type_depth(self: *Self, buf: *std.ArrayList(u8), dt: *const dtype.DataType, depth: usize) TranspileError!void {
+    fn append_mangled_type_depth(self: *Self, buf: *ArrayList(u8), dt: *const dtype.DataType, depth: usize) TranspileError!void {
         const max_depth: usize = 32;
         const max_segment_len: usize = 256;
         const max_total_len: usize = 8192;
@@ -8397,12 +8395,12 @@ pub const TranspileProcess = struct {
         }
     }
 
-    fn append_mangled_type(self: *Self, buf: *std.ArrayList(u8), dt: *const dtype.DataType) TranspileError!void {
+    fn append_mangled_type(self: *Self, buf: *ArrayList(u8), dt: *const dtype.DataType) TranspileError!void {
         try self.append_mangled_type_depth(buf, dt, 0);
     }
 
     fn type_name_mangled(self: *Self, dt: *const dtype.DataType) TranspileError![]const u8 {
-        var buf = std.ArrayList(u8).init(self.allocator);
+        var buf = ArrayList(u8).init(self.allocator);
         errdefer buf.deinit();
         try self.append_mangled_type(&buf, dt);
         return buf.toOwnedSlice() catch return TranspileError.MemoryAllocationFailed;
@@ -8410,9 +8408,9 @@ pub const TranspileProcess = struct {
 
     fn append_mangled_type_with_subst_depth(
         self: *Self,
-        buf: *std.ArrayList(u8),
+        buf: *ArrayList(u8),
         dt: *const dtype.DataType,
-        params: utils.Vector(std.ArrayList(u8)),
+        params: utils.Vector(ArrayList(u8)),
         args: []*dtype.DataType,
         depth: usize,
     ) TranspileError!void {
@@ -8452,12 +8450,12 @@ pub const TranspileProcess = struct {
         }
     }
 
-    fn append_mangled_type_with_subst(self: *Self, buf: *std.ArrayList(u8), dt: *const dtype.DataType, params: utils.Vector(std.ArrayList(u8)), args: []*dtype.DataType) TranspileError!void {
+    fn append_mangled_type_with_subst(self: *Self, buf: *ArrayList(u8), dt: *const dtype.DataType, params: utils.Vector(ArrayList(u8)), args: []*dtype.DataType) TranspileError!void {
         try self.append_mangled_type_with_subst_depth(buf, dt, params, args, 0);
     }
 
-    fn type_name_mangled_with_subst(self: *Self, dt: *const dtype.DataType, params: utils.Vector(std.ArrayList(u8)), args: []*dtype.DataType) TranspileError![]const u8 {
-        var buf = std.ArrayList(u8).init(self.allocator);
+    fn type_name_mangled_with_subst(self: *Self, dt: *const dtype.DataType, params: utils.Vector(ArrayList(u8)), args: []*dtype.DataType) TranspileError![]const u8 {
+        var buf = ArrayList(u8).init(self.allocator);
         errdefer buf.deinit();
         try self.append_mangled_type_with_subst(&buf, dt, params, args);
         return buf.toOwnedSlice() catch return TranspileError.MemoryAllocationFailed;
@@ -8472,7 +8470,7 @@ pub const TranspileProcess = struct {
         return self.type_name_mangled(dt);
     }
 
-    fn type_from_dtype_with_subst(self: *Self, dt: *const dtype.DataType, params: utils.Vector(std.ArrayList(u8)), args: []*dtype.DataType) TranspileError!CheckedType {
+    fn type_from_dtype_with_subst(self: *Self, dt: *const dtype.DataType, params: utils.Vector(ArrayList(u8)), args: []*dtype.DataType) TranspileError!CheckedType {
         if ((dt.type == null or dt.type == .Unknown) and dt.type_str.items.len > 0) {
             const params_items = params.items();
             var i: usize = 0;
@@ -8520,7 +8518,7 @@ pub const TranspileProcess = struct {
         return false;
     }
 
-    fn dtype_contains_type_param(self: *Self, dt: *const dtype.DataType, params: *const utils.Vector(std.ArrayList(u8))) bool {
+    fn dtype_contains_type_param(self: *Self, dt: *const dtype.DataType, params: *const utils.Vector(ArrayList(u8))) bool {
         if ((dt.type == null or dt.type == .Unknown) and dt.type_str.items.len > 0) {
             for (params.items()) |p| {
                 if (mem.eql(u8, p.items, dt.type_str.items)) return true;
@@ -8534,7 +8532,7 @@ pub const TranspileProcess = struct {
         return false;
     }
 
-    fn mangled_contains_type_param(self: *Self, mangled: []const u8, params: *const utils.Vector(std.ArrayList(u8))) bool {
+    fn mangled_contains_type_param(self: *Self, mangled: []const u8, params: *const utils.Vector(ArrayList(u8))) bool {
         _ = self;
         for (params.items()) |p| {
             const needle = p.items;
@@ -8570,7 +8568,7 @@ pub const TranspileProcess = struct {
         return false;
     }
 
-    fn generic_args_are_concrete(self: *Self, params: *const utils.Vector(std.ArrayList(u8)), gargs: []*dtype.DataType) bool {
+    fn generic_args_are_concrete(self: *Self, params: *const utils.Vector(ArrayList(u8)), gargs: []*dtype.DataType) bool {
         for (gargs) |ga| {
             if (self.dtype_contains_type_param(ga, params)) return false;
         }
@@ -8654,7 +8652,7 @@ pub const TranspileProcess = struct {
     }
 
     fn c_ident_sanitize(self: *Self, raw: []const u8) TranspileError![]const u8 {
-        var out = std.ArrayList(u8).init(self.allocator);
+        var out = ArrayList(u8).init(self.allocator);
         errdefer out.deinit();
         for (raw) |c| {
             if ((c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_') {
@@ -8975,7 +8973,7 @@ pub const TranspileProcess = struct {
         try self.write("// --- User types ---\n\n");
 
         // Enums (must come before compounds that use them by-value)
-        var enum_nodes = std.ArrayList(*ast.Node).init(self.allocator);
+        var enum_nodes = ArrayList(*ast.Node).init(self.allocator);
         defer enum_nodes.deinit();
 
         var seen_enum_names = std.StringHashMap(bool).init(self.allocator);
@@ -9037,7 +9035,7 @@ pub const TranspileProcess = struct {
         // dependent compounds before their dependencies (e.g. Rectangle before Point).
         // Emit compounds in a stable order that respects by-value dependencies.
 
-        var compound_nodes = std.ArrayList(*ast.Node).init(self.allocator);
+        var compound_nodes = ArrayList(*ast.Node).init(self.allocator);
         defer compound_nodes.deinit();
 
         var seen_compound_names = std.StringHashMap(bool).init(self.allocator);
@@ -9067,7 +9065,7 @@ pub const TranspileProcess = struct {
         var emitted_compounds = std.StringHashMap(bool).init(self.allocator);
         defer emitted_compounds.deinit();
 
-        var remaining = std.ArrayList(*ast.Node).init(self.allocator);
+        var remaining = ArrayList(*ast.Node).init(self.allocator);
         defer remaining.deinit();
         remaining.appendSlice(compound_nodes.items) catch {
             return TranspileError.MemoryAllocationFailed;
@@ -9076,7 +9074,7 @@ pub const TranspileProcess = struct {
         var spec_keys = std.StringHashMap(bool).init(self.allocator);
         defer spec_keys.deinit();
 
-        var specs = std.ArrayList(GenericSpec).init(self.allocator);
+        var specs = ArrayList(GenericSpec).init(self.allocator);
         defer {
             for (specs.items) |s| self.allocator.free(s.mangled);
             specs.deinit();
@@ -9098,7 +9096,7 @@ pub const TranspileProcess = struct {
                 inst_keys.deinit();
             }
 
-            var inst_list = std.ArrayList(*const dtype.DataType).init(self.allocator);
+            var inst_list = ArrayList(*const dtype.DataType).init(self.allocator);
             defer inst_list.deinit();
 
             try self.collect_generic_instantiations_recursive(self, c.name.items, &inst_keys, &inst_list);
@@ -9213,7 +9211,7 @@ pub const TranspileProcess = struct {
             const gargs_vec = s.dt.generic_args orelse continue;
             const gargs = gargs_vec.items();
 
-            var proc_stack = std.ArrayList(*Self).init(self.allocator);
+            var proc_stack = ArrayList(*Self).init(self.allocator);
             defer proc_stack.deinit();
             const root_proc = self.get_root();
             proc_stack.append(root_proc) catch return TranspileError.MemoryAllocationFailed;
@@ -9374,7 +9372,7 @@ pub const TranspileProcess = struct {
         }
         if (registry.quirks_by_sig.count() > 0 or registry.quirk_sig_by_name.count() > 0) try self.write("\n");
 
-        var remaining_specs = std.ArrayList(GenericSpec).init(self.allocator);
+        var remaining_specs = ArrayList(GenericSpec).init(self.allocator);
         defer remaining_specs.deinit();
         remaining_specs.appendSlice(specs.items) catch {
             return TranspileError.MemoryAllocationFailed;
@@ -9530,7 +9528,7 @@ pub const TranspileProcess = struct {
         quirk_name: []const u8,
         sig_h: u64,
         q: anytype,
-        params: ?*const utils.Vector(std.ArrayList(u8)),
+        params: ?*const utils.Vector(ArrayList(u8)),
         gargs: ?[]*dtype.DataType,
     ) TranspileError!void {
         if (impl_node.node_variant == null) return;
@@ -9770,7 +9768,7 @@ pub const TranspileProcess = struct {
                     inst_keys.deinit();
                 }
 
-                var inst_list = std.ArrayList(*const dtype.DataType).init(self.allocator);
+                var inst_list = ArrayList(*const dtype.DataType).init(self.allocator);
                 defer inst_list.deinit();
                 const base_name = if (mem.indexOf(u8, im.type_name.items, "__")) |idx| im.type_name.items[0..idx] else im.type_name.items;
                 try self.collect_generic_instantiations_recursive(self, base_name, &inst_keys, &inst_list);
@@ -9826,7 +9824,7 @@ pub const TranspileProcess = struct {
                 inst_keys.deinit();
             }
 
-            var inst_list = std.ArrayList(*const dtype.DataType).init(self.allocator);
+            var inst_list = ArrayList(*const dtype.DataType).init(self.allocator);
             defer inst_list.deinit();
             const base_name = if (mem.indexOf(u8, im.type_name.items, "__")) |idx| im.type_name.items[0..idx] else im.type_name.items;
             try self.collect_generic_instantiations_recursive(self, base_name, &inst_keys, &inst_list);
@@ -10042,7 +10040,7 @@ pub const TranspileProcess = struct {
             inst_keys.deinit();
         }
 
-        var inst_list = std.ArrayList(*const dtype.DataType).init(self.allocator);
+        var inst_list = ArrayList(*const dtype.DataType).init(self.allocator);
         defer inst_list.deinit();
 
         try self.collect_generic_instantiations_recursive(self, c.name.items, &inst_keys, &inst_list);
@@ -10145,7 +10143,7 @@ pub const TranspileProcess = struct {
         return true;
     }
 
-    fn write_type_with_subst(self: *Self, dt: *const dtype.DataType, params: utils.Vector(std.ArrayList(u8)), args: []*dtype.DataType) TranspileError!void {
+    fn write_type_with_subst(self: *Self, dt: *const dtype.DataType, params: utils.Vector(ArrayList(u8)), args: []*dtype.DataType) TranspileError!void {
         var idx: ?usize = null;
         if ((dt.type == null or dt.type == .Unknown) and dt.type_str.items.len > 0) {
             for (params.items(), 0..) |p, i| {
@@ -10188,7 +10186,7 @@ pub const TranspileProcess = struct {
         try self.write_type_no_subst(dt.*);
     }
 
-    fn collect_generic_instantiations(self: *Self, proc: *Self, name: []const u8, keys: *std.StringHashMap(bool), out: *std.ArrayList(*const dtype.DataType)) TranspileError!void {
+    fn collect_generic_instantiations(self: *Self, proc: *Self, name: []const u8, keys: *std.StringHashMap(bool), out: *ArrayList(*const dtype.DataType)) TranspileError!void {
         for (proc.nodes.items()) |node| {
             try self.collect_generic_instantiations_node(node, name, keys, out);
         }
@@ -10197,7 +10195,7 @@ pub const TranspileProcess = struct {
         }
     }
 
-    fn collect_generic_instantiations_recursive(self: *Self, proc: *Self, name: []const u8, keys: *std.StringHashMap(bool), out: *std.ArrayList(*const dtype.DataType)) TranspileError!void {
+    fn collect_generic_instantiations_recursive(self: *Self, proc: *Self, name: []const u8, keys: *std.StringHashMap(bool), out: *ArrayList(*const dtype.DataType)) TranspileError!void {
         try self.collect_generic_instantiations(proc, name, keys, out);
         for (proc.children.items) |child| {
             try self.collect_generic_instantiations_recursive(child, name, keys, out);
@@ -10239,7 +10237,7 @@ pub const TranspileProcess = struct {
             inst_keys.deinit();
         }
 
-        var inst_list = std.ArrayList(*const dtype.DataType).init(self.allocator);
+        var inst_list = ArrayList(*const dtype.DataType).init(self.allocator);
         defer inst_list.deinit();
 
         try self.collect_generic_instantiations_recursive(self, base, &inst_keys, &inst_list);
@@ -10254,7 +10252,7 @@ pub const TranspileProcess = struct {
         return false;
     }
 
-    fn collect_generic_instantiations_node(self: *Self, node: ast.Node, name: []const u8, keys: *std.StringHashMap(bool), out: *std.ArrayList(*const dtype.DataType)) TranspileError!void {
+    fn collect_generic_instantiations_node(self: *Self, node: ast.Node, name: []const u8, keys: *std.StringHashMap(bool), out: *ArrayList(*const dtype.DataType)) TranspileError!void {
         switch (node.type) {
             .Variable => if (node.node_variant) |v| try self.collect_generic_instantiations_dtype(v.variable.type, name, keys, out),
             .Function => if (node.node_variant) |f| {
@@ -10283,7 +10281,7 @@ pub const TranspileProcess = struct {
         }
     }
 
-    fn collect_generic_instantiations_in_body(self: *Self, body: *const ast.Node, name: []const u8, keys: *std.StringHashMap(bool), out: *std.ArrayList(*const dtype.DataType)) TranspileError!void {
+    fn collect_generic_instantiations_in_body(self: *Self, body: *const ast.Node, name: []const u8, keys: *std.StringHashMap(bool), out: *ArrayList(*const dtype.DataType)) TranspileError!void {
         if (body.type != .Body or body.node_variant == null) return;
         const stmts = body.node_variant.?.body.statements;
         for (stmts.items()) |stmt_ptr| {
@@ -10324,7 +10322,7 @@ pub const TranspileProcess = struct {
         }
     }
 
-    fn collect_generic_instantiations_dtype(self: *Self, dt: *const dtype.DataType, name: []const u8, keys: *std.StringHashMap(bool), out: *std.ArrayList(*const dtype.DataType)) TranspileError!void {
+    fn collect_generic_instantiations_dtype(self: *Self, dt: *const dtype.DataType, name: []const u8, keys: *std.StringHashMap(bool), out: *ArrayList(*const dtype.DataType)) TranspileError!void {
         if (dt.type_str.items.len > 0 and @intFromPtr(dt.type_str.items.ptr) == 0) return;
         if (dt.type_str.items.len > 0) {
             const dt_base = if (mem.indexOf(u8, dt.type_str.items, "__")) |idx| dt.type_str.items[0..idx] else dt.type_str.items;
@@ -10373,7 +10371,7 @@ pub const TranspileProcess = struct {
         }
     }
 
-    fn clone_dtype_with_subst_for_inst(self: *Self, dt: *const dtype.DataType, params: *const utils.Vector(std.ArrayList(u8)), args: []*dtype.DataType) TranspileError!*dtype.DataType {
+    fn clone_dtype_with_subst_for_inst(self: *Self, dt: *const dtype.DataType, params: *const utils.Vector(ArrayList(u8)), args: []*dtype.DataType) TranspileError!*dtype.DataType {
         if ((dt.type == null or dt.type == .Unknown) and dt.type_str.items.len > 0) {
             for (params.items(), 0..) |p, i| {
                 if (!mem.eql(u8, p.items, dt.type_str.items)) continue;
@@ -10397,7 +10395,7 @@ pub const TranspileProcess = struct {
 
         const out = self.allocator.create(dtype.DataType) catch return TranspileError.MemoryAllocationFailed;
         out.* = dt.*;
-        out.type_str = std.ArrayList(u8).init(self.allocator);
+        out.type_str = ArrayList(u8).init(self.allocator);
         out.type_str.appendSlice(dt.type_str.items) catch return TranspileError.MemoryAllocationFailed;
         out.generic_args = null;
 
@@ -10427,7 +10425,7 @@ pub const TranspileProcess = struct {
             inst_keys.deinit();
         }
 
-        var inst_list = std.ArrayList(*const dtype.DataType).init(self.allocator);
+        var inst_list = ArrayList(*const dtype.DataType).init(self.allocator);
         defer inst_list.deinit();
         const base_name = if (mem.indexOf(u8, im.type_name.items, "__")) |idx| im.type_name.items[0..idx] else im.type_name.items;
         try self.collect_generic_instantiations_recursive(self, base_name, &inst_keys, &inst_list);
@@ -10502,7 +10500,7 @@ pub const TranspileProcess = struct {
                 inst_keys.deinit();
             }
 
-            var inst_list = std.ArrayList(*const dtype.DataType).init(self.allocator);
+            var inst_list = ArrayList(*const dtype.DataType).init(self.allocator);
             defer inst_list.deinit();
             const base_name = if (mem.indexOf(u8, im.type_name.items, "__")) |idx| im.type_name.items[0..idx] else im.type_name.items;
             try self.collect_generic_instantiations_recursive(self, base_name, &inst_keys, &inst_list);
@@ -10677,7 +10675,7 @@ pub const TranspileProcess = struct {
         try self.write("\n");
 
         // Process import nodes first
-        var import_nodes = std.ArrayList(usize).init(self.allocator);
+        var import_nodes = ArrayList(usize).init(self.allocator);
         defer import_nodes.deinit();
 
         // Identify import nodes
@@ -11407,14 +11405,14 @@ pub const TranspileProcess = struct {
     fn emit_multidim_inner_declarators(self: *Self, outer_lit: *ast.Node, remaining: usize) TranspileError!void {
         if (remaining == 0 or outer_lit.type != .Bracket) return;
 
-        var outer_elems = std.ArrayList(*ast.Node).init(self.allocator);
+        var outer_elems = ArrayList(*ast.Node).init(self.allocator);
         defer outer_elems.deinit();
         try self.flatten_call_args_ptr(outer_lit.node_variant.?.bracket.inner, &outer_elems);
 
         if (outer_elems.items.len == 0 or outer_elems.items[0].type != .Bracket) return;
 
         const first_elem = outer_elems.items[0];
-        var inner_elems = std.ArrayList(*ast.Node).init(self.allocator);
+        var inner_elems = ArrayList(*ast.Node).init(self.allocator);
         defer inner_elems.deinit();
         try self.flatten_call_args_ptr(first_elem.node_variant.?.bracket.inner, &inner_elems);
 
@@ -11851,7 +11849,7 @@ pub const TranspileProcess = struct {
                                 mem.eql(u8, fname, "va_arg_num") or mem.eql(u8, fname, "va_arg_dec") or mem.eql(u8, fname, "va_arg_bin") or
                                 mem.eql(u8, fname, "va_arg_chr") or mem.eql(u8, fname, "va_arg_str") or mem.eql(u8, fname, "va_arg_raw"))
                             {
-                                var args_nodes = std.ArrayList(*ast.Node).init(self.allocator);
+                                var args_nodes = ArrayList(*ast.Node).init(self.allocator);
                                 defer args_nodes.deinit();
                                 if (exp.right) |right| {
                                     try self.flatten_call_args_ptr(right, &args_nodes);
@@ -11962,7 +11960,7 @@ pub const TranspileProcess = struct {
                             }
 
                             if (callee_is_variadic) {
-                                var args_nodes = std.ArrayList(*ast.Node).init(self.allocator);
+                                var args_nodes = ArrayList(*ast.Node).init(self.allocator);
                                 defer args_nodes.deinit();
                                 if (exp.right) |right| {
                                     try self.flatten_call_args_ptr(right, &args_nodes);
@@ -13045,7 +13043,7 @@ pub const TranspileProcess = struct {
                                             item_dt.array = null;
 
                                             const item_node = self.allocator.create(ast.Node) catch return TranspileError.MemoryAllocationFailed;
-                                            var item_name_buf = std.ArrayList(u8).init(self.allocator);
+                                            var item_name_buf = ArrayList(u8).init(self.allocator);
                                             item_name_buf.appendSlice(fi.item_name) catch return TranspileError.MemoryAllocationFailed;
                                             item_node.* = .{
                                                 .type = .Variable,
@@ -13414,7 +13412,7 @@ pub const TranspileProcess = struct {
     fn process_local_import(self: *Self, import_node: ast.Node, import_path: []const u8, import_alias: ?[]const u8) GeneralError!void {
         // Get full path of the file to import
         // This is a temporary helper string; keep it off the arena.
-        var file_path = std.ArrayList(u8).init(self.backing_allocator);
+        var file_path = ArrayList(u8).init(self.backing_allocator);
         defer file_path.deinit();
 
         const dir_path = std.fs.path.dirname(self.input_file_path) orelse ".";
@@ -13479,7 +13477,7 @@ pub const TranspileProcess = struct {
         };
         defer self.backing_allocator.free(full_path);
 
-        const canon_path = std.fs.cwd().realpathAlloc(self.allocator, full_path) catch null;
+        const canon_path = std.Io.Dir.cwd().realPathFileAlloc(self.io, full_path, self.allocator) catch null;
         const canon = canon_path orelse (self.allocator.dupe(u8, full_path) catch return TranspileError.MemoryAllocationFailed);
         errdefer self.allocator.free(canon);
 
@@ -13489,7 +13487,7 @@ pub const TranspileProcess = struct {
         try self.write(" */\n");
 
         // Check if the file exists
-        std.fs.cwd().access(canon, .{}) catch {
+        std.Io.Dir.cwd().access(self.io, canon, .{}) catch {
             // Keep the output comment (useful when dumping partial output), but also
             // emit a real diagnostic tied to the import statement.
             try self.write("\n/* ERROR: Import file not found: ");
@@ -13502,7 +13500,7 @@ pub const TranspileProcess = struct {
 
         // Robust direct circular dependency detection
         // First, check if the file being imported already has us in its import chain
-        const file_contents = fs.cwd().readFileAlloc(self.backing_allocator, canon, 1024 * 1024) catch |read_err| {
+        const file_contents = std.Io.Dir.cwd().readFileAlloc(self.io, canon, self.backing_allocator, .limited(1024 * 1024)) catch |read_err| {
             self.report_error(import_node, "Failed to read import file '{s}': {any}", .{ canon, read_err });
             return TranspileError.FileReadError;
         };
@@ -13510,7 +13508,7 @@ pub const TranspileProcess = struct {
 
         // Check if the file imports us directly (crude but effective)
         const our_name = std.fs.path.stem(self.input_file_path);
-        var import_line = std.ArrayList(u8).init(self.backing_allocator);
+        var import_line = ArrayList(u8).init(self.backing_allocator);
         defer import_line.deinit();
         import_line.appendSlice("imp ") catch |e| {
             std.debug.print("Failed to allocate memory for import line: {s}\\n", .{@errorName(e)});

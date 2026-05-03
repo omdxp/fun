@@ -2,6 +2,11 @@ const std = @import("std");
 const ast = @import("ast");
 const utils = @import("utils");
 
+/// Compatibility shim: ArrayList with embedded allocator (old-style managed API).
+fn ArrayList(comptime T: type) type {
+    return std.array_list.Managed(T);
+}
+
 /// Flags representing characteristics of a data type.
 pub const DataTypeFlags = packed struct {
     /// Indicates if the data type is a pointer.
@@ -44,7 +49,7 @@ pub const DataType = struct {
     /// The specific type of data.
     type: ?DataTypeType = null,
     /// A string representation of the data type.
-    type_str: std.ArrayList(u8),
+    type_str: ArrayList(u8),
     /// The depth of pointers if the data type is a pointer.
     pointer_depth: usize = 0,
     /// Information about the array dimensions and brackets.

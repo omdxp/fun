@@ -4,6 +4,11 @@ const dtype = @import("semantics").dtype;
 const token = @import("lexer").token;
 const ast = @import("ast");
 
+/// Compatibility shim: ArrayList with embedded allocator (old-style managed API).
+fn ArrayList(comptime T: type) type {
+    return std.array_list.Managed(T);
+}
+
 /// Checks if the given character is an alphabetic letter.
 ///
 /// This function returns `true` if the provided character is an alphabetic letter
@@ -393,7 +398,7 @@ pub fn is_left_operanded_unary_operator(op: []const u8) bool {
 ///
 /// Errors:
 /// - Returns an error if the writer fails to print the indentation.
-fn print_indent(writer: anytype, depth: usize) !void {
+fn print_indent(writer: *std.Io.Writer, depth: usize) !void {
     var i: usize = 0;
     while (i < depth) : (i += 1) {
         try writer.print("  ", .{});
@@ -414,7 +419,7 @@ fn print_indent(writer: anytype, depth: usize) !void {
 ///
 /// Errors:
 /// - Returns an error if the writer fails to print the node details.
-pub fn print_node(node: ast.Node, writer: anytype, depth: usize) !void {
+pub fn print_node(node: ast.Node, writer: *std.Io.Writer, depth: usize) !void {
     try print_indent(writer, depth);
     try writer.print("Node Type: {s}\n", .{@tagName(node.type)});
 
@@ -900,7 +905,7 @@ pub fn Vector(comptime T: type) type {
             peek_decrement: bool = false,
         },
         /// The internal ArrayList for storing elements.
-        data: std.ArrayList(T),
+        data: ArrayList(T),
         /// The peek index for accessing elements without removing them.
         pindex: isize = 0,
         /// The count of elements in the Vector.
@@ -918,7 +923,7 @@ pub fn Vector(comptime T: type) type {
         pub fn init(allocator: mem.Allocator) Self {
             return Self{
                 .flags = .{ .peek_decrement = false },
-                .data = std.ArrayList(T).init(allocator),
+                .data = ArrayList(T).init(allocator),
             };
         }
 

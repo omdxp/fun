@@ -3,6 +3,11 @@ const mem = std.mem;
 const semantics = @import("semantics");
 const dtype = semantics.dtype;
 
+/// Compatibility shim: ArrayList with embedded allocator (old-style managed API).
+fn ArrayList(comptime T: type) type {
+    return std.array_list.Managed(T);
+}
+
 /// Represents the different types of tokens that can be encountered in the source code.
 pub const TokenType = enum {
     /// An identifier, such as a variable or function name.
@@ -42,7 +47,7 @@ pub const TokenData = union(enum) {
     /// A single character value.
     cval: u8,
     /// A string value.
-    sval: std.ArrayList(u8),
+    sval: ArrayList(u8),
     /// An integer value.
     inum: c_int,
     /// A long integer value.

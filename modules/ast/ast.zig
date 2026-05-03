@@ -6,6 +6,11 @@ const dtype = semantics.dtype;
 const utils = @import("utils");
 pub const expressionable = @import("expressionable.zig");
 
+/// Compatibility shim: ArrayList with embedded allocator (old-style managed API).
+fn ArrayList(comptime T: type) type {
+    return std.array_list.Managed(T);
+}
+
 /// Flags representing characteristics of a node.
 pub const NodeFlags = packed struct {
     /// Indicates if the node is inside an expression.
@@ -168,7 +173,7 @@ pub const Node = struct {
             /// The data type of the variable.
             type: *dtype.DataType,
             /// The name of the variable.
-            name: std.ArrayList(u8),
+            name: ArrayList(u8),
             /// The value of the variable.
             val: ?*Node = null,
         },
@@ -216,9 +221,9 @@ pub const Node = struct {
             /// The return type of the function.
             rtype: ?dtype.DataType = null,
             /// The name of the function.
-            name: ?std.ArrayList(u8) = null,
+            name: ?ArrayList(u8) = null,
             /// Optional generic type parameters.
-            type_params: ?utils.Vector(std.ArrayList(u8)) = null,
+            type_params: ?utils.Vector(ArrayList(u8)) = null,
             /// The arguments of the function.
             args: ?utils.Vector(*Node) = null,
             /// Whether the function was declared with the `async` keyword.
@@ -230,28 +235,28 @@ pub const Node = struct {
         },
 
         compound: struct {
-            name: std.ArrayList(u8),
+            name: ArrayList(u8),
             fields: utils.Vector(CompoundField),
             /// Optional generic type parameters (e.g. Vec<T> -> ["T"]).
-            type_params: ?utils.Vector(std.ArrayList(u8)) = null,
+            type_params: ?utils.Vector(ArrayList(u8)) = null,
         },
 
         quirk: struct {
-            name: std.ArrayList(u8),
+            name: ArrayList(u8),
             methods: utils.Vector(QuirkMethodSig),
         },
 
         enum_decl: struct {
-            name: std.ArrayList(u8),
+            name: ArrayList(u8),
             variants: utils.Vector(EnumVariant),
         },
 
         impl: struct {
-            type_name: std.ArrayList(u8),
+            type_name: ArrayList(u8),
             /// Optional generic type parameters for impl blocks.
-            type_params: ?utils.Vector(std.ArrayList(u8)) = null,
+            type_params: ?utils.Vector(ArrayList(u8)) = null,
             /// Optional quirk name. When null, this is a plain impl block: `impl Type { ... }`.
-            quirk_name: ?std.ArrayList(u8) = null,
+            quirk_name: ?ArrayList(u8) = null,
             methods: utils.Vector(*Node),
         },
         /// The statement node.
@@ -265,17 +270,17 @@ pub const Node = struct {
             /// The inline assembly statement node.
             asm_stmt: struct {
                 /// Assembly template text.
-                template: std.ArrayList(u8),
+                template: ArrayList(u8),
                 /// Whether the asm is volatile.
                 is_volatile: bool = false,
                 /// Optional target architecture name.
-                arch: ?std.ArrayList(u8) = null,
+                arch: ?ArrayList(u8) = null,
                 /// Output operands.
                 outputs: utils.Vector(AsmOperand),
                 /// Input operands.
                 inputs: utils.Vector(AsmOperand),
                 /// Clobber list (string literals).
-                clobbers: utils.Vector(std.ArrayList(u8)),
+                clobbers: utils.Vector(ArrayList(u8)),
                 /// Whether the template was provided as a string literal.
                 is_string_literal: bool = false,
             },
@@ -349,29 +354,29 @@ pub const Node = struct {
 };
 
 pub const CompoundField = struct {
-    name: std.ArrayList(u8),
+    name: ArrayList(u8),
     dtype: *dtype.DataType,
 };
 
 pub const CompoundInitField = struct {
-    name: std.ArrayList(u8),
+    name: ArrayList(u8),
     value: *Node,
 };
 
 pub const QuirkMethodSig = struct {
-    name: std.ArrayList(u8),
+    name: ArrayList(u8),
     rtype: dtype.DataType,
     args: utils.Vector(QuirkArg),
     is_async: bool = false,
 };
 
 pub const QuirkArg = struct {
-    name: std.ArrayList(u8),
+    name: ArrayList(u8),
     dtype: *dtype.DataType,
 };
 
 pub const EnumVariant = struct {
-    name: std.ArrayList(u8),
+    name: ArrayList(u8),
     /// Optional explicit integer value (`Variant = 3;`).
     /// When null, values auto-increment from 0 following C enum rules.
     value: ?i64 = null,
@@ -386,8 +391,8 @@ pub const FitBranch = struct {
 };
 
 pub const AsmOperand = struct {
-    name: std.ArrayList(u8),
-    constraint: std.ArrayList(u8),
+    name: ArrayList(u8),
+    constraint: ArrayList(u8),
     expr: *Node,
 };
 
