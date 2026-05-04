@@ -81,6 +81,18 @@ pub fn main(init: std.process.Init) void {
         return;
     }
 
+    if (options.fmt_check) {
+        const already_formatted = cli.format_file_check(global_allocator, init.io, options.input_file) catch |err| print_error_and_exit(init.io, err);
+        if (!already_formatted) {
+            const stderr = std.Io.File.stderr();
+            var buf: [512]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "{s}\n", .{options.input_file}) catch options.input_file;
+            stderr.writeStreamingAll(init.io, msg) catch {};
+            std.process.exit(1);
+        }
+        return;
+    }
+
     if (options.fmt_diag) {
         // Format in-place, then fall through to full compilation so diagnostics
         // are emitted to stderr. Used by the language server (fls) to combine

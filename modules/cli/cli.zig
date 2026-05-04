@@ -60,6 +60,10 @@ pub const CliOptions = struct {
     /// combine formatting + diagnostics into a single subprocess invocation.
     fmt_diag: bool,
 
+    /// Flag to check whether the input file is correctly formatted without modifying it.
+    /// Exits with code 1 and prints the filename if the file would be changed by formatting.
+    fmt_check: bool,
+
     /// Arguments passed to the compiled program (everything after `--`).
     program_args: [][]const u8,
 };
@@ -77,7 +81,7 @@ pub const CliOptions = struct {
 fn print_usage(io: std.Io) void {
     std.Io.File.stderr().writeStreamingAll(io,
         \\Usage:
-        \\  fun -in <input_file> [-fmt | -fmt-all | -fmt-diag] [-out <output_file>] [-no-exec] [-outf] [-ast] [-help] [-- <program args...>]
+        \\  fun -in <input_file> [-fmt | -fmt-all | -fmt-diag | -fmt-check] [-out <output_file>] [-no-exec] [-outf] [-ast] [-help] [-- <program args...>]
         \\  fun -version
         \\
         \\Arguments:
@@ -87,6 +91,7 @@ fn print_usage(io: std.Io) void {
         \\  -fmt              Format the input file in-place (optional)
         \\  -fmt-all          Format the input file and all locally imported modules (optional)
         \\  -fmt-diag         Format the input file in-place, then run diagnostics (optional)
+        \\  -fmt-check        Check if the input file is formatted; exit 1 if not (optional)
         \\  -out     <file>   Output file (optional, defaults to input filename with .c extension)
         \\  -no-exec          Disable automatic compilation and execution (optional, execution enabled by default)
         \\  -outf             Generate .c output file (optional, disabled by default)
@@ -126,6 +131,7 @@ pub fn parse_args(allocator: mem.Allocator, io: std.Io, argv: []const []const u8
     var fmt = false;
     var fmt_all = false;
     var fmt_diag = false;
+    var fmt_check = false;
     var program_args = ArrayList([]const u8).init(allocator);
     errdefer {
         for (program_args.items) |p| allocator.free(p);
@@ -177,6 +183,8 @@ pub fn parse_args(allocator: mem.Allocator, io: std.Io, argv: []const []const u8
             fmt_all = true;
         } else if (std.mem.eql(u8, arg, "-fmt-diag")) {
             fmt_diag = true;
+        } else if (std.mem.eql(u8, arg, "-fmt-check")) {
+            fmt_check = true;
         }
     }
 
@@ -201,6 +209,7 @@ pub fn parse_args(allocator: mem.Allocator, io: std.Io, argv: []const []const u8
         .fmt = fmt,
         .fmt_all = fmt_all,
         .fmt_diag = fmt_diag,
+        .fmt_check = fmt_check,
         .program_args = try program_args.toOwnedSlice(),
     };
 }
@@ -1955,6 +1964,172 @@ pub fn format_file_in_place(allocator: mem.Allocator, io: std.Io, input_file: []
     // Overwrite input file in-place.
     try tp.ifile.writePositionalAll(io, out.items, 0);
     try tp.ifile.setLength(io, out.items.len);
+}
+
+/// Checks whether `input_file` is already correctly formatted, without modifying it.
+/// Returns `true` if the file is already formatted, `false` if formatting would change it.
+pub fn format_file_check(allocator: mem.Allocator, io: std.Io, input_file: []const u8) !bool {
+    const source = try std.Io.Dir.cwd().readFileAlloc(io, input_file, allocator, .limited(16 * 1024 * 1024));
+    defer allocator.free(source);
+
+    var line_starts = ArrayList(usize).init(allocator);
+    defer line_starts.deinit();
+    try line_starts.append(0);
+    for (source, 0..) |c, idx| {
+        if (c == '\n') {
+            try line_starts.append(idx + 1);
+        }
+    }
+
+    var tp = try codegen.TranspileProcess.init_rw(
+        allocator,
+        input_file,
+        "__fmt_unused__.c",
+        .{ .exec = false, .outf = false, .ast = false },
+    );
+    defer tp.deinit();
+    var lp = lexer.LexProcess.init(&tp);
+    defer lp.deinit();
+    try lp.lex();
+
+    var out = ArrayList(u8).init(allocator);
+    defer out.deinit();
+
+    var indent: usize = 0;
+    var at_line_start = true;
+    var prev_token: ?token.Token = null;
+
+    const tokens = tp.tokens.items();
+
+    var imports = ArrayList(token.Token).init(allocator);
+    defer imports.deinit();
+    var globals = ArrayList(token.Token).init(allocator);
+    defer globals.deinit();
+    var rest = ArrayList(token.Token).init(allocator);
+    defer rest.deinit();
+    var pending_comments = ArrayList(token.Token).init(allocator);
+    defer pending_comments.deinit();
+
+    var brace_depth: isize = 0;
+    var paren_depth: isize = 0;
+    var bracket_depth: isize = 0;
+    var can_start_stmt = true;
+    var i: usize = 0;
+    while (i < tokens.len) : (i += 1) {
+        const t = tokens[i];
+        if (t.type == .NewLine) {
+            if (brace_depth == 0 and pending_comments.items.len > 0) {
+                try pending_comments.append(t);
+            } else {
+                try rest.append(t);
+            }
+            continue;
+        }
+
+        const is_top = brace_depth == 0;
+        const is_stmt_start = is_top and paren_depth == 0 and bracket_depth == 0 and can_start_stmt;
+
+        if (is_top and t.type == .Comment) {
+            try pending_comments.append(t);
+            continue;
+        }
+
+        const is_kw = t.type == .Keyword;
+        const kw = if (is_kw) t.data.sval.items else "";
+
+        const starts_import_stmt = is_stmt_start and is_kw and std.mem.eql(u8, kw, "imp");
+        const starts_global_stmt = is_stmt_start and is_kw and (is_builtin_type_keyword(kw) or std.mem.eql(u8, kw, "let"));
+
+        if (starts_import_stmt or starts_global_stmt) {
+            var stmt = ArrayList(token.Token).init(allocator);
+            defer stmt.deinit();
+            try appendAll(&stmt, pending_comments.items);
+            pending_comments.clearRetainingCapacity();
+
+            try stmt.append(t);
+
+            var j: usize = i + 1;
+            while (j < tokens.len) : (j += 1) {
+                const tt = tokens[j];
+                if (tt.type == .NewLine) continue;
+                try stmt.append(tt);
+                if (tt.type == .Symbol and tt.data.cval == ';') {
+                    break;
+                }
+            }
+
+            if (starts_import_stmt) {
+                try appendAll(&imports, stmt.items);
+            } else {
+                try appendAll(&globals, stmt.items);
+            }
+
+            i = j;
+            can_start_stmt = true;
+            continue;
+        }
+
+        if (pending_comments.items.len > 0) {
+            try appendAll(&rest, pending_comments.items);
+            pending_comments.clearRetainingCapacity();
+        }
+        try rest.append(t);
+
+        if (t.type == .Operator) {
+            if (std.mem.eql(u8, t.data.sval.items, "(")) paren_depth += 1;
+            if (std.mem.eql(u8, t.data.sval.items, "[")) bracket_depth += 1;
+        }
+        if (t.type == .Symbol) {
+            if (t.data.cval == ')') {
+                if (paren_depth > 0) paren_depth -= 1;
+            }
+            if (t.data.cval == ']') {
+                if (bracket_depth > 0) bracket_depth -= 1;
+            }
+            if (t.data.cval == '{') brace_depth += 1;
+            if (t.data.cval == '}' and brace_depth > 0) brace_depth -= 1;
+            if (t.data.cval == ';' and brace_depth == 0) {
+                can_start_stmt = true;
+            } else if (t.data.cval == '}' and brace_depth == 0) {
+                can_start_stmt = true;
+            } else if (t.data.cval != ';') {
+                can_start_stmt = false;
+            }
+        } else {
+            can_start_stmt = false;
+        }
+    }
+
+    if (pending_comments.items.len > 0) {
+        try appendAll(&rest, pending_comments.items);
+        pending_comments.clearRetainingCapacity();
+    }
+
+    var state: EmitState = .{ .indent = &indent, .at_line_start = &at_line_start, .prev_token = &prev_token, .out = &out, .allocator = allocator };
+
+    if (imports.items.len > 0) {
+        try emitTokens(&state, imports.items, source, line_starts.items);
+        if (out.items.len > 0 and out.items[out.items.len - 1] != '\n') try out.append('\n');
+        try out.append('\n');
+        at_line_start = true;
+        prev_token = null;
+    }
+
+    if (globals.items.len > 0) {
+        try emitTokens(&state, globals.items, source, line_starts.items);
+        if (out.items.len > 0 and out.items[out.items.len - 1] != '\n') try out.append('\n');
+        try out.append('\n');
+        at_line_start = true;
+        prev_token = null;
+    }
+
+    try emitTokens(&state, rest.items, source, line_starts.items);
+
+    if (out.items.len == 0 or out.items[out.items.len - 1] != '\n') {
+        try out.append('\n');
+    }
+
+    return std.mem.eql(u8, source, out.items);
 }
 
 /// Compiles and runs the generated C code.
