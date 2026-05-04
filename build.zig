@@ -120,6 +120,20 @@ pub fn build(b: *std.Build) void {
     build_options.addOption([]const u8, "version", fun_version);
     exe.root_module.addOptions("build_options", build_options);
 
+    // --- Define FLS Library Module ---
+    const fls_lib_module = b.createModule(.{
+        .root_source_file = b.path("modules/fls/fls.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    fls_lib_module.addImport("utils", utils_module);
+    fls_lib_module.addImport("ast", ast_module);
+    fls_lib_module.addImport("lexer", lexer_module);
+    fls_lib_module.addImport("parser", parser_module);
+    fls_lib_module.addImport("semantics", semantics_module);
+    fls_lib_module.addImport("codegen", codegen_module);
+
     // --- Define Language Server Executable (fls) ---
     const fls_module = b.createModule(.{
         .root_source_file = b.path("cmd/fls/main.zig"),
@@ -127,13 +141,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-
-    fls_module.addImport("utils", utils_module);
-    fls_module.addImport("ast", ast_module);
-    fls_module.addImport("lexer", lexer_module);
-    fls_module.addImport("parser", parser_module);
-    fls_module.addImport("semantics", semantics_module);
-    fls_module.addImport("codegen", codegen_module);
+    fls_module.addImport("fls", fls_lib_module);
 
     const fls_exe = b.addExecutable(.{
         .name = "fls",
@@ -213,9 +221,9 @@ pub fn build(b: *std.Build) void {
     run_main_tests.setEnvironmentVariable("FUN_STDLIB_DIR", "stdlib");
 
     // --- Define fls (language server) Unit Tests ---
-    // We keep fls tests close to the implementation (cmd/fls/main.zig) and wire them into `zig build test`.
+    // Root at modules/fls/fls.zig so all sub-module tests are discovered through the import chain.
     const fls_test_module = b.createModule(.{
-        .root_source_file = b.path("cmd/fls/main.zig"),
+        .root_source_file = b.path("modules/fls/fls.zig"),
         .target = target,
         .optimize = .Debug,
         .link_libc = true,
