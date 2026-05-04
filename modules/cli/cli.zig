@@ -77,7 +77,7 @@ pub const CliOptions = struct {
 fn print_usage(io: std.Io) void {
     std.Io.File.stderr().writeStreamingAll(io,
         \\Usage:
-        \\  fun -in <input_file> [-fmt | -fmt-all] [-out <output_file>] [-no-exec] [-outf] [-ast] [-help] [-- <program args...>]
+        \\  fun -in <input_file> [-fmt | -fmt-all | -fmt-diag] [-out <output_file>] [-no-exec] [-outf] [-ast] [-help] [-- <program args...>]
         \\  fun -version
         \\
         \\Arguments:
@@ -86,6 +86,7 @@ fn print_usage(io: std.Io) void {
         \\  -in      <file>   Input file to compile (required)
         \\  -fmt              Format the input file in-place (optional)
         \\  -fmt-all          Format the input file and all locally imported modules (optional)
+        \\  -fmt-diag         Format the input file in-place, then run diagnostics (optional)
         \\  -out     <file>   Output file (optional, defaults to input filename with .c extension)
         \\  -no-exec          Disable automatic compilation and execution (optional, execution enabled by default)
         \\  -outf             Generate .c output file (optional, disabled by default)

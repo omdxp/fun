@@ -101,6 +101,9 @@ pub fn main(init: std.process.Init) void {
             .exec = options.exec,
             .outf = options.outf,
             .ast = options.print_ast,
+            // Skip C emission when we only need diagnostics (exec=false, no output file).
+            // This avoids the full codegen pass and roughly halves compile time.
+            .diag_only = !options.exec and !options.outf and !options.print_ast,
         },
     ) catch |err| print_error_and_exit(init.io, err);
 

@@ -112,6 +112,13 @@ pub const TranspileProcessFlags = packed struct {
     /// Tooling (like `fls`) may parse/lex temporary/incomplete snapshots while typing.
     /// Emitting those transient errors to stderr creates noisy logs without improving UX.
     emit_stderr: bool = true,
+
+    /// When true, skip C code emission entirely after type-checking.
+    ///
+    /// Used by the diagnostics-only path (`fun -no-exec` without `-outf`) to avoid the
+    /// full codegen pass when only error/warning output is needed.  Reduces compile time
+    /// by roughly half for large files.
+    diag_only: bool = false,
 };
 
 /// GlobalSymbolInfo tracks information about symbols across modules
@@ -3492,6 +3499,31 @@ pub const TranspileProcess = struct {
         };
     }
 
+    /// Emit a `return_local_ptr` warning if `ret_expr` is `&<name>` where `<name>
+    /// is declared in a body-local scope (TypeEnv frame index ≥ 1).  Frame 0
+    /// contains module-level globals and function arguments; frames 1+ are pushed
+    /// by `check_body` for each nested block and hold true locals.
+    fn warn_if_returning_local_ptr_in_env(self: *Self, ret_expr: ast.Node, env: *TypeEnv) void {
+        if (ret_expr.type != .Unary or ret_expr.node_variant == null) return;
+        const unary = ret_expr.node_variant.?.unary;
+        if (!mem.eql(u8, unary.op, "&")) return;
+
+        const operand = unary.operand.*;
+        if (operand.type != .Identifier or operand.data == null) return;
+        const name = operand.data.?.sval.items;
+
+        // Only warn for locals declared inside a function body (frame 1+).  Frame 0
+        // holds module-level globals and function args — those live for the entire
+        // call, but taking their address is less dangerous and not warned on here.
+        if (env.scopes.items.len < 2) return;
+        for (env.scopes.items[1..]) |scope_map| {
+            if (scope_map.contains(name)) {
+                self.report_warning(.return_local_ptr, operand, "returning address of local variable '{s}' from a pointer-returning function; this pointer will dangle after return", .{name});
+                return;
+            }
+        }
+    }
+
     fn warn_if_returning_address_of_local(self: *Self, ret_expr: ast.Node) void {
         const fn_ret = self.current_fn_return orelse return;
         if (fn_ret.pointer_depth == 0) return;
@@ -6121,6 +6153,10 @@ pub const TranspileProcess = struct {
                             self.report_type_error(stmt, "return type mismatch", .{});
                             return TranspileError.ReturnTypeMismatch;
                         }
+                        // Warn if returning the address of a body-local variable.
+                        if (fn_rtype.pointer_depth > 0) {
+                            self.warn_if_returning_local_ptr_in_env(rv.*, env);
+                        }
                     }
                 },
                 .StatementDefer => {
@@ -6244,6 +6280,14 @@ pub const TranspileProcess = struct {
                             self.report_type_error(stmt, "assert message must be str", .{});
                             return TranspileError.TypeMismatch;
                         }
+                    }
+                },
+                .StatementWarningControl => {
+                    // Queue allow/expect entries during typecheck so that subsequent
+                    // return_local_ptr warning checks in the same body see them.
+                    if (stmt.node_variant) |nv| {
+                        const ctrl = nv.statement.warning_ctrl;
+                        try self.queue_warning_control(ctrl.action, ctrl.id, ctrl.reason, stmt.pos);
                     }
                 },
                 else => {
@@ -10663,6 +10707,14 @@ pub const TranspileProcess = struct {
         // Type check after imports are parsed (so imported signatures are available).
         try self.typecheck_all();
 
+        // In diagnostics-only mode, skip C emission entirely.  Warnings/errors have
+        // already been written to stderr by typecheck_all; we just need to verify
+        // that any warning-expect annotations were fulfilled.
+        if (self.flags.diag_only) {
+            try self.finalize_warning_expectations();
+            return;
+        }
+
         // Seed generic instantiations from signatures/locals across all modules.
         try self.seed_forced_generic_instantiations_from_signatures();
 
@@ -12762,7 +12814,6 @@ pub const TranspileProcess = struct {
                         try self.transpile_scoped_block(else_s.body, .normal);
                     },
                     .return_stmt => |rn| {
-                        self.warn_if_returning_address_of_local(rn.*);
                         try self.emit_function_scope_defers();
                         try self.write_indent();
                         if (self.in_main) {
@@ -12826,7 +12877,8 @@ pub const TranspileProcess = struct {
                         try self.write("abort(); }");
                     },
                     .warning_ctrl => |ctrl| {
-                        try self.queue_warning_control(ctrl.action, ctrl.id, ctrl.reason, node.pos);
+                        // Warning control was already queued during the typecheck pass;
+                        // here we only emit the C comment marker.
                         try self.write("/* ");
                         try self.write(@tagName(ctrl.action));
                         try self.write(" ");

@@ -14,6 +14,7 @@ This directory contains the core modules that implement the Fun language.
 - **ast**: Abstract Syntax Tree structures and logic
 - **cli**: Command-line interface logic
 - **codegen**: Code generation and transpiler
+- **fls**: Language Server implementation
 - **lexer**: Lexical analysis
 - **parser**: Parsing logic
 - **semantics**: Type checking and symbol resolution

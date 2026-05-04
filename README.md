@@ -106,18 +106,22 @@ jobs:
 ## CLI Usage
 
 ```
-Usage: fun -in <input_file> [-out <output_file>] [-no-exec] [-outf] [-ast] [-fmt] [-fmt-diag] [-fmt-all] [-help]
+Usage:
+  fun -in <input_file> [-fmt | -fmt-all | -fmt-diag] [-out <output_file>] [-no-exec] [-outf] [-ast] [-help] [-- <program args...>]
+  fun -version
 
 Arguments:
-  -in       <file>  Input file to compile (required)
-  -out      <file>  Output file (optional, defaults to input filename with .c extension)
+  -help             Show this help message
+  -version          Print version and exit
+  -in      <file>   Input file to compile (required)
+  -fmt              Format the input file in-place (optional)
+  -fmt-all          Format the input file and all locally imported modules (optional)
+  -fmt-diag         Format the input file in-place, then run diagnostics (optional)
+  -out     <file>   Output file (optional, defaults to input filename with .c extension)
   -no-exec          Disable automatic compilation and execution (optional, execution enabled by default)
   -outf             Generate .c output file (optional, disabled by default)
   -ast              Print AST nodes (optional, disabled by default)
-  -fmt              Format the file in place, then exit (no compilation)
-  -fmt-all          Format the file and its local imports in place, then exit (skips std.*)
-  -fmt-diag         Format the file in place, then run full compilation to emit diagnostics
-  -help             Show this help message
+  --                All following args are passed to the compiled program
 ```
 
 ### C Compiler Selection

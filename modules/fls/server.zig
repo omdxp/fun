@@ -123,6 +123,58 @@ const getOrInitFlsTempDirCached = index_mod.getOrInitFlsTempDirCached;
 const IndexBuildScope = index_mod.IndexBuildScope;
 const GuessedCallSignature = index_mod.GuessedCallSignature;
 
+/// Cached result of a single diagnostic subprocess run.
+/// Keyed in `LspServer.diag_cache` by the URI of the file that was compiled.
+/// Cached result of a single diagnostic subprocess run.
+/// Keyed in `LspServer.diag_cache` by the URI of the file that was compiled.
+const DiagCacheEntry = struct {
+    /// Wyhash of the raw editor text that was compiled.
+    content_hash: u64,
+    /// Parsed diagnostics from the last compile run.  Owned by the server allocator.
+    diags: []DiagnosticWithUri,
+    /// The formatted source text produced by the last compile run.
+    /// Null when the cache was populated from a plain `computeDiagnostics` call
+    /// (which does not format the source).  Owned by the server allocator.
+    formatted: ?[]u8,
+};
+
+/// Deep-copy a slice of `DiagnosticWithUri`.  The returned slice is owned by the caller.
+fn dupeDiags(allocator: Allocator, src: []const DiagnosticWithUri) ![]DiagnosticWithUri {
+    const out = try allocator.alloc(DiagnosticWithUri, src.len);
+    var i: usize = 0;
+    errdefer {
+        for (out[0..i]) |d| {
+            allocator.free(d.uri);
+            allocator.free(d.diag.message);
+            if (d.diag.code) |c| allocator.free(c);
+        }
+        allocator.free(out);
+    }
+    while (i < src.len) : (i += 1) {
+        const s = src[i];
+        out[i] = .{
+            .uri = try allocator.dupe(u8, s.uri),
+            .diag = .{
+                .range = s.diag.range,
+                .severity = s.diag.severity,
+                .message = try allocator.dupe(u8, s.diag.message),
+                .code = if (s.diag.code) |c| try allocator.dupe(u8, c) else null,
+            },
+        };
+    }
+    return out;
+}
+
+/// Free a slice of `DiagnosticWithUri` and all its string fields.
+fn freeDiags(allocator: Allocator, diags: []const DiagnosticWithUri) void {
+    for (diags) |d| {
+        allocator.free(d.uri);
+        allocator.free(d.diag.message);
+        if (d.diag.code) |c| allocator.free(c);
+    }
+    allocator.free(diags);
+}
+
 pub const LspServer = struct {
     allocator: Allocator,
     docs: std.StringHashMap(Doc),
@@ -139,6 +191,12 @@ pub const LspServer = struct {
     debug_imports: bool = false,
     debug_definitions: bool = false,
     did_log_stdlib_root_resolution: bool = false,
+
+    /// Per-URI diagnostic result cache.  Keyed by URI string (owned by map).
+    /// Each entry stores the Wyhash of the formatted source text and the raw
+    /// stderr bytes that the last compiler run produced.  When the same
+    /// formatted text is seen again, we skip the subprocess entirely.
+    diag_cache: std.StringHashMap(DiagCacheEntry),
 
     fn envFlag(name: [:0]const u8) bool {
         const z = std.c.getenv(name) orelse return false;
@@ -179,6 +237,7 @@ pub const LspServer = struct {
             .fun_exe_path = try findSiblingOrPathExe(allocator, io, "fun"),
             .fls_exe_path = std.process.executablePathAlloc(io, allocator) catch null,
             .published_diag_uris = std.StringHashMap(void).init(allocator),
+            .diag_cache = std.StringHashMap(DiagCacheEntry).init(allocator),
             .root_uri = null,
             .root_path = null,
             .stdlib_root_path = null,
@@ -202,6 +261,13 @@ pub const LspServer = struct {
             self.allocator.free(entry.key_ptr.*);
         }
         self.published_diag_uris.deinit();
+        var cit = self.diag_cache.iterator();
+        while (cit.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            freeDiags(self.allocator, entry.value_ptr.diags);
+            if (entry.value_ptr.formatted) |f| self.allocator.free(f);
+        }
+        self.diag_cache.deinit();
         self.allocator.free(self.fun_exe_path);
         if (self.fls_exe_path) |p| self.allocator.free(p);
         if (self.root_uri) |u| self.allocator.free(u);
@@ -965,15 +1031,9 @@ pub const LspServer = struct {
             try self.sendResponseJson(id_val, empty);
             return;
         };
-        defer {
-            if (result.formatted) |f| self.allocator.free(f);
-            for (result.diags) |d| {
-                self.allocator.free(d.uri);
-                self.allocator.free(d.diag.message);
-                if (d.diag.code) |c| self.allocator.free(c);
-            }
-            self.allocator.free(result.diags);
-        }
+        // `result.formatted` is owned here; `result.diags` are transferred to
+        // `publishDiagsFromOwned` below, which takes ownership and frees them.
+        defer if (result.formatted) |f| self.allocator.free(f);
 
         // Send format edits only if we got a non-empty formatted result.
         if (result.formatted) |formatted| {
@@ -7640,6 +7700,14 @@ pub const LspServer = struct {
     }
 
     fn computeDiagnostics(self: *LspServer, current_uri: []const u8, text: []const u8) ![]DiagnosticWithUri {
+        // Fast path: skip the subprocess if the content hasn't changed.
+        const input_hash = std.hash.Wyhash.hash(0, text);
+        if (self.diag_cache.get(current_uri)) |entry| {
+            if (entry.content_hash == input_hash) {
+                return try dupeDiags(self.allocator, entry.diags);
+            }
+        }
+
         // Create the temp file next to the current document, so relative `imp "..."` resolution
         // and diagnostic file paths match the user's project layout.
         var tmp_name_buf: [80]u8 = undefined;
@@ -7673,7 +7741,14 @@ pub const LspServer = struct {
         const argv = [_][]const u8{ self.fun_exe_path, "-in", tmp_path_for_fun, "-no-exec" };
         _ = try runCaptureStderr(self.allocator, &argv, &stderr_buf);
 
-        return try parseFunDiagnosticsByUri(self.allocator, stderr_buf.items, current_uri, tmp_name);
+        const diags = try parseFunDiagnosticsByUri(self.allocator, stderr_buf.items, current_uri, tmp_name);
+
+        // Cache the result (no formatted text — this path doesn't format).
+        // checkDiagCache ignores entries with formatted=null, so this won't prevent
+        // formatAndComputeDiagnostics from running the formatter on the next save.
+        self.updateDiagCache(current_uri, input_hash, diags, null) catch {};
+
+        return diags;
     }
 
     const FormatDiagResult = struct {
@@ -7688,7 +7763,15 @@ pub const LspServer = struct {
     /// Run `fun -fmt-diag -no-exec` once to both format and collect diagnostics.
     /// This replaces the previous two-subprocess approach (one for formatting,
     /// one for diagnostics) with a single subprocess invocation.
+    ///
+    /// Results are cached by a Wyhash of the raw source text.  On a cache hit
+    /// (same content as last time) no subprocess is spawned.
     fn formatAndComputeDiagnostics(self: *LspServer, current_uri: []const u8, text: []const u8) !FormatDiagResult {
+        // Fast path: if the content hasn't changed since the last compile, return
+        // the cached result without spawning any subprocess.
+        const input_hash = std.hash.Wyhash.hash(0, text);
+        if (try self.checkDiagCache(current_uri, input_hash)) |cached| return cached;
+
         // Write the temp file next to the document so that relative imports resolve
         // the same way as they do in the normal diagnostics path.
         var tmp_name_buf: [80]u8 = undefined;
@@ -7737,7 +7820,65 @@ pub const LspServer = struct {
         };
 
         const diags = try parseFunDiagnosticsByUri(self.allocator, stderr_buf.items, current_uri, tmp_name);
+
+        // Store a deep copy of the result in the cache keyed by the raw input hash.
+        // Errors here are non-fatal — we still return the fresh result to the caller.
+        self.updateDiagCache(current_uri, input_hash, diags, formatted) catch {};
+
         return .{ .formatted = formatted, .diags = diags };
+    }
+
+    /// Check the diagnostic cache for `current_uri`.  Returns a `FormatDiagResult`
+    /// on a cache hit (no subprocess needed), or null on a miss.
+    ///
+    /// `content_hash` must be `Wyhash(raw_text)` — the same hash used when the
+    /// entry was stored by `updateDiagCache`.
+    ///
+    /// Only returns a hit when the cached entry has a non-null `formatted` value.
+    /// Entries written by `computeDiagnostics` (which never formats) are ignored
+    /// so that the next `formatAndComputeDiagnostics` call always runs the formatter.
+    fn checkDiagCache(self: *LspServer, current_uri: []const u8, content_hash: u64) !?FormatDiagResult {
+        const entry = self.diag_cache.get(current_uri) orelse return null;
+        if (content_hash != entry.content_hash) return null;
+        // Only serve cache hits that have a real formatted result.  A null means the
+        // entry came from computeDiagnostics, which doesn't format — serving it would
+        // suppress format edits on save.
+        if (entry.formatted == null) return null;
+
+        // Cache hit — return deep copies so the caller can take ownership.
+        const diags_copy = try dupeDiags(self.allocator, entry.diags);
+        const fmt_copy: ?[]u8 = if (entry.formatted) |f|
+            try self.allocator.dupe(u8, f)
+        else
+            null;
+        return .{ .formatted = fmt_copy, .diags = diags_copy };
+    }
+
+    /// Update or insert a diagnostic cache entry for `current_uri`.
+    ///
+    /// `content_hash` must be `Wyhash(raw_text)`.
+    /// `diags` and `formatted` are deep-copied into the cache; the originals
+    /// remain owned by the caller.
+    fn updateDiagCache(self: *LspServer, current_uri: []const u8, content_hash: u64, diags: []const DiagnosticWithUri, formatted: ?[]const u8) !void {
+        const diags_copy = try dupeDiags(self.allocator, diags);
+        errdefer freeDiags(self.allocator, diags_copy);
+        const fmt_copy: ?[]u8 = if (formatted) |f| try self.allocator.dupe(u8, f) else null;
+        errdefer if (fmt_copy) |f| self.allocator.free(f);
+
+        const gop = try self.diag_cache.getOrPut(current_uri);
+        if (gop.found_existing) {
+            // Free old cached data.
+            freeDiags(self.allocator, gop.value_ptr.diags);
+            if (gop.value_ptr.formatted) |old_f| self.allocator.free(old_f);
+        } else {
+            // New entry: duplicate the key.
+            gop.key_ptr.* = try self.allocator.dupe(u8, current_uri);
+        }
+        gop.value_ptr.* = .{
+            .content_hash = content_hash,
+            .diags = diags_copy,
+            .formatted = fmt_copy,
+        };
     }
 
     /// Publish pre-computed diagnostics (already owned/allocated by caller — this
@@ -7939,6 +8080,7 @@ test "fls: parse import spec from tokens" {
         .stdout = std.Io.File.stdout(),
         .fun_exe_path = try allocator.dupe(u8, "fun"),
         .published_diag_uris = std.StringHashMap(void).init(allocator),
+        .diag_cache = std.StringHashMap(DiagCacheEntry).init(allocator),
         .root_uri = null,
         .root_path = null,
     };
@@ -8009,6 +8151,7 @@ test "fls: resolve std import to stdlib" {
         .stdout = std.Io.File.stdout(),
         .fun_exe_path = try allocator.dupe(u8, "fun"),
         .published_diag_uris = std.StringHashMap(void).init(allocator),
+        .diag_cache = std.StringHashMap(DiagCacheEntry).init(allocator),
         .root_uri = null,
         .root_path = try allocator.dupe(u8, root_abs),
     };
@@ -8062,6 +8205,7 @@ test "fls: resolveImportUri relative imports" {
         .stdout = std.Io.File.stdout(),
         .fun_exe_path = try allocator.dupe(u8, "fun"),
         .published_diag_uris = std.StringHashMap(void).init(allocator),
+        .diag_cache = std.StringHashMap(DiagCacheEntry).init(allocator),
         .root_uri = null,
         .root_path = try allocator.dupe(u8, root_abs),
     };
@@ -8125,6 +8269,7 @@ test "fls: resolveImportUri std fails without stdlib" {
         .stdout = std.Io.File.stdout(),
         .fun_exe_path = try allocator.dupe(u8, "fun"),
         .published_diag_uris = std.StringHashMap(void).init(allocator),
+        .diag_cache = std.StringHashMap(DiagCacheEntry).init(allocator),
         .root_uri = null,
         .root_path = null,
         .stdlib_root_path = try allocator.dupe(u8, bogus_stdlib),
