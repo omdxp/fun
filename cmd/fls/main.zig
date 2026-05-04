@@ -265,11 +265,17 @@ const LspServer = struct {
         return true;
     }
 
-    fn dbg(enabled: bool, comptime category: []const u8, comptime fmt: []const u8, args: anytype) void {
+    fn dbg(self: *const LspServer, enabled: bool, comptime category: []const u8, comptime fmt: []const u8, args: anytype) void {
         if (!enabled) return;
-        std.debug.print("[fls:{s}] ", .{category});
-        std.debug.print(fmt, args);
-        std.debug.print("\n", .{});
+        var buf: [2048]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "[fls:" ++ category ++ "] " ++ fmt ++ "\n", args) catch return;
+        std.Io.File.stderr().writeStreamingAll(self.io, msg) catch {};
+    }
+
+    fn log(self: *const LspServer, comptime fmt: []const u8, args: anytype) void {
+        var buf: [1024]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
+        std.Io.File.stderr().writeStreamingAll(self.io, msg) catch {};
     }
 
     fn init(allocator: Allocator, io: std.Io) !LspServer {
@@ -320,23 +326,23 @@ const LspServer = struct {
 
         if (self.debug_imports and !self.did_log_stdlib_root_resolution) {
             self.did_log_stdlib_root_resolution = true;
-            dbg(true, "imports", "resolving stdlib root (env/exe/workspace/cwd)", .{});
-            if (self.root_path) |rp| dbg(true, "imports", "root_path={s}", .{rp});
-            dbg(true, "imports", "fun_exe_path={s}", .{self.fun_exe_path});
-            if (self.fls_exe_path) |fp| dbg(true, "imports", "fls_exe_path={s}", .{fp});
+            self.dbg(true, "imports", "resolving stdlib root (env/exe/workspace/cwd)", .{});
+            if (self.root_path) |rp| self.dbg(true, "imports", "root_path={s}", .{rp});
+            self.dbg(true, "imports", "fun_exe_path={s}", .{self.fun_exe_path});
+            if (self.fls_exe_path) |fp| self.dbg(true, "imports", "fls_exe_path={s}", .{fp});
         }
 
         // Prefer repo/workspace checkout layout when available.
         // This keeps fls working correctly when developing in a fun checkout even if
         // the machine also has a global install (or FUN_STDLIB_DIR) configured.
         if (self.tryStdlibRootFromWorkspace()) {
-            if (self.debug_imports) dbg(true, "imports", "stdlib root from workspace => {s}", .{self.stdlib_root_path.?});
+            if (self.debug_imports) self.dbg(true, "imports", "stdlib root from workspace => {s}", .{self.stdlib_root_path.?});
             return self.stdlib_root_path.?;
         }
 
         // Optional override for custom installs.
         if (self.tryStdlibRootFromEnv("FUN_STDLIB_DIR")) {
-            if (self.debug_imports) dbg(true, "imports", "stdlib root from FUN_STDLIB_DIR => {s}", .{self.stdlib_root_path.?});
+            if (self.debug_imports) self.dbg(true, "imports", "stdlib root from FUN_STDLIB_DIR => {s}", .{self.stdlib_root_path.?});
             return self.stdlib_root_path.?;
         }
 
@@ -350,7 +356,7 @@ const LspServer = struct {
 
         // Repo/workspace checkout layout (fallback).
         if (self.tryStdlibRootFromWorkspace()) {
-            if (self.debug_imports) dbg(true, "imports", "stdlib root from workspace => {s}", .{self.stdlib_root_path.?});
+            if (self.debug_imports) self.dbg(true, "imports", "stdlib root from workspace => {s}", .{self.stdlib_root_path.?});
             return self.stdlib_root_path.?;
         }
 
@@ -358,11 +364,11 @@ const LspServer = struct {
         // VS Code launches `fls` with `cwd` set to the workspace root, but some clients/flows
         // don't provide a usable `rootUri` or the document may be `untitled:`.
         if (self.trySetStdlibRoot("stdlib")) {
-            if (self.debug_imports) dbg(true, "imports", "stdlib root from cwd relative 'stdlib' => {s}", .{self.stdlib_root_path.?});
+            if (self.debug_imports) self.dbg(true, "imports", "stdlib root from cwd relative 'stdlib' => {s}", .{self.stdlib_root_path.?});
             return self.stdlib_root_path.?;
         }
         if (self.trySetStdlibRoot("zig-out/share/fun/stdlib")) {
-            if (self.debug_imports) dbg(true, "imports", "stdlib root from cwd relative 'zig-out/share/fun/stdlib' => {s}", .{self.stdlib_root_path.?});
+            if (self.debug_imports) self.dbg(true, "imports", "stdlib root from cwd relative 'zig-out/share/fun/stdlib' => {s}", .{self.stdlib_root_path.?});
             return self.stdlib_root_path.?;
         }
 
@@ -412,7 +418,7 @@ const LspServer = struct {
 
         if (!std.fs.path.isAbsolute(std_dir)) return false;
         var d = std.Io.Dir.openDirAbsolute(globalIo(), std_dir, .{}) catch |err| {
-            if (self.debug_imports) dbg(true, "imports", "stdlib root check failed: root={s} std_dir={s} err={s}", .{ root_abs, std_dir, @errorName(err) });
+            if (self.debug_imports) self.dbg(true, "imports", "stdlib root check failed: root={s} std_dir={s} err={s}", .{ root_abs, std_dir, @errorName(err) });
             return false;
         };
         d.close(globalIo());
@@ -420,7 +426,7 @@ const LspServer = struct {
     }
 
     fn trySetStdlibRoot(self: *LspServer, path: []const u8) bool {
-        if (self.debug_imports) dbg(true, "imports", "trySetStdlibRoot candidate={s}", .{path});
+        if (self.debug_imports) self.dbg(true, "imports", "trySetStdlibRoot candidate={s}", .{path});
         // Ensure we store an absolute path and never pass a non-absolute string to
         // `openDirAbsolute` (which asserts in Zig stdlib).
         var abs = if (std.fs.path.isAbsolute(path))
@@ -438,7 +444,7 @@ const LspServer = struct {
                 const parent = std.fs.path.dirname(abs) orelse null;
                 if (parent) |p| {
                     if (self.checkStdlibRootAbsolute(p)) {
-                        if (self.debug_imports) dbg(true, "imports", "normalized stdlib root from .../std => {s}", .{p});
+                        if (self.debug_imports) self.dbg(true, "imports", "normalized stdlib root from .../std => {s}", .{p});
                         self.allocator.free(abs);
                         abs = self.allocator.dupe(u8, p) catch return false;
                     }
@@ -451,7 +457,7 @@ const LspServer = struct {
                 const parent = std.fs.path.dirname(abs) orelse null;
                 if (parent) |p| {
                     if (self.checkStdlibRootAbsolute(p)) {
-                        if (self.debug_imports) dbg(true, "imports", "normalized stdlib root from .../stdlib => {s}", .{p});
+                        if (self.debug_imports) self.dbg(true, "imports", "normalized stdlib root from .../stdlib => {s}", .{p});
                         self.allocator.free(abs);
                         abs = self.allocator.dupe(u8, p) catch return false;
                     }
@@ -464,9 +470,9 @@ const LspServer = struct {
                 const derived1 = std.fs.path.join(self.allocator, &.{ abs, "stdlib" }) catch null;
                 if (derived1) |p| {
                     defer self.allocator.free(p);
-                    if (self.debug_imports) dbg(true, "imports", "trySetStdlibRoot derived(suffix stdlib)={s}", .{p});
+                    if (self.debug_imports) self.dbg(true, "imports", "trySetStdlibRoot derived(suffix stdlib)={s}", .{p});
                     if (self.checkStdlibRootAbsolute(p)) {
-                        if (self.debug_imports) dbg(true, "imports", "accepted derived stdlib root => {s}", .{p});
+                        if (self.debug_imports) self.dbg(true, "imports", "accepted derived stdlib root => {s}", .{p});
                         self.allocator.free(abs);
                         abs = self.allocator.dupe(u8, p) catch return false;
                     }
@@ -477,9 +483,9 @@ const LspServer = struct {
                     const derived_share_fun = std.fs.path.join(self.allocator, &.{ abs, "share", "fun" }) catch null;
                     if (derived_share_fun) |p| {
                         defer self.allocator.free(p);
-                        if (self.debug_imports) dbg(true, "imports", "trySetStdlibRoot derived(suffix share/fun)={s}", .{p});
+                        if (self.debug_imports) self.dbg(true, "imports", "trySetStdlibRoot derived(suffix share/fun)={s}", .{p});
                         if (self.checkStdlibRootAbsolute(p)) {
-                            if (self.debug_imports) dbg(true, "imports", "accepted derived stdlib root => {s}", .{p});
+                            if (self.debug_imports) self.dbg(true, "imports", "accepted derived stdlib root => {s}", .{p});
                             self.allocator.free(abs);
                             abs = self.allocator.dupe(u8, p) catch return false;
                         }
@@ -490,9 +496,9 @@ const LspServer = struct {
                     const derived2 = std.fs.path.join(self.allocator, &.{ abs, "share", "fun", "stdlib" }) catch null;
                     if (derived2) |p| {
                         defer self.allocator.free(p);
-                        if (self.debug_imports) dbg(true, "imports", "trySetStdlibRoot derived(suffix share/fun/stdlib)={s}", .{p});
+                        if (self.debug_imports) self.dbg(true, "imports", "trySetStdlibRoot derived(suffix share/fun/stdlib)={s}", .{p});
                         if (self.checkStdlibRootAbsolute(p)) {
-                            if (self.debug_imports) dbg(true, "imports", "accepted derived stdlib root => {s}", .{p});
+                            if (self.debug_imports) self.dbg(true, "imports", "accepted derived stdlib root => {s}", .{p});
                             self.allocator.free(abs);
                             abs = self.allocator.dupe(u8, p) catch return false;
                         }
@@ -503,9 +509,9 @@ const LspServer = struct {
                     const derived3 = std.fs.path.join(self.allocator, &.{ abs, "fun", "stdlib" }) catch null;
                     if (derived3) |p| {
                         defer self.allocator.free(p);
-                        if (self.debug_imports) dbg(true, "imports", "trySetStdlibRoot derived(suffix fun/stdlib)={s}", .{p});
+                        if (self.debug_imports) self.dbg(true, "imports", "trySetStdlibRoot derived(suffix fun/stdlib)={s}", .{p});
                         if (self.checkStdlibRootAbsolute(p)) {
-                            if (self.debug_imports) dbg(true, "imports", "accepted derived stdlib root => {s}", .{p});
+                            if (self.debug_imports) self.dbg(true, "imports", "accepted derived stdlib root => {s}", .{p});
                             self.allocator.free(abs);
                             abs = self.allocator.dupe(u8, p) catch return false;
                         }
@@ -518,14 +524,14 @@ const LspServer = struct {
         defer if (!keep) self.allocator.free(abs);
 
         if (!self.checkStdlibRootAbsolute(abs)) {
-            if (self.debug_imports) dbg(true, "imports", "reject stdlib root (unable to open 'std/'?) abs={s}", .{abs});
+            if (self.debug_imports) self.dbg(true, "imports", "reject stdlib root (unable to open 'std/'?) abs={s}", .{abs});
             return false;
         }
 
         if (self.stdlib_root_path) |p| self.allocator.free(p);
         self.stdlib_root_path = abs;
         keep = true;
-        if (self.debug_imports) dbg(true, "imports", "accepted stdlib root abs={s}", .{abs});
+        if (self.debug_imports) self.dbg(true, "imports", "accepted stdlib root abs={s}", .{abs});
         return true;
     }
 
@@ -611,7 +617,7 @@ const LspServer = struct {
 
             const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, msg_bytes, .{}) catch |err| {
                 // Bad JSON should not kill the server; VS Code will keep going.
-                std.debug.print("[fls] json parse failed: {s}\n", .{@errorName(err)});
+                self.log("[fls] json parse failed: {s}\n", .{@errorName(err)});
                 continue;
             };
             defer parsed.deinit();
@@ -630,7 +636,7 @@ const LspServer = struct {
 
             if (std.mem.eql(u8, method, "initialize")) {
                 self.handleInitialize(id_val, obj.get("params") orelse null) catch |err| {
-                    std.debug.print("[fls] initialize failed: {s}\n", .{@errorName(err)});
+                    self.log("[fls] initialize failed: {s}\n", .{@errorName(err)});
                     if (is_request) self.sendResponseJson(id_val, "null") catch {};
                 };
                 continue;
@@ -645,32 +651,32 @@ const LspServer = struct {
 
             if (std.mem.eql(u8, method, "textDocument/didOpen")) {
                 self.handleDidOpen(obj.get("params") orelse null) catch |err| {
-                    std.debug.print("[fls] didOpen failed: {s}\n", .{@errorName(err)});
+                    self.log("[fls] didOpen failed: {s}\n", .{@errorName(err)});
                 };
                 continue;
             }
             if (std.mem.eql(u8, method, "textDocument/didChange")) {
                 self.handleDidChange(obj.get("params") orelse null) catch |err| {
-                    std.debug.print("[fls] didChange failed: {s}\n", .{@errorName(err)});
+                    self.log("[fls] didChange failed: {s}\n", .{@errorName(err)});
                 };
                 continue;
             }
             if (std.mem.eql(u8, method, "textDocument/didSave")) {
                 self.handleDidSave(obj.get("params") orelse null) catch |err| {
-                    std.debug.print("[fls] didSave failed: {s}\n", .{@errorName(err)});
+                    self.log("[fls] didSave failed: {s}\n", .{@errorName(err)});
                 };
                 continue;
             }
             if (std.mem.eql(u8, method, "textDocument/didClose")) {
                 self.handleDidClose(obj.get("params") orelse null) catch |err| {
-                    std.debug.print("[fls] didClose failed: {s}\n", .{@errorName(err)});
+                    self.log("[fls] didClose failed: {s}\n", .{@errorName(err)});
                 };
                 continue;
             }
 
             if (std.mem.eql(u8, method, "textDocument/formatting")) {
                 self.handleFormatting(id_val, obj.get("params") orelse null) catch |err| {
-                    std.debug.print("[fls] formatting request failed: {s}\n", .{@errorName(err)});
+                    self.log("[fls] formatting request failed: {s}\n", .{@errorName(err)});
                     if (is_request) self.sendResponseJson(id_val, "[]") catch {};
                 };
                 continue;
@@ -678,7 +684,7 @@ const LspServer = struct {
 
             if (std.mem.eql(u8, method, "textDocument/hover")) {
                 self.handleHover(id_val, obj.get("params") orelse null) catch |err| {
-                    std.debug.print("[fls] hover failed: {s}\n", .{@errorName(err)});
+                    self.log("[fls] hover failed: {s}\n", .{@errorName(err)});
                     if (is_request) self.sendResponseJson(id_val, "null") catch {};
                 };
                 continue;
@@ -690,63 +696,63 @@ const LspServer = struct {
             {
                 const mode: DefinitionMode = if (std.mem.eql(u8, method, "textDocument/typeDefinition")) .type_definition else .definition;
                 self.handleDefinition(mode, id_val, obj.get("params") orelse null) catch |err| {
-                    std.debug.print("[fls] definition-like request failed: {s}\n", .{@errorName(err)});
+                    self.log("[fls] definition-like request failed: {s}\n", .{@errorName(err)});
                     if (is_request) self.sendResponseJson(id_val, "[]") catch {};
                 };
                 continue;
             }
             if (std.mem.eql(u8, method, "textDocument/references")) {
                 self.handleReferences(id_val, obj.get("params") orelse null) catch |err| {
-                    std.debug.print("[fls] references failed: {s}\n", .{@errorName(err)});
+                    self.log("[fls] references failed: {s}\n", .{@errorName(err)});
                     if (is_request) self.sendResponseJson(id_val, "[]") catch {};
                 };
                 continue;
             }
             if (std.mem.eql(u8, method, "textDocument/rename")) {
                 self.handleRename(id_val, obj.get("params") orelse null) catch |err| {
-                    std.debug.print("[fls] rename failed: {s}\n", .{@errorName(err)});
+                    self.log("[fls] rename failed: {s}\n", .{@errorName(err)});
                     if (is_request) self.sendResponseJson(id_val, "null") catch {};
                 };
                 continue;
             }
             if (std.mem.eql(u8, method, "textDocument/codeAction")) {
                 self.handleCodeAction(id_val, obj.get("params") orelse null) catch |err| {
-                    std.debug.print("[fls] codeAction failed: {s}\n", .{@errorName(err)});
+                    self.log("[fls] codeAction failed: {s}\n", .{@errorName(err)});
                     if (is_request) self.sendResponseJson(id_val, "[]") catch {};
                 };
                 continue;
             }
             if (std.mem.eql(u8, method, "textDocument/completion")) {
                 self.handleCompletion(id_val, obj.get("params") orelse null) catch |err| {
-                    std.debug.print("[fls] completion failed: {s}\n", .{@errorName(err)});
+                    self.log("[fls] completion failed: {s}\n", .{@errorName(err)});
                     if (is_request) self.sendResponseJson(id_val, "{\"isIncomplete\":false,\"items\":[]}") catch {};
                 };
                 continue;
             }
             if (std.mem.eql(u8, method, "textDocument/signatureHelp")) {
                 self.handleSignatureHelp(id_val, obj.get("params") orelse null) catch |err| {
-                    std.debug.print("[fls] signatureHelp failed: {s}\n", .{@errorName(err)});
+                    self.log("[fls] signatureHelp failed: {s}\n", .{@errorName(err)});
                     if (is_request) self.sendResponseJson(id_val, "null") catch {};
                 };
                 continue;
             }
             if (std.mem.eql(u8, method, "textDocument/documentSymbol")) {
                 self.handleDocumentSymbols(id_val, obj.get("params") orelse null) catch |err| {
-                    std.debug.print("[fls] documentSymbol failed: {s}\n", .{@errorName(err)});
+                    self.log("[fls] documentSymbol failed: {s}\n", .{@errorName(err)});
                     if (is_request) self.sendResponseJson(id_val, "[]") catch {};
                 };
                 continue;
             }
             if (std.mem.eql(u8, method, "workspace/symbol")) {
                 self.handleWorkspaceSymbols(id_val, obj.get("params") orelse null) catch |err| {
-                    std.debug.print("[fls] workspace/symbol failed: {s}\n", .{@errorName(err)});
+                    self.log("[fls] workspace/symbol failed: {s}\n", .{@errorName(err)});
                     if (is_request) self.sendResponseJson(id_val, "[]") catch {};
                 };
                 continue;
             }
             if (std.mem.eql(u8, method, "textDocument/semanticTokens/full")) {
                 self.handleSemanticTokensFull(id_val, obj.get("params") orelse null) catch |err| {
-                    std.debug.print("[fls] semanticTokens failed: {s}\n", .{@errorName(err)});
+                    self.log("[fls] semanticTokens failed: {s}\n", .{@errorName(err)});
                     if (is_request) self.sendResponseJson(id_val, "null") catch {};
                 };
                 continue;
@@ -888,8 +894,8 @@ const LspServer = struct {
         self.root_path = path;
 
         if (self.debug_imports) {
-            dbg(true, "imports", "initialize captured root_uri={s}", .{self.root_uri.?});
-            dbg(true, "imports", "initialize captured root_path={s}", .{self.root_path.?});
+            self.dbg(true, "imports", "initialize captured root_uri={s}", .{self.root_uri.?});
+            self.dbg(true, "imports", "initialize captured root_path={s}", .{self.root_path.?});
         }
     }
 
@@ -937,7 +943,7 @@ const LspServer = struct {
         try self.upsertDoc(uri, version, text);
         try self.rebuildIndex(uri);
         self.maybePublishDiagnostics(uri, text, true) catch |err| {
-            std.debug.print("[fls] publishDiagnostics failed on didOpen: {s}\n", .{@errorName(err)});
+            self.log("[fls] publishDiagnostics failed on didOpen: {s}\n", .{@errorName(err)});
             self.sendPublishDiagnostics(uri, &[_]Diagnostic{}) catch {};
         };
     }
@@ -1003,7 +1009,7 @@ const LspServer = struct {
         try self.upsertDoc(uri, version, working);
         try self.rebuildIndex(uri);
         self.maybePublishDiagnostics(uri, working, false) catch |err| {
-            std.debug.print("[fls] publishDiagnostics failed on didChange: {s}\n", .{@errorName(err)});
+            self.log("[fls] publishDiagnostics failed on didChange: {s}\n", .{@errorName(err)});
             self.sendPublishDiagnostics(uri, &[_]Diagnostic{}) catch {};
         };
     }
@@ -1017,7 +1023,7 @@ const LspServer = struct {
 
         const doc = self.docs.get(uri) orelse return;
         self.maybePublishDiagnostics(uri, doc.text, true) catch |err| {
-            std.debug.print("[fls] publishDiagnostics failed on didSave: {s}\n", .{@errorName(err)});
+            self.log("[fls] publishDiagnostics failed on didSave: {s}\n", .{@errorName(err)});
             self.sendPublishDiagnostics(uri, &[_]Diagnostic{}) catch {};
         };
     }
@@ -1063,7 +1069,7 @@ const LspServer = struct {
         };
 
         const formatted = self.formatText(doc.text) catch |err| {
-            std.debug.print("[fls] formatting failed: {s}\n", .{@errorName(err)});
+            self.log("[fls] formatting failed: {s}\n", .{@errorName(err)});
             try self.sendResponseJson(id_val, empty);
             return;
         };
@@ -1355,7 +1361,7 @@ const LspServer = struct {
 
         if (self.debug_definitions and def_local_opt != null and def_local_opt.?.kind == .variable) {
             const d = def_local_opt.?;
-            dbg(true, "defs", "hover pick name={s} detail={s} value_type={s} decl=({d},{d}) sel=({d},{d})", .{
+            self.dbg(true, "defs", "hover pick name={s} detail={s} value_type={s} decl=({d},{d}) sel=({d},{d})", .{
                 d.name,
                 d.detail orelse "",
                 d.value_type orelse "",
@@ -2397,7 +2403,7 @@ const LspServer = struct {
         const tok = idx.tokens[tok_i];
 
         if (self.debug_definitions) {
-            dbg(true, "defs", "definition request uri={s} pos=({d},{d}) tok='{s}' kind={s}", .{ uri, pos.line, pos.character, tok.text, @tagName(tok.kind) });
+            self.dbg(true, "defs", "definition request uri={s} pos=({d},{d}) tok='{s}' kind={s}", .{ uri, pos.line, pos.character, tok.text, @tagName(tok.kind) });
         }
 
         if (mode == .type_definition) {
@@ -7258,7 +7264,7 @@ const LspServer = struct {
 
         // Build the new index first; if it fails, keep the old one so completion doesn't "die" mid-edit.
         const new_idx = buildIndexFromTextAt(self.allocator, doc_ptr.text, null, scope) catch |err| {
-            std.debug.print("[fls] rebuildIndex failed (keeping old index): {s}\n", .{@errorName(err)});
+            self.log("[fls] rebuildIndex failed (keeping old index): {s}\n", .{@errorName(err)});
             return;
         };
 
@@ -7490,14 +7496,14 @@ const LspServer = struct {
             const spec = self.parseImportSpecFromTokens(idx, i) catch null;
             if (spec) |s| {
                 defer self.allocator.free(s);
-                if (self.debug_imports) dbg(true, "imports", "found import in {s}: '{s}'", .{ uri, s });
+                if (self.debug_imports) self.dbg(true, "imports", "found import in {s}: '{s}'", .{ uri, s });
                 const maybe_target_uri = self.resolveImportUri(uri, s) catch null;
                 if (maybe_target_uri) |target_uri| {
                     defer self.allocator.free(target_uri);
-                    if (self.debug_imports) dbg(true, "imports", "resolved import '{s}' => {s}", .{ s, target_uri });
+                    if (self.debug_imports) self.dbg(true, "imports", "resolved import '{s}' => {s}", .{ s, target_uri });
                     self.ensureDocIndexedFromDisk(target_uri) catch {};
                 } else {
-                    if (self.debug_imports) dbg(true, "imports", "failed to resolve import '{s}'", .{s});
+                    if (self.debug_imports) self.dbg(true, "imports", "failed to resolve import '{s}'", .{s});
                 }
             }
         }
@@ -7534,7 +7540,7 @@ const LspServer = struct {
         const spec = std.mem.trim(u8, raw_import, " \t\r\n\"");
         if (spec.len == 0) return null;
 
-        if (self.debug_imports) dbg(true, "imports", "resolveImportUri current_uri={s} raw='{s}' spec='{s}'", .{ current_uri, raw_import, spec });
+        if (self.debug_imports) self.dbg(true, "imports", "resolveImportUri current_uri={s} raw='{s}' spec='{s}'", .{ current_uri, raw_import, spec });
 
         const current_path = uriToPath(self.allocator, current_uri) catch return null;
         defer self.allocator.free(current_path);
@@ -7593,7 +7599,7 @@ const LspServer = struct {
                 stdlib_root = self.getStdlibRootPath() orelse null;
             }
             const root = stdlib_root orelse return null;
-            if (self.debug_imports) dbg(true, "imports", "stdlib root used={s}", .{root});
+            if (self.debug_imports) self.dbg(true, "imports", "stdlib root used={s}", .{root});
             try segs.append(root);
             try segs.append("std");
 
@@ -7611,7 +7617,7 @@ const LspServer = struct {
         const full = try std.mem.concat(self.allocator, u8, &[_][]const u8{ joined, ".fn" });
         defer self.allocator.free(full);
 
-        if (self.debug_imports) dbg(true, "imports", "candidate path={s}", .{full});
+        if (self.debug_imports) self.dbg(true, "imports", "candidate path={s}", .{full});
 
         // `full` is typically absolute (current file dir is absolute or stdlib root is absolute).
         // Use absolute file APIs so installed stdlib works on Windows.
@@ -9743,14 +9749,16 @@ fn getOrInitFlsTempDirCached() ?FlsTempDir {
     if (fls_temp_dir_cache) |res| {
         if (debug_on and !fls_temp_dir_announced) {
             fls_temp_dir_announced = true;
-            std.debug.print("[fls] temp dir: {s}\n", .{res.abs_path});
+            var _tmp_buf: [512]u8 = undefined;
+            const _tmp_msg = std.fmt.bufPrint(&_tmp_buf, "[fls] temp dir: {s}\n", .{res.abs_path}) catch return fls_temp_dir_cache;
+            std.Io.File.stderr().writeStreamingAll(globalIo(), _tmp_msg) catch {};
         }
         // One-time best-effort cleanup of stale leftovers.
         var d = res.dir;
         maybeCleanupFlsTempDir(&d);
     } else if (debug_on and !fls_temp_dir_warned) {
         fls_temp_dir_warned = true;
-        std.debug.print("[fls] warning: could not open OS temp dir; using process CWD for temp files\n", .{});
+        std.Io.File.stderr().writeStreamingAll(globalIo(), "[fls] warning: could not open OS temp dir; using process CWD for temp files\n") catch {};
     }
 
     return fls_temp_dir_cache;

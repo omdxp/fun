@@ -69,8 +69,8 @@ pub const CliOptions = struct {
 ///
 /// Returns:
 /// - Might return an error if writing to the output fails.
-fn print_usage() void {
-    std.debug.print(
+fn print_usage(io: std.Io) void {
+    std.Io.File.stderr().writeStreamingAll(io,
         \\Usage:
         \\  fun -in <input_file> [-fmt | -fmt-all] [-out <output_file>] [-no-exec] [-outf] [-ast] [-help] [-- <program args...>]
         \\  fun -version
@@ -87,7 +87,7 @@ fn print_usage() void {
         \\  -ast              Print AST nodes (optional, disabled by default)
         \\  --                All following args are passed to the compiled program
         \\
-    , .{});
+    ) catch {};
 }
 
 /// Parses command-line arguments and returns a CliOptions structure.
@@ -105,10 +105,10 @@ fn print_usage() void {
 ///
 /// Errors:
 /// - Returns an error if argument parsing or memory allocation fails.
-pub fn parse_args(allocator: mem.Allocator, argv: []const []const u8) !CliOptions {
+pub fn parse_args(allocator: mem.Allocator, io: std.Io, argv: []const []const u8) !CliOptions {
     // argv is everything after the executable name.
     if (argv.len == 0) {
-        print_usage();
+        print_usage(io);
         return CliError.ShowHelp;
     }
 
@@ -137,7 +137,7 @@ pub fn parse_args(allocator: mem.Allocator, argv: []const []const u8) !CliOption
             break;
         }
         if (std.mem.eql(u8, arg, "-help")) {
-            print_usage();
+            print_usage(io);
             return CliError.ShowHelp;
         } else if (std.mem.eql(u8, arg, "-in")) {
             if (i >= argv.len) return CliError.MissingInputFile;
@@ -2094,7 +2094,8 @@ pub fn compile_and_run(allocator: mem.Allocator, io: std.Io, c_file_or_content: 
             }
 
             if (result.term.exited != 0) {
-                std.debug.print("Compilation error:\n{s}", .{result.stderr});
+                std.Io.File.stderr().writeStreamingAll(io, "Compilation error:\n") catch {};
+                std.Io.File.stderr().writeStreamingAll(io, result.stderr) catch {};
                 return CliError.CompilationFailed;
             }
         } else {
@@ -2125,7 +2126,8 @@ pub fn compile_and_run(allocator: mem.Allocator, io: std.Io, c_file_or_content: 
 
                 any_compiler_found = true;
                 if (result.term.exited != 0) {
-                    std.debug.print("Compilation error:\n{s}", .{result.stderr});
+                    std.Io.File.stderr().writeStreamingAll(io, "Compilation error:\n") catch {};
+                    std.Io.File.stderr().writeStreamingAll(io, result.stderr) catch {};
                     return CliError.CompilationFailed;
                 }
 
@@ -2169,8 +2171,6 @@ pub fn compile_and_run(allocator: mem.Allocator, io: std.Io, c_file_or_content: 
                 .exited => |code| if (code != 0) return CliError.ExecutionFailed,
                 else => return CliError.ExecutionFailed,
             }
-
-            std.debug.print("{s}", .{result.stdout});
         } else {
             // In normal CLI usage we want the compiled program to behave like a normal
             // executable: inherit stdin/stdout/stderr so interactive programs work.

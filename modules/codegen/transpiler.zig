@@ -2577,13 +2577,11 @@ pub const TranspileProcess = struct {
             return TranspileError.ImportFileNotFound;
         };
 
-        self.imported_files.put(canon, true) catch |e| {
-            std.debug.print("Failed to allocate memory for imported file: {s}\n", .{@errorName(e)});
+        self.imported_files.put(canon, true) catch {
             return TranspileError.MemoryAllocationFailed;
         };
 
-        var import_proc = self.backing_allocator.create(TranspileProcess) catch |e| {
-            std.debug.print("Failed to allocate memory for import process: {s}\n", .{@errorName(e)});
+        var import_proc = self.backing_allocator.create(TranspileProcess) catch {
             return TranspileError.MemoryAllocationFailed;
         };
         errdefer self.backing_allocator.destroy(import_proc);
@@ -2598,36 +2596,30 @@ pub const TranspileProcess = struct {
         // Copy imported files to child (prevents duplicate imports across branches).
         var it = self.imported_files.iterator();
         while (it.next()) |entry| {
-            const imported_file_copy = import_proc.allocator.dupe(u8, entry.key_ptr.*) catch |e| {
-                std.debug.print("Failed to allocate memory for imported file copy: {s}\n", .{@errorName(e)});
+            const imported_file_copy = import_proc.allocator.dupe(u8, entry.key_ptr.*) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
             errdefer import_proc.allocator.free(imported_file_copy);
-            import_proc.imported_files.put(imported_file_copy, true) catch |e| {
-                std.debug.print("Failed to allocate memory for imported file: {s}\n", .{@errorName(e)});
+            import_proc.imported_files.put(imported_file_copy, true) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
         }
 
         for (self.import_chain.items) |chain_path| {
-            const chain_path_copy = import_proc.allocator.dupe(u8, chain_path) catch |e| {
-                std.debug.print("Failed to allocate memory for import chain copy: {s}\n", .{@errorName(e)});
+            const chain_path_copy = import_proc.allocator.dupe(u8, chain_path) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
             errdefer import_proc.allocator.free(chain_path_copy);
-            import_proc.import_chain.append(chain_path_copy) catch |e| {
-                std.debug.print("Failed to allocate memory for import chain: {s}\n", .{@errorName(e)});
+            import_proc.import_chain.append(chain_path_copy) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
         }
 
-        const import_path_copy = import_proc.allocator.dupe(u8, canon) catch |e| {
-            std.debug.print("Failed to allocate memory for import path copy: {s}\n", .{@errorName(e)});
+        const import_path_copy = import_proc.allocator.dupe(u8, canon) catch {
             return TranspileError.MemoryAllocationFailed;
         };
         errdefer import_proc.allocator.free(import_path_copy);
-        import_proc.import_chain.append(import_path_copy) catch |e| {
-            std.debug.print("Failed to allocate memory for import chain: {s}\n", .{@errorName(e)});
+        import_proc.import_chain.append(import_path_copy) catch {
             return TranspileError.MemoryAllocationFailed;
         };
 
@@ -2644,8 +2636,7 @@ pub const TranspileProcess = struct {
 
         try import_proc.sync_global_symbols_to_parent();
 
-        self.children.append(import_proc) catch |e| {
-            std.debug.print("Failed to allocate memory for child process: {s}\n", .{@errorName(e)});
+        self.children.append(import_proc) catch {
             return TranspileError.MemoryAllocationFailed;
         };
     }
@@ -2856,12 +2847,10 @@ pub const TranspileProcess = struct {
         defer file_path.deinit();
 
         const dir_path = std.fs.path.dirname(self.input_file_path) orelse ".";
-        file_path.appendSlice(dir_path) catch |e| {
-            std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+        file_path.appendSlice(dir_path) catch {
             return TranspileError.MemoryAllocationFailed;
         };
-        file_path.append('/') catch |e| {
-            std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+        file_path.append('/') catch {
             return TranspileError.MemoryAllocationFailed;
         };
 
@@ -2872,8 +2861,7 @@ pub const TranspileProcess = struct {
         var i: usize = 0;
         while (i < import_path.len) {
             if (import_path[i] != '.') {
-                file_path.append(import_path[i]) catch |e| {
-                    std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+                file_path.append(import_path[i]) catch {
                     return TranspileError.MemoryAllocationFailed;
                 };
                 i += 1;
@@ -2888,18 +2876,15 @@ pub const TranspileProcess = struct {
 
             var p: usize = 0;
             while (p < parents) : (p += 1) {
-                file_path.appendSlice("..") catch |e| {
-                    std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+                file_path.appendSlice("..") catch {
                     return TranspileError.MemoryAllocationFailed;
                 };
-                file_path.append('/') catch |e| {
-                    std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+                file_path.append('/') catch {
                     return TranspileError.MemoryAllocationFailed;
                 };
             }
             if (sep) {
-                file_path.append('/') catch |e| {
-                    std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+                file_path.append('/') catch {
                     return TranspileError.MemoryAllocationFailed;
                 };
             }
@@ -2907,13 +2892,11 @@ pub const TranspileProcess = struct {
             i = j;
         }
 
-        file_path.appendSlice(".fn") catch |e| {
-            std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+        file_path.appendSlice(".fn") catch {
             return TranspileError.MemoryAllocationFailed;
         };
 
-        return file_path.toOwnedSlice() catch |e| {
-            std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+        return file_path.toOwnedSlice() catch {
             return TranspileError.MemoryAllocationFailed;
         };
     }
@@ -2950,16 +2933,13 @@ pub const TranspileProcess = struct {
             const our_name = std.fs.path.stem(self.input_file_path);
             var import_line = ArrayList(u8).init(self.backing_allocator);
             defer import_line.deinit();
-            import_line.appendSlice("imp ") catch |e| {
-                std.debug.print("Failed to allocate memory for import line: {s}\\n", .{@errorName(e)});
+            import_line.appendSlice("imp ") catch {
                 return TranspileError.MemoryAllocationFailed;
             };
-            import_line.appendSlice(our_name) catch |e| {
-                std.debug.print("Failed to allocate memory for import line: {s}\\n", .{@errorName(e)});
+            import_line.appendSlice(our_name) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
-            import_line.appendSlice(";") catch |e| {
-                std.debug.print("Failed to allocate memory for import line: {s}\\n", .{@errorName(e)});
+            import_line.appendSlice(";") catch {
                 return TranspileError.MemoryAllocationFailed;
             };
 
@@ -3026,8 +3006,7 @@ pub const TranspileProcess = struct {
                 }
             }
 
-            const path_copy = self.allocator.dupe(u8, canon) catch |e| {
-                std.debug.print("Error duplicating file path '{any}': {s}\\n", .{ canon, @errorName(e) });
+            const path_copy = self.allocator.dupe(u8, canon) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
             errdefer self.allocator.free(path_copy);
@@ -3037,8 +3016,7 @@ pub const TranspileProcess = struct {
                 .file_path = path_copy,
                 .is_function = decl_kind != null and mem.eql(u8, decl_kind.?, "fun"),
                 .is_public = true,
-            }) catch |e| {
-                std.debug.print("Error registering imported symbol '{any}': {s}\\n", .{ key_name, @errorName(e) });
+            }) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
         }
@@ -3093,13 +3071,11 @@ pub const TranspileProcess = struct {
         const ifile = blk: {
             const is_abs = std.fs.path.isAbsolute(ifilepath) or (@import("builtin").target.os.tag == .windows and ifilepath.len >= 2 and ifilepath[1] == ':');
             if (is_abs) {
-                break :blk std.Io.Dir.openFileAbsolute(io, ifilepath, .{ .mode = input_mode }) catch |e| {
-                    std.debug.print("Error opening input file '{s}': {s}\n", .{ ifilepath, @errorName(e) });
+                break :blk std.Io.Dir.openFileAbsolute(io, ifilepath, .{ .mode = input_mode }) catch {
                     return TranspileError.FileOpenError;
                 };
             }
-            break :blk std.Io.Dir.cwd().openFile(io, ifilepath, .{ .mode = input_mode }) catch |e| {
-                std.debug.print("Error opening input file '{s}': {s}\n", .{ ifilepath, @errorName(e) });
+            break :blk std.Io.Dir.cwd().openFile(io, ifilepath, .{ .mode = input_mode }) catch {
                 return TranspileError.FileOpenError;
             };
         };
@@ -3120,13 +3096,11 @@ pub const TranspileProcess = struct {
             ofile = blk: {
                 const is_abs = std.fs.path.isAbsolute(ofilepath) or (@import("builtin").target.os.tag == .windows and ofilepath.len >= 2 and ofilepath[1] == ':');
                 if (is_abs) {
-                    break :blk std.Io.Dir.createFileAbsolute(io, ofilepath, .{ .read = true }) catch |e| {
-                        std.debug.print("Error creating output file '{s}': {s}\n", .{ ofilepath, @errorName(e) });
+                    break :blk std.Io.Dir.createFileAbsolute(io, ofilepath, .{ .read = true }) catch {
                         return TranspileError.FileOpenError;
                     };
                 }
-                break :blk std.Io.Dir.cwd().createFile(io, ofilepath, .{ .read = true }) catch |e| {
-                    std.debug.print("Error creating output file '{s}': {s}\n", .{ ofilepath, @errorName(e) });
+                break :blk std.Io.Dir.cwd().createFile(io, ofilepath, .{ .read = true }) catch {
                     return TranspileError.FileOpenError;
                 };
             };
@@ -3136,8 +3110,7 @@ pub const TranspileProcess = struct {
         }
 
         // Create initial symbol table
-        const initial_table = a.create(symbol.SymbolTable) catch |e| {
-            std.debug.print("Error creating initial symbol table: {s}\\n", .{@errorName(e)});
+        const initial_table = a.create(symbol.SymbolTable) catch {
             return TranspileError.MemoryAllocationFailed;
         };
         errdefer a.destroy(initial_table);
@@ -3154,8 +3127,7 @@ pub const TranspileProcess = struct {
         var import_chain = ArrayList([]const u8).init(a);
         errdefer import_chain.deinit();
 
-        const input_file_path = a.dupe(u8, ifilepath) catch |e| {
-            std.debug.print("Error duplicating input file path '{s}': {s}\\n", .{ ifilepath, @errorName(e) });
+        const input_file_path = a.dupe(u8, ifilepath) catch {
             return TranspileError.MemoryAllocationFailed;
         };
         errdefer a.free(input_file_path);
@@ -3163,20 +3135,17 @@ pub const TranspileProcess = struct {
         const input_source = blk: {
             var read_buf: [65536]u8 = undefined;
             var file_reader = ifile.reader(io, &read_buf);
-            const src = file_reader.interface.allocRemaining(a, .limited(64 * 1024 * 1024)) catch |e| {
-                std.debug.print("Error reading input file '{s}': {s}\n", .{ ifilepath, @errorName(e) });
+            const src = file_reader.interface.allocRemaining(a, .limited(64 * 1024 * 1024)) catch {
                 return TranspileError.FileReadError;
             };
             break :blk src;
         };
 
-        imported_files.put(input_file_path, true) catch |e| {
-            std.debug.print("Error adding file '{s}' to imported files: {s}\\n", .{ input_file_path, @errorName(e) });
+        imported_files.put(input_file_path, true) catch {
             return TranspileError.MemoryAllocationFailed;
         }; // Mark current file as imported
 
-        import_chain.append(input_file_path) catch |e| {
-            std.debug.print("Error adding initial path '{s}' to import chain: {s}\\n", .{ input_file_path, @errorName(e) });
+        import_chain.append(input_file_path) catch {
             return TranspileError.MemoryAllocationFailed;
         };
 
@@ -3399,23 +3368,19 @@ pub const TranspileProcess = struct {
     pub fn err(self: *Self, comptime fmt: []const u8, args: anytype) void {
         if (!self.flags.emit_stderr) return;
 
-        std.debug.print("\n[Error]\n", .{});
-        // Defensive: if format string expects args but none provided, print fallback
-        if (args.len == 0 and std.mem.indexOf(u8, fmt, "{") != null) {
-            std.debug.print("[INTERNAL ERROR: format string '{s}' called with no arguments]", .{fmt});
-        } else {
-            std.debug.print(fmt, args);
-        }
+        var buf: [4096]u8 = undefined;
+        std.Io.File.stderr().writeStreamingAll(self.io, "\n[Error]\n") catch {};
+        std.Io.File.stderr().writeStreamingAll(self.io, std.fmt.bufPrint(&buf, fmt, args) catch fmt) catch {};
 
         if (self.current_token) |ct| {
             const end_line = if (ct.pos.end_line == 0) ct.pos.line else ct.pos.end_line;
             if (end_line == ct.pos.line) {
-                std.debug.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, ct.pos.end_col });
+                std.Io.File.stderr().writeStreamingAll(self.io, std.fmt.bufPrint(&buf, "\nLocation: {s}:{d}:{d}-{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, ct.pos.end_col }) catch "") catch {};
             } else {
-                std.debug.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, end_line, ct.pos.end_col });
+                std.Io.File.stderr().writeStreamingAll(self.io, std.fmt.bufPrint(&buf, "\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, end_line, ct.pos.end_col }) catch "") catch {};
             }
         } else {
-            std.debug.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col });
+            std.Io.File.stderr().writeStreamingAll(self.io, std.fmt.bufPrint(&buf, "\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch "") catch {};
         }
         // Do not deinit here. Callers typically `defer tp.deinit()`; implicitly
         // deinitializing inside `err()` causes double-close crashes (especially on Windows).
@@ -3431,23 +3396,17 @@ pub const TranspileProcess = struct {
     /// - `fmt`: The format string for the warning message.
     /// - `args`: The arguments for the format string.
     pub fn warn(self: *Self, comptime fmt: []const u8, args: anytype) void {
-        std.debug.print("\n[Warning]\n", .{});
-        std.debug.print(fmt, args);
-
         self.warnings.print("\n[Warning]\n", .{});
         self.warnings.print(fmt, args);
 
         if (self.current_token) |ct| {
             const end_line = if (ct.pos.end_line == 0) ct.pos.line else ct.pos.end_line;
             if (end_line == ct.pos.line) {
-                std.debug.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, ct.pos.end_col });
                 self.warnings.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, ct.pos.end_col });
             } else {
-                std.debug.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, end_line, ct.pos.end_col });
                 self.warnings.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, end_line, ct.pos.end_col });
             }
         } else {
-            std.debug.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col });
             self.warnings.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col });
         }
     }
@@ -3483,20 +3442,20 @@ pub const TranspileProcess = struct {
     fn report_warning_expectation_error(self: *Self, pending: PendingWarningControl) void {
         if (!self.flags.emit_stderr) return;
 
-        std.debug.print("\n[Error]\n", .{});
-        std.debug.print("expected warning '{s}' was not emitted; reason: \"{s}\"", .{ ast.warning_id_to_string(pending.id), pending.reason });
+        var buf: [4096]u8 = undefined;
+        std.Io.File.stderr().writeStreamingAll(self.io, "\n[Error]\n") catch {};
+        std.Io.File.stderr().writeStreamingAll(self.io, std.fmt.bufPrint(&buf, "expected warning '{s}' was not emitted; reason: \"{s}\"", .{ ast.warning_id_to_string(pending.id), pending.reason }) catch "") catch {};
 
         if (pending.pos) |p| {
             const end_line = if (p.end_line == 0) p.line else p.end_line;
             if (end_line == p.line) {
-                std.debug.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col });
+                std.Io.File.stderr().writeStreamingAll(self.io, std.fmt.bufPrint(&buf, "\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col }) catch "") catch {};
             } else {
-                std.debug.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col });
+                std.Io.File.stderr().writeStreamingAll(self.io, std.fmt.bufPrint(&buf, "\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col }) catch "") catch {};
             }
             return;
         }
-
-        std.debug.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col });
+        std.Io.File.stderr().writeStreamingAll(self.io, std.fmt.bufPrint(&buf, "\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch "") catch {};
     }
 
     fn finalize_warning_expectations(self: *Self) TranspileError!void {
@@ -3681,33 +3640,32 @@ pub const TranspileProcess = struct {
     fn report_type_error(self: *Self, node: ?ast.Node, comptime fmt: []const u8, args: anytype) void {
         if (!self.flags.emit_stderr) return;
 
-        std.debug.print("\n[TypeError]\n", .{});
-        if (args.len == 0 and std.mem.indexOf(u8, fmt, "{") != null) {
-            std.debug.print("[INTERNAL ERROR: format string '{s}' called with no arguments]", .{fmt});
-        } else {
-            std.debug.print(fmt, args);
-        }
+        var buf: [4096]u8 = undefined;
+        std.Io.File.stderr().writeStreamingAll(self.io, "\n[TypeError]\n") catch {};
+        std.Io.File.stderr().writeStreamingAll(self.io, std.fmt.bufPrint(&buf, fmt, args) catch fmt) catch {};
 
         if (node) |n| {
             if (n.pos) |p| {
                 const end_line = if (p.end_line == 0) p.line else p.end_line;
                 if (end_line == p.line) {
-                    std.debug.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col });
+                    std.Io.File.stderr().writeStreamingAll(self.io, std.fmt.bufPrint(&buf, "\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col }) catch "") catch {};
                 } else {
-                    std.debug.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col });
+                    std.Io.File.stderr().writeStreamingAll(self.io, std.fmt.bufPrint(&buf, "\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col }) catch "") catch {};
                 }
                 return;
             }
         }
-        std.debug.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col });
+        std.Io.File.stderr().writeStreamingAll(self.io, std.fmt.bufPrint(&buf, "\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch "") catch {};
     }
 
     fn report_warning(self: *Self, id: ast.WarningId, node: ?ast.Node, comptime fmt: []const u8, args: anytype) void {
         if (self.consume_warning_control(id)) return;
 
+        var warn_buf: [4096]u8 = undefined;
+
         if (self.flags.emit_stderr) {
-            std.debug.print("\n[Warning:{s}]\n", .{ast.warning_id_to_string(id)});
-            std.debug.print(fmt, args);
+            std.Io.File.stderr().writeStreamingAll(self.io, std.fmt.bufPrint(&warn_buf, "\n[Warning:{s}]\n", .{ast.warning_id_to_string(id)}) catch "\n[Warning]\n") catch {};
+            std.Io.File.stderr().writeStreamingAll(self.io, std.fmt.bufPrint(&warn_buf, fmt, args) catch fmt) catch {};
         }
 
         self.warnings.print("\n[Warning:{s}]\n", .{ast.warning_id_to_string(id)}) catch unreachable;
@@ -3717,43 +3675,42 @@ pub const TranspileProcess = struct {
             if (n.pos) |p| {
                 const end_line = if (p.end_line == 0) p.line else p.end_line;
                 if (end_line == p.line) {
-                    if (self.flags.emit_stderr) std.debug.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col });
+                    const loc = std.fmt.bufPrint(&warn_buf, "\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col }) catch "";
+                    if (self.flags.emit_stderr) std.Io.File.stderr().writeStreamingAll(self.io, loc) catch {};
                     self.warnings.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col }) catch unreachable;
                 } else {
-                    if (self.flags.emit_stderr) std.debug.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col });
+                    const loc = std.fmt.bufPrint(&warn_buf, "\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col }) catch "";
+                    if (self.flags.emit_stderr) std.Io.File.stderr().writeStreamingAll(self.io, loc) catch {};
                     self.warnings.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col }) catch unreachable;
                 }
                 return;
             }
         }
 
-        if (self.flags.emit_stderr) std.debug.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col });
+        const loc = std.fmt.bufPrint(&warn_buf, "\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch "";
+        if (self.flags.emit_stderr) std.Io.File.stderr().writeStreamingAll(self.io, loc) catch {};
         self.warnings.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch unreachable;
     }
 
     fn report_error(self: *Self, node: ?ast.Node, comptime fmt: []const u8, args: anytype) void {
         if (!self.flags.emit_stderr) return;
 
-        std.debug.print("\n[Error]\n", .{});
-        if (args.len == 0 and std.mem.indexOf(u8, fmt, "{") != null) {
-            std.debug.print("[INTERNAL ERROR: format string '{s}' called with no arguments]", .{fmt});
-        } else {
-            std.debug.print(fmt, args);
-        }
+        var buf: [4096]u8 = undefined;
+        std.Io.File.stderr().writeStreamingAll(self.io, "\n[Error]\n") catch {};
+        std.Io.File.stderr().writeStreamingAll(self.io, std.fmt.bufPrint(&buf, fmt, args) catch fmt) catch {};
 
         if (node) |n| {
             if (n.pos) |p| {
                 const end_line = if (p.end_line == 0) p.line else p.end_line;
                 if (end_line == p.line) {
-                    std.debug.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col });
+                    std.Io.File.stderr().writeStreamingAll(self.io, std.fmt.bufPrint(&buf, "\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col }) catch "") catch {};
                 } else {
-                    std.debug.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col });
+                    std.Io.File.stderr().writeStreamingAll(self.io, std.fmt.bufPrint(&buf, "\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col }) catch "") catch {};
                 }
                 return;
             }
         }
-
-        std.debug.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col });
+        std.Io.File.stderr().writeStreamingAll(self.io, std.fmt.bufPrint(&buf, "\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch "") catch {};
     }
 
     fn type_from_dtype(dt: *const dtype.DataType) CheckedType {
@@ -7114,13 +7071,11 @@ pub const TranspileProcess = struct {
     /// - Returns an error if creating the new symbol table or initializing its symbols fails.
     pub fn new_table(self: *Self) TranspileError!void {
         if (self.symbols.active_table) |table| {
-            self.symbols.tables.push(table) catch |e| {
-                std.debug.print("Error pushing symbol table: {s}\\n", .{@errorName(e)});
+            self.symbols.tables.push(table) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
         }
-        const table = self.allocator.create(symbol.SymbolTable) catch |e| {
-            std.debug.print("Error creating new symbol table: {s}\\n", .{@errorName(e)});
+        const table = self.allocator.create(symbol.SymbolTable) catch {
             return TranspileError.MemoryAllocationFailed;
         };
         table.*.symbols = utils.Vector(symbol.Symbol).init(self.allocator);
@@ -7151,8 +7106,7 @@ pub const TranspileProcess = struct {
     /// Errors:
     /// - Returns an error if the symbol cannot be added to the active symbol table.
     pub fn push_symbol(self: *Self, s: symbol.Symbol) TranspileError!void {
-        self.symbols.active_table.?.symbols.push(s) catch |e| {
-            std.debug.print("Error pushing symbol '{s}': {s}\\n", .{ s.name, @errorName(e) });
+        self.symbols.active_table.?.symbols.push(s) catch {
             return TranspileError.MemoryAllocationFailed;
         };
     }
@@ -7286,8 +7240,7 @@ pub const TranspileProcess = struct {
                 .file_path = self.input_file_path,
                 .is_function = is_function,
                 .is_public = true,
-            }) catch |e| {
-                std.debug.print("Error registering symbol '{s}': {s}\n", .{ s.name, @errorName(e) });
+            }) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
         }
@@ -7330,8 +7283,7 @@ pub const TranspileProcess = struct {
                         .file_path = self.input_file_path,
                         .is_function = false,
                         .is_public = true,
-                    }) catch |e| {
-                        std.debug.print("Error registering symbol '{s}': {s}\n", .{ variable.name.items, @errorName(e) });
+                    }) catch {
                         return TranspileError.MemoryAllocationFailed;
                     };
                 }
@@ -7369,8 +7321,7 @@ pub const TranspileProcess = struct {
                         .file_path = self.input_file_path,
                         .is_function = true,
                         .is_public = true,
-                    }) catch |e| {
-                        std.debug.print("Error registering symbol '{s}': {s}\n", .{ function.name.?.items, @errorName(e) });
+                    }) catch {
                         return TranspileError.MemoryAllocationFailed;
                     };
                 }
@@ -7385,8 +7336,7 @@ pub const TranspileProcess = struct {
                         .file_path = self.input_file_path,
                         .is_function = false,
                         .is_public = true,
-                    }) catch |e| {
-                        std.debug.print("Error registering symbol '{s}': {s}\n", .{ compound.name.items, @errorName(e) });
+                    }) catch {
                         return TranspileError.MemoryAllocationFailed;
                     };
                 }
@@ -7399,8 +7349,7 @@ pub const TranspileProcess = struct {
                         .file_path = self.input_file_path,
                         .is_function = false,
                         .is_public = true,
-                    }) catch |e| {
-                        std.debug.print("Error registering symbol '{s}': {s}\n", .{ enum_decl.name.items, @errorName(e) });
+                    }) catch {
                         return TranspileError.MemoryAllocationFailed;
                     };
                 }
@@ -7413,8 +7362,7 @@ pub const TranspileProcess = struct {
                         .file_path = self.input_file_path,
                         .is_function = false,
                         .is_public = true,
-                    }) catch |e| {
-                        std.debug.print("Error registering symbol '{s}': {s}\n", .{ quirk.name.items, @errorName(e) });
+                    }) catch {
                         return TranspileError.MemoryAllocationFailed;
                     };
                 }
@@ -7434,8 +7382,7 @@ pub const TranspileProcess = struct {
     /// - `scope.Scope`: The initialized root scope.
     pub fn init_root_scope(self: *Self) TranspileError!scope.Scope {
         assert(self.scope == null);
-        const root_scope = self.allocator.create(scope.Scope) catch |e| {
-            std.debug.print("Error creating root scope: {s}\\n", .{@errorName(e)});
+        const root_scope = self.allocator.create(scope.Scope) catch {
             return TranspileError.MemoryAllocationFailed;
         };
         errdefer self.allocator.destroy(root_scope);
@@ -7491,8 +7438,7 @@ pub const TranspileProcess = struct {
     /// - `scope.Scope`: The initialized new scope.
     pub fn new_scope(self: *Self) TranspileError!scope.Scope {
         assert(self.scope != null);
-        const nc = self.allocator.create(scope.Scope) catch |e| {
-            std.debug.print("Error creating new scope: {s}\\n", .{@errorName(e)});
+        const nc = self.allocator.create(scope.Scope) catch {
             return TranspileError.MemoryAllocationFailed;
         };
         errdefer self.allocator.destroy(nc);
@@ -7606,8 +7552,7 @@ pub const TranspileProcess = struct {
     /// Errors:
     /// - Returns an error if the entity could not be added.
     pub fn push_scope_entity(self: *Self, entity: *scope.ScopeEntity) TranspileError!void {
-        self.scope.?.current.?.entities.push(entity) catch |e| {
-            std.debug.print("Error pushing scope entity: {s}\\n", .{@errorName(e)});
+        self.scope.?.current.?.entities.push(entity) catch {
             return TranspileError.MemoryAllocationFailed;
         };
     }
@@ -8141,13 +8086,11 @@ pub const TranspileProcess = struct {
         if (self.flags.outf) {
             const s = std.fmt.allocPrint(self.backing_allocator, fmt, args) catch return TranspileError.MemoryAllocationFailed;
             defer self.backing_allocator.free(s);
-            self.ofile.?.writeStreamingAll(self.io, s) catch |e| {
-                std.debug.print("Error writing to output file: {s}\n", .{@errorName(e)});
+            self.ofile.?.writeStreamingAll(self.io, s) catch {
                 return TranspileError.FileWriteError;
             };
         } else {
-            self.outbuf.?.print(fmt, args) catch |e| {
-                std.debug.print("Error writing to output buffer: {s}\n", .{@errorName(e)});
+            self.outbuf.?.print(fmt, args) catch {
                 return TranspileError.BufferWriteError;
             };
         }
@@ -8304,13 +8247,11 @@ pub const TranspileProcess = struct {
     /// Write to output (either file or buffer)
     pub fn write(self: *Self, bytes: []const u8) TranspileError!void {
         if (self.flags.outf) {
-            self.ofile.?.writeStreamingAll(self.io, bytes) catch |e| {
-                std.debug.print("Error writing to output file: {s}\\n", .{@errorName(e)});
+            self.ofile.?.writeStreamingAll(self.io, bytes) catch {
                 return TranspileError.FileWriteError;
             };
         } else {
-            self.outbuf.?.appendSlice(bytes) catch |e| {
-                std.debug.print("Error writing to output buffer: {s}\\n", .{@errorName(e)});
+            self.outbuf.?.appendSlice(bytes) catch {
                 return TranspileError.BufferWriteError;
             };
         }
@@ -10685,8 +10626,7 @@ pub const TranspileProcess = struct {
         // Identify import nodes
         for (self.nodes.items(), 0..) |node, i| {
             if (node.type == .Import) {
-                import_nodes.append(i) catch |e| {
-                    std.debug.print("Error adding import node index '{d}': {s}\\n", .{ i, @errorName(e) });
+                import_nodes.append(i) catch {
                     return TranspileError.MemoryAllocationFailed;
                 };
             }
@@ -13217,8 +13157,7 @@ pub const TranspileProcess = struct {
         if (self.scope == null or self.scope.?.current == null) return;
         if (var_node.type != .Variable) return;
 
-        const ent = self.allocator.create(scope.ScopeEntity) catch |e| {
-            std.debug.print("Error creating scope entity: {s}\n", .{@errorName(e)});
+        const ent = self.allocator.create(scope.ScopeEntity) catch {
             return TranspileError.MemoryAllocationFailed;
         };
         errdefer self.allocator.destroy(ent);
@@ -13230,8 +13169,7 @@ pub const TranspileProcess = struct {
         };
 
         try self.push_scope_entity(ent);
-        self.owned_scope_entities.append(ent) catch |e| {
-            std.debug.print("Error tracking scope entity: {s}\n", .{@errorName(e)});
+        self.owned_scope_entities.append(ent) catch {
             return TranspileError.MemoryAllocationFailed;
         };
     }
@@ -13311,33 +13249,27 @@ pub const TranspileProcess = struct {
         var header_name: []const u8 = undefined;
 
         if (mem.eql(u8, import_path, "std.c.io")) {
-            header_name = self.allocator.dupe(u8, "stdio.h") catch |e| {
-                self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
+            header_name = self.allocator.dupe(u8, "stdio.h") catch {
                 return TranspileError.MemoryAllocationFailed;
             };
         } else if (mem.eql(u8, import_path, "std.c.mem")) {
-            header_name = self.allocator.dupe(u8, "stdlib.h") catch |e| {
-                self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
+            header_name = self.allocator.dupe(u8, "stdlib.h") catch {
                 return TranspileError.MemoryAllocationFailed;
             };
         } else if (mem.eql(u8, import_path, "std.c.string")) {
-            header_name = self.allocator.dupe(u8, "string.h") catch |e| {
-                self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
+            header_name = self.allocator.dupe(u8, "string.h") catch {
                 return TranspileError.MemoryAllocationFailed;
             };
         } else if (mem.eql(u8, import_path, "std.c.math")) {
-            header_name = self.allocator.dupe(u8, "math.h") catch |e| {
-                self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
+            header_name = self.allocator.dupe(u8, "math.h") catch {
                 return TranspileError.MemoryAllocationFailed;
             };
         } else if (mem.eql(u8, import_path, "std.c.ctype")) {
-            header_name = self.allocator.dupe(u8, "ctype.h") catch |e| {
-                self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
+            header_name = self.allocator.dupe(u8, "ctype.h") catch {
                 return TranspileError.MemoryAllocationFailed;
             };
         } else if (mem.eql(u8, import_path, "std.c.time")) {
-            header_name = self.allocator.dupe(u8, "time.h") catch |e| {
-                self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
+            header_name = self.allocator.dupe(u8, "time.h") catch {
                 return TranspileError.MemoryAllocationFailed;
             };
         } else if (mem.eql(u8, import_path, "std.c.net")) {
@@ -13355,23 +13287,19 @@ pub const TranspileProcess = struct {
             try self.process_std_module_import(import_node, import_path);
             return;
         } else if (mem.eql(u8, import_path, "std.c.limits")) {
-            header_name = self.allocator.dupe(u8, "limits.h") catch |e| {
-                self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
+            header_name = self.allocator.dupe(u8, "limits.h") catch {
                 return TranspileError.MemoryAllocationFailed;
             };
         } else if (mem.eql(u8, import_path, "std.c.stdint")) {
-            header_name = self.allocator.dupe(u8, "stdint.h") catch |e| {
-                self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
+            header_name = self.allocator.dupe(u8, "stdint.h") catch {
                 return TranspileError.MemoryAllocationFailed;
             };
         } else if (mem.eql(u8, import_path, "std.c.def")) {
-            header_name = self.allocator.dupe(u8, "stddef.h") catch |e| {
-                self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
+            header_name = self.allocator.dupe(u8, "stddef.h") catch {
                 return TranspileError.MemoryAllocationFailed;
             };
         } else if (mem.eql(u8, import_path, "std.c.errno")) {
-            header_name = self.allocator.dupe(u8, "errno.h") catch |e| {
-                self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
+            header_name = self.allocator.dupe(u8, "errno.h") catch {
                 return TranspileError.MemoryAllocationFailed;
             };
         } else {
@@ -13385,8 +13313,7 @@ pub const TranspileProcess = struct {
                 return;
             }
         }
-        self.std_imports.append(header_name) catch |e| {
-            self.err("Failed to allocate memory for header name: {s}", .{@errorName(e)});
+        self.std_imports.append(header_name) catch {
             return TranspileError.MemoryAllocationFailed;
         };
 
@@ -13420,12 +13347,10 @@ pub const TranspileProcess = struct {
         defer file_path.deinit();
 
         const dir_path = std.fs.path.dirname(self.input_file_path) orelse ".";
-        file_path.appendSlice(dir_path) catch |e| {
-            std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+        file_path.appendSlice(dir_path) catch {
             return TranspileError.MemoryAllocationFailed;
         };
-        file_path.append('/') catch |e| {
-            std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+        file_path.append('/') catch {
             return TranspileError.MemoryAllocationFailed;
         };
 
@@ -13436,8 +13361,7 @@ pub const TranspileProcess = struct {
         var i: usize = 0;
         while (i < import_path.len) {
             if (import_path[i] != '.') {
-                file_path.append(import_path[i]) catch |e| {
-                    std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+                file_path.append(import_path[i]) catch {
                     return TranspileError.MemoryAllocationFailed;
                 };
                 i += 1;
@@ -13452,18 +13376,15 @@ pub const TranspileProcess = struct {
 
             var p: usize = 0;
             while (p < parents) : (p += 1) {
-                file_path.appendSlice("..") catch |e| {
-                    std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+                file_path.appendSlice("..") catch {
                     return TranspileError.MemoryAllocationFailed;
                 };
-                file_path.append('/') catch |e| {
-                    std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+                file_path.append('/') catch {
                     return TranspileError.MemoryAllocationFailed;
                 };
             }
             if (sep) {
-                file_path.append('/') catch |e| {
-                    std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+                file_path.append('/') catch {
                     return TranspileError.MemoryAllocationFailed;
                 };
             }
@@ -13471,12 +13392,10 @@ pub const TranspileProcess = struct {
             i = j;
         }
 
-        file_path.appendSlice(".fn") catch |e| {
-            std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+        file_path.appendSlice(".fn") catch {
             return TranspileError.MemoryAllocationFailed;
         };
-        const full_path = file_path.toOwnedSlice() catch |e| {
-            std.debug.print("Failed to allocate memory for file path: {s}\\n", .{@errorName(e)});
+        const full_path = file_path.toOwnedSlice() catch {
             return TranspileError.MemoryAllocationFailed;
         };
         defer self.backing_allocator.free(full_path);
@@ -13514,16 +13433,13 @@ pub const TranspileProcess = struct {
         const our_name = std.fs.path.stem(self.input_file_path);
         var import_line = ArrayList(u8).init(self.backing_allocator);
         defer import_line.deinit();
-        import_line.appendSlice("imp ") catch |e| {
-            std.debug.print("Failed to allocate memory for import line: {s}\\n", .{@errorName(e)});
+        import_line.appendSlice("imp ") catch {
             return TranspileError.MemoryAllocationFailed;
         };
-        import_line.appendSlice(our_name) catch |e| {
-            std.debug.print("Failed to allocate memory for import line: {s}\\n", .{@errorName(e)});
+        import_line.appendSlice(our_name) catch {
             return TranspileError.MemoryAllocationFailed;
         };
-        import_line.appendSlice(";") catch |e| {
-            std.debug.print("Failed to allocate memory for import line: {s}\\n", .{@errorName(e)});
+        import_line.appendSlice(";") catch {
             return TranspileError.MemoryAllocationFailed;
         };
 
@@ -13569,16 +13485,14 @@ pub const TranspileProcess = struct {
             self.allocator.free(canon);
             return;
         }
-        self.imported_files.put(canon, true) catch |e| {
-            std.debug.print("Failed to allocate memory for imported file: {s}\\n", .{@errorName(e)});
+        self.imported_files.put(canon, true) catch {
             return TranspileError.MemoryAllocationFailed;
         };
 
         // Create and initialize child transpile process.
         // The child process struct itself must be backing-allocated so the parent
         // can safely destroy it after `child.deinit()`.
-        var import_proc = self.backing_allocator.create(TranspileProcess) catch |e| {
-            std.debug.print("Failed to allocate memory for import process: {s}\\n", .{@errorName(e)});
+        var import_proc = self.backing_allocator.create(TranspileProcess) catch {
             return TranspileError.MemoryAllocationFailed;
         };
         errdefer self.backing_allocator.destroy(import_proc);
@@ -13594,39 +13508,33 @@ pub const TranspileProcess = struct {
 
         // Copy the import chain and add the current import for tracking
         for (self.import_chain.items) |chain_path| {
-            const chain_path_copy = import_proc.allocator.dupe(u8, chain_path) catch |e| {
-                std.debug.print("Failed to allocate memory for import chain copy: {s}\\n", .{@errorName(e)});
+            const chain_path_copy = import_proc.allocator.dupe(u8, chain_path) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
             errdefer import_proc.allocator.free(chain_path_copy);
 
-            import_proc.import_chain.append(chain_path_copy) catch |e| {
-                std.debug.print("Failed to allocate memory for import chain: {s}\\n", .{@errorName(e)});
+            import_proc.import_chain.append(chain_path_copy) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
         }
-        const import_path_copy = import_proc.allocator.dupe(u8, canon) catch |e| {
-            std.debug.print("Failed to allocate memory for import path copy: {s}\\n", .{@errorName(e)});
+        const import_path_copy = import_proc.allocator.dupe(u8, canon) catch {
             return TranspileError.MemoryAllocationFailed;
         };
         errdefer import_proc.allocator.free(import_path_copy);
 
-        import_proc.import_chain.append(import_path_copy) catch |e| {
-            std.debug.print("Failed to allocate memory for import chain: {s}\\n", .{@errorName(e)});
+        import_proc.import_chain.append(import_path_copy) catch {
             return TranspileError.MemoryAllocationFailed;
         };
 
         // Copy imported files to child
         var it = self.imported_files.iterator();
         while (it.next()) |entry| {
-            const imported_file_copy = import_proc.allocator.dupe(u8, entry.key_ptr.*) catch |e| {
-                std.debug.print("Failed to allocate memory for imported file copy: {s}\\n", .{@errorName(e)});
+            const imported_file_copy = import_proc.allocator.dupe(u8, entry.key_ptr.*) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
             errdefer import_proc.allocator.free(imported_file_copy);
 
-            import_proc.imported_files.put(imported_file_copy, true) catch |e| {
-                std.debug.print("Failed to allocate memory for imported file: {s}\\n", .{@errorName(e)});
+            import_proc.imported_files.put(imported_file_copy, true) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
         }
@@ -13649,8 +13557,7 @@ pub const TranspileProcess = struct {
         try import_proc.sync_global_symbols_to_parent();
 
         // Add to children list
-        self.children.append(import_proc) catch |e| {
-            std.debug.print("Failed to allocate memory for child process: {s}\\n", .{@errorName(e)});
+        self.children.append(import_proc) catch {
             return TranspileError.MemoryAllocationFailed;
         };
     }
@@ -13704,9 +13611,8 @@ pub const TranspileProcess = struct {
                 .file_path = symbol_info.file_path,
                 .is_function = symbol_info.is_function,
                 .is_public = symbol_info.is_public,
-            }) catch |e| {
+            }) catch {
                 if (self.import_alias != null) self.allocator.free(exported_name);
-                std.debug.print("Failed to allocate memory for global symbol: {s}\\n", .{@errorName(e)});
                 return TranspileError.MemoryAllocationFailed;
             };
         }

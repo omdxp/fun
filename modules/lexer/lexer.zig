@@ -165,8 +165,7 @@ pub const LexProcess = struct {
     /// - Returns an error if reading from the input file fails.
     pub fn next_char(self: *Self) LexError!?u8 {
         var buffer: [1]u8 = undefined;
-        const readBytes = self.transpile_proc.ifile.readPositionalAll(self.transpile_proc.io, &buffer, self.transpile_proc.file_pos) catch |e| {
-            std.debug.print("Error reading from file: {s}\n", .{@errorName(e)});
+        const readBytes = self.transpile_proc.ifile.readPositionalAll(self.transpile_proc.io, &buffer, self.transpile_proc.file_pos) catch {
             return LexError.FileReadError;
         };
         if (readBytes == 0) {
@@ -185,13 +184,11 @@ pub const LexProcess = struct {
         }
 
         if (self.in_expression()) {
-            self.parenthesis_buf.?.append(c) catch |e| {
-                std.debug.print("Error appending to parenthesis buffer: {s}\n", .{@errorName(e)});
+            self.parenthesis_buf.?.append(c) catch {
                 return LexError.MemoryAllocationFailed;
             };
             if (self.arg_str_buf != null) {
-                self.arg_str_buf.?.append(c) catch |e| {
-                    std.debug.print("Error appending to argument string buffer: {s}\n", .{@errorName(e)});
+                self.arg_str_buf.?.append(c) catch {
                     return LexError.MemoryAllocationFailed;
                 };
             }
@@ -212,8 +209,7 @@ pub const LexProcess = struct {
     /// - Returns an error if reading from or seeking in the input file fails.
     pub fn peek_char(self: *Self) LexError!?u8 {
         var buffer: [1]u8 = undefined;
-        const readBytes = self.transpile_proc.ifile.readPositionalAll(self.transpile_proc.io, &buffer, self.transpile_proc.file_pos) catch |e| {
-            std.debug.print("Error reading from file: {s}\n", .{@errorName(e)});
+        const readBytes = self.transpile_proc.ifile.readPositionalAll(self.transpile_proc.io, &buffer, self.transpile_proc.file_pos) catch {
             return LexError.FileReadError;
         };
         // file_pos is NOT advanced — this is a non-consuming peek.
@@ -264,8 +260,7 @@ pub const LexProcess = struct {
         while (true) {
             const c = try self.peek_char();
             if (c == null or !exp(c.?)) break;
-            buffer.append(c.?) catch |e| {
-                std.debug.print("Error appending to buffer: {s}\n", .{@errorName(e)});
+            buffer.append(c.?) catch {
                 return LexError.MemoryAllocationFailed;
             };
             _ = try self.next_char();
@@ -338,8 +333,7 @@ pub const LexProcess = struct {
         if (last_token != null) {
             _ = self.transpile_proc.tokens.pop();
             last_token.?.whitespace = true;
-            self.transpile_proc.tokens.push(last_token.?) catch |e| {
-                std.debug.print("Error pushing token: {s}\n", .{@errorName(e)});
+            self.transpile_proc.tokens.push(last_token.?) catch {
                 return LexError.MemoryAllocationFailed;
             };
         }
@@ -583,15 +577,13 @@ pub const LexProcess = struct {
             _ = try self.next_char();
             const after_dot = try self.peek_char();
             if (after_dot != null and utils.is_number(after_dot.?)) {
-                buffer.append('.') catch |e| {
-                    std.debug.print("Error appending to buffer: {s}\n", .{@errorName(e)});
+                buffer.append('.') catch {
                     return LexError.MemoryAllocationFailed;
                 };
 
                 const frac = try self.read_number_str();
                 defer frac.deinit();
-                buffer.appendSlice(frac.items) catch |e| {
-                    std.debug.print("Error appending to buffer: {s}\n", .{@errorName(e)});
+                buffer.appendSlice(frac.items) catch {
                     return LexError.MemoryAllocationFailed;
                 };
             } else {
@@ -727,8 +719,7 @@ pub const LexProcess = struct {
             self.transpile_proc.err("unexpected end of file while reading operator", .{});
             return LexError.InvalidOperator;
         };
-        buffer.append(op0) catch |e| {
-            std.debug.print("Error appending to buffer: {s}\n", .{@errorName(e)});
+        buffer.append(op0) catch {
             return LexError.MemoryAllocationFailed;
         };
         const pc = try self.peek_char();
@@ -743,23 +734,20 @@ pub const LexProcess = struct {
                 peek = try self.peek_char();
             }
             if (peek != null and peek.? == '=') {
-                buffer.append('=') catch |e| {
-                    std.debug.print("Error appending to buffer: {s}\n", .{@errorName(e)});
+                buffer.append('=') catch {
                     return LexError.MemoryAllocationFailed;
                 };
                 _ = try self.next_char();
                 single_operator = false;
             }
         } else if (op0 == '!' and pc != null and pc.? == '=') {
-            buffer.append(pc.?) catch |e| {
-                std.debug.print("Error appending to buffer: {s}\n", .{@errorName(e)});
+            buffer.append(pc.?) catch {
                 return LexError.MemoryAllocationFailed;
             };
             _ = try self.next_char();
             single_operator = false;
         } else if (op0 == '*' and pc != null and pc.? == '=') {
-            buffer.append(pc.?) catch |e| {
-                std.debug.print("Error appending to buffer: {s}\n", .{@errorName(e)});
+            buffer.append(pc.?) catch {
                 return LexError.MemoryAllocationFailed;
             };
             _ = try self.next_char();
@@ -773,8 +761,7 @@ pub const LexProcess = struct {
                 // logic and incorrectly splitting a valid operator into two tokens.
                 if (op.? == '(' or op.? == '[' or op.? == ',') break;
                 if (utils.is_single_operator(op.?)) {
-                    buffer.append(op.?) catch |e| {
-                        std.debug.print("Error appending to buffer: {s}\n", .{@errorName(e)});
+                    buffer.append(op.?) catch {
                         return LexError.MemoryAllocationFailed;
                     };
                     _ = try self.next_char();
@@ -923,8 +910,7 @@ pub const LexProcess = struct {
         _ = self.transpile_proc.tokens.pop(); // popping the first 0 (.eg [0]b0001)
         const c = try self.peek_char();
         if (c == null) {
-            self.transpile_proc.tokens.push(last_token.?) catch |e| {
-                std.debug.print("Error pushing token: {s}\n", .{@errorName(e)});
+            self.transpile_proc.tokens.push(last_token.?) catch {
                 return LexError.MemoryAllocationFailed;
             };
             self.transpile_proc.err("unexpected end of file while reading special number", .{});
@@ -960,8 +946,7 @@ pub const LexProcess = struct {
             return LexError.InvalidNumber;
         }
 
-        buf.append(@intCast(num)) catch |e| {
-            std.debug.print("Error appending to buffer: {s}\n", .{@errorName(e)});
+        buf.append(@intCast(num)) catch {
             return LexError.MemoryAllocationFailed;
         };
     }
@@ -988,8 +973,7 @@ pub const LexProcess = struct {
         }
 
         const ec = utils.get_escape_char(c.?);
-        buf.append(ec) catch |e| {
-            std.debug.print("Error appending to buffer: {s}\n", .{@errorName(e)});
+        buf.append(ec) catch {
             return LexError.MemoryAllocationFailed;
         };
         _ = try self.next_char();
@@ -1023,8 +1007,7 @@ pub const LexProcess = struct {
             // if (c.? == '\\') {
             //     try self.handle_escape(&buffer);
             // } else {
-            buffer.append(c.?) catch |e| {
-                std.debug.print("Error appending to buffer: {s}\n", .{@errorName(e)});
+            buffer.append(c.?) catch {
                 return LexError.MemoryAllocationFailed;
             };
             // }
@@ -1168,8 +1151,7 @@ pub const LexProcess = struct {
     pub fn lex(self: *Self) LexError!void {
         var t = try self.read_next_token();
         while (t != null) {
-            self.transpile_proc.tokens.push(t.?) catch |e| {
-                std.debug.print("Error pushing token: {s}\n", .{@errorName(e)});
+            self.transpile_proc.tokens.push(t.?) catch {
                 return LexError.MemoryAllocationFailed;
             };
             t = try self.read_next_token();
