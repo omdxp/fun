@@ -12,9 +12,11 @@ $ErrorActionPreference = 'Stop'
 if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
   $scriptDir = if ($PSCommandPath) {
     Split-Path -Parent $PSCommandPath
-  } elseif ($PSScriptRoot) {
+  }
+  elseif ($PSScriptRoot) {
     $PSScriptRoot
-  } else {
+  }
+  else {
     (Get-Location).Path
   }
 
@@ -48,7 +50,7 @@ function Is-ExpectedFail([string]$relPath) {
   # Private visibility example should fail.
   if ($relPath -ieq 'examples\pub_visibility\private_access.fn') { return $true }
 
-  # Arch-specific asm example is expected to fail on some targets.
+  # Arch-specific asm example fails during codegen on mismatched targets.
   if ($relPath -ieq 'examples\advanced\asm_arch_specific.fn') { return $true }
 
   # Direct files in examples/error_cases are meant to fail.
@@ -137,7 +139,7 @@ function Cleanup-Leftovers {
   if ($Enabled -ne 1) { return }
   try {
     Get-ChildItem -LiteralPath (Join-Path $Root 'examples') -Recurse -Directory -Filter '.fun-cache' -ErrorAction SilentlyContinue |
-      ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
 
     $rootFiles = @(
       'out.txt',
@@ -154,100 +156,103 @@ function Cleanup-Leftovers {
     }
 
     Get-ChildItem -LiteralPath $Root -Filter 'temp_*.c' -ErrorAction SilentlyContinue |
-      ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
     Get-ChildItem -LiteralPath $Root -Filter 'main_exit_status_*' -ErrorAction SilentlyContinue |
-      ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
-  } catch {
+    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+  }
+  catch {
     # Ignore cleanup errors to avoid hiding example failures.
   }
 }
 
 try {
 
-$funExe = Join-Path $RepoRoot 'zig-out\bin\fun.exe'
-if (-not (Test-Path -LiteralPath $funExe)) {
-  throw "Missing $funExe. Run 'zig build' first."
-}
-
-# Minimal output assertions (only where we have stable strings).
-$expected = @{
-  'examples\test.fn' = @('The factorial of')
-  'examples\advanced\custom_functions.fn' = @('The result of subtracting')
-  'examples\advanced\fit_exhaustive_ok.fn' = @('x was true')
-  'examples\advanced\fit_exhaustive_warning.fn' = @('x was true')
-  'examples\advanced\for_loops.fn' = @('arr[0]=1', 'arr[2]=3')
-  'examples\imports\main.fn' = @('grand_child', 'child')
-}
-
-$files = Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'examples') -Recurse -Filter *.fn | Sort-Object FullName
-$failed = New-Object System.Collections.Generic.List[string]
-$unexpectedPass = New-Object System.Collections.Generic.List[string]
-$expectedFailCount = 0
-
-Write-Host "Running $($files.Count) example files..."
-
-$idx = 0
-foreach ($f in $files) {
-  $idx++
-  if ($ProgressEvery -gt 0 -and ($idx % $ProgressEvery) -eq 0) {
-    Write-Host "... $idx/$($files.Count)" 
-  }
-  $rel = Get-RelativePath -base $RepoRoot -full $f.FullName
-  $rel = $rel -replace '/', '\\'
-
-  $isExpectedFail = Is-ExpectedFail -relPath $rel
-  $isRunnable = (Is-RunnableFile -path $f.FullName) -and (-not $isExpectedFail)
-
-  $funArgs = @('-in', $f.FullName)
-  if ($isExpectedFail -or (-not $isRunnable)) {
-    $funArgs += '-no-exec'
+  $funExe = Join-Path $RepoRoot 'zig-out\bin\fun.exe'
+  if (-not (Test-Path -LiteralPath $funExe)) {
+    throw "Missing $funExe. Run 'zig build' first."
   }
 
-  $res = Invoke-Fun -funExe $funExe -argumentList $funArgs -workingDir $RepoRoot -timeoutSec $PerFileTimeoutSec
-  $allOut = ($res.Stdout + "`n" + $res.Stderr)
+  # Minimal output assertions (only where we have stable strings).
+  $expected = @{
+    'examples\test.fn'                            = @('The factorial of')
+    'examples\advanced\custom_functions.fn'       = @('The result of subtracting')
+    'examples\advanced\fit_exhaustive_ok.fn'      = @('x was true')
+    'examples\advanced\fit_exhaustive_warning.fn' = @('x was true')
+    'examples\advanced\for_loops.fn'              = @('arr[0]=1', 'arr[2]=3')
+    'examples\imports\main.fn'                    = @('grand_child', 'child')
+  }
 
-  if ($isExpectedFail) {
-    if ($res.ExitCode -eq 0) {
-      $unexpectedPass.Add($rel)
-    } else {
-      $expectedFailCount++
+  $files = Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'examples') -Recurse -Filter *.fn | Sort-Object FullName
+  $failed = New-Object System.Collections.Generic.List[string]
+  $unexpectedPass = New-Object System.Collections.Generic.List[string]
+  $expectedFailCount = 0
+
+  Write-Host "Running $($files.Count) example files..."
+
+  $idx = 0
+  foreach ($f in $files) {
+    $idx++
+    if ($ProgressEvery -gt 0 -and ($idx % $ProgressEvery) -eq 0) {
+      Write-Host "... $idx/$($files.Count)" 
     }
-    continue
-  }
+    $rel = Get-RelativePath -base $RepoRoot -full $f.FullName
+    $rel = $rel -replace '/', '\\'
 
-  $expectedExit = if ($isRunnable) { Get-ExpectedRunExitCode -relPath $rel } else { 0 }
-  if ($res.ExitCode -ne $expectedExit) {
-    $failed.Add("$rel (exit=$($res.ExitCode))")
-    continue
-  }
+    $isExpectedFail = Is-ExpectedFail -relPath $rel
+    $isRunnable = (Is-RunnableFile -path $f.FullName) -and (-not $isExpectedFail)
 
-  if ($expected.ContainsKey($rel)) {
-    foreach ($needle in $expected[$rel]) {
-      if ($allOut -notmatch [regex]::Escape($needle)) {
-        $failed.Add("$rel (missing: $needle)")
-        break
+    $funArgs = @('-in', $f.FullName)
+    if (-not $isExpectedFail -and (-not $isRunnable)) {
+      $funArgs += '-no-exec'
+    }
+
+    $res = Invoke-Fun -funExe $funExe -argumentList $funArgs -workingDir $RepoRoot -timeoutSec $PerFileTimeoutSec
+    $allOut = ($res.Stdout + "`n" + $res.Stderr)
+
+    if ($isExpectedFail) {
+      if ($res.ExitCode -eq 0) {
+        $unexpectedPass.Add($rel)
+      }
+      else {
+        $expectedFailCount++
+      }
+      continue
+    }
+
+    $expectedExit = if ($isRunnable) { Get-ExpectedRunExitCode -relPath $rel } else { 0 }
+    if ($res.ExitCode -ne $expectedExit) {
+      $failed.Add("$rel (exit=$($res.ExitCode))")
+      continue
+    }
+
+    if ($expected.ContainsKey($rel)) {
+      foreach ($needle in $expected[$rel]) {
+        if ($allOut -notmatch [regex]::Escape($needle)) {
+          $failed.Add("$rel (missing: $needle)")
+          break
+        }
       }
     }
   }
+
+  Write-Host "Total: $($files.Count)  Failed: $($failed.Count)  ExpectedFail: $expectedFailCount  UnexpectedPass: $($unexpectedPass.Count)"
+
+  if ($failed.Count -gt 0) {
+    Write-Host "\nFailures:" 
+    $failed | Sort-Object -Unique | ForEach-Object { Write-Host "FAIL: $_" }
+  }
+
+  if ($unexpectedPass.Count -gt 0) {
+    Write-Host "\nUnexpected passes (negative examples returned exit 0):"
+    $unexpectedPass | Sort-Object -Unique | ForEach-Object { Write-Host "UNEXPECTED PASS: $_" }
+  }
+
+  if ($failed.Count -gt 0 -or $unexpectedPass.Count -gt 0) {
+    exit 1
+  }
+
+  exit 0
 }
-
-Write-Host "Total: $($files.Count)  Failed: $($failed.Count)  ExpectedFail: $expectedFailCount  UnexpectedPass: $($unexpectedPass.Count)"
-
-if ($failed.Count -gt 0) {
-  Write-Host "\nFailures:" 
-  $failed | Sort-Object -Unique | ForEach-Object { Write-Host "FAIL: $_" }
-}
-
-if ($unexpectedPass.Count -gt 0) {
-  Write-Host "\nUnexpected passes (negative examples returned exit 0):"
-  $unexpectedPass | Sort-Object -Unique | ForEach-Object { Write-Host "UNEXPECTED PASS: $_" }
-}
-
-if ($failed.Count -gt 0 -or $unexpectedPass.Count -gt 0) {
-  exit 1
-}
-
-exit 0
-} finally {
+finally {
   Cleanup-Leftovers -Root $RepoRoot -Enabled $CleanupFunCache
 }

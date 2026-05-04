@@ -88,13 +88,13 @@ is_expected_fail() {
     return 0
   fi
 
-  # Direct files in examples/error_cases are meant to fail.
-  if [[ "$rel" =~ ^examples/error_cases/[^/]+\.fn$ ]]; then
+  # Arch-specific asm example fails during codegen on mismatched targets.
+  if [[ "$rel" == "examples/advanced/asm_arch_specific.fn" ]]; then
     return 0
   fi
 
-  # Arch-specific asm example is expected to fail on some targets.
-  if [[ "$rel" == "examples/advanced/asm_arch_specific.fn" ]]; then
+  # Direct files in examples/error_cases are meant to fail.
+  if [[ "$rel" =~ ^examples/error_cases/[^/]+\.fn$ ]]; then
     return 0
   fi
 
@@ -155,12 +155,13 @@ for full in "${files[@]}"; do
   rel="${full#"$REPO_ROOT/"}"
 
   if is_expected_fail "$rel"; then
-    # Always compile-only for expected-fail examples.
+    # Run without -no-exec so codegen runs (needed for arch-check errors etc.).
+    # All expected-fail files error during Fun compilation before C compilation.
     in_path="$(to_fun_path "$full")"
     workdir="$REPO_ROOT"
     if [[ $USE_WINDOWS_PATHS -eq 1 ]]; then workdir="$REPO_ROOT_WIN"; fi
     set +e
-    out="$(run_with_timeout "$FUN_EXE" -in "$in_path" -no-exec 2>&1)"
+    out="$(run_with_timeout "$FUN_EXE" -in "$in_path" 2>&1)"
     ec=$?
     set -e
 
