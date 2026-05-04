@@ -55,6 +55,11 @@ pub const CliOptions = struct {
     /// Flag to format the input file and all locally imported modules (skips `std.*`).
     fmt_all: bool,
 
+    /// Flag to format the input `.fn` file in-place AND then run the full compiler
+    /// pipeline (reporting diagnostics via stderr). Used by the language server to
+    /// combine formatting + diagnostics into a single subprocess invocation.
+    fmt_diag: bool,
+
     /// Arguments passed to the compiled program (everything after `--`).
     program_args: [][]const u8,
 };
@@ -119,6 +124,7 @@ pub fn parse_args(allocator: mem.Allocator, io: std.Io, argv: []const []const u8
     var print_ast = false;
     var fmt = false;
     var fmt_all = false;
+    var fmt_diag = false;
     var program_args = ArrayList([]const u8).init(allocator);
     errdefer {
         for (program_args.items) |p| allocator.free(p);
@@ -168,6 +174,8 @@ pub fn parse_args(allocator: mem.Allocator, io: std.Io, argv: []const []const u8
             fmt = true;
         } else if (std.mem.eql(u8, arg, "-fmt-all")) {
             fmt_all = true;
+        } else if (std.mem.eql(u8, arg, "-fmt-diag")) {
+            fmt_diag = true;
         }
     }
 
@@ -191,6 +199,7 @@ pub fn parse_args(allocator: mem.Allocator, io: std.Io, argv: []const []const u8
         .print_ast = print_ast,
         .fmt = fmt,
         .fmt_all = fmt_all,
+        .fmt_diag = fmt_diag,
         .program_args = try program_args.toOwnedSlice(),
     };
 }

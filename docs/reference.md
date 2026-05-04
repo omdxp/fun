@@ -374,7 +374,9 @@ Examples:
 
 ## Tooling (fls)
 - Language Server for diagnostics and formatting.
-- Diagnostics use `fun -no-exec` under the hood.
+- On save with format-on-save enabled, fls uses a single `fun -fmt-diag -no-exec` subprocess to format the file and collect diagnostics simultaneously, avoiding the cost of two sequential compiler invocations.
+- When format-on-save is disabled, diagnostics use `fun -no-exec` under the hood.
+- A 1500 ms debounce prevents redundant diagnostic subprocess launches when formatting already ran one on the same save event.
 
 ## Standard Library (high level)
 - `std.array`: array helpers

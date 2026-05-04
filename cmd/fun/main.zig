@@ -81,7 +81,14 @@ pub fn main(init: std.process.Init) void {
         return;
     }
 
-    if (options.fmt) {
+    if (options.fmt_diag) {
+        // Format in-place, then fall through to full compilation so diagnostics
+        // are emitted to stderr. Used by the language server (fls) to combine
+        // formatting + diagnostics in a single subprocess call.
+        cli.format_file_in_place(global_allocator, init.io, options.input_file) catch {};
+    }
+
+    if (options.fmt and !options.fmt_diag) {
         cli.format_file_in_place(global_allocator, init.io, options.input_file) catch |err| print_error_and_exit(init.io, err);
         return;
     }

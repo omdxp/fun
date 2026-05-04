@@ -52,7 +52,7 @@
 
 ## Installation
 
-Requires [Zig](https://ziglang.org/) (v0.14.0+ recommended).
+Requires [Zig](https://ziglang.org/).
 
 ```bash
 zig build
@@ -106,15 +106,18 @@ jobs:
 ## CLI Usage
 
 ```
-Usage: fun -in <input_file> [-out <output_file>] [-no-exec] [-outf] [-ast] [-help]
+Usage: fun -in <input_file> [-out <output_file>] [-no-exec] [-outf] [-ast] [-fmt] [-fmt-diag] [-fmt-all] [-help]
 
 Arguments:
-  -in      <file>  Input file to compile (required)
-  -out     <file>  Output file (optional, defaults to input filename with .c extension)
-  -no-exec         Disable automatic compilation and execution (optional, execution enabled by default)
-  -outf            Generate .c output file (optional, disabled by default)
-  -ast             Print AST nodes (optional, disabled by default)
-  -help            Show this help message
+  -in       <file>  Input file to compile (required)
+  -out      <file>  Output file (optional, defaults to input filename with .c extension)
+  -no-exec          Disable automatic compilation and execution (optional, execution enabled by default)
+  -outf             Generate .c output file (optional, disabled by default)
+  -ast              Print AST nodes (optional, disabled by default)
+  -fmt              Format the file in place, then exit (no compilation)
+  -fmt-all          Format the file and its local imports in place, then exit (skips std.*)
+  -fmt-diag         Format the file in place, then run full compilation to emit diagnostics
+  -help             Show this help message
 ```
 
 ### C Compiler Selection
@@ -219,7 +222,7 @@ This repo includes a work-in-progress language server called `fls`.
 - Build: `zig build` (installs `fls` alongside `fun`)
 - The server speaks LSP over stdio and currently supports:
   - Diagnostics (via `fun -no-exec`)
-  - Formatting (via `fun -fmt -no-exec`)
+  - Formatting + diagnostics combined (via `fun -fmt-diag -no-exec`) — when format-on-save is enabled, fls uses a single subprocess to format and collect diagnostics simultaneously, rather than two sequential compiler calls
 
 ### VS Code
 

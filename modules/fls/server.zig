@@ -910,7 +910,11 @@ pub const LspServer = struct {
         const uri = (text_document.object.get("uri") orelse return).string;
 
         const doc = self.docs.get(uri) orelse return;
-        self.maybePublishDiagnostics(uri, doc.text, true) catch |err| {
+        // If formatting already ran diagnostics within the last 1500 ms (which happens
+        // when format-on-save is enabled), skip the redundant diagnostics subprocess.
+        const since_last_diag = nowMs() - doc.last_diag_ms;
+        const force = doc.last_diag_ms == 0 or since_last_diag > 1500 or since_last_diag < 0;
+        self.maybePublishDiagnostics(uri, doc.text, force) catch |err| {
             self.log("[fls] publishDiagnostics failed on didSave: {s}\n", .{@errorName(err)});
             self.sendPublishDiagnostics(uri, &[_]Diagnostic{}) catch {};
         };
@@ -956,24 +960,41 @@ pub const LspServer = struct {
             return;
         };
 
-        const formatted = self.formatText(doc.text) catch |err| {
+        const result = self.formatAndComputeDiagnostics(uri, doc.text) catch |err| {
             self.log("[fls] formatting failed: {s}\n", .{@errorName(err)});
             try self.sendResponseJson(id_val, empty);
             return;
         };
-        defer self.allocator.free(formatted);
+        defer {
+            if (result.formatted) |f| self.allocator.free(f);
+            for (result.diags) |d| {
+                self.allocator.free(d.uri);
+                self.allocator.free(d.diag.message);
+                if (d.diag.code) |c| self.allocator.free(c);
+            }
+            self.allocator.free(result.diags);
+        }
 
-        const edits = [_]TextEdit{.{
-            .range = .{
-                .start = .{ .line = 0, .character = 0 },
-                .end = .{ .line = 1_000_000, .character = 0 },
-            },
-            .newText = formatted,
-        }};
+        // Send format edits only if we got a non-empty formatted result.
+        if (result.formatted) |formatted| {
+            const edits = [_]TextEdit{.{
+                .range = .{
+                    .start = .{ .line = 0, .character = 0 },
+                    .end = .{ .line = 1_000_000, .character = 0 },
+                },
+                .newText = formatted,
+            }};
+            const json = try jsonStringifyAlloc(self.allocator, edits);
+            defer self.allocator.free(json);
+            try self.sendResponseJson(id_val, json);
+        } else {
+            try self.sendResponseJson(id_val, empty);
+        }
 
-        const json = try jsonStringifyAlloc(self.allocator, edits);
-        defer self.allocator.free(json);
-        try self.sendResponseJson(id_val, json);
+        // Publish diagnostics collected during the same subprocess run and mark
+        // the timestamp so handleDidSave can skip the redundant re-run.
+        try self.publishDiagsFromOwned(result.diags);
+        if (self.docs.getPtr(uri)) |dp| dp.last_diag_ms = nowMs();
     }
 
     fn handleHover(self: *LspServer, id_val: ?std.json.Value, params_val: ?std.json.Value) !void {
@@ -7655,44 +7676,120 @@ pub const LspServer = struct {
         return try parseFunDiagnosticsByUri(self.allocator, stderr_buf.items, current_uri, tmp_name);
     }
 
-    fn formatText(self: *LspServer, text: []const u8) ![]u8 {
-        var tmp_dir = std.Io.Dir.cwd();
-        var tmp_abs_path: ?[]u8 = null;
-        defer if (tmp_abs_path) |p| self.allocator.free(p);
+    const FormatDiagResult = struct {
+        /// Formatted source text; null means formatting failed (no edit should be sent).
+        /// Owned by caller.
+        formatted: ?[]u8,
+        /// Diagnostics collected from the same subprocess run.  Owned by caller —
+        /// caller must free each .uri, .diag.message, .diag.code, and the slice.
+        diags: []DiagnosticWithUri,
+    };
 
-        if (getOrInitFlsTempDirCached()) |res| {
-            tmp_dir = res.dir;
-        }
+    /// Run `fun -fmt-diag -no-exec` once to both format and collect diagnostics.
+    /// This replaces the previous two-subprocess approach (one for formatting,
+    /// one for diagnostics) with a single subprocess invocation.
+    fn formatAndComputeDiagnostics(self: *LspServer, current_uri: []const u8, text: []const u8) !FormatDiagResult {
+        // Write the temp file next to the document so that relative imports resolve
+        // the same way as they do in the normal diagnostics path.
+        var tmp_name_buf: [80]u8 = undefined;
+        const tmp_name = try std.fmt.bufPrint(&tmp_name_buf, ".__fls_fmt_{d}_{d}.fn", .{ nowMs(), nowNs() });
 
-        var tmp_name_buf: [64]u8 = undefined;
-        const tmp_name = try std.fmt.bufPrint(&tmp_name_buf, ".__fls_fmt_{d}.fn", .{nowMs()});
+        const current_path_opt = uriToPath(self.allocator, current_uri) catch null;
+        defer if (current_path_opt) |p| self.allocator.free(p);
+        const current_dir_opt = if (current_path_opt) |p| std.fs.path.dirname(p) else null;
 
-        if (getOrInitFlsTempDirCached()) |res2| {
-            tmp_abs_path = try std.fs.path.join(self.allocator, &[_][]const u8{ res2.abs_path, tmp_name });
-        }
+        var base_dir = if (current_dir_opt) |d|
+            try std.Io.Dir.openDirAbsolute(globalIo(), d, .{})
+        else
+            std.Io.Dir.cwd();
+        defer if (current_dir_opt != null) base_dir.close(globalIo());
 
         {
-            const f = try tmp_dir.createFile(globalIo(), tmp_name, .{ .read = true, .truncate = true });
+            const f = try base_dir.createFile(globalIo(), tmp_name, .{ .read = true, .truncate = true });
             defer f.close(globalIo());
             try f.writeStreamingAll(globalIo(), text);
         }
-        defer tmp_dir.deleteFile(globalIo(), tmp_name) catch {};
+        defer base_dir.deleteFile(globalIo(), tmp_name) catch {};
+
+        const tmp_abs_path = blk: {
+            if (current_dir_opt) |d|
+                break :blk try std.fs.path.join(self.allocator, &[_][]const u8{ d, tmp_name });
+            break :blk try self.allocator.dupe(u8, tmp_name);
+        };
+        defer self.allocator.free(tmp_abs_path);
 
         var stderr_buf = ArrayList(u8).init(self.allocator);
         defer stderr_buf.deinit();
 
-        const in_path = if (tmp_abs_path) |p| p else tmp_name;
-        const argv = [_][]const u8{ self.fun_exe_path, "-in", in_path, "-fmt", "-no-exec" };
-        const code = try runCaptureStderr(self.allocator, &argv, &stderr_buf);
-        if (code != 0) return error.FormatFailed;
+        // Single subprocess: format in-place AND get diagnostics from stderr.
+        const argv = [_][]const u8{ self.fun_exe_path, "-in", tmp_abs_path, "-fmt-diag", "-no-exec" };
+        _ = try runCaptureStderr(self.allocator, &argv, &stderr_buf);
 
-        const out = try tmp_dir.readFileAlloc(globalIo(), tmp_name, self.allocator, .limited(10 * 1024 * 1024));
-        // Defensive: never send an edit that wipes the doc unless the input was empty.
-        if (out.len == 0 and text.len != 0) {
-            self.allocator.free(out);
-            return error.FormatFailed;
+        // Read the (possibly-formatted) result.
+        const formatted: ?[]u8 = blk: {
+            const out = base_dir.readFileAlloc(globalIo(), tmp_name, self.allocator, .limited(10 * 1024 * 1024)) catch break :blk null;
+            // Defensive: never send an edit that wipes the doc unless the input was empty.
+            if (out.len == 0 and text.len != 0) {
+                self.allocator.free(out);
+                break :blk null;
+            }
+            break :blk out;
+        };
+
+        const diags = try parseFunDiagnosticsByUri(self.allocator, stderr_buf.items, current_uri, tmp_name);
+        return .{ .formatted = formatted, .diags = diags };
+    }
+
+    /// Publish pre-computed diagnostics (already owned/allocated by caller — this
+    /// function takes ownership and frees them).
+    fn publishDiagsFromOwned(self: *LspServer, diags_owned: []const DiagnosticWithUri) !void {
+        defer {
+            for (diags_owned) |d| {
+                self.allocator.free(d.uri);
+                self.allocator.free(d.diag.message);
+                if (d.diag.code) |c| self.allocator.free(c);
+            }
+            self.allocator.free(diags_owned);
         }
-        return out;
+
+        var new_uris = std.StringHashMap(void).init(self.allocator);
+        defer new_uris.deinit();
+
+        var grouped = std.StringHashMap(ArrayList(Diagnostic)).init(self.allocator);
+        defer {
+            var git = grouped.iterator();
+            while (git.next()) |e| e.value_ptr.deinit();
+            grouped.deinit();
+        }
+
+        for (diags_owned) |d| {
+            try new_uris.put(d.uri, {});
+            if (grouped.getPtr(d.uri)) |list| {
+                try list.append(d.diag);
+            } else {
+                var list = ArrayList(Diagnostic).init(self.allocator);
+                try list.append(d.diag);
+                try grouped.put(d.uri, list);
+            }
+        }
+
+        var pit = self.published_diag_uris.iterator();
+        while (pit.next()) |entry| {
+            if (!new_uris.contains(entry.key_ptr.*))
+                self.sendPublishDiagnostics(entry.key_ptr.*, &[_]Diagnostic{}) catch {};
+        }
+
+        var git2 = grouped.iterator();
+        while (git2.next()) |e|
+            try self.sendPublishDiagnostics(e.key_ptr.*, e.value_ptr.items);
+
+        var dit = self.published_diag_uris.iterator();
+        while (dit.next()) |entry| self.allocator.free(entry.key_ptr.*);
+        self.published_diag_uris.clearRetainingCapacity();
+
+        var nit = new_uris.iterator();
+        while (nit.next()) |entry|
+            try self.published_diag_uris.put(try self.allocator.dupe(u8, entry.key_ptr.*), {});
     }
 
     fn sendPublishDiagnostics(self: *LspServer, uri: []const u8, diagnostics: []const Diagnostic) !void {
