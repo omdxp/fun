@@ -151,6 +151,28 @@ fun main() {
 ### Generics
 - Compounds and impls can be generic: `compound Vec<T> { ... }`.
 - Use `Vec<num>` etc. where required.
+- Impl type parameters can be constrained with `:` and `|`.
+  - Example: `impl Vec<T: num | dec> { ... }`.
+  - This lets one impl body work for a fixed set of concrete numeric types.
+
+```fun
+compound Vec<T> {
+  T[] data;
+  num len;
+}
+
+impl Vec<T: num | dec> {
+  pub sum() T {
+    T out = self.zero_value();
+    num i = 0;
+    for i < self.len {
+      out = out + self.data[i];
+      i = i + 1;
+    }
+    ret out;
+  }
+}
+```
 
 ## Variables
 - Variables can be explicitly typed or inferred with `let`.

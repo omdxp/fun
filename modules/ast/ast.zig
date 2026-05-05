@@ -255,6 +255,10 @@ pub const Node = struct {
             type_name: ArrayList(u8),
             /// Optional generic type parameters for impl blocks.
             type_params: ?utils.Vector(ArrayList(u8)) = null,
+            /// Forced concrete type combinations derived from constrained type parameters.
+            /// E.g. `impl Vec<T: num | dec>` yields [["num"], ["dec"]].
+            /// Each inner vector maps one concrete type name per param (parallel to type_params).
+            type_param_forced_insts: ?utils.Vector(utils.Vector(ArrayList(u8))) = null,
             /// Optional quirk name. When null, this is a plain impl block: `impl Type { ... }`.
             quirk_name: ?ArrayList(u8) = null,
             methods: utils.Vector(*Node),

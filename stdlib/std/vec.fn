@@ -332,4 +332,192 @@ impl Vec<str> {
   }
 }
 
+// Numeric methods shared across Vec<num> and Vec<dec> via constrained generics.
+impl Vec<T: num | dec> {
+  // Sort elements in ascending order (in-place, insertion sort).
+  pub sort() {
+    num i = 1;
+    for i < self.len {
+      T key = self.data[i];
+      num j = i - 1;
+      for j >= 0 {
+        if self.data[j] <= key {
+          break;
+        }
+        self.data[j + 1] = self.data[j];
+        j = j - 1;
+      }
+      self.data[j + 1] = key;
+      i = i + 1;
+    }
+  }
+
+  // Sort elements in descending order (in-place, insertion sort).
+  pub sort_desc() {
+    num i = 1;
+    for i < self.len {
+      T key = self.data[i];
+      num j = i - 1;
+      for j >= 0 {
+        if self.data[j] >= key {
+          break;
+        }
+        self.data[j + 1] = self.data[j];
+        j = j - 1;
+      }
+      self.data[j + 1] = key;
+      i = i + 1;
+    }
+  }
+
+  // Return true if value is present.
+  pub contains(T value) bin {
+    num i = 0;
+    for i < self.len {
+      if self.data[i] == value {
+        ret true;
+      }
+      i = i + 1;
+    }
+    ret false;
+  }
+
+  // Return index of first occurrence, or -1 if not found.
+  pub index_of(T value) num {
+    num i = 0;
+    for i < self.len {
+      if self.data[i] == value {
+        ret i;
+      }
+      i = i + 1;
+    }
+    ret -1;
+  }
+
+  // Return the minimum value, or zero if empty.
+  pub min() T {
+    if self.len == 0 {
+      ret self.zero_value();
+    }
+    T m = self.data[0];
+    num i = 1;
+    for i < self.len {
+      if self.data[i] < m {
+        m = self.data[i];
+      }
+      i = i + 1;
+    }
+    ret m;
+  }
+
+  // Return the maximum value, or zero if empty.
+  pub max() T {
+    if self.len == 0 {
+      ret self.zero_value();
+    }
+    T m = self.data[0];
+    num i = 1;
+    for i < self.len {
+      if self.data[i] > m {
+        m = self.data[i];
+      }
+      i = i + 1;
+    }
+    ret m;
+  }
+
+  // Return the sum of all elements.
+  pub sum() T {
+    T s = self.zero_value();
+    num i = 0;
+    for i < self.len {
+      s = s + self.data[i];
+      i = i + 1;
+    }
+    ret s;
+  }
+}
+
+fun _str_cmp(str a, str b) num {
+  num i = 0;
+  for a[i] != 0 {
+    if b[i] == 0 {
+      ret 1;
+    }
+    if a[i] < b[i] {
+      ret -1;
+    }
+    if a[i] > b[i] {
+      ret 1;
+    }
+    i = i + 1;
+  }
+  if b[i] != 0 {
+    ret -1;
+  }
+  ret 0;
+}
+
+impl Vec<str> {
+  // Sort elements in ascending lexicographic order (in-place, insertion sort).
+  pub sort() {
+    num i = 1;
+    for i < self.len {
+      str key = self.data[i];
+      num j = i - 1;
+      for j >= 0 {
+        if _str_cmp(self.data[j], key) <= 0 {
+          break;
+        }
+        self.data[j + 1] = self.data[j];
+        j = j - 1;
+      }
+      self.data[j + 1] = key;
+      i = i + 1;
+    }
+  }
+
+  // Sort elements in descending lexicographic order (in-place, insertion sort).
+  pub sort_desc() {
+    num i = 1;
+    for i < self.len {
+      str key = self.data[i];
+      num j = i - 1;
+      for j >= 0 {
+        if _str_cmp(self.data[j], key) >= 0 {
+          break;
+        }
+        self.data[j + 1] = self.data[j];
+        j = j - 1;
+      }
+      self.data[j + 1] = key;
+      i = i + 1;
+    }
+  }
+
+  // Return true if value is present (exact string equality).
+  pub contains(str value) bin {
+    num i = 0;
+    for i < self.len {
+      if _str_cmp(self.data[i], value) == 0 {
+        ret true;
+      }
+      i = i + 1;
+    }
+    ret false;
+  }
+
+  // Return index of first occurrence, or -1 if not found.
+  pub index_of(str value) num {
+    num i = 0;
+    for i < self.len {
+      if _str_cmp(self.data[i], value) == 0 {
+        ret i;
+      }
+      i = i + 1;
+    }
+    ret -1;
+  }
+}
+
 // Backwards-compatible helpers were removed in favor of generic Vec<T>.

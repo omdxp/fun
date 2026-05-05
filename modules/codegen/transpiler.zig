@@ -5929,7 +5929,7 @@ pub const TranspileProcess = struct {
                             self.report_type_error(node, "array index must be num", .{});
                             return TranspileError.TypeMismatch;
                         }
-                        return .{ .base = lt.base, .is_array = false, .pointer_depth = lt.pointer_depth - 1 };
+                        return .{ .base = lt.base, .is_array = false, .pointer_depth = lt.pointer_depth - 1, .name = lt.name, .mangled_name = lt.mangled_name, .dtype_ref = lt.dtype_ref };
                     }
                     if (!lt.is_array) {
                         self.report_type_error(node, "indexing requires an array", .{});
@@ -5939,7 +5939,7 @@ pub const TranspileProcess = struct {
                         self.report_type_error(node, "array index must be num", .{});
                         return TranspileError.TypeMismatch;
                     }
-                    return .{ .base = lt.base, .is_array = false, .pointer_depth = lt.pointer_depth };
+                    return .{ .base = lt.base, .is_array = false, .pointer_depth = lt.pointer_depth, .name = lt.name, .mangled_name = lt.mangled_name, .dtype_ref = lt.dtype_ref };
                 }
 
                 const is_assign = mem.eql(u8, op, "=") or
@@ -6049,6 +6049,16 @@ pub const TranspileProcess = struct {
                 const l: CheckedType = if (exp.left) |left| try self.infer_expr_type(left.*, env, fns) else CheckedType{ .base = .Unknown };
                 const r: CheckedType = if (exp.right) |right| try self.infer_expr_type(right.*, env, fns) else CheckedType{ .base = .Unknown };
 
+                // A type param (e.g. T) is unknown but may be constrained to numeric types;
+                // allow it in numeric/comparison contexts so generic bodies typecheck.
+                const is_num_or_param = struct {
+                    fn call(checker: *Self, t: CheckedType, e: *TypeEnv) bool {
+                        if (checker.is_numeric_type(t)) return true;
+                        if (t.base == .Unknown and t.name != null and e.has_type_param(t.name.?)) return true;
+                        return false;
+                    }
+                }.call;
+
                 if (mem.eql(u8, op, "+") or mem.eql(u8, op, "-") or mem.eql(u8, op, "*") or mem.eql(u8, op, "/") or mem.eql(u8, op, "%")) {
                     if (mem.eql(u8, op, "%")) {
                         if (l.base != .Num or r.base != .Num) {
@@ -6058,15 +6068,20 @@ pub const TranspileProcess = struct {
                         return .{ .base = .Num };
                     }
 
-                    if (!self.is_numeric_type(l) or !self.is_numeric_type(r)) {
+                    if (!is_num_or_param(self, l, env) or !is_num_or_param(self, r, env)) {
                         self.report_type_error(node, "operator '{s}' expects num/dec operands", .{op});
                         return TranspileError.TypeMismatch;
+                    }
+                    if (l.base == .Unknown and r.base == .Unknown and l.name != null and r.name != null and
+                        mem.eql(u8, l.name.?, r.name.?) and env.has_type_param(l.name.?))
+                    {
+                        return l;
                     }
                     return .{ .base = promote_numeric_type(l, r) };
                 }
 
                 if (mem.eql(u8, op, "<") or mem.eql(u8, op, "<=") or mem.eql(u8, op, ">") or mem.eql(u8, op, ">=")) {
-                    if (!self.is_numeric_type(l) or !self.is_numeric_type(r)) {
+                    if (!is_num_or_param(self, l, env) or !is_num_or_param(self, r, env)) {
                         self.report_type_error(node, "comparison '{s}' expects num/dec operands", .{op});
                         return TranspileError.TypeMismatch;
                     }
@@ -6694,6 +6709,7 @@ pub const TranspileProcess = struct {
             const im = n.node_variant.?.impl;
             const self_base = if (mem.indexOf(u8, im.type_name.items, "__")) |idx| im.type_name.items[0..idx] else im.type_name.items;
             const self_type: CheckedType = .{ .base = .Unknown, .name = self_base, .mangled_name = im.type_name.items, .pointer_depth = 1 };
+            const concrete_impl = mem.indexOf(u8, im.type_name.items, "__") != null;
 
             for (im.methods.items()) |m| {
                 if (m.type != .Function or m.node_variant == null) continue;
@@ -6725,6 +6741,10 @@ pub const TranspileProcess = struct {
                         const arg = arg_ptr.*;
                         if (arg.type != .Variable or arg.node_variant == null) continue;
                         const v = arg.node_variant.?.variable;
+                        if (concrete_impl and mem.eql(u8, v.name.items, "self")) {
+                            fn_env.put_current("self", self_type) catch {};
+                            continue;
+                        }
                         const vtype = self.type_from_dtype_with_mangled(v.type) catch continue;
                         fn_env.put_current(v.name.items, vtype) catch {};
                     }
@@ -6856,6 +6876,7 @@ pub const TranspileProcess = struct {
             const im = n.node_variant.?.impl;
             const self_base = if (mem.indexOf(u8, im.type_name.items, "__")) |idx| im.type_name.items[0..idx] else im.type_name.items;
             const self_type: CheckedType = .{ .base = .Unknown, .name = self_base, .mangled_name = im.type_name.items, .pointer_depth = 1 };
+            const concrete_impl = mem.indexOf(u8, im.type_name.items, "__") != null;
 
             var allow_params: ?[]const []const u8 = null;
             var allow_store: ?ArrayList([]const u8) = null;
@@ -6945,6 +6966,10 @@ pub const TranspileProcess = struct {
                         const arg = arg_ptr.*;
                         if (arg.type != .Variable or arg.node_variant == null) continue;
                         const v = arg.node_variant.?.variable;
+                        if (concrete_impl and mem.eql(u8, v.name.items, "self")) {
+                            try fn_env.put_current("self", self_type);
+                            continue;
+                        }
                         try proc.ensure_dtype_visible(n.*, v.type, allow_params);
                         try fn_env.put_current(v.name.items, try proc.type_from_dtype_with_mangled(v.type));
                     }
@@ -7904,6 +7929,15 @@ pub const TranspileProcess = struct {
                             p.deinit();
                         }
                         params.deinit();
+                    }
+                    if (im.type_param_forced_insts) |*insts| {
+                        for (insts.items()) |*combo| {
+                            for (combo.items()) |*t| {
+                                t.deinit();
+                            }
+                            combo.deinit();
+                        }
+                        insts.deinit();
                     }
                     if (im.quirk_name) |*qn| {
                         qn.deinit();
@@ -10486,6 +10520,114 @@ pub const TranspileProcess = struct {
         try self.seed_forced_generic_instantiations_from_impl_signatures_module(self.get_root());
     }
 
+    /// For each impl with `type_param_forced_insts` (from constrained type params such as
+    /// `impl Vec<T: num | dec>`), register the concrete specializations as forced generic
+    /// instantiations so that all methods are emitted even if those types are never
+    /// explicitly referenced in user code.
+    fn seed_constrained_impl_instantiations_node(self: *Self, n: *ast.Node) TranspileError!void {
+        if (n.type != .Impl or n.node_variant == null) return;
+        const im = &n.node_variant.?.impl;
+        const forced_insts = im.type_param_forced_insts orelse return;
+        const params = im.type_params orelse return;
+
+        const base_name = if (mem.indexOf(u8, im.type_name.items, "__")) |idx|
+            im.type_name.items[0..idx]
+        else
+            im.type_name.items;
+
+        for (forced_insts.items()) |inst| {
+            if (inst.items().len != params.count) continue;
+
+            // Build the mangled name (e.g. "Vec__num") so we can round-trip through
+            // dtype_from_mangled_type, which correctly reconstructs the generic_args tree.
+            var mangled = ArrayList(u8).init(self.allocator);
+            defer mangled.deinit();
+            mangled.appendSlice(base_name) catch return TranspileError.MemoryAllocationFailed;
+            for (inst.items()) |t| {
+                mangled.appendSlice("__") catch return TranspileError.MemoryAllocationFailed;
+                mangled.appendSlice(t.items) catch return TranspileError.MemoryAllocationFailed;
+            }
+
+            const synthetic = (try self.dtype_from_mangled_type(mangled.items)) orelse continue;
+            defer {
+                if (synthetic.generic_args) |*gargs| {
+                    for (gargs.items()) |ga| {
+                        ga.type_str.deinit();
+                        self.allocator.destroy(ga);
+                    }
+                    gargs.deinit();
+                }
+                synthetic.type_str.deinit();
+                self.allocator.destroy(synthetic);
+            }
+            try self.register_generic_instantiation(synthetic);
+        }
+    }
+
+    fn seed_constrained_impl_instantiations_module(self: *Self, proc: *Self) TranspileError!void {
+        for (proc.nodes.items()) |*n| {
+            try self.seed_constrained_impl_instantiations_node(n);
+        }
+        for (proc.owned_nodes.items) |n| {
+            try self.seed_constrained_impl_instantiations_node(n);
+        }
+        for (proc.children.items) |child| {
+            try self.seed_constrained_impl_instantiations_module(child);
+        }
+    }
+
+    fn seed_constrained_impl_instantiations(self: *Self) TranspileError!void {
+        try self.seed_constrained_impl_instantiations_module(self.get_root());
+    }
+
+    fn checked_type_matches_constraint_name(t: CheckedType, expected: []const u8) bool {
+        const normalized = normalize_builtin_named_checked_type(t);
+        if (normalized.base != .Unknown) {
+            return switch (normalized.base) {
+                .Num => mem.eql(u8, expected, "num"),
+                .Dec => mem.eql(u8, expected, "dec"),
+                .Str => mem.eql(u8, expected, "str"),
+                .Chr => mem.eql(u8, expected, "chr"),
+                .Bin => mem.eql(u8, expected, "bin"),
+                .Raw => mem.eql(u8, expected, "raw"),
+                .Void => mem.eql(u8, expected, "void"),
+                else => false,
+            };
+        }
+
+        if (normalized.mangled_name) |name| {
+            if (mem.eql(u8, name, expected)) return true;
+            const base = if (mem.indexOf(u8, name, "__")) |idx| name[0..idx] else name;
+            if (mem.eql(u8, base, expected)) return true;
+        }
+
+        if (normalized.name) |name| {
+            if (mem.eql(u8, name, expected)) return true;
+            const base = if (mem.indexOf(u8, name, "__")) |idx| name[0..idx] else name;
+            if (mem.eql(u8, base, expected)) return true;
+        }
+
+        return false;
+    }
+
+    fn generic_args_match_forced_inst(gargs: []*dtype.DataType, inst: *const utils.Vector(ArrayList(u8))) bool {
+        const expected = inst.items();
+        if (gargs.len != expected.len) return false;
+
+        for (gargs, expected) |ga, want| {
+            if (!checked_type_matches_constraint_name(type_from_dtype(ga), want.items)) return false;
+        }
+        return true;
+    }
+
+    fn impl_allows_generic_args(forced: ?utils.Vector(utils.Vector(ArrayList(u8))), gargs: []*dtype.DataType) bool {
+        const insts = forced orelse return true;
+        for (insts.items()) |*inst| {
+            if (generic_args_match_forced_inst(gargs, inst)) return true;
+        }
+        return false;
+    }
+
     fn emit_plain_impl_methods_from_node(self: *Self, n: *ast.Node, emitted: *std.StringHashMap(bool)) TranspileError!void {
         if (n.type != .Impl or n.node_variant == null) return;
         const im = n.node_variant.?.impl;
@@ -10512,6 +10654,7 @@ pub const TranspileProcess = struct {
                 const gargs = dt.generic_args.?.items();
                 if (gargs.len != params.count) continue;
                 if (self.dtype_contains_type_param(dt, params)) continue;
+                if (!impl_allows_generic_args(im.type_param_forced_insts, gargs)) continue;
 
                 const mangled = try self.type_name_mangled(dt);
                 defer self.allocator.free(mangled);
@@ -10564,6 +10707,7 @@ pub const TranspileProcess = struct {
                 const gargs = dt.generic_args.?.items();
                 if (gargs.len != params.count) continue;
                 if (self.dtype_contains_type_param(dt, params)) continue;
+                if (!impl_allows_generic_args(im.type_param_forced_insts, gargs)) continue;
 
                 for (im.methods.items()) |m| {
                     if (m.type != .Function or m.node_variant == null) continue;
@@ -10735,6 +10879,10 @@ pub const TranspileProcess = struct {
         // generic impl method signatures (e.g. Map<K,V>::keys -> Vec<K>).
         try self.seed_forced_generic_instantiations_from_impl_signatures();
 
+        // Seed forced instantiations from constrained impl type params
+        // (e.g. `impl Vec<T: num | dec>` forces Vec<num> and Vec<dec>).
+        try self.seed_constrained_impl_instantiations();
+
         // Write standard library includes and prelude
         try self.transpile_prelude();
 
@@ -10749,6 +10897,7 @@ pub const TranspileProcess = struct {
         // Re-seed impl signature instantiations after emitting user types so
         // field-driven generic specializations are visible to impl emission.
         try self.seed_forced_generic_instantiations_from_impl_signatures();
+        try self.seed_constrained_impl_instantiations();
 
         // Emit forward declarations for all functions so calls work even when
         // function bodies are declared later in the file.

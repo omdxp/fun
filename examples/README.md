@@ -113,6 +113,7 @@ zig-out/bin/fun -in examples/<example>.fn
 - stdlib/time_helpers.fn
 - stdlib/toml_basic.fn
 - stdlib/vec_basic.fn
+- stdlib/vec_constrained_generic_impl.fn
 
 ## Visibility (pub)
 - pub_visibility/main.fn

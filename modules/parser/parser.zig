@@ -765,6 +765,38 @@ pub const ParseProcess = struct {
             }
 
             const next_tok = self.token_peek_n(off) orelse return false;
+
+            // Handle constrained type param: T: num | dec
+            if (next_tok.type == .Operator and next_tok.data.sval.items.len > 0 and next_tok.data.sval.items[0] == ':') {
+                off += 1; // skip ':'
+                while (true) {
+                    const ct = self.token_peek_n(off) orelse return false;
+                    if (ct.type == .Keyword or ct.type == .Identifier) {
+                        off += 1;
+                    } else {
+                        return false;
+                    }
+                    const sep = self.token_peek_n(off) orelse return false;
+                    if (sep.type == .Operator and mem.eql(u8, sep.data.sval.items, "|")) {
+                        off += 1;
+                        continue;
+                    }
+                    break;
+                }
+                const after = self.token_peek_n(off) orelse return false;
+                if (after.type == .Operator and mem.eql(u8, after.data.sval.items, ",")) {
+                    off += 1;
+                    continue;
+                }
+                if (after.type == .Operator and (mem.eql(u8, after.data.sval.items, ">") or mem.eql(u8, after.data.sval.items, ">>"))) {
+                    return saw_any;
+                }
+                if (after.type == .Symbol and after.data.cval == '>') {
+                    return saw_any;
+                }
+                return false;
+            }
+
             if (next_tok.type == .Operator and mem.eql(u8, next_tok.data.sval.items, ",")) {
                 off += 1;
                 continue;
@@ -832,6 +864,166 @@ pub const ParseProcess = struct {
             try self.expect_sym('>');
         }
         return params;
+    }
+
+    /// Result type for `parse_impl_type_params_with_constraints`.
+    const ImplTypeParamResult = struct {
+        params: ?utils.Vector(ArrayList(u8)),
+        forced_insts: ?utils.Vector(utils.Vector(ArrayList(u8))),
+    };
+
+    /// Parse `<T>` or `<T: num | dec>` in an impl header.
+    /// Returns param names and, when constraints are present, a list of forced
+    /// concrete instantiations computed as the Cartesian product of all per-param
+    /// constraint sets.  E.g. `<T: num | dec>` → forced_insts = [["num"], ["dec"]].
+    fn parse_impl_type_params_with_constraints(self: *Self) ParseError!ImplTypeParamResult {
+        try self.split_angle_opener_token_if_needed();
+        if (!self.next_token_is_angle_open()) return .{ .params = null, .forced_insts = null };
+        _ = self.token_next(); // consume '<'
+
+        var params = utils.Vector(ArrayList(u8)).init(self.transpile_proc.allocator);
+        errdefer {
+            for (params.items()) |*p| p.deinit();
+            params.deinit();
+        }
+
+        var has_constraints = false;
+        // Per-param constraint lists (parallel to params).
+        var param_constraints = ArrayList(utils.Vector(ArrayList(u8))).init(self.transpile_proc.allocator);
+        errdefer {
+            for (param_constraints.items) |*pc| {
+                for (pc.items()) |*t| t.deinit();
+                pc.deinit();
+            }
+            param_constraints.deinit();
+        }
+
+        while (true) {
+            const tok = self.token_next();
+            if (tok == null or tok.?.type != .Identifier) {
+                self.transpile_proc.err("expected generic parameter name", .{});
+                return ParseError.InvalidIdentifier;
+            }
+
+            var name = ArrayList(u8).initCapacity(self.transpile_proc.allocator, tok.?.data.sval.items.len) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer name.deinit();
+            name.appendSlice(tok.?.data.sval.items) catch return ParseError.MemoryAllocationFailed;
+            params.push(name) catch return ParseError.MemoryAllocationFailed;
+
+            var constraints = utils.Vector(ArrayList(u8)).init(self.transpile_proc.allocator);
+            errdefer {
+                for (constraints.items()) |*t| t.deinit();
+                constraints.deinit();
+            }
+            if (self.next_token_is_operator(":")) {
+                _ = self.token_next(); // consume ':'
+                has_constraints = true;
+                while (true) {
+                    const ct = self.token_next();
+                    if (ct == null) {
+                        self.transpile_proc.err("expected type name in constraint after ':'", .{});
+                        return ParseError.InvalidIdentifier;
+                    }
+                    if (ct.?.type != .Keyword and ct.?.type != .Identifier) {
+                        self.transpile_proc.err("expected type name in constraint", .{});
+                        return ParseError.InvalidIdentifier;
+                    }
+                    var cname = ArrayList(u8).init(self.transpile_proc.allocator);
+                    errdefer cname.deinit();
+                    cname.appendSlice(ct.?.data.sval.items) catch return ParseError.MemoryAllocationFailed;
+                    constraints.push(cname) catch return ParseError.MemoryAllocationFailed;
+                    if (self.next_token_is_operator("|")) {
+                        _ = self.token_next();
+                        continue;
+                    }
+                    break;
+                }
+            }
+            param_constraints.append(constraints) catch return ParseError.MemoryAllocationFailed;
+
+            if (self.next_token_is_operator(",")) {
+                _ = self.token_next();
+                continue;
+            }
+            break;
+        }
+
+        try self.split_angle_closer_token_if_needed();
+        if (self.next_token_is_operator(">")) {
+            try self.expect_op(">");
+        } else {
+            try self.expect_sym('>');
+        }
+
+        var forced_insts: ?utils.Vector(utils.Vector(ArrayList(u8))) = null;
+        if (has_constraints) {
+            // Compute Cartesian product of per-param constraint lists.
+            var combos = ArrayList(utils.Vector(ArrayList(u8))).init(self.transpile_proc.allocator);
+            defer {
+                // On success the items are moved into forced_insts; this deinit is for
+                // the outer ArrayList wrapper only (items() are already consumed).
+                combos.deinit();
+            }
+            // Seed with one empty combination.
+            const initial = utils.Vector(ArrayList(u8)).init(self.transpile_proc.allocator);
+            combos.append(initial) catch return ParseError.MemoryAllocationFailed;
+
+            for (param_constraints.items) |pc| {
+                var new_combos = ArrayList(utils.Vector(ArrayList(u8))).init(self.transpile_proc.allocator);
+                errdefer {
+                    for (new_combos.items) |*nc| {
+                        for (nc.items()) |*t| t.deinit();
+                        nc.deinit();
+                    }
+                    new_combos.deinit();
+                }
+                for (combos.items) |existing| {
+                    for (pc.items()) |ct| {
+                        var new_combo = utils.Vector(ArrayList(u8)).init(self.transpile_proc.allocator);
+                        errdefer {
+                            for (new_combo.items()) |*t| t.deinit();
+                            new_combo.deinit();
+                        }
+                        for (existing.items()) |et| {
+                            var et_copy = ArrayList(u8).init(self.transpile_proc.allocator);
+                            et_copy.appendSlice(et.items) catch return ParseError.MemoryAllocationFailed;
+                            new_combo.push(et_copy) catch return ParseError.MemoryAllocationFailed;
+                        }
+                        var ct_copy = ArrayList(u8).init(self.transpile_proc.allocator);
+                        ct_copy.appendSlice(ct.items) catch return ParseError.MemoryAllocationFailed;
+                        new_combo.push(ct_copy) catch return ParseError.MemoryAllocationFailed;
+                        new_combos.append(new_combo) catch return ParseError.MemoryAllocationFailed;
+                    }
+                }
+                // Free old combos (string contents were copied into new_combos).
+                for (combos.items) |*c| c.deinit();
+                combos.clearRetainingCapacity();
+                for (new_combos.items) |nc| {
+                    combos.append(nc) catch return ParseError.MemoryAllocationFailed;
+                }
+                new_combos.clearRetainingCapacity();
+                new_combos.deinit();
+            }
+
+            var fi = utils.Vector(utils.Vector(ArrayList(u8))).init(self.transpile_proc.allocator);
+            for (combos.items) |combo| {
+                fi.push(combo) catch return ParseError.MemoryAllocationFailed;
+            }
+            // combos items moved into fi; clear so defer doesn't double-free.
+            combos.clearRetainingCapacity();
+            forced_insts = fi;
+        }
+
+        // Free param_constraints (string contents were copied into forced_insts combos).
+        for (param_constraints.items) |*pc| {
+            for (pc.items()) |*t| t.deinit();
+            pc.deinit();
+        }
+        param_constraints.deinit();
+
+        return .{ .params = params, .forced_insts = forced_insts };
     }
 
     fn parse_generic_type_args(self: *Self, dt: *dtype.DataType) ParseError!void {
@@ -2707,6 +2899,14 @@ pub const ParseProcess = struct {
         }
 
         var type_params: ?utils.Vector(ArrayList(u8)) = null;
+        var type_param_forced_insts: ?utils.Vector(utils.Vector(ArrayList(u8))) = null;
+        errdefer if (type_param_forced_insts) |*insts| {
+            for (insts.items()) |*combo| {
+                for (combo.items()) |*t| t.deinit();
+                combo.deinit();
+            }
+            insts.deinit();
+        };
 
         // `impl Type as Quirk { ... }` (quirk impl) OR `impl Type { ... }` (plain impl).
         var peek_after_type = self.token_peek_next();
@@ -2716,7 +2916,9 @@ pub const ParseProcess = struct {
 
         if (self.next_token_is_angle_open()) {
             if (self.impl_generic_args_are_params()) {
-                type_params = try self.parse_generic_type_params();
+                const parsed = try self.parse_impl_type_params_with_constraints();
+                type_params = parsed.params;
+                type_param_forced_insts = parsed.forced_insts;
                 peek_after_type = self.token_peek_next();
             } else {
                 var dt: dtype.DataType = .{
@@ -3010,7 +3212,7 @@ pub const ParseProcess = struct {
             .type = .Impl,
             .pos = type_tok.?.pos,
             .flags = .{ .is_public = is_public },
-            .node_variant = .{ .impl = .{ .type_name = type_name, .type_params = type_params, .quirk_name = quirk_name, .methods = methods } },
+            .node_variant = .{ .impl = .{ .type_name = type_name, .type_params = type_params, .type_param_forced_insts = type_param_forced_insts, .quirk_name = quirk_name, .methods = methods } },
         };
 
         self.transpile_proc.nodes.push(node.*) catch {

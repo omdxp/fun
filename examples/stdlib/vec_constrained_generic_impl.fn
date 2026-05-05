@@ -1,0 +1,25 @@
+// Constrained generic impl example: impl Vec<T: num | dec>.
+
+imp std.c.io;
+imp std.vec;
+
+fun main() {
+  Vec<num> nums;
+  nums.init(0);
+  nums.push(5);
+  nums.push(2);
+  nums.push(8);
+  nums.sort();
+  printf("nums min=%d max=%d sum=%d\n", nums.min(), nums.max(), nums.sum());
+
+  Vec<dec> decs;
+  decs.init(0);
+  decs.push(3.14);
+  decs.push(1.0);
+  decs.push(2.72);
+  decs.sort_desc();
+  printf("decs min=%.2f max=%.2f sum=%.2f\n", decs.min(), decs.max(), decs.sum());
+
+  nums.free();
+  decs.free();
+}

@@ -9,6 +9,7 @@
 
 imp std.c.mem;
 imp std.c.def;
+imp std.c.io;
 imp std.vec;
 imp std.quirks;
 
@@ -63,6 +64,26 @@ impl StringBuilder {
     tmp[1] = '\0';
     self.parts.push(tmp);
     self.total_len = self.total_len + 1;
+  }
+
+  // Append a num as decimal digits.
+  pub append_num(num n) {
+    str s = format_num(n);
+    if s == NULL {
+      ret;
+    }
+    self.total_len = self.total_len + _string_len(s);
+    self.parts.push(s);
+  }
+
+  // Append a dec with the given number of decimal places.
+  pub append_dec(dec d, num places) {
+    str s = format_dec(d, places);
+    if s == NULL {
+      ret;
+    }
+    self.total_len = self.total_len + _string_len(s);
+    self.parts.push(s);
   }
 
   // Clear fragments (keeps capacity).
@@ -773,6 +794,150 @@ pub fun parse_int(str s) num {
       break;
     }
     value = value * 10 + (s[i] - '0');
+    i = i + 1;
+  }
+  ret value * sign;
+}
+
+// Format a num as a decimal string.
+// 
+// Params:
+// - n: the integer to format
+// 
+// Returns:
+// - heap-allocated string; caller owns the memory
+pub fun format_num(num n) str {
+  // Max i64 is 19 digits + sign + NUL = 21 bytes.
+  str buf = malloc(21);
+  if buf == NULL {
+    ret NULL;
+  }
+  if n == 0 {
+    buf[0] = '0';
+    buf[1] = '\0';
+    ret buf;
+  }
+  bin neg = n < 0;
+  if neg {
+    n = 0 - n;
+  }
+  // Digit lookup.
+  str digits = "0123456789";
+  // Write digits in reverse.
+  num pos = 0;
+  for n > 0 {
+    buf[pos] = digits[n % 10];
+    n = n / 10;
+    pos = pos + 1;
+  }
+  if neg {
+    buf[pos] = '-';
+    pos = pos + 1;
+  }
+  buf[pos] = '\0';
+  // Reverse the string in-place.
+  num lo = 0;
+  num hi = pos - 1;
+  for lo < hi {
+    chr tmp = buf[lo];
+    buf[lo] = buf[hi];
+    buf[hi] = tmp;
+    lo = lo + 1;
+    hi = hi - 1;
+  }
+  ret buf;
+}
+
+// Format a dec as a string with a fixed number of decimal places.
+// 
+// Params:
+// - d:      the value to format
+// - places: decimal places to show (0..9; clamped)
+// 
+// Returns:
+// - heap-allocated string; caller owns the memory
+pub fun format_dec(dec d, num places) str {
+  if places < 0 {
+    places = 0;
+  }
+  if places > 9 {
+    places = 9;
+  }
+  // 48 bytes is enough for any double with up to 9 decimal places.
+  str buf = malloc(48);
+  if buf == NULL {
+    ret NULL;
+  }
+  // Build format string "%.Nf" where N is the places digit.
+  str fmt = malloc(6);
+  if fmt == NULL {
+    free(buf);
+    ret NULL;
+  }
+  str digits = "0123456789";
+  fmt[0] = '%';
+  fmt[1] = '.';
+  fmt[2] = digits[places];
+  fmt[3] = 'f';
+  fmt[4] = '\0';
+  _ = snprintf(buf, 48, fmt, d);
+  free(fmt);
+  ret buf;
+}
+
+// Format a bin as "true" or "false".
+// 
+// Params:
+// - b: the boolean to format
+// 
+// Returns:
+// - "true" or "false" (static string, do not free)
+pub fun format_bin(bin b) str {
+  if b {
+    ret "true";
+  }
+  ret "false";
+}
+
+// Parse a decimal string into a dec.
+// 
+// Params:
+// - s: string like "3.14" or "-0.5"
+// 
+// Returns:
+// - parsed dec value (0.0 on empty input)
+pub fun parse_dec(str s) dec {
+  num i = 0;
+  dec sign = 1.0;
+  if s[0] == '-' {
+    sign = -1.0;
+    i = 1;
+  }
+  dec value = 0.0;
+  for s[i] != 0 {
+    if s[i] == '.' {
+      i = i + 1;
+      break;
+    }
+    if s[i] < '0' {
+      break;
+    }
+    if s[i] > '9' {
+      break;
+    }
+    value = value * 10.0 + (s[i] - '0');
+    i = i + 1;
+  }
+  dec frac = 0.1;
+  for s[i] != 0 {
+    if s[i] < '0' {
+      break;
+    }
+    if s[i] > '9' {
+      break;
+    }
+    value = value + (s[i] - '0') * frac;
+    frac = frac * 0.1;
     i = i + 1;
   }
   ret value * sign;
