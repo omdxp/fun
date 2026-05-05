@@ -4628,3 +4628,98 @@ test "fls e2e: torture - extreme positions + most handlers" {
     shutdown_res.deinit();
     try lsp.notify("exit", "{}");
 }
+
+test "fls e2e: format-on-save cache hit - warm save skips subprocess" {
+    // Verifies the two key performance improvements:
+    // 1. didOpen now runs -fmt-diag, so the format cache is warm before the user
+    //    ever explicitly saves. The first explicit format request is a cache hit.
+    // 2. After format runs, a second format with the same content is also a cache hit.
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "imp std.c.io;\n\n" ++
+        "fun main() {\n" ++
+        "  printf(\"hello\\n\");\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-save-perf.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const fmt_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"options\":{{\"tabSize\":2,\"insertSpaces\":true}}}}",
+        .{doc_uri},
+    );
+    defer allocator.free(fmt_params);
+
+    const io = std.testing.io;
+
+    // Wait for the initial publishDiagnostics from didOpen.
+    // This confirms the -fmt-diag subprocess has completed and warmed the format cache.
+    {
+        if (lsp.waitNotification("textDocument/publishDiagnostics", 15000)) |notif| {
+            var n = notif;
+            n.deinit();
+        } else |_| {}
+    }
+
+    // --- First format after didOpen: should be a cache hit (no subprocess) ---
+    const first_t0: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds, std.time.ns_per_ms));
+    const fmt_id = try lsp.request("textDocument/formatting", fmt_params);
+    var fmt_res = try lsp.waitResponse(fmt_id, 15000);
+    defer fmt_res.deinit();
+    const first_ms = @divFloor(std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds, std.time.ns_per_ms) - first_t0;
+
+    try std.testing.expect(fmt_res.parsed.value == .object);
+    _ = try jsonResultFromResponseObj(fmt_res.parsed.value.object);
+    std.debug.print("\n[perf] first format after didOpen (cache hit): {}ms\n", .{first_ms});
+
+    // A cold subprocess takes ~300-1600 ms total (including server overhead).
+    // A cache hit takes ~50-100 ms (1-2 poll cycles). Threshold is 150 ms.
+    try std.testing.expect(first_ms < 150);
+
+    // --- Second format (identical content - must also be a cache hit) ---
+    const warm_t0: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds, std.time.ns_per_ms));
+    const fmt_id2 = try lsp.request("textDocument/formatting", fmt_params);
+    var fmt_res2 = try lsp.waitResponse(fmt_id2, 5000);
+    defer fmt_res2.deinit();
+    const warm_ms = @divFloor(std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds, std.time.ns_per_ms) - warm_t0;
+
+    try std.testing.expect(fmt_res2.parsed.value == .object);
+    _ = try jsonResultFromResponseObj(fmt_res2.parsed.value.object);
+    std.debug.print("[perf] second format (cache hit): {}ms\n", .{warm_ms});
+    try std.testing.expect(warm_ms < 150);
+
+    // --- didSave immediately after format (the format-on-save pattern) ---
+    // FLS should early-return because last_diag_ms is < 1500 ms ago.
+    const save_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}}}}",
+        .{doc_uri},
+    );
+    defer allocator.free(save_params);
+
+    try lsp.notify("textDocument/didSave", save_params);
+    // Ping to confirm server stayed alive and responsive after the early-return save.
+    const ping_t0: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds, std.time.ns_per_ms));
+    const ping_id = try lsp.request("textDocument/formatting", fmt_params);
+    var ping_res = try lsp.waitResponse(ping_id, 5000);
+    defer ping_res.deinit();
+    const ping_ms = @divFloor(std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds, std.time.ns_per_ms) - ping_t0;
+    std.debug.print("[perf] didSave+ping round-trip: {}ms\n", .{ping_ms});
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res2 = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res2.deinit();
+    try lsp.notify("exit", "{}");
+}

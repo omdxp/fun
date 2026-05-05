@@ -137,6 +137,12 @@
       "[fun]": {
         "editor.tabSize": 2,
         "editor.insertSpaces": true
+      },
+      "files.exclude": {
+        "**/.__fls_*.fn": true
+      },
+      "files.watcherExclude": {
+        "**/.__fls_*.fn": true
       }
     },
     "menus": {

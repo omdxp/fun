@@ -25,7 +25,6 @@ const Allocator = std.mem.Allocator;
 // --- Globals ---
 const globalIo = globals.globalIo;
 const nowMs = globals.nowMs;
-const nowNs = globals.nowNs;
 const fileReadAlloc = globals.fileReadAlloc;
 
 // --- Types ---
@@ -130,6 +129,12 @@ const GuessedCallSignature = index_mod.GuessedCallSignature;
 const DiagCacheEntry = struct {
     /// Wyhash of the raw editor text that was compiled.
     content_hash: u64,
+    /// Wyhash of the *formatted* text produced by the last compile run.
+    /// Zero when this entry was created by `computeDiagnostics` (which does not format).
+    /// Used so that `computeDiagnostics` can hit the cache when called with already-formatted
+    /// text (the common format-on-save flow sends `didChange` with the formatted text and
+    /// then immediately fires `didSave`).
+    formatted_hash: u64,
     /// Parsed diagnostics from the last compile run.  Owned by the server allocator.
     diags: []DiagnosticWithUri,
     /// The formatted source text produced by the last compile run.
@@ -977,8 +982,9 @@ pub const LspServer = struct {
 
         const doc = self.docs.get(uri) orelse return;
         // If formatting already ran diagnostics within the last 1500 ms (which happens
-        // when format-on-save is enabled), skip the redundant diagnostics subprocess.
+        // when format-on-save is enabled), skip the redundant diagnostics subprocess entirely.
         const since_last_diag = nowMs() - doc.last_diag_ms;
+        if (doc.last_diag_ms != 0 and since_last_diag >= 0 and since_last_diag < 1500) return;
         const force = doc.last_diag_ms == 0 or since_last_diag > 1500 or since_last_diag < 0;
         self.maybePublishDiagnostics(uri, doc.text, force) catch |err| {
             self.log("[fls] publishDiagnostics failed on didSave: {s}\n", .{@errorName(err)});
@@ -7230,9 +7236,15 @@ pub const LspServer = struct {
             if (dt >= 0 and dt < 400) return;
         }
 
-        // Update timestamp even if diagnostics fail, to avoid tight retry loops.
+        // Update timestamp before the subprocess so that a failure doesn't cause
+        // an immediate tight retry loop on the next didChange.
         doc_ptr.last_diag_ms = now;
         try self.publishDiagnostics(uri, text);
+        // Reset to actual completion time after a (potentially slow) subprocess.
+        // Without this, all didChange messages that piled up in the OS pipe buffer
+        // while the subprocess ran see dt = subprocess_duration >> 400 ms and
+        // immediately fire another subprocess — a thundering herd.
+        if (self.docs.getPtr(uri)) |dp| dp.last_diag_ms = nowMs();
     }
 
     fn rebuildIndex(self: *LspServer, uri: []const u8) !void {
@@ -7709,17 +7721,22 @@ pub const LspServer = struct {
 
     fn computeDiagnostics(self: *LspServer, current_uri: []const u8, text: []const u8) ![]DiagnosticWithUri {
         // Fast path: skip the subprocess if the content hasn't changed.
+        // Also hit the cache when called with already-formatted text (the
+        // format-on-save flow: format runs, updates doc text, then didSave fires).
         const input_hash = std.hash.Wyhash.hash(0, text);
         if (self.diag_cache.get(current_uri)) |entry| {
-            if (entry.content_hash == input_hash) {
+            if (entry.content_hash == input_hash or
+                (entry.formatted_hash != 0 and entry.formatted_hash == input_hash))
+            {
                 return try dupeDiags(self.allocator, entry.diags);
             }
         }
 
         // Create the temp file next to the current document, so relative `imp "..."` resolution
         // and diagnostic file paths match the user's project layout.
+        // Use a stable name derived from the URI so the file never flickers in the editor explorer.
         var tmp_name_buf: [80]u8 = undefined;
-        const tmp_name = try std.fmt.bufPrint(&tmp_name_buf, ".__fls_{d}_{d}.fn", .{ nowMs(), nowNs() });
+        const tmp_name = try std.fmt.bufPrint(&tmp_name_buf, ".__fls_{x:0>6}.fn", .{std.hash.Wyhash.hash(0, current_uri) & 0xFFFFFF});
 
         const current_path_opt = uriToPath(self.allocator, current_uri) catch null;
         defer if (current_path_opt) |p| self.allocator.free(p);
@@ -7746,15 +7763,29 @@ pub const LspServer = struct {
         var stderr_buf = ArrayList(u8).init(self.allocator);
         defer stderr_buf.deinit();
 
-        const argv = [_][]const u8{ self.fun_exe_path, "-in", tmp_path_for_fun, "-no-exec" };
+        // Use -fmt-diag instead of -no-exec so we warm the format cache for free.
+        // The subprocess cost is identical (~40 ms); by storing the formatted result
+        // now, any subsequent formatting request on the same content is a cache hit
+        // with no subprocess needed.
+        const argv = [_][]const u8{ self.fun_exe_path, "-in", tmp_path_for_fun, "-fmt-diag", "-no-exec" };
         _ = try runCaptureStderr(self.allocator, &argv, &stderr_buf);
+
+        // Read back the (possibly reformatted) temp file so we can cache it.
+        const formatted_text: ?[]u8 = blk: {
+            const out = base_dir.readFileAlloc(globalIo(), tmp_name, self.allocator, .limited(10 * 1024 * 1024)) catch break :blk null;
+            if (out.len == 0 and text.len != 0) {
+                self.allocator.free(out);
+                break :blk null;
+            }
+            break :blk out;
+        };
+        defer if (formatted_text) |f| self.allocator.free(f);
 
         const diags = try parseFunDiagnosticsByUri(self.allocator, stderr_buf.items, current_uri, tmp_name);
 
-        // Cache the result (no formatted text — this path doesn't format).
-        // checkDiagCache ignores entries with formatted=null, so this won't prevent
-        // formatAndComputeDiagnostics from running the formatter on the next save.
-        self.updateDiagCache(current_uri, input_hash, diags, null) catch {};
+        // Cache both the diagnostics and the formatted text so formatAndComputeDiagnostics
+        // gets a cache hit (no second subprocess) when the user saves.
+        self.updateDiagCache(current_uri, input_hash, diags, formatted_text) catch {};
 
         return diags;
     }
@@ -7782,8 +7813,9 @@ pub const LspServer = struct {
 
         // Write the temp file next to the document so that relative imports resolve
         // the same way as they do in the normal diagnostics path.
+        // Use a stable name derived from the URI so the file never flickers in the editor explorer.
         var tmp_name_buf: [80]u8 = undefined;
-        const tmp_name = try std.fmt.bufPrint(&tmp_name_buf, ".__fls_fmt_{d}_{d}.fn", .{ nowMs(), nowNs() });
+        const tmp_name = try std.fmt.bufPrint(&tmp_name_buf, ".__fls_{x:0>6}.fn", .{std.hash.Wyhash.hash(0, current_uri) & 0xFFFFFF});
 
         const current_path_opt = uriToPath(self.allocator, current_uri) catch null;
         defer if (current_path_opt) |p| self.allocator.free(p);
@@ -7847,11 +7879,14 @@ pub const LspServer = struct {
     /// so that the next `formatAndComputeDiagnostics` call always runs the formatter.
     fn checkDiagCache(self: *LspServer, current_uri: []const u8, content_hash: u64) !?FormatDiagResult {
         const entry = self.diag_cache.get(current_uri) orelse return null;
-        if (content_hash != entry.content_hash) return null;
-        // Only serve cache hits that have a real formatted result.  A null means the
-        // entry came from computeDiagnostics, which doesn't format — serving it would
-        // suppress format edits on save.
+        // Only serve cache hits that have a real formatted result.
         if (entry.formatted == null) return null;
+        // Primary hit: content matches the unformatted input from the last subprocess.
+        // Secondary hit: content matches the formatted output — the file is already
+        // formatted so the formatter would produce the same text (deterministic).
+        const is_hit = content_hash == entry.content_hash or
+            (entry.formatted_hash != 0 and content_hash == entry.formatted_hash);
+        if (!is_hit) return null;
 
         // Cache hit — return deep copies so the caller can take ownership.
         const diags_copy = try dupeDiags(self.allocator, entry.diags);
@@ -7884,6 +7919,7 @@ pub const LspServer = struct {
         }
         gop.value_ptr.* = .{
             .content_hash = content_hash,
+            .formatted_hash = if (fmt_copy) |f| std.hash.Wyhash.hash(0, f) else 0,
             .diags = diags_copy,
             .formatted = fmt_copy,
         };
