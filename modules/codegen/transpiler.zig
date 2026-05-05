@@ -216,6 +216,7 @@ pub const TranspileProcess = struct {
 
     const DeferEntry = struct {
         body: *ast.Node,
+        pos: ?token.Pos,
     };
 
     const DeferScopeFrame = struct {
@@ -8220,9 +8221,9 @@ pub const TranspileProcess = struct {
         self.defer_stack.shrinkRetainingCapacity(frame.start_index);
     }
 
-    fn register_scope_defer(self: *Self, body: *ast.Node) TranspileError!void {
+    fn register_scope_defer(self: *Self, body: *ast.Node, pos: ?token.Pos) TranspileError!void {
         if (self.defer_scope_stack.items.len == 0) return;
-        self.defer_stack.append(.{ .body = body }) catch return TranspileError.MemoryAllocationFailed;
+        self.defer_stack.append(.{ .body = body, .pos = pos }) catch return TranspileError.MemoryAllocationFailed;
     }
 
     fn emit_defers_from_index(self: *Self, start_index: usize) TranspileError!void {
@@ -8230,6 +8231,9 @@ pub const TranspileProcess = struct {
         var i: usize = self.defer_stack.items.len;
         while (i > start_index) : (i -= 1) {
             const d = self.defer_stack.items[i - 1];
+            if (self.flags.debug_info) {
+                self.pending_line_directive = d.pos;
+            }
             try self.write_indent();
             try self.emit_defer_body(d.body);
         }
@@ -12909,6 +12913,9 @@ pub const TranspileProcess = struct {
                 // `ret;` is represented as StatementReturn with no node_variant.
                 if (node.type == .StatementReturn and node.node_variant == null) {
                     try self.emit_function_scope_defers();
+                    if (self.flags.debug_info) {
+                        self.pending_line_directive = node.pos;
+                    }
                     try self.write_indent();
                     if (self.in_main) {
                         // `main` always emits as `int main(...)` in C.
@@ -12924,7 +12931,7 @@ pub const TranspileProcess = struct {
                 const statement = node.node_variant.?.statement;
                 switch (statement) {
                     .defer_stmt => |d| {
-                        try self.register_scope_defer(d.body);
+                        try self.register_scope_defer(d.body, node.pos);
                     },
                     .asm_stmt => |a| {
                         // Validate optional arch selection.
@@ -13051,6 +13058,9 @@ pub const TranspileProcess = struct {
                     },
                     .return_stmt => |rn| {
                         try self.emit_function_scope_defers();
+                        if (self.flags.debug_info) {
+                            self.pending_line_directive = node.pos;
+                        }
                         try self.write_indent();
                         if (self.in_main) {
                             const main_ret = self.current_fn_return orelse CheckedType{ .base = .Void };
