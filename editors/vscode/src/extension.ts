@@ -1,4 +1,5 @@
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
 
@@ -173,8 +174,324 @@ function deriveStdlibDirFromExe(exePath: string): string {
   return "";
 }
 
+// ---------------------------------------------------------------------------
+// Helpers for Run / Debug code lenses
+// ---------------------------------------------------------------------------
+
+/** Spawn a process with an args array (no shell), resolve stdout on success. */
+function runProcess(
+  cmd: string,
+  args: string[],
+  cwd: string,
+  extraEnv?: Record<string, string>,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const env = extraEnv ? { ...(process?.env ?? {}), ...extraEnv } : undefined;
+    const child = spawn(cmd, args, {
+      cwd,
+      env,
+      stdio: "pipe",
+      windowsHide: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (d: Buffer) => (stdout += d.toString()));
+    child.stderr?.on("data", (d: Buffer) => (stderr += d.toString()));
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve(stdout);
+      else
+        reject(
+          new Error(
+            stderr.trim() || stdout.trim() || `exited with code ${code}`,
+          ),
+        );
+    });
+  });
+}
+
+/**
+ * Build extra env vars needed by the `fun` compiler subprocess.
+ * Ensures FUN_STDLIB_DIR is set even when VS Code is launched from the Dock
+ * (where shell env vars like FUN_STDLIB_DIR are not inherited).
+ */
+function buildFunEnv(root: string | undefined): Record<string, string> {
+  const config = vscode.workspace.getConfiguration("fun");
+  const funCfg = config.get<string>("fls.funPath", "");
+  const stdlibCfg = config.get<string>("fls.stdlibDir", "");
+  const funDefaultRel = path.join("zig-out", "bin", platformExeName("fun"));
+  const funPath = resolveExe(funCfg, root, funDefaultRel);
+
+  const existingStdlibRaw =
+    typeof process?.env?.FUN_STDLIB_DIR === "string"
+      ? String(process.env.FUN_STDLIB_DIR)
+      : "";
+  const existingStdlib = normalizeStdlibRoot(existingStdlibRaw);
+
+  const stdlibCfgExpanded = expandWindowsEnvVars(
+    expandWorkspaceVars(stripOuterQuotes(stdlibCfg ?? ""), root),
+  );
+  const stdlibCfgResolved =
+    root &&
+    !path.isAbsolute(stdlibCfgExpanded) &&
+    (stdlibCfgExpanded.includes("/") || stdlibCfgExpanded.includes("\\"))
+      ? path.join(root, stdlibCfgExpanded)
+      : stdlibCfgExpanded;
+  const stdlibCfgNormalized = normalizeStdlibRoot(stdlibCfgResolved);
+
+  const resolvedFunExe =
+    funPath && funPath.trim().length > 0 && fs.existsSync(funPath)
+      ? funPath
+      : "";
+  const resolvedFunExeOnPath = !resolvedFunExe
+    ? resolveCommandOnPath(funPath)
+    : "";
+
+  const derivedStdlib =
+    stdlibCfgNormalized ||
+    existingStdlib ||
+    (resolvedFunExe ? deriveStdlibDirFromExe(resolvedFunExe) : "") ||
+    (resolvedFunExeOnPath
+      ? deriveStdlibDirFromExe(resolvedFunExeOnPath)
+      : "") ||
+    (root
+      ? deriveStdlibDirFromExe(
+          path.join(root, "zig-out", "bin", platformExeName("fun")),
+        )
+      : "");
+
+  const extra: Record<string, string> = {};
+  if (derivedStdlib) extra["FUN_STDLIB_DIR"] = derivedStdlib;
+  return extra;
+}
+
+/** Resolve the `fun` compiler executable from VS Code settings or defaults. */
+function resolveFunCompilerExe(root: string | undefined): string {
+  const config = vscode.workspace.getConfiguration("fun");
+  const funCfg = config.get<string>("fls.funPath", "");
+  const funDefaultRel = path.join("zig-out", "bin", platformExeName("fun"));
+  const resolved = resolveExe(funCfg, root, funDefaultRel);
+  return resolved || "fun";
+}
+
+/** Return which native debugger type to use (CodeLLDB or cpptools). */
+function detectDebugType(): string {
+  const configured = vscode.workspace
+    .getConfiguration("fun")
+    .get<string>("debugger.type", "");
+  if (configured) return configured;
+  if (vscode.extensions.getExtension("vadimcn.vscode-lldb")) return "lldb";
+  if (vscode.extensions.getExtension("ms-vscode.cpptools")) return "cppdbg";
+  // On Windows, cppdbg (MSVC engine) is more likely available than CodeLLDB.
+  return process?.platform === "win32" ? "cppdbg" : "lldb";
+}
+
+/** Build the VS Code debug configuration for a compiled Fun binary. */
+function buildDebugConfig(
+  program: string,
+  cwd: string,
+): vscode.DebugConfiguration {
+  const debugType = detectDebugType();
+  if (debugType === "cppdbg") {
+    if (process?.platform === "win32") {
+      // cpptools on Windows uses the MSVC debug engine, not GDB/LLDB.
+      return {
+        type: "cppdbg",
+        request: "launch",
+        name: "Debug Fun Program",
+        program,
+        args: [],
+        cwd,
+        stopAtEntry: false,
+        // No MIMode → cpptools auto-selects the MSVC engine on Windows.
+      };
+    }
+    // cpptools on macOS/Linux uses LLDB as the MI backend.
+    return {
+      type: "cppdbg",
+      request: "launch",
+      name: "Debug Fun Program",
+      program,
+      args: [],
+      cwd,
+      stopAtEntry: false,
+      MIMode: "lldb",
+      setupCommands: [
+        {
+          description: "Enable pretty-printing",
+          text: "-enable-pretty-printing",
+          ignoreFailures: true,
+        },
+      ],
+    };
+  }
+  // CodeLLDB ("lldb") — works on macOS, Linux, and Windows.
+  return {
+    type: "lldb",
+    request: "launch",
+    name: "Debug Fun Program",
+    program,
+    args: [],
+    cwd,
+    stopAtEntry: false,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// DAP type-remapping tracker — C types → Fun types in Variables/Evaluate
+// ---------------------------------------------------------------------------
+
+/** Exact C type → Fun type reverse mapping, mirroring transpiler.zig map_type_to_c(). */
+const C_TO_FUN_TYPES: ReadonlyMap<string, string> = new Map([
+  // Numeric primitives
+  ["int64_t", "num"],
+  ["double", "dec"],
+  ["float", "f32"],
+  ["int8_t", "i8"],
+  ["int16_t", "i16"],
+  ["int32_t", "i32"],
+  ["uint8_t", "u8"],
+  ["uint16_t", "u16"],
+  ["uint32_t", "u32"],
+  ["uint64_t", "u64"],
+  // Other primitives
+  ["char *", "str"],
+  ["char*", "str"],
+  ["const char *", "str"],
+  ["const char*", "str"],
+  ["bool", "bin"],
+  ["_Bool", "bin"],
+  ["char", "chr"],
+  // void* → raw* (opaque pointer); plain void stays as void (Fun's own void keyword)
+  ["void *", "raw*"],
+  ["void*", "raw*"],
+]);
+
+function remapFunType(cType: string | undefined): string | undefined {
+  if (!cType) return cType;
+  const direct = C_TO_FUN_TYPES.get(cType.trim());
+  if (direct) return direct;
+
+  // Pointer types: "SomeStruct *" → keep as-is (user-defined), but handle
+  // primitive pointers already covered above. Strip const qualifiers first.
+  const noConst = cType
+    .replace(/\bconst\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const directNoConst = C_TO_FUN_TYPES.get(noConst);
+  if (directNoConst) return directNoConst;
+
+  return cType; // Unknown → leave unchanged
+}
+
+function remapVariableBody(body: Record<string, unknown>): void {
+  if (typeof body["type"] === "string") {
+    body["type"] = remapFunType(body["type"] as string);
+  }
+}
+
+/**
+ * DAP tracker that rewrites C type strings in `variables` and `evaluate`
+ * responses so the Variables panel and Watch panel show Fun types instead of
+ * their C equivalents.
+ *
+ * We only activate this tracker for sessions whose configuration name is
+ * "Debug Fun Program" so it doesn't interfere with unrelated C/C++ sessions.
+ */
+class FunDapTracker implements vscode.DebugAdapterTracker {
+  onDidSendMessage(message: unknown): void {
+    if (!message || typeof message !== "object") return;
+    const msg = message as Record<string, unknown>;
+    if (msg["type"] !== "response") return;
+
+    const command = msg["command"] as string | undefined;
+    const body = msg["body"];
+    if (!body || typeof body !== "object") return;
+    const b = body as Record<string, unknown>;
+
+    if (command === "variables") {
+      const vars = b["variables"];
+      if (Array.isArray(vars)) {
+        for (const v of vars) {
+          if (v && typeof v === "object")
+            remapVariableBody(v as Record<string, unknown>);
+        }
+      }
+    } else if (command === "evaluate") {
+      remapVariableBody(b);
+    } else if (command === "stackTrace") {
+      // Stack frames already show Fun source via #line directives.
+      // Clean up any residual C frame names that CodeLLDB may show for
+      // inlined/synthetic frames (e.g., "__fun_thread_entry_win").
+      const frames = b["stackFrames"];
+      if (Array.isArray(frames)) {
+        for (const f of frames) {
+          if (f && typeof f === "object") {
+            const frame = f as Record<string, unknown>;
+            const src = frame["source"] as Record<string, unknown> | undefined;
+            // Mark frames whose source is our temp .c file as non-primary
+            // so they are collapsed by default.
+            if (src && typeof src["path"] === "string") {
+              const p = src["path"] as string;
+              if (p.endsWith(".c") && p.includes("fun_dbg_")) {
+                frame["presentationHint"] = "subtle";
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+class FunDapTrackerFactory implements vscode.DebugAdapterTrackerFactory {
+  createDebugAdapterTracker(
+    session: vscode.DebugSession,
+  ): vscode.DebugAdapterTracker | undefined {
+    if (session.configuration.name === "Debug Fun Program") {
+      return new FunDapTracker();
+    }
+    return undefined;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Code Lens Provider — shows "▶ Run  ⚙ Debug" above fn main(
+// ---------------------------------------------------------------------------
+
+class FunCodeLensProvider implements vscode.CodeLensProvider {
+  private readonly _onDidChange = new vscode.EventEmitter<void>();
+  readonly onDidChangeCodeLenses: vscode.Event<void> = this._onDidChange.event;
+
+  refresh(): void {
+    this._onDidChange.fire();
+  }
+
+  provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
+    const lenses: vscode.CodeLens[] = [];
+    for (let i = 0; i < document.lineCount; i++) {
+      if (/^\s*(async\s+)?fun\s+main\s*\(/.test(document.lineAt(i).text)) {
+        const range = new vscode.Range(i, 0, i, 0);
+        lenses.push(
+          new vscode.CodeLens(range, {
+            title: "▶ Run",
+            command: "fun.runFile",
+            arguments: [document.uri],
+          }),
+          new vscode.CodeLens(range, {
+            title: "⚙ Debug",
+            command: "fun.debugFile",
+            arguments: [document.uri],
+          }),
+        );
+        break; // only one main per file
+      }
+    }
+    return lenses;
+  }
+}
+
 function openOutput(output: vscode.OutputChannel): void {
-  // `toggleOutput` can actually hide the panel if it's already visible.
   // Keep this deterministic: just reveal our channel.
   try {
     output.show(true);
@@ -447,6 +764,222 @@ export function activate(context: vscode.ExtensionContext) {
         );
       }
     }),
+  );
+
+  // ---------------------------------------------------------------------------
+  // Code Lenses — "▶ Run" and "⚙ Debug" above fn main(
+  // ---------------------------------------------------------------------------
+
+  const codeLensProvider = new FunCodeLensProvider();
+  context.subscriptions.push(
+    vscode.languages.registerCodeLensProvider(
+      { language: "fun", scheme: "file" },
+      codeLensProvider,
+    ),
+  );
+
+  // Register the DAP tracker for both lldb and cppdbg sessions.
+  // The tracker factory only activates for "Debug Fun Program" sessions.
+  const dapTrackerFactory = new FunDapTrackerFactory();
+  context.subscriptions.push(
+    vscode.debug.registerDebugAdapterTrackerFactory("lldb", dapTrackerFactory),
+    vscode.debug.registerDebugAdapterTrackerFactory(
+      "cppdbg",
+      dapTrackerFactory,
+    ),
+  );
+
+  // Reuse a single terminal across Run invocations; recreate it if closed.
+  let runTerminal: vscode.Terminal | undefined;
+  context.subscriptions.push(
+    vscode.window.onDidCloseTerminal((t) => {
+      if (t === runTerminal) runTerminal = undefined;
+    }),
+  );
+
+  // Track temp files produced for each debug session so we can clean them up.
+  const debugCleanup = new Map<string, string[]>();
+  context.subscriptions.push(
+    vscode.debug.onDidTerminateDebugSession((session) => {
+      const files = debugCleanup.get(session.id);
+      if (files) {
+        for (const f of files) fs.unlink(f, () => {});
+        debugCleanup.delete(session.id);
+      }
+    }),
+  );
+
+  // ▶ Run — compile-and-run in an integrated terminal
+  context.subscriptions.push(
+    vscode.commands.registerCommand("fun.runFile", async (uri?: vscode.Uri) => {
+      const fileUri = uri ?? vscode.window.activeTextEditor?.document.uri;
+      if (!fileUri || fileUri.scheme !== "file") return;
+
+      // Save before running.
+      const doc = vscode.workspace.textDocuments.find(
+        (d) => d.uri.toString() === fileUri.toString(),
+      );
+      if (doc?.isDirty) await doc.save();
+
+      const root = workspaceRootPath();
+      const funExe = resolveFunCompilerExe(root);
+
+      if (!runTerminal || runTerminal.exitStatus !== undefined) {
+        runTerminal = vscode.window.createTerminal({ name: "Fun: Run" });
+      }
+      runTerminal.show(true);
+      runTerminal.sendText(`"${funExe}" -in "${fileUri.fsPath}"`);
+    }),
+  );
+
+  // ⚙ Debug — compile with -g, then launch native debugger
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "fun.debugFile",
+      async (uri?: vscode.Uri) => {
+        const fileUri = uri ?? vscode.window.activeTextEditor?.document.uri;
+        if (!fileUri || fileUri.scheme !== "file") return;
+
+        // Save before compiling.
+        const doc = vscode.workspace.textDocuments.find(
+          (d) => d.uri.toString() === fileUri.toString(),
+        );
+        if (doc?.isDirty) await doc.save();
+
+        const root = workspaceRootPath() ?? path.dirname(fileUri.fsPath);
+        const funExe = resolveFunCompilerExe(workspaceRootPath());
+
+        // Temp paths for the generated C file and compiled binary.
+        const stem = path.basename(
+          fileUri.fsPath,
+          path.extname(fileUri.fsPath),
+        );
+        const uid = Date.now();
+        const tmpDir = os.tmpdir();
+        const cFile = path.join(tmpDir, `fun_dbg_${stem}_${uid}.c`);
+        const binFile = path.join(
+          tmpDir,
+          process?.platform === "win32"
+            ? `fun_dbg_${stem}_${uid}.exe`
+            : `fun_dbg_${stem}_${uid}`,
+        );
+
+        try {
+          // Step 1: transpile with #line directives, write C file.
+          // Passing the absolute path as -in ensures #line directives embed
+          // absolute Fun source paths that the debugger can resolve directly.
+          // Pass derived FUN_STDLIB_DIR so stdlib imports resolve even when
+          // VS Code was launched from the Dock (no shell env inheritance).
+          await runProcess(
+            funExe,
+            ["-in", fileUri.fsPath, "-g", "-no-exec", "-outf", "-out", cFile],
+            root,
+            buildFunEnv(workspaceRootPath()),
+          );
+        } catch (err: any) {
+          void vscode.window.showErrorMessage(
+            `Fun: compilation failed:\n${err?.message ?? String(err)}`,
+          );
+          return;
+        }
+
+        try {
+          // Step 2: compile C → native binary with DWARF debug info.
+          // Try cc first, then clang, then gcc.
+          // On Windows try clang-cl first (produces DWARF-compatible debug info
+          // for CodeLLDB), then cl.exe (MSVC, works with cpptools MSVC engine).
+          const compilers =
+            process?.platform === "win32"
+              ? ["clang-cl", "cl"]
+              : ["cc", "clang", "gcc"];
+          let compiled = false;
+          let lastErr = "";
+          for (const cc of compilers) {
+            try {
+              if (process?.platform === "win32") {
+                if (cc === "clang-cl") {
+                  // clang-cl: LLVM front-end with MSVC-compatible flags.
+                  // -Z7 embeds DWARF/CodeView in the .obj (no separate PDB).
+                  await runProcess(
+                    cc,
+                    ["-Z7", "-Od", cFile, `-Fe${binFile}`],
+                    root,
+                  );
+                } else {
+                  // cl.exe (MSVC): /Zi debug info, /Fd keeps PDB next to binary.
+                  const pdbFile = binFile.replace(/\.exe$/i, ".pdb");
+                  await runProcess(
+                    cc,
+                    [
+                      cFile,
+                      `/Fe${binFile}`,
+                      `/Fd${pdbFile}`,
+                      "/Zi",
+                      "/Od",
+                      "/link",
+                    ],
+                    root,
+                  );
+                }
+              } else {
+                await runProcess(cc, ["-g", cFile, "-o", binFile], root);
+              }
+              compiled = true;
+              break;
+            } catch (e: any) {
+              lastErr = e?.message ?? String(e);
+            }
+          }
+          if (!compiled) {
+            void vscode.window.showErrorMessage(
+              `Fun: C compilation failed:\n${lastErr}`,
+            );
+            fs.unlink(cFile, () => {});
+            return;
+          }
+        } catch (err: any) {
+          void vscode.window.showErrorMessage(
+            `Fun: C compilation failed:\n${err?.message ?? String(err)}`,
+          );
+          fs.unlink(cFile, () => {});
+          return;
+        }
+
+        // Step 3: launch the native debugger.
+        const debugType = detectDebugType();
+        const noDebugExtMsg =
+          debugType === "lldb"
+            ? 'Install the "CodeLLDB" extension (vadimcn.vscode-lldb) to debug Fun programs.'
+            : 'Install the "C/C++" extension (ms-vscode.cpptools) to debug Fun programs.';
+
+        const folder = vscode.workspace.workspaceFolders?.[0];
+        const config = buildDebugConfig(binFile, root);
+
+        const started = await vscode.debug.startDebugging(folder, config).then(
+          (ok) => ok,
+          (e: any) => {
+            void vscode.window.showErrorMessage(
+              `Fun: failed to start debugger: ${e?.message ?? String(e)}\n${noDebugExtMsg}`,
+            );
+            return false;
+          },
+        );
+
+        if (started) {
+          // Register cleanup for when the session ends.
+          const disposable = vscode.debug.onDidStartDebugSession((session) => {
+            if (session.configuration.name === config.name) {
+              debugCleanup.set(session.id, [cFile, binFile]);
+              disposable.dispose();
+            }
+          });
+          context.subscriptions.push(disposable);
+        } else {
+          fs.unlink(cFile, () => {});
+          fs.unlink(binFile, () => {});
+        }
+      },
+    ),
   );
 
   output.appendLine("Activation complete.");

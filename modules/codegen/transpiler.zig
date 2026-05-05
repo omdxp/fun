@@ -119,6 +119,11 @@ pub const TranspileProcessFlags = packed struct {
     /// full codegen pass when only error/warning output is needed.  Reduces compile time
     /// by roughly half for large files.
     diag_only: bool = false,
+
+    /// When true, emit `#line` directives in generated C so debuggers (gdb, lldb)
+    /// map back to Fun source lines.  Also causes the C compiler to be invoked with
+    /// `-g` (DWARF symbols) instead of `-g0`.
+    debug_info: bool = false,
 };
 
 /// GlobalSymbolInfo tracks information about symbols across modules
@@ -226,6 +231,10 @@ pub const TranspileProcess = struct {
 
     /// Current token position for diagnostics.
     pos: token.Pos,
+
+    /// When `flags.debug_info` is true, holds the Fun source position that the
+    /// next `write_indent()` call should emit as a `#line` directive.
+    pending_line_directive: ?token.Pos = null,
 
     /// Input/output file handles.
     ifile: std.Io.File,
@@ -8231,6 +8240,10 @@ pub const TranspileProcess = struct {
         if (statement.type == .Variable) {
             try self.register_scope_variable(statement);
         }
+        // When debug info is enabled, queue a #line directive for write_indent() to emit.
+        if (self.flags.debug_info) {
+            self.pending_line_directive = statement.pos;
+        }
         if (statement.type != .StatementReturn and statement.type != .StatementDefer) {
             try self.write_indent();
         }
@@ -10978,6 +10991,19 @@ pub const TranspileProcess = struct {
         try self.write(");\n");
     }
 
+    /// Emits a `#line N "filename"` directive for the given source position.
+    /// Used to anchor compiler-generated C code back to a known Fun source line
+    /// so the debugger does not land on unrelated lines when stepping.
+    fn write_pos_line_directive(self: *Self, pos: token.Pos) TranspileError!void {
+        try self.write("#line ");
+        try self.print("{d}", .{pos.line});
+        try self.write(" \"");
+        for (pos.filename) |ch| {
+            if (ch == '\\') try self.write("\\\\") else try self.print("{c}", .{ch});
+        }
+        try self.write("\"\n");
+    }
+
     fn write_async_function_support_definitions(self: *Self, node: ast.Node) TranspileError!void {
         if (node.type != .Function or node.node_variant == null) return;
         const fnv = node.node_variant.?.function;
@@ -10987,16 +11013,27 @@ pub const TranspileProcess = struct {
         const effective_name = try self.alloc_effective_function_name(fnv.name.?.items);
         defer self.allocator.free(effective_name);
 
-        // Entry trampoline.
+        // When debug info is enabled we emit a `#line pos.line "file"` directive
+        // before EVERY C statement inside the generated helpers.  This pins every
+        // line of every trampoline to the Fun function's own definition line so
+        // the debugger always shows that line while stepping through the helper
+        // internals.  Without this, the C preprocessor's line counter drifts from
+        // pos.line into adjacent blank lines, comments, and the next method's
+        // header — causing confusing "wrong line" stops.
+        const pos_opt: ?token.Pos = if (self.flags.debug_info) node.pos else null;
+
+        // ----- Entry trampoline -----
+        if (pos_opt) |pos| try self.write_pos_line_directive(pos);
         try self.write("static void* __fun_async_entry_");
         try self.write(effective_name);
         try self.write("(void* __arg) {\n");
+        if (pos_opt) |pos| try self.write_pos_line_directive(pos);
         try self.write("  __fun_async_payload_");
         try self.write(effective_name);
         try self.write("* __payload = (__fun_async_payload_");
         try self.write(effective_name);
         try self.write("*)__arg;\n");
-
+        if (pos_opt) |pos| try self.write_pos_line_directive(pos);
         if (fnv.rtype) |rt| {
             if (rt.type != .Void) {
                 try self.write("  __payload->__result = ");
@@ -11016,21 +11053,27 @@ pub const TranspileProcess = struct {
             }
         }
         try self.write(");\n");
+        if (pos_opt) |pos| try self.write_pos_line_directive(pos);
         try self.write("  return NULL;\n");
+        if (pos_opt) |pos| try self.write_pos_line_directive(pos);
         try self.write("}\n");
 
-        // Spawn helper.
+        // ----- Spawn helper -----
+        if (pos_opt) |pos| try self.write_pos_line_directive(pos);
         try self.write("static int __fun_async_spawn_");
         try self.write(effective_name);
         try self.write("(__fun_async_payload_");
         try self.write(effective_name);
         try self.write("* __payload, __fun_thread_t* __thr) {\n");
+        if (pos_opt) |pos| try self.write_pos_line_directive(pos);
         try self.write("  return __fun_thread_start(__thr, __fun_async_entry_");
         try self.write(effective_name);
         try self.write(", __payload);\n");
+        if (pos_opt) |pos| try self.write_pos_line_directive(pos);
         try self.write("}\n");
 
-        // Await helper.
+        // ----- Await helper -----
+        if (pos_opt) |pos| try self.write_pos_line_directive(pos);
         if (fnv.rtype) |rt| {
             try self.write("static ");
             try self.write_type(rt);
@@ -11042,23 +11085,31 @@ pub const TranspileProcess = struct {
         try self.write("(__fun_async_payload_");
         try self.write(effective_name);
         try self.write("* __payload, __fun_thread_t __thr) {\n");
+        if (pos_opt) |pos| try self.write_pos_line_directive(pos);
         try self.write("  (void)__fun_thread_join(__thr);\n");
         if (fnv.rtype) |rt| {
             if (rt.type != .Void) {
+                if (pos_opt) |pos| try self.write_pos_line_directive(pos);
                 try self.write("  ");
                 try self.write_type(rt);
                 try self.write(" __result = __payload->__result;\n");
+                if (pos_opt) |pos| try self.write_pos_line_directive(pos);
                 try self.write("  free(__payload);\n");
+                if (pos_opt) |pos| try self.write_pos_line_directive(pos);
                 try self.write("  return __result;\n");
             } else {
+                if (pos_opt) |pos| try self.write_pos_line_directive(pos);
                 try self.write("  free(__payload);\n");
             }
         } else {
+            if (pos_opt) |pos| try self.write_pos_line_directive(pos);
             try self.write("  free(__payload);\n");
         }
+        if (pos_opt) |pos| try self.write_pos_line_directive(pos);
         try self.write("}\n");
 
-        // High-level call helper used by `await` lowering.
+        // ----- High-level call helper (what `await` lowers to) -----
+        if (pos_opt) |pos| try self.write_pos_line_directive(pos);
         if (fnv.rtype) |rt| {
             try self.write("static ");
             try self.write_type(rt);
@@ -11077,7 +11128,7 @@ pub const TranspileProcess = struct {
         }
         self.in_function_params = false;
         try self.write(") {\n");
-
+        if (pos_opt) |pos| try self.write_pos_line_directive(pos);
         try self.write("  __fun_async_payload_");
         try self.write(effective_name);
         try self.write("* __payload = (__fun_async_payload_");
@@ -11085,8 +11136,9 @@ pub const TranspileProcess = struct {
         try self.write("*)malloc(sizeof(__fun_async_payload_");
         try self.write(effective_name);
         try self.write("));\n");
-
+        if (pos_opt) |pos| try self.write_pos_line_directive(pos);
         try self.write("  if (__payload == NULL) {\n");
+        if (pos_opt) |pos| try self.write_pos_line_directive(pos);
         if (fnv.rtype) |rt| {
             if (rt.type != .Void) {
                 try self.write("    return ");
@@ -11108,14 +11160,16 @@ pub const TranspileProcess = struct {
         try self.write(");\n");
         if (fnv.rtype) |rt| {
             if (rt.type == .Void) {
+                if (pos_opt) |pos| try self.write_pos_line_directive(pos);
                 try self.write("    return;\n");
             }
         }
+        if (pos_opt) |pos| try self.write_pos_line_directive(pos);
         try self.write("  }\n");
-
         if (fnv.args) |args| {
             for (args.items(), 0..) |arg, i| {
                 if (arg.type != .Variable or arg.node_variant == null) continue;
+                if (pos_opt) |pos| try self.write_pos_line_directive(pos);
                 try self.write("  __payload->__arg");
                 try self.print("{d}", .{i});
                 try self.write(" = ");
@@ -11123,13 +11177,17 @@ pub const TranspileProcess = struct {
                 try self.write(";\n");
             }
         }
-
+        if (pos_opt) |pos| try self.write_pos_line_directive(pos);
         try self.write("  __fun_thread_t __thr;\n");
+        if (pos_opt) |pos| try self.write_pos_line_directive(pos);
         try self.write("  int __rc = __fun_async_spawn_");
         try self.write(effective_name);
         try self.write("(__payload, &__thr);\n");
+        if (pos_opt) |pos| try self.write_pos_line_directive(pos);
         try self.write("  if (__rc != 0) {\n");
+        if (pos_opt) |pos| try self.write_pos_line_directive(pos);
         try self.write("    free(__payload);\n");
+        if (pos_opt) |pos| try self.write_pos_line_directive(pos);
         if (fnv.rtype) |rt| {
             if (rt.type != .Void) {
                 try self.write("    return ");
@@ -11151,11 +11209,13 @@ pub const TranspileProcess = struct {
         try self.write(");\n");
         if (fnv.rtype) |rt| {
             if (rt.type == .Void) {
+                if (pos_opt) |pos| try self.write_pos_line_directive(pos);
                 try self.write("    return;\n");
             }
         }
+        if (pos_opt) |pos| try self.write_pos_line_directive(pos);
         try self.write("  }\n");
-
+        if (pos_opt) |pos| try self.write_pos_line_directive(pos);
         if (fnv.rtype) |rt| {
             if (rt.type != .Void) {
                 try self.write("  return ");
@@ -11170,9 +11230,11 @@ pub const TranspileProcess = struct {
         try self.write("(__payload, __thr);\n");
         if (fnv.rtype) |rt| {
             if (rt.type == .Void) {
+                if (pos_opt) |pos| try self.write_pos_line_directive(pos);
                 try self.write("  return;\n");
             }
         }
+        if (pos_opt) |pos| try self.write_pos_line_directive(pos);
         try self.write("}\n");
     }
 
@@ -12461,6 +12523,19 @@ pub const TranspileProcess = struct {
                         return; // Skip this main function from an imported module
                     }
 
+                    // Emit #line before the function signature when debug info is enabled.
+                    if (self.flags.debug_info) {
+                        if (node.pos) |pos| {
+                            try self.write("#line ");
+                            try self.print("{d}", .{pos.line});
+                            try self.write(" \"");
+                            for (pos.filename) |ch| {
+                                if (ch == '\\') try self.write("\\\\") else try self.print("{c}", .{ch});
+                            }
+                            try self.write("\"\n");
+                        }
+                    }
+
                     try self.write("int");
                     try self.write(" ");
                     try self.write("main");
@@ -12527,6 +12602,18 @@ pub const TranspileProcess = struct {
                         try self.transpile_node(body.*);
                     }
                 } else {
+                    // Emit #line before the function signature when debug info is enabled.
+                    if (self.flags.debug_info) {
+                        if (node.pos) |pos| {
+                            try self.write("#line ");
+                            try self.print("{d}", .{pos.line});
+                            try self.write(" \"");
+                            for (pos.filename) |ch| {
+                                if (ch == '\\') try self.write("\\\\") else try self.print("{c}", .{ch});
+                            }
+                            try self.write("\"\n");
+                        }
+                    }
                     if (function.rtype) |rtype| {
                         try self.write_type(rtype);
                     } else {
@@ -13241,6 +13328,19 @@ pub const TranspileProcess = struct {
     /// Write a newline followed by the current indentation
     pub fn write_indent(self: *Self) TranspileError!void {
         try self.write("\n");
+        if (self.flags.debug_info) {
+            if (self.pending_line_directive) |pos| {
+                // Escape backslashes in path (needed on Windows).
+                try self.write("#line ");
+                try self.print("{d}", .{pos.line});
+                try self.write(" \"");
+                for (pos.filename) |ch| {
+                    if (ch == '\\') try self.write("\\\\") else try self.print("{c}", .{ch});
+                }
+                try self.write("\"\n");
+                self.pending_line_directive = null;
+            }
+        }
         try self.write_spaces(self.indent_level * 4); // 4 spaces per level
     }
 

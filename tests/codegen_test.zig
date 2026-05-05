@@ -1465,7 +1465,7 @@ test "aliased io.format with bare placeholder renders values" {
         try c_file.writeStreamingAll(std.testing.io, out_owned);
     }
 
-    try cli.compile_and_run(allocator, std.testing.io, c_path, true, input_path, &.{});
+    try cli.compile_and_run(allocator, std.testing.io, c_path, true, input_path, &.{}, false);
 
     const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, out_path, allocator, .limited(1024 * 1024));
     defer allocator.free(got);

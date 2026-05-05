@@ -23,7 +23,9 @@
   "activationEvents": [
     "onLanguage:fun",
     "onCommand:fun.restartLanguageServer",
-    "onCommand:fun.showLanguageServerOutput"
+    "onCommand:fun.showLanguageServerOutput",
+    "onCommand:fun.runFile",
+    "onCommand:fun.debugFile"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -35,6 +37,16 @@
       {
         "command": "fun.showLanguageServerOutput",
         "title": "Fun: Show Language Server Output"
+      },
+      {
+        "command": "fun.runFile",
+        "title": "▶ Run",
+        "category": "Fun"
+      },
+      {
+        "command": "fun.debugFile",
+        "title": "⚙ Debug",
+        "category": "Fun"
       }
     ],
     "languages": [
@@ -66,6 +78,11 @@
         "label": "Fun Web",
         "uiTheme": "vs-dark",
         "path": "./themes/fun-web-color-theme.json"
+      }
+    ],
+    "breakpoints": [
+      {
+        "language": "fun"
       }
     ],
     "configuration": {
@@ -100,6 +117,19 @@
           "type": "boolean",
           "default": false,
           "description": "Enable go-to-definition debug logging from fls (sets FLS_DEBUG_DEFINITIONS=1)."
+        },
+        "fun.debugger.type": {
+          "type": "string",
+          "enum": [
+            "lldb",
+            "cppdbg"
+          ],
+          "enumDescriptions": [
+            "CodeLLDB extension (vadimcn.vscode-lldb) — recommended on macOS/Linux",
+            "C/C++ extension (ms-vscode.cpptools)"
+          ],
+          "default": "",
+          "description": "Debugger type used by 'Debug' code lens. Leave empty for auto-detection (prefers CodeLLDB, then cpptools)."
         }
       }
     },
@@ -118,6 +148,14 @@
         {
           "command": "fun.showLanguageServerOutput",
           "when": "editorLangId == fun || resourceLangId == fun"
+        },
+        {
+          "command": "fun.runFile",
+          "when": "editorLangId == fun"
+        },
+        {
+          "command": "fun.debugFile",
+          "when": "editorLangId == fun"
         }
       ]
     }

@@ -378,6 +378,18 @@ Examples:
 - When format-on-save is disabled, diagnostics use `fun -no-exec` under the hood.
 - A 1500 ms debounce prevents redundant diagnostic subprocess launches when formatting already ran one on the same save event.
 
+## VS Code Debug Experience
+- **▶ Run** and **⚙ Debug** code lenses appear above every `fun main(` declaration.
+- **▶ Run** compiles and runs the file in an integrated terminal.
+- **⚙ Debug** performs a three-step build: `fun -g -no-exec -outf` → C compiler with `-g`/`/Zi` → native debugger launch.
+- `-g` embeds `#line N "file.fn"` directives in the generated C so DWARF maps directly to Fun source lines.
+- Breakpoints, call stack, and step-through work on `.fn` files without any manual configuration.
+- Variable types are remapped from C (`int64_t`, `char*`, `bool`, …) to Fun (`num`, `str`, `bin`, …) via a DAP message tracker.
+- Internal C boilerplate frames (`__fun_async_entry_*`, etc.) are marked secondary and collapsed in the call stack.
+- Temp `.c` and compiled binary files are created in the OS temp directory and deleted automatically when the session ends.
+- Debugger auto-detection order: `fun.debugger.type` setting → CodeLLDB → cpptools → platform default (CodeLLDB on macOS/Linux, cpptools on Windows).
+- On Windows: tries `clang-cl` (DWARF, works with CodeLLDB) then `cl.exe` (CodeView, works with cpptools MSVC engine).
+
 ## Standard Library (high level)
 - `std.array`: array helpers
 - `std.io`: file helpers + print utilities

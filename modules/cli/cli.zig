@@ -64,6 +64,10 @@ pub const CliOptions = struct {
     /// Exits with code 1 and prints the filename if the file would be changed by formatting.
     fmt_check: bool,
 
+    /// Flag to enable debug info: emits `#line` directives in generated C and passes `-g`
+    /// to the C compiler so gdb/lldb/sanitizers map back to Fun source locations.
+    debug_info: bool,
+
     /// Arguments passed to the compiled program (everything after `--`).
     program_args: [][]const u8,
 };
@@ -81,7 +85,7 @@ pub const CliOptions = struct {
 fn print_usage(io: std.Io) void {
     std.Io.File.stderr().writeStreamingAll(io,
         \\Usage:
-        \\  fun -in <input_file> [-fmt | -fmt-all | -fmt-diag | -fmt-check] [-out <output_file>] [-no-exec] [-outf] [-ast] [-help] [-- <program args...>]
+        \\  fun -in <input_file> [-fmt | -fmt-all | -fmt-diag | -fmt-check] [-out <output_file>] [-no-exec] [-outf] [-ast] [-g] [-help] [-- <program args...>]
         \\  fun -version
         \\
         \\Arguments:
@@ -92,6 +96,7 @@ fn print_usage(io: std.Io) void {
         \\  -fmt-all          Format the input file and all locally imported modules (optional)
         \\  -fmt-diag         Format the input file in-place, then run diagnostics (optional)
         \\  -fmt-check        Check if the input file is formatted; exit 1 if not (optional)
+        \\  -g                Enable debug info: source-level Fun→C mapping + DWARF symbols (optional)
         \\  -out     <file>   Output file (optional, defaults to input filename with .c extension)
         \\  -no-exec          Disable automatic compilation and execution (optional, execution enabled by default)
         \\  -outf             Generate .c output file (optional, disabled by default)
@@ -132,6 +137,7 @@ pub fn parse_args(allocator: mem.Allocator, io: std.Io, argv: []const []const u8
     var fmt_all = false;
     var fmt_diag = false;
     var fmt_check = false;
+    var debug_info = false;
     var program_args = ArrayList([]const u8).init(allocator);
     errdefer {
         for (program_args.items) |p| allocator.free(p);
@@ -185,6 +191,8 @@ pub fn parse_args(allocator: mem.Allocator, io: std.Io, argv: []const []const u8
             fmt_diag = true;
         } else if (std.mem.eql(u8, arg, "-fmt-check")) {
             fmt_check = true;
+        } else if (std.mem.eql(u8, arg, "-g")) {
+            debug_info = true;
         }
     }
 
@@ -210,6 +218,7 @@ pub fn parse_args(allocator: mem.Allocator, io: std.Io, argv: []const []const u8
         .fmt_all = fmt_all,
         .fmt_diag = fmt_diag,
         .fmt_check = fmt_check,
+        .debug_info = debug_info,
         .program_args = try program_args.toOwnedSlice(),
     };
 }
@@ -744,7 +753,7 @@ fn detect_compiler_flavor(argv0: []const u8) CompilerFlavor {
     return .unknown;
 }
 
-fn append_default_compile_args(allocator: mem.Allocator, argv_list: *ArrayList([]const u8), flavor: CompilerFlavor, c_path: []const u8, exe_file: []const u8) !void {
+fn append_default_compile_args(allocator: mem.Allocator, argv_list: *ArrayList([]const u8), flavor: CompilerFlavor, c_path: []const u8, exe_file: []const u8, debug_info: bool) !void {
     switch (flavor) {
         .cl => {
             try argv_list.append(try allocator.dupe(u8, c_path));
@@ -752,7 +761,8 @@ fn append_default_compile_args(allocator: mem.Allocator, argv_list: *ArrayList([
             try argv_list.append(out_flag);
         },
         else => {
-            try argv_list.append(try allocator.dupe(u8, "-g0"));
+            // Use -g for DWARF symbols when debug info requested, -g0 otherwise (smaller binary).
+            try argv_list.append(try allocator.dupe(u8, if (debug_info) "-g" else "-g0"));
             try argv_list.append(try allocator.dupe(u8, c_path));
             try argv_list.append(try allocator.dupe(u8, "-o"));
             try argv_list.append(try allocator.dupe(u8, exe_file));
@@ -848,7 +858,7 @@ test "FUN_CC=zig with FUN_CC_ARGS=cc keeps zig cc ordering" {
     defer free_arg_list(allocator, argv_list.items);
 
     try argv_list.append(try allocator.dupe(u8, "zig"));
-    try append_default_compile_args(allocator, &argv_list, .zig, "test.c", "test.exe");
+    try append_default_compile_args(allocator, &argv_list, .zig, "test.c", "test.exe", false);
 
     try append_fun_cc_extra_args(allocator, &argv_list, &.{"cc"}, true, false, 1);
 
@@ -867,7 +877,7 @@ test "default gcc-like args include pthread on non-windows" {
     defer free_arg_list(allocator, argv_list.items);
 
     try argv_list.append(try allocator.dupe(u8, "clang"));
-    try append_default_compile_args(allocator, &argv_list, .gcc_like, "test.c", "test.exe");
+    try append_default_compile_args(allocator, &argv_list, .gcc_like, "test.c", "test.exe", false);
 
     var has_pthread = false;
     for (argv_list.items) |arg| {
@@ -886,7 +896,7 @@ test "default cl args do not include pthread" {
     defer free_arg_list(allocator, argv_list.items);
 
     try argv_list.append(try allocator.dupe(u8, "cl"));
-    try append_default_compile_args(allocator, &argv_list, .cl, "test.c", "test.exe");
+    try append_default_compile_args(allocator, &argv_list, .cl, "test.c", "test.exe", false);
 
     for (argv_list.items) |arg| {
         try std.testing.expect(!std.mem.eql(u8, arg, "-pthread"));
@@ -2147,7 +2157,7 @@ pub fn format_file_check(allocator: mem.Allocator, io: std.Io, input_file: []con
 /// Returns:
 /// - Might return error.CompilationFailed if GCC compilation fails.
 /// - Might return other errors from file operations or process execution.
-pub fn compile_and_run(allocator: mem.Allocator, io: std.Io, c_file_or_content: []const u8, is_file: bool, input_file: []const u8, program_args: []const []const u8) !void {
+pub fn compile_and_run(allocator: mem.Allocator, io: std.Io, c_file_or_content: []const u8, is_file: bool, input_file: []const u8, program_args: []const []const u8, debug_info: bool) !void {
     const input_path = std.fs.path.basename(input_file);
     const extension_index = std.mem.lastIndexOf(u8, input_path, ".");
     var exe_file_name: []const u8 = input_path;
@@ -2249,7 +2259,7 @@ pub fn compile_and_run(allocator: mem.Allocator, io: std.Io, c_file_or_content: 
                 }
                 non_template_base_argc = base.items.len;
                 const flavor = if (argv_list.items.len >= 1) detect_compiler_flavor(argv_list.items[0]) else .unknown;
-                try append_default_compile_args(allocator, &argv_list, flavor, c_path, exe_file);
+                try append_default_compile_args(allocator, &argv_list, flavor, c_path, exe_file, debug_info);
             }
 
             var using_zig = false;
@@ -2296,7 +2306,7 @@ pub fn compile_and_run(allocator: mem.Allocator, io: std.Io, c_file_or_content: 
                 for (candidate.extra) |a| {
                     try argv_list.append(try allocator.dupe(u8, a));
                 }
-                try append_default_compile_args(allocator, &argv_list, candidate.flavor, c_path, exe_file);
+                try append_default_compile_args(allocator, &argv_list, candidate.flavor, c_path, exe_file, debug_info);
 
                 const result = std.process.run(allocator, io, .{
                     .argv = argv_list.items,

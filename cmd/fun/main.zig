@@ -116,6 +116,7 @@ pub fn main(init: std.process.Init) void {
             // Skip C emission when we only need diagnostics (exec=false, no output file).
             // This avoids the full codegen pass and roughly halves compile time.
             .diag_only = !options.exec and !options.outf and !options.print_ast,
+            .debug_info = options.debug_info,
         },
     ) catch |err| print_error_and_exit(init.io, err);
 
@@ -141,9 +142,9 @@ pub fn main(init: std.process.Init) void {
 
     if (tp.flags.exec) {
         if (tp.flags.outf) {
-            cli.compile_and_run(global_allocator, init.io, options.output_file, true, options.input_file, options.program_args) catch |err| print_error_and_exit(init.io, err);
+            cli.compile_and_run(global_allocator, init.io, options.output_file, true, options.input_file, options.program_args, options.debug_info) catch |err| print_error_and_exit(init.io, err);
         } else if (tp.get_output()) |output| {
-            cli.compile_and_run(global_allocator, init.io, output, false, options.input_file, options.program_args) catch |err| print_error_and_exit(init.io, err);
+            cli.compile_and_run(global_allocator, init.io, output, false, options.input_file, options.program_args, options.debug_info) catch |err| print_error_and_exit(init.io, err);
         }
     }
 }
