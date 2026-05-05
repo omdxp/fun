@@ -2459,6 +2459,16 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                             }
                         }
 
+                        // Consume array dimension brackets that are part of the field type,
+                        // e.g. `T[] data;` or `num[][] grid;`.
+                        while (field_name_i < tokens.len and isPunctChar(tokens[field_name_i], '[')) {
+                            const rbr_i = nextNonTrivialToken(tokens, field_name_i + 1) orelse break;
+                            if (rbr_i < tokens.len and isPunctChar(tokens[rbr_i], ']')) {
+                                ftype_buf.appendSlice("[]") catch {};
+                                field_name_i = nextNonTrivialToken(tokens, rbr_i + 1) orelse break;
+                            } else break;
+                        }
+
                         var markers = ArrayList(u8).init(allocator);
                         defer markers.deinit();
                         while (field_name_i < tokens.len and (isPunctChar(tokens[field_name_i], '*') or isPunctChar(tokens[field_name_i], '&'))) {

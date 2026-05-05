@@ -763,3 +763,26 @@ test "-fmt nested generics keep closing brackets tight" {
     try std.testing.expect(std.mem.indexOf(u8, got, "Result<Vec<str>>") != null);
     try std.testing.expect(std.mem.indexOf(u8, got, "Result<Vec<str >>") == null);
 }
+
+test "-fmt constrained generic impl keeps colon tight" {
+    const allocator = std.testing.allocator;
+
+    const ugly =
+        "compound Vec<T>{T[] data;num len;}\n" ++
+        "impl Vec<T : num | dec>{sum() T{ret self.data[0];}}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_impl_constraint_colon", ugly);
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+
+    try std.testing.expect(std.mem.indexOf(u8, got, "impl Vec<T: num | dec>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "impl Vec<T : num | dec>") == null);
+    try expectFileParses(allocator, path);
+}

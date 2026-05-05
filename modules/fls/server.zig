@@ -1661,6 +1661,14 @@ pub const LspServer = struct {
         }.call;
 
         const mapTemplateParam = struct {
+            fn normalizeParamName(param_raw: []const u8) []const u8 {
+                const trimmed = std.mem.trim(u8, param_raw, " \t\r\n");
+                if (std.mem.indexOfScalar(u8, trimmed, ':')) |colon| {
+                    return std.mem.trim(u8, trimmed[0..colon], " \t\r\n");
+                }
+                return trimmed;
+            }
+
             fn call(template_params: []const []const u8, concrete_args: []const []const u8, needle_raw: []const u8) ?[]const u8 {
                 const needle = std.mem.trim(u8, needle_raw, " \t\r\n");
                 if (needle.len == 0) return null;
@@ -1668,7 +1676,7 @@ pub const LspServer = struct {
                 const n = @min(template_params.len, concrete_args.len);
                 var i: usize = 0;
                 while (i < n) : (i += 1) {
-                    const p = std.mem.trim(u8, template_params[i], " \t\r\n");
+                    const p = normalizeParamName(template_params[i]);
                     if (!std.mem.eql(u8, p, needle)) continue;
                     return std.mem.trim(u8, concrete_args[i], " \t\r\n");
                 }

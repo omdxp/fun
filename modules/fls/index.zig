@@ -872,6 +872,64 @@ test "fls index: let locals infer types" {
     try std.testing.expect(found_s);
 }
 
+test "fls index: compound array fields are indexed" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const text =
+        "compound Vec<T> {\n" ++
+        "  T[] data;\n" ++
+        "  num len;\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found_data = false;
+    for (idx.symbols) |s| {
+        if (s.kind != .field) continue;
+        if (!std.mem.eql(u8, s.name, "data")) continue;
+        found_data = true;
+        try std.testing.expect(s.container_type != null);
+        try std.testing.expect(std.mem.eql(u8, s.container_type.?, "Vec<T>"));
+        try std.testing.expect(s.value_type != null);
+        try std.testing.expect(std.mem.eql(u8, s.value_type.?, "T[]"));
+    }
+
+    try std.testing.expect(found_data);
+}
+
+test "fls index: constrained impl keeps self owner type" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const text =
+        "compound Vec<T> { T[] data; }\n" ++
+        "impl Vec<T: num | dec> {\n" ++
+        "  pub sum() T {\n" ++
+        "    ret self.data[0];\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found_self = false;
+    for (idx.symbols) |s| {
+        if (s.kind != .variable) continue;
+        if (!std.mem.eql(u8, s.name, "self")) continue;
+        if (s.container_fn_range == null) continue;
+        found_self = true;
+        try std.testing.expect(s.value_type != null);
+        try std.testing.expect(std.mem.eql(u8, s.value_type.?, "Vec<T:num|dec>"));
+        break;
+    }
+
+    try std.testing.expect(found_self);
+}
+
 test "fls index: let locals inferred in token-only index" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();

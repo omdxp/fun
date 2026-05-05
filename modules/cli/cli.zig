@@ -572,6 +572,7 @@ fn operator_needs_spaces(op: []const u8) bool {
         return false;
     }
     return !std.mem.eql(u8, op, ",") and
+        !std.mem.eql(u8, op, ":") and
         !std.mem.eql(u8, op, "(") and
         !std.mem.eql(u8, op, "[");
 }
@@ -1739,6 +1740,13 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
             } else {
                 try state.out.append(' ');
             }
+            state.prev_token.* = null;
+            continue;
+        }
+
+        if (t2.type == .Operator and std.mem.eql(u8, t2.data.sval.items, ":")) {
+            try state.out.append(':');
+            try state.out.append(' ');
             state.prev_token.* = null;
             continue;
         }
