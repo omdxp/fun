@@ -12739,8 +12739,9 @@ pub const TranspileProcess = struct {
                         self.in_function_params = false;
                     }
 
-                    try self.write(") ");
+                    try self.write(")");
                     if (function.body) |body| {
+                        try self.write(" ");
                         const prev_in_main = self.in_main;
                         const prev_in_fn_body = self.in_function_body;
                         const prev_body_depth = self.function_body_depth;
@@ -12753,6 +12754,8 @@ pub const TranspileProcess = struct {
                             self.function_body_depth = prev_body_depth;
                         }
                         try self.transpile_node(body.*);
+                    } else {
+                        try self.write(";");
                     }
                 } else {
                     // Emit #line before the function signature when debug info is enabled.
@@ -12796,9 +12799,10 @@ pub const TranspileProcess = struct {
                         try self.write(", ...");
                     }
                     self.in_function_params = false;
-                    try self.write(") ");
+                    try self.write(")");
 
                     if (function.body) |body| {
+                        try self.write(" ");
                         const prev_in_fn_body = self.in_function_body;
                         const prev_body_depth = self.function_body_depth;
                         const prev_var = self.current_fn_is_variadic;
@@ -12811,6 +12815,8 @@ pub const TranspileProcess = struct {
                             self.current_fn_is_variadic = prev_var;
                         }
                         try self.transpile_node(body.*);
+                    } else {
+                        try self.write(";");
                     }
                 }
             },

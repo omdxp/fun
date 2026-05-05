@@ -1340,6 +1340,24 @@ test "function definitions can be out of order (prototypes emitted)" {
     try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
 
+test "declaration-only function emits semicolon prototype" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_decl_only_fn.fn";
+
+    const input =
+        "fun someCFunc() str;\n" ++
+        "fun main() {\n" ++
+        "  someCFunc();\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "char* someCFunc();") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "char* someCFunc() ;") == null);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
+}
+
 test "aliased import calls transpile to qualified symbols" {
     const allocator = std.testing.allocator;
     const ifilepath = "examples/imports/alias_collision/main_codegen_alias.fn";
