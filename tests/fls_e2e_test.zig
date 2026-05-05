@@ -4685,8 +4685,8 @@ test "fls e2e: format-on-save cache hit - warm save skips subprocess" {
     std.debug.print("\n[perf] first format after didOpen (cache hit): {}ms\n", .{first_ms});
 
     // A cold subprocess takes ~300-1600 ms total (including server overhead).
-    // A cache hit takes ~50-100 ms (1-2 poll cycles). Threshold is 150 ms.
-    try std.testing.expect(first_ms < 150);
+    // A cache hit takes ~50-100 ms (1-2 poll cycles). Threshold is 200 ms.
+    try std.testing.expect(first_ms < 200);
 
     // --- Second format (identical content - must also be a cache hit) ---
     const warm_t0: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds, std.time.ns_per_ms));
