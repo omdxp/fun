@@ -11,5 +11,10 @@
   "fun.fls.path": "${workspaceFolder}/zig-out/bin/fls",
   "fun.fls.funPath": "${workspaceFolder}/zig-out/bin/fun",
   "fun.fls.debugImports": true,
-  "fun.fls.debugDefinitions": true
+  "fun.fls.debugDefinitions": true,
+  "zig.testArgs": [
+    "build",
+    "test",
+    "-Dtest-filter=${filter}"
+  ]
 }
