@@ -1,0 +1,28 @@
+imp std.io as io;
+imp std.json;
+imp std.string;
+
+fun main() {
+  StringBuilder b = string_builder_init(4);
+  b.append_char('{');
+  b.append_char('"');
+  b.append("key");
+  b.append_char('"');
+  b.append(": ");
+  b.append_char('"');
+  b.append("value");
+  b.append_char('"');
+  b.append_char('}');
+  str src = b.build();
+  b.free();
+
+  JsonObject obj = parse_object(src);
+  defer obj.free();
+
+  let vals = obj.values.values();
+  defer vals.free();
+
+  for val : vals {
+    io.println(val);
+  }
+}

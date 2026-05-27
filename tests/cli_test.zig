@@ -85,3 +85,21 @@ test "compile_and_run reports compilation failure for invalid C (file)" {
 
     try std.testing.expectError(cli.CliError.CompilationFailed, cli.compile_and_run(allocator, std.testing.io, c_path, true, "cli_compile_and_run_bad.fn", &.{}, false));
 }
+
+test "parse_args supports -fmt-check-all without -in" {
+    const allocator = std.testing.allocator;
+    const options = try cli.parse_args(allocator, std.testing.io, &.{"-fmt-check-all"});
+    defer cli.free_options(allocator, options);
+
+    try std.testing.expect(options.fmt_check_all);
+    try std.testing.expectEqualStrings(".", options.input_file);
+}
+
+test "parse_args keeps directory input for -fmt-check-all" {
+    const allocator = std.testing.allocator;
+    const options = try cli.parse_args(allocator, std.testing.io, &.{ "-fmt-check-all", "-in", "examples" });
+    defer cli.free_options(allocator, options);
+
+    try std.testing.expect(options.fmt_check_all);
+    try std.testing.expectEqualStrings("examples", options.input_file);
+}

@@ -119,6 +119,26 @@ test "std.io aliased import: format uses alias-prefixed helpers" {
     try std.testing.expect(std.mem.indexOf(u8, out, "myio__fmt_num") != null);
 }
 
+test "std.log aliased import: methods use alias-prefixed helpers" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "alias_log_levels.fn";
+    const input =
+        "imp std.log as mylog;\n" ++
+        "fun main() {\n" ++
+        "  mylog.Logger logger = mylog.logger_init(mylog.LogLevel.Debug);\n" ++
+        "  logger.warn(\"warn\");\n" ++
+        "}\n";
+
+    const out = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "mylog__level_value") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "mylog__level_name") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, " level_value(") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, " level_name(") == null);
+}
+
 test "user module imported under two aliases: stubs emitted for second alias" {
     // helper.fn exported under alias 'a'. main.fn imports it as 'b'.
     // Codegen should emit `#define b__helper_fn a__helper_fn`.

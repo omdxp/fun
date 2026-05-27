@@ -35,7 +35,7 @@ pub const CliError = error{
 /// `CliOptions` represents the command-line options for the transpiler.
 /// This structure holds all the configuration options that can be set via command-line arguments.
 pub const CliOptions = struct {
-    /// The path to the input file that will be transpiled.
+    /// The path to the input file that will be transpiled, or the scan root for tree-wide formatter checks.
     input_file: []const u8,
     /// The path where the output file will be written.
     output_file: []const u8,
@@ -64,13 +64,26 @@ pub const CliOptions = struct {
     /// Exits with code 1 and prints the filename if the file would be changed by formatting.
     fmt_check: bool,
 
+    /// Flag to recursively check all `.fn` files under the current directory or the path given by `-in`.
+    fmt_check_all: bool,
+
     /// Flag to enable debug info: emits `#line` directives in generated C and passes `-g`
     /// to the C compiler so gdb/lldb/sanitizers map back to Fun source locations.
     debug_info: bool,
 
+    /// Flag to emit unused import/variable/function/compound warnings.
+    warn_unused: bool,
+
     /// Arguments passed to the compiled program (everything after `--`).
     program_args: [][]const u8,
 };
+
+pub fn free_options(allocator: mem.Allocator, options: CliOptions) void {
+    allocator.free(options.input_file);
+    allocator.free(options.output_file);
+    for (options.program_args) |arg| allocator.free(arg);
+    allocator.free(options.program_args);
+}
 
 /// Prints the usage information for the transpiler command-line interface.
 ///
@@ -85,18 +98,21 @@ pub const CliOptions = struct {
 fn print_usage(io: std.Io) void {
     std.Io.File.stderr().writeStreamingAll(io,
         \\Usage:
-        \\  fun -in <input_file> [-fmt | -fmt-all | -fmt-diag | -fmt-check] [-out <output_file>] [-no-exec] [-outf] [-ast] [-g] [-help] [-- <program args...>]
+        \\  fun -in <input_file> [-fmt | -fmt-all | -fmt-diag | -fmt-check | -fmt-check-all] [-out <output_file>] [-no-exec] [-outf] [-ast] [-g] [-warn-unused] [-help] [-- <program args...>]
+        \\  fun -fmt-check-all [-in <file_or_dir>]
         \\  fun -version
         \\
         \\Arguments:
         \\  -help             Show this help message
         \\  -version          Print version and exit
-        \\  -in      <file>   Input file to compile (required)
+        \\  -in      <file>   Input file to compile (required except for -fmt-check-all)
         \\  -fmt              Format the input file in-place (optional)
         \\  -fmt-all          Format the input file and all locally imported modules (optional)
         \\  -fmt-diag         Format the input file in-place, then run diagnostics (optional)
         \\  -fmt-check        Check if the input file is formatted; exit 1 if not (optional)
+        \\  -fmt-check-all    Check every .fn file under the current directory or -in root; exit 1 if any are unformatted (optional)
         \\  -g                Enable debug info: source-level Fun→C mapping + DWARF symbols (optional)
+        \\  -warn-unused      Emit unused import/variable/function/compound warnings (optional)
         \\  -out     <file>   Output file (optional, defaults to input filename with .c extension)
         \\  -no-exec          Disable automatic compilation and execution (optional, execution enabled by default)
         \\  -outf             Generate .c output file (optional, disabled by default)
@@ -137,7 +153,9 @@ pub fn parse_args(allocator: mem.Allocator, io: std.Io, argv: []const []const u8
     var fmt_all = false;
     var fmt_diag = false;
     var fmt_check = false;
+    var fmt_check_all = false;
     var debug_info = false;
+    var warn_unused = false;
     var program_args = ArrayList([]const u8).init(allocator);
     errdefer {
         for (program_args.items) |p| allocator.free(p);
@@ -162,10 +180,6 @@ pub fn parse_args(allocator: mem.Allocator, io: std.Io, argv: []const []const u8
             if (i >= argv.len) return CliError.MissingInputFile;
             const file = argv[i];
             i += 1;
-            // Validate file extension
-            if (!std.mem.endsWith(u8, file, ".fn")) {
-                return CliError.InvalidInputExtension;
-            }
             input_file = try allocator.dupe(u8, file);
         } else if (std.mem.eql(u8, arg, "-out")) {
             if (i >= argv.len) return CliError.MissingOutputFile;
@@ -191,14 +205,27 @@ pub fn parse_args(allocator: mem.Allocator, io: std.Io, argv: []const []const u8
             fmt_diag = true;
         } else if (std.mem.eql(u8, arg, "-fmt-check")) {
             fmt_check = true;
+        } else if (std.mem.eql(u8, arg, "-fmt-check-all")) {
+            fmt_check_all = true;
         } else if (std.mem.eql(u8, arg, "-g")) {
             debug_info = true;
+        } else if (std.mem.eql(u8, arg, "-warn-unused")) {
+            warn_unused = true;
         }
     }
 
-    const ifilepath = input_file orelse return CliError.MissingInputFile;
+    const ifilepath = input_file orelse blk: {
+        if (fmt_check_all) break :blk try allocator.dupe(u8, ".");
+        return CliError.MissingInputFile;
+    };
 
-    const ofilepath = if (output_file) |path| path else blk: {
+    if (!fmt_check_all and !std.mem.endsWith(u8, ifilepath, ".fn")) {
+        return CliError.InvalidInputExtension;
+    }
+
+    const ofilepath = if (output_file) |path| path else if (fmt_check_all)
+        try allocator.dupe(u8, "")
+    else blk: {
         // Create default output path by replacing extension with .c
         const input_path = std.fs.path.basename(ifilepath);
         const extension_index = std.mem.lastIndexOf(u8, input_path, ".");
@@ -218,9 +245,114 @@ pub fn parse_args(allocator: mem.Allocator, io: std.Io, argv: []const []const u8
         .fmt_all = fmt_all,
         .fmt_diag = fmt_diag,
         .fmt_check = fmt_check,
+        .fmt_check_all = fmt_check_all,
         .debug_info = debug_info,
+        .warn_unused = warn_unused,
         .program_args = try program_args.toOwnedSlice(),
     };
+}
+
+fn dir_exists(io: std.Io, path: []const u8) bool {
+    if (std.fs.path.isAbsolute(path)) {
+        var dir = std.Io.Dir.openDirAbsolute(io, path, .{}) catch return false;
+        dir.close(io);
+        return true;
+    }
+
+    var dir = std.Io.Dir.cwd().openDir(io, path, .{}) catch return false;
+    dir.close(io);
+    return true;
+}
+
+fn should_skip_fmt_check_dir(name: []const u8) bool {
+    return std.mem.eql(u8, name, ".funsand") or
+        std.mem.eql(u8, name, ".git") or
+        std.mem.eql(u8, name, ".zig-cache") or
+        std.mem.eql(u8, name, "build") or
+        std.mem.eql(u8, name, "zig-out");
+}
+
+fn collect_fun_files_recursive(
+    allocator: mem.Allocator,
+    io: std.Io,
+    dir_path: []const u8,
+    out: *ArrayList([]const u8),
+) !void {
+    var dir = if (std.fs.path.isAbsolute(dir_path))
+        try std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true })
+    else
+        try std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true });
+    defer dir.close(io);
+
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        switch (entry.kind) {
+            .directory => {
+                if (should_skip_fmt_check_dir(entry.name)) continue;
+                const child_path = try std.fs.path.join(allocator, &.{ dir_path, entry.name });
+                defer allocator.free(child_path);
+                try collect_fun_files_recursive(allocator, io, child_path, out);
+            },
+            .file => {
+                if (!std.mem.endsWith(u8, entry.name, ".fn")) continue;
+                try out.append(try std.fs.path.join(allocator, &.{ dir_path, entry.name }));
+            },
+            else => {},
+        }
+    }
+}
+
+fn fmt_check_root_path(allocator: mem.Allocator, io: std.Io, input_path: []const u8) ![]const u8 {
+    if (dir_exists(io, input_path)) {
+        return allocator.dupe(u8, input_path);
+    }
+
+    if (std.mem.endsWith(u8, input_path, ".fn")) {
+        const parent = std.fs.path.dirname(input_path) orelse ".";
+        return allocator.dupe(u8, parent);
+    }
+
+    return allocator.dupe(u8, input_path);
+}
+
+pub fn free_owned_paths(allocator: mem.Allocator, paths: []const []const u8) void {
+    for (paths) |path| allocator.free(path);
+    allocator.free(paths);
+}
+
+pub fn collect_unformatted_fun_files(allocator: mem.Allocator, io: std.Io, input_path: []const u8) ![]const []const u8 {
+    const root_path = try fmt_check_root_path(allocator, io, input_path);
+    defer allocator.free(root_path);
+
+    var files = ArrayList([]const u8).init(allocator);
+    errdefer {
+        for (files.items) |path| allocator.free(path);
+        files.deinit();
+    }
+    try collect_fun_files_recursive(allocator, io, root_path, &files);
+
+    std.sort.pdq([]const u8, files.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+
+    var offenders = ArrayList([]const u8).init(allocator);
+    errdefer {
+        for (offenders.items) |path| allocator.free(path);
+        offenders.deinit();
+    }
+
+    for (files.items) |path| {
+        if (try format_file_check(allocator, io, path)) {
+            allocator.free(path);
+            continue;
+        }
+        try offenders.append(path);
+    }
+    files.deinit();
+
+    return offenders.toOwnedSlice();
 }
 
 fn build_full_import_path_for_formatter(allocator: mem.Allocator, input_file_path: []const u8, import_path: []const u8) ![]const u8 {
@@ -602,6 +734,34 @@ fn nextSignificantIndex(toks: []const token.Token, start_at: usize) ?usize {
 fn nextSignificantToken(toks: []const token.Token, start_at: usize) ?token.Token {
     const idx = nextSignificantIndex(toks, start_at) orelse return null;
     return toks[idx];
+}
+
+fn isForLoopColonContext(toks: []const token.Token, colon_idx: usize) bool {
+    if (colon_idx >= toks.len) return false;
+    const colon = toks[colon_idx];
+    const is_colon = switch (colon.type) {
+        .Symbol => colon.data.cval == ':',
+        .Operator => std.mem.eql(u8, colon.data.sval.items, ":"),
+        else => false,
+    };
+    if (!is_colon) return false;
+
+    var i = colon_idx;
+    while (i > 0) {
+        i -= 1;
+        const t = toks[i];
+        if (t.type == .Comment) continue;
+        if (t.type == .NewLine) return false;
+
+        if (t.type == .Keyword and std.mem.eql(u8, t.data.sval.items, "for")) return true;
+
+        if (t.type == .Symbol) {
+            const c = t.data.cval;
+            if (c == ';' or c == '{' or c == '}') return false;
+        }
+    }
+
+    return false;
 }
 
 fn isPointerTypeStarContext(toks: []const token.Token, idx: usize, prev: token.Token, in_decl_only_ctx: bool) bool {
@@ -1593,7 +1753,8 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                     if ((c2 == '<' and (generic_open or generic_angle_depth > 0)) or (c2 == '>' and generic_angle_depth > 0)) {
                         break :blk false;
                     }
-                    if (c2 == ',' or c2 == ';' or c2 == ')' or c2 == ']' or c2 == '}' or c2 == ':') break :blk false;
+                    if (c2 == ':') break :blk isForLoopColonContext(toks, idx);
+                    if (c2 == ',' or c2 == ';' or c2 == ')' or c2 == ']' or c2 == '}') break :blk false;
                     if (c2 == '{') break :blk is_block_brace;
                     if (c2 == '*' or c2 == '+' or c2 == '-' or c2 == '/' or c2 == '%' or c2 == '<' or c2 == '>' or c2 == '=' or c2 == '&' or c2 == '|' or c2 == '^') {
                         break :blk true;
@@ -1648,9 +1809,11 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                     break :blk false;
                 }
                 if (t2.type == .Operator) {
+                    if (std.mem.eql(u8, t2.data.sval.items, ":")) break :blk isForLoopColonContext(toks, idx);
                     break :blk operator_needs_spaces(t2.data.sval.items);
                 }
                 if (pt2.type == .Operator) {
+                    if (std.mem.eql(u8, pt2.data.sval.items, ":") and isForLoopColonContext(toks, idx - 1)) break :blk true;
                     break :blk operator_needs_spaces(pt2.data.sval.items);
                 }
                 if (is_word_like(pt2) and is_word_like(t2)) break :blk true;

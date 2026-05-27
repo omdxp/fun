@@ -103,6 +103,32 @@ test "for array index and item method call transpiles" {
     try std.testing.expect(true);
 }
 
+test "for Vec values transpiles via len and data" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "for_vec_values.fn";
+
+    const input =
+        "imp std.io as io;\n" ++
+        "imp std.json;\n" ++
+        "fun main() {\n" ++
+        "  JsonObject obj = parse_object(\"{'key': 'value'}\");\n" ++
+        "  let vals = obj.values.values();\n" ++
+        "  for val : vals {\n" ++
+        "    io.println(val);\n" ++
+        "  }\n" ++
+        "  vals.free();\n" ++
+        "  obj.free();\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "for (int64_t __fun_i = 0; __fun_i < vals.len; __fun_i++)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "__auto_type val = vals.data[__fun_i];") != null);
+
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
 test "for condition transpiles to while" {
     const allocator = std.testing.allocator;
     const ifilepath = "for_condition.fn";

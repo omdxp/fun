@@ -499,6 +499,180 @@ test "-fmt-all formats local imports recursively (skips std.*)" {
     try std.testing.expectEqualStrings(expected_imported, got_import);
 }
 
+test "-fmt-check-all finds unformatted files recursively and skips generated dirs" {
+    const allocator = std.testing.allocator;
+
+    const dir = try makeTempDir(allocator, "fmt_check_all");
+    defer {
+        deleteTreeIfExists(dir);
+        allocator.free(dir);
+    }
+
+    const formatted_path = try writeFileInDir(
+        allocator,
+        dir,
+        "src/good.fn",
+        "fun good() num {\n  ret 1;\n}\n",
+    );
+    defer allocator.free(formatted_path);
+
+    const bad_path = try writeFileInDir(
+        allocator,
+        dir,
+        "src/bad.fn",
+        "fun  bad() num{ret 2;}\n",
+    );
+    defer allocator.free(bad_path);
+
+    const nested_bad_path = try writeFileInDir(
+        allocator,
+        dir,
+        "src/nested/worse.fn",
+        "fun  worse() num{ret 3;}\n",
+    );
+    defer allocator.free(nested_bad_path);
+
+    const ignored_build_path = try writeFileInDir(
+        allocator,
+        dir,
+        "build/ignored.fn",
+        "fun  ignored() num{ret 0;}\n",
+    );
+    defer allocator.free(ignored_build_path);
+
+    const offenders = try cli.collect_unformatted_fun_files(allocator, std.testing.io, dir);
+    defer cli.free_owned_paths(allocator, offenders);
+
+    try std.testing.expectEqual(@as(usize, 2), offenders.len);
+    try std.testing.expectEqualStrings(bad_path, offenders[0]);
+    try std.testing.expectEqualStrings(nested_bad_path, offenders[1]);
+}
+
+test "-fmt-check-all uses a file input as the scan root parent" {
+    const allocator = std.testing.allocator;
+
+    const dir = try makeTempDir(allocator, "fmt_check_all_parent");
+    defer {
+        deleteTreeIfExists(dir);
+        allocator.free(dir);
+    }
+
+    const main_path = try writeFileInDir(
+        allocator,
+        dir,
+        "app/main.fn",
+        "fun main() num {\n  ret 0;\n}\n",
+    );
+    defer allocator.free(main_path);
+
+    const bad_path = try writeFileInDir(
+        allocator,
+        dir,
+        "app/features/bad.fn",
+        "fun  bad() num{ret 1;}\n",
+    );
+    defer allocator.free(bad_path);
+
+    const offenders = try cli.collect_unformatted_fun_files(allocator, std.testing.io, main_path);
+    defer cli.free_owned_paths(allocator, offenders);
+
+    try std.testing.expectEqual(@as(usize, 1), offenders.len);
+    try std.testing.expectEqualStrings(bad_path, offenders[0]);
+}
+
+test "-fmt preserves indexed for-range loop syntax" {
+    const allocator = std.testing.allocator;
+
+    const ugly =
+        "fun main(){let a=[1,2,3];for i,item :: a {println_fmt(\"%d %d\",i,item);}}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_for_indexed", ugly);
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+
+    const expected =
+        "fun main() {\n" ++
+        "  let a = [1, 2, 3];\n" ++
+        "  for i, item :: a {\n" ++
+        "    println_fmt(\"%d %d\", i, item);\n" ++
+        "  }\n" ++
+        "}\n";
+
+    try std.testing.expectEqualStrings(expected, got);
+}
+
+test "-fmt preserves single-variable for-range loop syntax" {
+    const allocator = std.testing.allocator;
+
+    const ugly =
+        "fun main(){let items=[1,2,3];for i : items {println_fmt(\"%d\",i);}}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_for_single", ugly);
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+
+    const expected =
+        "fun main() {\n" ++
+        "  let items = [1, 2, 3];\n" ++
+        "  for i : items {\n" ++
+        "    println_fmt(\"%d\", i);\n" ++
+        "  }\n" ++
+        "}\n";
+
+    try std.testing.expectEqualStrings(expected, got);
+}
+
+test "-fmt formats nested blocks with comment lines" {
+    const allocator = std.testing.allocator;
+
+    const ugly =
+        "fun main(){\n" ++
+        "{\n" ++
+        "defer println(\"done\");\n" ++
+        "//comment about the block\n" ++
+        "num value=1;\n" ++
+        "println_fmt(\"%d\",value);\n" ++
+        "}\n" ++
+        "}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_nested_block", ugly);
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+
+    const expected =
+        "fun main() {\n" ++
+        "  {\n" ++
+        "    defer println(\"done\");\n" ++
+        "    // comment about the block\n" ++
+        "    num value = 1;\n" ++
+        "    println_fmt(\"%d\", value);\n" ++
+        "  }\n" ++
+        "}\n";
+
+    try std.testing.expectEqualStrings(expected, got);
+}
+
 test "-fmt output still parses (quirks/ops)" {
     const allocator = std.testing.allocator;
 

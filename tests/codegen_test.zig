@@ -1490,6 +1490,105 @@ test "aliased io.format with bare placeholder renders values" {
     try std.testing.expectEqualStrings("Hello, Alice!", got);
 }
 
+test "aliased math rand option program compiles and runs" {
+    const allocator = std.testing.allocator;
+    const input_path = "codegen_alias_math_rand_option_main.fn";
+    const c_path = "codegen_alias_math_rand_option_main.c";
+    const out_path = "codegen_alias_math_rand_option_out.txt";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, input_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, out_path) catch {};
+
+    const input =
+        "imp std.io as io;\n" ++
+        "imp std.math as m;\n" ++
+        "imp std.rand as r;\n" ++
+        "imp std.option;\n\n" ++
+        "compound Person<T> {\n" ++
+        "  T name;\n" ++
+        "  num age;\n" ++
+        "  Option<str> nickname;\n" ++
+        "}\n\n" ++
+        "impl Person<T> {\n" ++
+        "  new(T name, num age) Person<T> {\n" ++
+        "    ret Person{name = name, age = age, nickname = some(\"none\")};\n" ++
+        "  }\n" ++
+        "}\n\n" ++
+        "fun main() {\n" ++
+        "  let root = m.sqrt_dec(4);\n" ++
+        "  r.Rand rand = r.rand_init(42);\n" ++
+        "  let flip = rand.chance(0.5);\n" ++
+        "\n" ++
+        "  Person<str> p;\n" ++
+        "  p = p.new(\"Alice\", 30);\n" ++
+        "  p.nickname = some(\"Ally\");\n" ++
+        "  let nick = p.nickname.unwrap_or(\"none\");\n" ++
+        "\n" ++
+        "  _ = root;\n" ++
+        "  _ = flip;\n" ++
+        "  str msg = io.format(\"{str}\", nick);\n" ++
+        "  _ = io.write_all(\"codegen_alias_math_rand_option_out.txt\", msg);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, input_path, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{});
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+
+    try cli.compile_and_run(allocator, std.testing.io, c_path, true, input_path, &.{}, false);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, out_path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+    try std.testing.expectEqualStrings("Ally", got);
+}
+
+test "aliased sys try_env and log program compiles and runs" {
+    const allocator = std.testing.allocator;
+    const input_path = "codegen_sys_log_alias_main.fn";
+    const c_path = "codegen_sys_log_alias_main.c";
+    const out_path = "codegen_sys_log_alias_out.txt";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, input_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, out_path) catch {};
+
+    const input =
+        "imp std.io as io;\n" ++
+        "imp std.log as l;\n" ++
+        "imp std.result;\n" ++
+        "imp std.sys as sys;\n\n" ++
+        "fun main() {\n" ++
+        "  let env = sys.try_env(\"PATH\");\n" ++
+        "  Result<str> copy = env;\n" ++
+        "  str status = \"err\";\n" ++
+        "  if copy.is_ok() {\n" ++
+        "    status = \"ok\";\n" ++
+        "  }\n" ++
+        "  l.log(l.LogLevel.Info, \"env check\");\n" ++
+        "  l.Logger logger = l.logger_init(l.LogLevel.Debug);\n" ++
+        "  logger.warn(\"warn\");\n" ++
+        "  _ = io.write_all(\"codegen_sys_log_alias_out.txt\", status);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, input_path, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{});
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+
+    try cli.compile_and_run(allocator, std.testing.io, c_path, true, input_path, &.{}, false);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, out_path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+    try std.testing.expectEqualStrings("ok", got);
+}
+
 test "defer emits in LIFO order before return" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_defer_lifo.fn";

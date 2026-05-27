@@ -122,6 +122,167 @@ const getOrInitFlsTempDirCached = index_mod.getOrInitFlsTempDirCached;
 const IndexBuildScope = index_mod.IndexBuildScope;
 const GuessedCallSignature = index_mod.GuessedCallSignature;
 
+fn isLitePunct(t: TokenLite, ch: u8) bool {
+    return (t.kind == .symbol or t.kind == .operator) and t.text.len == 1 and t.text[0] == ch;
+}
+
+fn fieldNameIndexAfterTypeLite(tokens: []const TokenLite, type_i: usize) ?usize {
+    var field_name_i = nextNonTrivialTokenLite(tokens, type_i + 1) orelse return null;
+
+    if (field_name_i < tokens.len and isLitePunct(tokens[field_name_i], '<')) {
+        field_name_i = skipGenericArgsLite(tokens, field_name_i);
+    }
+
+    while (field_name_i < tokens.len and isLitePunct(tokens[field_name_i], '[')) {
+        const rbr_i = nextNonTrivialTokenLite(tokens, field_name_i + 1) orelse return null;
+        if (!isLitePunct(tokens[rbr_i], ']')) break;
+        field_name_i = nextNonTrivialTokenLite(tokens, rbr_i + 1) orelse return null;
+    }
+
+    while (field_name_i < tokens.len and (isLitePunct(tokens[field_name_i], '*') or isLitePunct(tokens[field_name_i], '&'))) {
+        field_name_i = nextNonTrivialTokenLite(tokens, field_name_i + 1) orelse return null;
+    }
+
+    return field_name_i;
+}
+
+fn buildFieldTypeTextFromTokensLite(allocator: Allocator, tokens: []const TokenLite, type_i: usize) ?[]u8 {
+    if (type_i >= tokens.len) return null;
+
+    var buf = ArrayList(u8).init(allocator);
+    errdefer buf.deinit();
+    buf.appendSlice(tokens[type_i].text) catch return null;
+
+    var cursor = nextNonTrivialTokenLite(tokens, type_i + 1) orelse return buf.toOwnedSlice() catch null;
+
+    if (cursor < tokens.len and isLitePunct(tokens[cursor], '<')) {
+        var generic_depth: i64 = 0;
+        while (cursor < tokens.len) : (cursor += 1) {
+            const t = tokens[cursor];
+            if (t.kind == .comment) continue;
+
+            if (isLitePunct(t, '<')) {
+                generic_depth += 1;
+                buf.append('<') catch return null;
+                continue;
+            }
+
+            if (isLitePunct(t, '>')) {
+                generic_depth -= 1;
+                buf.append('>') catch return null;
+                if (generic_depth == 0) {
+                    cursor = nextNonTrivialTokenLite(tokens, cursor + 1) orelse tokens.len;
+                    break;
+                }
+                continue;
+            }
+
+            if (generic_depth <= 0) break;
+
+            if (isLitePunct(t, ',')) {
+                buf.appendSlice(", ") catch return null;
+                continue;
+            }
+
+            buf.appendSlice(t.text) catch return null;
+        }
+    }
+
+    while (cursor < tokens.len and isLitePunct(tokens[cursor], '[')) {
+        const rbr_i = nextNonTrivialTokenLite(tokens, cursor + 1) orelse break;
+        if (!isLitePunct(tokens[rbr_i], ']')) break;
+        buf.appendSlice("[]") catch return null;
+        cursor = nextNonTrivialTokenLite(tokens, rbr_i + 1) orelse tokens.len;
+    }
+
+    while (cursor < tokens.len and (isLitePunct(tokens[cursor], '*') or isLitePunct(tokens[cursor], '&'))) {
+        buf.appendSlice(tokens[cursor].text) catch return null;
+        cursor = nextNonTrivialTokenLite(tokens, cursor + 1) orelse tokens.len;
+    }
+
+    return buf.toOwnedSlice() catch null;
+}
+
+fn findFieldTypeFromCurrentDocTokens(idx: *const Index, container_type: []const u8, field_name: []const u8) ?[]u8 {
+    const localBaseTypeName = struct {
+        fn call(name: []const u8) []const u8 {
+            var base = if (std.mem.indexOfScalar(u8, name, '<')) |idx_lt| name[0..idx_lt] else name;
+            base = std.mem.trim(u8, base, " \t\r\n");
+
+            while (base.len >= 2 and std.mem.eql(u8, base[base.len - 2 ..], "[]")) {
+                base = std.mem.trim(u8, base[0 .. base.len - 2], " \t\r\n");
+            }
+            while (base.len != 0) {
+                const ch = base[base.len - 1];
+                if (ch == '*' or ch == '&') {
+                    base = std.mem.trim(u8, base[0 .. base.len - 1], " \t\r\n");
+                    continue;
+                }
+                break;
+            }
+            return base;
+        }
+    }.call;
+
+    const isIdentLite = struct {
+        fn call(t: TokenLite) bool {
+            return t.kind == .identifier;
+        }
+    }.call;
+
+    const isTypeLike = struct {
+        fn call(t: TokenLite) bool {
+            if (t.kind == .identifier) return true;
+            if (t.kind != .keyword) return false;
+            const s = t.text;
+            return std.mem.eql(u8, s, "num") or std.mem.eql(u8, s, "dec") or std.mem.eql(u8, s, "str") or std.mem.eql(u8, s, "bin") or std.mem.eql(u8, s, "chr") or std.mem.eql(u8, s, "raw") or std.mem.eql(u8, s, "void") or std.mem.eql(u8, s, "f32") or std.mem.eql(u8, s, "f64") or std.mem.eql(u8, s, "i8") or std.mem.eql(u8, s, "i16") or std.mem.eql(u8, s, "i32") or std.mem.eql(u8, s, "i64") or std.mem.eql(u8, s, "u8") or std.mem.eql(u8, s, "u16") or std.mem.eql(u8, s, "u32") or std.mem.eql(u8, s, "u64");
+        }
+    }.call;
+
+    const target_type = localBaseTypeName(container_type);
+    const arena_alloc = @constCast(&idx.arena).allocator();
+
+    var i: usize = 0;
+    while (i < idx.tokens.len) : (i += 1) {
+        if (idx.tokens[i].kind != .keyword or !std.mem.eql(u8, idx.tokens[i].text, "compound")) continue;
+
+        const name_i = nextNonTrivialTokenLite(idx.tokens, i + 1) orelse continue;
+        if (!isIdentLite(idx.tokens[name_i])) continue;
+        if (!std.mem.eql(u8, localBaseTypeName(idx.tokens[name_i].text), target_type)) continue;
+
+        var j_opt = nextNonTrivialTokenLite(idx.tokens, name_i + 1);
+        while (j_opt) |j| {
+            if (!isLitePunct(idx.tokens[j], '{')) {
+                j_opt = nextNonTrivialTokenLite(idx.tokens, j + 1);
+                continue;
+            }
+
+            var depth: i64 = 1;
+            var k: usize = j + 1;
+            while (k < idx.tokens.len and depth > 0) : (k += 1) {
+                const tk = idx.tokens[k];
+                if (isLitePunct(tk, '{')) depth += 1;
+                if (isLitePunct(tk, '}')) depth -= 1;
+                if (depth != 1) continue;
+                if (!isTypeLike(tk)) continue;
+
+                const field_name_i = fieldNameIndexAfterTypeLite(idx.tokens, k) orelse continue;
+                if (!isIdentLite(idx.tokens[field_name_i])) continue;
+                if (!std.mem.eql(u8, idx.tokens[field_name_i].text, field_name)) continue;
+
+                const after_name_i = nextNonTrivialTokenLite(idx.tokens, field_name_i + 1) orelse continue;
+                if (!isLitePunct(idx.tokens[after_name_i], ';')) continue;
+
+                return buildFieldTypeTextFromTokensLite(arena_alloc, idx.tokens, k);
+            }
+
+            break;
+        }
+    }
+
+    return null;
+}
+
 /// Cached result of a single diagnostic subprocess run.
 /// Keyed in `LspServer.diag_cache` by the URI of the file that was compiled.
 /// Cached result of a single diagnostic subprocess run.
@@ -187,7 +348,7 @@ pub const LspServer = struct {
     stdin: std.Io.File,
     stdout: std.Io.File,
     fun_exe_path: []const u8,
-    fls_exe_path: ?[]u8 = null,
+    fls_exe_path: ?[:0]u8 = null,
     published_diag_uris: std.StringHashMap(void),
     root_uri: ?[]u8 = null,
     root_path: ?[]u8 = null,
@@ -1476,7 +1637,10 @@ pub const LspServer = struct {
         while (start_i >= 2) {
             const dot = idx.tokens[start_i - 1];
             const left = idx.tokens[start_i - 2];
-            if (isDotToken(dot) and left.kind == .identifier) {
+            if (isDotToken(dot) and left.kind == .identifier and
+                left.range.start.line == dot.range.start.line and
+                dot.range.start.line == idx.tokens[start_i].range.start.line)
+            {
                 start_i -= 2;
                 continue;
             }
@@ -1493,38 +1657,124 @@ pub const LspServer = struct {
             if (j == last_ident_i) break;
             if (j + 2 > last_ident_i) return null;
             if (!isDotToken(idx.tokens[j + 1])) return null;
+            if (idx.tokens[j].range.start.line != idx.tokens[j + 1].range.start.line or
+                idx.tokens[j + 1].range.start.line != idx.tokens[j + 2].range.start.line)
+            {
+                return null;
+            }
             j += 2;
         }
         if (ids.items.len == 0) return null;
 
-        const base_name = idx.tokens[ids.items[0]].text;
         var current_type: ?[]const u8 = null;
+        var segment_start: usize = 1;
 
-        if (std.mem.eql(u8, base_name, "self")) {
-            current_type = self.guessEnclosingImplType(idx, at);
-        } else if (self.isKnownTypeName(uri, base_name)) {
-            current_type = base_name;
+        if (start_i >= 2 and isDotToken(idx.tokens[start_i - 1]) and idx.tokens[start_i - 1].range.start.line == idx.tokens[start_i].range.start.line) {
+            current_type = self.resolveTypeOfExprEndingAtToken(idx, uri, at, start_i - 2);
+            segment_start = 0;
         } else {
-            current_type = self.guessVariableType(idx, uri, base_name, at);
+            const base_name = idx.tokens[ids.items[0]].text;
+            if (std.mem.eql(u8, base_name, "self")) {
+                current_type = self.guessEnclosingImplType(idx, at);
+            } else if (self.isKnownTypeName(uri, base_name)) {
+                current_type = base_name;
+            } else {
+                current_type = self.guessVariableType(idx, uri, base_name, at);
+            }
+            if (self.debug_definitions) {
+                self.dbg(true, "defs", "chain base name={s} at=({d},{d}) type={s}", .{
+                    base_name,
+                    at.line,
+                    at.character,
+                    current_type orelse "",
+                });
+            }
         }
         if (current_type == null) return null;
 
-        if (ids.items.len == 1) return current_type.?;
+        if (segment_start >= ids.items.len) return current_type.?;
 
         // Walk remaining segments as fields/properties.
-        var si: usize = 1;
+        var si: usize = segment_start;
         while (si < ids.items.len) : (si += 1) {
             const seg = idx.tokens[ids.items[si]].text;
             const field = self.findMemberByContainer(uri, current_type.?, seg, .field) orelse
-                self.findMemberByContainer(uri, current_type.?, seg, .property) orelse return null;
-            if (field.sym.value_type) |vt| {
-                current_type = vt;
-            } else {
-                return null;
+                self.findMemberByContainer(uri, current_type.?, seg, .property);
+            if (field) |hit| {
+                if (self.debug_definitions) {
+                    self.dbg(true, "defs", "chain segment owner={s} seg={s} field_type={s}", .{
+                        current_type.?,
+                        seg,
+                        hit.sym.value_type orelse "",
+                    });
+                }
+                if (hit.sym.value_type) |vt| {
+                    current_type = vt;
+                    continue;
+                }
             }
+
+            const fallback_vt = findFieldTypeFromCurrentDocTokens(idx, current_type.?, seg) orelse return null;
+            if (self.debug_definitions) {
+                self.dbg(true, "defs", "chain segment fallback owner={s} seg={s} field_type={s}", .{
+                    current_type.?,
+                    seg,
+                    fallback_vt,
+                });
+            }
+            current_type = fallback_vt;
         }
 
         return current_type.?;
+    }
+
+    fn resolveTypeOfExprEndingAtToken(self: *LspServer, idx: *const Index, uri: []const u8, at: Position, expr_last_i: usize) ?[]const u8 {
+        if (expr_last_i >= idx.tokens.len) return null;
+
+        const tok = idx.tokens[expr_last_i];
+        if (tok.kind == .identifier) {
+            if (self.resolveTypeOfChainUpTo(idx, uri, at, expr_last_i)) |resolved| return resolved;
+
+            if (std.mem.eql(u8, tok.text, "self")) return self.guessEnclosingImplType(idx, at);
+            if (self.isKnownTypeName(uri, tok.text)) return tok.text;
+            return self.guessVariableType(idx, uri, tok.text, at);
+        }
+
+        if ((tok.kind == .symbol or tok.kind == .operator) and std.mem.eql(u8, tok.text, "]")) {
+            const lbrack_i = findMatchingLBracketLite(idx.tokens, expr_last_i) orelse return null;
+            const base_end_i = prevNonTrivialTokenLite(idx.tokens, lbrack_i) orelse return null;
+            const base_type = self.resolveTypeOfExprEndingAtToken(idx, uri, at, base_end_i) orelse return null;
+            return stripOneArraySuffix(base_type);
+        }
+
+        return null;
+    }
+
+    fn findMatchingLBracketLite(tokens: []const TokenLite, rbrack_i: usize) ?usize {
+        if (rbrack_i >= tokens.len) return null;
+        var depth: i64 = 0;
+        var i: isize = @intCast(rbrack_i);
+        while (i >= 0) : (i -= 1) {
+            const t = tokens[@intCast(i)];
+            if (t.kind != .symbol and t.kind != .operator) continue;
+            if (std.mem.eql(u8, t.text, "]")) {
+                depth += 1;
+                continue;
+            }
+            if (std.mem.eql(u8, t.text, "[")) {
+                depth -= 1;
+                if (depth == 0) return @intCast(i);
+            }
+        }
+        return null;
+    }
+
+    fn stripOneArraySuffix(name: []const u8) ?[]const u8 {
+        var trimmed = std.mem.trim(u8, name, " \t\r\n");
+        if (trimmed.len < 2 or !std.mem.eql(u8, trimmed[trimmed.len - 2 ..], "[]")) return null;
+        trimmed = std.mem.trim(u8, trimmed[0 .. trimmed.len - 2], " \t\r\n");
+        if (trimmed.len == 0) return null;
+        return trimmed;
     }
 
     fn baseTypeNameForLookup(name: []const u8) []const u8 {
@@ -1776,6 +2026,193 @@ pub const LspServer = struct {
         return null;
     }
 
+    fn specializeMemberLabelForReceiver(
+        self: *LspServer,
+        allocator: Allocator,
+        declared_container_type: []const u8,
+        receiver_type: []const u8,
+        label: []const u8,
+    ) !?[]u8 {
+        _ = self;
+        const GenericCore = struct {
+            base: []const u8,
+            inner: []const u8,
+        };
+
+        const TypeBinding = struct {
+            param: []const u8,
+            arg: []const u8,
+        };
+
+        const parseGenericCore = struct {
+            fn call(type_name_raw: []const u8) ?GenericCore {
+                const type_name = std.mem.trim(u8, type_name_raw, " \t\r\n");
+                const lt = std.mem.indexOfScalar(u8, type_name, '<') orelse return null;
+
+                var depth: i64 = 0;
+                var close_i: ?usize = null;
+                var i = lt;
+                while (i < type_name.len) : (i += 1) {
+                    const ch = type_name[i];
+                    if (ch == '<') {
+                        depth += 1;
+                        continue;
+                    }
+                    if (ch == '>') {
+                        depth -= 1;
+                        if (depth == 0) {
+                            close_i = i;
+                            break;
+                        }
+                    }
+                }
+                if (close_i == null) return null;
+
+                const tail = std.mem.trim(u8, type_name[close_i.? + 1 ..], " \t\r\n");
+                if (tail.len != 0) return null;
+
+                const base = std.mem.trim(u8, type_name[0..lt], " \t\r\n");
+                const inner = std.mem.trim(u8, type_name[lt + 1 .. close_i.?], " \t\r\n");
+                if (base.len == 0 or inner.len == 0) return null;
+                return .{ .base = base, .inner = inner };
+            }
+        }.call;
+
+        const splitTopLevelCsv = struct {
+            fn call(text: []const u8, out_list: *ArrayList([]const u8)) !void {
+                var start: usize = 0;
+                var angle_depth: i64 = 0;
+                var paren_depth: i64 = 0;
+                var bracket_depth: i64 = 0;
+                var i: usize = 0;
+
+                while (i < text.len) : (i += 1) {
+                    const ch = text[i];
+                    switch (ch) {
+                        '<' => angle_depth += 1,
+                        '>' => {
+                            if (angle_depth > 0) angle_depth -= 1;
+                        },
+                        '(' => paren_depth += 1,
+                        ')' => {
+                            if (paren_depth > 0) paren_depth -= 1;
+                        },
+                        '[' => bracket_depth += 1,
+                        ']' => {
+                            if (bracket_depth > 0) bracket_depth -= 1;
+                        },
+                        ',' => {
+                            if (angle_depth == 0 and paren_depth == 0 and bracket_depth == 0) {
+                                const seg = std.mem.trim(u8, text[start..i], " \t\r\n");
+                                if (seg.len != 0) try out_list.append(seg);
+                                start = i + 1;
+                            }
+                        },
+                        else => {},
+                    }
+                }
+
+                const tail = std.mem.trim(u8, text[start..], " \t\r\n");
+                if (tail.len != 0) try out_list.append(tail);
+            }
+        }.call;
+
+        const normalizeGenericParamName = struct {
+            fn call(param_raw: []const u8) []const u8 {
+                var p = std.mem.trim(u8, param_raw, " \t\r\n");
+                if (p.len == 0) return p;
+                var cut = p.len;
+                var i: usize = 0;
+                while (i < p.len) : (i += 1) {
+                    const ch = p[i];
+                    if (ch == ':' or ch == '=' or ch == ' ' or ch == '\t') {
+                        cut = i;
+                        break;
+                    }
+                }
+                return std.mem.trim(u8, p[0..cut], " \t\r\n");
+            }
+        }.call;
+
+        const lookupBinding = struct {
+            fn call(bindings: []const TypeBinding, name: []const u8) ?[]const u8 {
+                for (bindings) |b| {
+                    if (std.mem.eql(u8, b.param, name)) return b.arg;
+                }
+                return null;
+            }
+        }.call;
+
+        const substituteLabelTypeParams = struct {
+            fn isIdentStart(ch: u8) bool {
+                return std.ascii.isAlphabetic(ch) or ch == '_';
+            }
+
+            fn isIdentChar(ch: u8) bool {
+                return std.ascii.isAlphanumeric(ch) or ch == '_';
+            }
+
+            fn call(allocator_: Allocator, in_label: []const u8, bindings: []const TypeBinding) ?[]u8 {
+                if (bindings.len == 0) return null;
+
+                var out = ArrayList(u8).init(allocator_);
+                defer out.deinit();
+
+                var changed = false;
+                var i: usize = 0;
+                while (i < in_label.len) {
+                    const ch = in_label[i];
+                    if (!isIdentStart(ch)) {
+                        out.append(ch) catch return null;
+                        i += 1;
+                        continue;
+                    }
+
+                    const start = i;
+                    i += 1;
+                    while (i < in_label.len and isIdentChar(in_label[i])) : (i += 1) {}
+                    const ident = in_label[start..i];
+                    if (lookupBinding(bindings, ident)) |mapped| {
+                        out.appendSlice(mapped) catch return null;
+                        changed = true;
+                    } else {
+                        out.appendSlice(ident) catch return null;
+                    }
+                }
+
+                if (!changed) return null;
+                return out.toOwnedSlice() catch null;
+            }
+        }.call;
+
+        const declared_core = parseGenericCore(declared_container_type) orelse return null;
+        const receiver_core = parseGenericCore(receiver_type) orelse return null;
+        if (!std.mem.eql(u8, baseTypeNameForLookup(declared_core.base), baseTypeNameForLookup(receiver_core.base))) return null;
+
+        var declared_params = ArrayList([]const u8).init(allocator);
+        defer declared_params.deinit();
+        var receiver_args = ArrayList([]const u8).init(allocator);
+        defer receiver_args.deinit();
+
+        try splitTopLevelCsv(declared_core.inner, &declared_params);
+        try splitTopLevelCsv(receiver_core.inner, &receiver_args);
+        if (declared_params.items.len == 0 or receiver_args.items.len == 0) return null;
+
+        var bindings = ArrayList(TypeBinding).init(allocator);
+        defer bindings.deinit();
+
+        const bind_n = @min(declared_params.items.len, receiver_args.items.len);
+        var i: usize = 0;
+        while (i < bind_n) : (i += 1) {
+            const param = normalizeGenericParamName(declared_params.items[i]);
+            const arg = std.mem.trim(u8, receiver_args.items[i], " \t\r\n");
+            if (param.len == 0 or arg.len == 0) continue;
+            try bindings.append(.{ .param = param, .arg = arg });
+        }
+
+        return substituteLabelTypeParams(allocator, label, bindings.items);
+    }
+
     fn hasTypeDeclarationInDoc(self: *LspServer, uri: []const u8, type_name: []const u8) bool {
         const doc = self.docs.get(uri) orelse return false;
         if (doc.index) |idx| {
@@ -1795,7 +2232,8 @@ pub const LspServer = struct {
             while (j < idx.tokens.len and idx.tokens[j].kind == .comment) : (j += 1) {}
             if (j >= idx.tokens.len) continue;
             if (idx.tokens[j].kind != .identifier) continue;
-            if (std.mem.eql(u8, idx.tokens[j].text, type_name)) return true;
+            const decl_name = if (std.mem.indexOfScalar(u8, idx.tokens[j].text, '<')) |idx_lt| idx.tokens[j].text[0..idx_lt] else idx.tokens[j].text;
+            if (std.mem.eql(u8, decl_name, type_name)) return true;
         }
         return false;
     }
@@ -1839,6 +2277,11 @@ pub const LspServer = struct {
         // If this document declares the type, do not merge same-name members
         // from other docs.
         if (self.hasTypeDeclarationInDoc(preferred_uri, container_base)) {
+            if (self.docs.get(preferred_uri)) |local_doc| {
+                if (local_doc.index) |local_idx| {
+                    try self.appendMemberCompletionsFromIndexForType(items, seen, local_idx, container_type, prefix);
+                }
+            }
             try self.appendMemberCompletionsFromUriForType(items, seen, preferred_uri, preferred_uri, container_base, container_type, prefix);
             return;
         }
@@ -1973,6 +2416,75 @@ pub const LspServer = struct {
         }
     }
 
+    fn appendMemberCompletionsFromIndexForType(
+        self: *LspServer,
+        items: *ArrayList(CompletionItem),
+        seen: *std.StringHashMap(void),
+        idx: *const Index,
+        container_type: []const u8,
+        prefix: []const u8,
+    ) !void {
+        const container_base = baseTypeNameForLookup(container_type);
+
+        for (idx.symbols) |s| {
+            if (s.container_fn_range != null) continue;
+            if (s.container_type == null) continue;
+            if (!std.mem.eql(u8, baseTypeNameForLookup(s.container_type.?), container_base)) continue;
+            if (!(s.kind == .field or s.kind == .property or s.kind == .method or s.kind == .enumMember)) continue;
+            if (prefix.len != 0 and !std.mem.startsWith(u8, s.name, prefix)) continue;
+
+            var key_buf = ArrayList(u8).init(self.allocator);
+            defer key_buf.deinit();
+            try key_buf.print("{s}:{s}", .{ @tagName(s.kind), s.name });
+            const key = try self.allocator.dupe(u8, key_buf.items);
+            if (seen.contains(key)) {
+                self.allocator.free(key);
+                continue;
+            }
+            try seen.put(key, {});
+
+            const kind: i64 = switch (s.kind) {
+                .method => 2,
+                .field, .property => 5,
+                .enumMember => 20,
+                else => 6,
+            };
+
+            const detail: ?[]u8 = blk: {
+                if (s.kind == .field or s.kind == .property) {
+                    if (s.value_type) |vt| {
+                        if (s.container_type) |declared_container| {
+                            if (try self.specializeMemberTypeForReceiver(declared_container, container_type, vt)) |specialized_vt| {
+                                break :blk specialized_vt;
+                            }
+                        }
+                        break :blk try self.allocator.dupe(u8, vt);
+                    }
+                }
+                if (s.kind == .enumMember) {
+                    var db = ArrayList(u8).init(self.allocator);
+                    defer db.deinit();
+                    try db.print("{s}.{s}", .{ container_type, s.name });
+                    break :blk try self.allocator.dupe(u8, db.items);
+                }
+                if (s.kind == .method) {
+                    if (s.detail) |d| break :blk try self.allocator.dupe(u8, d);
+                    var db = ArrayList(u8).init(self.allocator);
+                    defer db.deinit();
+                    try db.print("{s}.{s}", .{ container_type, s.name });
+                    break :blk try self.allocator.dupe(u8, db.items);
+                }
+                break :blk null;
+            };
+
+            try items.append(.{
+                .label = try self.allocator.dupe(u8, s.name),
+                .kind = kind,
+                .detail = detail,
+            });
+        }
+    }
+
     fn appendMemberFieldCompletionsFromTokens(
         self: *LspServer,
         items: *ArrayList(CompletionItem),
@@ -2020,7 +2532,7 @@ pub const LspServer = struct {
 
             const name_i = nextNonComment(idx.tokens, i + 1) orelse continue;
             if (!isIdentLite(idx.tokens[name_i])) continue;
-            if (!std.mem.eql(u8, idx.tokens[name_i].text, target_type)) continue;
+            if (!std.mem.eql(u8, baseTypeNameForLookup(idx.tokens[name_i].text), target_type)) continue;
 
             var j_opt = nextNonComment(idx.tokens, name_i + 1);
             while (j_opt) |j| {
@@ -2038,9 +2550,9 @@ pub const LspServer = struct {
                     if (depth != 1) continue;
                     if (!isTypeLike(tk)) continue;
 
-                    const field_name_i = nextNonComment(idx.tokens, k + 1) orelse continue;
+                    const field_name_i = fieldNameIndexAfterTypeLite(idx.tokens, k) orelse continue;
                     if (!isIdentLite(idx.tokens[field_name_i])) continue;
-                    const after_name_i = nextNonComment(idx.tokens, field_name_i + 1) orelse continue;
+                    const after_name_i = nextNonTrivialTokenLite(idx.tokens, field_name_i + 1) orelse continue;
                     if (!isSymbolLite(idx.tokens[after_name_i], ';')) continue;
 
                     const fname = idx.tokens[field_name_i].text;
@@ -2081,7 +2593,7 @@ pub const LspServer = struct {
 
             const name_i = nextNonComment(idx.tokens, i + 1) orelse continue;
             if (!isIdentLite(idx.tokens[name_i])) continue;
-            if (!std.mem.eql(u8, idx.tokens[name_i].text, target_type)) continue;
+            if (!std.mem.eql(u8, baseTypeNameForLookup(idx.tokens[name_i].text), target_type)) continue;
 
             var j_opt = nextNonComment(idx.tokens, name_i + 1);
             while (j_opt) |j| {
@@ -2210,6 +2722,22 @@ pub const LspServer = struct {
             allowed.deinit();
         }
 
+        for (idx.symbols) |s| {
+            const declared_container = s.container_type orelse continue;
+            if (!std.mem.eql(u8, baseTypeNameForLookup(declared_container), target_type)) continue;
+            switch (s.kind) {
+                .field, .property, .method, .enumMember => {
+                    const key = try self.allocator.dupe(u8, s.name);
+                    if (allowed.contains(key)) {
+                        self.allocator.free(key);
+                        continue;
+                    }
+                    try allowed.put(key, {});
+                },
+                else => {},
+            }
+        }
+
         const nextNonComment = struct {
             fn call(tokens: []const TokenLite, start_index: usize) ?usize {
                 var i = start_index;
@@ -2236,7 +2764,7 @@ pub const LspServer = struct {
 
             const name_i = nextNonComment(idx.tokens, i + 1) orelse continue;
             if (!isIdentLite(idx.tokens[name_i])) continue;
-            if (!std.mem.eql(u8, idx.tokens[name_i].text, target_type)) continue;
+            if (!std.mem.eql(u8, baseTypeNameForLookup(idx.tokens[name_i].text), target_type)) continue;
 
             var j_opt = nextNonComment(idx.tokens, name_i + 1);
             while (j_opt) |j| {
@@ -2254,9 +2782,9 @@ pub const LspServer = struct {
                     if (depth != 1) continue;
                     if (tk.kind != .identifier and tk.kind != .keyword) continue;
 
-                    const field_name_i = nextNonComment(idx.tokens, k + 1) orelse continue;
+                    const field_name_i = fieldNameIndexAfterTypeLite(idx.tokens, k) orelse continue;
                     if (!isIdentLite(idx.tokens[field_name_i])) continue;
-                    const after_name_i = nextNonComment(idx.tokens, field_name_i + 1) orelse continue;
+                    const after_name_i = nextNonTrivialTokenLite(idx.tokens, field_name_i + 1) orelse continue;
                     if (!isSymbolLite(idx.tokens[after_name_i], ';')) continue;
 
                     const key = try self.allocator.dupe(u8, idx.tokens[field_name_i].text);
@@ -2273,7 +2801,7 @@ pub const LspServer = struct {
 
             const name_i = nextNonComment(idx.tokens, i + 1) orelse continue;
             if (!isIdentLite(idx.tokens[name_i])) continue;
-            if (!std.mem.eql(u8, idx.tokens[name_i].text, target_type)) continue;
+            if (!std.mem.eql(u8, baseTypeNameForLookup(idx.tokens[name_i].text), target_type)) continue;
 
             var j_opt = nextNonComment(idx.tokens, name_i + 1);
             while (j_opt) |j| {
@@ -3148,48 +3676,56 @@ pub const LspServer = struct {
 
         // Prefer current document first.
         if (self.docs.get(preferred_uri)) |doc| {
-            if (doc.index) |idx| {
-                for (idx.symbols) |s| {
-                    if (s.container_fn_range != null) continue;
-                    if (s.kind != kind) continue;
-                    if (s.container_type == null) continue;
-                    if (!std.mem.eql(u8, baseTypeNameForLookup(s.container_type.?), container_base)) continue;
-                    if (!std.mem.eql(u8, s.name, name)) continue;
+            if (doc.index != null) {
+                if (self.findMemberByContainerInUri(preferred_uri, container_base, name, kind)) |s| {
                     return .{ .uri = preferred_uri, .sym = s };
                 }
             }
         }
 
+        var best_hit: ?MemberHit = null;
         var it = self.docs.iterator();
         while (it.next()) |entry| {
             const uri = entry.value_ptr.uri;
             if (std.mem.eql(u8, uri, preferred_uri)) continue;
-            const idx = entry.value_ptr.index orelse continue;
-            for (idx.symbols) |s| {
-                if (s.container_fn_range != null) continue;
-                if (s.kind != kind) continue;
-                if (s.container_type == null) continue;
-                if (!std.mem.eql(u8, baseTypeNameForLookup(s.container_type.?), container_base)) continue;
-                if (!std.mem.eql(u8, s.name, name)) continue;
-                if (!self.isSymbolVisibleFromUri(preferred_uri, uri, s)) continue;
-                return .{ .uri = uri, .sym = s };
+            const s = self.findMemberByContainerInUri(uri, container_base, name, kind) orelse continue;
+            if (!self.isSymbolVisibleFromUri(preferred_uri, uri, s)) continue;
+            if (best_hit == null or preferDetailedSymbol(s, best_hit.?.sym)) {
+                best_hit = .{ .uri = uri, .sym = s };
             }
         }
-        return null;
+        return best_hit;
     }
 
     fn findMemberByContainerInUri(self: *LspServer, uri: []const u8, container_base: []const u8, name: []const u8, kind: SymbolKind) ?SymbolLite {
         const doc = self.docs.get(uri) orelse return null;
         const idx = doc.index orelse return null;
+        var best: ?SymbolLite = null;
+        var container_match_count: usize = 0;
+        var name_match_count: usize = 0;
         for (idx.symbols) |s| {
             if (s.container_fn_range != null) continue;
             if (s.kind != kind) continue;
             if (s.container_type == null) continue;
             if (!std.mem.eql(u8, baseTypeNameForLookup(s.container_type.?), container_base)) continue;
+            container_match_count += 1;
             if (!std.mem.eql(u8, s.name, name)) continue;
-            return s;
+            name_match_count += 1;
+            if (best == null or preferDetailedSymbol(s, best.?)) {
+                best = s;
+            }
         }
-        return null;
+        if (self.debug_definitions and best == null) {
+            self.dbg(true, "defs", "member miss uri={s} container={s} name={s} kind={s} container_matches={d} name_matches={d}", .{
+                uri,
+                container_base,
+                name,
+                @tagName(kind),
+                container_match_count,
+                name_match_count,
+            });
+        }
+        return best;
     }
 
     fn isKnownTypeName(self: *LspServer, preferred_uri: []const u8, name: []const u8) bool {
@@ -3238,7 +3774,7 @@ pub const LspServer = struct {
         }
 
         // Prefer direct imports of the current doc next.
-        if (self.findAnyGlobalDefinitionInDirectImports(preferred_uri, type_name)) |hit| {
+        if (self.findAnyGlobalDefinitionInDirectImports(preferred_uri, base)) |hit| {
             if (hit.sym.kind == .struct_ or hit.sym.kind == .interface or hit.sym.kind == .enum_) return hit;
         }
 
@@ -3886,6 +4422,7 @@ pub const LspServer = struct {
                     while (it.next()) |e| self.allocator.free(e.key_ptr.*);
                     seen.deinit();
                 }
+                try self.appendMemberCompletionsFromIndexForType(&items, &seen, idx, rt, prefix);
                 try self.appendMemberCompletionsForType(&items, &seen, uri, rt, prefix);
                 try self.appendMemberFieldCompletionsFromTokens(&items, &seen, idx, rt, prefix);
                 try self.filterMemberCompletionItemsToLocalType(&items, idx, doc.text, rt);
@@ -3956,6 +4493,7 @@ pub const LspServer = struct {
                             seen.deinit();
                         }
 
+                        try self.appendMemberCompletionsFromIndexForType(&items, &seen, idx, rt, prefix);
                         try self.appendMemberCompletionsForType(&items, &seen, uri, rt, prefix);
                         try self.appendMemberFieldCompletionsFromTokens(&items, &seen, idx, rt, prefix);
                         try self.filterMemberCompletionItemsToLocalType(&items, idx, doc.text, rt);
@@ -4033,6 +4571,7 @@ pub const LspServer = struct {
                                     while (it.next()) |e| self.allocator.free(e.key_ptr.*);
                                     seen.deinit();
                                 }
+                                try self.appendMemberCompletionsFromIndexForType(&items, &seen, idx, rt, prefix);
                                 try self.appendMemberCompletionsForType(&items, &seen, uri, rt, prefix);
                                 try self.appendMemberFieldCompletionsFromTokens(&items, &seen, idx, rt, prefix);
                                 try self.filterMemberCompletionItemsToLocalType(&items, idx, doc.text, rt);
@@ -4063,6 +4602,7 @@ pub const LspServer = struct {
                         while (it.next()) |e| self.allocator.free(e.key_ptr.*);
                         seen.deinit();
                     }
+                    try self.appendMemberCompletionsFromIndexForType(&items, &seen, idx, recv_type, prefix);
                     try self.appendMemberCompletionsForType(&items, &seen, uri, recv_type, prefix);
                     try self.appendMemberFieldCompletionsFromTokens(&items, &seen, idx, recv_type, prefix);
                     try self.filterMemberCompletionItemsToLocalType(&items, idx, doc.text, recv_type);
@@ -4082,6 +4622,7 @@ pub const LspServer = struct {
                             while (it.next()) |e| self.allocator.free(e.key_ptr.*);
                             seen.deinit();
                         }
+                        try self.appendMemberCompletionsFromIndexForType(&items, &seen, idx, rt, prefix);
                         try self.appendMemberCompletionsForType(&items, &seen, uri, rt, prefix);
                         try self.appendMemberFieldCompletionsFromTokens(&items, &seen, idx, rt, prefix);
                         try self.filterMemberCompletionItemsToLocalType(&items, idx, doc.text, rt);
@@ -4119,6 +4660,7 @@ pub const LspServer = struct {
                             while (it.next()) |e| self.allocator.free(e.key_ptr.*);
                             seen.deinit();
                         }
+                        try self.appendMemberCompletionsFromIndexForType(&items, &seen, idx, rt, prefix);
                         try self.appendMemberCompletionsForType(&items, &seen, uri, rt, prefix);
                         try self.appendMemberFieldCompletionsFromTokens(&items, &seen, idx, rt, prefix);
                         try self.filterMemberCompletionItemsToLocalType(&items, idx, doc.text, rt);
@@ -4708,9 +5250,9 @@ pub const LspServer = struct {
                     if (depth != 1) continue;
                     if (!isTypeLike(tk)) continue;
 
-                    const field_name_i = nextNonComment(idx.tokens, k + 1) orelse continue;
+                    const field_name_i = fieldNameIndexAfterTypeLite(idx.tokens, k) orelse continue;
                     if (!isIdentLite(idx.tokens[field_name_i])) continue;
-                    const after_name_i = nextNonComment(idx.tokens, field_name_i + 1) orelse continue;
+                    const after_name_i = nextNonTrivialTokenLite(idx.tokens, field_name_i + 1) orelse continue;
                     if (!isSymbolLite(idx.tokens[after_name_i], ';')) continue;
 
                     const fname = idx.tokens[field_name_i].text;
@@ -6192,9 +6734,7 @@ pub const LspServer = struct {
             after_kw = line["allow".len..];
         } else if (std.mem.startsWith(u8, line, "expect") and (line.len == "expect".len or line["expect".len] == ' ' or line["expect".len] == '\t')) {
             after_kw = line["expect".len..];
-        } else {
-            return false;
-        }
+        } else return false;
 
         while (after_kw.len != 0 and (after_kw[0] == ' ' or after_kw[0] == '\t')) after_kw = after_kw[1..];
 
@@ -6223,11 +6763,14 @@ pub const LspServer = struct {
         const warning_ids = [_][]const u8{
             "return_local_ptr",
             "fit_non_exhaustive",
+            "unused_variable",
+            "unused_import",
+            "unused_function",
+            "unused_compound",
         };
+        _ = prefix;
         for (warning_ids) |wid| {
-            if (prefix.len == 0 or std.mem.startsWith(u8, wid, prefix)) {
-                try items.append(.{ .label = try self.allocator.dupe(u8, wid), .kind = 21 }); // CompletionItemKind.Constant
-            }
+            try items.append(.{ .label = try self.allocator.dupe(u8, wid), .kind = 21 }); // CompletionItemKind.Constant
         }
 
         const list: CompletionList = .{ .items = items.items };
@@ -6411,10 +6954,31 @@ pub const LspServer = struct {
                                     .explicit_generic_start_i = callee_res.explicit_generic_start_i,
                                 };
                             }
-                            if (self.resolveTypeOfChainUpTo(idx, uri, p, callee_i - 2)) |recv_type| {
-                                const hit = self.findMemberByContainer(uri, recv_type, callee.text, .method);
+                            const recv_type = self.resolveTypeOfChainUpTo(idx, uri, p, callee_i - 2);
+                            if (self.debug_definitions) {
+                                self.dbg(true, "defs", "sig member callee={s} recv_ident={s} recv_type={s}", .{
+                                    callee.text,
+                                    idx.tokens[callee_i - 2].text,
+                                    recv_type orelse "",
+                                });
+                            }
+                            if (recv_type) |resolved_recv_type| {
+                                const hit = self.findMemberByContainer(uri, resolved_recv_type, callee.text, .method);
+                                if (self.debug_definitions) {
+                                    self.dbg(true, "defs", "sig member lookup callee={s} recv_type={s} hit_detail={s} hit_container={s}", .{
+                                        callee.text,
+                                        resolved_recv_type,
+                                        if (hit) |h| h.sym.detail orelse "" else "",
+                                        if (hit) |h| h.sym.container_type orelse "" else "",
+                                    });
+                                }
                                 if (hit) |h| {
-                                    const label = if (h.sym.detail) |d| d else callee.text;
+                                    var label = if (h.sym.detail) |d| d else callee.text;
+                                    if (h.sym.container_type) |declared_container| {
+                                        if (self.specializeMemberLabelForReceiver(@constCast(&idx.arena).allocator(), declared_container, resolved_recv_type, label) catch null) |specialized| {
+                                            label = specialized;
+                                        }
+                                    }
                                     return .{
                                         .label = label,
                                         .active_param = active_param,
@@ -6568,6 +7132,20 @@ pub const LspServer = struct {
         const cursor_tok_i = sig.cursor_tok_i orelse return null;
         _ = sig.callee_i orelse return null;
 
+        if (sig.callee_i) |callee_i| {
+            if (callee_i >= 2 and isDotToken(idx.tokens[callee_i - 1]) and idx.tokens[callee_i - 2].kind == .identifier) {
+                if (self.resolveTypeOfChainUpTo(idx, uri, at, callee_i - 2)) |recv_type| {
+                    if (self.findMemberByContainer(uri, recv_type, idx.tokens[callee_i].text, .method)) |hit| {
+                        if (hit.sym.container_type) |declared_container| {
+                            if (try self.specializeMemberLabelForReceiver(self.allocator, declared_container, recv_type, sig.label)) |specialized| {
+                                return specialized;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         const TypeBinding = struct {
             param: []const u8,
             arg: []const u8,
@@ -6693,6 +7271,59 @@ pub const LspServer = struct {
                         }
                     }
                     p = std.mem.trim(u8, p[0..cut], " \t\r\n");
+                    if (p.len == 0) continue;
+                    try out.append(p);
+                }
+            }
+        }.call;
+
+        const normalizeGenericParamName = struct {
+            fn call(param_raw: []const u8) []const u8 {
+                var p = std.mem.trim(u8, param_raw, " \t\r\n");
+                if (p.len == 0) return p;
+                var cut = p.len;
+                var j: usize = 0;
+                while (j < p.len) : (j += 1) {
+                    const ch = p[j];
+                    if (ch == ':' or ch == '=' or ch == ' ' or ch == '\t') {
+                        cut = j;
+                        break;
+                    }
+                }
+                return std.mem.trim(u8, p[0..cut], " \t\r\n");
+            }
+        }.call;
+
+        const appendGenericParamNamesFromType = struct {
+            fn call(type_name_raw: []const u8, out: *ArrayList([]const u8)) !void {
+                const tname = std.mem.trim(u8, type_name_raw, " \t\r\n");
+                const lt = std.mem.indexOfScalar(u8, tname, '<') orelse return;
+
+                var depth: i64 = 0;
+                var gt: ?usize = null;
+                var i = lt;
+                while (i < tname.len) : (i += 1) {
+                    const ch = tname[i];
+                    if (ch == '<') {
+                        depth += 1;
+                        continue;
+                    }
+                    if (ch == '>') {
+                        depth -= 1;
+                        if (depth == 0) {
+                            gt = i;
+                            break;
+                        }
+                    }
+                }
+                if (gt == null or gt.? <= lt) return;
+
+                var raw = ArrayList([]const u8).init(std.heap.page_allocator);
+                defer raw.deinit();
+                splitTopLevelCsv(tname[lt + 1 .. gt.?], &raw) catch return;
+
+                for (raw.items) |it| {
+                    const p = normalizeGenericParamName(it);
                     if (p.len == 0) continue;
                     try out.append(p);
                 }
@@ -7074,6 +7705,27 @@ pub const LspServer = struct {
         var generic_params = ArrayList([]const u8).init(self.allocator);
         defer generic_params.deinit();
         try parseGenericParamNamesFromLabel(sig.label, &generic_params);
+
+        var receiver_declared_container: ?[]const u8 = null;
+        var receiver_type_for_bindings: ?[]const u8 = null;
+        if (generic_params.items.len == 0) {
+            if (sig.callee_i) |callee_i| {
+                if (callee_i >= 2 and isDotToken(idx.tokens[callee_i - 1]) and idx.tokens[callee_i - 2].kind == .identifier) {
+                    if (self.resolveTypeOfChainUpTo(idx, uri, at, callee_i - 2)) |recv_type| {
+                        if (self.findMemberByContainer(uri, recv_type, idx.tokens[callee_i].text, .method)) |hit| {
+                            if (hit.sym.container_type) |declared_container| {
+                                try appendGenericParamNamesFromType(declared_container, &generic_params);
+                                if (generic_params.items.len != 0) {
+                                    receiver_declared_container = declared_container;
+                                    receiver_type_for_bindings = recv_type;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if (generic_params.items.len == 0) return null;
 
         var bindings = ArrayList(TypeBinding).init(self.allocator);
@@ -7091,6 +7743,33 @@ pub const LspServer = struct {
             var bi: usize = 0;
             while (bi < map_n) : (bi += 1) {
                 try bindIfMissing(&bindings, generic_params.items[bi], explicit_args.items[bi]);
+            }
+        }
+
+        if (receiver_declared_container) |declared_container| {
+            if (receiver_type_for_bindings) |recv_type| {
+                if (parseGenericCore(declared_container)) |declared_core| {
+                    if (parseGenericCore(recv_type)) |receiver_core| {
+                        if (std.mem.eql(u8, baseTypeNameForLookup(declared_core.base), baseTypeNameForLookup(receiver_core.base))) {
+                            var declared_params = ArrayList([]const u8).init(std.heap.page_allocator);
+                            defer declared_params.deinit();
+                            var receiver_args = ArrayList([]const u8).init(std.heap.page_allocator);
+                            defer receiver_args.deinit();
+
+                            try splitTopLevelCsv(declared_core.inner, &declared_params);
+                            try splitTopLevelCsv(receiver_core.inner, &receiver_args);
+
+                            const map_n = @min(declared_params.items.len, receiver_args.items.len);
+                            var bi: usize = 0;
+                            while (bi < map_n) : (bi += 1) {
+                                const param = normalizeGenericParamName(declared_params.items[bi]);
+                                const arg = std.mem.trim(u8, receiver_args.items[bi], " \t\r\n");
+                                if (param.len == 0 or arg.len == 0) continue;
+                                try bindIfMissing(&bindings, param, arg);
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -7266,6 +7945,13 @@ pub const LspServer = struct {
     fn refineLetVariableTypesFromDirectImports(self: *LspServer, uri: []const u8) void {
         const doc_ptr = self.docs.getPtr(uri) orelse return;
         const idx = doc_ptr.index orelse return;
+        const has_imports = blk: {
+            for (idx.tokens) |t| {
+                if (t.kind == .keyword and std.mem.eql(u8, t.text, "imp")) break :blk true;
+            }
+            break :blk false;
+        };
+        if (!has_imports) return;
         const arena_alloc = idx.arena.allocator();
 
         var pass: usize = 0;
@@ -7284,7 +7970,7 @@ pub const LspServer = struct {
                 if (isLetInferTypeName(inferred)) continue;
                 if (existing_vt_opt) |existing_vt| {
                     if (std.mem.eql(u8, inferred, existing_vt)) continue;
-                    if (isBuiltinTypeName(existing_vt) and isBuiltinTypeName(inferred)) continue;
+                    if (isBuiltinTypeName(existing_vt) and isBuiltinTypeName(inferred) and !self.letInitializerEndsWithCall(idx, s)) continue;
                 }
 
                 s.value_type = inferred;
@@ -7298,6 +7984,105 @@ pub const LspServer = struct {
 
             if (!changed) break;
         }
+    }
+
+    fn letInitializerEndsWithCall(self: *LspServer, idx: *const Index, sym: *const SymbolLite) bool {
+        _ = self;
+
+        const tokenHasChar = struct {
+            fn call(text: []const u8, ch: u8) bool {
+                return std.mem.indexOfScalar(u8, text, ch) != null;
+            }
+        }.call;
+
+        const isDelimiterOnlyToken = struct {
+            fn call(text: []const u8) bool {
+                if (text.len == 0) return false;
+                for (text) |ch| {
+                    if (ch != ';' and ch != ',') return false;
+                }
+                return true;
+            }
+        }.call;
+
+        const findExprEnd = struct {
+            fn call(tokens: []const TokenLite, start_i: usize) usize {
+                var paren_depth: i64 = 0;
+                var brack_depth: i64 = 0;
+                var brace_depth: i64 = 0;
+
+                var i = start_i;
+                while (i < tokens.len) : (i += 1) {
+                    const t = tokens[i];
+                    if (t.kind == .comment) continue;
+
+                    var saw_end = false;
+                    for (t.text) |ch| {
+                        switch (ch) {
+                            '(' => paren_depth += 1,
+                            ')' => {
+                                if (paren_depth > 0) paren_depth -= 1;
+                            },
+                            '[' => brack_depth += 1,
+                            ']' => {
+                                if (brack_depth > 0) brack_depth -= 1;
+                            },
+                            '{' => brace_depth += 1,
+                            '}' => {
+                                if (brace_depth > 0) brace_depth -= 1;
+                            },
+                            ';', ',' => {
+                                if (paren_depth == 0 and brack_depth == 0 and brace_depth == 0) saw_end = true;
+                            },
+                            else => {},
+                        }
+                    }
+
+                    if (saw_end) return i;
+                }
+
+                return tokens.len;
+            }
+        }.call;
+
+        var name_i_opt: ?usize = null;
+        for (idx.tokens, 0..) |t, i| {
+            if (t.kind != .identifier) continue;
+            if (!std.mem.eql(u8, t.text, sym.name)) continue;
+            if (!rangeEqual(t.range, sym.selection_range)) continue;
+            name_i_opt = i;
+            break;
+        }
+        const name_i = name_i_opt orelse return false;
+
+        const let_kw_i = prevNonTrivialTokenLite(idx.tokens, name_i) orelse return false;
+        if (idx.tokens[let_kw_i].kind != .keyword or !std.mem.eql(u8, idx.tokens[let_kw_i].text, "let")) return false;
+
+        const eq_i = nextNonTrivialTokenLite(idx.tokens, name_i + 1) orelse return false;
+        if (!(idx.tokens[eq_i].kind == .operator or idx.tokens[eq_i].kind == .symbol) or !std.mem.eql(u8, idx.tokens[eq_i].text, "=")) return false;
+
+        var expr_i = nextNonTrivialTokenLite(idx.tokens, eq_i + 1) orelse return false;
+        if (idx.tokens[expr_i].kind == .keyword and std.mem.eql(u8, idx.tokens[expr_i].text, "await")) {
+            expr_i = nextNonTrivialTokenLite(idx.tokens, expr_i + 1) orelse return false;
+        }
+
+        const expr_end_i = findExprEnd(idx.tokens, expr_i);
+        if (expr_end_i <= expr_i) return false;
+
+        const expr_last_i = blk: {
+            if (expr_end_i >= idx.tokens.len) {
+                break :blk prevNonTrivialTokenLite(idx.tokens, idx.tokens.len) orelse return false;
+            }
+            if (isDelimiterOnlyToken(idx.tokens[expr_end_i].text)) {
+                break :blk prevNonTrivialTokenLite(idx.tokens, expr_end_i) orelse return false;
+            }
+            break :blk expr_end_i;
+        };
+        if (expr_last_i < expr_i) return false;
+        if (!tokenHasChar(idx.tokens[expr_last_i].text, ')')) return false;
+
+        const lparen_i = findMatchingLParenLite(idx.tokens, expr_last_i) orelse return false;
+        return lparen_i >= expr_i;
     }
 
     fn tryInferLetInitializerCallReturnType(self: *LspServer, idx: *const Index, uri: []const u8, sym: *const SymbolLite, arena_alloc: Allocator) ?[]const u8 {
@@ -8323,4 +9108,299 @@ test "fls: resolveImportUri std fails without stdlib" {
     const resolved = try server.resolveImportUri(current_uri, "std.c.io");
     defer if (resolved) |r| allocator.free(r);
     try std.testing.expect(resolved == null);
+}
+
+test "fls: member call signature uses receiver specialization" {
+    const allocator = std.testing.allocator;
+    const src =
+        "compound Option<T> {\n" ++
+        "  T value;\n" ++
+        "}\n\n" ++
+        "impl Option<T> {\n" ++
+        "  unwrap_or(T default_value) T {\n" ++
+        "    ret default_value;\n" ++
+        "  }\n" ++
+        "}\n\n" ++
+        "compound Person<T> {\n" ++
+        "  Option<str> nickname;\n" ++
+        "}\n\n" ++
+        "fun main() {\n" ++
+        "  Person<str> p;\n" ++
+        "  p.nickname.unwrap_or(\"Alias\"\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, src);
+
+    var server: LspServer = .{
+        .allocator = allocator,
+        .io = globalIo(),
+        .docs = std.StringHashMap(Doc).init(allocator),
+        .stdin = std.Io.File.stdin(),
+        .stdout = std.Io.File.stdout(),
+        .fun_exe_path = try allocator.dupe(u8, "fun"),
+        .published_diag_uris = std.StringHashMap(void).init(allocator),
+        .diag_cache = std.StringHashMap(DiagCacheEntry).init(allocator),
+        .root_uri = null,
+        .root_path = null,
+    };
+    defer server.deinit();
+
+    const uri = try allocator.dupe(u8, "file:///tmp/fls-member-sig.fn");
+    errdefer allocator.free(uri);
+    const text_owned = try allocator.dupe(u8, src);
+    errdefer allocator.free(text_owned);
+    try server.docs.put(uri, .{ .uri = uri, .version = 1, .text = text_owned, .index = idx });
+
+    const findPositionInText = struct {
+        fn call(text: []const u8, needle: []const u8, char_offset: usize) !Position {
+            const start = std.mem.indexOf(u8, text, needle) orelse return error.TestUnexpectedResult;
+            var line: i64 = 0;
+            var col: i64 = 0;
+            var i: usize = 0;
+            while (i < start) : (i += 1) {
+                if (text[i] == '\n') {
+                    line += 1;
+                    col = 0;
+                } else {
+                    col += 1;
+                }
+            }
+            return .{ .line = line, .character = col + @as(i64, @intCast(char_offset)) };
+        }
+    }.call;
+
+    const pos = try findPositionInText(src, "  p.nickname.unwrap_or(\"Alias\"", "  p.nickname.unwrap_or(".len + 1);
+    const sig = server.guessCallSignatureAt(uri, idx, pos) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("unwrap_or(str default_value) str", sig.label);
+}
+
+test "fls: build index infers indexed field access local type" {
+    const allocator = std.testing.allocator;
+    const src =
+        "compound Point {\n" ++
+        "  num x;\n" ++
+        "  num y;\n" ++
+        "}\n" ++
+        "fun make_point(num x, num y) Point { ret Point{x = x, y = y}; }\n" ++
+        "fun main() {\n" ++
+        "  let n = 42;\n" ++
+        "  let n2 = 17;\n" ++
+        "  let mix_points = [make_point(n, n + 1), make_point(n2, n2 + 1)];\n" ++
+        "  let mp_x = mix_points[0].x;\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, src);
+    defer idx.deinit();
+
+    var mix_points_type: ?[]const u8 = null;
+    var mp_x_type: ?[]const u8 = null;
+    for (idx.symbols) |s| {
+        if (s.kind != .variable) continue;
+        if (std.mem.eql(u8, s.name, "mix_points")) mix_points_type = s.value_type;
+        if (std.mem.eql(u8, s.name, "mp_x")) mp_x_type = s.value_type;
+    }
+
+    try std.testing.expect(mix_points_type != null);
+    try std.testing.expect(mp_x_type != null);
+    try std.testing.expectEqualStrings("Point[]", mix_points_type.?);
+    try std.testing.expectEqualStrings("num", mp_x_type.?);
+}
+
+test "fls: rebuildIndexFromDoc preserves indexed field access local type" {
+    const allocator = std.testing.allocator;
+    const src =
+        "compound Point {\n" ++
+        "  num x;\n" ++
+        "  num y;\n" ++
+        "}\n" ++
+        "fun make_point(num x, num y) Point { ret Point{x = x, y = y}; }\n" ++
+        "fun main() {\n" ++
+        "  let n = 42;\n" ++
+        "  let n2 = 17;\n" ++
+        "  let mix_points = [make_point(n, n + 1), make_point(n2, n2 + 1)];\n" ++
+        "  let mp_x = mix_points[0].x;\n" ++
+        "}\n";
+
+    var server: LspServer = .{
+        .allocator = allocator,
+        .io = globalIo(),
+        .docs = std.StringHashMap(Doc).init(allocator),
+        .stdin = std.Io.File.stdin(),
+        .stdout = std.Io.File.stdout(),
+        .fun_exe_path = try allocator.dupe(u8, "fun"),
+        .published_diag_uris = std.StringHashMap(void).init(allocator),
+        .diag_cache = std.StringHashMap(DiagCacheEntry).init(allocator),
+        .root_uri = null,
+        .root_path = null,
+    };
+    defer server.deinit();
+
+    const uri = try allocator.dupe(u8, "file:///tmp/fls-rebuild-index-mp-x.fn");
+    errdefer allocator.free(uri);
+    const text_owned = try allocator.dupe(u8, src);
+    errdefer allocator.free(text_owned);
+    try server.docs.put(uri, .{ .uri = uri, .version = 1, .text = text_owned, .index = null });
+
+    try server.rebuildIndex(uri);
+
+    const idx = server.docs.get(uri).?.index orelse return error.TestUnexpectedResult;
+    var mp_x_type: ?[]const u8 = null;
+    for (idx.symbols) |s| {
+        if (s.kind != .variable) continue;
+        if (std.mem.eql(u8, s.name, "mp_x")) {
+            mp_x_type = s.value_type;
+            break;
+        }
+    }
+
+    try std.testing.expect(mp_x_type != null);
+    try std.testing.expectEqualStrings("num", mp_x_type.?);
+}
+
+test "fls: rebuildIndexFromDoc preserves indexed field access in mixed let doc" {
+    const allocator = std.testing.allocator;
+    const src =
+        "enum Color { Red, Green, Blue }\n" ++
+        "enum Status { Ok, Err }\n" ++
+        "compound Point {\n" ++
+        "  num x;\n" ++
+        "  num y;\n" ++
+        "}\n" ++
+        "fun make_point(num x, num y) Point { ret Point{x = x, y = y}; }\n" ++
+        "fun min_num(num left, num right) num { if left < right { ret left; } ret right; }\n" ++
+        "fun max_num(num left, num right) num { if left > right { ret left; } ret right; }\n" ++
+        "fun abs_dec(dec x) dec { if x < 0 { ret -x; } ret x; }\n" ++
+        "fun lerp_dec(num a, num b, dec t) dec { ret (a + b) + t; }\n" ++
+        "fun main() {\n" ++
+        "  let n = 42;\n" ++
+        "  let d = 3.5;\n" ++
+        "  let p = Point{x = 1, y = 2};\n" ++
+        "  let color = Color.Red;\n" ++
+        "  let status = Status.Ok;\n" ++
+        "  let points = [Point{x = 0, y = 1}, Point{x = 2, y = 3}];\n" ++
+        "  let n2 = (n + 5) * (n - 3);\n" ++
+        "  let arr2 = [n, n + 1, n + 2];\n" ++
+        "  let idx = (n - 40) / 2;\n" ++
+        "  let pick = arr2[idx];\n" ++
+        "  let p3 = Point{x = n + 1, y = (n - 2) * 3};\n" ++
+        "  let psum = (p.x + p.y) * 2;\n" ++
+        "  let neg = -(n - 5);\n" ++
+        "  let dec_expr = (d * d) + (d / 2);\n" ++
+        "  let nested = make_point(n + 1, n - 1);\n" ++
+        "  let nested_sum = (nested.x + nested.y) / 2;\n" ++
+        "  let dec_mix = lerp_dec(n, n + 2, d) + abs_dec(d / 2);\n" ++
+        "  let dec_mix2 = lerp_dec(n2, n2 + n, (d + 1)) / 2;\n" ++
+        "  let mix_point = make_point(min_num(n, n2), max_num(n, n2));\n" ++
+        "  let mix_points = [make_point(n, n + 1), make_point(n2, n2 + 1)];\n" ++
+        "  let mp_x = mix_points[0].x;\n" ++
+        "}\n";
+
+    var server: LspServer = .{
+        .allocator = allocator,
+        .io = globalIo(),
+        .docs = std.StringHashMap(Doc).init(allocator),
+        .stdin = std.Io.File.stdin(),
+        .stdout = std.Io.File.stdout(),
+        .fun_exe_path = try allocator.dupe(u8, "fun"),
+        .published_diag_uris = std.StringHashMap(void).init(allocator),
+        .diag_cache = std.StringHashMap(DiagCacheEntry).init(allocator),
+        .root_uri = null,
+        .root_path = null,
+    };
+    defer server.deinit();
+
+    const uri = try allocator.dupe(u8, "file:///tmp/fls-rebuild-index-mixed-mp-x.fn");
+    errdefer allocator.free(uri);
+    const text_owned = try allocator.dupe(u8, src);
+    errdefer allocator.free(text_owned);
+    try server.docs.put(uri, .{ .uri = uri, .version = 1, .text = text_owned, .index = null });
+
+    try server.rebuildIndex(uri);
+
+    const idx = server.docs.get(uri).?.index orelse return error.TestUnexpectedResult;
+    var mix_points_type: ?[]const u8 = null;
+    var mp_x_type: ?[]const u8 = null;
+    for (idx.symbols) |s| {
+        if (s.kind != .variable) continue;
+        if (std.mem.eql(u8, s.name, "mix_points")) mix_points_type = s.value_type;
+        if (std.mem.eql(u8, s.name, "mp_x")) mp_x_type = s.value_type;
+    }
+
+    try std.testing.expect(mix_points_type != null);
+    try std.testing.expect(mp_x_type != null);
+    try std.testing.expectEqualStrings("Point[]", mix_points_type.?);
+    try std.testing.expectEqualStrings("num", mp_x_type.?);
+}
+
+test "fls: imported member call signature uses receiver specialization" {
+    const allocator = std.testing.allocator;
+    const option_src =
+        "pub compound Option<T> {\n" ++
+        "  T value;\n" ++
+        "}\n\n" ++
+        "impl Option<T> {\n" ++
+        "  pub unwrap_or(T default_value) T {\n" ++
+        "    ret default_value;\n" ++
+        "  }\n" ++
+        "}\n";
+    const main_src =
+        "imp option_mod;\n\n" ++
+        "compound Person<T> {\n" ++
+        "  Option<str> nickname;\n" ++
+        "}\n\n" ++
+        "fun main() {\n" ++
+        "  Person<str> p;\n" ++
+        "  p.nickname.unwrap_or(\"Alias\"\n" ++
+        "}\n";
+
+    const option_idx = try buildIndexFromText(allocator, option_src);
+    const main_idx = try buildIndexFromText(allocator, main_src);
+
+    var server: LspServer = .{
+        .allocator = allocator,
+        .io = globalIo(),
+        .docs = std.StringHashMap(Doc).init(allocator),
+        .stdin = std.Io.File.stdin(),
+        .stdout = std.Io.File.stdout(),
+        .fun_exe_path = try allocator.dupe(u8, "fun"),
+        .published_diag_uris = std.StringHashMap(void).init(allocator),
+        .diag_cache = std.StringHashMap(DiagCacheEntry).init(allocator),
+        .root_uri = null,
+        .root_path = null,
+    };
+    defer server.deinit();
+
+    const option_uri = try allocator.dupe(u8, "file:///tmp/option_mod.fn");
+    errdefer allocator.free(option_uri);
+    const option_text = try allocator.dupe(u8, option_src);
+    errdefer allocator.free(option_text);
+    try server.docs.put(option_uri, .{ .uri = option_uri, .version = 1, .text = option_text, .index = option_idx });
+
+    const main_uri = try allocator.dupe(u8, "file:///tmp/main.fn");
+    errdefer allocator.free(main_uri);
+    const main_text = try allocator.dupe(u8, main_src);
+    errdefer allocator.free(main_text);
+    try server.docs.put(main_uri, .{ .uri = main_uri, .version = 1, .text = main_text, .index = main_idx });
+
+    const findPositionInText = struct {
+        fn call(text: []const u8, needle: []const u8, char_offset: usize) !Position {
+            const start = std.mem.indexOf(u8, text, needle) orelse return error.TestUnexpectedResult;
+            var line: i64 = 0;
+            var col: i64 = 0;
+            var i: usize = 0;
+            while (i < start) : (i += 1) {
+                if (text[i] == '\n') {
+                    line += 1;
+                    col = 0;
+                } else {
+                    col += 1;
+                }
+            }
+            return .{ .line = line, .character = col + @as(i64, @intCast(char_offset)) };
+        }
+    }.call;
+
+    const pos = try findPositionInText(main_src, "  p.nickname.unwrap_or(\"Alias\"", "  p.nickname.unwrap_or(".len + 1);
+    const sig = server.guessCallSignatureAt(main_uri, main_idx, pos) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("unwrap_or(str default_value) str", sig.label);
 }

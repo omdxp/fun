@@ -4,14 +4,14 @@ const ParseProcess = @import("parser").ParseProcess;
 const lexer = @import("lexer");
 const codegen = @import("codegen");
 
-fn runTranspileWithWarnings(allocator: std.mem.Allocator, input_path: []const u8, input: []const u8) !struct { out: []const u8, warnings: ?[]const u8 } {
+fn runTranspileWithWarnings(allocator: std.mem.Allocator, input_path: []const u8, input: []const u8, emit_unused_warnings: bool) !struct { out: []const u8, warnings: ?[]const u8 } {
     {
         const file = try std.Io.Dir.cwd().createFile(std.testing.io, input_path, .{ .read = true });
         defer file.close(std.testing.io);
         try file.writeStreamingAll(std.testing.io, input);
     }
 
-    var transpile_proc = try codegen.TranspileProcess.init(allocator, input_path, "_ignored.c", .{ .outf = false });
+    var transpile_proc = try codegen.TranspileProcess.init(allocator, input_path, "_ignored.c", .{ .outf = false, .emit_unused_warnings = emit_unused_warnings });
     var lex_proc = lexer.LexProcess.init(&transpile_proc);
     var parse_proc = ParseProcess.init(&transpile_proc);
 
@@ -46,7 +46,7 @@ test "diagnostic: returning address of local warns" {
         "  ret &x;\n" ++
         "}\n";
 
-    const res = try runTranspileWithWarnings(allocator, ifilepath, input);
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, false);
     defer {
         allocator.free(res.out);
         if (res.warnings) |w| allocator.free(w);
@@ -68,7 +68,7 @@ test "diagnostic: returning pointer local does not warn" {
         "  ret p;\n" ++
         "}\n";
 
-    const res = try runTranspileWithWarnings(allocator, ifilepath, input);
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, false);
     defer {
         allocator.free(res.out);
         if (res.warnings) |w| allocator.free(w);
@@ -90,7 +90,7 @@ test "diagnostic: allow return_local_ptr suppresses warning" {
         "  ret &x;\n" ++
         "}\n";
 
-    const res = try runTranspileWithWarnings(allocator, ifilepath, input);
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, false);
     defer {
         allocator.free(res.out);
         if (res.warnings) |w| allocator.free(w);
@@ -111,7 +111,7 @@ test "diagnostic: expect return_local_ptr suppresses warning" {
         "  ret &x;\n" ++
         "}\n";
 
-    const res = try runTranspileWithWarnings(allocator, ifilepath, input);
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, false);
     defer {
         allocator.free(res.out);
         if (res.warnings) |w| allocator.free(w);
@@ -132,7 +132,7 @@ test "diagnostic: unmet expect return_local_ptr fails" {
         "  ret p;\n" ++
         "}\n";
 
-    const res = runTranspileWithWarnings(allocator, ifilepath, input) catch |err| {
+    const res = runTranspileWithWarnings(allocator, ifilepath, input, false) catch |err| {
         try std.testing.expectEqual(codegen.TranspileError.UnmetWarningExpectation, err);
         std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
         return;
@@ -143,4 +143,109 @@ test "diagnostic: unmet expect return_local_ptr fails" {
     }
 
     try std.testing.expect(false);
+}
+
+test "diagnostic: unused local variable warns" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "unused_variable_warn.fn";
+
+    const input =
+        "fun demo() void {\n" ++
+        "  num value = 1;\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, true);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(res.warnings != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "unused variable 'value'") != null);
+
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "diagnostic: allow unused_variable suppresses warning" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "unused_variable_allow.fn";
+
+    const input =
+        "fun main() void {\n" ++
+        "  allow unused_variable, \"temporary scaffolding\";\n" ++
+        "  num value = 1;\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, true);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(res.warnings == null);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "diagnostic: unused import warns" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "unused_import_warn.fn";
+
+    const input =
+        "imp std.option;\n" ++
+        "fun main() void {}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, true);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(res.warnings != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "unused import 'std.option'") != null);
+
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "diagnostic: unused private function warns" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "unused_function_warn.fn";
+
+    const input =
+        "fun helper() num {\n" ++
+        "  ret 1;\n" ++
+        "}\n" ++
+        "fun main() void {}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, true);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(res.warnings != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "unused function 'helper'") != null);
+
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "diagnostic: unused private compound warns" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "unused_compound_warn.fn";
+
+    const input =
+        "compound Hidden {\n" ++
+        "  num value;\n" ++
+        "}\n" ++
+        "fun main() void {}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, true);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(res.warnings != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "unused compound 'Hidden'") != null);
+
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }

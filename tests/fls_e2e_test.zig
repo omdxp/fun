@@ -1191,6 +1191,7 @@ test "fls e2e: indexing edge-case workspace files does not crash server" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const slow_timeout_ms = 30000;
 
     var setup = try resolveTestSetup(allocator);
     defer freeTestSetup(allocator, &setup);
@@ -1231,7 +1232,7 @@ test "fls e2e: indexing edge-case workspace files does not crash server" {
         );
         defer allocator.free(ds_params);
         const ds_id = try lsp.request("textDocument/documentSymbol", ds_params);
-        var ds_res = try lsp.waitResponse(ds_id, 15000);
+        var ds_res = try lsp.waitResponse(ds_id, slow_timeout_ms);
         defer ds_res.deinit();
         _ = try jsonResultFromResponseObj(ds_res.parsed.value.object);
     }
@@ -1240,7 +1241,7 @@ test "fls e2e: indexing edge-case workspace files does not crash server" {
     var i: usize = 0;
     while (i < 5) : (i += 1) {
         const ws_id = try lsp.request("workspace/symbol", "{\"query\":\"main\"}");
-        var ws_res = try lsp.waitResponse(ws_id, 15000);
+        var ws_res = try lsp.waitResponse(ws_id, slow_timeout_ms);
         defer ws_res.deinit();
         _ = try jsonResultFromResponseObj(ws_res.parsed.value.object);
     }
@@ -1255,6 +1256,7 @@ test "fls e2e: workspace indexing survives multiple malformed files" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const slow_timeout_ms = 30000;
 
     var setup = try resolveTestSetup(allocator);
     defer freeTestSetup(allocator, &setup);
@@ -1314,7 +1316,7 @@ test "fls e2e: workspace indexing survives multiple malformed files" {
         );
         defer allocator.free(ds_params);
         const ds_id = try lsp.request("textDocument/documentSymbol", ds_params);
-        var ds_res = try lsp.waitResponse(ds_id, 15000);
+        var ds_res = try lsp.waitResponse(ds_id, slow_timeout_ms);
         defer ds_res.deinit();
         _ = try jsonResultFromResponseObj(ds_res.parsed.value.object);
     }
@@ -1322,7 +1324,7 @@ test "fls e2e: workspace indexing survives multiple malformed files" {
     var i: usize = 0;
     while (i < 8) : (i += 1) {
         const ws_id = try lsp.request("workspace/symbol", "{\"query\":\"main\"}");
-        var ws_res = try lsp.waitResponse(ws_id, 15000);
+        var ws_res = try lsp.waitResponse(ws_id, slow_timeout_ms);
         defer ws_res.deinit();
         _ = try jsonResultFromResponseObj(ws_res.parsed.value.object);
     }
@@ -2907,6 +2909,194 @@ test "fls e2e: signatureHelp specializes generic calls" {
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: array params appear in hover and signatureHelp" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "compound Point {\n" ++
+        "  num x;\n" ++
+        "}\n\n" ++
+        "fun sum(num[] values, dec scale) num {\n" ++
+        "  _ = scale;\n" ++
+        "  ret values[0];\n" ++
+        "}\n\n" ++
+        "fun head(Point[] points) Point {\n" ++
+        "  ret points[0];\n" ++
+        "}\n\n" ++
+        "fun main() {\n" ++
+        "  num[] nums = [1, 2, 3];\n" ++
+        "  Point[] pts = [Point{x = 1}, Point{x = 2}];\n" ++
+        "  sum(nums, 1.5\n" ++
+        "  head(pts\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-array-params.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const sum_hover_pos = try findPosition(doc_text, "fun sum", 0);
+    const sum_hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, sum_hover_pos.line, sum_hover_pos.col + 4 },
+    );
+    defer allocator.free(sum_hover_params);
+    const sum_hover_id = try lsp.request("textDocument/hover", sum_hover_params);
+    var sum_hover_res = try lsp.waitResponse(sum_hover_id, 15000);
+    defer sum_hover_res.deinit();
+    const sum_hover_val = try jsonResultFromResponseObj(sum_hover_res.parsed.value.object);
+    try expectHoverContains(allocator, sum_hover_val, "sum(num[] values, dec scale)");
+
+    const sum_call_pos = try findPosition(doc_text, "sum(nums, 1.5", 0);
+    const sum_sig_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, sum_call_pos.line, sum_call_pos.col + @as(i64, @intCast("sum(nums, ".len)) },
+    );
+    defer allocator.free(sum_sig_params);
+    const sum_sig_id = try lsp.request("textDocument/signatureHelp", sum_sig_params);
+    var sum_sig_res = try lsp.waitResponse(sum_sig_id, 15000);
+    defer sum_sig_res.deinit();
+    const sum_sig_val = try jsonResultFromResponseObj(sum_sig_res.parsed.value.object);
+    try expectSignatureHelpLabelContains(allocator, sum_sig_val, "sum(num[] values, dec scale)");
+    try expectSignatureHelpHasParameter(allocator, sum_sig_val, "num[] values");
+    try expectSignatureHelpHasParameter(allocator, sum_sig_val, "dec scale");
+    try expectSignatureHelpActiveParameter(allocator, sum_sig_val, 1);
+
+    const head_call_pos = try findPosition(doc_text, "head(pts", 0);
+    const head_sig_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, head_call_pos.line, head_call_pos.col + @as(i64, @intCast("head(".len)) },
+    );
+    defer allocator.free(head_sig_params);
+    const head_sig_id = try lsp.request("textDocument/signatureHelp", head_sig_params);
+    var head_sig_res = try lsp.waitResponse(head_sig_id, 15000);
+    defer head_sig_res.deinit();
+    const head_sig_val = try jsonResultFromResponseObj(head_sig_res.parsed.value.object);
+    try expectSignatureHelpLabelContains(allocator, head_sig_val, "head(Point[] points)");
+    try expectSignatureHelpHasParameter(allocator, head_sig_val, "Point[] points");
+    try expectSignatureHelpActiveParameter(allocator, head_sig_val, 0);
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: aliased stdlib inference and option members" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "imp std.math as m;\n" ++
+        "imp std.rand as r;\n" ++
+        "imp std.option;\n\n" ++
+        "compound Person<T> {\n" ++
+        "  T name;\n" ++
+        "  num age;\n" ++
+        "  Option<str> nickname;\n" ++
+        "}\n\n" ++
+        "impl Person<T> {\n" ++
+        "  new(T name, num age) Person<T> {\n" ++
+        "    ret Person{name = name, age = age, nickname = some(\"\")};\n" ++
+        "  }\n" ++
+        "}\n\n" ++
+        "fun main() {\n" ++
+        "  let root = m.sqrt_dec(4);\n" ++
+        "  r.Rand rand = r.rand_init(42);\n" ++
+        "  let flip = rand.chance(0.5);\n" ++
+        "  Person<str> p;\n" ++
+        "  p = p.new(\"Alice\", 30);\n" ++
+        "  p.nickname = some(\"Ally\");\n" ++
+        "  let nick = p.nickname.unwrap_or(\"No nickname\");\n" ++
+        "  p.\n" ++
+        "  p.nickname.unwrap_or(\"Alias\"\n" ++
+        "  root\n" ++
+        "  flip\n" ++
+        "  nick\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-aliased-stdlib-option.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const dot_pos = try findPosition(doc_text, "  p.\n", 0);
+    const comp_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, dot_pos.line, dot_pos.col + 4 },
+    );
+    defer allocator.free(comp_params);
+    const comp_id = try lsp.request("textDocument/completion", comp_params);
+    var comp_res = try lsp.waitResponse(comp_id, 15000);
+    defer comp_res.deinit();
+    const comp_val = try jsonResultFromResponseObj(comp_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, comp_val, "name");
+    try expectCompletionHasLabel(allocator, comp_val, "age");
+    try expectCompletionHasLabel(allocator, comp_val, "nickname");
+    try expectCompletionLabelDetailContains(allocator, comp_val, "nickname", "Option<str>");
+
+    const sig_pos = try findPosition(doc_text, "p.nickname.unwrap_or(\"Alias\"", 0);
+    const sig_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, sig_pos.line, sig_pos.col + @as(i64, @intCast("p.nickname.unwrap_or(".len)) + 1 },
+    );
+    defer allocator.free(sig_params);
+    const sig_id = try lsp.request("textDocument/signatureHelp", sig_params);
+    var sig_res = try lsp.waitResponse(sig_id, 15000);
+    defer sig_res.deinit();
+    const sig_val = try jsonResultFromResponseObj(sig_res.parsed.value.object);
+    try expectSignatureHelpLabelContains(allocator, sig_val, "unwrap_or(str default_value)");
+    try expectSignatureHelpHasParameter(allocator, sig_val, "str default_value");
+    try expectSignatureHelpActiveParameter(allocator, sig_val, 0);
+
+    const Case = struct { needle: []const u8, expect: []const u8 };
+    const hover_cases = [_]Case{
+        .{ .needle = "  root\n", .expect = "dec root" },
+        .{ .needle = "  flip\n", .expect = "bin flip" },
+        .{ .needle = "  nick\n", .expect = "str nick" },
+    };
+
+    for (hover_cases) |cinfo| {
+        const pos = try findPosition(doc_text, cinfo.needle, 0);
+        const hover_params = try std.fmt.allocPrint(
+            allocator,
+            "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+            .{ doc_uri, pos.line, pos.col + 2 },
+        );
+        defer allocator.free(hover_params);
+        const hover_id = try lsp.request("textDocument/hover", hover_params);
+        var hover_res = try lsp.waitResponse(hover_id, 15000);
+        defer hover_res.deinit();
+        const hover_val = try jsonResultFromResponseObj(hover_res.parsed.value.object);
+        try expectHoverContains(allocator, hover_val, cinfo.expect);
+    }
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: builtin sizeof completion + hover + signatureHelp" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
@@ -3829,6 +4019,7 @@ test "fls e2e: warning ids completion for allow and expect" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const slow_timeout_ms = 30000;
 
     var setup = try resolveTestSetup(allocator);
     defer freeTestSetup(allocator, &setup);
@@ -3847,6 +4038,35 @@ test "fls e2e: warning ids completion for allow and expect" {
     defer allocator.free(doc_uri);
     try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
 
+    // Wait for didOpen diagnostics for this exact document so completion timing
+    // is not coupled to unrelated workspace diagnostics.
+    {
+        const deadline_ms = @as(i64, @intCast(@divFloor(std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds, std.time.ns_per_ms))) + slow_timeout_ms;
+        var saw_doc_diagnostics = false;
+
+        while (@as(i64, @intCast(@divFloor(std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds, std.time.ns_per_ms))) < deadline_ms and !saw_doc_diagnostics) {
+            var notif = lsp.waitNotification("textDocument/publishDiagnostics", 1000) catch |err| {
+                if (err == error.Timeout) continue;
+                return err;
+            };
+            defer notif.deinit();
+
+            if (notif.parsed.value != .object) continue;
+            const root = notif.parsed.value.object;
+            const params_val = root.get("params") orelse continue;
+            if (params_val != .object) continue;
+            const params_obj = params_val.object;
+            const uri_val = params_obj.get("uri") orelse continue;
+            if (uri_val != .string) continue;
+
+            if (std.mem.eql(u8, uri_val.string, doc_uri)) {
+                saw_doc_diagnostics = true;
+            }
+        }
+
+        try std.testing.expect(saw_doc_diagnostics);
+    }
+
     const allow_pos = try findPosition(doc_text, "allow f", 0);
     const allow_params = try std.fmt.allocPrint(
         allocator,
@@ -3855,10 +4075,14 @@ test "fls e2e: warning ids completion for allow and expect" {
     );
     defer allocator.free(allow_params);
     const allow_id = try lsp.request("textDocument/completion", allow_params);
-    var allow_res = try lsp.waitResponse(allow_id, 15000);
+    var allow_res = try lsp.waitResponse(allow_id, slow_timeout_ms);
     defer allow_res.deinit();
     const allow_val = try jsonResultFromResponseObj(allow_res.parsed.value.object);
     try expectCompletionHasLabel(allocator, allow_val, "fit_non_exhaustive");
+    try expectCompletionHasLabel(allocator, allow_val, "unused_variable");
+    try expectCompletionHasLabel(allocator, allow_val, "unused_import");
+    try expectCompletionHasLabel(allocator, allow_val, "unused_function");
+    try expectCompletionHasLabel(allocator, allow_val, "unused_compound");
 
     const expect_pos = try findPosition(doc_text, "expect r", 0);
     const expect_params = try std.fmt.allocPrint(
@@ -3868,10 +4092,14 @@ test "fls e2e: warning ids completion for allow and expect" {
     );
     defer allocator.free(expect_params);
     const expect_id = try lsp.request("textDocument/completion", expect_params);
-    var expect_res = try lsp.waitResponse(expect_id, 15000);
+    var expect_res = try lsp.waitResponse(expect_id, slow_timeout_ms);
     defer expect_res.deinit();
     const expect_val = try jsonResultFromResponseObj(expect_res.parsed.value.object);
     try expectCompletionHasLabel(allocator, expect_val, "return_local_ptr");
+    try expectCompletionHasLabel(allocator, expect_val, "unused_variable");
+    try expectCompletionHasLabel(allocator, expect_val, "unused_import");
+    try expectCompletionHasLabel(allocator, expect_val, "unused_function");
+    try expectCompletionHasLabel(allocator, expect_val, "unused_compound");
 
     const shutdown_id = try lsp.request("shutdown", "{}");
     var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);

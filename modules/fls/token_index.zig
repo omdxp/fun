@@ -330,10 +330,32 @@ pub fn buildSignatureFromTokens(
             return i;
         }
 
-        fn pointerSuffixLen(all_tokens: []const token.Token, start_i: usize) usize {
+        fn appendArraySuffix(out_buf: *ArrayList(u8), all_tokens: []const token.Token, start_i: usize) !usize {
             var i = start_i;
-            while (i < all_tokens.len and isStarToken(all_tokens[i])) : (i += 1) {}
-            return i - start_i;
+            while (i < all_tokens.len) {
+                const tk = all_tokens[i];
+                if (!isPunctChar(tk, '[')) break;
+
+                try out_buf.appendSlice("[]");
+
+                var bracket_depth: i64 = 0;
+                while (i < all_tokens.len) : (i += 1) {
+                    const at = all_tokens[i];
+                    if (at.type == .NewLine or at.type == .Comment) continue;
+                    if (isPunctChar(at, '[')) {
+                        bracket_depth += 1;
+                        continue;
+                    }
+                    if (isPunctChar(at, ']')) {
+                        bracket_depth -= 1;
+                        if (bracket_depth == 0) {
+                            i = nextNonTrivialToken(all_tokens, i + 1) orelse (i + 1);
+                            break;
+                        }
+                    }
+                }
+            }
+            return i;
         }
     };
 
@@ -370,8 +392,9 @@ pub fn buildSignatureFromTokens(
         var after_type_i = nextNonTrivialToken(tokens, pi + 1) orelse break;
         after_type_i = try parsed.appendGenericSuffix(&ptype_buf, tokens, after_type_i);
         const after_ptr_i = try parsed.appendPointerSuffix(&ptype_buf, tokens, after_type_i);
+        const after_array_i = try parsed.appendArraySuffix(&ptype_buf, tokens, after_ptr_i);
 
-        const pname_i = nextNonTrivialToken(tokens, after_ptr_i) orelse break;
+        const pname_i = nextNonTrivialToken(tokens, after_array_i) orelse break;
         if (!isIdent(tokens[pname_i])) {
             pi += 1;
             continue;
@@ -402,11 +425,8 @@ pub fn buildSignatureFromTokens(
             var after_type_i = nextNonTrivialToken(tokens, ri + 1) orelse (ri + 1);
             after_type_i = try parsed.appendGenericSuffix(&rt_buf, tokens, after_type_i);
 
-            const suffix_len = parsed.pointerSuffixLen(tokens, after_type_i);
-            var si: usize = 0;
-            while (si < suffix_len) : (si += 1) {
-                try rt_buf.append('*');
-            }
+            const after_ptr_i = try parsed.appendPointerSuffix(&rt_buf, tokens, after_type_i);
+            _ = try parsed.appendArraySuffix(&rt_buf, tokens, after_ptr_i);
             rtype_owned = try rt_buf.toOwnedSlice();
             try buf.print(" {s}", .{rtype_owned.?});
         }
@@ -1841,6 +1861,11 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                     },
                     .Identifier => {
                         const name = tokenString(t);
+                        if (prevNonTrivialToken(tokens_, i)) |prev_i| {
+                            if (prev_i >= start_i and isDotTokenAny(tokens_[prev_i])) {
+                                continue;
+                            }
+                        }
                         const next_i_opt = nextNonTrivialToken(tokens_, i + 1);
                         if (next_i_opt == null) {
                             if (resolveIdentType(name, locals_map, globals_map)) |tname| {
@@ -2166,6 +2191,29 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                         const ts = tokenString(gtok);
                         if (ts.len != 0) ptype_buf.appendSlice(ts) catch {};
                     }
+                }
+
+                while (name_i < tokens_.len and isPunctChar(tokens_[name_i], '[')) {
+                    ptype_buf.appendSlice("[]") catch {};
+
+                    var bracket_depth: i64 = 0;
+                    var bi = name_i;
+                    while (bi < tokens_.len) : (bi += 1) {
+                        const bt = tokens_[bi];
+                        if (bt.type == .NewLine or bt.type == .Comment) continue;
+                        if (isPunctChar(bt, '[')) {
+                            bracket_depth += 1;
+                            continue;
+                        }
+                        if (isPunctChar(bt, ']')) {
+                            bracket_depth -= 1;
+                            if (bracket_depth == 0) {
+                                name_i = nextNonTrivialToken(tokens_, bi + 1) orelse break;
+                                break;
+                            }
+                        }
+                    }
+                    if (name_i >= tokens_.len) break;
                 }
 
                 // Allow pointer/reference markers between type and name: `Type* name` / `Type & name`.

@@ -433,6 +433,7 @@ pub fn findBestDefinition(symbols: []const SymbolLite, name: []const u8, at: Pos
 pub fn findAnyGlobalDefinition(symbols: []const SymbolLite, name: []const u8) ?SymbolLite {
     for (symbols) |s| {
         if (s.container_fn_range != null) continue;
+        if (s.container_type != null) continue;
         if (!std.mem.eql(u8, s.name, name)) continue;
         return s;
     }

@@ -107,17 +107,19 @@ jobs:
 
 ```
 Usage:
-  fun -in <input_file> [-fmt | -fmt-all | -fmt-diag | -fmt-check] [-out <output_file>] [-no-exec] [-outf] [-ast] [-g] [-help] [-- <program args...>]
+  fun -in <input_file> [-fmt | -fmt-all | -fmt-diag | -fmt-check | -fmt-check-all] [-out <output_file>] [-no-exec] [-outf] [-ast] [-g] [-help] [-- <program args...>]
+  fun -fmt-check-all [-in <file_or_dir>]
   fun -version
 
 Arguments:
   -help             Show this help message
   -version          Print version and exit
-  -in      <file>   Input file to compile (required)
+  -in      <file>   Input file to compile (required except for -fmt-check-all)
   -fmt              Format the input file in-place (optional)
   -fmt-all          Format the input file and all locally imported modules (optional)
   -fmt-diag         Format the input file in-place, then run diagnostics (optional)
   -fmt-check        Check if the input file is formatted; exit 1 if not (optional)
+  -fmt-check-all    Check every .fn file under the current directory or -in root; exit 1 if any are unformatted (optional)
   -g                Enable debug info: source-level Fun→C mapping + DWARF symbols (optional)
   -out     <file>   Output file (optional, defaults to input filename with .c extension)
   -no-exec          Disable automatic compilation and execution (optional, execution enabled by default)

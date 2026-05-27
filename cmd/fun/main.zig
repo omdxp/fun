@@ -75,6 +75,7 @@ pub fn main(init: std.process.Init) void {
     }
 
     const options = cli.parse_args(global_allocator, init.io, argv) catch |err| print_error_and_exit(init.io, err);
+    defer cli.free_options(global_allocator, options);
 
     if (options.fmt_all) {
         cli.format_file_and_imports_in_place(global_allocator, init.io, options.input_file) catch |err| print_error_and_exit(init.io, err);
@@ -88,6 +89,21 @@ pub fn main(init: std.process.Init) void {
             var buf: [512]u8 = undefined;
             const msg = std.fmt.bufPrint(&buf, "{s}\n", .{options.input_file}) catch options.input_file;
             stderr.writeStreamingAll(init.io, msg) catch {};
+            std.process.exit(1);
+        }
+        return;
+    }
+
+    if (options.fmt_check_all) {
+        const offenders = cli.collect_unformatted_fun_files(global_allocator, init.io, options.input_file) catch |err| print_error_and_exit(init.io, err);
+        defer cli.free_owned_paths(global_allocator, offenders);
+
+        if (offenders.len != 0) {
+            const stderr = std.Io.File.stderr();
+            for (offenders) |path| {
+                stderr.writeStreamingAll(init.io, path) catch {};
+                stderr.writeStreamingAll(init.io, "\n") catch {};
+            }
             std.process.exit(1);
         }
         return;
@@ -117,6 +133,7 @@ pub fn main(init: std.process.Init) void {
             // This avoids the full codegen pass and roughly halves compile time.
             .diag_only = !options.exec and !options.outf and !options.print_ast,
             .debug_info = options.debug_info,
+            .emit_unused_warnings = options.warn_unused,
         },
     ) catch |err| print_error_and_exit(init.io, err);
 

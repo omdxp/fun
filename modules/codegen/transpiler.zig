@@ -113,6 +113,12 @@ pub const TranspileProcessFlags = packed struct {
     /// Emitting those transient errors to stderr creates noisy logs without improving UX.
     emit_stderr: bool = true,
 
+    /// When false, suppress unused-* warnings.
+    ///
+    /// Tooling paths such as `fls` may disable these to keep indexing/hover fast and avoid
+    /// dependency-noise diagnostics while users are editing incomplete files.
+    emit_unused_warnings: bool = false,
+
     /// When true, skip C code emission entirely after type-checking.
     ///
     /// Used by the diagnostics-only path (`fun -no-exec` without `-outf`) to avoid the
@@ -659,6 +665,7 @@ pub const TranspileProcess = struct {
         const alias_map = self.alias_map_for_node(ref_node);
         const import_path = alias_map.get(alias);
         if (import_path == null) return null;
+        self.mark_import_used_by_alias(alias);
         const import_path_unwrapped = import_path.?;
         if (std.mem.startsWith(u8, import_path_unwrapped, "std.c.")) {
             return self.allocator.dupe(u8, name) catch TranspileError.MemoryAllocationFailed;
@@ -3617,14 +3624,21 @@ pub const TranspileProcess = struct {
     };
 
     const TypeEnv = struct {
+        const TypeBinding = struct {
+            ty: CheckedType,
+            decl_node: ?*ast.Node = null,
+            warn_on_unused: bool = false,
+            used: bool = false,
+        };
+
         allocator: mem.Allocator,
-        scopes: ArrayList(std.StringHashMap(CheckedType)),
+        scopes: ArrayList(std.StringHashMap(TypeBinding)),
         type_params: ?[]const []const u8 = null,
 
         fn init(allocator: mem.Allocator) TypeEnv {
             return .{
                 .allocator = allocator,
-                .scopes = ArrayList(std.StringHashMap(CheckedType)).init(allocator),
+                .scopes = ArrayList(std.StringHashMap(TypeBinding)).init(allocator),
                 .type_params = null,
             };
         }
@@ -3637,7 +3651,7 @@ pub const TranspileProcess = struct {
         }
 
         fn push(self: *TypeEnv) TranspileError!void {
-            self.scopes.append(std.StringHashMap(CheckedType).init(self.allocator)) catch {
+            self.scopes.append(std.StringHashMap(TypeBinding).init(self.allocator)) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
         }
@@ -3650,9 +3664,21 @@ pub const TranspileProcess = struct {
         }
 
         fn put_current(self: *TypeEnv, name: []const u8, ty: CheckedType) TranspileError!void {
+            return self.put_current_binding(name, ty, null, false);
+        }
+
+        fn put_current_marked(self: *TypeEnv, name: []const u8, ty: CheckedType, decl_node: ?*ast.Node) TranspileError!void {
+            return self.put_current_binding(name, ty, decl_node, false);
+        }
+
+        fn put_current_decl(self: *TypeEnv, name: []const u8, ty: CheckedType, decl_node: ?*ast.Node) TranspileError!void {
+            return self.put_current_binding(name, ty, decl_node, true);
+        }
+
+        fn put_current_binding(self: *TypeEnv, name: []const u8, ty: CheckedType, decl_node: ?*ast.Node, warn_on_unused: bool) TranspileError!void {
             if (self.scopes.items.len == 0) return TranspileError.MemoryAllocationFailed;
             var scope_map = &self.scopes.items[self.scopes.items.len - 1];
-            scope_map.put(name, ty) catch {
+            scope_map.put(name, .{ .ty = ty, .decl_node = decl_node, .warn_on_unused = warn_on_unused }) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
         }
@@ -3660,7 +3686,15 @@ pub const TranspileProcess = struct {
         fn get(self: *TypeEnv, name: []const u8) ?CheckedType {
             var i: usize = self.scopes.items.len;
             while (i > 0) : (i -= 1) {
-                if (self.scopes.items[i - 1].get(name)) |t| return t;
+                var scope_map = &self.scopes.items[i - 1];
+                if (scope_map.getPtr(name)) |binding| {
+                    binding.used = true;
+                    if (binding.decl_node) |decl_node| {
+                        if (decl_node.flags == null) decl_node.flags = .{};
+                        decl_node.flags.?.is_used = true;
+                    }
+                    return binding.ty;
+                }
             }
             return null;
         }
@@ -3678,6 +3712,34 @@ pub const TranspileProcess = struct {
             return false;
         }
     };
+
+    fn should_warn_unused_variable(name: []const u8) bool {
+        if (name.len == 0) return false;
+        if (mem.eql(u8, name, "_")) return false;
+        if (mem.eql(u8, name, "self")) return false;
+        if (mem.eql(u8, name, "vargs")) return false;
+        return true;
+    }
+
+    fn warn_unused_bindings_in_current_scope(self: *Self, env: *TypeEnv) void {
+        if (!self.flags.emit_unused_warnings) return;
+        if (self.is_importing) return;
+        if (env.scopes.items.len == 0) return;
+
+        var scope_map = &env.scopes.items[env.scopes.items.len - 1];
+        var it = scope_map.iterator();
+        while (it.next()) |entry| {
+            const name = entry.key_ptr.*;
+            const binding = entry.value_ptr;
+            if (binding.used) continue;
+            if (binding.decl_node == null) continue;
+            if (!binding.warn_on_unused) continue;
+            if (!should_warn_unused_variable(name)) continue;
+
+            const decl_node = binding.decl_node.?;
+            self.report_warning(.unused_variable, decl_node.*, "unused variable '{s}'", .{name});
+        }
+    }
 
     fn report_type_error(self: *Self, node: ?ast.Node, comptime fmt: []const u8, args: anytype) void {
         if (!self.flags.emit_stderr) return;
@@ -3816,6 +3878,10 @@ pub const TranspileProcess = struct {
                     self.report_type_error(ref_node, "type '{s}' is private", .{cand});
                     return TranspileError.SymbolNotDefined;
                 }
+                mark_node_used(enode);
+                if (!same_module(&ref_node, enode)) {
+                    if (enode.pos) |p| self.mark_import_used_by_origin_file(p.filename);
+                }
                 return;
             }
 
@@ -3823,6 +3889,15 @@ pub const TranspileProcess = struct {
                 if (!self.can_access(&ref_node, cnode)) {
                     self.report_type_error(ref_node, "type '{s}' is private", .{cand});
                     return TranspileError.SymbolNotDefined;
+                }
+                mark_node_used(cnode);
+                if (std.mem.indexOf(u8, cand, "__")) |idx| {
+                    const alias = cand[0..idx];
+                    if (self.alias_map_for_node(&ref_node).contains(alias)) {
+                        self.mark_import_used_by_alias(alias);
+                    }
+                } else if (!same_module(&ref_node, cnode)) {
+                    if (cnode.pos) |p| self.mark_import_used_by_origin_file(p.filename);
                 }
                 return;
             }
@@ -3836,6 +3911,10 @@ pub const TranspileProcess = struct {
                 if (!self.can_access(&ref_node, qnode.?)) {
                     self.report_type_error(ref_node, "type '{s}' is private", .{cand});
                     return TranspileError.SymbolNotDefined;
+                }
+                mark_node_used(qnode.?);
+                if (!same_module(&ref_node, qnode.?)) {
+                    if (qnode.?.pos) |p| self.mark_import_used_by_origin_file(p.filename);
                 }
                 return;
             }
@@ -3874,6 +3953,61 @@ pub const TranspileProcess = struct {
 
     fn is_user_named_type(t: CheckedType) bool {
         return t.base == .Unknown and t.name != null;
+    }
+
+    fn node_is_public(node: *const ast.Node) bool {
+        return node.flags != null and node.flags.?.is_public;
+    }
+
+    fn node_is_used(node: *const ast.Node) bool {
+        return node.flags != null and node.flags.?.is_used;
+    }
+
+    fn mark_node_used(node: *ast.Node) void {
+        if (node.flags == null) node.flags = .{};
+        node.flags.?.is_used = true;
+    }
+
+    fn import_node_matches_file_path(self: *Self, node: *const ast.Node, file_path: []const u8) bool {
+        if (node.type != .Import or node.node_variant == null) return false;
+        const imp = node.node_variant.?.import;
+
+        const full_path = blk: {
+            if (std.mem.startsWith(u8, imp.path, "std.")) {
+                const built = self.build_stdlib_module_path(imp.path) catch return false;
+                if (built == null) return false;
+                break :blk built.?;
+            }
+            break :blk self.build_full_import_path(imp.path) catch return false;
+        };
+        defer self.backing_allocator.free(full_path);
+
+        const canon_opt = std.Io.Dir.cwd().realPathFileAlloc(self.io, full_path, self.allocator) catch null;
+        defer if (canon_opt) |canon| self.allocator.free(canon);
+        const resolved = canon_opt orelse full_path;
+        return std.mem.eql(u8, resolved, file_path);
+    }
+
+    fn mark_import_used_by_alias(self: *Self, alias: []const u8) void {
+        for (self.nodes.items()) |*node| {
+            if (node.type != .Import or node.node_variant == null) continue;
+            const imp = node.node_variant.?.import;
+            if (imp.alias == null) continue;
+            if (!std.mem.eql(u8, imp.alias.?, alias)) continue;
+            mark_node_used(node);
+            return;
+        }
+    }
+
+    fn mark_import_used_by_origin_file(self: *Self, file_path: []const u8) void {
+        for (self.nodes.items()) |*node| {
+            if (node.type != .Import or node.node_variant == null) continue;
+            const imp = node.node_variant.?.import;
+            if (imp.alias != null) continue;
+            if (!self.import_node_matches_file_path(node, file_path)) continue;
+            mark_node_used(node);
+            return;
+        }
     }
 
     fn lookup_receiver_dtype(self: *Self, recv: ast.Node) ?*dtype.DataType {
@@ -4993,6 +5127,7 @@ pub const TranspileProcess = struct {
                 // Allow function symbols as callback values.
                 if (fns.get(name) != null) {
                     if (self.find_function_node(name)) |fn_node| {
+                        mark_node_used(fn_node);
                         if (!self.can_access(&node, fn_node)) {
                             self.report_type_error(node, "function '{s}' is private", .{name});
                             return TranspileError.SymbolNotDefined;
@@ -5288,6 +5423,7 @@ pub const TranspileProcess = struct {
                             callee_async_known = true;
                             await_lowering_callee = fname;
                             if (self.find_function_node(fname)) |fn_node| {
+                                mark_node_used(fn_node);
                                 if (!self.can_access(&node, fn_node)) {
                                     self.report_type_error(node, "function '{s}' is private", .{fname});
                                     return TranspileError.SymbolNotDefined;
@@ -5297,7 +5433,13 @@ pub const TranspileProcess = struct {
                             // If the name is known from preloaded imports/stdlib signatures, treat it
                             // as an external function and skip type checking.
                             // Otherwise, this is a real semantic error (we don't want to defer to C).
-                            if (self.global_symbols.get(fname) != null or is_known_extern_function_name(fname)) {
+                            if (self.global_symbols.get(fname)) |g| {
+                                if (!mem.eql(u8, g.file_path, self.input_file_path)) {
+                                    self.mark_import_used_by_origin_file(g.file_path);
+                                }
+                                skip_signature_typecheck = true;
+                                call_rtype = .{ .base = .Unknown };
+                            } else if (is_known_extern_function_name(fname)) {
                                 skip_signature_typecheck = true;
                                 call_rtype = .{ .base = .Unknown };
                             }
@@ -5336,7 +5478,14 @@ pub const TranspileProcess = struct {
                                     call_rtype = sig.rtype;
                                     callee_is_async = sig.is_async;
                                     callee_async_known = true;
-                                } else if (self.global_symbols.get(qualified) != null or is_known_extern_function_name(qualified)) {
+                                } else if (self.global_symbols.get(qualified)) |g| {
+                                    if (!mem.eql(u8, g.file_path, self.input_file_path)) {
+                                        self.mark_import_used_by_origin_file(g.file_path);
+                                    }
+                                    skip_signature_typecheck = true;
+                                    call_rtype = .{ .base = .Unknown };
+                                    callee_async_known = false;
+                                } else if (is_known_extern_function_name(qualified)) {
                                     skip_signature_typecheck = true;
                                     call_rtype = .{ .base = .Unknown };
                                     callee_async_known = false;
@@ -6118,6 +6267,7 @@ pub const TranspileProcess = struct {
 
         try env.push();
         defer env.pop();
+        defer self.warn_unused_bindings_in_current_scope(env);
 
         const stmts = body.node_variant.?.body.statements;
         for (stmts.items()) |stmt_ptr| {
@@ -6135,7 +6285,7 @@ pub const TranspileProcess = struct {
                     if (inferred_let_t) |it| {
                         try self.register_generic_instantiation_from_checked_type(it);
                     }
-                    try env.put_current(name, vtype);
+                    try env.put_current_decl(name, vtype, stmt_ptr);
                     if (v.val) |val| {
                         if (val.*.type == .CompoundInit) {
                             try self.bind_compound_init_expected(val, vtype, env, fns);
@@ -6273,17 +6423,30 @@ pub const TranspileProcess = struct {
                         },
                         .iter => |fi| {
                             const it_t = try self.infer_expr_type(fi.iterable.*, env, fns);
-                            if (!it_t.is_array) {
+                            const vec_item_dt = blk: {
+                                const dt = it_t.dtype_ref orelse break :blk null;
+                                if (dt.pointer_depth != 0 or dt.array_depth != 0 or dt.generic_args == null) break :blk null;
+                                if (!mem.eql(u8, dt.type_str.items, "Vec")) break :blk null;
+                                const gargs = dt.generic_args.?.items();
+                                if (gargs.len != 1) break :blk null;
+                                break :blk gargs[0];
+                            };
+                            if (!it_t.is_array and vec_item_dt == null) {
                                 self.report_type_error(stmt, "for-iter expects array iterable", .{});
                                 return TranspileError.TypeMismatch;
                             }
                             try env.push();
                             defer env.pop();
                             if (fi.index_name) |iname| try env.put_current(iname, .{ .base = .Num });
-                            var item_t = it_t;
-                            // Element is one dimension fewer than the iterable.
-                            item_t.array_depth = if (it_t.array_depth > 0) it_t.array_depth - 1 else 0;
-                            item_t.is_array = item_t.array_depth > 0;
+                            var item_t = if (vec_item_dt) |elem_dt|
+                                try self.type_from_dtype_with_mangled(elem_dt)
+                            else
+                                it_t;
+                            if (vec_item_dt == null) {
+                                // Element is one dimension fewer than the iterable.
+                                item_t.array_depth = if (it_t.array_depth > 0) it_t.array_depth - 1 else 0;
+                                item_t.is_array = item_t.array_depth > 0;
+                            }
                             try env.put_current(fi.item_name, item_t);
                             try self.check_body(fi.body, env, fns, fn_rtype);
                         },
@@ -6787,7 +6950,7 @@ pub const TranspileProcess = struct {
             if (inferred_let_t) |it| {
                 try proc.register_generic_instantiation_from_checked_type(it);
             }
-            try global_env.put_current(v.name.items, vtype);
+            try global_env.put_current_marked(v.name.items, vtype, gn);
 
             if (v.val) |val| {
                 if (val.*.type == .CompoundInit) {
@@ -6839,10 +7002,10 @@ pub const TranspileProcess = struct {
             fn_env.set_type_params(allow_params);
 
             // Add module-level globals (nodes without binded context).
-            for (proc.nodes.items()) |gn| {
+            for (proc.nodes.items()) |*gn| {
                 if (gn.type == .Variable and gn.node_variant != null and gn.binded == null) {
                     const v = gn.node_variant.?.variable;
-                    try fn_env.put_current(v.name.items, try proc.type_from_dtype_with_mangled(v.type));
+                    try fn_env.put_current_marked(v.name.items, try proc.type_from_dtype_with_mangled(v.type), gn);
                 }
             }
 
@@ -6853,7 +7016,7 @@ pub const TranspileProcess = struct {
                     if (arg.type != .Variable or arg.node_variant == null) continue;
                     const v = arg.node_variant.?.variable;
                     try proc.ensure_dtype_visible(node, v.type, allow_params);
-                    try fn_env.put_current(v.name.items, try proc.type_from_dtype_with_mangled(v.type));
+                    try fn_env.put_current_decl(v.name.items, try proc.type_from_dtype_with_mangled(v.type), arg_ptr);
                 }
             }
 
@@ -6867,6 +7030,8 @@ pub const TranspileProcess = struct {
                 proc.current_fn_is_async = fnv.is_async;
                 defer proc.current_fn_is_async = prev_async;
                 try proc.check_body(body, &fn_env, fns, fn_rtype);
+
+                proc.warn_unused_bindings_in_current_scope(&fn_env);
             }
         }
 
@@ -6951,10 +7116,10 @@ pub const TranspileProcess = struct {
                 fn_env.set_type_params(allow_params);
 
                 // Add module-level globals.
-                for (proc.nodes.items()) |gn| {
+                for (proc.nodes.items()) |*gn| {
                     if (gn.type == .Variable and gn.node_variant != null and gn.binded == null) {
                         const v = gn.node_variant.?.variable;
-                        try fn_env.put_current(v.name.items, try proc.type_from_dtype_with_mangled(v.type));
+                        try fn_env.put_current_marked(v.name.items, try proc.type_from_dtype_with_mangled(v.type), gn);
                     }
                 }
 
@@ -6972,7 +7137,7 @@ pub const TranspileProcess = struct {
                             continue;
                         }
                         try proc.ensure_dtype_visible(n.*, v.type, allow_params);
-                        try fn_env.put_current(v.name.items, try proc.type_from_dtype_with_mangled(v.type));
+                        try fn_env.put_current_decl(v.name.items, try proc.type_from_dtype_with_mangled(v.type), arg_ptr);
                     }
                 }
 
@@ -6981,6 +7146,44 @@ pub const TranspileProcess = struct {
                     proc.current_fn_is_async = fnv.is_async;
                     defer proc.current_fn_is_async = prev_async;
                     try proc.check_body(body, &fn_env, fns, fn_rtype);
+
+                    proc.warn_unused_bindings_in_current_scope(&fn_env);
+                }
+            }
+        }
+
+        if (!proc.is_importing and proc.flags.emit_unused_warnings) {
+            for (proc.nodes.items()) |*node| {
+                switch (node.type) {
+                    .Import => {
+                        if (node_is_used(node)) continue;
+                        const imp = node.node_variant.?.import;
+                        if (imp.alias) |alias| {
+                            proc.report_warning(.unused_import, node.*, "unused import '{s}' as '{s}'", .{ imp.path, alias });
+                        } else {
+                            proc.report_warning(.unused_import, node.*, "unused import '{s}'", .{imp.path});
+                        }
+                    },
+                    .Variable => {
+                        if (node.binded != null) continue;
+                        if (node_is_public(node) or node_is_used(node)) continue;
+                        const v = node.node_variant.?.variable;
+                        if (!should_warn_unused_variable(v.name.items)) continue;
+                        proc.report_warning(.unused_variable, node.*, "unused variable '{s}'", .{v.name.items});
+                    },
+                    .Function => {
+                        const fnv = node.node_variant.?.function;
+                        if (fnv.name == null or fnv.body == null) continue;
+                        if (node_is_public(node) or node_is_used(node)) continue;
+                        if (mem.eql(u8, fnv.name.?.items, "main")) continue;
+                        proc.report_warning(.unused_function, node.*, "unused function '{s}'", .{fnv.name.?.items});
+                    },
+                    .Compound => {
+                        if (node_is_public(node) or node_is_used(node)) continue;
+                        const compound = node.node_variant.?.compound;
+                        proc.report_warning(.unused_compound, node.*, "unused compound '{s}'", .{compound.name.items});
+                    },
+                    else => {},
                 }
             }
         }
@@ -8643,6 +8846,35 @@ pub const TranspileProcess = struct {
         return false;
     }
 
+    fn write_type_array_suffix(self: *Self, data_type: *const dtype.DataType) TranspileError!void {
+        if (data_type.array) |array| {
+            if (!array.brackets.is_empty()) {
+                for (array.brackets.items()) |bracket_node| {
+                    try self.write("[");
+                    if (bracket_node.type == .Bracket) {
+                        try self.transpile_node(bracket_node.node_variant.?.bracket.inner.*);
+                    } else {
+                        try self.transpile_node(bracket_node);
+                    }
+                    try self.write("]");
+                }
+                return;
+            }
+        }
+
+        if (data_type.array_depth > 0) {
+            var depth_i: usize = 0;
+            while (depth_i < data_type.array_depth) : (depth_i += 1) {
+                try self.write("[]");
+            }
+            return;
+        }
+
+        if (data_type.flags != null and data_type.flags.?.is_array) {
+            try self.write("[]");
+        }
+    }
+
     /// Helper function to write data type to output (no substitutions).
     fn write_type_no_subst(self: *Self, data_type: dtype.DataType) TranspileError!void {
         if (data_type.generic_args != null and data_type.type == .Unknown) {
@@ -8671,14 +8903,6 @@ pub const TranspileProcess = struct {
                 try self.write("*");
             }
         }
-        // TODO: Handle array types
-        // if (data_type.array) |array| {
-        //     for (array.brackets.items()) |bracket| {
-        //         try self.write("[");
-        //         try self.transpile_node(bracket);
-        //         try self.write("]");
-        //     }
-        // }
     }
 
     /// Helper function to write data type to output
@@ -8841,10 +9065,6 @@ pub const TranspileProcess = struct {
     fn expr_is_quirk_typed_from_scope(self: *Self, node: ast.Node) bool {
         const tname = self.expr_named_type_from_scope(node) orelse return false;
         return self.is_quirk_name(tname);
-    }
-
-    fn node_is_public(node: *const ast.Node) bool {
-        return node.flags != null and node.flags.?.is_public;
     }
 
     fn same_module(ref_node: ?*const ast.Node, def_node: *const ast.Node) bool {
@@ -10010,6 +10230,7 @@ pub const TranspileProcess = struct {
             const fnv = m.node_variant.?.function;
             if (fnv.name == null) continue;
             const fname = fnv.name.?.items;
+
             if (emitted.contains(fname)) continue;
             emitted.put(fname, true) catch return TranspileError.MemoryAllocationFailed;
 
@@ -10032,12 +10253,30 @@ pub const TranspileProcess = struct {
             try self.write(");\n");
 
             if (fnv.is_async) {
+                const prev_override = self.override_fn_name;
+                self.override_fn_name = fname;
+                defer self.override_fn_name = prev_override;
                 try self.write_async_function_support_prototypes(m.*);
             }
         }
     }
 
     fn emit_plain_impl_method_prototypes_module(self: *Self, proc: *Self, emitted: *std.StringHashMap(bool)) TranspileError!void {
+        const prev_alias = self.import_alias;
+        const prev_aliases_override = self.import_aliases_override;
+        const prev_emit_input_file_path = self.emit_input_file_path;
+        const prev_emit_module_proc = self.emit_module_proc;
+        self.import_alias = proc.import_alias;
+        self.import_aliases_override = &proc.import_aliases;
+        self.emit_input_file_path = proc.input_file_path;
+        self.emit_module_proc = proc;
+        defer {
+            self.import_alias = prev_alias;
+            self.import_aliases_override = prev_aliases_override;
+            self.emit_input_file_path = prev_emit_input_file_path;
+            self.emit_module_proc = prev_emit_module_proc;
+        }
+
         for (proc.nodes.items()) |*n| {
             try self.emit_plain_impl_method_prototypes_from_node(n, emitted);
         }
@@ -10201,6 +10440,13 @@ pub const TranspileProcess = struct {
                 flags.is_pointer = true;
                 sub.flags = flags;
                 sub.pointer_depth += dt.pointer_depth;
+            }
+            if ((dt.flags != null and dt.flags.?.is_array) or dt.array != null or dt.array_depth > 0) {
+                var flags = sub.flags orelse dtype.DataTypeFlags{};
+                flags.is_array = true;
+                sub.flags = flags;
+                if (dt.array != null) sub.array = dt.array;
+                if (dt.array_depth > sub.array_depth) sub.array_depth = dt.array_depth;
             }
             try self.write_type_no_subst(sub);
             return;
@@ -10760,12 +11006,30 @@ pub const TranspileProcess = struct {
             const fname = fnv.name.?.items;
             if (emitted.contains(fname)) continue;
             emitted.put(fname, true) catch return TranspileError.MemoryAllocationFailed;
+            const prev_override = self.override_fn_name;
+            self.override_fn_name = fname;
+            defer self.override_fn_name = prev_override;
             try self.transpile_node(m.*);
             try self.write("\n\n");
         }
     }
 
     fn emit_plain_impl_methods_module(self: *Self, proc: *Self, emitted: *std.StringHashMap(bool)) TranspileError!void {
+        const prev_alias = self.import_alias;
+        const prev_aliases_override = self.import_aliases_override;
+        const prev_emit_input_file_path = self.emit_input_file_path;
+        const prev_emit_module_proc = self.emit_module_proc;
+        self.import_alias = proc.import_alias;
+        self.import_aliases_override = &proc.import_aliases;
+        self.emit_input_file_path = proc.input_file_path;
+        self.emit_module_proc = proc;
+        defer {
+            self.import_alias = prev_alias;
+            self.import_aliases_override = prev_aliases_override;
+            self.emit_input_file_path = prev_emit_input_file_path;
+            self.emit_module_proc = prev_emit_module_proc;
+        }
+
         for (proc.nodes.items()) |*n| {
             try self.emit_plain_impl_methods_from_node(n, emitted);
         }
@@ -11565,6 +11829,44 @@ pub const TranspileProcess = struct {
         return false;
     }
 
+    fn module_has_impl_method_named(self: *Self, proc: *const TranspileProcess, name: []const u8) bool {
+        _ = self;
+
+        for (proc.nodes.items()) |n| {
+            if (n.type != .Impl or n.node_variant == null) continue;
+            const im = n.node_variant.?.impl;
+            for (im.methods.items()) |m| {
+                if (m.type != .Function or m.node_variant == null) continue;
+                const fnv = m.node_variant.?.function;
+                if (fnv.name == null) continue;
+                if (mem.eql(u8, fnv.name.?.items, name)) return true;
+            }
+        }
+
+        for (proc.owned_nodes.items) |n| {
+            if (n.type != .Impl or n.node_variant == null) continue;
+            const im = n.node_variant.?.impl;
+            for (im.methods.items()) |m| {
+                if (m.type != .Function or m.node_variant == null) continue;
+                const fnv = m.node_variant.?.function;
+                if (fnv.name == null) continue;
+                if (mem.eql(u8, fnv.name.?.items, name)) return true;
+            }
+        }
+        return false;
+    }
+
+    fn find_import_alias_for_impl_method(self: *Self, proc: *const TranspileProcess, name: []const u8) ?[]const u8 {
+        if (proc.import_alias) |alias| {
+            if (self.module_has_impl_method_named(proc, name)) return alias;
+        }
+
+        for (proc.children.items) |child| {
+            if (self.find_import_alias_for_impl_method(child, name)) |alias| return alias;
+        }
+        return null;
+    }
+
     fn write_module_function_ref(self: *Self, name: []const u8) TranspileError!void {
         if (self.import_alias) |alias| {
             if (self.emit_module_proc) |mproc| {
@@ -11576,6 +11878,10 @@ pub const TranspileProcess = struct {
                 }
             }
         }
+        try self.write(name);
+    }
+
+    fn write_module_impl_method_ref(self: *Self, name: []const u8) TranspileError!void {
         try self.write(name);
     }
 
@@ -11864,7 +12170,7 @@ pub const TranspileProcess = struct {
                                                     const mname = member.?.data.?.sval.items;
                                                     if (self.lookup_plain_impl_method_fn(&node, type_name_canon, mname)) |fn_name| {
                                                         try self.write("(");
-                                                        try self.write(fn_name);
+                                                        try self.write_module_impl_method_ref(fn_name);
                                                         try self.write("(");
 
                                                         if (field_type.pointer_depth == 0) {
@@ -11897,7 +12203,7 @@ pub const TranspileProcess = struct {
                                                     if (!qres.ambiguous) {
                                                         if (qres.fn_name) |qfn_name| {
                                                             try self.write("(");
-                                                            try self.write(qfn_name);
+                                                            try self.write_module_impl_method_ref(qfn_name);
                                                             try self.write("(");
 
                                                             if (field_type.pointer_depth == 0) {
@@ -11944,7 +12250,7 @@ pub const TranspileProcess = struct {
                                         const mname = member.?.data.?.sval.items;
                                         if (self.lookup_plain_impl_method_fn(&node, type_name_canon, mname)) |fn_name| {
                                             try self.write("(");
-                                            try self.write(fn_name);
+                                            try self.write_module_impl_method_ref(fn_name);
                                             try self.write("(");
 
                                             if (dt.?.pointer_depth == 0) {
@@ -11977,7 +12283,7 @@ pub const TranspileProcess = struct {
                                         if (!qres.ambiguous) {
                                             if (qres.fn_name) |qfn_name| {
                                                 try self.write("(");
-                                                try self.write(qfn_name);
+                                                try self.write_module_impl_method_ref(qfn_name);
                                                 try self.write("(");
 
                                                 if (dt.?.pointer_depth == 0) {
@@ -12010,7 +12316,7 @@ pub const TranspileProcess = struct {
                                         if (mem.eql(u8, rname, "self")) {
                                             if (self.lookup_quirk_impl_method_fn_for_self(type_name_canon, mname)) |qfn_name| {
                                                 try self.write("(");
-                                                try self.write(qfn_name);
+                                                try self.write_module_impl_method_ref(qfn_name);
                                                 try self.write("(");
 
                                                 if (dt.?.pointer_depth == 0) {
@@ -12516,7 +12822,11 @@ pub const TranspileProcess = struct {
                 //     return TranspileError.SymbolNotDefined;
                 // }
                 if (self.import_alias) |alias| {
-                    if (self.get_scope_entity(str) == null) {
+                    const shadowed_by_variable = if (self.get_scope_entity(str)) |ent|
+                        if (ent.node) |ent_node| ent_node.type == .Variable else false
+                    else
+                        false;
+                    if (!shadowed_by_variable) {
                         if (self.emit_module_proc) |mproc| {
                             if (!mem.eql(u8, str, "main") and self.module_has_function_named(mproc, str)) {
                                 try self.write(alias);
@@ -13180,6 +13490,8 @@ pub const TranspileProcess = struct {
 
                                 const idx_name = fi.index_name orelse "__fun_i";
 
+                                var vec_item_dt: ?*dtype.DataType = null;
+
                                 // Determine array depth and multidim info from scope.
                                 var arr_depth: usize = 1;
                                 var mdim_root: ?[]const u8 = null;
@@ -13189,144 +13501,210 @@ pub const TranspileProcess = struct {
                                     mdim_depth = arr_ent.multidim_depth;
                                     if (arr_ent.node) |arr_node| {
                                         if (arr_node.type == .Variable and arr_node.node_variant != null) {
-                                            const adepth = arr_node.node_variant.?.variable.type.array_depth;
-                                            if (adepth > 0) arr_depth = adepth;
+                                            const arr_dt = arr_node.node_variant.?.variable.type;
+                                            if (arr_dt.array_depth > 0) {
+                                                arr_depth = arr_dt.array_depth;
+                                            } else if (arr_dt.pointer_depth == 0 and arr_dt.generic_args != null and mem.eql(u8, arr_dt.type_str.items, "Vec")) {
+                                                const gargs = arr_dt.generic_args.?.items();
+                                                if (gargs.len == 1) {
+                                                    vec_item_dt = gargs[0];
+                                                }
+                                            }
                                         }
                                     }
                                 }
 
-                                // The length expression root and offset:
-                                // - For regular arrays: root=arr_name, offset=0
-                                //   → sizeof(arr_name)/sizeof(arr_name[0])
-                                // - For multi-dim elements (mdim_root set): use root and offset
-                                //   → sizeof(root[0]*offset)/sizeof(root[0]*(offset+1))
-                                const len_root = mdim_root orelse arr_name;
-                                const len_offset = if (mdim_root != null) mdim_depth else 0;
+                                if (vec_item_dt != null) {
+                                    try self.write("for (int64_t ");
+                                    try self.write(idx_name);
+                                    try self.write(" = 0; ");
+                                    try self.write(idx_name);
+                                    try self.write(" < ");
+                                    try self.write(arr_name);
+                                    try self.write(".len; ");
+                                    try self.write(idx_name);
+                                    try self.write("++) {");
+                                    self.indent();
 
-                                try self.write("for (int64_t ");
-                                try self.write(idx_name);
-                                try self.write(" = 0; ");
-                                try self.write(idx_name);
-                                try self.write(" < (int64_t)(sizeof(");
-                                try self.write(len_root);
-                                {
-                                    var d: usize = 0;
-                                    while (d < len_offset) : (d += 1) try self.write("[0]");
-                                }
-                                try self.write(")/sizeof(");
-                                try self.write(len_root);
-                                {
-                                    var d: usize = 0;
-                                    while (d <= len_offset) : (d += 1) try self.write("[0]");
-                                }
-                                try self.write(")); ");
-                                try self.write(idx_name);
-                                try self.write("++) {");
-                                self.indent();
+                                    try self.push_defer_scope(.loop);
+                                    defer self.pop_defer_scope();
 
-                                try self.push_defer_scope(.loop);
-                                defer self.pop_defer_scope();
+                                    _ = try self.new_scope();
+                                    defer self.finish_scope();
 
-                                _ = try self.new_scope();
-                                defer self.finish_scope();
-
-                                // Determine base C type for the element.
-                                var item_c_type: []const u8 = "int64_t";
-                                if (self.get_scope_entity(arr_name)) |arr_ent_for_type| {
-                                    if (arr_ent_for_type.node) |arr_node| {
-                                        if (arr_node.type == .Variable and arr_node.node_variant != null) {
-                                            const dt = arr_node.node_variant.?.variable.type.*;
-                                            item_c_type = map_type_to_c(dt.type_str.items);
-                                        }
-                                    }
-                                }
-
-                                // element_depth = arr_depth - 1: number of pointer stars for the element.
-                                const element_depth = if (arr_depth > 0) arr_depth - 1 else 0;
-
-                                // Emit item declaration.
-                                // For elements that are themselves arrays (element_depth >= 2), use
-                                // __auto_type so the compiler infers the correct array-pointer type
-                                // (e.g. int64_t (*layer)[4] for a 3D tensor), avoiding the invalid
-                                // int64_t ** that would result from naive pointer-star expansion.
-                                try self.write_indent();
-                                if (element_depth >= 2) {
+                                    try self.write_indent();
                                     try self.write("__auto_type ");
                                     try self.write(fi.item_name);
                                     try self.write(" = ");
                                     try self.write(arr_name);
-                                    try self.write("[");
+                                    try self.write(".data[");
                                     try self.write(idx_name);
                                     try self.write("];\n");
+
+                                    const item_dt = try self.clone_dtype(vec_item_dt.?);
+                                    const item_node = self.allocator.create(ast.Node) catch return TranspileError.MemoryAllocationFailed;
+                                    var item_name_buf = ArrayList(u8).init(self.allocator);
+                                    item_name_buf.appendSlice(fi.item_name) catch return TranspileError.MemoryAllocationFailed;
+                                    item_node.* = .{
+                                        .type = .Variable,
+                                        .node_variant = .{ .variable = .{
+                                            .type = item_dt,
+                                            .name = item_name_buf,
+                                            .val = null,
+                                        } },
+                                    };
+
+                                    const item_ent = self.allocator.create(scope.ScopeEntity) catch return TranspileError.MemoryAllocationFailed;
+                                    item_ent.* = .{
+                                        .flags = .{ .on_stack = false },
+                                        .node = item_node,
+                                        .name = fi.item_name,
+                                    };
+                                    try self.push_scope_entity(item_ent);
+                                    self.owned_scope_entities.append(item_ent) catch return TranspileError.MemoryAllocationFailed;
+
+                                    try self.transpile_block_contents(fi.body);
+                                    if (!self.block_ends_with_scope_terminator(fi.body)) {
+                                        try self.emit_current_scope_defers();
+                                    }
+
+                                    self.dedent();
+                                    try self.write_indent();
+                                    try self.write("}");
                                 } else {
-                                    try self.write(item_c_type);
+                                    // The length expression root and offset:
+                                    // - For regular arrays: root=arr_name, offset=0
+                                    //   → sizeof(arr_name)/sizeof(arr_name[0])
+                                    // - For multi-dim elements (mdim_root set): use root and offset
+                                    //   → sizeof(root[0]*offset)/sizeof(root[0]*(offset+1))
+                                    const len_root = mdim_root orelse arr_name;
+                                    const len_offset = if (mdim_root != null) mdim_depth else 0;
+
+                                    try self.write("for (int64_t ");
+                                    try self.write(idx_name);
+                                    try self.write(" = 0; ");
+                                    try self.write(idx_name);
+                                    try self.write(" < (int64_t)(sizeof(");
+                                    try self.write(len_root);
                                     {
                                         var d: usize = 0;
-                                        while (d < element_depth) : (d += 1) try self.write(" *");
+                                        while (d < len_offset) : (d += 1) try self.write("[0]");
                                     }
-                                    try self.write(" ");
-                                    try self.write(fi.item_name);
-                                    try self.write(" = ");
-                                    try self.write(arr_name);
-                                    try self.write("[");
+                                    try self.write(")/sizeof(");
+                                    try self.write(len_root);
+                                    {
+                                        var d: usize = 0;
+                                        while (d <= len_offset) : (d += 1) try self.write("[0]");
+                                    }
+                                    try self.write(")); ");
                                     try self.write(idx_name);
-                                    try self.write("];\n");
-                                }
+                                    try self.write("++) {");
+                                    self.indent();
 
-                                // Register item in scope with multidim info if it is still an array.
-                                if (self.get_scope_entity(arr_name)) |arr_ent| {
-                                    if (arr_ent.node) |arr_node| {
-                                        if (arr_node.type == .Variable and arr_node.node_variant != null) {
-                                            const arr_dt = arr_node.node_variant.?.variable.type;
-                                            const item_dt = self.allocator.create(dtype.DataType) catch return TranspileError.MemoryAllocationFailed;
-                                            item_dt.* = arr_dt.*;
-                                            item_dt.array_depth = if (arr_dt.array_depth > 0) arr_dt.array_depth - 1 else 0;
-                                            if (item_dt.array_depth == 0) {
-                                                if (item_dt.flags) |flags| {
-                                                    var fcopy = flags;
-                                                    fcopy.is_array = false;
-                                                    item_dt.flags = fcopy;
-                                                }
+                                    try self.push_defer_scope(.loop);
+                                    defer self.pop_defer_scope();
+
+                                    _ = try self.new_scope();
+                                    defer self.finish_scope();
+
+                                    // Determine base C type for the element.
+                                    var item_c_type: []const u8 = "int64_t";
+                                    if (self.get_scope_entity(arr_name)) |arr_ent_for_type| {
+                                        if (arr_ent_for_type.node) |arr_node| {
+                                            if (arr_node.type == .Variable and arr_node.node_variant != null) {
+                                                const dt = arr_node.node_variant.?.variable.type.*;
+                                                item_c_type = map_type_to_c(dt.type_str.items);
                                             }
-                                            item_dt.array = null;
-
-                                            const item_node = self.allocator.create(ast.Node) catch return TranspileError.MemoryAllocationFailed;
-                                            var item_name_buf = ArrayList(u8).init(self.allocator);
-                                            item_name_buf.appendSlice(fi.item_name) catch return TranspileError.MemoryAllocationFailed;
-                                            item_node.* = .{
-                                                .type = .Variable,
-                                                .node_variant = .{ .variable = .{
-                                                    .type = item_dt,
-                                                    .name = item_name_buf,
-                                                    .val = null,
-                                                } },
-                                            };
-
-                                            // Create scope entity with multidim info if element is still an array.
-                                            const item_ent = self.allocator.create(scope.ScopeEntity) catch return TranspileError.MemoryAllocationFailed;
-                                            item_ent.* = .{
-                                                .flags = .{ .on_stack = false },
-                                                .node = item_node,
-                                                .name = fi.item_name,
-                                            };
-                                            if (element_depth > 0) {
-                                                item_ent.multidim_root = len_root;
-                                                item_ent.multidim_depth = len_offset + 1;
-                                            }
-                                            try self.push_scope_entity(item_ent);
-                                            self.owned_scope_entities.append(item_ent) catch return TranspileError.MemoryAllocationFailed;
                                         }
                                     }
-                                }
 
-                                try self.transpile_block_contents(fi.body);
-                                if (!self.block_ends_with_scope_terminator(fi.body)) {
-                                    try self.emit_current_scope_defers();
-                                }
+                                    // element_depth = arr_depth - 1: number of pointer stars for the element.
+                                    const element_depth = if (arr_depth > 0) arr_depth - 1 else 0;
 
-                                self.dedent();
-                                try self.write_indent();
-                                try self.write("}");
+                                    // Emit item declaration.
+                                    // For elements that are themselves arrays (element_depth >= 2), use
+                                    // __auto_type so the compiler infers the correct array-pointer type
+                                    // (e.g. int64_t (*layer)[4] for a 3D tensor), avoiding the invalid
+                                    // int64_t ** that would result from naive pointer-star expansion.
+                                    try self.write_indent();
+                                    if (element_depth >= 2) {
+                                        try self.write("__auto_type ");
+                                        try self.write(fi.item_name);
+                                        try self.write(" = ");
+                                        try self.write(arr_name);
+                                        try self.write("[");
+                                        try self.write(idx_name);
+                                        try self.write("];\n");
+                                    } else {
+                                        try self.write(item_c_type);
+                                        {
+                                            var d: usize = 0;
+                                            while (d < element_depth) : (d += 1) try self.write(" *");
+                                        }
+                                        try self.write(" ");
+                                        try self.write(fi.item_name);
+                                        try self.write(" = ");
+                                        try self.write(arr_name);
+                                        try self.write("[");
+                                        try self.write(idx_name);
+                                        try self.write("];\n");
+                                    }
+
+                                    // Register item in scope with multidim info if it is still an array.
+                                    if (self.get_scope_entity(arr_name)) |arr_ent| {
+                                        if (arr_ent.node) |arr_node| {
+                                            if (arr_node.type == .Variable and arr_node.node_variant != null) {
+                                                const arr_dt = arr_node.node_variant.?.variable.type;
+                                                const item_dt = self.allocator.create(dtype.DataType) catch return TranspileError.MemoryAllocationFailed;
+                                                item_dt.* = arr_dt.*;
+                                                item_dt.array_depth = if (arr_dt.array_depth > 0) arr_dt.array_depth - 1 else 0;
+                                                if (item_dt.array_depth == 0) {
+                                                    if (item_dt.flags) |flags| {
+                                                        var fcopy = flags;
+                                                        fcopy.is_array = false;
+                                                        item_dt.flags = fcopy;
+                                                    }
+                                                }
+                                                item_dt.array = null;
+
+                                                const item_node = self.allocator.create(ast.Node) catch return TranspileError.MemoryAllocationFailed;
+                                                var item_name_buf = ArrayList(u8).init(self.allocator);
+                                                item_name_buf.appendSlice(fi.item_name) catch return TranspileError.MemoryAllocationFailed;
+                                                item_node.* = .{
+                                                    .type = .Variable,
+                                                    .node_variant = .{ .variable = .{
+                                                        .type = item_dt,
+                                                        .name = item_name_buf,
+                                                        .val = null,
+                                                    } },
+                                                };
+
+                                                // Create scope entity with multidim info if element is still an array.
+                                                const item_ent = self.allocator.create(scope.ScopeEntity) catch return TranspileError.MemoryAllocationFailed;
+                                                item_ent.* = .{
+                                                    .flags = .{ .on_stack = false },
+                                                    .node = item_node,
+                                                    .name = fi.item_name,
+                                                };
+                                                if (element_depth > 0) {
+                                                    item_ent.multidim_root = len_root;
+                                                    item_ent.multidim_depth = len_offset + 1;
+                                                }
+                                                try self.push_scope_entity(item_ent);
+                                                self.owned_scope_entities.append(item_ent) catch return TranspileError.MemoryAllocationFailed;
+                                            }
+                                        }
+                                    }
+
+                                    try self.transpile_block_contents(fi.body);
+                                    if (!self.block_ends_with_scope_terminator(fi.body)) {
+                                        try self.emit_current_scope_defers();
+                                    }
+
+                                    self.dedent();
+                                    try self.write_indent();
+                                    try self.write("}");
+                                }
                             },
                         }
                     },

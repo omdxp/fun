@@ -1,0 +1,15 @@
+imp std.log as l;
+imp std.result;
+imp std.sys as sys;
+
+fun main() {
+  let env = sys.try_env("PATH");
+  Result<str> path_res = env;
+
+  l.Logger logger = l.logger_init(l.LogLevel.Debug);
+  if path_res.is_ok() {
+    logger.info("PATH is available");
+  } else {
+    logger.warn("PATH missing");
+  }
+}

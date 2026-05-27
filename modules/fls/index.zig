@@ -250,7 +250,7 @@ pub fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path
         tmp_alloc,
         tmp_path_for_codegen,
         out_path_for_codegen,
-        .{ .exec = false, .outf = false, .ast = false, .preload_imports = false, .preload_std_imports = false, .emit_stderr = false },
+        .{ .exec = false, .outf = false, .ast = false, .preload_imports = false, .preload_std_imports = false, .emit_stderr = false, .emit_unused_warnings = false },
     );
     defer tp.deinit();
 
@@ -1037,6 +1037,32 @@ test "fls index: generic function signature includes params" {
         found = true;
         try std.testing.expect(s.detail != null);
         try std.testing.expect(std.mem.indexOf(u8, s.detail.?, "id<T>") != null);
+        break;
+    }
+    try std.testing.expect(found);
+}
+
+test "fls index: function signature includes array params" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const text =
+        "fun sum(num[] values, dec scale) num {\n" ++
+        "  _ = scale;\n" ++
+        "  ret values[0];\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found = false;
+    for (idx.symbols) |s| {
+        if (s.kind != .function) continue;
+        if (!std.mem.eql(u8, s.name, "sum")) continue;
+        found = true;
+        try std.testing.expect(s.detail != null);
+        try std.testing.expectEqualStrings("fun sum(num[] values, dec scale) num", s.detail.?);
         break;
     }
     try std.testing.expect(found);

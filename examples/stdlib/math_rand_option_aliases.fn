@@ -1,0 +1,30 @@
+imp std.io;
+imp std.math as m;
+imp std.rand as r;
+imp std.option;
+
+compound Person<T> {
+  T name;
+  num age;
+  Option<str> nickname;
+}
+
+impl Person<T> {
+  new(T name, num age) Person<T> {
+    ret Person{name = name, age = age, nickname = some("none")};
+  }
+}
+
+fun main() num {
+  let root = m.sqrt_dec(4);
+  r.Rand rand = r.rand_init(42);
+  let flip = rand.chance(0.5);
+
+  Person<str> p;
+  p = p.new("Alice", 30);
+  p.nickname = some("Ally");
+
+  let nick = p.nickname.unwrap_or("none");
+  println_fmt("root={dec} flip={bin} nick={str}", root, flip, nick);
+  ret 0;
+}
