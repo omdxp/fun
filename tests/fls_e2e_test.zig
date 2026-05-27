@@ -4173,6 +4173,78 @@ test "fls e2e: publishDiagnostics includes warning from ID-tagged warning output
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: publishDiagnostics includes fit_non_exhaustive warning in diag-only mode" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  bin x = true;\n" ++
+        "  fit x {\n" ++
+        "    true -> { printf(\"x was true\\n\"); }\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-fit-warning-diagnostics.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const deadline_ms = @as(i64, @intCast(@divFloor(std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds, std.time.ns_per_ms))) + 15000;
+    var saw_expected_warning = false;
+
+    while (@as(i64, @intCast(@divFloor(std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds, std.time.ns_per_ms))) < deadline_ms and !saw_expected_warning) {
+        var notif = lsp.waitNotification("textDocument/publishDiagnostics", 1000) catch |err| {
+            if (err == error.Timeout) continue;
+            return err;
+        };
+        defer notif.deinit();
+
+        if (notif.parsed.value != .object) continue;
+        const root = notif.parsed.value.object;
+        const params_val = root.get("params") orelse continue;
+        if (params_val != .object) continue;
+        const params_obj = params_val.object;
+
+        const uri_val = params_obj.get("uri") orelse continue;
+        if (uri_val != .string or !std.mem.eql(u8, uri_val.string, doc_uri)) continue;
+
+        const diags_val = params_obj.get("diagnostics") orelse continue;
+        if (diags_val != .array) continue;
+
+        for (diags_val.array.items) |dv| {
+            if (dv != .object) continue;
+            const sev = dv.object.get("severity") orelse continue;
+            const msg = dv.object.get("message") orelse continue;
+            const code = dv.object.get("code") orelse continue;
+            if (sev != .integer or msg != .string or code != .string) continue;
+            if (sev.integer != 2) continue;
+
+            if (std.mem.eql(u8, code.string, "fit_non_exhaustive") and
+                std.mem.indexOf(u8, msg.string, "missing false branch") != null)
+            {
+                saw_expected_warning = true;
+                break;
+            }
+        }
+    }
+
+    try std.testing.expect(saw_expected_warning);
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: enum variant dot completion + hover" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();

@@ -3492,30 +3492,6 @@ pub const TranspileProcess = struct {
         if (has_unmet) return TranspileError.UnmetWarningExpectation;
     }
 
-    fn infer_simple_dtype(self: *Self, node: ast.Node) ?dtype.DataTypeType {
-        return switch (node.type) {
-            .Boolean => .Bin,
-            .Number => blk: {
-                if (node.data == null) break :blk .Num;
-                break :blk switch (node.data.?) {
-                    .dnum => .Dec,
-                    else => .Num,
-                };
-            },
-            .String => .Str,
-            .Character => .Chr,
-            .Identifier => blk: {
-                if (node.data == null) break :blk null;
-                const name = node.data.?.sval.items;
-                const ent = self.get_scope_entity(name) orelse break :blk null;
-                const ent_node = ent.node orelse break :blk null;
-                if (ent_node.type != .Variable) break :blk null;
-                break :blk ent_node.node_variant.?.variable.type.type;
-            },
-            else => null,
-        };
-    }
-
     /// Emit a `return_local_ptr` warning if `ret_expr` is `&<name>` where `<name>
     /// is declared in a body-local scope (TypeEnv frame index ≥ 1).  Frame 0
     /// contains module-level globals and function arguments; frames 1+ are pushed
@@ -6392,6 +6368,7 @@ pub const TranspileProcess = struct {
                         }
                         try self.check_body(branch.body, env, fns, fn_rtype);
                     }
+                    self.warn_if_fit_not_exhausted(stmt, target_t, fit.branches.items());
                 },
                 .StatementFor => {
                     const f = stmt.node_variant.?.statement.for_stmt;
@@ -7189,7 +7166,7 @@ pub const TranspileProcess = struct {
         }
     }
 
-    fn warn_if_fit_not_exhausted(self: *Self, fit_stmt: ast.Node, condition: *ast.Node, branches: []const ast.FitBranch) void {
+    fn warn_if_fit_not_exhausted(self: *Self, fit_stmt: ast.Node, condition_type: CheckedType, branches: []const ast.FitBranch) void {
         // If there is any default branch, treat it as exhausted.
         for (branches) |branch| {
             if (branch.condition == null) return;
@@ -7214,59 +7191,9 @@ pub const TranspileProcess = struct {
         // Exhaustive boolean fit: true + false present.
         if (has_true and has_false) return;
 
-        const resolve_enum_name = struct {
-            fn call(self_: *Self, cond: *ast.Node) ?[]const u8 {
-                var node = cond.*;
-                if (node.type == .ExpressionParenthesis and node.node_variant != null) {
-                    node = node.node_variant.?.paren.exp.*;
-                }
-
-                if (node.type == .Identifier and node.data != null) {
-                    const vname = node.data.?.sval.items;
-                    if (self_.get_scope_entity(vname)) |ent| {
-                        if (ent.node) |ent_node| {
-                            if (ent_node.type == .Variable and ent_node.node_variant != null) {
-                                const dt = ent_node.node_variant.?.variable.type;
-                                if (dt.type == .Unknown and dt.pointer_depth == 0 and dt.type_str.items.len > 0) {
-                                    return dt.type_str.items;
-                                }
-                            }
-                        }
-                    }
-                    return null;
-                }
-
-                if (node.type == .Expression and node.node_variant != null and mem.eql(u8, node.node_variant.?.exp.op, ".")) {
-                    const exp = node.node_variant.?.exp;
-                    const left = exp.left orelse return null;
-                    const right = exp.right orelse return null;
-                    if (left.type != .Identifier or left.data == null) return null;
-                    if (right.type != .Identifier or right.data == null) return null;
-
-                    const base_name = left.data.?.sval.items;
-                    if (self_.get_scope_entity(base_name)) |ent| {
-                        if (ent.node) |ent_node| {
-                            if (ent_node.type == .Variable and ent_node.node_variant != null) {
-                                const dt = ent_node.node_variant.?.variable.type;
-                                if (dt.type == .Unknown and dt.type_str.items.len > 0) {
-                                    const field_dt = self_.lookup_compound_field(dt.type_str.items, right.data.?.sval.items) orelse return null;
-                                    if (field_dt.type == .Unknown and field_dt.pointer_depth == 0 and field_dt.type_str.items.len > 0) {
-                                        return field_dt.type_str.items;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                return null;
-            }
-        }.call;
-
-        // Try enum exhaustiveness for variables and field accesses (e.g. `self.color`).
         const root = self.get_root();
         if (root.type_registry != null) {
-            if (resolve_enum_name(self, condition)) |enum_name| {
+            if (self.expected_enum_name(condition_type)) |enum_name| {
                 const reg = &root.type_registry.?;
                 if (reg.enums_by_name.get(enum_name)) |enode| {
                     if (enode.node_variant != null) {
@@ -7319,10 +7246,11 @@ pub const TranspileProcess = struct {
             }
         }
 
-        const cond_type = self.infer_simple_dtype(condition.*) orelse {
+        const cond_type = condition_type.base;
+        if (cond_type == .Unknown) {
             self.report_warning(.fit_non_exhaustive, fit_stmt, "fit statement is not exhausted for unknown condition (missing catch-all '_' branch)", .{});
             return;
-        };
+        }
 
         if (cond_type != .Bin) {
             self.report_warning(.fit_non_exhaustive, fit_stmt, "fit statement is not exhausted for {s} condition (missing catch-all '_' branch)", .{@tagName(cond_type)});
@@ -13709,7 +13637,6 @@ pub const TranspileProcess = struct {
                         }
                     },
                     .fit_stmt => |fit| {
-                        self.warn_if_fit_not_exhausted(node, fit.exp, fit.branches.items());
                         try self.write("switch (");
                         try self.transpile_node(fit.exp.*);
                         try self.write(") {");
