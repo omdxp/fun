@@ -40,7 +40,10 @@ fn makeTempDir(allocator: std.mem.Allocator, prefix: []const u8) ![]const u8 {
 }
 
 fn writeFileInDir(allocator: std.mem.Allocator, dir: []const u8, rel: []const u8, contents: []const u8) ![]const u8 {
-    const path = try std.fs.path.join(allocator, &.{ dir, rel });
+    const normalized_rel = try std.mem.replaceOwned(u8, allocator, rel, "/", std.fs.path.sep_str);
+    defer allocator.free(normalized_rel);
+
+    const path = try std.fs.path.join(allocator, &.{ dir, normalized_rel });
     errdefer allocator.free(path);
 
     if (std.fs.path.dirname(path)) |pdir| {
