@@ -53,6 +53,11 @@ function Is-ExpectedFail([string]$relPath) {
   # Arch-specific asm example fails during codegen on mismatched targets.
   if ($relPath -ieq 'examples\advanced\asm_arch_specific.fn') { return $true }
 
+  # Unused variable expect example should fail.
+  if ($relPath -ieq 'examples\advanced\unused_variable_expect.fn') {
+    return $true
+  }
+
   # Direct files in examples/error_cases are meant to fail.
   if ($relPath -match '^examples\\error_cases\\[^\\]+\.fn$') { return $true }
 
