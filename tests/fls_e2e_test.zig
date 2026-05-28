@@ -4079,6 +4079,9 @@ test "fls e2e: warning ids completion for allow and expect" {
     defer allow_res.deinit();
     const allow_val = try jsonResultFromResponseObj(allow_res.parsed.value.object);
     try expectCompletionHasLabel(allocator, allow_val, "fit_non_exhaustive");
+    try expectCompletionHasLabel(allocator, allow_val, "fit_unreachable_branch");
+    try expectCompletionHasLabel(allocator, allow_val, "unreachable_code");
+    try expectCompletionHasLabel(allocator, allow_val, "assert_constant");
     try expectCompletionHasLabel(allocator, allow_val, "unused_variable");
     try expectCompletionHasLabel(allocator, allow_val, "unused_import");
     try expectCompletionHasLabel(allocator, allow_val, "unused_function");
@@ -4096,6 +4099,9 @@ test "fls e2e: warning ids completion for allow and expect" {
     defer expect_res.deinit();
     const expect_val = try jsonResultFromResponseObj(expect_res.parsed.value.object);
     try expectCompletionHasLabel(allocator, expect_val, "return_local_ptr");
+    try expectCompletionHasLabel(allocator, expect_val, "fit_unreachable_branch");
+    try expectCompletionHasLabel(allocator, expect_val, "unreachable_code");
+    try expectCompletionHasLabel(allocator, expect_val, "assert_constant");
     try expectCompletionHasLabel(allocator, expect_val, "unused_variable");
     try expectCompletionHasLabel(allocator, expect_val, "unused_import");
     try expectCompletionHasLabel(allocator, expect_val, "unused_function");
@@ -4166,6 +4172,295 @@ test "fls e2e: publishDiagnostics includes warning from ID-tagged warning output
     }
 
     try std.testing.expect(saw_expected_warning);
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: publishDiagnostics includes fit_non_exhaustive warning in diag-only mode" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  bin x = true;\n" ++
+        "  fit x {\n" ++
+        "    true -> { printf(\"x was true\\n\"); }\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-fit-warning-diagnostics.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const deadline_ms = @as(i64, @intCast(@divFloor(std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds, std.time.ns_per_ms))) + 15000;
+    var saw_expected_warning = false;
+
+    while (@as(i64, @intCast(@divFloor(std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds, std.time.ns_per_ms))) < deadline_ms and !saw_expected_warning) {
+        var notif = lsp.waitNotification("textDocument/publishDiagnostics", 1000) catch |err| {
+            if (err == error.Timeout) continue;
+            return err;
+        };
+        defer notif.deinit();
+
+        if (notif.parsed.value != .object) continue;
+        const root = notif.parsed.value.object;
+        const params_val = root.get("params") orelse continue;
+        if (params_val != .object) continue;
+        const params_obj = params_val.object;
+
+        const uri_val = params_obj.get("uri") orelse continue;
+        if (uri_val != .string or !std.mem.eql(u8, uri_val.string, doc_uri)) continue;
+
+        const diags_val = params_obj.get("diagnostics") orelse continue;
+        if (diags_val != .array) continue;
+
+        for (diags_val.array.items) |dv| {
+            if (dv != .object) continue;
+            const sev = dv.object.get("severity") orelse continue;
+            const msg = dv.object.get("message") orelse continue;
+            const code = dv.object.get("code") orelse continue;
+            if (sev != .integer or msg != .string or code != .string) continue;
+            if (sev.integer != 2) continue;
+
+            if (std.mem.eql(u8, code.string, "fit_non_exhaustive") and
+                std.mem.indexOf(u8, msg.string, "missing false branch") != null)
+            {
+                saw_expected_warning = true;
+                break;
+            }
+        }
+    }
+
+    try std.testing.expect(saw_expected_warning);
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: publishDiagnostics includes unused_variable warning" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "fun main() void {\n" ++
+        "  num value = 1;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-unused-variable-warning.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const deadline_ms = @as(i64, @intCast(@divFloor(std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds, std.time.ns_per_ms))) + 15000;
+    var saw_expected_warning = false;
+
+    while (@as(i64, @intCast(@divFloor(std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds, std.time.ns_per_ms))) < deadline_ms and !saw_expected_warning) {
+        var notif = lsp.waitNotification("textDocument/publishDiagnostics", 1000) catch |err| {
+            if (err == error.Timeout) continue;
+            return err;
+        };
+        defer notif.deinit();
+
+        if (notif.parsed.value != .object) continue;
+        const root = notif.parsed.value.object;
+        const params_val = root.get("params") orelse continue;
+        if (params_val != .object) continue;
+        const params_obj = params_val.object;
+
+        const uri_val = params_obj.get("uri") orelse continue;
+        if (uri_val != .string or !std.mem.eql(u8, uri_val.string, doc_uri)) continue;
+
+        const diags_val = params_obj.get("diagnostics") orelse continue;
+        if (diags_val != .array) continue;
+
+        for (diags_val.array.items) |dv| {
+            if (dv != .object) continue;
+            const sev = dv.object.get("severity") orelse continue;
+            const msg = dv.object.get("message") orelse continue;
+            const code = dv.object.get("code") orelse continue;
+            if (sev != .integer or msg != .string or code != .string) continue;
+            if (sev.integer != 2) continue;
+
+            if (std.mem.eql(u8, code.string, "unused_variable") and
+                std.mem.indexOf(u8, msg.string, "unused variable 'value'") != null)
+            {
+                saw_expected_warning = true;
+                break;
+            }
+        }
+    }
+
+    try std.testing.expect(saw_expected_warning);
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: publishDiagnostics includes unused_import warning" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "imp std.option;\n" ++
+        "fun main() {\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-unused-import-warning.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const deadline_ms = @as(i64, @intCast(@divFloor(std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds, std.time.ns_per_ms))) + 15000;
+    var saw_expected_warning = false;
+
+    while (@as(i64, @intCast(@divFloor(std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds, std.time.ns_per_ms))) < deadline_ms and !saw_expected_warning) {
+        var notif = lsp.waitNotification("textDocument/publishDiagnostics", 1000) catch |err| {
+            if (err == error.Timeout) continue;
+            return err;
+        };
+        defer notif.deinit();
+
+        if (notif.parsed.value != .object) continue;
+        const root = notif.parsed.value.object;
+        const params_val = root.get("params") orelse continue;
+        if (params_val != .object) continue;
+        const params_obj = params_val.object;
+
+        const uri_val = params_obj.get("uri") orelse continue;
+        if (uri_val != .string or !std.mem.eql(u8, uri_val.string, doc_uri)) continue;
+
+        const diags_val = params_obj.get("diagnostics") orelse continue;
+        if (diags_val != .array) continue;
+
+        for (diags_val.array.items) |dv| {
+            if (dv != .object) continue;
+            const sev = dv.object.get("severity") orelse continue;
+            const msg = dv.object.get("message") orelse continue;
+            const code = dv.object.get("code") orelse continue;
+            if (sev != .integer or msg != .string or code != .string) continue;
+            if (sev.integer != 2) continue;
+
+            if (std.mem.eql(u8, code.string, "unused_import") and
+                std.mem.indexOf(u8, msg.string, "unused import 'std.option'") != null)
+            {
+                saw_expected_warning = true;
+                break;
+            }
+        }
+    }
+
+    try std.testing.expect(saw_expected_warning);
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: publishDiagnostics suppresses expect unused_import after formatting" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "expect unused_import, \"tracked import until the API lands\";\n" ++
+        "imp std.option;\n" ++
+        "fun main() {\n" ++
+        "  num value = 1;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-unused-import-expect.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const deadline_ms = @as(i64, @intCast(@divFloor(std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds, std.time.ns_per_ms))) + 15000;
+    var saw_expected_warning = false;
+    var saw_unexpected_unused_import = false;
+    var saw_unexpected_expect_error = false;
+
+    while (@as(i64, @intCast(@divFloor(std.Io.Clock.Timestamp.now(std.testing.io, .real).raw.nanoseconds, std.time.ns_per_ms))) < deadline_ms and !saw_expected_warning and !saw_unexpected_unused_import and !saw_unexpected_expect_error) {
+        var notif = lsp.waitNotification("textDocument/publishDiagnostics", 1000) catch |err| {
+            if (err == error.Timeout) continue;
+            return err;
+        };
+        defer notif.deinit();
+
+        if (notif.parsed.value != .object) continue;
+        const root = notif.parsed.value.object;
+        const params_val = root.get("params") orelse continue;
+        if (params_val != .object) continue;
+        const params_obj = params_val.object;
+
+        const uri_val = params_obj.get("uri") orelse continue;
+        if (uri_val != .string or !std.mem.eql(u8, uri_val.string, doc_uri)) continue;
+
+        const diags_val = params_obj.get("diagnostics") orelse continue;
+        if (diags_val != .array) continue;
+
+        for (diags_val.array.items) |dv| {
+            if (dv != .object) continue;
+            const sev = dv.object.get("severity") orelse continue;
+            const msg = dv.object.get("message") orelse continue;
+            const code = dv.object.get("code");
+            if (sev != .integer or msg != .string) continue;
+
+            if (code) |code_val| {
+                if (code_val == .string and std.mem.eql(u8, code_val.string, "unused_import")) {
+                    saw_unexpected_unused_import = true;
+                }
+                if (code_val == .string and std.mem.eql(u8, code_val.string, "unused_variable") and
+                    std.mem.indexOf(u8, msg.string, "unused variable 'value'") != null)
+                {
+                    saw_expected_warning = true;
+                }
+            }
+
+            if (std.mem.indexOf(u8, msg.string, "expected warning 'unused_import' was not emitted") != null) {
+                saw_unexpected_expect_error = true;
+            }
+        }
+    }
+
+    try std.testing.expect(saw_expected_warning);
+    try std.testing.expect(!saw_unexpected_unused_import);
+    try std.testing.expect(!saw_unexpected_expect_error);
 
     const shutdown_id = try lsp.request("shutdown", "{}");
     var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);

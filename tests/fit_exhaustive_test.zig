@@ -36,6 +36,36 @@ fn runTranspileWithWarnings(allocator: std.mem.Allocator, input_path: []const u8
     return .{ .out = out_owned, .warnings = warnings_owned };
 }
 
+fn runDiagOnlyWithWarnings(allocator: std.mem.Allocator, input_path: []const u8, input: []const u8) !?[]const u8 {
+    {
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, input_path, .{ .read = true });
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, input);
+    }
+
+    var transpile_proc = try codegen.TranspileProcess.init(allocator, input_path, "_ignored.c", .{
+        .exec = false,
+        .outf = false,
+        .diag_only = true,
+    });
+    var lex_proc = lexer.LexProcess.init(&transpile_proc);
+    var parse_proc = ParseProcess.init(&transpile_proc);
+
+    defer {
+        lex_proc.deinit();
+        transpile_proc.deinit();
+    }
+
+    try lex_proc.lex();
+    try parse_proc.parse();
+    try transpile_proc.transpile();
+
+    return if (transpile_proc.get_warnings()) |w|
+        try allocator.dupe(u8, w)
+    else
+        null;
+}
+
 test "fit bin missing false warns" {
     const allocator = std.testing.allocator;
     const ifilepath = "fit_bin_missing_false.fn";
@@ -59,6 +89,135 @@ test "fit bin missing false warns" {
     try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "fit statement is not exhausted for bin condition") != null);
 
     std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "fit bin missing false warns in diag_only mode" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "fit_bin_missing_false_diag_only.fn";
+
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  bin x = true;\n" ++
+        "  fit x {\n" ++
+        "    true -> { printf(\"T\\n\"); }\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const warnings = try runDiagOnlyWithWarnings(allocator, ifilepath, input);
+    defer if (warnings) |w| allocator.free(w);
+
+    try std.testing.expect(warnings != null);
+    try std.testing.expect(std.mem.indexOf(u8, warnings.?, "fit statement is not exhausted for bin condition (missing false branch)") != null);
+
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "fit duplicate bool branch warns unreachable branch" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "fit_bin_duplicate_true.fn";
+
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  bin x = true;\n" ++
+        "  fit x {\n" ++
+        "    true -> { printf(\"T1\\n\"); },\n" ++
+        "    true -> { printf(\"T2\\n\"); },\n" ++
+        "    false -> { printf(\"F\\n\"); }\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(res.warnings != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "fit branch is unreachable because condition 'true' was already handled earlier") != null);
+
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "fit allow fit_unreachable_branch suppresses warning" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "fit_bin_allow_unreachable_branch.fn";
+
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  bin x = true;\n" ++
+        "  allow fit_unreachable_branch, \"keep duplicate branch during parser refactor\";\n" ++
+        "  fit x {\n" ++
+        "    true -> { printf(\"T1\\n\"); },\n" ++
+        "    true -> { printf(\"T2\\n\"); },\n" ++
+        "    false -> { printf(\"F\\n\"); }\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(res.warnings == null);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "fit expect fit_unreachable_branch suppresses warning" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "fit_bin_expect_unreachable_branch.fn";
+
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  bin x = true;\n" ++
+        "  expect fit_unreachable_branch, \"duplicate branch is intentional while rewriting control flow\";\n" ++
+        "  fit x {\n" ++
+        "    true -> { printf(\"T1\\n\"); },\n" ++
+        "    true -> { printf(\"T2\\n\"); },\n" ++
+        "    false -> { printf(\"F\\n\"); }\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(res.warnings == null);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "fit unmet expect fit_unreachable_branch fails" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "fit_bin_expect_unreachable_branch_unmet.fn";
+
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  bin x = true;\n" ++
+        "  expect fit_unreachable_branch, \"should fail when duplicate branch is removed\";\n" ++
+        "  fit x {\n" ++
+        "    true -> { printf(\"T\\n\"); },\n" ++
+        "    false -> { printf(\"F\\n\"); }\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const res = runTranspileWithWarnings(allocator, ifilepath, input) catch |err| {
+        try std.testing.expectEqual(codegen.TranspileError.UnmetWarningExpectation, err);
+        std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+        return;
+    };
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(false);
 }
 
 test "fit allow fit_non_exhaustive suppresses warning" {

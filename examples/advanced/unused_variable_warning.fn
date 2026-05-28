@@ -1,0 +1,13 @@
+// Demonstrates the optional unused_variable warning.
+// 
+// Run:
+// fun -warn-unused -in .\examples\advanced\unused_variable_warning.fn
+// 
+// Expected:
+// - A warning like:
+// "unused variable 'value'"
+// - Program still runs normally.
+
+fun main() {
+  num value = 1;
+}

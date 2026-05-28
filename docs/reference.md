@@ -445,18 +445,25 @@ fun -in <input_file> [-out <output_file>] [-no-exec] [-outf] [-ast] [-help]
 
 ## Errors and Warnings
 - Type mismatches, unknown symbols, and incomplete quirk implementations are errors.
-- Fit exhaustiveness and pointer-return warnings are emitted as warnings.
+- Pointer-return, fit exhaustiveness, redundant fit branches, unreachable statements, constant assertions, and optional unused-* diagnostics are emitted as warnings.
 
 ### Warning IDs
 - `return_local_ptr`
 - `fit_non_exhaustive`
+- `fit_unreachable_branch`
+- `unreachable_code`
+- `assert_constant`
+- `unused_variable` (with `-warn-unused`)
+- `unused_import` (with `-warn-unused`)
+- `unused_function` (with `-warn-unused`)
+- `unused_compound` (with `-warn-unused`)
 
 ### Warning Control Statements
 - `allow <warning_id>, "reason";`
 - `expect <warning_id>, "reason";`
 
 Rules:
-- Valid only inside function bodies.
+- Valid inside function bodies. At module scope, only `unused_variable`, `unused_import`, `unused_function`, and `unused_compound` may be controlled, and they apply to the next top-level declaration or import in file order.
 - `reason` must be a string literal.
 - `allow` suppresses the next warning emitted with the given ID.
 - `expect` suppresses the next warning emitted with the given ID and fails compilation if that warning is never emitted.
@@ -487,4 +494,19 @@ Additional examples:
 - examples/advanced/warning_allow.fn
 - examples/advanced/warning_expect.fn
 - examples/advanced/return_local_ptr_allow.fn
+- examples/advanced/unused_variable_warning.fn
+- examples/advanced/unused_variable_allow.fn
+- examples/advanced/unused_variable_expect.fn
+- examples/advanced/unused_import_warning.fn
+- examples/advanced/unused_import_allow.fn
+- examples/advanced/unused_import_expect.fn
+- examples/advanced/unused_function_warning.fn
+- examples/advanced/unused_function_allow.fn
+- examples/advanced/unused_function_expect.fn
+- examples/advanced/unused_compound_warning.fn
+- examples/advanced/unused_compound_allow.fn
+- examples/advanced/unused_compound_expect.fn
+- examples/advanced/fit_unreachable_branch_warning.fn
+- examples/advanced/unreachable_code_warning.fn
+- examples/advanced/assert_constant_warning.fn
 - examples/error_cases/warning_expect_unmet.fn (expected compile failure)

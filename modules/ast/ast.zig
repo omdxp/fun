@@ -27,6 +27,9 @@ pub const NodeFlags = packed struct {
 pub const WarningId = enum {
     return_local_ptr,
     fit_non_exhaustive,
+    fit_unreachable_branch,
+    unreachable_code,
+    assert_constant,
     unused_variable,
     unused_import,
     unused_function,
@@ -42,6 +45,9 @@ pub const WarningControlAction = enum {
 pub fn warning_id_from_string(name: []const u8) ?WarningId {
     if (mem.eql(u8, name, "return_local_ptr")) return .return_local_ptr;
     if (mem.eql(u8, name, "fit_non_exhaustive")) return .fit_non_exhaustive;
+    if (mem.eql(u8, name, "fit_unreachable_branch")) return .fit_unreachable_branch;
+    if (mem.eql(u8, name, "unreachable_code")) return .unreachable_code;
+    if (mem.eql(u8, name, "assert_constant")) return .assert_constant;
     if (mem.eql(u8, name, "unused_variable")) return .unused_variable;
     if (mem.eql(u8, name, "unused_import")) return .unused_import;
     if (mem.eql(u8, name, "unused_function")) return .unused_function;
@@ -53,6 +59,9 @@ pub fn warning_id_to_string(id: WarningId) []const u8 {
     return switch (id) {
         .return_local_ptr => "return_local_ptr",
         .fit_non_exhaustive => "fit_non_exhaustive",
+        .fit_unreachable_branch => "fit_unreachable_branch",
+        .unreachable_code => "unreachable_code",
+        .assert_constant => "assert_constant",
         .unused_variable => "unused_variable",
         .unused_import => "unused_import",
         .unused_function => "unused_function",

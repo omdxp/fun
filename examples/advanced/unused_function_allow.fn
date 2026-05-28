@@ -1,0 +1,17 @@
+// Demonstrates allowing the optional unused_function warning.
+// 
+// Run:
+// fun -warn-unused -in .\examples\advanced\unused_function_allow.fn
+// 
+// Expected:
+// - No warning is emitted because allow consumes the next unused_function warning.
+// - Program still runs normally.
+
+allow unused_function, "temporary helper while the caller is being wired";
+
+fun helper() num {
+  ret 1;
+}
+
+fun main() {
+}

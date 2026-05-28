@@ -6763,6 +6763,9 @@ pub const LspServer = struct {
         const warning_ids = [_][]const u8{
             "return_local_ptr",
             "fit_non_exhaustive",
+            "fit_unreachable_branch",
+            "unreachable_code",
+            "assert_constant",
             "unused_variable",
             "unused_import",
             "unused_function",
@@ -8552,7 +8555,7 @@ pub const LspServer = struct {
         // The subprocess cost is identical (~40 ms); by storing the formatted result
         // now, any subsequent formatting request on the same content is a cache hit
         // with no subprocess needed.
-        const argv = [_][]const u8{ self.fun_exe_path, "-in", tmp_path_for_fun, "-fmt-diag", "-no-exec" };
+        const argv = [_][]const u8{ self.fun_exe_path, "-in", tmp_path_for_fun, "-fmt-diag", "-no-exec", "-warn-unused" };
         _ = try runCaptureStderr(self.allocator, &argv, &stderr_buf);
 
         // Read back the (possibly reformatted) temp file so we can cache it.
@@ -8630,7 +8633,7 @@ pub const LspServer = struct {
         defer stderr_buf.deinit();
 
         // Single subprocess: format in-place AND get diagnostics from stderr.
-        const argv = [_][]const u8{ self.fun_exe_path, "-in", tmp_abs_path, "-fmt-diag", "-no-exec" };
+        const argv = [_][]const u8{ self.fun_exe_path, "-in", tmp_abs_path, "-fmt-diag", "-no-exec", "-warn-unused" };
         _ = try runCaptureStderr(self.allocator, &argv, &stderr_buf);
 
         // Read the (possibly-formatted) result.

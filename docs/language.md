@@ -58,13 +58,14 @@
 - **Pattern matching (`fit`)**:
     - `fit c { .Red -> { ... }, .Green -> { ... }, _ -> { ... } }`
     - `fit c { Color.Red -> { ... }, Color.Green -> { ... }, Color.Blue -> { ... } }`
-- **Exhaustiveness**: Missing enum variants in `fit` may emit a warning unless a `_` catch-all branch is present.
+- **Exhaustiveness**: Missing enum variants in `fit` may emit `fit_non_exhaustive`; redundant branches or catch-alls may emit `fit_unreachable_branch`.
 
 ### Control Flow
 - **If/Else**: Standard conditional branching.
 - **Elif**: Else-if chaining.
 - **Pattern Matching**: `fit` statement for exhaustive and non-exhaustive matches.
-- **Assert**: `assert <condition>;` aborts if condition is false. Optional message: `assert <condition>, "msg";`.
+- **Assert**: `assert <condition>;` aborts if condition is false. Optional message: `assert <condition>, "msg";`. Constant assertions may emit `assert_constant`.
+- **Unreachable Statements**: Statements after `ret`, `break`, or `continue` may emit `unreachable_code`.
 - **For Loops**:
     - Range: `for i : 0..10 { ... }`
     - Array: `for item : arr { ... }`
@@ -188,11 +189,18 @@ async fun main() {
 - **Stable warning IDs**:
         - `return_local_ptr`
         - `fit_non_exhaustive`
+    - `fit_unreachable_branch`
+    - `unreachable_code`
+    - `assert_constant`
+    - `unused_variable` (with `-warn-unused`)
+    - `unused_import` (with `-warn-unused`)
+    - `unused_function` (with `-warn-unused`)
+    - `unused_compound` (with `-warn-unused`)
 - **Suppress next warning intentionally**:
         - `allow <warning_id>, "reason";`
 - **Require next warning to appear**:
         - `expect <warning_id>, "reason";`
-- **Scope**: `allow`/`expect` are statement directives and are valid inside function bodies.
+- **Scope**: `allow`/`expect` are statement directives. They work inside function bodies, and `unused_variable`, `unused_import`, `unused_function`, and `unused_compound` may also be controlled at module scope for the next top-level declaration or import.
 - **Reason is required**: the intent string documents why the warning is being allowed/expected.
 - **Behavior**:
         - `allow` consumes and suppresses the next emitted warning with that ID.
@@ -224,6 +232,21 @@ See also:
 - examples/advanced/warning_allow.fn
 - examples/advanced/warning_expect.fn
 - examples/advanced/return_local_ptr_allow.fn
+- examples/advanced/unused_variable_warning.fn
+- examples/advanced/unused_variable_allow.fn
+- examples/advanced/unused_variable_expect.fn
+- examples/advanced/unused_import_warning.fn
+- examples/advanced/unused_import_allow.fn
+- examples/advanced/unused_import_expect.fn
+- examples/advanced/unused_function_warning.fn
+- examples/advanced/unused_function_allow.fn
+- examples/advanced/unused_function_expect.fn
+- examples/advanced/unused_compound_warning.fn
+- examples/advanced/unused_compound_allow.fn
+- examples/advanced/unused_compound_expect.fn
+- examples/advanced/fit_unreachable_branch_warning.fn
+- examples/advanced/unreachable_code_warning.fn
+- examples/advanced/assert_constant_warning.fn
 - examples/error_cases/warning_expect_unmet.fn
 
 ### Example

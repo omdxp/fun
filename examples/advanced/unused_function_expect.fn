@@ -1,0 +1,17 @@
+// Demonstrates expecting the optional unused_function warning.
+// 
+// Run:
+// fun -warn-unused -in .\examples\advanced\unused_function_expect.fn
+// 
+// Expected:
+// - No warning is emitted because expect consumes the next unused_function warning.
+// - Compilation fails if the warning stops being emitted.
+
+expect unused_function, "tracked helper pending its first call site";
+
+fun helper() num {
+  ret 1;
+}
+
+fun main() {
+}

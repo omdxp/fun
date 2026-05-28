@@ -1,0 +1,13 @@
+// Demonstrates expecting the optional unused_variable warning.
+// 
+// Run:
+// fun -warn-unused -in .\examples\advanced\unused_variable_expect.fn
+// 
+// Expected:
+// - No warning is emitted because expect consumes the next unused_variable warning.
+// - Compilation fails if the warning stops being emitted.
+
+fun main() {
+  expect unused_variable, "tracked temporary local until the result is used";
+  num value = 1;
+}

@@ -1,0 +1,14 @@
+// Demonstrates expecting the optional unused_import warning.
+// 
+// Run:
+// fun -warn-unused -in .\examples\advanced\unused_import_expect.fn
+// 
+// Expected:
+// - No warning is emitted because expect consumes the next unused_import warning.
+// - Compilation fails if the warning stops being emitted.
+
+expect unused_import, "tracked unused import until the call site lands";
+imp std.option;
+
+fun main() {
+}
