@@ -88,6 +88,11 @@ is_expected_fail() {
     return 0
   fi
 
+  # Unused variable expect example should fail.
+  if [[ "$rel" == "examples/advanced/unused_variable_expect.fn" ]]; then
+    return 0
+  fi
+
   # Arch-specific asm example fails during codegen on mismatched targets.
   if [[ "$rel" == "examples/advanced/asm_arch_specific.fn" ]]; then
     return 0
