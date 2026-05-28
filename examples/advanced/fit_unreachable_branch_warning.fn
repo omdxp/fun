@@ -1,0 +1,27 @@
+// Demonstrates the transpiler warning for a redundant `fit` catch-all branch.
+// 
+// Run:
+// fun -in .\examples\advanced\fit_unreachable_branch_warning.fn
+// 
+// Expected:
+// - A warning like:
+// "fit catch-all '_' branch is unreachable because earlier branches already cover all bin values"
+// - Program still runs normally.
+
+imp std.c.io;
+
+fun main() {
+  bin x = true;
+
+  fit x {
+    true -> {
+      printf("x was true\n");
+    },
+    false -> {
+      printf("x was false\n");
+    },
+    _ -> {
+      printf("unreachable fallback\n");
+    }
+  }
+}

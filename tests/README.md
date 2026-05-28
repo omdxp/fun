@@ -10,6 +10,7 @@ This directory contains tests for the fun compiler and language features.
 - `parser_test.zig` — Parsing
 - `semantics_test.zig` — Semantic analysis
 - `utils_test.zig` — Utility functions
+- `warnings_test.zig` — Warning diagnostics and warning-control behavior
 
 Run all tests with:
 ```bash

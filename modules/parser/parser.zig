@@ -4566,6 +4566,13 @@ pub const ParseProcess = struct {
         self.transpile_proc.err("invalid keyword", .{});
     }
 
+    fn warning_control_is_valid_in_module_scope(id: ast.WarningId) bool {
+        return switch (id) {
+            .unused_variable, .unused_import, .unused_function, .unused_compound => true,
+            else => false,
+        };
+    }
+
     /// Parses a warning control statement.
     ///
     /// Syntax:
@@ -4575,11 +4582,6 @@ pub const ParseProcess = struct {
         const ctrl_token = self.token_peek_next();
         _ = self.token_next(); // skip allow/expect
 
-        if (self.parser_current_function == null) {
-            self.transpile_proc.err("warning controls are only valid inside functions", .{});
-            return ParseError.InvalidStatement;
-        }
-
         const id_tok = self.token_next();
         if (id_tok == null or id_tok.?.type != .Identifier) {
             self.transpile_proc.err("expected warning id after '{s}'", .{@tagName(action)});
@@ -4588,11 +4590,19 @@ pub const ParseProcess = struct {
 
         const warning_id = ast.warning_id_from_string(id_tok.?.data.sval.items) orelse {
             self.transpile_proc.err(
-                "unknown warning id '{s}' (expected one of: return_local_ptr, fit_non_exhaustive, unused_variable, unused_import, unused_function, unused_compound)",
+                "unknown warning id '{s}' (expected one of: return_local_ptr, fit_non_exhaustive, fit_unreachable_branch, unreachable_code, assert_constant, unused_variable, unused_import, unused_function, unused_compound)",
                 .{id_tok.?.data.sval.items},
             );
             return ParseError.InvalidIdentifier;
         };
+
+        if (self.parser_current_function == null and !warning_control_is_valid_in_module_scope(warning_id)) {
+            self.transpile_proc.err(
+                "warning id '{s}' is only valid inside functions; only unused_variable, unused_import, unused_function, and unused_compound may be controlled at module scope",
+                .{id_tok.?.data.sval.items},
+            );
+            return ParseError.InvalidStatement;
+        }
 
         try self.expect_op(",");
 

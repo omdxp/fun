@@ -113,6 +113,113 @@ test "fit bin missing false warns in diag_only mode" {
     std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 
+test "fit duplicate bool branch warns unreachable branch" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "fit_bin_duplicate_true.fn";
+
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  bin x = true;\n" ++
+        "  fit x {\n" ++
+        "    true -> { printf(\"T1\\n\"); },\n" ++
+        "    true -> { printf(\"T2\\n\"); },\n" ++
+        "    false -> { printf(\"F\\n\"); }\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(res.warnings != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "fit branch is unreachable because condition 'true' was already handled earlier") != null);
+
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "fit allow fit_unreachable_branch suppresses warning" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "fit_bin_allow_unreachable_branch.fn";
+
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  bin x = true;\n" ++
+        "  allow fit_unreachable_branch, \"keep duplicate branch during parser refactor\";\n" ++
+        "  fit x {\n" ++
+        "    true -> { printf(\"T1\\n\"); },\n" ++
+        "    true -> { printf(\"T2\\n\"); },\n" ++
+        "    false -> { printf(\"F\\n\"); }\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(res.warnings == null);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "fit expect fit_unreachable_branch suppresses warning" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "fit_bin_expect_unreachable_branch.fn";
+
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  bin x = true;\n" ++
+        "  expect fit_unreachable_branch, \"duplicate branch is intentional while rewriting control flow\";\n" ++
+        "  fit x {\n" ++
+        "    true -> { printf(\"T1\\n\"); },\n" ++
+        "    true -> { printf(\"T2\\n\"); },\n" ++
+        "    false -> { printf(\"F\\n\"); }\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(res.warnings == null);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "fit unmet expect fit_unreachable_branch fails" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "fit_bin_expect_unreachable_branch_unmet.fn";
+
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  bin x = true;\n" ++
+        "  expect fit_unreachable_branch, \"should fail when duplicate branch is removed\";\n" ++
+        "  fit x {\n" ++
+        "    true -> { printf(\"T\\n\"); },\n" ++
+        "    false -> { printf(\"F\\n\"); }\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const res = runTranspileWithWarnings(allocator, ifilepath, input) catch |err| {
+        try std.testing.expectEqual(codegen.TranspileError.UnmetWarningExpectation, err);
+        std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+        return;
+    };
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(false);
+}
+
 test "fit allow fit_non_exhaustive suppresses warning" {
     const allocator = std.testing.allocator;
     const ifilepath = "fit_bin_allow_warning.fn";

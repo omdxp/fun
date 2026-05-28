@@ -1,0 +1,17 @@
+// Demonstrates expecting the optional unused_compound warning.
+// 
+// Run:
+// fun -warn-unused -in .\examples\advanced\unused_compound_expect.fn
+// 
+// Expected:
+// - No warning is emitted because expect consumes the next unused_compound warning.
+// - Compilation fails if the warning stops being emitted.
+
+expect unused_compound, "tracked private type pending external use";
+
+compound Hidden {
+  num value;
+}
+
+fun main() {
+}

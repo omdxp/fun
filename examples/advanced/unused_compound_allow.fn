@@ -1,0 +1,17 @@
+// Demonstrates allowing the optional unused_compound warning.
+// 
+// Run:
+// fun -warn-unused -in .\examples\advanced\unused_compound_allow.fn
+// 
+// Expected:
+// - No warning is emitted because allow consumes the next unused_compound warning.
+// - Program still runs normally.
+
+allow unused_compound, "temporary private type during refactor";
+
+compound Hidden {
+  num value;
+}
+
+fun main() {
+}

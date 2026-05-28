@@ -1,0 +1,16 @@
+// Demonstrates the optional unused_compound warning.
+// 
+// Run:
+// fun -warn-unused -in .\examples\advanced\unused_compound_warning.fn
+// 
+// Expected:
+// - A warning like:
+// "unused compound 'Hidden'"
+// - Program still runs normally.
+
+compound Hidden {
+  num value;
+}
+
+fun main() {
+}

@@ -271,6 +271,40 @@ test "-fmt groups imports and globals at top" {
     try std.testing.expectEqualStrings(expected, got);
 }
 
+test "-fmt keeps unused warning controls attached to grouped imports and globals" {
+    const allocator = std.testing.allocator;
+
+    const ugly =
+        "allow unused_import, \"keep attached\";\n" ++
+        "imp std.option;\n" ++
+        "allow unused_variable, \"keep attached\";\n" ++
+        "num value=1;\n" ++
+        "fun main(){}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_warning_ctrl_groups", ugly);
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+
+    const expected =
+        "allow unused_import, \"keep attached\";\n" ++
+        "imp std.option;\n" ++
+        "\n" ++
+        "allow unused_variable, \"keep attached\";\n" ++
+        "num value = 1;\n" ++
+        "\n" ++
+        "fun main() {\n" ++
+        "}\n";
+
+    try std.testing.expectEqualStrings(expected, got);
+}
+
 test "-fmt formats parent traversal imports" {
     const allocator = std.testing.allocator;
 

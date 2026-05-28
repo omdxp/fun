@@ -1,0 +1,14 @@
+// Demonstrates the optional unused_import warning.
+// 
+// Run:
+// fun -warn-unused -in .\examples\advanced\unused_import_warning.fn
+// 
+// Expected:
+// - A warning like:
+// "unused import 'std.option'"
+// - Program still runs normally.
+
+imp std.option;
+
+fun main() {
+}

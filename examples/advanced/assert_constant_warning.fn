@@ -1,0 +1,13 @@
+// Demonstrates the transpiler warning for constant assertions.
+// 
+// Run:
+// fun -in .\examples\advanced\assert_constant_warning.fn
+// 
+// Expected:
+// - A warning like:
+// "assert condition is always true"
+// - Program still runs normally.
+
+fun main() {
+  assert true, "temporary debug assert";
+}

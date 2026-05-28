@@ -3717,6 +3717,98 @@ pub const TranspileProcess = struct {
         }
     }
 
+    fn fit_branch_warning_node(branch: ast.FitBranch) ast.Node {
+        if (branch.condition) |cond| return cond.*;
+        return branch.body.*;
+    }
+
+    fn fit_branch_enum_variant_name(enum_name: []const u8, cond: *ast.Node) ?[]const u8 {
+        if (dot_shorthand_variant_name(cond)) |short_name| return short_name;
+        if (cond.type != .Expression or cond.node_variant == null) return null;
+
+        const exp = cond.node_variant.?.exp;
+        if (!mem.eql(u8, exp.op, ".")) return null;
+
+        const left = exp.left orelse return null;
+        const right = exp.right orelse return null;
+        if (left.type != .Identifier or left.data == null) return null;
+        if (right.type != .Identifier or right.data == null) return null;
+        if (!mem.eql(u8, left.data.?.sval.items, enum_name)) return null;
+        return right.data.?.sval.items;
+    }
+
+    fn warn_if_fit_has_unreachable_branches(self: *Self, condition_type: CheckedType, branches: []const ast.FitBranch) void {
+        var saw_default = false;
+        var has_true = false;
+        var has_false = false;
+
+        const enum_name = self.expected_enum_name(condition_type);
+        const root = self.get_root();
+        const enum_variant_count: usize = blk: {
+            if (enum_name == null or root.type_registry == null) break :blk 0;
+            const reg = &root.type_registry.?;
+            const enode = reg.enums_by_name.get(enum_name.?) orelse break :blk 0;
+            if (enode.node_variant == null) break :blk 0;
+            break :blk enode.node_variant.?.enum_decl.variants.items().len;
+        };
+
+        var seen_variants = std.StringHashMap(bool).init(self.backing_allocator);
+        defer seen_variants.deinit();
+        var seen_variant_count: usize = 0;
+
+        for (branches) |branch| {
+            const warn_node = fit_branch_warning_node(branch);
+
+            if (branch.condition == null) {
+                if (saw_default) {
+                    self.report_warning(.fit_unreachable_branch, warn_node, "fit branch is unreachable because a catch-all '_' branch was already handled earlier", .{});
+                } else if (condition_type.base == .Bin and has_true and has_false) {
+                    self.report_warning(.fit_unreachable_branch, warn_node, "fit catch-all '_' branch is unreachable because earlier branches already cover all bin values", .{});
+                } else if (enum_name != null and enum_variant_count != 0 and seen_variant_count == enum_variant_count) {
+                    self.report_warning(.fit_unreachable_branch, warn_node, "fit catch-all '_' branch is unreachable because earlier branches already cover all variants of enum '{s}'", .{enum_name.?});
+                }
+
+                saw_default = true;
+                continue;
+            }
+
+            const cond = branch.condition.?;
+            if (saw_default) {
+                self.report_warning(.fit_unreachable_branch, warn_node, "fit branch is unreachable because a catch-all '_' branch was already handled earlier", .{});
+                continue;
+            }
+
+            if (condition_type.base == .Bin and cond.*.type == .Boolean) {
+                const cond_value = cond.data != null and cond.data.?.bval;
+                if (cond_value) {
+                    if (has_true) {
+                        self.report_warning(.fit_unreachable_branch, warn_node, "fit branch is unreachable because condition 'true' was already handled earlier", .{});
+                    } else {
+                        has_true = true;
+                    }
+                } else {
+                    if (has_false) {
+                        self.report_warning(.fit_unreachable_branch, warn_node, "fit branch is unreachable because condition 'false' was already handled earlier", .{});
+                    } else {
+                        has_false = true;
+                    }
+                }
+                continue;
+            }
+
+            if (enum_name) |name| {
+                if (fit_branch_enum_variant_name(name, cond)) |variant_name| {
+                    if (seen_variants.contains(variant_name)) {
+                        self.report_warning(.fit_unreachable_branch, warn_node, "fit branch is unreachable because variant '{s}.{s}' was already handled earlier", .{ name, variant_name });
+                    } else {
+                        seen_variants.put(variant_name, true) catch {};
+                        seen_variant_count += 1;
+                    }
+                }
+            }
+        }
+    }
+
     fn report_type_error(self: *Self, node: ?ast.Node, comptime fmt: []const u8, args: anytype) void {
         if (!self.flags.emit_stderr) return;
 
@@ -3854,7 +3946,7 @@ pub const TranspileProcess = struct {
                     self.report_type_error(ref_node, "type '{s}' is private", .{cand});
                     return TranspileError.SymbolNotDefined;
                 }
-                mark_node_used(enode);
+                self.mark_node_used_and_sync_top_level_copy(enode);
                 if (!same_module(&ref_node, enode)) {
                     if (enode.pos) |p| self.mark_import_used_by_origin_file(p.filename);
                 }
@@ -3866,7 +3958,7 @@ pub const TranspileProcess = struct {
                     self.report_type_error(ref_node, "type '{s}' is private", .{cand});
                     return TranspileError.SymbolNotDefined;
                 }
-                mark_node_used(cnode);
+                self.mark_node_used_and_sync_top_level_copy(cnode);
                 if (std.mem.indexOf(u8, cand, "__")) |idx| {
                     const alias = cand[0..idx];
                     if (self.alias_map_for_node(&ref_node).contains(alias)) {
@@ -3888,7 +3980,7 @@ pub const TranspileProcess = struct {
                     self.report_type_error(ref_node, "type '{s}' is private", .{cand});
                     return TranspileError.SymbolNotDefined;
                 }
-                mark_node_used(qnode.?);
+                self.mark_node_used_and_sync_top_level_copy(qnode.?);
                 if (!same_module(&ref_node, qnode.?)) {
                     if (qnode.?.pos) |p| self.mark_import_used_by_origin_file(p.filename);
                 }
@@ -3942,6 +4034,22 @@ pub const TranspileProcess = struct {
     fn mark_node_used(node: *ast.Node) void {
         if (node.flags == null) node.flags = .{};
         node.flags.?.is_used = true;
+    }
+
+    fn mark_node_used_and_sync_top_level_copy(self: *Self, node: *ast.Node) void {
+        mark_node_used(node);
+
+        const target_pos = node.pos orelse return;
+        for (self.nodes.items()) |*candidate| {
+            if (candidate.type != node.type) continue;
+            const candidate_pos = candidate.pos orelse continue;
+            if (!mem.eql(u8, candidate_pos.filename, target_pos.filename)) continue;
+            if (candidate_pos.line != target_pos.line) continue;
+            if (candidate_pos.start_col != target_pos.start_col) continue;
+            if (candidate_pos.end_col != target_pos.end_col) continue;
+            mark_node_used(candidate);
+            return;
+        }
     }
 
     fn import_node_matches_file_path(self: *Self, node: *const ast.Node, file_path: []const u8) bool {
@@ -6246,8 +6354,16 @@ pub const TranspileProcess = struct {
         defer self.warn_unused_bindings_in_current_scope(env);
 
         const stmts = body.node_variant.?.body.statements;
+        var scope_terminated = false;
+        var reported_unreachable = false;
         for (stmts.items()) |stmt_ptr| {
             const stmt = stmt_ptr.*;
+
+            if (scope_terminated and stmt.type != .StatementWarningControl and !reported_unreachable) {
+                self.report_warning(.unreachable_code, stmt, "statement is unreachable because the previous statement always exits the current scope", .{});
+                reported_unreachable = true;
+            }
+
             switch (stmt.type) {
                 .Variable => {
                     const inferred_let_t = try self.infer_let_variable_dtype(stmt_ptr, env, fns);
@@ -6368,6 +6484,7 @@ pub const TranspileProcess = struct {
                         }
                         try self.check_body(branch.body, env, fns, fn_rtype);
                     }
+                    self.warn_if_fit_has_unreachable_branches(target_t, fit.branches.items());
                     self.warn_if_fit_not_exhausted(stmt, target_t, fit.branches.items());
                 },
                 .StatementFor => {
@@ -6414,7 +6531,9 @@ pub const TranspileProcess = struct {
                             }
                             try env.push();
                             defer env.pop();
-                            if (fi.index_name) |iname| try env.put_current(iname, .{ .base = .Num });
+                            if (fi.index_name) |iname| {
+                                try env.put_current(iname, .{ .base = .Num });
+                            }
                             var item_t = if (vec_item_dt) |elem_dt|
                                 try self.type_from_dtype_with_mangled(elem_dt)
                             else
@@ -6446,6 +6565,13 @@ pub const TranspileProcess = struct {
                             return TranspileError.TypeMismatch;
                         }
                     }
+                    if (stmtv.condition.*.type == .Boolean) {
+                        if (stmtv.condition.*.data != null and stmtv.condition.*.data.?.bval) {
+                            self.report_warning(.assert_constant, stmt, "assert condition is always true", .{});
+                        } else {
+                            self.report_warning(.assert_constant, stmt, "assert condition is always false and will always abort", .{});
+                        }
+                    }
                 },
                 .StatementWarningControl => {
                     // Queue allow/expect entries during typecheck so that subsequent
@@ -6460,6 +6586,8 @@ pub const TranspileProcess = struct {
                     _ = try self.infer_expr_type(stmt, env, fns);
                 },
             }
+
+            if (node_is_scope_terminator(stmt_ptr)) scope_terminated = true;
         }
     }
 
@@ -7129,39 +7257,49 @@ pub const TranspileProcess = struct {
             }
         }
 
-        if (!proc.is_importing and proc.flags.emit_unused_warnings) {
-            for (proc.nodes.items()) |*node| {
-                switch (node.type) {
-                    .Import => {
-                        if (node_is_used(node)) continue;
-                        const imp = node.node_variant.?.import;
-                        if (imp.alias) |alias| {
-                            proc.report_warning(.unused_import, node.*, "unused import '{s}' as '{s}'", .{ imp.path, alias });
-                        } else {
-                            proc.report_warning(.unused_import, node.*, "unused import '{s}'", .{imp.path});
-                        }
-                    },
-                    .Variable => {
-                        if (node.binded != null) continue;
-                        if (node_is_public(node) or node_is_used(node)) continue;
-                        const v = node.node_variant.?.variable;
-                        if (!should_warn_unused_variable(v.name.items)) continue;
-                        proc.report_warning(.unused_variable, node.*, "unused variable '{s}'", .{v.name.items});
-                    },
-                    .Function => {
-                        const fnv = node.node_variant.?.function;
-                        if (fnv.name == null or fnv.body == null) continue;
-                        if (node_is_public(node) or node_is_used(node)) continue;
-                        if (mem.eql(u8, fnv.name.?.items, "main")) continue;
-                        proc.report_warning(.unused_function, node.*, "unused function '{s}'", .{fnv.name.?.items});
-                    },
-                    .Compound => {
-                        if (node_is_public(node) or node_is_used(node)) continue;
-                        const compound = node.node_variant.?.compound;
-                        proc.report_warning(.unused_compound, node.*, "unused compound '{s}'", .{compound.name.items});
-                    },
-                    else => {},
-                }
+        try proc.emit_unused_top_level_warnings();
+    }
+
+    fn emit_unused_top_level_warnings(proc: *Self) TranspileError!void {
+        if (proc.is_importing or !proc.flags.emit_unused_warnings) return;
+
+        for (proc.nodes.items()) |*node| {
+            switch (node.type) {
+                .StatementWarningControl => {
+                    if (node.node_variant) |nv| {
+                        const ctrl = nv.statement.warning_ctrl;
+                        try proc.queue_warning_control(ctrl.action, ctrl.id, ctrl.reason, node.pos);
+                    }
+                },
+                .Import => {
+                    if (node_is_used(node)) continue;
+                    const imp = node.node_variant.?.import;
+                    if (imp.alias) |alias| {
+                        proc.report_warning(.unused_import, node.*, "unused import '{s}' as '{s}'", .{ imp.path, alias });
+                    } else {
+                        proc.report_warning(.unused_import, node.*, "unused import '{s}'", .{imp.path});
+                    }
+                },
+                .Variable => {
+                    if (node.binded != null) continue;
+                    if (node_is_public(node) or node_is_used(node)) continue;
+                    const v = node.node_variant.?.variable;
+                    if (!should_warn_unused_variable(v.name.items)) continue;
+                    proc.report_warning(.unused_variable, node.*, "unused variable '{s}'", .{v.name.items});
+                },
+                .Function => {
+                    const fnv = node.node_variant.?.function;
+                    if (fnv.name == null or fnv.body == null) continue;
+                    if (node_is_public(node) or node_is_used(node)) continue;
+                    if (mem.eql(u8, fnv.name.?.items, "main")) continue;
+                    proc.report_warning(.unused_function, node.*, "unused function '{s}'", .{fnv.name.?.items});
+                },
+                .Compound => {
+                    if (node_is_public(node) or node_is_used(node)) continue;
+                    const compound = node.node_variant.?.compound;
+                    proc.report_warning(.unused_compound, node.*, "unused compound '{s}'", .{compound.name.items});
+                },
+                else => {},
             }
         }
     }

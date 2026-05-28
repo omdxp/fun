@@ -1,0 +1,18 @@
+// Demonstrates the transpiler warning for unreachable statements after `ret`.
+// 
+// Run:
+// fun -in .\examples\advanced\unreachable_code_warning.fn
+// 
+// Expected:
+// - A warning like:
+// "statement is unreachable because the previous statement always exits the current scope"
+// - Program still runs normally.
+
+imp std.c.io;
+
+fun main() num {
+  printf("about to return\n");
+  ret 0;
+
+  printf("this line is unreachable\n");
+}

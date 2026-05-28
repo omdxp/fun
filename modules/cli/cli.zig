@@ -315,6 +315,27 @@ fn fmt_check_root_path(allocator: mem.Allocator, io: std.Io, input_path: []const
     return allocator.dupe(u8, input_path);
 }
 
+const FmtTopLevelGroup = enum {
+    imports,
+    globals,
+};
+
+fn warning_control_group_for_tokens(tokens: []const token.Token, start_idx: usize) ?FmtTopLevelGroup {
+    if (start_idx + 1 >= tokens.len) return null;
+    const keyword = tokens[start_idx];
+    if (keyword.type != .Keyword) return null;
+    const kw = keyword.data.sval.items;
+    if (!std.mem.eql(u8, kw, "allow") and !std.mem.eql(u8, kw, "expect")) return null;
+
+    const id_tok = tokens[start_idx + 1];
+    if (id_tok.type != .Identifier) return null;
+    const id = id_tok.data.sval.items;
+
+    if (std.mem.eql(u8, id, "unused_import")) return .imports;
+    if (std.mem.eql(u8, id, "unused_variable")) return .globals;
+    return null;
+}
+
 pub fn free_owned_paths(allocator: mem.Allocator, paths: []const []const u8) void {
     for (paths) |path| allocator.free(path);
     allocator.free(paths);
@@ -2015,6 +2036,9 @@ pub fn format_file_in_place(allocator: mem.Allocator, io: std.Io, input_file: []
     defer rest.deinit();
     var pending_comments = ArrayList(token.Token).init(allocator);
     defer pending_comments.deinit();
+    var pending_group: ?FmtTopLevelGroup = null;
+    var pending_group_tokens = ArrayList(token.Token).init(allocator);
+    defer pending_group_tokens.deinit();
 
     var brace_depth: isize = 0;
     var paren_depth: isize = 0;
@@ -2048,10 +2072,57 @@ pub fn format_file_in_place(allocator: mem.Allocator, io: std.Io, input_file: []
         const starts_import_stmt = is_stmt_start and is_kw and std.mem.eql(u8, kw, "imp");
         const starts_global_stmt = is_stmt_start and is_kw and (is_builtin_type_keyword(kw) or std.mem.eql(u8, kw, "let"));
 
+        if (is_stmt_start and pending_group != null and !starts_import_stmt and !starts_global_stmt) {
+            try appendAll(&rest, pending_group_tokens.items);
+            pending_group_tokens.clearRetainingCapacity();
+            pending_group = null;
+        }
+
+        if (is_stmt_start and is_kw) {
+            if (warning_control_group_for_tokens(tokens, i)) |group| {
+                var stmt = ArrayList(token.Token).init(allocator);
+                defer stmt.deinit();
+                try appendAll(&stmt, pending_comments.items);
+                pending_comments.clearRetainingCapacity();
+
+                try stmt.append(t);
+
+                var j: usize = i + 1;
+                while (j < tokens.len) : (j += 1) {
+                    const tt = tokens[j];
+                    if (tt.type == .NewLine) continue;
+                    try stmt.append(tt);
+                    if (tt.type == .Symbol and tt.data.cval == ';') break;
+                }
+
+                if (pending_group != null) {
+                    try appendAll(&rest, pending_group_tokens.items);
+                    pending_group_tokens.clearRetainingCapacity();
+                }
+                pending_group = group;
+                try appendAll(&pending_group_tokens, stmt.items);
+                i = j;
+                can_start_stmt = true;
+                continue;
+            }
+        }
+
         if (starts_import_stmt or starts_global_stmt) {
             // Collect up to ';'
             var stmt = ArrayList(token.Token).init(allocator);
             defer stmt.deinit();
+            if (pending_group) |group| {
+                const matches_group = (group == .imports and starts_import_stmt) or (group == .globals and starts_global_stmt);
+                if (matches_group) {
+                    try appendAll(&stmt, pending_group_tokens.items);
+                    pending_group_tokens.clearRetainingCapacity();
+                    pending_group = null;
+                } else {
+                    try appendAll(&rest, pending_group_tokens.items);
+                    pending_group_tokens.clearRetainingCapacity();
+                    pending_group = null;
+                }
+            }
             try appendAll(&stmt, pending_comments.items);
             pending_comments.clearRetainingCapacity();
 
@@ -2115,6 +2186,11 @@ pub fn format_file_in_place(allocator: mem.Allocator, io: std.Io, input_file: []
     if (pending_comments.items.len > 0) {
         try appendAll(&rest, pending_comments.items);
         pending_comments.clearRetainingCapacity();
+    }
+    if (pending_group != null) {
+        try appendAll(&rest, pending_group_tokens.items);
+        pending_group_tokens.clearRetainingCapacity();
+        pending_group = null;
     }
 
     var state: EmitState = .{ .indent = &indent, .at_line_start = &at_line_start, .prev_token = &prev_token, .out = &out, .allocator = allocator };
@@ -2190,6 +2266,9 @@ pub fn format_file_check(allocator: mem.Allocator, io: std.Io, input_file: []con
     defer rest.deinit();
     var pending_comments = ArrayList(token.Token).init(allocator);
     defer pending_comments.deinit();
+    var pending_group: ?FmtTopLevelGroup = null;
+    var pending_group_tokens = ArrayList(token.Token).init(allocator);
+    defer pending_group_tokens.deinit();
 
     var brace_depth: isize = 0;
     var paren_depth: isize = 0;
@@ -2221,9 +2300,56 @@ pub fn format_file_check(allocator: mem.Allocator, io: std.Io, input_file: []con
         const starts_import_stmt = is_stmt_start and is_kw and std.mem.eql(u8, kw, "imp");
         const starts_global_stmt = is_stmt_start and is_kw and (is_builtin_type_keyword(kw) or std.mem.eql(u8, kw, "let"));
 
+        if (is_stmt_start and pending_group != null and !starts_import_stmt and !starts_global_stmt) {
+            try appendAll(&rest, pending_group_tokens.items);
+            pending_group_tokens.clearRetainingCapacity();
+            pending_group = null;
+        }
+
+        if (is_stmt_start and is_kw) {
+            if (warning_control_group_for_tokens(tokens, i)) |group| {
+                var stmt = ArrayList(token.Token).init(allocator);
+                defer stmt.deinit();
+                try appendAll(&stmt, pending_comments.items);
+                pending_comments.clearRetainingCapacity();
+
+                try stmt.append(t);
+
+                var j: usize = i + 1;
+                while (j < tokens.len) : (j += 1) {
+                    const tt = tokens[j];
+                    if (tt.type == .NewLine) continue;
+                    try stmt.append(tt);
+                    if (tt.type == .Symbol and tt.data.cval == ';') break;
+                }
+
+                if (pending_group != null) {
+                    try appendAll(&rest, pending_group_tokens.items);
+                    pending_group_tokens.clearRetainingCapacity();
+                }
+                pending_group = group;
+                try appendAll(&pending_group_tokens, stmt.items);
+                i = j;
+                can_start_stmt = true;
+                continue;
+            }
+        }
+
         if (starts_import_stmt or starts_global_stmt) {
             var stmt = ArrayList(token.Token).init(allocator);
             defer stmt.deinit();
+            if (pending_group) |group| {
+                const matches_group = (group == .imports and starts_import_stmt) or (group == .globals and starts_global_stmt);
+                if (matches_group) {
+                    try appendAll(&stmt, pending_group_tokens.items);
+                    pending_group_tokens.clearRetainingCapacity();
+                    pending_group = null;
+                } else {
+                    try appendAll(&rest, pending_group_tokens.items);
+                    pending_group_tokens.clearRetainingCapacity();
+                    pending_group = null;
+                }
+            }
             try appendAll(&stmt, pending_comments.items);
             pending_comments.clearRetainingCapacity();
 
@@ -2284,6 +2410,11 @@ pub fn format_file_check(allocator: mem.Allocator, io: std.Io, input_file: []con
     if (pending_comments.items.len > 0) {
         try appendAll(&rest, pending_comments.items);
         pending_comments.clearRetainingCapacity();
+    }
+    if (pending_group != null) {
+        try appendAll(&rest, pending_group_tokens.items);
+        pending_group_tokens.clearRetainingCapacity();
+        pending_group = null;
     }
 
     var state: EmitState = .{ .indent = &indent, .at_line_start = &at_line_start, .prev_token = &prev_token, .out = &out, .allocator = allocator };
