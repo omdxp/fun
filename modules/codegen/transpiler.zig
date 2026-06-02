@@ -4094,6 +4094,14 @@ pub const TranspileProcess = struct {
         }
     }
 
+    fn mark_function_node_used_and_sync_import(self: *Self, fn_node: *ast.Node) void {
+        mark_node_used(fn_node);
+
+        const fn_pos = fn_node.pos orelse return;
+        if (mem.eql(u8, fn_pos.filename, self.input_file_path)) return;
+        self.mark_import_used_by_origin_file(fn_pos.filename);
+    }
+
     fn lookup_receiver_dtype(self: *Self, recv: ast.Node) ?*dtype.DataType {
         if (recv.type == .Identifier and recv.data != null) {
             const name = recv.data.?.sval.items;
@@ -5211,7 +5219,7 @@ pub const TranspileProcess = struct {
                 // Allow function symbols as callback values.
                 if (fns.get(name) != null) {
                     if (self.find_function_node(name)) |fn_node| {
-                        mark_node_used(fn_node);
+                        self.mark_function_node_used_and_sync_import(fn_node);
                         if (!self.can_access(&node, fn_node)) {
                             self.report_type_error(node, "function '{s}' is private", .{name});
                             return TranspileError.SymbolNotDefined;
@@ -5507,7 +5515,7 @@ pub const TranspileProcess = struct {
                             callee_async_known = true;
                             await_lowering_callee = fname;
                             if (self.find_function_node(fname)) |fn_node| {
-                                mark_node_used(fn_node);
+                                self.mark_function_node_used_and_sync_import(fn_node);
                                 if (!self.can_access(&node, fn_node)) {
                                     self.report_type_error(node, "function '{s}' is private", .{fname});
                                     return TranspileError.SymbolNotDefined;

@@ -36,6 +36,12 @@ fn runTranspileWithWarnings(allocator: std.mem.Allocator, input_path: []const u8
     return .{ .out = out_owned, .warnings = warnings_owned };
 }
 
+fn writeTestFile(path: []const u8, contents: []const u8) !void {
+    const file = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{ .read = true, .truncate = true });
+    defer file.close(std.testing.io);
+    try file.writeStreamingAll(std.testing.io, contents);
+}
+
 test "diagnostic: returning address of local warns" {
     const allocator = std.testing.allocator;
     const ifilepath = "return_local_ptr_warn.fn";
@@ -459,6 +465,35 @@ test "diagnostic: expect unused_import suppresses warning" {
 
     try std.testing.expect(res.warnings == null);
     std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "diagnostic: imported public function call marks non-aliased import used" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "unused_import_public_function_call.fn";
+    const helper_path = "unused_import_public_function_helper.fn";
+
+    try writeTestFile(
+        helper_path,
+        "pub fun helper() num {\n" ++
+            "  ret 1;\n" ++
+            "}\n",
+    );
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, helper_path) catch {};
+
+    const input =
+        "imp unused_import_public_function_helper;\n" ++
+        "fun main() void {\n" ++
+        "  _ = helper();\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, true);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+
+    try std.testing.expect(res.warnings == null);
 }
 
 test "diagnostic: unmet expect unused_import fails" {
