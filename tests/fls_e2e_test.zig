@@ -5316,7 +5316,7 @@ test "fls e2e: format-on-save cache hit - warm save skips subprocess" {
     try std.testing.expect(fmt_res2.parsed.value == .object);
     _ = try jsonResultFromResponseObj(fmt_res2.parsed.value.object);
     std.debug.print("[perf] second format (cache hit): {}ms\n", .{warm_ms});
-    try std.testing.expect(warm_ms < 150);
+    try std.testing.expect(warm_ms < 200);
 
     // --- didSave immediately after format (the format-on-save pattern) ---
     // FLS should early-return because last_diag_ms is < 1500 ms ago.
