@@ -701,3 +701,201 @@ test "diagnostic: unmet expect unused_compound fails" {
 
     try std.testing.expect(false);
 }
+
+// ---------------------------------------------------------------------------
+// unused_import false-positive regressions.
+//
+// `unused_import` previously fired even when the import WAS used, in three cases:
+//   1. a type used only as a compound field type (never accessed in a body);
+//   2. a C-binding doc module (std.c.def/limits) whose only "symbols" are
+//      best-effort C macros hardcoded in the transpiler (NULL, INT_MAX, ...);
+//   3. a re-export passthrough module (std.c.thread_windows) that declares
+//      nothing and only forwards another import.
+// Each test also guards the inverse (a genuinely unused import must still warn).
+// ---------------------------------------------------------------------------
+
+test "diagnostic: import used only as a compound field type is not unused" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "unused_import_field_type.fn";
+
+    // Map<str,str> is used only as a compound field; never accessed in a body.
+    const input =
+        "imp std.map;\n" ++
+        "imp std.quirks;\n" ++
+        "pub compound Holder {\n" ++
+        "  Map<str, str> opts;\n" ++
+        "}\n" ++
+        "fun main() void {}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, true);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    if (res.warnings) |w| {
+        try std.testing.expect(std.mem.indexOf(u8, w, "unused import 'std.map'") == null);
+    }
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "diagnostic: genuinely unused std.map import still warns (false-negative guard)" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "unused_import_map_unused.fn";
+
+    // Imported but Map is never referenced anywhere.
+    const input =
+        "imp std.map;\n" ++
+        "fun main() void {}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, true);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(res.warnings != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "unused import 'std.map'") != null);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "diagnostic: std.c.def import used via NULL is not unused" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "unused_import_cdef_used.fn";
+
+    const input =
+        "imp std.c.def;\n" ++
+        "fun main() void {\n" ++
+        "  raw* p = NULL;\n" ++
+        "  _ = p;\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, true);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    if (res.warnings) |w| {
+        try std.testing.expect(std.mem.indexOf(u8, w, "unused import 'std.c.def'") == null);
+    }
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "diagnostic: std.c.limits import used via INT_MAX is not unused" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "unused_import_climits_used.fn";
+
+    const input =
+        "imp std.c.limits;\n" ++
+        "fun main() void {\n" ++
+        "  num x = INT_MAX;\n" ++
+        "  _ = x;\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, true);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    if (res.warnings) |w| {
+        try std.testing.expect(std.mem.indexOf(u8, w, "unused import 'std.c.limits'") == null);
+    }
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "diagnostic: genuinely unused std.c.def import still warns (false-negative guard)" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "unused_import_cdef_unused.fn";
+
+    // std.c.def imported but no def macro/type is used.
+    const input =
+        "imp std.c.def;\n" ++
+        "fun main() void {\n" ++
+        "  num x = 1;\n" ++
+        "  _ = x;\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, true);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(res.warnings != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "unused import 'std.c.def'") != null);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "diagnostic: re-export passthrough import (std.c.thread_windows) is not unused" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "unused_import_reexport.fn";
+
+    // std.c.thread_windows declares nothing of its own; it only re-exports
+    // std.c.thread. Importing it is meaningful even with no own-name reference.
+    const input =
+        "imp std.c.thread_windows;\n" ++
+        "fun main() void {}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, true);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    if (res.warnings) |w| {
+        try std.testing.expect(std.mem.indexOf(u8, w, "unused import 'std.c.thread_windows'") == null);
+    }
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "diagnostic: std.c.def import used via size_t type is not unused" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "unused_import_cdef_sizet.fn";
+
+    // size_t is a C typedef used in TYPE position (not a value). It resolves to a
+    // numeric semantic type during parsing, so the import must still be marked
+    // used via the typedef->module mapping in ensure_dtype_visible.
+    const input =
+        "imp std.c.def;\n" ++
+        "fun main() void {\n" ++
+        "  size_t n = 0;\n" ++
+        "  n = n + 5;\n" ++
+        "  _ = n;\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, true);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    if (res.warnings) |w| {
+        try std.testing.expect(std.mem.indexOf(u8, w, "unused import 'std.c.def'") == null);
+    }
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "diagnostic: std.c.time import used via time_t type is not unused" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "unused_import_ctime_timet.fn";
+
+    const input =
+        "imp std.c.time;\n" ++
+        "fun main() void {\n" ++
+        "  time_t t = 0;\n" ++
+        "  _ = t;\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, true);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    if (res.warnings) |w| {
+        try std.testing.expect(std.mem.indexOf(u8, w, "unused import 'std.c.time'") == null);
+    }
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}

@@ -910,6 +910,12 @@ pub fn Vector(comptime T: type) type {
         pindex: isize = 0,
         /// The count of elements in the Vector.
         count: usize = 0,
+        /// Structural-mutation counter. Bumped whenever an element is inserted or
+        /// removed (push/push_slice/push_at/pop/peek_pop/clear). Moving `pindex`
+        /// does NOT bump it, since that doesn't change which index holds which
+        /// element. Callers can cache index-derived data and invalidate it by
+        /// comparing against this value (see `parser.ParseProcess.token_peek_n`).
+        generation: u64 = 0,
 
         const Self = @This();
 
@@ -1009,6 +1015,7 @@ pub fn Vector(comptime T: type) type {
         pub fn push(self: *Self, elem: T) mem.Allocator.Error!void {
             try self.data.append(elem);
             self.count += 1;
+            self.generation +%= 1;
         }
 
         /// Appends a slice of elements to the Vector.
@@ -1026,6 +1033,7 @@ pub fn Vector(comptime T: type) type {
         pub fn push_slice(self: *Self, elems: []const T) !void {
             try self.data.appendSlice(elems);
             self.count += elems.len;
+            self.generation +%= 1;
         }
 
         /// Inserts an element at the specified index in the Vector.
@@ -1039,6 +1047,7 @@ pub fn Vector(comptime T: type) type {
         pub fn push_at(self: *Self, index: usize, elem: T) !void {
             try self.data.insert(index, elem);
             self.count += 1;
+            self.generation +%= 1;
         }
 
         /// Pops an element off the Vector.
@@ -1046,6 +1055,7 @@ pub fn Vector(comptime T: type) type {
             if (self.count > 0) {
                 self.count -= 1;
                 _ = self.data.pop();
+                self.generation +%= 1;
             }
         }
 
@@ -1055,6 +1065,7 @@ pub fn Vector(comptime T: type) type {
                 self.pindex -= 1;
                 _ = self.data.pop();
                 self.count -= 1;
+                self.generation +%= 1;
             }
         }
 
@@ -1082,6 +1093,7 @@ pub fn Vector(comptime T: type) type {
             self.data.clearRetainingCapacity();
             self.count = 0;
             self.pindex = 0;
+            self.generation +%= 1;
         }
 
         /// Deinitializes the Vector, releasing its resources.

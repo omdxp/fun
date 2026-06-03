@@ -306,3 +306,37 @@ test "print_node handles newly covered node kinds" {
         try std.testing.expect(std.mem.indexOf(u8, out, expected) != null);
     }
 }
+
+test "Vector generation bumps on structural mutation but not on cursor moves" {
+    const allocator = std.testing.allocator;
+    var vec = Vector(u8).init(allocator);
+    defer vec.deinit();
+
+    const g0 = vec.generation;
+    try vec.push(1);
+    const g1 = vec.generation;
+    try std.testing.expect(g1 != g0);
+
+    try vec.push_slice(&[_]u8{ 2, 3, 4 });
+    const g2 = vec.generation;
+    try std.testing.expect(g2 != g1);
+
+    try vec.push_at(0, 9);
+    const g3 = vec.generation;
+    try std.testing.expect(g3 != g2);
+
+    // Cursor moves and reads must NOT change the generation — index-derived
+    // caches keyed on `generation` rely on this.
+    vec.set_peek_pointer(2);
+    _ = vec.peek_no_increment();
+    _ = vec.peek();
+    vec.set_peek_pointer(0);
+    try std.testing.expectEqual(g3, vec.generation);
+
+    vec.pop();
+    try std.testing.expect(vec.generation != g3);
+    const g4 = vec.generation;
+
+    vec.clear();
+    try std.testing.expect(vec.generation != g4);
+}

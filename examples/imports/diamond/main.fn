@@ -1,0 +1,8 @@
+imp std.c.io;
+imp left;
+imp right;
+
+fun main() {
+  left();
+  right();
+}

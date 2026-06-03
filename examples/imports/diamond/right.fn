@@ -1,0 +1,6 @@
+imp shared;
+imp std.c.io;
+
+pub fun right() {
+  printf("right=%d\n", shared_value());
+}

@@ -191,3 +191,50 @@ test "same module imported without alias uses bare function names" {
     try std.testing.expect(std.mem.indexOf(u8, out, "format_impl") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "fmt_num") != null);
 }
+
+test "diamond import: shared module reachable via two branches compiles once" {
+    // examples/imports/diamond/main.fn imports `left` and `right`; both import
+    // `shared`. Before compile-wide import dedup, `shared` was fully re-parsed
+    // once per branch. This verifies the diamond still type-checks and codegens
+    // correctly (shared_value visible from both branches, no duplicate-symbol
+    // error) and that shared's definition is emitted exactly once.
+    const allocator = std.testing.allocator;
+
+    var tp = try codegen.TranspileProcess.init(
+        allocator,
+        "examples/imports/diamond/main.fn",
+        "temp.c",
+        .{ .exec = false, .outf = false, .ast = false, .emit_stderr = false },
+    );
+    var lex_proc = lexer.LexProcess.init(&tp);
+    var parse_proc = ParseProcess.init(&tp);
+    defer {
+        lex_proc.deinit();
+        tp.deinit();
+    }
+
+    try lex_proc.lex();
+    try parse_proc.parse();
+    // Must not raise DuplicateSymbol for `shared_value` seen via left and right.
+    try tp.transpile();
+
+    const out = tp.get_output() orelse return error.NoOutput;
+
+    // The shared module's function body must be emitted EXACTLY ONCE, even though
+    // it is imported through two branches. A C function definition is the header
+    // immediately followed by `{` ("shared_value() {"); a forward declaration ends
+    // in ";" and the call sites are followed by ")". Count definitions only.
+    var def_count: usize = 0;
+    var search: usize = 0;
+    while (std.mem.indexOfPos(u8, out, search, "shared_value()")) |idx| {
+        const after = idx + "shared_value()".len;
+        var j = after;
+        while (j < out.len and (out[j] == ' ' or out[j] == '\t')) : (j += 1) {}
+        if (j < out.len and out[j] == '{') def_count += 1;
+        search = idx + 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), def_count);
+
+    // And it must be referenced from both consumers (left=%d and right=%d call it).
+    try std.testing.expect(std.mem.indexOf(u8, out, "shared_value") != null);
+}

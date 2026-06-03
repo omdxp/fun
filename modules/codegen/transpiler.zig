@@ -340,6 +340,13 @@ pub const TranspileProcess = struct {
     /// Track imported files to avoid circular imports
     imported_files: std.StringHashMap(bool),
 
+    /// Compile-wide set of canonical file paths that have already been lex/parsed,
+    /// across all import branches. Meaningful only on the root process (children
+    /// query/update it through `get_root()` via `imported_files_is_globally_parsed`
+    /// / `mark_globally_parsed`). Prevents diamond imports from re-parsing the
+    /// same module once per branch. Keys are owned by the root's arena.
+    globally_parsed_files: std.StringHashMap(bool),
+
     /// Forced generic instantiations discovered during typecheck.
     forced_generic_instantiations: ArrayList(*const dtype.DataType),
     forced_generic_instantiation_keys: std.StringHashMap(bool),
@@ -604,6 +611,26 @@ pub const TranspileProcess = struct {
             cur = p;
         }
         return cur;
+    }
+
+    /// Compile-wide dedup: has this canonical file already been lex/parsed
+    /// anywhere in the current import tree? Tracked on the root process so that
+    /// a module reachable through multiple sibling branches (a diamond import)
+    /// is parsed exactly once instead of once per branch. Public symbols still
+    /// reach every consumer via `sync_global_symbols_to_parent`, which walks up
+    /// to the root, so skipping the redundant re-parse is behavior-preserving.
+    fn imported_files_is_globally_parsed(self: *Self, canon: []const u8) bool {
+        return self.get_root().globally_parsed_files.contains(canon);
+    }
+
+    /// Record (best-effort) that `canon` has been parsed compile-wide. The key
+    /// is duped into the root's arena so it outlives this child process. A
+    /// failure here is non-fatal: it only forfeits the dedup for this file.
+    fn mark_globally_parsed(self: *Self, canon: []const u8) void {
+        const root = self.get_root();
+        if (root.globally_parsed_files.contains(canon)) return;
+        const key = root.allocator.dupe(u8, canon) catch return;
+        root.globally_parsed_files.put(key, true) catch {};
     }
 
     fn find_process_for_file(self: *Self, filename: []const u8) ?*TranspileProcess {
@@ -2566,7 +2593,9 @@ pub const TranspileProcess = struct {
         // When the file is already imported, we may still need to register a new alias.
         // If so, create a minimal stub child process (no lex/parse) so that
         // transpile_children_recursive can emit #define stubs for the new alias.
-        if (self.imported_files.contains(canon)) {
+        // See `imported_files_is_globally_parsed` for why the compile-wide set is
+        // consulted in addition to this subtree's local `imported_files`.
+        if (self.imported_files.contains(canon) or self.imported_files_is_globally_parsed(canon)) {
             if (import_alias) |alias| {
                 var stub_proc = self.backing_allocator.create(TranspileProcess) catch {
                     self.allocator.free(canon);
@@ -2604,6 +2633,7 @@ pub const TranspileProcess = struct {
         self.imported_files.put(canon, true) catch {
             return TranspileError.MemoryAllocationFailed;
         };
+        self.mark_globally_parsed(canon);
 
         var import_proc = self.backing_allocator.create(TranspileProcess) catch {
             return TranspileError.MemoryAllocationFailed;
@@ -3209,6 +3239,7 @@ pub const TranspileProcess = struct {
             .backing_allocator = allocator,
             .arena = arena_ptr,
             .imported_files = imported_files,
+            .globally_parsed_files = std.StringHashMap(bool).init(a),
             .import_chain = import_chain,
             .global_symbols = std.StringHashMap(GlobalSymbolInfo).init(a),
             .import_aliases = std.StringHashMap([]const u8).init(a),
@@ -3915,7 +3946,10 @@ pub const TranspileProcess = struct {
             return;
         }
 
-        // Known C typedef aliases are treated as externally visible.
+        // Known C typedef aliases are treated as externally visible. (Marking
+        // the owning std.c.* import used is handled in `ensure_dtype_visible`,
+        // the common entry point for all type positions, since the typedef's
+        // semantic type is often resolved to a primitive before reaching here.)
         if (utils.get_c_typedef_alias_datatype_type(base_name) != null) {
             return;
         }
@@ -3993,6 +4027,17 @@ pub const TranspileProcess = struct {
     }
 
     fn ensure_dtype_visible(self: *Self, ref_node: ast.Node, dt: *const dtype.DataType, allow: ?[]const []const u8) TranspileError!void {
+        // A C typedef type name (`size_t`, `time_t`, `FILE`, `va_list`, …) is
+        // resolved to a primitive semantic type during parsing, so `dt.type` is
+        // often non-Unknown and the visibility check below is skipped. Mark the
+        // std.c.* module that documents the typedef as used here, regardless of
+        // the resolved semantic type, so importing it for such a type is not
+        // reported as unused. Recurses into generic args via the loop below.
+        if (dt.type_str.items.len > 0) {
+            if (c_typedef_owner_module(dt.type_str.items)) |owner| {
+                self.mark_import_used_by_path(owner);
+            }
+        }
         if ((dt.type == null or dt.type == .Unknown) and dt.type_str.items.len > 0) {
             if (allow) |list| {
                 for (list) |p| {
@@ -4034,6 +4079,103 @@ pub const TranspileProcess = struct {
     fn mark_node_used(node: *ast.Node) void {
         if (node.flags == null) node.flags = .{};
         node.flags.?.is_used = true;
+    }
+
+    /// Single source of truth mapping a best-effort C macro/constant identifier
+    /// to the `std.c.*` module that documents it. Returns null for names that are
+    /// not recognized C builtins. Drives both the value typing in
+    /// `infer_expr_type` (Identifier) and the import-usage marking, so the two
+    /// can never drift. Keep in sync with the C-binding doc modules under
+    /// `stdlib/std/c/`.
+    fn c_builtin_owner_module(name: []const u8) ?[]const u8 {
+        const Entry = struct { name: []const u8, module: []const u8 };
+        const table = [_]Entry{
+            // stddef.h -> std.c.def
+            .{ .name = "NULL", .module = "std.c.def" },
+            .{ .name = "SIZE_MAX", .module = "std.c.def" },
+            .{ .name = "RSIZE_MAX", .module = "std.c.def" },
+            .{ .name = "PTRDIFF_MIN", .module = "std.c.def" },
+            .{ .name = "PTRDIFF_MAX", .module = "std.c.def" },
+            .{ .name = "WCHAR_MIN", .module = "std.c.def" },
+            .{ .name = "WCHAR_MAX", .module = "std.c.def" },
+            .{ .name = "WINT_MIN", .module = "std.c.def" },
+            .{ .name = "WINT_MAX", .module = "std.c.def" },
+            // stdio.h -> std.c.io
+            .{ .name = "EOF", .module = "std.c.io" },
+            .{ .name = "SEEK_SET", .module = "std.c.io" },
+            .{ .name = "SEEK_CUR", .module = "std.c.io" },
+            .{ .name = "SEEK_END", .module = "std.c.io" },
+            // stdlib.h -> std.c.mem
+            .{ .name = "EXIT_SUCCESS", .module = "std.c.mem" },
+            .{ .name = "EXIT_FAILURE", .module = "std.c.mem" },
+            // limits.h -> std.c.limits
+            .{ .name = "CHAR_BIT", .module = "std.c.limits" },
+            .{ .name = "MB_LEN_MAX", .module = "std.c.limits" },
+            .{ .name = "SCHAR_MIN", .module = "std.c.limits" },
+            .{ .name = "SCHAR_MAX", .module = "std.c.limits" },
+            .{ .name = "UCHAR_MAX", .module = "std.c.limits" },
+            .{ .name = "CHAR_MIN", .module = "std.c.limits" },
+            .{ .name = "CHAR_MAX", .module = "std.c.limits" },
+            .{ .name = "SHRT_MIN", .module = "std.c.limits" },
+            .{ .name = "SHRT_MAX", .module = "std.c.limits" },
+            .{ .name = "USHRT_MAX", .module = "std.c.limits" },
+            .{ .name = "INT_MAX", .module = "std.c.limits" },
+            .{ .name = "INT_MIN", .module = "std.c.limits" },
+            .{ .name = "UINT_MAX", .module = "std.c.limits" },
+            .{ .name = "LONG_MAX", .module = "std.c.limits" },
+            .{ .name = "LONG_MIN", .module = "std.c.limits" },
+            .{ .name = "ULONG_MAX", .module = "std.c.limits" },
+            .{ .name = "LLONG_MAX", .module = "std.c.limits" },
+            .{ .name = "LLONG_MIN", .module = "std.c.limits" },
+            .{ .name = "ULLONG_MAX", .module = "std.c.limits" },
+            // time.h -> std.c.time
+            .{ .name = "CLOCKS_PER_SEC", .module = "std.c.time" },
+        };
+        for (table) |e| {
+            if (mem.eql(u8, name, e.name)) return e.module;
+        }
+        return null;
+    }
+
+    /// Single source of truth mapping a best-effort C typedef *type name*
+    /// (`size_t`, `time_t`, `FILE`, `va_list`, `pthread_*`, …) to the `std.c.*`
+    /// module that documents it. Returns null for names with no owning Fun module
+    /// (e.g. `stdint.h` types like `int32_t`/`intptr_t`, which have no `std.c.*`
+    /// module and are available for free via included headers).
+    ///
+    /// These names resolve in `ensure_named_type_visible` (type position) — the
+    /// type-position analogue of `c_builtin_owner_module` (value position). Keep
+    /// the member set aligned with `utils.get_c_typedef_alias_datatype_type`.
+    fn c_typedef_owner_module(name: []const u8) ?[]const u8 {
+        const Entry = struct { name: []const u8, module: []const u8 };
+        const table = [_]Entry{
+            // stddef.h -> std.c.def
+            .{ .name = "size_t", .module = "std.c.def" },
+            .{ .name = "ptrdiff_t", .module = "std.c.def" },
+            .{ .name = "wchar_t", .module = "std.c.def" },
+            .{ .name = "rsize_t", .module = "std.c.def" },
+            .{ .name = "ssize_t", .module = "std.c.def" },
+            // stdarg.h is documented alongside stddef in std.c.def
+            .{ .name = "va_list", .module = "std.c.def" },
+            // time.h -> std.c.time
+            .{ .name = "time_t", .module = "std.c.time" },
+            .{ .name = "clock_t", .module = "std.c.time" },
+            // stdio.h -> std.c.io
+            .{ .name = "FILE", .module = "std.c.io" },
+            // pthread.h -> std.c.thread
+            .{ .name = "pthread_t", .module = "std.c.thread" },
+            .{ .name = "pthread_attr_t", .module = "std.c.thread" },
+            .{ .name = "pthread_mutex_t", .module = "std.c.thread" },
+            .{ .name = "pthread_mutexattr_t", .module = "std.c.thread" },
+            .{ .name = "pthread_cond_t", .module = "std.c.thread" },
+            .{ .name = "pthread_condattr_t", .module = "std.c.thread" },
+            // NOTE: stdint.h types (int*_t / intptr_t / uintptr_t) intentionally
+            // omitted — there is no std.c.stdint Fun module to attribute them to.
+        };
+        for (table) |e| {
+            if (mem.eql(u8, name, e.name)) return e.module;
+        }
+        return null;
     }
 
     fn mark_node_used_and_sync_top_level_copy(self: *Self, node: *ast.Node) void {
@@ -4090,6 +4232,69 @@ pub const TranspileProcess = struct {
             if (imp.alias != null) continue;
             if (!self.import_node_matches_file_path(node, file_path)) continue;
             mark_node_used(node);
+            return;
+        }
+    }
+
+    /// True if the module brought in by `import_node` is a "re-export passthrough"
+    /// module: it declares no top-level symbols of its own but pulls in other
+    /// modules via `imp`. Importing such a module is meaningful even when none of
+    /// *its own* names are referenced — its purpose is to forward the symbols it
+    /// re-imports (and, for some, to trigger codegen compat layers). The canonical
+    /// example is `std.c.thread_windows`, which only does `imp std.c.thread;`.
+    ///
+    /// Detected from the already-parsed child process (no filesystem re-read):
+    /// the child's nodes contain at least one `.Import` and zero own symbol
+    /// declarations (function/compound/quirk/enum/typed global).
+    fn import_is_reexport_passthrough(self: *Self, import_node: *const ast.Node) bool {
+        if (import_node.type != .Import or import_node.node_variant == null) return false;
+        const imp = import_node.node_variant.?.import;
+
+        const full_path = blk: {
+            if (std.mem.startsWith(u8, imp.path, "std.")) {
+                const built = self.build_stdlib_module_path(imp.path) catch return false;
+                break :blk built orelse return false;
+            }
+            break :blk self.build_full_import_path(imp.path) catch return false;
+        };
+        defer self.backing_allocator.free(full_path);
+
+        const canon_opt = std.Io.Dir.cwd().realPathFileAlloc(self.io, full_path, self.allocator) catch null;
+        defer if (canon_opt) |canon| self.allocator.free(canon);
+        const resolved = canon_opt orelse full_path;
+
+        const child = self.get_root().find_process_for_file(resolved) orelse return false;
+
+        var has_import = false;
+        for (child.nodes.items()) |n| {
+            switch (n.type) {
+                .Import => has_import = true,
+                .Function, .Compound, .Enum, .Quirk, .Impl, .Variable => return false,
+                else => {},
+            }
+        }
+        return has_import;
+    }
+
+    /// Marks the import of `module_path` (e.g. "std.c.def") as used by matching
+    /// the import node's declared path. Used for signature-only C-binding modules
+    /// that declare no Fun symbols, so usage cannot be detected via the origin
+    /// file. Matches the canonical `std.*` form (legacy `stdlib.std.*` is
+    /// rewritten per `process_import`) and handles aliased imports.
+    fn mark_import_used_by_path(self: *Self, module_path: []const u8) void {
+        for (self.nodes.items()) |*node| {
+            if (node.type != .Import or node.node_variant == null) continue;
+            const imp = node.node_variant.?.import;
+            const canon = if (std.mem.startsWith(u8, imp.path, "stdlib.std."))
+                imp.path["stdlib.".len..]
+            else
+                imp.path;
+            if (!std.mem.eql(u8, canon, module_path)) continue;
+            if (imp.alias) |alias| {
+                self.mark_import_used_by_alias(alias);
+            } else {
+                mark_node_used(node);
+            }
             return;
         }
     }
@@ -5231,34 +5436,17 @@ pub const TranspileProcess = struct {
                 // Best-effort typing for common C macro constants.
                 // - `NULL` behaves like a C null pointer constant.
                 // - Common numeric macros (limits/stdio/stdlib/time) behave like integers.
-                if (mem.eql(u8, name, "NULL")) {
-                    return .{ .base = .Num, .is_null_literal = true };
-                }
-                if (mem.eql(u8, name, "EOF") or
-                    mem.eql(u8, name, "EXIT_SUCCESS") or mem.eql(u8, name, "EXIT_FAILURE") or
-                    mem.eql(u8, name, "SEEK_SET") or mem.eql(u8, name, "SEEK_CUR") or mem.eql(u8, name, "SEEK_END") or
-                    // `limits.h`
-                    mem.eql(u8, name, "CHAR_BIT") or
-                    mem.eql(u8, name, "MB_LEN_MAX") or
-                    mem.eql(u8, name, "SCHAR_MIN") or mem.eql(u8, name, "SCHAR_MAX") or
-                    mem.eql(u8, name, "UCHAR_MAX") or
-                    mem.eql(u8, name, "CHAR_MIN") or mem.eql(u8, name, "CHAR_MAX") or
-                    mem.eql(u8, name, "SHRT_MIN") or mem.eql(u8, name, "SHRT_MAX") or
-                    mem.eql(u8, name, "USHRT_MAX") or
-                    mem.eql(u8, name, "INT_MAX") or mem.eql(u8, name, "INT_MIN") or
-                    mem.eql(u8, name, "UINT_MAX") or
-                    mem.eql(u8, name, "LONG_MAX") or mem.eql(u8, name, "LONG_MIN") or
-                    mem.eql(u8, name, "ULONG_MAX") or
-                    mem.eql(u8, name, "LLONG_MAX") or mem.eql(u8, name, "LLONG_MIN") or
-                    mem.eql(u8, name, "ULLONG_MAX") or
-                    // Common extensions / related headers (often visible when importing std c headers)
-                    mem.eql(u8, name, "SIZE_MAX") or
-                    mem.eql(u8, name, "RSIZE_MAX") or
-                    mem.eql(u8, name, "PTRDIFF_MIN") or mem.eql(u8, name, "PTRDIFF_MAX") or
-                    mem.eql(u8, name, "WCHAR_MIN") or mem.eql(u8, name, "WCHAR_MAX") or
-                    mem.eql(u8, name, "WINT_MIN") or mem.eql(u8, name, "WINT_MAX") or
-                    mem.eql(u8, name, "CLOCKS_PER_SEC"))
-                {
+                //
+                // Each recognized name is also associated with the `std.c.*` module
+                // that documents it (see `c_builtin_owner_module`), and that import
+                // is marked used here. These C-binding modules are signature-only
+                // doc files that declare no Fun symbols, so without this they would
+                // always be reported as unused even when their constants are used.
+                if (c_builtin_owner_module(name)) |owner| {
+                    self.mark_import_used_by_path(owner);
+                    if (mem.eql(u8, name, "NULL")) {
+                        return .{ .base = .Num, .is_null_literal = true };
+                    }
                     return .{ .base = .Num };
                 }
 
@@ -7265,6 +7453,34 @@ pub const TranspileProcess = struct {
             }
         }
 
+        // Visit compound field types. Without this, a type used *only* as a
+        // compound field (e.g. `compound CliArgs { Map<str,str> opts; }`) is
+        // never run through `ensure_dtype_visible`, so the import that provides
+        // the field type is wrongly reported as unused. `ensure_dtype_visible`
+        // recurses into generic args, so `Map<str,str>` marks `std.map` used and
+        // validates `str`. The compound's own type params are passed as the
+        // `allow` list so `T`/`K`/`V` are not treated as unknown types.
+        for (proc.nodes.items()) |*node| {
+            if (node.type != .Compound or node.node_variant == null) continue;
+            const comp = node.node_variant.?.compound;
+
+            var allow_params: ?[]const []const u8 = null;
+            var allow_store: ?ArrayList([]const u8) = null;
+            defer if (allow_store) |*s| s.deinit();
+            if (comp.type_params) |*params| {
+                var buf = ArrayList([]const u8).init(proc.allocator);
+                for (params.items()) |p| {
+                    buf.append(p.items) catch return TranspileError.MemoryAllocationFailed;
+                }
+                allow_store = buf;
+                allow_params = allow_store.?.items;
+            }
+
+            for (comp.fields.items()) |f| {
+                try proc.ensure_dtype_visible(node.*, f.dtype, allow_params);
+            }
+        }
+
         try proc.emit_unused_top_level_warnings();
     }
 
@@ -7281,6 +7497,10 @@ pub const TranspileProcess = struct {
                 },
                 .Import => {
                     if (node_is_used(node)) continue;
+                    // Re-export passthrough modules (declare nothing, only forward
+                    // other imports — e.g. `std.c.thread_windows`) are meaningful
+                    // when imported even if none of their own names are referenced.
+                    if (proc.import_is_reexport_passthrough(node)) continue;
                     const imp = node.node_variant.?.import;
                     if (imp.alias) |alias| {
                         proc.report_warning(.unused_import, node.*, "unused import '{s}' as '{s}'", .{ imp.path, alias });
@@ -14224,7 +14444,15 @@ pub const TranspileProcess = struct {
         // Avoid importing the same file under different relative paths.
         // If the file is already imported but a new alias is being introduced, create
         // a minimal stub child process so transpile_children_recursive can emit #define stubs.
-        if (self.imported_files.contains(canon)) {
+        //
+        // Dedup of the expensive lex/parse is tracked compile-wide on the root
+        // process (`imported_files_is_globally_parsed`), not just within this
+        // import subtree. Without that, a module reachable through two sibling
+        // import branches (a diamond) is fully re-parsed once per branch even
+        // though its public symbols already propagate upward via
+        // `sync_global_symbols_to_parent`. The local `self.imported_files` map
+        // is still maintained for alias/stub bookkeeping below.
+        if (self.imported_files.contains(canon) or self.imported_files_is_globally_parsed(canon)) {
             if (import_alias) |alias| {
                 var stub_proc = self.backing_allocator.create(TranspileProcess) catch {
                     self.allocator.free(canon);
@@ -14256,6 +14484,7 @@ pub const TranspileProcess = struct {
         self.imported_files.put(canon, true) catch {
             return TranspileError.MemoryAllocationFailed;
         };
+        self.mark_globally_parsed(canon);
 
         // Create and initialize child transpile process.
         // The child process struct itself must be backing-allocated so the parent

@@ -53,6 +53,26 @@ pub const ParseProcess = struct {
     /// The current function node being processed by the parser.
     parser_current_function: ?ast.Node = null,
 
+    /// O(1) significant-token lookahead index (see `token_peek_n`).
+    ///
+    /// `sig_indices[r]` is the physical index of the r-th "significant" token
+    /// (a token for which `is_nl_or_comment_or_newline_separator` is false), in
+    /// stream order. `phys_to_rank[p]` is the number of significant tokens at
+    /// physical indices strictly less than `p` — i.e. the rank of the first
+    /// significant token at or after `p`. With these, the n-th significant token
+    /// at or after the cursor is `sig_indices[phys_to_rank[pindex] + n]`, an O(1)
+    /// lookup instead of an O(n) forward rescan.
+    ///
+    /// The tables are rebuilt lazily whenever the token stream's structural
+    /// `generation` changes (the parser only mutates the stream when splitting
+    /// `>>`/`<<`), so they cost one O(n) pass amortized over the whole parse.
+    /// They are lazily allocated on first use; storage is reused across rebuilds.
+    sig_indices: ?ArrayList(u32) = null,
+    phys_to_rank: ?ArrayList(u32) = null,
+    /// The token-stream `generation` the tables above were built for; `null`
+    /// means "never built". A mismatch with the live generation forces a rebuild.
+    sig_table_generation: ?u64 = null,
+
     const Self = @This();
 
     /// Initializes a new `ParseProcess` instance.
@@ -265,10 +285,99 @@ pub const ParseProcess = struct {
         return peek_token;
     }
 
+    /// Rebuilds the significant-token lookahead tables (`sig_indices` /
+    /// `phys_to_rank`) from the current token stream, if they are stale.
+    ///
+    /// Stale means the stream's structural `generation` differs from the
+    /// generation the tables were last built for (or they were never built).
+    /// This is O(number of tokens), but only runs when the stream actually
+    /// changes shape — i.e. once after lexing and again after each `>>`/`<<`
+    /// split — so it is amortized O(1) per lookahead over a full parse.
+    ///
+    /// Storage is allocated once from the (arena-backed) transpiler allocator
+    /// and reused via `clearRetainingCapacity` on subsequent rebuilds, so there
+    /// is no per-rebuild allocation churn after the first build.
+    ///
+    /// On allocation failure the tables are left marked stale and lookahead
+    /// falls back to the linear scan; correctness is never affected.
+    fn ensure_sig_tables(self: *Self) void {
+        const tokens = &self.transpile_proc.tokens;
+        if (self.sig_table_generation != null and self.sig_table_generation.? == tokens.generation) {
+            return;
+        }
+
+        if (self.sig_indices == null) {
+            self.sig_indices = ArrayList(u32).init(self.transpile_proc.allocator);
+        }
+        if (self.phys_to_rank == null) {
+            self.phys_to_rank = ArrayList(u32).init(self.transpile_proc.allocator);
+        }
+        var sig = &self.sig_indices.?;
+        var rank = &self.phys_to_rank.?;
+        sig.clearRetainingCapacity();
+        rank.clearRetainingCapacity();
+
+        const items = tokens.items();
+        // `phys_to_rank` has one entry per physical token: the count of
+        // significant tokens before that index.
+        rank.ensureTotalCapacity(items.len) catch {
+            self.sig_table_generation = null;
+            return;
+        };
+        sig.ensureTotalCapacity(items.len) catch {
+            self.sig_table_generation = null;
+            return;
+        };
+        var seen: u32 = 0;
+        for (items, 0..) |t, phys| {
+            // Rank of physical index `phys` = significant tokens seen before it.
+            rank.appendAssumeCapacity(seen);
+            if (!token.is_nl_or_comment_or_newline_separator(t)) {
+                sig.appendAssumeCapacity(@intCast(phys));
+                seen += 1;
+            }
+        }
+
+        self.sig_table_generation = tokens.generation;
+    }
+
     /// Peeks at the Nth next non-skippable token without incrementing.
     ///
     /// `n = 0` is equivalent to `token_peek_next()`.
+    ///
+    /// O(1) amortized: resolved through the `sig_indices`/`phys_to_rank` tables
+    /// (see `ensure_sig_tables`) rather than rescanning the stream. The result
+    /// is identical to a forward scan from `pindex` that skips newline/comment/
+    /// `\` tokens and returns the n-th remaining token.
     fn token_peek_n(self: *Self, n: usize) ?token.Token {
+        const tokens = &self.transpile_proc.tokens;
+        self.ensure_sig_tables();
+
+        // Fallback to the linear scan if the tables could not be built.
+        if (self.sig_table_generation == null) return self.token_peek_n_linear(n);
+
+        const rank = self.phys_to_rank.?.items;
+        const sig = self.sig_indices.?.items;
+
+        // Clamp the cursor into range. A negative `pindex` means "before the
+        // start", which ranks at 0; a `pindex` past the end has no significant
+        // token at or after it.
+        const pidx = self.transpile_proc.tokens.pindex;
+        const start_rank: usize = if (pidx <= 0)
+            0
+        else if (@as(usize, @intCast(pidx)) >= rank.len)
+            sig.len
+        else
+            rank[@intCast(pidx)];
+
+        const target = start_rank + n;
+        if (target >= sig.len) return null;
+        return tokens.at(sig[target]);
+    }
+
+    /// Linear fallback for `token_peek_n` (used only if the index tables could
+    /// not be allocated). Preserves the original semantics exactly.
+    fn token_peek_n_linear(self: *Self, n: usize) ?token.Token {
         var idx: isize = self.transpile_proc.tokens.pindex;
         var seen: usize = 0;
         while (true) {
@@ -281,29 +390,47 @@ pub const ParseProcess = struct {
         }
     }
 
+    /// Resolves the n-th significant token strictly before physical index
+    /// `exclusive_end` (n = 0 → the closest one), via the rank tables. Returns
+    /// null when there is no such token or the tables are unavailable.
+    ///
+    /// `phys_to_rank[exclusive_end]` is the number of significant tokens at
+    /// indices `< exclusive_end`, so the closest significant token before it is
+    /// `sig_indices[that_count - 1]`, the next one back `... - 2`, and so on.
+    fn token_peek_prev_significant(self: *Self, exclusive_end: isize, n: usize) ?token.Token {
+        self.ensure_sig_tables();
+        if (self.sig_table_generation == null) {
+            // Linear fallback: scan down from `exclusive_end - 1`.
+            var idx: isize = exclusive_end - 1;
+            var seen: usize = 0;
+            while (idx >= 0) : (idx -= 1) {
+                const t = self.transpile_proc.tokens.at(@intCast(idx)) orelse return null;
+                if (token.is_nl_or_comment_or_newline_separator(t)) continue;
+                if (seen == n) return t;
+                seen += 1;
+            }
+            return null;
+        }
+
+        const rank = self.phys_to_rank.?.items;
+        const sig = self.sig_indices.?.items;
+        if (exclusive_end <= 0) return null;
+        const end: usize = @intCast(exclusive_end);
+        const before: usize = if (end >= rank.len) sig.len else rank[end];
+        if (before == 0 or n + 1 > before) return null;
+        return self.transpile_proc.tokens.at(sig[before - 1 - n]);
+    }
+
     /// Peeks the previous non-skippable token (relative to the most recently consumed token).
     fn token_peek_prev(self: *Self) ?token.Token {
-        var idx: isize = @as(isize, @intCast(self.transpile_proc.tokens.pindex)) - 2;
-        while (idx >= 0) : (idx -= 1) {
-            const t = self.transpile_proc.tokens.at(@intCast(idx)) orelse return null;
-            if (!token.is_nl_or_comment_or_newline_separator(t)) return t;
-        }
-        return null;
+        return self.token_peek_prev_significant(self.transpile_proc.tokens.pindex - 1, 0);
     }
 
     /// Peeks the Nth previous non-skippable token (relative to the most recently consumed token).
     ///
     /// `n = 0` is equivalent to `token_peek_prev()`.
     fn token_peek_prev_n(self: *Self, n: usize) ?token.Token {
-        var idx: isize = @as(isize, @intCast(self.transpile_proc.tokens.pindex)) - 2;
-        var seen: usize = 0;
-        while (idx >= 0) : (idx -= 1) {
-            const t = self.transpile_proc.tokens.at(@intCast(idx)) orelse return null;
-            if (token.is_nl_or_comment_or_newline_separator(t)) continue;
-            if (seen == n) return t;
-            seen += 1;
-        }
-        return null;
+        return self.token_peek_prev_significant(self.transpile_proc.tokens.pindex - 1, n);
     }
 
     /// Peeks the Nth previous non-skippable token relative to the *next* token to be consumed.
@@ -312,15 +439,7 @@ pub const ParseProcess = struct {
     /// from `pindex-1`, `pindex-2`, etc. This is often the most intuitive notion of "previous"
     /// when doing context-sensitive parsing.
     fn token_peek_prev_stream_n(self: *Self, n: usize) ?token.Token {
-        var idx: isize = @as(isize, @intCast(self.transpile_proc.tokens.pindex)) - 1;
-        var seen: usize = 0;
-        while (idx >= 0) : (idx -= 1) {
-            const t = self.transpile_proc.tokens.at(@intCast(idx)) orelse return null;
-            if (token.is_nl_or_comment_or_newline_separator(t)) continue;
-            if (seen == n) return t;
-            seen += 1;
-        }
-        return null;
+        return self.token_peek_prev_significant(self.transpile_proc.tokens.pindex, n);
     }
 
     fn is_sizeof_type_operand_context(self: *Self) bool {
@@ -5387,5 +5506,38 @@ pub const ParseProcess = struct {
 
         while (try self.next()) {}
         self.transpile_proc.deinit_root_scope();
+    }
+
+    // --- Test-support API ---------------------------------------------------
+    // These thin wrappers exist solely so the test suite (tests/parser_test.zig)
+    // can exercise the otherwise-private lookahead functions and verify that the
+    // O(1) significant-token index produces exactly the same results as a naive
+    // linear scan. They are not used by the parser itself.
+
+    /// Test-only: the O(1) `token_peek_n` result.
+    pub fn testPeekN(self: *Self, n: usize) ?token.Token {
+        return self.token_peek_n(n);
+    }
+
+    /// Test-only: a reference linear scan equivalent to the original
+    /// `token_peek_n`, used as the oracle in equivalence tests.
+    pub fn testPeekNLinear(self: *Self, n: usize) ?token.Token {
+        return self.token_peek_n_linear(n);
+    }
+
+    /// Test-only: the O(1) `token_peek_prev_n` result.
+    pub fn testPeekPrevN(self: *Self, n: usize) ?token.Token {
+        return self.token_peek_prev_n(n);
+    }
+
+    /// Test-only: the O(1) `token_peek_prev_stream_n` result.
+    pub fn testPeekPrevStreamN(self: *Self, n: usize) ?token.Token {
+        return self.token_peek_prev_stream_n(n);
+    }
+
+    /// Test-only: move the read cursor to a physical index (does not bump the
+    /// stream generation, so it must not invalidate the lookahead tables).
+    pub fn testSetCursor(self: *Self, index: usize) void {
+        self.transpile_proc.tokens.set_peek_pointer(index);
     }
 };

@@ -1,0 +1,5 @@
+imp std.c.io;
+
+pub fun shared_value() num {
+  ret 42;
+}

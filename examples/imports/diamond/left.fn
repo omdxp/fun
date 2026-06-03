@@ -1,0 +1,6 @@
+imp shared;
+imp std.c.io;
+
+pub fun left() {
+  printf("left=%d\n", shared_value());
+}
