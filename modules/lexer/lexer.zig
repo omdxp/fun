@@ -881,6 +881,7 @@ pub const LexProcess = struct {
     fn token_make_number_hexadecimal(self: *Self) LexError!?token.Token {
         _ = try self.next_char(); // skip special character 'x'
         const number_str = try self.read_hex_number_str();
+        defer number_str.deinit();
         const number: c_longlong = std.fmt.parseInt(c_longlong, number_str.items, 16) catch {
             self.transpile_proc.err("failed to parse number '{s}'", .{number_str.items});
             return LexError.InvalidNumber;

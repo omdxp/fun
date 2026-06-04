@@ -118,6 +118,11 @@
           "default": false,
           "description": "Enable go-to-definition debug logging from fls (sets FLS_DEBUG_DEFINITIONS=1)."
         },
+        "fun.inlayHints.parameterNames.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show inline parameter-name hints at call sites (e.g. add(a: 1, b: 2)). Hints never appear on declarations."
+        },
         "fun.debugger.type": {
           "type": "string",
           "enum": [

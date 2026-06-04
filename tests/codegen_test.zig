@@ -4943,3 +4943,89 @@ test "nested import generic impl specialization prototypes emit and run" {
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("42|ok", stdout);
 }
+
+test "hexadecimal literals with a-f and A-F digits compile and run" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_hex_literals.fn";
+    const c_path = "codegen_hex_literals.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_hex_literals.exe" else "codegen_hex_literals";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: is_hex_number previously only accepted 'a'..'b', so any literal
+    // containing c-f or uppercase A-F failed to lex ("failed to parse number ''").
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() num {\n" ++
+        "  num a = 0xdead;\n" ++
+        "  num b = 0xBEEF;\n" ++
+        "  num c = 0xFF;\n" ++
+        "  num d = 0x1f;\n" ++
+        "  printf(\"%lld %lld %lld %lld\\n\", a, b, c, d);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+
+    try std.testing.expectEqualStrings("57005 48879 255 31\n", stdout);
+}
+
+test "long type name with quirk impl does not overflow mangled C identifier buffers" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_long_type_name.fn";
+    const c_path = "codegen_long_type_name.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_long_type_name.exe" else "codegen_long_type_name";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: quirk-impl C-identifier mangling used fixed [96]/[128]u8 stack
+    // buffers with `bufPrint(...) catch unreachable`. A type name longer than the
+    // buffer's free space panicked the compiler ("NoSpaceLeft") on valid input.
+    const long_name = "A" ** 90;
+    const input =
+        "imp std.c.io;\n" ++
+        "quirk Greeter {\n" ++
+        "  greet() str;\n" ++
+        "}\n" ++
+        "compound " ++ long_name ++ " {\n" ++
+        "  num x;\n" ++
+        "}\n" ++
+        "impl " ++ long_name ++ " as Greeter {\n" ++
+        "  greet() str { ret \"hi\"; }\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  " ++ long_name ++ " g;\n" ++
+        "  g.x = 1;\n" ++
+        "  printf(\"%s\\n\", g.greet());\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    // The key assertion is that transpilation completes without a panic.
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+
+    try std.testing.expectEqualStrings("hi\n", stdout);
+}

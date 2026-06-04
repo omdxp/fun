@@ -5341,3 +5341,122 @@ test "fls e2e: format-on-save cache hit - warm save skips subprocess" {
     shutdown_res2.deinit();
     try lsp.notify("exit", "{}");
 }
+
+test "fls e2e: hover has no bold title, completion uses arg snippets, inlay hints show param names" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "compound Point {\n" ++
+        "  num x;\n" ++
+        "  num y;\n" ++
+        "}\n\n" ++
+        "fun add(num a, num b) num {\n" ++
+        "  ret a + b;\n" ++
+        "}\n\n" ++
+        "fun main() {\n" ++
+        "  num r = add(1, 2);\n" ++
+        "  Point p;\n" ++
+        "  p.x = r;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-features.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // --- Hover on `add` (its definition) must NOT contain a bold "**add**" title.
+    const add_def = try findPosition(doc_text, "fun add", 0);
+    const hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, add_def.line, add_def.col + 4 },
+    );
+    defer allocator.free(hover_params);
+    const hov_id = try lsp.request("textDocument/hover", hover_params);
+    var hov_res = try lsp.waitResponse(hov_id, 5000);
+    defer hov_res.deinit();
+    const hov_result = try jsonResultFromResponseObj(hov_res.parsed.value.object);
+    if (hov_result == .object) {
+        if (hov_result.object.get("contents")) |c| {
+            if (c == .object) {
+                if (c.object.get("value")) |v| {
+                    if (v == .string) {
+                        // Go-style: no markdown bold title anywhere in the hover.
+                        try std.testing.expect(std.mem.indexOf(u8, v.string, "**") == null);
+                        // The signature should still be present.
+                        try std.testing.expect(std.mem.indexOf(u8, v.string, "add(num a, num b)") != null);
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Completion at the call site: the `add` item must carry a snippet.
+    const comp_pos = try findPosition(doc_text, "num r = ad", 0);
+    const comp_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, comp_pos.line, comp_pos.col + @as(i64, @intCast("num r = ad".len)) },
+    );
+    defer allocator.free(comp_params);
+    const comp_id = try lsp.request("textDocument/completion", comp_params);
+    var comp_res = try lsp.waitResponse(comp_id, 5000);
+    defer comp_res.deinit();
+    const comp_result = try jsonResultFromResponseObj(comp_res.parsed.value.object);
+    if (comp_result == .object) {
+        if (comp_result.object.get("items")) |items_v| {
+            if (items_v == .array) {
+                for (items_v.array.items) |it| {
+                    if (it != .object) continue;
+                    const lbl = it.object.get("label") orelse continue;
+                    if (lbl != .string or !std.mem.eql(u8, lbl.string, "add")) continue;
+                    // Snippet format (2) with a placeholder insert text.
+                    if (it.object.get("insertTextFormat")) |fmt_v| {
+                        try std.testing.expect(fmt_v == .integer and fmt_v.integer == 2);
+                    }
+                    if (it.object.get("insertText")) |ins_v| {
+                        try std.testing.expect(ins_v == .string and std.mem.indexOf(u8, ins_v.string, "${1:") != null);
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Inlay hints over the whole file: expect `a:` and `b:` at the add(1,2) call.
+    const inlay_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"range\":{{\"start\":{{\"line\":0,\"character\":0}},\"end\":{{\"line\":100,\"character\":0}}}}}}",
+        .{doc_uri},
+    );
+    defer allocator.free(inlay_params);
+    const inlay_id = try lsp.request("textDocument/inlayHint", inlay_params);
+    var inlay_res = try lsp.waitResponse(inlay_id, 5000);
+    defer inlay_res.deinit();
+    const inlay_result = try jsonResultFromResponseObj(inlay_res.parsed.value.object);
+    var saw_a = false;
+    var saw_b = false;
+    if (inlay_result == .array) {
+        for (inlay_result.array.items) |h| {
+            if (h != .object) continue;
+            const lbl = h.object.get("label") orelse continue;
+            if (lbl != .string) continue;
+            if (std.mem.eql(u8, lbl.string, "a:")) saw_a = true;
+            if (std.mem.eql(u8, lbl.string, "b:")) saw_b = true;
+        }
+    }
+    try std.testing.expect(saw_a and saw_b);
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}

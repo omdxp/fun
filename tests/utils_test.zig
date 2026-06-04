@@ -340,3 +340,15 @@ test "Vector generation bumps on structural mutation but not on cursor moves" {
     vec.clear();
     try std.testing.expect(vec.generation != g4);
 }
+
+test "is_hex_number accepts 0-9 a-f A-F and rejects others" {
+    const is_hex = utils.is_hex_number;
+    // digits
+    for ("0123456789") |c| try std.testing.expect(is_hex(c));
+    // lowercase a-f (regression: previously only a-b were accepted)
+    for ("abcdef") |c| try std.testing.expect(is_hex(c));
+    // uppercase A-F (regression: previously none were accepted)
+    for ("ABCDEF") |c| try std.testing.expect(is_hex(c));
+    // non-hex letters and symbols
+    for ("gGhzZ_.- /") |c| try std.testing.expect(!is_hex(c));
+}

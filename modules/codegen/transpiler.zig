@@ -3441,31 +3441,6 @@ pub const TranspileProcess = struct {
         // deinitializing inside `err()` causes double-close crashes (especially on Windows).
     }
 
-    /// Logs a warning message with the current position in the token stream.
-    ///
-    /// This function logs a warning message along with the line number, column span,
-    /// and filename where the warning occurred.
-    ///
-    /// Parameters:
-    /// - `self`: The instance of the transpiler.
-    /// - `fmt`: The format string for the warning message.
-    /// - `args`: The arguments for the format string.
-    pub fn warn(self: *Self, comptime fmt: []const u8, args: anytype) void {
-        self.warnings.print("\n[Warning]\n", .{});
-        self.warnings.print(fmt, args);
-
-        if (self.current_token) |ct| {
-            const end_line = if (ct.pos.end_line == 0) ct.pos.line else ct.pos.end_line;
-            if (end_line == ct.pos.line) {
-                self.warnings.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, ct.pos.end_col });
-            } else {
-                self.warnings.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ ct.pos.filename, ct.pos.line, ct.pos.start_col, end_line, ct.pos.end_col });
-            }
-        } else {
-            self.warnings.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col });
-        }
-    }
-
     fn queue_warning_control(self: *Self, action: ast.WarningControlAction, id: ast.WarningId, reason: []const u8, pos: ?token.Pos) TranspileError!void {
         const pending: PendingWarningControl = .{
             .id = id,
@@ -3871,8 +3846,10 @@ pub const TranspileProcess = struct {
             std.Io.File.stderr().writeStreamingAll(self.io, std.fmt.bufPrint(&warn_buf, fmt, args) catch fmt) catch {};
         }
 
-        self.warnings.print("\n[Warning:{s}]\n", .{ast.warning_id_to_string(id)}) catch unreachable;
-        self.warnings.print(fmt, args) catch unreachable;
+        // Warnings are advisory: if the in-memory buffer can't grow (OOM), drop
+        // the text rather than panic the whole compile via `catch unreachable`.
+        self.warnings.print("\n[Warning:{s}]\n", .{ast.warning_id_to_string(id)}) catch {};
+        self.warnings.print(fmt, args) catch {};
 
         if (node) |n| {
             if (n.pos) |p| {
@@ -3880,11 +3857,11 @@ pub const TranspileProcess = struct {
                 if (end_line == p.line) {
                     const loc = std.fmt.bufPrint(&warn_buf, "\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col }) catch "";
                     if (self.flags.emit_stderr) std.Io.File.stderr().writeStreamingAll(self.io, loc) catch {};
-                    self.warnings.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col }) catch unreachable;
+                    self.warnings.print("\nLocation: {s}:{d}:{d}-{d}\n", .{ p.filename, p.line, p.start_col, p.end_col }) catch {};
                 } else {
                     const loc = std.fmt.bufPrint(&warn_buf, "\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col }) catch "";
                     if (self.flags.emit_stderr) std.Io.File.stderr().writeStreamingAll(self.io, loc) catch {};
-                    self.warnings.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col }) catch unreachable;
+                    self.warnings.print("\nLocation: {s}:{d}:{d}-{d}:{d}\n", .{ p.filename, p.line, p.start_col, end_line, p.end_col }) catch {};
                 }
                 return;
             }
@@ -3892,7 +3869,7 @@ pub const TranspileProcess = struct {
 
         const loc = std.fmt.bufPrint(&warn_buf, "\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch "";
         if (self.flags.emit_stderr) std.Io.File.stderr().writeStreamingAll(self.io, loc) catch {};
-        self.warnings.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch unreachable;
+        self.warnings.print("\nLocation: {s}:{d}:{d}\n", .{ self.pos.filename, self.pos.line, self.pos.col }) catch {};
     }
 
     fn report_error(self: *Self, node: ?ast.Node, comptime fmt: []const u8, args: anytype) void {
@@ -4794,15 +4771,22 @@ pub const TranspileProcess = struct {
             }
             if (!has_method) continue;
 
-            // Find the generated method function name by suffix match.
-            var suf_buf: [128]u8 = undefined;
-            const suf = (std.fmt.bufPrint(&suf_buf, "__{s}", .{method_name}) catch unreachable);
+            // Find the generated method function name by suffix match. Match
+            // `full` ending in `__<method_name>` without materializing the
+            // suffix string (method names are unbounded, so a fixed buffer could
+            // overflow): require the trailing `<method_name>` to be preceded by
+            // `__`.
             for (im.methods.items()) |m| {
                 if (m.type != .Function or m.node_variant == null) continue;
                 const fnv = m.node_variant.?.function;
                 if (fnv.name == null) continue;
                 const full = fnv.name.?.items;
-                if (mem.endsWith(u8, full, suf)) return full;
+                if (full.len >= method_name.len + 2 and
+                    mem.endsWith(u8, full, method_name) and
+                    mem.eql(u8, full[full.len - method_name.len - 2 .. full.len - method_name.len], "__"))
+                {
+                    return full;
+                }
             }
         }
         return null;
@@ -4855,9 +4839,6 @@ pub const TranspileProcess = struct {
             }
             if (!has_method) continue;
 
-            var suf_buf: [128]u8 = undefined;
-            const suf = (std.fmt.bufPrint(&suf_buf, "__{s}", .{method_name}) catch unreachable);
-
             var fn_name: ?[]const u8 = null;
             for (im.methods.items()) |m| {
                 if (m.type != .Function or m.node_variant == null) continue;
@@ -4865,7 +4846,12 @@ pub const TranspileProcess = struct {
                 const fnv = m.node_variant.?.function;
                 if (fnv.name == null) continue;
                 const full = fnv.name.?.items;
-                if (mem.endsWith(u8, full, suf)) {
+                // Match `full` ending in `__<method_name>` without allocating a
+                // suffix string (method names are unbounded).
+                if (full.len >= method_name.len + 2 and
+                    mem.endsWith(u8, full, method_name) and
+                    mem.eql(u8, full[full.len - method_name.len - 2 .. full.len - method_name.len], "__"))
+                {
                     if (matches_exact) {
                         fn_name = full;
                     } else {
@@ -9248,6 +9234,17 @@ pub const TranspileProcess = struct {
         return .{ .slice = heap_buf, .owned = true };
     }
 
+    /// Builds a generated C identifier by formatting `fmt` with `args` onto the
+    /// backing allocator. Use this (instead of a fixed `bufPrint` stack buffer)
+    /// whenever the format includes an unbounded `{s}` such as a (sanitized) type
+    /// or method name — those can be arbitrarily long for deeply-nested generics
+    /// or long user identifiers and would otherwise overflow a fixed buffer and
+    /// panic. The returned slice is owned by the caller, which must free it via
+    /// `backing_allocator` (typically with `defer`).
+    fn c_name_alloc(self: *Self, comptime fmt: []const u8, args: anytype) TranspileError![]u8 {
+        return std.fmt.allocPrint(self.backing_allocator, fmt, args) catch return TranspileError.MemoryAllocationFailed;
+    }
+
     fn quirk_sig_hash(sig: []const u8) u64 {
         return std.hash.Wyhash.hash(0, sig);
     }
@@ -10105,11 +10102,11 @@ pub const TranspileProcess = struct {
         const type_s = try self.c_ident_sanitize_temp(type_name, &type_stack);
         defer if (type_s.owned) self.backing_allocator.free(type_s.slice);
 
-        var vtbl_buf: [96]u8 = undefined;
-        const vtbl_name = (std.fmt.bufPrint(&vtbl_buf, "__fun_impl_{s}_{x}_vtable", .{ type_s.slice, sig_h }) catch unreachable);
+        const vtbl_name = try self.c_name_alloc("__fun_impl_{s}_{x}_vtable", .{ type_s.slice, sig_h });
+        defer self.backing_allocator.free(vtbl_name);
 
-        var coerce_buf: [96]u8 = undefined;
-        const coerce_name = (std.fmt.bufPrint(&coerce_buf, "__fun_coerce_{s}_{x}", .{ type_s.slice, sig_h }) catch unreachable);
+        const coerce_name = try self.c_name_alloc("__fun_coerce_{s}_{x}", .{ type_s.slice, sig_h });
+        defer self.backing_allocator.free(coerce_name);
 
         // Forward declare generated impl methods so wrappers can call them.
         for (im.methods.items()) |m| {
@@ -10207,8 +10204,8 @@ pub const TranspileProcess = struct {
             var m_stack: [128]u8 = undefined;
             const m_s = try self.c_ident_sanitize_temp(m.name.items, &m_stack);
             defer if (m_s.owned) self.backing_allocator.free(m_s.slice);
-            var wrap_buf: [128]u8 = undefined;
-            const wrap_name = (std.fmt.bufPrint(&wrap_buf, "__fun_wrap_{s}_{x}_{s}", .{ type_s.slice, sig_h, m_s.slice }) catch unreachable);
+            const wrap_name = try self.c_name_alloc("__fun_wrap_{s}_{x}_{s}", .{ type_s.slice, sig_h, m_s.slice });
+            defer self.backing_allocator.free(wrap_name);
 
             try self.write("static ");
             try self.write_type(m.rtype);
@@ -10254,8 +10251,8 @@ pub const TranspileProcess = struct {
             var m_stack2: [128]u8 = undefined;
             const m_s = try self.c_ident_sanitize_temp(m.name.items, &m_stack2);
             defer if (m_s.owned) self.backing_allocator.free(m_s.slice);
-            var wrap_buf2: [128]u8 = undefined;
-            const wrap_name2 = (std.fmt.bufPrint(&wrap_buf2, "__fun_wrap_{s}_{x}_{s}", .{ type_s.slice, sig_h, m_s.slice }) catch unreachable);
+            const wrap_name2 = try self.c_name_alloc("__fun_wrap_{s}_{x}_{s}", .{ type_s.slice, sig_h, m_s.slice });
+            defer self.backing_allocator.free(wrap_name2);
             try self.write("  .");
             try self.write(m.name.items);
             try self.write(" = ");
@@ -12287,8 +12284,8 @@ pub const TranspileProcess = struct {
                                     var type_stack4: [128]u8 = undefined;
                                     const type_s = try self.c_ident_sanitize_temp(actual.?, &type_stack4);
                                     defer if (type_s.owned) self.backing_allocator.free(type_s.slice);
-                                    var coerce_buf: [96]u8 = undefined;
-                                    const coerce_name = (std.fmt.bufPrint(&coerce_buf, "__fun_coerce_{s}_{x}", .{ type_s.slice, self.quirk_sig_hash_cached(sig.?) }) catch unreachable);
+                                    const coerce_name = try self.c_name_alloc("__fun_coerce_{s}_{x}", .{ type_s.slice, self.quirk_sig_hash_cached(sig.?) });
+                                    defer self.backing_allocator.free(coerce_name);
                                     try self.write(coerce_name);
                                     try self.write("(");
                                     try self.transpile_node(f.value.*);
@@ -13008,8 +13005,8 @@ pub const TranspileProcess = struct {
                                         var type_stack2: [128]u8 = undefined;
                                         const type_s = try self.c_ident_sanitize_temp(actual.?, &type_stack2);
                                         defer if (type_s.owned) self.backing_allocator.free(type_s.slice);
-                                        var coerce_buf: [96]u8 = undefined;
-                                        const coerce_name = (std.fmt.bufPrint(&coerce_buf, "__fun_coerce_{s}_{x}", .{ type_s.slice, self.quirk_sig_hash_cached(expected_sig.?) }) catch unreachable);
+                                        const coerce_name = try self.c_name_alloc("__fun_coerce_{s}_{x}", .{ type_s.slice, self.quirk_sig_hash_cached(expected_sig.?) });
+                                        defer self.backing_allocator.free(coerce_name);
                                         try self.transpile_node(left.*);
                                         try self.write(" = ");
                                         try self.write(coerce_name);
@@ -13204,8 +13201,8 @@ pub const TranspileProcess = struct {
                                     var type_stack3: [128]u8 = undefined;
                                     const type_s = try self.c_ident_sanitize_temp(actual.?, &type_stack3);
                                     defer if (type_s.owned) self.backing_allocator.free(type_s.slice);
-                                    var coerce_buf: [96]u8 = undefined;
-                                    const coerce_name = (std.fmt.bufPrint(&coerce_buf, "__fun_coerce_{s}_{x}", .{ type_s.slice, self.quirk_sig_hash_cached(sig.?) }) catch unreachable);
+                                    const coerce_name = try self.c_name_alloc("__fun_coerce_{s}_{x}", .{ type_s.slice, self.quirk_sig_hash_cached(sig.?) });
+                                    defer self.backing_allocator.free(coerce_name);
                                     try self.write(coerce_name);
                                     try self.write("(");
                                     try self.transpile_node(val.*);
@@ -13697,8 +13694,8 @@ pub const TranspileProcess = struct {
                                     var type_stack4: [128]u8 = undefined;
                                     const type_s = try self.c_ident_sanitize_temp(actual.?, &type_stack4);
                                     defer if (type_s.owned) self.backing_allocator.free(type_s.slice);
-                                    var coerce_buf: [96]u8 = undefined;
-                                    const coerce_name = (std.fmt.bufPrint(&coerce_buf, "__fun_coerce_{s}_{x}", .{ type_s.slice, self.quirk_sig_hash_cached(sig.?) }) catch unreachable);
+                                    const coerce_name = try self.c_name_alloc("__fun_coerce_{s}_{x}", .{ type_s.slice, self.quirk_sig_hash_cached(sig.?) });
+                                    defer self.backing_allocator.free(coerce_name);
                                     try self.write("return ");
                                     try self.write(coerce_name);
                                     try self.write("(");

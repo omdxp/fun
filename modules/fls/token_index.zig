@@ -44,20 +44,28 @@ pub fn appendDocCommentAboveLine(allocator: Allocator, out: *ArrayList(u8), text
     defer lines.deinit();
 
     while (cur_start > 0) {
-        var prev_end: usize = cur_start - 1;
+        // `cur_start` is the first byte of the current line, so the byte at
+        // `cur_start - 1` is the '\n' that terminates the previous line. The
+        // previous line's content is the half-open range
+        // `[prev_start, line_end)` where `line_end` excludes that '\n'.
+        //
+        // IMPORTANT: do not "step back over the newline" before locating the
+        // line start — an *empty* previous line is exactly the case where
+        // `cur_start - 1` is its terminating '\n' and the byte before that is
+        // the previous line's '\n'. Stepping back would skip the empty line
+        // entirely and keep collecting comments across the blank separator,
+        // which is what made hovering a declaration pull in the unrelated
+        // file-level doc block above a blank line.
+        const line_end: usize = cur_start - 1; // exclusive (the terminating '\n')
 
-        // If we're sitting right after a newline, step back over it.
-        if (text[prev_end] == '\n' and prev_end > 0) prev_end -= 1;
-
-        // Find start of previous line.
-        var prev_start: usize = prev_end;
+        var prev_start: usize = line_end;
         while (prev_start > 0 and text[prev_start - 1] != '\n') : (prev_start -= 1) {}
 
-        var line = text[prev_start .. prev_end + 1];
+        var line = text[prev_start..line_end];
         line = trimRightCR(line);
         const trimmed = trimLeftSpace(line);
 
-        if (trimmed.len == 0) break;
+        if (trimmed.len == 0) break; // blank line -> stop (separates doc blocks)
         if (!std.mem.startsWith(u8, trimmed, "//")) break;
 
         var content = trimmed[2..];
@@ -474,6 +482,13 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
     defer globals_type_map.deinit();
 
     const putType = struct {
+        // Populates a transient (arena-backed) name->type hint map used only to
+        // enrich LSP hovers/completions. This is intentionally best-effort: under
+        // memory exhaustion we drop a single type hint rather than fail the whole
+        // index build (which would leave the editor with no symbols at all). The
+        // dupes guard against the source slices being freed before the map is
+        // consumed; on dupe failure we fall back to the original (arena-owned)
+        // slice, which is valid for the lifetime of this build.
         fn call(map: *std.StringHashMap([]const u8), name: []const u8, tname: ?[]const u8, allocator_: Allocator) void {
             if (tname == null) return;
             const key = allocator_.dupe(u8, name) catch name;
@@ -3191,4 +3206,66 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
             continue;
         }
     }
+}
+
+test "fls: appendDocCommentAboveLine stops at a blank line (file-doc separation)" {
+    const a = std.testing.allocator;
+    // Mirrors stdlib/std/array.fn: a file-level doc block, a blank line, then a
+    // one-line doc directly above the declaration. Hovering the declaration must
+    // collect ONLY the line(s) below the blank separator, not the file doc.
+    const text =
+        "// File level doc line 1.\n" ++ // line 0
+        "// File level doc line 2.\n" ++ // line 1
+        "\n" ++ // line 2 (blank separator)
+        "// View over a generic array.\n" ++ // line 3
+        "pub compound Array<T> {\n" ++ // line 4 (decl)
+        "}\n";
+
+    var out = ArrayList(u8).init(a);
+    defer out.deinit();
+    const got = try appendDocCommentAboveLine(a, &out, text, 4);
+    try std.testing.expect(got);
+    // Only the line below the blank, plus the trailing blank line the fn appends.
+    try std.testing.expectEqualStrings("View over a generic array.\n\n", out.items);
+}
+
+test "fls: appendDocCommentAboveLine collects a contiguous multi-line block" {
+    const a = std.testing.allocator;
+    const text =
+        "// Line one.\n" ++ // line 0
+        "// Line two.\n" ++ // line 1
+        "fun f() {}\n"; // line 2 (decl)
+
+    var out = ArrayList(u8).init(a);
+    defer out.deinit();
+    const got = try appendDocCommentAboveLine(a, &out, text, 2);
+    try std.testing.expect(got);
+    try std.testing.expectEqualStrings("Line one.\nLine two.\n\n", out.items);
+}
+
+test "fls: appendDocCommentAboveLine stops at a non-comment line" {
+    const a = std.testing.allocator;
+    const text =
+        "num x = 1;\n" ++ // line 0 (code, not a comment)
+        "// doc.\n" ++ // line 1
+        "fun f() {}\n"; // line 2 (decl)
+
+    var out = ArrayList(u8).init(a);
+    defer out.deinit();
+    const got = try appendDocCommentAboveLine(a, &out, text, 2);
+    try std.testing.expect(got);
+    try std.testing.expectEqualStrings("doc.\n\n", out.items);
+}
+
+test "fls: appendDocCommentAboveLine returns false with no doc above" {
+    const a = std.testing.allocator;
+    const text =
+        "\n" ++ // line 0 (blank)
+        "fun f() {}\n"; // line 1 (decl)
+
+    var out = ArrayList(u8).init(a);
+    defer out.deinit();
+    const got = try appendDocCommentAboveLine(a, &out, text, 1);
+    try std.testing.expect(!got);
+    try std.testing.expectEqual(@as(usize, 0), out.items.len);
 }

@@ -38,6 +38,7 @@ const CompletionItem = types.CompletionItem;
 const CompletionList = types.CompletionList;
 const MarkupContent = types.MarkupContent;
 const Hover = types.Hover;
+const InlayHint = types.InlayHint;
 const Location = types.Location;
 const SymbolInformation = types.SymbolInformation;
 const DocumentSymbol = types.DocumentSymbol;
@@ -79,6 +80,13 @@ const posInRange = positions_mod.posInRange;
 const findTokenAt = positions_mod.findTokenAt;
 const findTokenIndexAt = positions_mod.findTokenIndexAt;
 const isDotToken = positions_mod.isDotToken;
+const isOpenParen = positions_mod.isOpenParen;
+const callParenIsDeclaration = positions_mod.callParenIsDeclaration;
+const isCloseParen = positions_mod.isCloseParen;
+const isOpenBracket = positions_mod.isOpenBracket;
+const isCloseBracket = positions_mod.isCloseBracket;
+const isCommaToken = positions_mod.isCommaToken;
+const paramNameFromLabel = positions_mod.paramNameFromLabel;
 const nextNonTrivialTokenLite = positions_mod.nextNonTrivialTokenLite;
 const prevNonTrivialTokenLite = positions_mod.prevNonTrivialTokenLite;
 const findMatchingLParenLite = positions_mod.findMatchingLParenLite;
@@ -94,6 +102,9 @@ const rangeEqual = positions_mod.rangeEqual;
 const findEnclosingFunctionAsyncInsertPosFromTokens = positions_mod.findEnclosingFunctionAsyncInsertPosFromTokens;
 const isBuiltinTypeName = positions_mod.isBuiltinTypeName;
 const isLetInferTypeName = positions_mod.isLetInferTypeName;
+const collectTypeNamesFromTypeString = positions_mod.collectTypeNamesFromTypeString;
+const collectReturnAndParamTypeNames = positions_mod.collectReturnAndParamTypeNames;
+const buildCallSnippet = positions_mod.buildCallSnippet;
 const preferDetailedSymbol = positions_mod.preferDetailedSymbol;
 const hasNonBuiltinValueType = positions_mod.hasNonBuiltinValueType;
 const numericBuiltinRank = positions_mod.numericBuiltinRank;
@@ -877,6 +888,13 @@ pub const LspServer = struct {
                 };
                 continue;
             }
+            if (std.mem.eql(u8, method, "textDocument/inlayHint")) {
+                self.handleInlayHint(id_val, obj.get("params") orelse null) catch |err| {
+                    self.log("[fls] inlayHint failed: {s}\n", .{@errorName(err)});
+                    if (is_request) self.sendResponseJson(id_val, "[]") catch {};
+                };
+                continue;
+            }
 
             if (is_request) {
                 self.sendResponseJson(id_val, "null") catch {};
@@ -906,12 +924,16 @@ pub const LspServer = struct {
                 completionProvider: struct {
                     resolveProvider: bool = false,
                     triggerCharacters: []const []const u8 = &[_][]const u8{ ".", "(", ":" },
+                    completionItem: struct {
+                        labelDetailsSupport: bool = true,
+                    } = .{},
                 },
                 signatureHelpProvider: struct {
                     triggerCharacters: []const []const u8 = &[_][]const u8{ "(", "," },
                 },
                 documentSymbolProvider: bool,
                 workspaceSymbolProvider: bool,
+                inlayHintProvider: bool,
                 semanticTokensProvider: struct {
                     legend: struct {
                         tokenTypes: []const []const u8,
@@ -938,6 +960,7 @@ pub const LspServer = struct {
                 .signatureHelpProvider = .{ .triggerCharacters = &[_][]const u8{ "(", "," } },
                 .documentSymbolProvider = true,
                 .workspaceSymbolProvider = true,
+                .inlayHintProvider = true,
                 .semanticTokensProvider = .{
                     .legend = .{
                         .tokenTypes = &[_][]const u8{
@@ -1251,8 +1274,7 @@ pub const LspServer = struct {
 
             if (std.mem.eql(u8, tok.text, "async")) {
                 try buf.appendSlice(
-                    "**async**\n\n" ++
-                        "```fun\n" ++
+                    "```fun\n" ++
                         "async fun name(...) Type { ... }\n" ++
                         "```\n" ++
                         "Marks a function or method as asynchronous.\n" ++
@@ -1260,8 +1282,7 @@ pub const LspServer = struct {
                 );
             } else if (std.mem.eql(u8, tok.text, "await")) {
                 try buf.appendSlice(
-                    "**await**\n\n" ++
-                        "```fun\n" ++
+                    "```fun\n" ++
                         "await some_async_call();\n" ++
                         "```\n" ++
                         "Waits for an async call and yields its result.\n" ++
@@ -1301,8 +1322,7 @@ pub const LspServer = struct {
             var buf = ArrayList(u8).init(self.allocator);
             defer buf.deinit();
             try buf.appendSlice(
-                "**sizeof**\n\n" ++
-                    "```fun\n" ++
+                "```fun\n" ++
                     "sizeof(Type) num\n" ++
                     "```\n" ++
                     "Returns the size in bytes of `Type`.\n" ++
@@ -1328,7 +1348,6 @@ pub const LspServer = struct {
                     if (self.findMemberByContainer(uri, enum_name, variant_name, .enumMember)) |h| {
                         var buf = ArrayList(u8).init(self.allocator);
                         defer buf.deinit();
-                        try buf.print("**{s}**\n\n", .{variant_name});
                         try buf.print("```fun\n{s}.{s}\n```\n", .{ enum_name, variant_name });
                         if (self.docs.get(h.uri)) |hdoc| {
                             _ = try appendDocCommentAboveLine(self.allocator, &buf, hdoc.text, h.sym.decl_range.start.line);
@@ -1356,7 +1375,6 @@ pub const LspServer = struct {
                         if (hit) |h| {
                             var buf = ArrayList(u8).init(self.allocator);
                             defer buf.deinit();
-                            try buf.print("**{s}**\n\n", .{name});
                             switch (h.sym.kind) {
                                 .field, .property => {
                                     if (h.sym.value_type) |vt| {
@@ -1396,6 +1414,7 @@ pub const LspServer = struct {
                             if (self.docs.get(h.uri)) |hdoc| {
                                 _ = try appendDocCommentAboveLine(self.allocator, &buf, hdoc.text, h.sym.decl_range.start.line);
                             }
+                            try self.appendSeeAlsoForSymbol(&buf, uri, h.sym);
 
                             const hover: Hover = .{ .contents = .{ .value = buf.items }, .range = tok.range };
                             const json = try jsonStringifyAlloc(self.allocator, hover);
@@ -1509,7 +1528,6 @@ pub const LspServer = struct {
         }
 
         if (def_local_opt) |d| {
-            try buf.print("**{s}**\n\n", .{tok.text});
             const let_infer_detail = d.kind == .variable and ((d.value_type != null and isLetInferTypeName(d.value_type.?)) or
                 (d.detail != null and std.mem.startsWith(u8, d.detail.?, "__let_infer__")));
             if (d.detail) |det| {
@@ -1556,13 +1574,14 @@ pub const LspServer = struct {
                 } else {
                     try buf.print("```fun\n{s} {s}\n```\n", .{ kw, tok.text });
                 }
-            } else {
+            } else if (d.detail == null or let_infer_detail) {
+                // Only show a bare kind label when no signature was rendered above.
                 try buf.print("_{s}_\n", .{@tagName(d.kind)});
             }
             _ = try appendDocCommentAboveLine(self.allocator, &buf, doc.text, d.decl_range.start.line);
+            try self.appendSeeAlsoForSymbol(&buf, uri, d);
         } else if (def_import) |hit| {
             const d = hit.sym;
-            try buf.print("**{s}**\n\n", .{tok.text});
 
             var printed_detail = false;
             if (d.detail) |det| {
@@ -1611,8 +1630,8 @@ pub const LspServer = struct {
             if (self.docs.get(hit.uri)) |idoc| {
                 _ = try appendDocCommentAboveLine(self.allocator, &buf, idoc.text, d.decl_range.start.line);
             }
+            try self.appendSeeAlsoForSymbol(&buf, uri, d);
         } else {
-            try buf.print("**{s}**\n\n", .{tok.text});
             if (self.guessVariableType(idx, uri, tok.text, pos)) |vt| {
                 try buf.print("```fun\n{s} {s}\n```\n", .{ vt, tok.text });
             }
@@ -1625,6 +1644,62 @@ pub const LspServer = struct {
         const json = try jsonStringifyAlloc(self.allocator, hover);
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
+    }
+
+    /// Appends a Go-doc-style "See also" footer to a hover buffer, linking to the
+    /// definitions of user-defined types related to the hovered symbol (its
+    /// declared/return type, owning type, and any generic type arguments).
+    /// Builtins are skipped, duplicates de-duplicated, and only types that
+    /// resolve to a definition are linked (as clickable `file://` markdown links).
+    /// No section is emitted if nothing resolves. `preferred_uri` is the document
+    /// the hover originated from (used to prefer same-doc/imported definitions).
+    fn appendSeeAlsoForSymbol(self: *LspServer, buf: *ArrayList(u8), preferred_uri: []const u8, sym: SymbolLite) !void {
+        // Gather candidate type names from the symbol.
+        var candidates = ArrayList([]const u8).init(self.allocator);
+        defer candidates.deinit();
+        if (sym.value_type) |vt| try collectTypeNamesFromTypeString(&candidates, vt);
+        if (sym.container_type) |ct| try collectTypeNamesFromTypeString(&candidates, ct);
+        if (sym.detail) |det| try collectReturnAndParamTypeNames(&candidates, det);
+
+        // Resolve, de-dup, and render links.
+        var links = ArrayList(u8).init(self.allocator);
+        defer links.deinit();
+        var seen = std.StringHashMap(void).init(self.allocator);
+        defer seen.deinit();
+        var count: usize = 0;
+        for (candidates.items) |raw| {
+            const name = std.mem.trim(u8, raw, " \t\r\n*[]");
+            if (name.len == 0) continue;
+            if (isBuiltinTypeName(name)) continue;
+            // Skip the symbol's own name (don't "see also" yourself).
+            if (std.mem.eql(u8, name, sym.name)) continue;
+            if (seen.contains(name)) continue;
+            try seen.put(name, {});
+
+            const hit = self.findTypeDefinitionAnyDoc(preferred_uri, name) orelse continue;
+            const target_uri = self.pathOrUriToFileUri(hit.uri) catch continue;
+            defer self.allocator.free(target_uri);
+            if (count > 0) try links.appendSlice(", ");
+            // 1-based line for the editor's #L fragment.
+            try links.print("[`{s}`]({s}#L{d})", .{ name, target_uri, hit.sym.selection_range.start.line + 1 });
+            count += 1;
+            if (count >= 8) break; // keep the footer compact
+        }
+
+        if (count == 0) return;
+        try buf.appendSlice("\n---\n\nSee also: ");
+        try buf.appendSlice(links.items);
+        try buf.append('\n');
+    }
+
+    /// Normalizes an indexed `uri` (which may already be a `file://` URI or a
+    /// plain filesystem path) into a `file://` URI suitable for a markdown link.
+    /// Caller owns the returned slice.
+    fn pathOrUriToFileUri(self: *LspServer, uri_or_path: []const u8) ![]u8 {
+        if (std.mem.startsWith(u8, uri_or_path, "file://")) {
+            return self.allocator.dupe(u8, uri_or_path);
+        }
+        return pathToUri(self.allocator, uri_or_path);
     }
 
     fn resolveTypeOfChainUpTo(self: *LspServer, idx: *const Index, uri: []const u8, at: Position, last_ident_i: usize) ?[]const u8 {
@@ -2879,6 +2954,10 @@ pub const LspServer = struct {
             self.allocator.free(it.label);
             if (it.detail) |d| self.allocator.free(d);
             if (it.insertText) |ins| self.allocator.free(ins);
+            if (it.labelDetails) |ld| {
+                if (ld.detail) |d| self.allocator.free(d);
+                if (ld.description) |d| self.allocator.free(d);
+            }
             if (it.filterText) |ft| self.allocator.free(ft);
             _ = items.orderedRemove(ri);
         }
@@ -3504,9 +3583,6 @@ pub const LspServer = struct {
         var buf = ArrayList(u8).init(self.allocator);
         defer buf.deinit();
 
-        const name = idx.tokens[tok_i].text;
-        try buf.print("**{s}**\n\n", .{name});
-
         var wrote_doc: bool = false;
         var li: usize = 0;
         while (li < module_text.len) {
@@ -3655,6 +3731,89 @@ pub const LspServer = struct {
     fn completionInsertTextForSymbol(self: *LspServer, s: SymbolLite) !?[]const u8 {
         if (!(s.kind == .struct_ or s.kind == .interface or s.kind == .enum_)) return null;
         return try makeGenericTypeInsertText(self.allocator, s.name, s.detail);
+    }
+
+    const CompletionInsert = struct {
+        text: ?[]const u8 = null,
+        /// 2 = Snippet (LSP InsertTextFormat).
+        format: ?i64 = null,
+    };
+
+    /// Builds the completion insert text for a symbol. For functions and methods
+    /// with a known signature this produces a snippet with parameter placeholders
+    /// (`name(${1:arg}, ${2:arg})`), like gopls, so the editor drops the cursor
+    /// into the first argument. Generic types keep their `<...>` snippet. Other
+    /// symbols insert plainly (null text → editor uses the label).
+    fn completionInsertForSymbol(self: *LspServer, s: SymbolLite) !CompletionInsert {
+        if (s.kind == .struct_ or s.kind == .interface or s.kind == .enum_) {
+            const t = try makeGenericTypeInsertText(self.allocator, s.name, s.detail);
+            // makeGenericTypeInsertText returns a snippet (with ${..}) only when
+            // the type has generic params; otherwise it returns null/plain.
+            const is_snip = if (t) |tt| std.mem.indexOfScalar(u8, tt, '$') != null else false;
+            return .{ .text = t, .format = if (is_snip) 2 else null };
+        }
+        if (s.kind == .function or s.kind == .method) {
+            if (s.detail) |det| {
+                if (try buildCallSnippet(self.allocator, s.name, det)) |snip| {
+                    return .{ .text = snip, .format = 2 };
+                }
+            }
+        }
+        return .{};
+    }
+
+    /// Builds gopls-style structured label details for a symbol: the parameter
+    /// list shown dimmed after the name, and the return type shown right-aligned.
+    /// Returns null when there is nothing useful to show. Caller owns the strings.
+    fn completionLabelDetailsForSymbol(self: *LspServer, s: SymbolLite) !?types.CompletionLabelDetails {
+        if (s.kind != .function and s.kind != .method) return null;
+        const det = s.detail orelse return null;
+        const open = std.mem.indexOfScalar(u8, det, '(') orelse return null;
+        const close = std.mem.lastIndexOfScalar(u8, det, ')') orelse return null;
+        if (close < open) return null;
+
+        const params = det[open .. close + 1]; // includes the parens
+        const detail_owned = try self.allocator.dupe(u8, params);
+
+        var desc_owned: ?[]const u8 = null;
+        if (close + 1 < det.len) {
+            const rtype = std.mem.trim(u8, det[close + 1 ..], " \t\r\n");
+            if (rtype.len != 0) desc_owned = try self.allocator.dupe(u8, rtype);
+        }
+        return .{ .detail = detail_owned, .description = desc_owned };
+    }
+
+    /// Builds a fully-formed CompletionItem for a top-level symbol (function,
+    /// method, type, or variable): label, LSP kind, detail (full signature),
+    /// gopls-style structured labelDetails, and a parameter-placeholder snippet
+    /// for callables. All strings are owned by `self.allocator` (freed when the
+    /// completion list is freed).
+    fn buildSymbolCompletionItem(self: *LspServer, s: SymbolLite) !CompletionItem {
+        const kind: i64 = switch (s.kind) {
+            .function => 3,
+            .method => 2,
+            .struct_ => 7,
+            .interface => 8,
+            .variable => 6,
+            else => 6,
+        };
+        const ins = try self.completionInsertForSymbol(s);
+        return .{
+            .label = try self.allocator.dupe(u8, s.name),
+            .kind = kind,
+            .detail = blk: {
+                if (s.detail) |d| break :blk try self.allocator.dupe(u8, d);
+                if (s.kind == .variable) {
+                    if (s.value_type) |vt| {
+                        if (!isLetInferTypeName(vt)) break :blk try self.allocator.dupe(u8, vt);
+                    }
+                }
+                break :blk null;
+            },
+            .labelDetails = try self.completionLabelDetailsForSymbol(s),
+            .insertText = ins.text,
+            .insertTextFormat = ins.format,
+        };
     }
 
     fn findMemberByContainer(self: *LspServer, preferred_uri: []const u8, container_type: []const u8, name: []const u8, kind: SymbolKind) ?MemberHit {
@@ -4380,6 +4539,10 @@ pub const LspServer = struct {
                 self.allocator.free(it.label);
                 if (it.detail) |d| self.allocator.free(d);
                 if (it.insertText) |ins| self.allocator.free(ins);
+                if (it.labelDetails) |ld| {
+                    if (ld.detail) |d| self.allocator.free(d);
+                    if (ld.description) |d| self.allocator.free(d);
+                }
                 if (it.filterText) |ft| self.allocator.free(ft);
             }
             items.deinit();
@@ -4897,15 +5060,6 @@ pub const LspServer = struct {
             }
             if (prefix.len != 0 and !std.mem.startsWith(u8, s.name, prefix)) continue;
 
-            const kind: i64 = switch (s.kind) {
-                .function => 3,
-                .method => 2,
-                .struct_ => 7,
-                .interface => 8,
-                .variable => 6,
-                else => 6,
-            };
-
             const key = try self.allocator.dupe(u8, s.name);
             if (seen.contains(key)) {
                 self.allocator.free(key);
@@ -4913,19 +5067,7 @@ pub const LspServer = struct {
             }
             try seen.put(key, {});
 
-            const insert_text = try self.completionInsertTextForSymbol(s);
-            try items.append(.{
-                .label = try self.allocator.dupe(u8, s.name),
-                .kind = kind,
-                .detail = blk: {
-                    if (s.detail) |d| break :blk try self.allocator.dupe(u8, d);
-                    if (s.kind == .variable) {
-                        if (s.value_type) |vt| break :blk try self.allocator.dupe(u8, vt);
-                    }
-                    break :blk null;
-                },
-                .insertText = insert_text,
-            });
+            try items.append(try self.buildSymbolCompletionItem(s));
         }
 
         // 2) Current-document globals/types/functions.
@@ -4934,15 +5076,6 @@ pub const LspServer = struct {
             if (s.container_fn_range != null) continue;
             if (prefix.len != 0 and !std.mem.startsWith(u8, s.name, prefix)) continue;
 
-            const kind: i64 = switch (s.kind) {
-                .function => 3,
-                .method => 2,
-                .struct_ => 7,
-                .interface => 8,
-                .variable => 6,
-                else => 6,
-            };
-
             const key = try self.allocator.dupe(u8, s.name);
             if (seen.contains(key)) {
                 self.allocator.free(key);
@@ -4950,19 +5083,7 @@ pub const LspServer = struct {
             }
             try seen.put(key, {});
 
-            const insert_text = try self.completionInsertTextForSymbol(s);
-            try items.append(.{
-                .label = try self.allocator.dupe(u8, s.name),
-                .kind = kind,
-                .detail = blk: {
-                    if (s.detail) |d| break :blk try self.allocator.dupe(u8, d);
-                    if (s.kind == .variable) {
-                        if (s.value_type) |vt| break :blk try self.allocator.dupe(u8, vt);
-                    }
-                    break :blk null;
-                },
-                .insertText = insert_text,
-            });
+            try items.append(try self.buildSymbolCompletionItem(s));
         }
 
         // Direct imports.
@@ -4986,15 +5107,6 @@ pub const LspServer = struct {
 
                 if (prefix.len != 0 and !std.mem.startsWith(u8, s.name, prefix)) continue;
 
-                const kind: i64 = switch (s.kind) {
-                    .function => 3,
-                    .method => 2,
-                    .struct_ => 7,
-                    .interface => 8,
-                    .variable => 6,
-                    else => 6,
-                };
-
                 const key = try self.allocator.dupe(u8, s.name);
                 if (seen.contains(key)) {
                     self.allocator.free(key);
@@ -5002,21 +5114,7 @@ pub const LspServer = struct {
                 }
                 try seen.put(key, {});
 
-                const insert_text = try self.completionInsertTextForSymbol(s);
-                try items.append(.{
-                    .label = try self.allocator.dupe(u8, s.name),
-                    .kind = kind,
-                    .detail = blk: {
-                        if (s.detail) |d| break :blk try self.allocator.dupe(u8, d);
-                        if (s.kind == .variable) {
-                            if (s.value_type) |vt| {
-                                if (!isLetInferTypeName(vt)) break :blk try self.allocator.dupe(u8, vt);
-                            }
-                        }
-                        break :blk null;
-                    },
-                    .insertText = insert_text,
-                });
+                try items.append(try self.buildSymbolCompletionItem(s));
             }
         }
 
@@ -5033,7 +5131,6 @@ pub const LspServer = struct {
         var buf = ArrayList(u8).init(self.allocator);
         defer buf.deinit();
 
-        try buf.print("**{s}**\n\n", .{alias_name});
         try buf.print("_alias for `{s}`_\n", .{info.spec});
 
         if (self.resolveImportUri(current_uri, info.spec) catch null) |target_uri| {
@@ -5469,6 +5566,10 @@ pub const LspServer = struct {
                 self.allocator.free(it.label);
                 if (it.detail) |d| self.allocator.free(d);
                 if (it.insertText) |ins| self.allocator.free(ins);
+                if (it.labelDetails) |ld| {
+                    if (ld.detail) |d| self.allocator.free(d);
+                    if (ld.description) |d| self.allocator.free(d);
+                }
             }
             items.deinit();
         }
@@ -5517,6 +5618,10 @@ pub const LspServer = struct {
                 self.allocator.free(it.label);
                 if (it.detail) |d| self.allocator.free(d);
                 if (it.insertText) |ins| self.allocator.free(ins);
+                if (it.labelDetails) |ld| {
+                    if (ld.detail) |d| self.allocator.free(d);
+                    if (ld.description) |d| self.allocator.free(d);
+                }
                 if (it.filterText) |ft| self.allocator.free(ft);
             }
             items.deinit();
@@ -6316,7 +6421,6 @@ pub const LspServer = struct {
 
             const sym = findTopLevelSymbol(didx, symbol_name) orelse return false;
 
-            try buf.print("**{s}**\n\n", .{symbol_name});
             if (sym.detail) |det| {
                 try buf.print("```fun\n{s}\n```\n", .{det});
             } else if (sym.kind == .variable) {
@@ -6380,9 +6484,6 @@ pub const LspServer = struct {
             break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), module_file, self.allocator, .limited(128 * 1024)) catch return false;
         };
         defer self.allocator.free(module_text);
-
-        const name = idx.tokens[tok_i].text;
-        try buf.print("**{s}**\n\n", .{name});
 
         // Extract the leading line-comment block and render it as markdown.
         var wrote_doc: bool = false;
@@ -7801,6 +7902,141 @@ pub const LspServer = struct {
         }
 
         return substituteLabelTypeParams(self.allocator, sig.label, bindings.items);
+    }
+
+    /// Resolves a callee identifier to its signature detail string (e.g.
+    /// `fun add(num a, num b) num`), searching the current document first and
+    /// then direct imports. Returns null if no signature is known.
+    fn calleeSignatureDetail(self: *LspServer, uri: []const u8, idx: *const Index, callee_i: usize) ?[]const u8 {
+        const callee = idx.tokens[callee_i];
+        if (callee.kind != .identifier) return null;
+        const name = callee.text;
+        const at = callee.range.start;
+
+        // Method call (`recv.method(`): resolve via the receiver type.
+        if (callee_i >= 2 and isDotToken(idx.tokens[callee_i - 1]) and idx.tokens[callee_i - 2].kind == .identifier) {
+            if (self.resolveTypeOfChainUpTo(idx, uri, at, callee_i - 2)) |recv_type| {
+                if (self.findMemberByContainer(uri, recv_type, name, .method)) |hit| {
+                    return hit.sym.detail;
+                }
+            }
+        }
+
+        if (findBestDefinition(idx.symbols, name, at)) |d| {
+            if (d.kind == .function or d.kind == .method) return d.detail;
+        }
+        if (self.findAnyGlobalDefinitionInDirectImports(uri, name)) |hit| {
+            if (hit.sym.kind == .function or hit.sym.kind == .method) return hit.sym.detail;
+        }
+        return null;
+    }
+
+    /// Parameter-name inlay hints (gopls/rust-analyzer style): renders the
+    /// parameter name before each argument at a call site, e.g. `f(x: 1, y: 2)`.
+    /// Only emits hints within the client-requested range and only when the
+    /// callee's parameter names are known. A hint is suppressed when the argument
+    /// is already a bare identifier equal to the parameter name (it would be
+    /// redundant), matching what mature language servers do.
+    fn handleInlayHint(self: *LspServer, id_val: ?std.json.Value, params_val: ?std.json.Value) !void {
+        const empty = "[]";
+        const params = params_val orelse return self.sendResponseJson(id_val, empty);
+        if (params != .object) return self.sendResponseJson(id_val, empty);
+        const text_document = params.object.get("textDocument") orelse return self.sendResponseJson(id_val, empty);
+        if (text_document != .object) return self.sendResponseJson(id_val, empty);
+        const uri = (text_document.object.get("uri") orelse return self.sendResponseJson(id_val, empty)).string;
+
+        // Requested range (hints outside it are skipped for performance).
+        var want = Range{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 1_000_000_000, .character = 0 } };
+        if (params.object.get("range")) |rv| {
+            if (rv == .object) {
+                if (rv.object.get("start")) |sv| {
+                    if (sv == .object) {
+                        want.start.line = (sv.object.get("line") orelse std.json.Value{ .integer = 0 }).integer;
+                        want.start.character = (sv.object.get("character") orelse std.json.Value{ .integer = 0 }).integer;
+                    }
+                }
+                if (rv.object.get("end")) |ev| {
+                    if (ev == .object) {
+                        want.end.line = (ev.object.get("line") orelse std.json.Value{ .integer = 1_000_000_000 }).integer;
+                        want.end.character = (ev.object.get("character") orelse std.json.Value{ .integer = 0 }).integer;
+                    }
+                }
+            }
+        }
+
+        const doc = self.docs.get(uri) orelse return self.sendResponseJson(id_val, empty);
+        const idx = doc.index orelse return self.sendResponseJson(id_val, empty);
+
+        var hints = ArrayList(InlayHint).init(self.allocator);
+        defer hints.deinit();
+
+        const toks = idx.tokens;
+        var i: usize = 0;
+        while (i + 1 < toks.len) : (i += 1) {
+            // Detect a call: identifier immediately followed by `(`.
+            if (toks[i].kind != .identifier) continue;
+            if (!isOpenParen(toks[i + 1])) continue;
+            // Skip function/method *declarations* (incl. `impl` methods written
+            // `pub name(...)` with no `fun` keyword) — their parameter names are
+            // already written, so inlay hints there are noise.
+            if (callParenIsDeclaration(toks, i, i + 1)) continue;
+
+            const detail = self.calleeSignatureDetail(uri, idx, i) orelse continue;
+            var params_list = self.parseParamsFromSignatureLabel(detail) catch continue;
+            defer {
+                for (params_list.items) |p| self.allocator.free(p.label);
+                params_list.deinit();
+            }
+            if (params_list.items.len == 0) continue;
+
+            // Walk arguments: top-level (depth-aware) comma-separated groups
+            // between the matching parens. Emit a hint at each argument's first token.
+            var depth: i32 = 0;
+            var arg_index: usize = 0;
+            var expecting_arg = true; // next significant token starts an argument
+            var j = i + 1; // at '('
+            while (j < toks.len) : (j += 1) {
+                const t = toks[j];
+                if (isOpenParen(t) or isOpenBracket(t)) {
+                    depth += 1;
+                    if (depth == 1) continue; // the call's own '('
+                }
+                if (isCloseParen(t) or isCloseBracket(t)) {
+                    depth -= 1;
+                    if (depth == 0) break; // end of this call
+                    continue;
+                }
+                if (depth == 1 and isCommaToken(t)) {
+                    arg_index += 1;
+                    expecting_arg = true;
+                    continue;
+                }
+                if (depth == 1 and expecting_arg and t.kind != .comment) {
+                    expecting_arg = false;
+                    if (arg_index < params_list.items.len) {
+                        const pname = paramNameFromLabel(params_list.items[arg_index].label);
+                        if (pname.len != 0 and posInRange(t.range.start, want)) {
+                            // Suppress redundant hint when the arg is the same identifier.
+                            const redundant = t.kind == .identifier and std.mem.eql(u8, t.text, pname);
+                            if (!redundant) {
+                                const label = try std.fmt.allocPrint(self.allocator, "{s}:", .{pname});
+                                try hints.append(.{
+                                    .position = t.range.start,
+                                    .label = label,
+                                    .kind = 2,
+                                    .paddingRight = true,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        const json = try jsonStringifyAlloc(self.allocator, hints.items);
+        defer self.allocator.free(json);
+        defer for (hints.items) |h| self.allocator.free(h.label);
+        try self.sendResponseJson(id_val, json);
     }
 
     fn handleDocumentSymbols(self: *LspServer, id_val: ?std.json.Value, params_val: ?std.json.Value) !void {

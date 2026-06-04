@@ -195,7 +195,7 @@ pub fn op_valid(op: []const u8) bool {
 /// Parameters:
 /// - `c (u8)`: The character to check.
 pub fn is_hex_number(c: u8) bool {
-    return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'b');
+    return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
 }
 
 /// Converts an escape character to its corresponding value.

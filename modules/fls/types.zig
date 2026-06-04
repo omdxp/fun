@@ -35,11 +35,22 @@ pub const TextEdit = struct {
     newText: []const u8,
 };
 
+pub const CompletionLabelDetails = struct {
+    /// Shown dimmed immediately after the label (e.g. the parameter list).
+    detail: ?[]const u8 = null,
+    /// Shown right-aligned (e.g. the return type or owning module).
+    description: ?[]const u8 = null,
+};
+
 pub const CompletionItem = struct {
     label: []const u8,
     kind: ?i64 = null,
     detail: ?[]const u8 = null,
+    /// Structured label decoration (gopls-style "name(args) returnType").
+    labelDetails: ?CompletionLabelDetails = null,
     insertText: ?[]const u8 = null,
+    /// 1 = PlainText (default), 2 = Snippet (enables `${1:arg}` placeholders).
+    insertTextFormat: ?i64 = null,
     filterText: ?[]const u8 = null,
 };
 
@@ -94,6 +105,15 @@ pub const SignatureHelp = struct {
 
 pub const SemanticTokens = struct {
     data: []const u32,
+};
+
+pub const InlayHint = struct {
+    position: Position,
+    label: []const u8,
+    /// 1 = Type, 2 = Parameter.
+    kind: ?i64 = null,
+    paddingLeft: bool = false,
+    paddingRight: bool = false,
 };
 
 pub const TokenLiteKind = enum {

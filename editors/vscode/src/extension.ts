@@ -674,6 +674,19 @@ function createClient(output: vscode.OutputChannel): LanguageClient {
         return { action: CloseAction.Restart };
       },
     },
+    middleware: {
+      // Gate parameter-name inlay hints on the user setting (default on).
+      // Returning an empty list (without calling the server) hides them while
+      // keeping the capability registered, so toggling the setting takes effect
+      // immediately without a server restart.
+      provideInlayHints: (document, viewPort, token, next) => {
+        const enabled = vscode.workspace
+          .getConfiguration("fun")
+          .get<boolean>("inlayHints.parameterNames.enabled", true);
+        if (!enabled) return [];
+        return next(document, viewPort, token);
+      },
+    },
   };
 
   return new LanguageClient(
@@ -727,6 +740,24 @@ export function activate(context: vscode.ExtensionContext) {
   startPromise.finally(() => clearTimeout(timer));
 
   context.subscriptions.push({ dispose: () => void client?.stop() });
+
+  // Toggling the inlay-hints setting takes effect on the next inlay-hint query
+  // (the client middleware reads the setting live). Nudge VS Code to re-query
+  // immediately so the change feels instant rather than waiting for an edit.
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration("fun.inlayHints.parameterNames.enabled")) {
+        // A no-op selection re-set on visible Fun editors triggers a re-query
+        // of inlay hints for their visible ranges.
+        for (const ed of vscode.window.visibleTextEditors) {
+          if (ed.document.languageId === "fun") {
+            const sel = ed.selections;
+            ed.selections = sel; // touch -> provider re-invoked
+          }
+        }
+      }
+    }),
+  );
 
   context.subscriptions.push(
     vscode.commands.registerCommand(

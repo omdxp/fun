@@ -28,7 +28,7 @@
           <key>1</key>
           <dict>
             <key>name</key>
-            <string>storage.type.struct.fun</string>
+            <string>keyword.control.fun</string>
           </dict>
           <key>2</key>
           <dict>
@@ -52,7 +52,7 @@
           <key>1</key>
           <dict>
             <key>name</key>
-            <string>storage.type.enum.fun</string>
+            <string>keyword.control.fun</string>
           </dict>
           <key>2</key>
           <dict>
@@ -76,7 +76,7 @@
           <key>1</key>
           <dict>
             <key>name</key>
-            <string>storage.type.interface.fun</string>
+            <string>keyword.control.fun</string>
           </dict>
           <key>2</key>
           <dict>
