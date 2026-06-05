@@ -1,0 +1,61 @@
+// Data-carrying enums (Rust-style sum types / tagged unions) with pattern matching.
+// 
+// A variant may carry a positional payload — `Circle(num)`, `Rect(num, num)`.
+// An enum is a tagged union as soon as any variant carries data; payload-free
+// variants (`Empty`) still participate. Construct with `Enum.Variant(args)` and
+// match with `fit`, binding each matched variant's payload into locals.
+
+imp std.c.io;
+
+enum Geometry {
+  Circle(num),
+  Rect(num, num),
+  Empty,
+}
+
+// A classic sum type: an optional integer.
+enum OptionalInt {
+  Some(num),
+  None,
+}
+
+fun area(Geometry s) num {
+  fit s {
+    Geometry.Circle(r) -> {
+      ret r * r * 3;
+    }
+    // pi ~= 3 for the demo
+    Geometry.Rect(w, h) -> {
+      ret w * h;
+    }
+    Geometry.Empty -> {
+      ret 0;
+    }
+  }
+  ret -1;
+}
+
+fun unwrap_or(OptionalInt o, num fallback) num {
+  fit o {
+    OptionalInt.Some(v) -> {
+      ret v;
+    }
+    OptionalInt.None -> {
+      ret fallback;
+    }
+  }
+  ret fallback;
+}
+
+fun main() num {
+  Geometry a = Geometry.Circle(5);
+  Geometry b = Geometry.Rect(3, 4);
+  Geometry c = Geometry.Empty;
+  printf("areas: %lld %lld %lld\n", area(a), area(b), area(c));
+
+  OptionalInt present = OptionalInt.Some(42);
+  OptionalInt absent = OptionalInt.None;
+  printf("option: %lld %lld\n", unwrap_or(present, -1), unwrap_or(absent, -1));
+
+  ret 0;
+}

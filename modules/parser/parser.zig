@@ -102,6 +102,13 @@ pub const ParseProcess = struct {
     /// and codegen, which recurse over the same tree.
     expr_depth: usize = 0,
 
+    /// True while parsing a `fit` arm CONDITION. A data-carrying-enum pattern like
+    /// `Enum.Variant(x, y)` introduces NEW binding identifiers (`x`, `y`) that are
+    /// not yet in scope, so the eager "unknown identifier" parse-time check must be
+    /// relaxed here; the binding names are registered (and validated) right after
+    /// the condition is parsed, and the type-checker enforces correctness.
+    in_fit_condition: bool = false,
+
     const Self = @This();
 
     /// Initializes a new `ParseProcess` instance.
@@ -1457,7 +1464,7 @@ pub const ParseProcess = struct {
                                     // immediately called (`foo(...)`), accept it and defer validation
                                     // to later passes / C compilation.
                                     const is_possible_enum_member_access = self.next_token_is_operator(".");
-                                    if (!self.next_token_is_operator("(") and !is_possible_enum_member_access) {
+                                    if (!self.next_token_is_operator("(") and !is_possible_enum_member_access and !self.in_fit_condition) {
                                         self.transpile_proc.err("unknown identifier '{s}'", .{t.?.data.sval.items});
                                         return ParseError.InvalidIdentifier;
                                     }
@@ -3167,6 +3174,50 @@ pub const ParseProcess = struct {
                 return ParseError.MemoryAllocationFailed;
             };
 
+            // Optional positional payload for a data-carrying variant:
+            // `Circle(num)`, `Rect(num, num)`. The `(` makes this a tagged-union
+            // variant; the comma-separated types become its positional fields.
+            var payload: ?utils.Vector(*dtype.DataType) = null;
+            if (self.next_token_is_operator("(")) {
+                _ = self.token_next(); // consume '('
+                var ptypes = utils.Vector(*dtype.DataType).init(self.transpile_proc.allocator);
+                errdefer ptypes.deinit();
+                while (!self.next_token_is_symbol(')')) {
+                    const pdt = self.transpile_proc.allocator.create(dtype.DataType) catch {
+                        return ParseError.MemoryAllocationFailed;
+                    };
+                    pdt.* = dtype.DataType{
+                        .array = null,
+                        .pointer_depth = 0,
+                        .type = .Unknown,
+                        .type_str = ArrayList(u8).init(self.transpile_proc.allocator),
+                        .flags = .{},
+                    };
+                    var phist = utils.History.init(self.transpile_proc.allocator, .{});
+                    defer phist.deinit();
+                    try self.parse_datatype(pdt);
+                    if (self.next_token_is_operator("[")) {
+                        try self.parse_array_brackets(pdt, &phist);
+                    }
+                    ptypes.push(pdt) catch return ParseError.MemoryAllocationFailed;
+                    if (self.next_token_is_operator(",")) {
+                        _ = self.token_next();
+                        continue;
+                    }
+                    break;
+                }
+                if (!self.next_token_is_symbol(')')) {
+                    self.transpile_proc.err("expected ')' to close enum variant payload", .{});
+                    return ParseError.InvalidToken;
+                }
+                _ = self.token_next(); // consume ')'
+                if (ptypes.count == 0) {
+                    self.transpile_proc.err("enum variant payload '()' must list at least one type", .{});
+                    return ParseError.InvalidToken;
+                }
+                payload = ptypes;
+            }
+
             var value: ?i64 = null;
             if (self.next_token_is_operator("=")) {
                 _ = self.token_next(); // skip '='
@@ -3205,7 +3256,7 @@ pub const ParseProcess = struct {
                 self.transpile_proc.err("expected ',' or ';' after enum variant", .{});
                 return ParseError.InvalidToken;
             }
-            variants.push(.{ .name = vname, .value = value }) catch {
+            variants.push(.{ .name = vname, .value = value, .payload = payload }) catch {
                 return ParseError.MemoryAllocationFailed;
             };
         }
@@ -4285,6 +4336,132 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
+    /// Flatten a fit-arm destructuring argument list into positional binding names.
+    /// `args` is the call's argument node: either a single identifier (`r`), or a
+    /// comma expression tree (`w, h`). Each leaf must be a plain identifier; if any
+    /// leaf is something else, sets `ok.* = false` (so the caller treats the arm as
+    /// a non-destructuring pattern rather than a binding).
+    fn collect_fit_binding_names(self: *Self, args: *ast.Node, out: *utils.Vector(ArrayList(u8)), ok: *bool) ParseError!void {
+        if (args.type == .Expression and args.node_variant != null and
+            mem.eql(u8, args.node_variant.?.exp.op, ","))
+        {
+            const cexp = args.node_variant.?.exp;
+            if (cexp.left) |l| try self.collect_fit_binding_names(l, out, ok);
+            if (cexp.right) |r| try self.collect_fit_binding_names(r, out, ok);
+            return;
+        }
+        if (args.type == .Identifier and args.data != null) {
+            var name = ArrayList(u8).init(self.transpile_proc.allocator);
+            name.appendSlice(args.data.?.sval.items) catch return ParseError.MemoryAllocationFailed;
+            out.push(name) catch return ParseError.MemoryAllocationFailed;
+            return;
+        }
+        ok.* = false;
+    }
+
+    /// Try to parse a data-carrying-enum destructuring fit pattern at the cursor:
+    ///   `Enum.Variant(a, b)`  or shorthand  `.Variant(a, b)`
+    /// On a match, consumes those tokens, sets `condition_out` to the variant-path
+    /// `.` expression (`Enum.Variant`, or `<blank>.Variant` for shorthand), fills
+    /// `bindings_out` with the positional binding identifiers, and returns true. On
+    /// no match, consumes NOTHING and returns false (caller parses normally).
+    /// Detection requires the trailing `(` so a plain `Enum.Variant` arm (no
+    /// payload binding) still goes through the ordinary path.
+    fn try_parse_fit_destructure(self: *Self, condition_out: *?ast.Node, bindings_out: *?utils.Vector(ArrayList(u8))) ParseError!bool {
+        // Two shapes, distinguished by lookahead of the significant tokens:
+        //   shorthand:  . Ident (        -> peek(0)='.', peek(1)=Ident, peek(2)='('
+        //   qualified:  Ident . Ident (  -> peek(0)=Ident, peek(1)='.', peek(2)=Ident, peek(3)='('
+        const p0 = self.token_peek_n(0);
+        const p1 = self.token_peek_n(1);
+        if (p0 == null or p1 == null) return false;
+
+        const is_op = struct {
+            fn f(tk: ?token.Token, s: []const u8) bool {
+                return tk != null and tk.?.type == .Operator and mem.eql(u8, tk.?.data.sval.items, s);
+            }
+        }.f;
+
+        var is_shorthand = false;
+        var enum_tok: ?token.Token = null;
+        var variant_tok: ?token.Token = null;
+
+        if (is_op(p0, ".") and p1.?.type == .Identifier) {
+            // `.Variant(` ?
+            if (!is_op(self.token_peek_n(2), "(")) return false;
+            is_shorthand = true;
+            variant_tok = p1;
+        } else if (p0.?.type == .Identifier and is_op(p1, ".")) {
+            const p2 = self.token_peek_n(2);
+            if (p2 == null or p2.?.type != .Identifier) return false;
+            if (!is_op(self.token_peek_n(3), "(")) return false;
+            enum_tok = p0;
+            variant_tok = p2;
+        } else {
+            return false;
+        }
+
+        // Commit: consume the path tokens.
+        if (is_shorthand) {
+            _ = self.token_next(); // '.'
+            _ = self.token_next(); // Variant
+        } else {
+            _ = self.token_next(); // Enum
+            _ = self.token_next(); // '.'
+            _ = self.token_next(); // Variant
+        }
+        _ = self.token_next(); // '('
+
+        // Collect binding identifiers until ')'.
+        var binds = utils.Vector(ArrayList(u8)).init(self.transpile_proc.allocator);
+        errdefer binds.deinit();
+        while (!self.next_token_is_symbol(')')) {
+            const bt = self.token_next();
+            if (bt == null or bt.?.type != .Identifier) {
+                self.transpile_proc.err("expected binding name in fit destructuring pattern", .{});
+                return ParseError.InvalidIdentifier;
+            }
+            var bn = ArrayList(u8).init(self.transpile_proc.allocator);
+            bn.appendSlice(bt.?.data.sval.items) catch return ParseError.MemoryAllocationFailed;
+            binds.push(bn) catch return ParseError.MemoryAllocationFailed;
+            if (self.next_token_is_operator(",")) {
+                _ = self.token_next();
+                continue;
+            }
+            break;
+        }
+        if (!self.next_token_is_symbol(')')) {
+            self.transpile_proc.err("expected ')' to close fit destructuring pattern", .{});
+            return ParseError.InvalidToken;
+        }
+        _ = self.token_next(); // ')'
+        if (binds.count == 0) {
+            self.transpile_proc.err("fit destructuring pattern '()' must bind at least one field", .{});
+            return ParseError.InvalidToken;
+        }
+
+        // Build the variant-path `.` expression: left = Enum ident (or Blank for
+        // shorthand), right = Variant ident.
+        const vpos = variant_tok.?.pos;
+        var right_node = ast.Node{ .type = .Identifier, .pos = vpos, .data = .{ .sval = variant_tok.?.data.sval } };
+        right_node.flags = .{ .inside_expression = true };
+        var left_node: ast.Node = undefined;
+        if (is_shorthand) {
+            left_node = .{ .type = .Blank, .pos = vpos };
+        } else {
+            left_node = .{ .type = .Identifier, .pos = enum_tok.?.pos, .data = .{ .sval = enum_tok.?.data.sval } };
+        }
+        left_node.flags = .{ .inside_expression = true };
+        try self.make_expression_node(&left_node, &right_node, ".", vpos);
+        const exp_node = self.node_pop() orelse {
+            self.transpile_proc.err("failed to build fit destructuring variant path", .{});
+            return ParseError.InvalidExpression;
+        };
+
+        condition_out.* = exp_node;
+        bindings_out.* = binds;
+        return true;
+    }
+
     fn parse_fit_body(self: *Self, fit_node: *ast.Node, hist: *utils.History) ParseError!void {
         try self.expect_sym('{');
         fit_node.*.node_variant.?.statement.fit_stmt.branches = utils.Vector(ast.FitBranch).init(self.transpile_proc.allocator);
@@ -4292,34 +4469,53 @@ pub const ParseProcess = struct {
             var hist_down = utils.History.down(self.transpile_proc.allocator, hist, hist.flags);
             defer hist_down.deinit();
             var condition_node: ?ast.Node = null;
-            // Always allow dot operator as fit branch pattern root.
-            const t = self.token_peek_next();
-            if (t != null and t.?.type == .Operator and mem.eql(u8, t.?.data.sval.items, ".")) {
-                // Directly parse `.Variant` as fit branch pattern, bypassing normal root logic.
-                _ = self.token_next(); // skip '.'
-                _ = try self.parse_identifier();
-                var node_right = self.node_pop() orelse {
-                    self.transpile_proc.err("expected identifier after '.' in fit pattern", .{});
-                    return ParseError.InvalidExpression;
-                };
-                node_right.flags = .{ .inside_expression = true };
-                var blank_left: ast.Node = .{ .type = .Blank, .pos = t.?.pos };
-                blank_left.flags = .{ .inside_expression = true };
-                try self.make_expression_node(&blank_left, &node_right, ".", t.?.pos);
-                var exp_node = self.node_pop() orelse {
-                    self.transpile_proc.err("expected fit branch condition expression", .{});
-                    return ParseError.InvalidExpression;
-                };
-                try self.parse_reorder_expression(&exp_node);
-                condition_node = exp_node;
+            var manual_bindings: ?utils.Vector(ArrayList(u8)) = null;
+            // Relax the unknown-identifier check while parsing the arm condition so
+            // a destructuring pattern's new binding names (`Variant(x, y)`) don't
+            // trip it; they're registered + validated immediately after.
+            const prev_in_fit_cond = self.in_fit_condition;
+            self.in_fit_condition = true;
+
+            // Destructuring pattern: `Enum.Variant(a, b)` or shorthand `.Variant(a, b)`.
+            // Detect via lookahead and parse the variant path + binding names by hand
+            // (the general expression parser doesn't carry a member-call cleanly here).
+            if (try self.try_parse_fit_destructure(&condition_node, &manual_bindings)) {
+                // condition_node + manual_bindings are set; fall through to '->'.
+                self.in_fit_condition = prev_in_fit_cond;
             } else {
-                // If not dot, use normal root logic.
-                try self.parse_expressionable_root(&hist_down);
-                condition_node = self.node_pop() orelse {
-                    self.transpile_proc.err("expected fit branch condition expression", .{});
-                    return ParseError.InvalidExpression;
-                };
-            }
+                // Always allow dot operator as fit branch pattern root.
+                const t = self.token_peek_next();
+                if (t != null and t.?.type == .Operator and mem.eql(u8, t.?.data.sval.items, ".")) {
+                    // Directly parse `.Variant` as fit branch pattern, bypassing normal root logic.
+                    _ = self.token_next(); // skip '.'
+                    _ = try self.parse_identifier();
+                    var node_right = self.node_pop() orelse {
+                        self.in_fit_condition = prev_in_fit_cond;
+                        self.transpile_proc.err("expected identifier after '.' in fit pattern", .{});
+                        return ParseError.InvalidExpression;
+                    };
+                    node_right.flags = .{ .inside_expression = true };
+                    var blank_left: ast.Node = .{ .type = .Blank, .pos = t.?.pos };
+                    blank_left.flags = .{ .inside_expression = true };
+                    try self.make_expression_node(&blank_left, &node_right, ".", t.?.pos);
+                    var exp_node = self.node_pop() orelse {
+                        self.in_fit_condition = prev_in_fit_cond;
+                        self.transpile_proc.err("expected fit branch condition expression", .{});
+                        return ParseError.InvalidExpression;
+                    };
+                    try self.parse_reorder_expression(&exp_node);
+                    condition_node = exp_node;
+                } else {
+                    // If not dot, use normal root logic.
+                    try self.parse_expressionable_root(&hist_down);
+                    condition_node = self.node_pop() orelse {
+                        self.in_fit_condition = prev_in_fit_cond;
+                        self.transpile_proc.err("expected fit branch condition expression", .{});
+                        return ParseError.InvalidExpression;
+                    };
+                }
+                self.in_fit_condition = prev_in_fit_cond;
+            } // end non-destructuring condition parse
             if (condition_node.?.type == .Expression and mem.eql(u8, condition_node.?.node_variant.?.exp.op, "=")) {
                 self.transpile_proc.err("expected expression, got assignment", .{});
                 return ParseError.InvalidExpression;
@@ -4351,15 +4547,56 @@ pub const ParseProcess = struct {
             };
             errdefer self.transpile_proc.allocator.destroy(condition);
             condition.* = condition_node.?;
+
+            // Destructuring binding names captured by `try_parse_fit_destructure`
+            // (the condition is already the bare variant path at this point).
+            const bindings: ?utils.Vector(ArrayList(u8)) = manual_bindings;
+
             try self.expect_op("->");
+            // Register destructuring binding names in a scope so the arm body can
+            // reference them at parse time (identifier resolution checks scope). The
+            // scope is opened here and closed after the body is parsed, so bindings
+            // don't leak to sibling arms or past the fit.
+            const has_binds = bindings != null and bindings.?.count > 0;
+            if (has_binds) {
+                _ = try self.transpile_proc.new_scope();
+                for (bindings.?.items()) |bname| {
+                    var bn = ArrayList(u8).init(self.transpile_proc.allocator);
+                    bn.appendSlice(bname.items) catch return ParseError.MemoryAllocationFailed;
+                    const bvar = self.transpile_proc.allocator.create(ast.Node) catch {
+                        return ParseError.MemoryAllocationFailed;
+                    };
+                    const bdt = self.transpile_proc.allocator.create(dtype.DataType) catch {
+                        return ParseError.MemoryAllocationFailed;
+                    };
+                    bdt.* = dtype.DataType{
+                        .array = null,
+                        .pointer_depth = 0,
+                        .type = .Unknown,
+                        .type_str = ArrayList(u8).init(self.transpile_proc.allocator),
+                        .flags = .{},
+                    };
+                    bvar.* = ast.Node{
+                        .type = .Variable,
+                        .pos = condition.*.pos,
+                        .node_variant = .{ .variable = .{ .name = bn, .type = bdt, .val = null } },
+                    };
+                    const bentity = try self.new_scope_entity(bvar, .{});
+                    self.transpile_proc.owned_scope_entities.append(bentity) catch {
+                        return ParseError.MemoryAllocationFailed;
+                    };
+                    try self.transpile_proc.push_scope_entity(bentity);
+                }
+            }
             try self.parse_body(&hist_down);
+            if (has_binds) self.transpile_proc.finish_scope();
             const body_node = self.node_pop();
             const body = self.transpile_proc.allocator.create(ast.Node) catch {
                 return ParseError.MemoryAllocationFailed;
             };
             errdefer self.transpile_proc.allocator.destroy(body);
             body.* = body_node.?;
-            fit_node.*.node_variant.?.statement.fit_stmt.branches.push(.{ .body = body, .condition = condition }) catch {
+            fit_node.*.node_variant.?.statement.fit_stmt.branches.push(.{ .body = body, .condition = condition, .bindings = bindings }) catch {
                 return ParseError.MemoryAllocationFailed;
             };
             if (self.next_token_is_operator(",")) {

@@ -1349,8 +1349,16 @@ pub const LspServer = struct {
                         var buf = ArrayList(u8).init(self.allocator);
                         defer buf.deinit();
                         try buf.print("```fun\n{s}.{s}\n```\n", .{ enum_name, variant_name });
+                        var had_leading_doc = false;
                         if (self.docs.get(h.uri)) |hdoc| {
-                            _ = try appendDocCommentAboveLine(self.allocator, &buf, hdoc.text, h.sym.decl_range.start.line);
+                            had_leading_doc = try appendDocCommentAboveLine(self.allocator, &buf, hdoc.text, h.sym.decl_range.start.line);
+                        }
+                        // Fall back to the variant's trailing doc comment (stored in
+                        // `detail`) when there's no leading doc: `Number(num), // ...`.
+                        if (!had_leading_doc) {
+                            if (h.sym.detail) |variant_doc| {
+                                if (variant_doc.len != 0) try buf.print("\n{s}\n", .{variant_doc});
+                            }
                         }
                         const hover: Hover = .{ .contents = .{ .value = buf.items }, .range = tok.range };
                         const json = try jsonStringifyAlloc(self.allocator, hover);
@@ -1427,8 +1435,17 @@ pub const LspServer = struct {
                                 },
                             }
 
+                            var member_had_leading_doc = false;
                             if (self.docs.get(h.uri)) |hdoc| {
-                                _ = try appendDocCommentAboveLine(self.allocator, &buf, hdoc.text, h.sym.decl_range.start.line);
+                                member_had_leading_doc = try appendDocCommentAboveLine(self.allocator, &buf, hdoc.text, h.sym.decl_range.start.line);
+                            }
+                            // An enum variant carries its trailing doc comment in
+                            // `detail` (`Number(num), // ...`); surface it when there
+                            // is no leading doc above the variant.
+                            if (!member_had_leading_doc and h.sym.kind == .enumMember) {
+                                if (h.sym.detail) |variant_doc| {
+                                    if (variant_doc.len != 0) try buf.print("\n{s}\n", .{variant_doc});
+                                }
                             }
                             try self.appendSeeAlsoForSymbol(&buf, uri, h.sym);
 
@@ -5514,6 +5531,35 @@ pub const LspServer = struct {
         var j: usize = open_i.?;
         while (j > 0 and (text[j - 1] == ' ' or text[j - 1] == '\t' or text[j - 1] == '\r' or text[j - 1] == '\n')) : (j -= 1) {}
         if (j == 0) return null;
+
+        // Generic compound init: `Box<num>{ ... }` / `Map<str, num>{ ... }`.
+        // Skip backward over a balanced `<...>` generic-argument run so the
+        // identifier scan below lands on the base type name (`Box`/`Map`). The
+        // field index keys fields under the base name and matching already strips
+        // generics, so recovering the base name is all that's needed.
+        if (j > 0 and text[j - 1] == '>') {
+            var gdepth: i64 = 0;
+            var gi: usize = j;
+            while (gi > 0) {
+                gi -= 1;
+                const ch = text[gi];
+                if (ch == '>') {
+                    gdepth += 1;
+                } else if (ch == '<') {
+                    gdepth -= 1;
+                    if (gdepth == 0) {
+                        j = gi;
+                        break;
+                    }
+                } else if (ch == ';' or ch == '{' or ch == '}') {
+                    // Not a generic-arg run (e.g. a stray `>`); leave `j` as-is.
+                    break;
+                }
+            }
+            // Skip any whitespace between the type name and `<`.
+            while (j > 0 and (text[j - 1] == ' ' or text[j - 1] == '\t' or text[j - 1] == '\r' or text[j - 1] == '\n')) : (j -= 1) {}
+            if (j == 0) return null;
+        }
 
         // Shorthand compound init: `.{ ... }`
         if (text[j - 1] == '.') {

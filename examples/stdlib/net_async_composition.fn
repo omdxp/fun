@@ -8,7 +8,11 @@ imp std.channel;
 async fun main() {
   Channel<str> reqs = channel_new_cap("", 1);
   ChannelCancelToken token = channel_cancel_token_new();
-  num build_rc = await build_http_get_to_channel_async("http://example.com:8080/health", &reqs, &token);
+  num build_rc = await build_http_get_to_channel_async(
+    "http://example.com:8080/health",
+    &reqs,
+    &token
+  );
 
   str req_raw = NULL;
   str req = "";
@@ -30,7 +34,13 @@ async fun main() {
     first = req[0];
   }
 
-  printf("build_rc=%lld roundtrip_rc=%lld offload_rc=%lld req_first=%c\n", build_rc, roundtrip_rc, offload_rc, first);
+  printf(
+    "build_rc=%lld roundtrip_rc=%lld offload_rc=%lld req_first=%c\n",
+    build_rc,
+    roundtrip_rc,
+    offload_rc,
+    first
+  );
 
   if req_raw != NULL {
     free(req_raw);

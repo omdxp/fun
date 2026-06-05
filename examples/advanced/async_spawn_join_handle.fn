@@ -14,5 +14,13 @@ async fun main() {
   RuntimeAsyncTask detached = runtime_async_spawn(worker, NULL);
   num detach_rc = await detached.detach_async();
 
-  printf("join(start=%lld rc=%lld active=%lld) detach(start=%lld rc=%lld active=%lld)\n", joined.last_start_rc(), join_rc, joined.is_active(), detached.last_start_rc(), detach_rc, detached.is_active());
+  printf(
+    "join(start=%lld rc=%lld active=%lld) detach(start=%lld rc=%lld active=%lld)\n",
+    joined.last_start_rc(),
+    join_rc,
+    joined.is_active(),
+    detached.last_start_rc(),
+    detach_rc,
+    detached.is_active()
+  );
 }

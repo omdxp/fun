@@ -80,6 +80,20 @@ fun main() {
 }
 ```
 
+A field whose name begins with `_` is **module-private**: it is accessible only
+from code in the same module as the compound's declaration (including the type's
+own `impl` methods via `self._field`). Other modules must use public accessors.
+```fun
+compound Account {
+  num id;          // public
+  num _balance;    // private to this module
+}
+impl Account {
+  pub balance() num { ret self._balance; }   // ok: same module
+}
+// Another module: `acc._balance` is rejected; `acc.balance()` works.
+```
+
 ### Quirks (Interfaces)
 ```fun
 quirk Shape {
@@ -314,6 +328,42 @@ fun main() {
 }
 ```
 - Missing variants may produce warnings unless `_` is present.
+
+### Data-carrying enums (tagged unions)
+A variant may carry a positional payload, making the enum a tagged union (sum
+type). Construct longhand `Enum.Variant(args)` or shorthand `.Variant(args)`
+(when the expected enum type is known). Pattern matching destructures the payload
+into locals.
+```fun
+compound Vec2 { num x; num y; }
+
+enum Shape {
+  Circle(num),          // primitive payload
+  Rect(num, num),       // multiple payload fields
+  At(Vec2),             // compound payload (by value)
+  Empty,                // payload-free variant
+}
+
+fun area(Shape s) num {
+  fit s {
+    Shape.Circle(r) -> { ret r * r; }     // r binds the payload
+    Shape.Rect(w, h) -> { ret w * h; }     // w, h bind the payload
+    Shape.At(p) -> { ret p.x + p.y; }      // p is the compound payload
+    Shape.Empty -> { ret 0; }
+  }
+  ret -1;
+}
+
+fun main() {
+  Shape s = .Circle(5);   // shorthand construction
+  _ = area(s);
+}
+```
+- A tagged-union enum lowers to a C `struct { Enum_tag tag; union { ... } payload; }`.
+- Payloads may be primitives, compounds (by value), or monomorphized generic
+  instances (`Boxed(Box<num>)`).
+- `fit` exhaustiveness (`fit_non_exhaustive`) covers data variants too; cover all
+  variants or add `_`.
 
 ## Defer
 - Expression: `defer close(fd);`

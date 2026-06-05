@@ -2385,6 +2385,9 @@ pub const TranspileProcess = struct {
                 self.report_type_error(init_node, "unknown field '{s}' in compound initializer", .{field.name.items});
                 return TranspileError.UnknownField;
             }
+            // A leading-underscore field is module-private: it cannot be set from a
+            // compound initializer in another module (same rule as field access).
+            try self.check_private_field_access(init_node, base_name, field.name.items);
 
             const expected = if (params != null and gargs != null)
                 try self.type_from_dtype_with_subst(fdt.?, params.?, gargs.?)
@@ -2397,6 +2400,9 @@ pub const TranspileProcess = struct {
             if (self.expected_enum_name(expected)) |enum_name| {
                 if (dot_shorthand_variant_name(field.value)) |_| {
                     _ = try self.resolve_dot_shorthand_enum_variant(field.value, enum_name);
+                } else {
+                    // Shorthand data-variant construction as a compound-init value.
+                    try self.resolve_shorthand_enum_call(field.value, enum_name);
                 }
             }
 
@@ -4478,6 +4484,80 @@ pub const TranspileProcess = struct {
         return null;
     }
 
+    /// Look up the AST EnumVariant for `enum_name.variant_name`, or null if either
+    /// the enum or the variant is unknown.
+    fn lookup_enum_variant(self: *Self, enum_name: []const u8, variant_name: []const u8) ?ast.EnumVariant {
+        const reg = self.root_registry() orelse return null;
+        const enode = reg.enums_by_name.get(enum_name) orelse return null;
+        if (enode.node_variant == null) return null;
+        for (enode.node_variant.?.enum_decl.variants.items()) |v| {
+            if (mem.eql(u8, v.name.items, variant_name)) return v;
+        }
+        return null;
+    }
+
+    /// True when `name` is a declared enum that is a tagged union (sum type).
+    fn enum_name_is_tagged_union(self: *Self, name: []const u8) bool {
+        const reg = self.root_registry() orelse return false;
+        const enode = reg.enums_by_name.get(name) orelse return false;
+        if (enode.node_variant == null) return false;
+        return enum_is_tagged_union(enode.node_variant.?.enum_decl);
+    }
+
+    /// If `callee` is `EnumName.Variant` for a declared enum variant, return
+    /// {enum_name, variant_name}. Handles the shorthand `.Variant` form too (the
+    /// LHS is a blank/empty identifier). Returns null when it isn't an enum-variant
+    /// path. Does NOT require the variant to carry a payload.
+    fn enum_variant_path(self: *Self, callee: *const ast.Node) ?struct { enum_name: []const u8, variant: []const u8 } {
+        if (callee.type != .Expression or callee.node_variant == null) return null;
+        const cexp = callee.node_variant.?.exp;
+        if (!mem.eql(u8, cexp.op, ".")) return null;
+        const left = cexp.left orelse return null;
+        const right = cexp.right orelse return null;
+        if (left.*.type != .Identifier or left.*.data == null) return null;
+        if (right.*.type != .Identifier or right.*.data == null) return null;
+        const ename = left.*.data.?.sval.items;
+        const vname = right.*.data.?.sval.items;
+        const reg = self.root_registry() orelse return null;
+        if (!reg.enums_by_name.contains(ename)) return null;
+        return .{ .enum_name = ename, .variant = vname };
+    }
+
+    /// Type-check a data-carrying enum construction `EnumName.Variant(args...)`.
+    /// Returns the enum's CheckedType on success, null when `callee` is not an
+    /// enum-variant path (so the caller falls through to normal call inference).
+    /// Errors when the variant has no payload, or the arg count/types mismatch.
+    fn infer_enum_variant_construction(self: *Self, node: ast.Node, callee: *const ast.Node, args: []const *ast.Node, env: *TypeEnv, fns: *const std.StringHashMap(FnSig)) TranspileError!?CheckedType {
+        const path = self.enum_variant_path(callee) orelse return null;
+        const variant = self.lookup_enum_variant(path.enum_name, path.variant) orelse {
+            self.report_type_error(node, "enum '{s}' has no variant '{s}'", .{ path.enum_name, path.variant });
+            return TranspileError.UnknownField;
+        };
+        const payload = variant.payload orelse {
+            self.report_type_error(node, "enum variant '{s}.{s}' carries no data and cannot be called like a constructor", .{ path.enum_name, path.variant });
+            return TranspileError.NotCallable;
+        };
+        const ptypes = payload.items();
+        if (args.len != ptypes.len) {
+            self.report_type_error(node, "enum variant '{s}.{s}' expects {d} payload value(s), got {d}", .{ path.enum_name, path.variant, ptypes.len, args.len });
+            return TranspileError.WrongArgCount;
+        }
+        for (args, 0..) |arg, i| {
+            // Use the mangled form so a generic-instance payload (`Box<num>`) carries
+            // its `Box__num` identity and matches the argument's inferred type.
+            const expected = try self.type_from_dtype_with_mangled(ptypes[i]);
+            if (ptypes[i].generic_args != null) {
+                self.register_generic_instantiation(ptypes[i]) catch {};
+            }
+            const actual = try self.infer_expr_type(arg.*, env, fns);
+            if (is_known_type(expected) and is_known_type(actual) and !(try self.can_implicit_coerce(expected, actual))) {
+                self.report_type_error(node, "enum variant '{s}.{s}' payload field {d} type mismatch", .{ path.enum_name, path.variant, i });
+                return TranspileError.TypeMismatch;
+            }
+        }
+        return .{ .base = .Unknown, .name = path.enum_name };
+    }
+
     fn resolve_enum_variant_constant_type(self: *Self, node: ast.Node, enum_name: []const u8, variant_name: []const u8) TranspileError!?CheckedType {
         const root = self.get_root();
         if (root.type_registry == null) return null;
@@ -4549,6 +4629,23 @@ pub const TranspileProcess = struct {
         return .{ .base = .Unknown, .name = enum_name };
     }
 
+    /// If `node` is a shorthand data-variant CONSTRUCTION call `.Variant(args...)`
+    /// (a `()` call whose callee is `<blank>.Variant`), rewrite the callee's blank
+    /// LHS to `enum_name` so it becomes `Enum.Variant(args...)`. This lets shorthand
+    /// construction work wherever the expected enum type is known (typed var-init,
+    /// `ret`, compound-init field, fit subject). No-op if `node` isn't that shape.
+    fn resolve_shorthand_enum_call(self: *Self, node: *ast.Node, enum_name: []const u8) TranspileError!void {
+        if (node.type != .Expression or node.node_variant == null) return;
+        const exp = node.node_variant.?.exp;
+        if (!mem.eql(u8, exp.op, "()")) return;
+        const callee = exp.left orelse return;
+        // Callee must be a shorthand `.Variant` (blank LHS dot expression).
+        if (dot_shorthand_variant_name(callee) == null) return;
+        // Reuse the non-call rewrite on the callee path (mutates its blank LHS to
+        // the enum name and validates the variant exists).
+        _ = try self.resolve_dot_shorthand_enum_variant(callee, enum_name);
+    }
+
     fn infer_let_enum_dot_shorthand(self: *Self, node: *ast.Node) TranspileError!?CheckedType {
         const variant_name = dot_shorthand_variant_name(node) orelse return null;
         const reg = self.root_registry() orelse return null;
@@ -4600,6 +4697,21 @@ pub const TranspileProcess = struct {
         return null;
     }
 
+    /// Enforce leading-underscore field privacy: a field whose name begins with
+    /// `_` is module-private (accessible only from the file where its compound is
+    /// declared). `ref_node` is the access site; `compound_base_name` is the
+    /// (un-mangled) compound name. No-op when the field is not underscore-prefixed,
+    /// when the compound isn't found, or when the access is in the same module.
+    fn check_private_field_access(self: *Self, ref_node: ast.Node, compound_base_name: []const u8, field_name: []const u8) TranspileError!void {
+        if (field_name.len == 0 or field_name[0] != '_') return;
+        const reg = self.root_registry() orelse return;
+        const cnode = reg.compounds_by_name.get(compound_base_name) orelse return;
+        if (!same_module(&ref_node, cnode)) {
+            self.report_type_error(ref_node, "field '{s}' is private to its module (leading '_'); it cannot be accessed from another module", .{field_name});
+            return TranspileError.InvalidFieldAccess;
+        }
+    }
+
     fn canonical_compound_name(self: *Self, name: []const u8) []const u8 {
         const root = self.get_root();
         if (root.type_registry == null) return name;
@@ -4634,6 +4746,12 @@ pub const TranspileProcess = struct {
         const tname = base.mangled_name orelse base.name.?;
         const base_name = if (mem.indexOf(u8, tname, "__")) |idx| tname[0..idx] else tname;
         try self.ensure_named_type_visible(node, tname);
+
+        // Leading-underscore fields are module-private: `compound User { num _pw; }`
+        // exposes `_pw` only to code in the same module as the type's declaration.
+        // A method body (`self._pw`) lives in the same file as the type, so it is
+        // always allowed; a cross-module `u._pw` is rejected.
+        try self.check_private_field_access(node, base_name, field_name);
 
         if (base.pointer_depth > 1) {
             self.report_type_error(node, "field access supports at most one pointer indirection", .{});
@@ -5845,6 +5963,14 @@ pub const TranspileProcess = struct {
                         try self.flatten_call_args_ptr(right, &args_nodes);
                     }
 
+                    // Data-carrying enum construction: `EnumName.Variant(args...)`
+                    // (or shorthand `.Variant(args...)` once resolved). Recognize it
+                    // before the function-call machinery so it isn't mistaken for a
+                    // method/free call. Returns a value of the enum type.
+                    if (try self.infer_enum_variant_construction(node, callee, args_nodes.items, env, fns)) |ct| {
+                        return ct;
+                    }
+
                     // Standard function call: `foo(...)`.
                     var maybe_sig: ?FnSig = null;
                     var call_rtype: CheckedType = .{ .base = .Unknown };
@@ -6998,6 +7124,9 @@ pub const TranspileProcess = struct {
                         if (self.expected_enum_name(vtype)) |enum_name| {
                             if (dot_shorthand_variant_name(val)) |_| {
                                 _ = try self.resolve_dot_shorthand_enum_variant(val, enum_name);
+                            } else {
+                                // Shorthand data-variant construction: `.Variant(args)`.
+                                try self.resolve_shorthand_enum_call(val, enum_name);
                             }
                         }
                         const init_t = try self.infer_expr_type(val.*, env, fns);
@@ -7026,6 +7155,9 @@ pub const TranspileProcess = struct {
                         if (self.expected_enum_name(fn_rtype)) |enum_name| {
                             if (dot_shorthand_variant_name(rv)) |_| {
                                 _ = try self.resolve_dot_shorthand_enum_variant(rv, enum_name);
+                            } else {
+                                // Shorthand data-variant construction in return position.
+                                try self.resolve_shorthand_enum_call(rv, enum_name);
                             }
                         }
                         const rt = try self.infer_expr_type(rv.*, env, fns);
@@ -7082,6 +7214,7 @@ pub const TranspileProcess = struct {
                     const fit = stmt.node_variant.?.statement.fit_stmt;
                     const target_t = try self.infer_expr_type(fit.exp.*, env, fns);
                     const target_enum = self.expected_enum_name(target_t);
+                    const subject_is_tagged = if (target_enum) |en| self.enum_name_is_tagged_union(en) else false;
                     for (fit.branches.items()) |branch| {
                         if (branch.condition) |cond| {
                             if (target_enum) |enum_name| {
@@ -7089,13 +7222,45 @@ pub const TranspileProcess = struct {
                                     _ = try self.resolve_dot_shorthand_enum_variant(cond, enum_name);
                                 }
                             }
-                            const ct = try self.infer_expr_type(cond.*, env, fns);
-                            if (is_known_type(target_t) and is_known_type(ct) and !self.can_compare_or_match(target_t, ct)) {
-                                self.report_type_error(stmt, "fit branch condition type must match fit expression type", .{});
-                                return TranspileError.TypeMismatch;
+                            // For a tagged-union subject, a variant-path condition
+                            // (`Enum.Variant`) is a pattern, not a comparable value —
+                            // validate it names a real variant instead of type-matching.
+                            if (subject_is_tagged) {
+                                const vname = self.fit_variant_name_of(cond.*) orelse {
+                                    self.report_type_error(stmt, "fit arm on a data-carrying enum must match a variant", .{});
+                                    return TranspileError.TypeMismatch;
+                                };
+                                if (self.lookup_enum_variant(target_enum.?, vname) == null) {
+                                    self.report_type_error(stmt, "enum '{s}' has no variant '{s}'", .{ target_enum.?, vname });
+                                    return TranspileError.UnknownField;
+                                }
+                            } else {
+                                const ct = try self.infer_expr_type(cond.*, env, fns);
+                                if (is_known_type(target_t) and is_known_type(ct) and !self.can_compare_or_match(target_t, ct)) {
+                                    self.report_type_error(stmt, "fit branch condition type must match fit expression type", .{});
+                                    return TranspileError.TypeMismatch;
+                                }
                             }
                         }
-                        try self.check_body(branch.body, env, fns, fn_rtype);
+                        // Destructuring arm: register payload bindings as locals in a
+                        // fresh scope so the arm body type-checks against them.
+                        if (branch.bindings != null and branch.condition != null and subject_is_tagged) {
+                            try env.push();
+                            defer env.pop();
+                            const vname = self.fit_variant_name_of(branch.condition.?.*).?;
+                            const variant = self.lookup_enum_variant(target_enum.?, vname);
+                            const payload = if (variant) |v| v.payload else null;
+                            for (branch.bindings.?.items(), 0..) |bname, i| {
+                                const bt = if (payload != null and i < payload.?.count)
+                                    type_from_dtype(payload.?.items()[i])
+                                else
+                                    CheckedType{ .base = .Unknown };
+                                try env.put_current(bname.items, bt);
+                            }
+                            try self.check_body(branch.body, env, fns, fn_rtype);
+                        } else {
+                            try self.check_body(branch.body, env, fns, fn_rtype);
+                        }
                     }
                     self.warn_if_fit_has_unreachable_branches(target_t, fit.branches.items());
                     self.warn_if_fit_not_exhausted(stmt, target_t, fit.branches.items());
@@ -9948,6 +10113,126 @@ pub const TranspileProcess = struct {
         return .Num;
     }
 
+    /// If the fit subject is a value of a tagged-union (data-carrying) enum, return
+    /// that enum's name; otherwise null. Resolves via the subject's declared type
+    /// (identifier) or its branch conditions' variant paths (fallback).
+    fn fit_subject_tagged_union_name(self: *Self, fit_exp: ast.Node) ?[]const u8 {
+        if (fit_exp.type == .Identifier and fit_exp.data != null) {
+            if (self.identifier_declared_dtype(fit_exp.data.?.sval.items)) |dt| {
+                if (dt.pointer_depth == 0 and dt.type_str.items.len > 0) {
+                    const nm = dt.type_str.items;
+                    if (self.enum_name_is_tagged_union(nm)) return nm;
+                }
+            }
+        }
+        return null;
+    }
+
+    /// Lower a `fit` over a tagged-union subject:
+    ///   { Enum __fitN = <subj>; switch (__fitN.tag) {
+    ///       case Enum_Variant: { <Type b = __fitN.payload.Variant._i;>* <body> break; }
+    ///       ... default: { <body> break; } } }
+    /// The subject is snapshotted into a temp so payload reads and a possibly
+    /// side-effecting subject expression are evaluated exactly once.
+    fn emit_tagged_union_fit(self: *Self, fit: anytype, enum_name: []const u8) TranspileError!void {
+        const tmp = try self.next_tmp_name("fit");
+        defer self.allocator.free(tmp);
+
+        try self.write("{");
+        self.indent();
+        try self.write_indent();
+        try self.write(enum_name);
+        try self.write(" ");
+        try self.write(tmp);
+        try self.write(" = ");
+        try self.transpile_node(fit.exp.*);
+        try self.write(";");
+
+        try self.write_indent();
+        try self.write("switch (");
+        try self.write(tmp);
+        try self.write(".tag) {");
+        self.indent();
+
+        for (fit.branches.items()) |branch| {
+            if (branch.condition) |condition| {
+                // The condition is the variant path `Enum.Variant` (or `.Variant`).
+                const variant_name = self.fit_variant_name_of(condition.*) orelse {
+                    self.report_type_error(condition.*, "fit arm on a data-carrying enum must match a variant", .{});
+                    return TranspileError.TypeMismatch;
+                };
+                try self.write_indent();
+                try self.write("case ");
+                try self.write(enum_name);
+                try self.write("_");
+                try self.write(variant_name);
+                try self.write(": {");
+                self.indent();
+
+                // Bind the matched variant's payload fields into locals.
+                if (branch.bindings) |binds| {
+                    const variant = self.lookup_enum_variant(enum_name, variant_name);
+                    const payload = if (variant) |v| v.payload else null;
+                    for (binds.items(), 0..) |bname, i| {
+                        try self.write_indent();
+                        if (payload) |pl| {
+                            if (i < pl.count) {
+                                try self.write_type(pl.items()[i].*);
+                                try self.write(" ");
+                            } else {
+                                try self.write("__auto_type ");
+                            }
+                        } else {
+                            try self.write("__auto_type ");
+                        }
+                        try self.write(bname.items);
+                        try self.print(" = {s}.payload.{s}._{d};", .{ tmp, variant_name, i });
+                    }
+                }
+
+                try self.write_indent();
+                try self.transpile_node(branch.body.*);
+                if (self.node_needs_trailing_semicolon(branch.body.*)) try self.write(";");
+                try self.write_indent();
+                try self.write("break;");
+                self.dedent();
+                try self.write_indent();
+                try self.write("}");
+            } else {
+                try self.write_indent();
+                try self.write("default: {");
+                self.indent();
+                try self.write_indent();
+                try self.transpile_node(branch.body.*);
+                if (self.node_needs_trailing_semicolon(branch.body.*)) try self.write(";");
+                try self.write_indent();
+                try self.write("break;");
+                self.dedent();
+                try self.write_indent();
+                try self.write("}");
+            }
+        }
+
+        self.dedent();
+        try self.write_indent();
+        try self.write("}");
+        self.dedent();
+        try self.write_indent();
+        try self.write("}");
+    }
+
+    /// Extract the variant name from a fit-arm variant path: `Enum.Variant` or the
+    /// shorthand `.Variant` (blank LHS). Returns null if it isn't a `.`-path.
+    fn fit_variant_name_of(self: *Self, condition: ast.Node) ?[]const u8 {
+        _ = self;
+        if (condition.type != .Expression or condition.node_variant == null) return null;
+        const cexp = condition.node_variant.?.exp;
+        if (!mem.eql(u8, cexp.op, ".")) return null;
+        const right = cexp.right orelse return null;
+        if (right.*.type != .Identifier or right.*.data == null) return null;
+        return right.*.data.?.sval.items;
+    }
+
     /// Flattens a `fit` branch condition into its individual labels. A comma
     /// condition (`1, 2 ->`) is a `,`-operator Expression tree; this collects each
     /// leaf label (`1`, `2`). A single-label condition yields one entry.
@@ -10690,6 +10975,87 @@ pub const TranspileProcess = struct {
         return true;
     }
 
+    /// True when an enum is a tagged union (sum type) — i.e. at least one of its
+    /// variants carries a payload. Payload-free enums keep the plain C `enum`
+    /// lowering for full backward compatibility.
+    fn enum_is_tagged_union(e: anytype) bool {
+        for (e.variants.items()) |v| {
+            if (v.payload != null) return true;
+        }
+        return false;
+    }
+
+    /// Emit a data-carrying enum as a tagged union:
+    ///   typedef enum E_tag { E_A, E_B, ... } E_tag;
+    ///   typedef struct E { E_tag tag; union { struct {..} A; ... } payload; } E;
+    /// Variants with no payload occupy a tag slot but no union member.
+    fn emit_tagged_union_enum(self: *Self, e: anytype) TranspileError!void {
+        // Discriminant enum.
+        try self.write("typedef enum ");
+        try self.write(e.name.items);
+        try self.write("_tag {\n");
+        for (e.variants.items()) |v| {
+            try self.write("  ");
+            try self.write(e.name.items);
+            try self.write("_");
+            try self.write(v.name.items);
+            try self.write(",\n");
+        }
+        try self.write("} ");
+        try self.write(e.name.items);
+        try self.write("_tag;\n");
+
+        // Tagged struct with a payload union.
+        try self.write("typedef struct ");
+        try self.write(e.name.items);
+        try self.write(" {\n  ");
+        try self.write(e.name.items);
+        try self.write("_tag tag;\n  union {\n");
+        for (e.variants.items()) |v| {
+            const payload = v.payload orelse continue;
+            try self.write("    struct { ");
+            for (payload.items(), 0..) |pt, i| {
+                try self.write_type(pt.*);
+                try self.print(" _{d}; ", .{i});
+            }
+            try self.write("} ");
+            try self.write(v.name.items);
+            try self.write(";\n");
+        }
+        try self.write("  } payload;\n} ");
+        try self.write(e.name.items);
+        try self.write(";\n\n");
+    }
+
+    /// Emit a tagged-union compound literal for `EnumName.Variant(args...)`:
+    ///   ((Enum){ .tag = Enum_Variant, .payload.Variant = { ._0 = (a0), ... } })
+    /// `args_node` is the (possibly comma-flattened) call argument expression. The
+    /// payload field names `_0`, `_1`, ... match the union struct layout emitted by
+    /// `emit_tagged_union_enum`.
+    fn emit_enum_variant_construction(self: *Self, enum_name: []const u8, variant_name: []const u8, args_node: ?*ast.Node) TranspileError!void {
+        var args = ArrayList(*ast.Node).init(self.allocator);
+        defer args.deinit();
+        if (args_node) |an| {
+            try self.flatten_call_args_ptr(an, &args);
+        }
+        try self.write("((");
+        try self.write(enum_name);
+        try self.write("){ .tag = ");
+        try self.write(enum_name);
+        try self.write("_");
+        try self.write(variant_name);
+        try self.write(", .payload.");
+        try self.write(variant_name);
+        try self.write(" = { ");
+        for (args.items, 0..) |arg, i| {
+            if (i > 0) try self.write(", ");
+            try self.print("._{d} = (", .{i});
+            try self.transpile_node(arg.*);
+            try self.write(")");
+        }
+        try self.write(" } })");
+    }
+
     fn emit_user_types(self: *Self) TranspileError!void {
         if (self.did_emit_user_types) return;
         self.did_emit_user_types = true;
@@ -10733,6 +11099,11 @@ pub const TranspileProcess = struct {
             if (enode.node_variant == null) continue;
             if (self.is_std_c_signature_node(enode)) continue;
             const e = enode.node_variant.?.enum_decl;
+            // Tagged-union (data-carrying) enums are emitted AFTER compounds, since a
+            // by-value payload field (`Branch(Point)`) needs the compound's full
+            // definition to already exist. Plain enums have no such dependency and
+            // are emitted here, before compounds (a compound may hold an enum field).
+            if (enum_is_tagged_union(e)) continue;
             if (emitted_enum_names.contains(e.name.items)) continue;
             emitted_enum_names.put(e.name.items, true) catch {
                 return TranspileError.MemoryAllocationFailed;
@@ -11237,6 +11608,20 @@ pub const TranspileProcess = struct {
                 self.report_error(null, "cyclic by-value compound dependency (use pointers to break the cycle)", .{});
                 return TranspileError.CyclicCompoundDependency;
             }
+        }
+
+        // Tagged-union (data-carrying) enums, emitted AFTER all compounds so a
+        // by-value payload field (`Branch(Point)`) sees the compound's definition.
+        for (enum_nodes.items) |enode| {
+            if (enode.node_variant == null) continue;
+            if (self.is_std_c_signature_node(enode)) continue;
+            const e = enode.node_variant.?.enum_decl;
+            if (!enum_is_tagged_union(e)) continue;
+            if (emitted_enum_names.contains(e.name.items)) continue;
+            emitted_enum_names.put(e.name.items, true) catch {
+                return TranspileError.MemoryAllocationFailed;
+            };
+            try self.emit_tagged_union_enum(e);
         }
 
         // Quirk canonical structs per signature
@@ -13628,6 +14013,18 @@ pub const TranspileProcess = struct {
             .Expression => {
                 const exp = node.node_variant.?.exp;
                 if (mem.eql(u8, exp.op, "()")) {
+                    // Data-carrying enum construction `EnumName.Variant(args...)`
+                    // lowers to a tagged-union compound literal.
+                    if (exp.left) |callee| {
+                        if (self.enum_variant_path(callee)) |path| {
+                            if (self.lookup_enum_variant(path.enum_name, path.variant)) |variant| {
+                                if (variant.payload != null) {
+                                    try self.emit_enum_variant_construction(path.enum_name, path.variant, exp.right);
+                                    return;
+                                }
+                            }
+                        }
+                    }
                     if (exp.left) |left| {
                         var callee_base_name: ?[]const u8 = null;
                         var callee_module_alias: ?[]const u8 = null;
@@ -14459,6 +14856,20 @@ pub const TranspileProcess = struct {
                                 if (reg.enums_by_name.get(enum_name)) |enode| {
                                     if (enode.node_variant == null) return;
                                     const emit_enum_name = enode.node_variant.?.enum_decl.name.items;
+                                    // In a tagged-union enum, a no-payload variant used
+                                    // as a value must construct the struct with its tag
+                                    // set: `((Enum){ .tag = Enum_Variant })`. The bare
+                                    // `Enum_Variant` is only the discriminant constant.
+                                    if (enum_is_tagged_union(enode.node_variant.?.enum_decl)) {
+                                        try self.write("((");
+                                        try self.write(emit_enum_name);
+                                        try self.write("){ .tag = ");
+                                        try self.write(emit_enum_name);
+                                        try self.write("_");
+                                        try self.write(variant_name);
+                                        try self.write(" })");
+                                        return;
+                                    }
                                     try self.write(emit_enum_name);
                                     try self.write("_");
                                     try self.write(variant_name);
@@ -15656,6 +16067,13 @@ pub const TranspileProcess = struct {
                         const subject_type = self.fit_subject_base_type(fit.exp.*, fit.branches.items());
                         const use_chain = subject_type == .Str or subject_type == .Dec;
                         const is_str = subject_type == .Str;
+
+                        // Tagged-union (data-carrying enum) subject: switch on the
+                        // discriminant `.tag` and bind each arm's payload into locals.
+                        if (self.fit_subject_tagged_union_name(fit.exp.*)) |enum_name| {
+                            try self.emit_tagged_union_fit(fit, enum_name);
+                            return;
+                        }
 
                         if (use_chain) {
                             const tmp = try self.next_tmp_name("fit");

@@ -1255,6 +1255,236 @@ fn pos_to_index(line_starts: []const usize, pos: token.Pos, use_end: bool) usize
 
 const fmt_indent_width: usize = 2;
 
+/// Maximum rendered line width before the formatter wraps a comma-separated group
+/// (call args, function params, compound-init fields, array literals) one item per
+/// line. Lines that fit stay on one line.
+const fmt_max_line_width: usize = 100;
+
+/// True if `t` opens a wrappable comma group: `(` (call/params), `[` (array literal).
+/// A `{` compound-init open is detected separately (it needs the preceding token to
+/// be a type/`>`, not a block).
+fn isWrapOpenParenOrBracket(t: token.Token) bool {
+    return t.type == .Operator and (std.mem.eql(u8, t.data.sval.items, "(") or std.mem.eql(u8, t.data.sval.items, "["));
+}
+
+fn matchingCloseChar(open: token.Token) u8 {
+    if (open.type == .Operator) {
+        if (std.mem.eql(u8, open.data.sval.items, "(")) return ')';
+        if (std.mem.eql(u8, open.data.sval.items, "[")) return ']';
+    }
+    if (open.type == .Symbol and open.data.cval == '{') return '}';
+    return 0;
+}
+
+const WrapGroup = struct {
+    /// Index of the matching close token.
+    close_idx: usize,
+    /// Single-line rendered width of the whole group, open..close inclusive.
+    width: usize,
+    /// True if the group contains at least one top-level comma (worth wrapping).
+    has_comma: bool,
+};
+
+/// Measure the single-line rendered width of the bracket group that opens at
+/// `open_idx`, and locate its matching close. Width counts each significant token's
+/// rendered text plus the one space the formatter would put after a top-level comma
+/// (`, `). Comments/newlines inside are ignored for the measurement. Nested brackets
+/// are spanned but their inner commas don't count as top-level. Returns null if the
+/// group is unterminated. Conservative: this is only a heuristic to DECIDE wrapping;
+/// it never has to be byte-exact, only good enough to pick lines clearly over budget.
+fn measureWrapGroup(
+    allocator: mem.Allocator,
+    toks: []const token.Token,
+    open_idx: usize,
+    source: []const u8,
+    line_starts: []const usize,
+) !?WrapGroup {
+    const open = toks[open_idx];
+    const close_c = matchingCloseChar(open);
+    if (close_c == 0) return null;
+
+    var depth: isize = 0;
+    var width: usize = 0;
+    var has_comma = false;
+    var i: usize = open_idx;
+    var prev_was_value: bool = false; // for deciding inter-token spacing roughly
+    while (i < toks.len) : (i += 1) {
+        const t = toks[i];
+        if (t.type == .NewLine or t.type == .Comment) continue;
+
+        // Track nesting to find the matching close and top-level commas.
+        if (t.type == .Operator and (std.mem.eql(u8, t.data.sval.items, "(") or std.mem.eql(u8, t.data.sval.items, "["))) {
+            depth += 1;
+        } else if (t.type == .Symbol and t.data.cval == '{') {
+            depth += 1;
+        } else if (t.type == .Symbol and (t.data.cval == ')' or t.data.cval == ']' or t.data.cval == '}')) {
+            depth -= 1;
+        }
+
+        const s = try token_text(allocator, t, source, line_starts);
+        defer allocator.free(s);
+
+        // Approximate spacing: a leading space before an identifier/keyword/number
+        // that follows another value token, and after a comma. Good enough for a
+        // width threshold decision.
+        const is_value = t.type == .Identifier or t.type == .Keyword or t.type == .Number or t.type == .String or t.type == .Boolean;
+        if (is_value and prev_was_value) width += 1;
+        width += s.len;
+        prev_was_value = is_value;
+
+        if (t.type == .Operator and std.mem.eql(u8, t.data.sval.items, ",") and depth == 1) {
+            has_comma = true;
+            width += 1; // the space after `, `
+        }
+        if (depth == 0 and i > open_idx) {
+            return WrapGroup{ .close_idx = i, .width = width, .has_comma = has_comma };
+        }
+    }
+    return null;
+}
+
+/// Current column = number of characters since the last newline in `out`.
+fn currentColumn(out: *const ArrayList(u8)) usize {
+    var n = out.items.len;
+    var col: usize = 0;
+    while (n > 0) {
+        n -= 1;
+        if (out.items[n] == '\n') break;
+        col += 1;
+    }
+    return col;
+}
+
+/// Find the byte index of a line's trailing-comment `//`, or null if the line has
+/// none (no `//`, or a `//` that is a standalone comment with no code before it, or
+/// a `//` that sits inside a string/char literal). `line` excludes the newline.
+fn trailingCommentStart(line: []const u8) ?usize {
+    var in_str = false;
+    var in_chr = false;
+    var i: usize = 0;
+    var first_code: ?usize = null; // first non-space code column
+    while (i < line.len) : (i += 1) {
+        const c = line[i];
+        if (in_str) {
+            if (c == '\\') {
+                i += 1;
+            } else if (c == '"') in_str = false;
+            continue;
+        }
+        if (in_chr) {
+            if (c == '\\') {
+                i += 1;
+            } else if (c == '\'') in_chr = false;
+            continue;
+        }
+        if (c == '"') {
+            in_str = true;
+            if (first_code == null) first_code = i;
+            continue;
+        }
+        if (c == '\'') {
+            in_chr = true;
+            if (first_code == null) first_code = i;
+            continue;
+        }
+        if (c == '/' and i + 1 < line.len and line[i + 1] == '/') {
+            // A trailing comment must have code before it on the line.
+            if (first_code != null and first_code.? < i) return i;
+            return null;
+        }
+        if (c != ' ' and c != '\t') {
+            if (first_code == null) first_code = i;
+        }
+    }
+    return null;
+}
+
+/// Width (in columns) of the code portion of a line that ends at the trailing
+/// comment starting at `cstart` — i.e. the code with trailing spaces trimmed.
+fn codeWidthBeforeComment(line: []const u8, cstart: usize) usize {
+    var n = cstart;
+    while (n > 0 and (line[n - 1] == ' ' or line[n - 1] == '\t')) n -= 1;
+    return n;
+}
+
+/// Align consecutive trailing comments to a common column (gofmt-style). A run is a
+/// maximal block of adjacent lines that each carry a trailing comment AND share the
+/// same leading indentation; within a run, every `//` is padded to one space past
+/// the widest code portion. Standalone comment lines, blank lines, and comment-less
+/// code lines break a run. Operates on the finished output buffer in place; it only
+/// adjusts the spaces between code and `//`, so it is idempotent.
+fn alignTrailingComments(allocator: mem.Allocator, out: *ArrayList(u8)) !void {
+    // Split into lines (without the trailing newline of each).
+    var lines = ArrayList([]const u8).init(allocator);
+    defer lines.deinit();
+    {
+        var start: usize = 0;
+        var i: usize = 0;
+        while (i < out.items.len) : (i += 1) {
+            if (out.items[i] == '\n') {
+                try lines.append(out.items[start..i]);
+                start = i + 1;
+            }
+        }
+        if (start < out.items.len) try lines.append(out.items[start..]);
+    }
+
+    // Precompute, per line, the trailing-comment start (or null) and indent width.
+    const Info = struct { cstart: ?usize, indent: usize, code_w: usize };
+    var infos = ArrayList(Info).init(allocator);
+    defer infos.deinit();
+    for (lines.items) |ln| {
+        var indent: usize = 0;
+        while (indent < ln.len and (ln[indent] == ' ' or ln[indent] == '\t')) indent += 1;
+        const cstart = trailingCommentStart(ln);
+        const cw = if (cstart) |cs| codeWidthBeforeComment(ln, cs) else 0;
+        try infos.append(.{ .cstart = cstart, .indent = indent, .code_w = cw });
+    }
+
+    var result = ArrayList(u8).init(allocator);
+    defer result.deinit();
+
+    var li: usize = 0;
+    while (li < lines.items.len) {
+        if (infos.items[li].cstart == null) {
+            try result.appendSlice(lines.items[li]);
+            try result.append('\n');
+            li += 1;
+            continue;
+        }
+        // Start of a run: gather consecutive comment lines with the same indent.
+        const run_indent = infos.items[li].indent;
+        var run_end = li;
+        var target: usize = 0;
+        while (run_end < lines.items.len and infos.items[run_end].cstart != null and infos.items[run_end].indent == run_indent) {
+            if (infos.items[run_end].code_w > target) target = infos.items[run_end].code_w;
+            run_end += 1;
+        }
+        // Emit each line in the run with its comment padded to `target + 1`.
+        var k = li;
+        while (k < run_end) : (k += 1) {
+            const ln = lines.items[k];
+            const cs = infos.items[k].cstart.?;
+            const code = ln[0..codeWidthBeforeComment(ln, cs)];
+            try result.appendSlice(code);
+            // At least one space between code and comment; pad to the target column.
+            const pad = (target - code.len) + 1;
+            try result.appendNTimes(' ', pad);
+            try result.appendSlice(ln[cs..]);
+            try result.append('\n');
+        }
+        li = run_end;
+    }
+
+    // Replace out with result (drop any extra trailing newline beyond the original;
+    // the caller normalizes the final newline).
+    out.clearRetainingCapacity();
+    try out.appendSlice(result.items);
+    if (out.items.len > 0 and out.items[out.items.len - 1] == '\n') {
+        out.items.len -= 1; // caller re-adds exactly one
+    }
+}
+
 fn ensureBlankLine(out: *ArrayList(u8)) !void {
     // Ensure output ends with at least two '\n' characters.
     const n = out.items.len;
@@ -1288,18 +1518,40 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
     var decl_block_depth: isize = 0;
     var pending_enum_block_open: bool = false;
     var enum_block_depth: isize = 0;
+    // Paren nesting INSIDE an enum body, used to tell a top-level variant separator
+    // comma (`A, B`) — which becomes a newline — from a comma inside a data-carrying
+    // variant's payload (`Pair(num, num)`), which must stay `, ` on the same line.
+    var enum_payload_paren_depth: isize = 0;
     var pending_control_block_open: bool = false;
     var function_body_depth: isize = 0;
     var generic_angle_depth: usize = 0;
     var asm_raw: ?AsmRawRange = null;
     var brace_stack = ArrayList(bool).init(state.allocator);
     defer brace_stack.deinit();
+    // Stack of close-token indices for comma groups currently being wrapped one
+    // item per line (width-based wrapping). When the current token's index matches
+    // the top entry, we emit the closing delimiter on its own dedented line.
+    var wrap_close_stack = ArrayList(usize).init(state.allocator);
+    defer wrap_close_stack.deinit();
+    // Running nesting depth of `(`/`[`/`{` as the emit loop sees them, used to tell
+    // a wrap group's OWN top-level commas from commas in nested groups.
+    var bracket_depth: isize = 0;
+    // For each active wrap group, the bracket_depth at which its items live (its
+    // commas fire a line break only at exactly this depth). Parallel to
+    // wrap_close_stack.
+    var wrap_item_depth = ArrayList(isize).init(state.allocator);
+    defer wrap_item_depth.deinit();
     while (idx < toks.len) : (idx += 1) {
         const t2 = toks[idx];
         if (t2.type == .NewLine) {
             pending_newlines += 1;
             continue;
         }
+
+        // How many source newlines preceded this token. Captured before the reset
+        // below so a `.Comment` can tell a trailing/inline comment (`x; // note`,
+        // newlines_before == 0) from a standalone comment line (>= 1).
+        const newlines_before = pending_newlines;
 
         // Preserve blank lines (2+ newlines) between statements/constructs.
         if (pending_newlines >= 2) {
@@ -1309,6 +1561,49 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
             state.prev_token.* = null;
         }
         pending_newlines = 0;
+
+        // Track paren nesting inside an enum body so a payload comma (`Pair(num,
+        // num)`) is not mistaken for a variant separator. Counted before the token
+        // is emitted; a `)` decrements after the check below uses the open depth.
+        if (enum_block_depth > 0) {
+            if (t2.type == .Operator and std.mem.eql(u8, t2.data.sval.items, "(")) {
+                enum_payload_paren_depth += 1;
+            } else if (t2.type == .Symbol and t2.data.cval == ')') {
+                if (enum_payload_paren_depth > 0) enum_payload_paren_depth -= 1;
+            }
+        }
+
+        // Maintain a general bracket-nesting depth for width-based comma wrapping.
+        // Opens increment BEFORE the token is emitted (so a wrap group's own items
+        // sit at the open's depth+1); closes decrement here so the close token is
+        // seen at the group's outer depth. `bracket_depth` is otherwise inert.
+        const tok_is_open = (t2.type == .Operator and (std.mem.eql(u8, t2.data.sval.items, "(") or std.mem.eql(u8, t2.data.sval.items, "["))) or (t2.type == .Symbol and t2.data.cval == '{');
+        const tok_is_close = t2.type == .Symbol and (t2.data.cval == ')' or t2.data.cval == ']' or t2.data.cval == '}');
+        if (tok_is_open) {
+            bracket_depth += 1;
+        } else if (tok_is_close) {
+            bracket_depth -= 1;
+        }
+
+        // Close of an active wrap group: emit the closing delimiter on its own
+        // dedented line. A trailing comma was already turned into `,\n<indent>`
+        // by the comma handler, so the last item sits one line above the close.
+        if (tok_is_close and wrap_close_stack.items.len > 0 and idx == wrap_close_stack.items[wrap_close_stack.items.len - 1]) {
+            _ = wrap_close_stack.pop();
+            _ = wrap_item_depth.pop();
+            if (state.indent.* > 0) state.indent.* -= 1;
+            // Strip a trailing run of spaces left by the last item's break, then
+            // ensure we're at line start at the dedented indent.
+            var n = state.out.items.len;
+            while (n > 0 and (state.out.items[n - 1] == ' ' or state.out.items[n - 1] == '\t')) n -= 1;
+            state.out.items.len = n;
+            if (!(n > 0 and state.out.items[n - 1] == '\n')) try state.out.append('\n');
+            try state.out.appendNTimes(' ', state.indent.* * fmt_indent_width);
+            try state.out.append(t2.data.cval);
+            state.at_line_start.* = false;
+            state.prev_token.* = t2;
+            continue;
+        }
 
         if (asm_raw) |range| {
             if (idx == range.start_idx) {
@@ -1376,6 +1671,32 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
         }
 
         if (t2.type == .Comment) {
+            const s2 = try token_text(state.allocator, t2, source, line_starts);
+            defer state.allocator.free(s2);
+
+            // A trailing/inline comment (`Foo, // note`) stays on the same line as
+            // the code it follows: no source newline separated them. Note that a
+            // preceding separator handler (enum variant `,`, statement `;`) may have
+            // ALREADY emitted a `\n` (+ indent), leaving us at line start — so when
+            // there was no source newline we retract that trailing whitespace run
+            // back to the code, then append `<space>// note` inline.
+            if (newlines_before == 0) {
+                var n = state.out.items.len;
+                while (n > 0 and (state.out.items[n - 1] == ' ' or state.out.items[n - 1] == '\t')) n -= 1;
+                if (n > 0 and state.out.items[n - 1] == '\n') {
+                    n -= 1; // drop the single separator newline we just emitted
+                    state.out.items.len = n;
+                }
+                const last_ch = if (state.out.items.len > 0) state.out.items[state.out.items.len - 1] else 0;
+                if (last_ch != 0 and last_ch != ' ' and last_ch != '\t' and last_ch != '\n') try state.out.append(' ');
+                try state.out.appendSlice(s2);
+                try state.out.append('\n');
+                state.at_line_start.* = true;
+                state.prev_token.* = null;
+                continue;
+            }
+
+            // Standalone comment line: own line at the current indent.
             if (!state.at_line_start.*) {
                 try state.out.append('\n');
                 state.at_line_start.* = true;
@@ -1383,8 +1704,6 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
             if (state.at_line_start.*) {
                 try state.out.appendNTimes(' ', state.indent.* * fmt_indent_width);
             }
-            const s2 = try token_text(state.allocator, t2, source, line_starts);
-            defer state.allocator.free(s2);
             try state.out.appendSlice(s2);
             try state.out.append('\n');
             state.at_line_start.* = true;
@@ -1758,6 +2077,14 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                         // Always separate `imp` from the import path, even if it starts with dot-runs.
                         break :blk true;
                     }
+                    // A leading-dot enum shorthand begins an expression, so it needs a
+                    // space after an expression-introducing keyword: `ret .Number(n)`,
+                    // `let x = .Some(1)` (the `=` case is already spaced). Without this
+                    // the dot glues to the keyword (`ret.Number`). A bare `.` operator
+                    // here is the shorthand; `obj.field` never has a keyword as `pt2`.
+                    if (t2.type == .Operator and std.mem.eql(u8, t2.data.sval.items, ".")) {
+                        if (std.mem.eql(u8, pkw2, "ret") or std.mem.eql(u8, pkw2, "for")) break :blk true;
+                    }
                 }
                 if (t2.type == .Symbol) {
                     const c2 = t2.data.cval;
@@ -1896,7 +2223,12 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
             }
             if (c2 == ',') {
                 try state.out.append(',');
-                if (enum_block_depth > 0) {
+                const in_wrap = wrap_item_depth.items.len > 0 and bracket_depth == wrap_item_depth.items[wrap_item_depth.items.len - 1];
+                if (in_wrap) {
+                    // Newline only; the line-start path indents the next item.
+                    try state.out.append('\n');
+                    state.at_line_start.* = true;
+                } else if (enum_block_depth > 0 and enum_payload_paren_depth == 0) {
                     try state.out.append('\n');
                     state.at_line_start.* = true;
                 } else {
@@ -1918,7 +2250,12 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
 
         if (t2.type == .Operator and std.mem.eql(u8, t2.data.sval.items, ",")) {
             try state.out.append(',');
-            if (enum_block_depth > 0) {
+            const in_wrap = wrap_item_depth.items.len > 0 and bracket_depth == wrap_item_depth.items[wrap_item_depth.items.len - 1];
+            if (in_wrap) {
+                // Newline only; the line-start path indents the next item.
+                try state.out.append('\n');
+                state.at_line_start.* = true;
+            } else if (enum_block_depth > 0 and enum_payload_paren_depth == 0) {
                 try state.out.append('\n');
                 state.at_line_start.* = true;
             } else {
@@ -1939,6 +2276,25 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
             const s2 = try token_text(state.allocator, t2, source, line_starts);
             defer state.allocator.free(s2);
             try state.out.appendSlice(s2);
+
+            // Width-based wrapping: if this comma group, rendered on one line from
+            // the current column, would exceed the budget, switch it to one-item-
+            // per-line. We only wrap groups that have a top-level comma (multiple
+            // items) — single-arg calls / index expressions never wrap.
+            const col = currentColumn(state.out);
+            if (try measureWrapGroup(state.allocator, toks, idx, source, line_starts)) |g| {
+                if (g.has_comma and col + g.width > fmt_max_line_width) {
+                    try wrap_close_stack.append(g.close_idx);
+                    try wrap_item_depth.append(bracket_depth); // items live at this depth
+                    state.indent.* += 1;
+                    // Emit only the newline; the standard line-start path emits the
+                    // indent for the first item (avoid double-indenting).
+                    try state.out.append('\n');
+                    state.at_line_start.* = true;
+                    state.prev_token.* = null;
+                    continue;
+                }
+            }
             state.prev_token.* = t2;
             continue;
         }
@@ -2213,6 +2569,9 @@ pub fn format_file_in_place(allocator: mem.Allocator, io: std.Io, input_file: []
 
     try emitTokens(&state, rest.items, source, line_starts.items);
 
+    // Align consecutive trailing comments to a common column.
+    try alignTrailingComments(allocator, &out);
+
     // Ensure exactly one trailing newline.
     if (out.items.len == 0 or out.items[out.items.len - 1] != '\n') {
         try out.append('\n');
@@ -2436,6 +2795,8 @@ pub fn format_file_check(allocator: mem.Allocator, io: std.Io, input_file: []con
     }
 
     try emitTokens(&state, rest.items, source, line_starts.items);
+
+    try alignTrailingComments(allocator, &out);
 
     if (out.items.len == 0 or out.items[out.items.len - 1] != '\n') {
         try out.append('\n');

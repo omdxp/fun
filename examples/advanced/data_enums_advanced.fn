@@ -1,0 +1,78 @@
+// Advanced data-carrying enums: variants carrying compounds and generic instances,
+// matched with `fit` destructuring, plus shorthand `.Variant(...)` construction.
+// 
+// A tagged-union enum may carry any type in a variant payload — primitives, a
+// compound by value, or a monomorphized generic instance. Pattern matching binds
+// each matched variant's payload into locals; payload-free variants coexist.
+
+imp std.c.io;
+
+// A generic container, used below as an enum payload.
+compound Box<T> {
+  T val;
+}
+
+// A 2D point, used below as a by-value enum payload.
+compound Vec2 {
+  num x;
+  num y;
+}
+
+// A JSON-ish value: each variant carries a different shape of data.
+enum Json {
+  Number(num),     // primitive payload
+  Text(str),       // string payload
+  Point(Vec2),     // compound payload (by value)
+  Boxed(Box<num>), // generic-instance payload (monomorphized to Box__num)
+  Null,            // payload-free variant
+}
+
+// Sum to a single number, demonstrating destructuring of every payload shape.
+fun score(Json j) num {
+  fit j {
+    Json.Number(n) -> {
+      ret n;
+    }
+    Json.Text(s) -> {
+      ret 100;
+    } // (length omitted for the demo)
+    Json.Point(p) -> {
+      ret p.x + p.y;
+    } // read the compound payload's fields
+    Json.Boxed(b) -> {
+      ret b.val;
+    } // read the generic payload's field
+    Json.Null -> {
+      ret 0;
+    }
+  }
+  ret -1;
+}
+
+// Shorthand construction: the expected enum type (the return type) selects `Json`.
+fun wrap(num n) Json {
+  ret .Number(n);
+}
+
+fun main() num {
+  Vec2 pt = Vec2{x = 3, y = 4};
+  Box<num> bx = Box<num>{val = 42};
+
+  Json a = Json.Number(7);
+  Json b = Json.Text("hi");
+  Json c = Json.Point(pt);
+  Json d = Json.Boxed(bx);
+  Json e = Json.Null;
+  Json f = wrap(9); // built via shorthand inside wrap()
+
+  printf(
+    "%lld %lld %lld %lld %lld %lld\n",
+    score(a),
+    score(b),
+    score(c),
+    score(d),
+    score(e),
+    score(f)
+  );
+  ret 0;
+}

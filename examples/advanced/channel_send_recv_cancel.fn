@@ -33,7 +33,13 @@ fun main() {
     ok_cancel_recv = 1;
   }
 
-  printf("ok_send=%lld ok_recv=%lld cancel_send=%lld cancel_recv=%lld\n", ok_send, ok_recv, ok_cancel_send, ok_cancel_recv);
+  printf(
+    "ok_send=%lld ok_recv=%lld cancel_send=%lld cancel_recv=%lld\n",
+    ok_send,
+    ok_recv,
+    ok_cancel_send,
+    ok_cancel_recv
+  );
 
   _ = ch.destroy();
 }

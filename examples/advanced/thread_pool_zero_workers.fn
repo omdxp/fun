@@ -13,7 +13,14 @@ fun main() {
   num rc_join = pool.join_all(NULL);
   num rc_detach = pool.detach_all();
 
-  printf("ready=%lld workers=%lld start=%lld join=%lld detach=%lld\n", ready, pool.count(), rc_start, rc_join, rc_detach);
+  printf(
+    "ready=%lld workers=%lld start=%lld join=%lld detach=%lld\n",
+    ready,
+    pool.count(),
+    rc_start,
+    rc_join,
+    rc_detach
+  );
 
   _ = pool.destroy();
 }

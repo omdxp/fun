@@ -359,3 +359,52 @@ test "alias-qualified access to a private (non-pub) global is rejected" {
         try std.testing.expect(std.mem.indexOf(u8, out, "shared_g") != null);
     }
 }
+
+test "leading-underscore field is private across modules; public accessor still works" {
+    // A compound field whose name begins with `_` is module-private: a cross-module
+    // read `acc._balance` is rejected, while a `pub` accessor method that touches the
+    // field from inside the type's own module is allowed.
+    const allocator = std.testing.allocator;
+    const lib_path = "privfield_lib.fn";
+    {
+        const lf = try std.Io.Dir.cwd().createFile(std.testing.io, lib_path, .{});
+        defer lf.close(std.testing.io);
+        try lf.writeStreamingAll(
+            std.testing.io,
+            "pub compound Account { num id; num _balance; }\n" ++
+                "impl Account {\n" ++
+                "  pub balance() num { ret self._balance; }\n" ++
+                "}\n" ++
+                "pub fun new_account(num id, num bal) Account { ret Account{id = id, _balance = bal}; }\n",
+        );
+    }
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, lib_path) catch {};
+
+    // Cross-module read of the private field -> rejected.
+    {
+        const main_path = "privfield_main_bad.fn";
+        const bad =
+            "imp privfield_lib as a;\n" ++
+            "imp std.c.io;\n" ++
+            "fun main() num { Account acc = a.new_account(1, 100); printf(\"%lld\\n\", acc._balance); ret 0; }\n";
+        const res = runTranspile(allocator, main_path, bad);
+        std.Io.Dir.cwd().deleteFile(std.testing.io, main_path) catch {};
+        if (res) |out| {
+            allocator.free(out);
+            return error.ExpectedRejection;
+        } else |_| {}
+    }
+
+    // Cross-module use through the public accessor -> compiles.
+    {
+        const main_path = "privfield_main_ok.fn";
+        const good =
+            "imp privfield_lib as a;\n" ++
+            "imp std.c.io;\n" ++
+            "fun main() num { Account acc = a.new_account(1, 100); printf(\"%lld\\n\", acc.balance()); ret 0; }\n";
+        const out = try runTranspile(allocator, main_path, good);
+        defer allocator.free(out);
+        std.Io.Dir.cwd().deleteFile(std.testing.io, main_path) catch {};
+        try std.testing.expect(std.mem.indexOf(u8, out, "balance") != null);
+    }
+}

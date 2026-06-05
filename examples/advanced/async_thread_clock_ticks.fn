@@ -101,7 +101,13 @@ async fun main() {
   }
 
   num rc_join = thread_join(&clock, 0);
-  printf("summary observed=%lld last=%lld start=%lld join=%lld\n", observed, last_tick, rc_start, rc_join);
+  printf(
+    "summary observed=%lld last=%lld start=%lld join=%lld\n",
+    observed,
+    last_tick,
+    rc_start,
+    rc_join
+  );
 
   _ = stop.close();
   _ = ticks.destroy();

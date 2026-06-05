@@ -1,6 +1,7 @@
 const std = @import("std");
 const ast = @import("ast");
 const codegen = @import("codegen");
+const dt_mod = @import("semantics").dtype;
 const types = @import("types.zig");
 const positions_mod = @import("positions.zig");
 
@@ -169,6 +170,38 @@ pub fn enrichSymbolsFromAst(allocator: Allocator, symbols: *ArrayList(SymbolLite
                     if (!enrich.member_rtype_by_key.contains(key)) {
                         const rts = try dtypeStringOwned.build(allocator, m.rtype);
                         try enrich.member_rtype_by_key.put(key, rts);
+                    }
+                }
+            },
+            .Enum => {
+                // Surface data-carrying variant payloads for hover/completion:
+                // register a per-variant "signature" like `Circle(num)` or
+                // `Rect(num, num)` under `Enum.Variant`. Payload-free variants get
+                // a bare `Variant` entry. This makes IDE hover on a tagged-union
+                // variant show its payload types.
+                const ev = n.node_variant.?.enum_decl;
+                const enum_name = ev.name.items;
+                for (ev.variants.items()) |variant| {
+                    const vname = variant.name.items;
+                    const key = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ enum_name, vname });
+                    if (enrich.member_sig_by_key.contains(key)) continue;
+                    var sig = ArrayList(u8).init(allocator);
+                    errdefer sig.deinit();
+                    try sig.appendSlice(enum_name);
+                    try sig.append('.');
+                    try sig.appendSlice(vname);
+                    if (variant.payload) |payload| {
+                        try sig.append('(');
+                        for (payload.items(), 0..) |pt, i| {
+                            if (i != 0) try sig.appendSlice(", ");
+                            try appendDTypeFull(&sig, pt.*);
+                        }
+                        try sig.append(')');
+                    }
+                    try enrich.member_sig_by_key.put(key, try sig.toOwnedSlice());
+                    // The variant's "result type" is the enum itself.
+                    if (!enrich.member_rtype_by_key.contains(key)) {
+                        try enrich.member_rtype_by_key.put(key, try allocator.dupe(u8, enum_name));
                     }
                 }
             },
@@ -600,6 +633,169 @@ pub fn collectLocalVarsFromExpression(allocator: Allocator, out: *ArrayList(Symb
         },
         .bracket => |b| try collectLocalVars(allocator, out, b.inner, container_fn_range),
         else => {},
+    }
+}
+
+/// Extract `Enum.Variant` (or just `Variant`) from a fit-arm condition node — the
+/// pattern written before `->`. Handles `Shape.Circle` (Expression `.`), a bare
+/// `Circle` (Identifier), and the dot-shorthand `.Circle` (Expression `.` with a
+/// blank/empty left). Returns the variant name; the enum name (if present) is
+/// returned via `enum_out`.
+fn fitConditionVariantName(cond: *ast.Node, enum_out: *?[]const u8) ?[]const u8 {
+    enum_out.* = null;
+    if (cond.node_variant == null) return null;
+    switch (cond.type) {
+        .Identifier => {
+            if (cond.data) |d| if (d == .sval) return d.sval.items;
+            return null;
+        },
+        .Expression => {
+            const e = cond.node_variant.?.exp;
+            if (!std.mem.eql(u8, e.op, ".")) return null;
+            const right = e.right orelse return null;
+            const vname = if (right.type == .Identifier and right.data != null and right.data.? == .sval) right.data.?.sval.items else return null;
+            if (e.left) |l| {
+                if (l.type == .Identifier and l.data != null and l.data.? == .sval) enum_out.* = l.data.?.sval.items;
+            }
+            return vname;
+        },
+        else => return null,
+    }
+}
+
+/// Walk a node subtree for `fit` statements and, for each destructuring arm
+/// (`Enum.Variant(a, b) -> { ... }`), index the binding names (`a`, `b`) as typed
+/// local variables scoped to the arm body. The payload types come from
+/// `payload_by_key` (`"Enum.Variant"` -> positional payload dtypes). This is what
+/// gives hover and completion on a matched payload binding its real type.
+fn collectFitBindingLocals(
+    allocator: Allocator,
+    out: *ArrayList(SymbolLite),
+    n: *ast.Node,
+    payload_by_key: *const std.StringHashMap([]const *dt_mod.DataType),
+    variant_to_enum: *const std.StringHashMap([]const u8),
+) Allocator.Error!void {
+    if (n.node_variant == null) return;
+    switch (n.type) {
+        .Body => {
+            for (n.node_variant.?.body.statements.items()) |s| {
+                try collectFitBindingLocals(allocator, out, s, payload_by_key, variant_to_enum);
+            }
+        },
+        .StatementFit => {
+            const fitv = n.node_variant.?.statement.fit_stmt;
+            for (fitv.branches.items()) |branch| {
+                // Recurse into the arm body for nested fits regardless of bindings.
+                try collectFitBindingLocals(allocator, out, branch.body, payload_by_key, variant_to_enum);
+
+                const binds = branch.bindings orelse continue;
+                if (binds.count == 0) continue;
+                const cond = branch.condition orelse continue;
+
+                var enum_name: ?[]const u8 = null;
+                const vname = fitConditionVariantName(cond, &enum_name) orelse continue;
+
+                // Resolve the variant's payload types. Prefer the qualified key
+                // `Enum.Variant`; fall back to the unique `Variant` (dot-shorthand).
+                const resolved_enum = enum_name orelse (variant_to_enum.get(vname) orelse continue);
+                const key = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ resolved_enum, vname });
+                defer allocator.free(key);
+                const payload = payload_by_key.get(key) orelse continue;
+
+                const arm_range = if (branch.body.pos) |bp| rangeFromTokenPos(bp) else continue;
+
+                // One typed local per positional binding (positions beyond the
+                // payload arity are skipped rather than mis-typed).
+                for (binds.items(), 0..) |bind_name, i| {
+                    if (i >= payload.len) break;
+                    const pt = payload[i];
+                    const name = bind_name.items;
+                    if (name.len == 0) continue;
+
+                    var vtype_buf = ArrayList(u8).init(allocator);
+                    defer vtype_buf.deinit();
+                    try appendDTypeFull(&vtype_buf, pt.*);
+
+                    var detail_buf = ArrayList(u8).init(allocator);
+                    errdefer detail_buf.deinit();
+                    try appendDTypeFull(&detail_buf, pt.*);
+                    try detail_buf.print(" {s}", .{name});
+
+                    try out.append(.{
+                        .name = try allocator.dupe(u8, name),
+                        .kind = .variable,
+                        .decl_range = arm_range,
+                        .selection_range = arm_range,
+                        .container_fn_range = arm_range, // scope to the arm body
+                        .container_type = null,
+                        .value_type = try allocator.dupe(u8, vtype_buf.items),
+                        .detail = try detail_buf.toOwnedSlice(),
+                    });
+                }
+            }
+        },
+        else => {
+            // Walk other statement/expression children that may hold a `fit`.
+            if (n.node_variant) |v| switch (v) {
+                .statement => |st| switch (st) {
+                    .for_stmt => |fs| switch (fs) {
+                        .cond => |c| try collectFitBindingLocals(allocator, out, c.body, payload_by_key, variant_to_enum),
+                        .range => |r| try collectFitBindingLocals(allocator, out, r.body, payload_by_key, variant_to_enum),
+                        .iter => |it| try collectFitBindingLocals(allocator, out, it.body, payload_by_key, variant_to_enum),
+                    },
+                    .if_stmt => |ifs| try collectFitBindingLocals(allocator, out, ifs.body, payload_by_key, variant_to_enum),
+                    .elif_stmt => |es| try collectFitBindingLocals(allocator, out, es.body, payload_by_key, variant_to_enum),
+                    .else_stmt => |es| try collectFitBindingLocals(allocator, out, es.body, payload_by_key, variant_to_enum),
+                    .defer_stmt => |dn| try collectFitBindingLocals(allocator, out, dn.body, payload_by_key, variant_to_enum),
+                    else => {},
+                },
+                else => {},
+            };
+        },
+    }
+}
+
+/// Build payload + variant->enum maps from all top-level enum declarations, then
+/// index every fit-arm payload binding across all function bodies as a typed local.
+/// Call after the main symbol collection with the full top-level node list.
+pub fn appendFitBindingLocals(allocator: Allocator, out: *ArrayList(SymbolLite), nodes: []const ast.Node) Allocator.Error!void {
+    var payload_by_key = std.StringHashMap([]const *dt_mod.DataType).init(allocator);
+    defer payload_by_key.deinit();
+    var variant_to_enum = std.StringHashMap([]const u8).init(allocator);
+    defer variant_to_enum.deinit();
+    var ambiguous = std.StringHashMap(void).init(allocator);
+    defer ambiguous.deinit();
+
+    for (nodes) |n| {
+        if (n.type != .Enum or n.node_variant == null) continue;
+        const ev = n.node_variant.?.enum_decl;
+        const enum_name = ev.name.items;
+        for (ev.variants.items()) |variant| {
+            const payload = variant.payload orelse continue;
+            const vname = variant.name.items;
+            const key = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ enum_name, vname });
+            // Snapshot the payload dtypes into a plain slice (decoupled from the
+            // Vector's internal storage).
+            const slice = try allocator.dupe(*dt_mod.DataType, payload.items());
+            try payload_by_key.put(key, slice);
+            // Track variant->enum for dot-shorthand; mark ambiguous if two enums
+            // share a variant name (then shorthand can't disambiguate).
+            if (variant_to_enum.contains(vname)) {
+                try ambiguous.put(vname, {});
+            } else {
+                try variant_to_enum.put(vname, enum_name);
+            }
+        }
+    }
+    var it = ambiguous.keyIterator();
+    while (it.next()) |k| _ = variant_to_enum.remove(k.*);
+
+    for (nodes) |n| {
+        if (n.type != .Function or n.node_variant == null) continue;
+        const fnv = n.node_variant.?.function;
+        if (fnv.body) |b| {
+            try collectFitBindingLocals(allocator, out, b, &payload_by_key, &variant_to_enum);
+        }
     }
 }
 

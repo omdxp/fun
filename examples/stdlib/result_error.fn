@@ -7,5 +7,12 @@ fun main() {
   e.with_context("field: age");
 
   Result<num> r = err_error(e, 0);
-  printf("ok=%d val=%d err=%d %s ctx=%s\n", r.is_ok(), r.value, r.err.code, r.err.message, r.err.context);
+  printf(
+    "ok=%d val=%d err=%d %s ctx=%s\n",
+    r.is_ok(),
+    r.value,
+    r.err.code,
+    r.err.message,
+    r.err.context
+  );
 }

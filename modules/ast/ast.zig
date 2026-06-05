@@ -407,6 +407,11 @@ pub const EnumVariant = struct {
     /// Optional explicit integer value (`Variant = 3;`).
     /// When null, values auto-increment from 0 following C enum rules.
     value: ?i64 = null,
+    /// Optional positional payload types for a data-carrying variant, e.g.
+    /// `Circle(num)` -> [num], `Rect(num, num)` -> [num, num]. When null the
+    /// variant carries no data (a plain C-style enumerator). An enum is a tagged
+    /// union (sum type) iff ANY of its variants has a payload.
+    payload: ?utils.Vector(*dtype.DataType) = null,
 };
 
 /// Represents the branches in a fit statement.
@@ -415,6 +420,12 @@ pub const FitBranch = struct {
     condition: ?*Node = null,
     /// The body of the branch statement.
     body: *Node,
+    /// For a data-carrying enum arm (`Shape.Circle(r)` / `.Rect(w, h)`), the
+    /// positional binding names that destructure the matched variant's payload
+    /// into locals visible in `body`. Null/empty for plain (non-destructuring)
+    /// arms. The condition node holds the variant path (`Shape.Circle`); the
+    /// payload arg list is captured here so codegen can emit the bindings.
+    bindings: ?utils.Vector(ArrayList(u8)) = null,
 };
 
 pub const AsmOperand = struct {

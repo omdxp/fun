@@ -43,6 +43,15 @@ fun main() {
   pt.y = 9;
 
   str s_pt = pt.to_string();
-  println_fmt("num={num} dec={dec} bin={bin} chr={chr} str={str} ptr={ptr} pt={str}", n, d, b, c, s, p, s_pt);
+  println_fmt(
+    "num={num} dec={dec} bin={bin} chr={chr} str={str} ptr={ptr} pt={str}",
+    n,
+    d,
+    b,
+    c,
+    s,
+    p,
+    s_pt
+  );
   free(s_pt);
 }

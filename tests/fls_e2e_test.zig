@@ -1727,6 +1727,59 @@ test "fls e2e: enum dot shorthand completion/hover/definition" {
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: data-carrying enum shorthand completion" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    // A tagged-union enum: variants carry payloads. Completion after `.` in a
+    // typed var-init should still offer the variant names, exactly like a plain
+    // enum — the new payload syntax must not break dot-shorthand completion.
+    // Use a unique enum name (`Geo`) to avoid colliding with `Shape`, which is a
+    // quirk declared in examples/advanced/quirks.fn that the shared workspace index
+    // also picks up.
+    const doc_text =
+        "imp std.c.io;\n\n" ++
+        "enum Geo {\n" ++
+        "  Circle(num),\n" ++
+        "  Rect(num, num),\n" ++
+        "  Empty,\n" ++
+        "}\n\n" ++
+        "fun main() {\n" ++
+        "  Geo s = .\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-data-enum.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const comp_pos = try findPosition(doc_text, "Geo s = .", 0);
+    const comp_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, comp_pos.line, comp_pos.col + @as(i64, @intCast("Geo s = .".len)) },
+    );
+    defer allocator.free(comp_params);
+    const comp_id = try lsp.request("textDocument/completion", comp_params);
+    var comp_res = try lsp.waitResponse(comp_id, 15000);
+    defer comp_res.deinit();
+    const comp_result = try jsonResultFromResponseObj(comp_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, comp_result, "Circle");
+    try expectCompletionHasLabel(allocator, comp_result, "Empty");
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: generic type member completion (Vec<T>)" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
@@ -1919,6 +1972,57 @@ test "fls e2e: generic compound init member detail specializes field type" {
     defer value_hover_res.deinit();
     const value_hover_val = try jsonResultFromResponseObj(value_hover_res.parsed.value.object);
     try expectHoverContains(allocator, value_hover_val, "num value");
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: generic compound init offers field-name completion" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    // Field-name completion inside an EXPLICITLY-GENERIC compound initializer
+    // (`Box<num>{ <cursor> }`). The type name before `{` is `Box<num>`; FLS must
+    // skip the `<num>` generic args to recover the base type `Box` and offer its
+    // field `value`. (A non-generic `Point{` already worked; this guards the
+    // generic-args handling.)
+    const doc_text =
+        "compound Box<T> {\n" ++
+        "  T value;\n" ++
+        "  num tag;\n" ++
+        "}\n\n" ++
+        "fun main() {\n" ++
+        "  Box<num> b = Box<num>{ \n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-generic-init-fields.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // Cursor right after `Box<num>{ ` (inside the braces).
+    const init_pos = try findPosition(doc_text, "Box<num>{ ", 0);
+    const comp_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, init_pos.line, init_pos.col + @as(i64, @intCast("Box<num>{ ".len)) },
+    );
+    defer allocator.free(comp_params);
+    const comp_id = try lsp.request("textDocument/completion", comp_params);
+    var comp_res = try lsp.waitResponse(comp_id, 15000);
+    defer comp_res.deinit();
+    const comp_result = try jsonResultFromResponseObj(comp_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, comp_result, "value");
+    try expectCompletionHasLabel(allocator, comp_result, "tag");
 
     const shutdown_id = try lsp.request("shutdown", "{}");
     var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
@@ -5454,6 +5558,174 @@ test "fls e2e: hover has no bold title, completion uses arg snippets, inlay hint
         }
     }
     try std.testing.expect(saw_a and saw_b);
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: inlay hint shows the called function's own param name, not another fn's" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    // Mirrors the reported screenshot: a sibling fn `other(num j)` and the called
+    // fn `score(num a)`, with `score(...)` calls NESTED inside a wrapped multi-line
+    // `printf(...)`. The hint for a `score(a)` arg must be `a:` (score's own param)
+    // — and since the arg is the identifier `a`, it is suppressed as redundant —
+    // and must NEVER be `j:` (the sibling's param). This guards both signature
+    // resolution and the nested-call walk inside a wrapped outer call.
+    const doc_text =
+        "fun other(num j) num {\n" ++
+        "  ret j;\n" ++
+        "}\n\n" ++
+        "fun score(num a) num {\n" ++
+        "  ret a;\n" ++
+        "}\n\n" ++
+        "fun main() num {\n" ++
+        "  num a = 1;\n" ++
+        "  num q = 3;\n" ++
+        "  num s = score(q);\n" ++
+        "  printf(\n" ++
+        "    \"%lld %lld\\n\",\n" ++
+        "    score(a),\n" ++
+        "    score(a)\n" ++
+        "  );\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-inlay-correct-param.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const inlay_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"range\":{{\"start\":{{\"line\":0,\"character\":0}},\"end\":{{\"line\":100,\"character\":0}}}}}}",
+        .{doc_uri},
+    );
+    defer allocator.free(inlay_params);
+    const inlay_id = try lsp.request("textDocument/inlayHint", inlay_params);
+    var inlay_res = try lsp.waitResponse(inlay_id, 5000);
+    defer inlay_res.deinit();
+    const inlay_result = try jsonResultFromResponseObj(inlay_res.parsed.value.object);
+    var saw_a = false;
+    var saw_j = false;
+    if (inlay_result == .array) {
+        for (inlay_result.array.items) |h| {
+            if (h != .object) continue;
+            const lbl = h.object.get("label") orelse continue;
+            if (lbl != .string) continue;
+            if (std.mem.eql(u8, lbl.string, "a:")) saw_a = true;
+            if (std.mem.eql(u8, lbl.string, "j:")) saw_j = true;
+        }
+    }
+    try std.testing.expect(saw_a); // score's own param
+    try std.testing.expect(!saw_j); // never the other function's param
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: data-enum fit arm binding has typed hover and member completion" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    // A data-carrying enum whose `Point` variant carries a `Vec2` compound. In the
+    // arm `Json.Point(p) -> { ... }`, the binding `p` must be a typed local: hover
+    // shows `Vec2`, and member completion `p.` offers Vec2's fields `x`/`y`.
+    const doc_text =
+        "compound Vec2 {\n" ++
+        "  num x;\n" ++
+        "  num y;\n" ++
+        "}\n\n" ++
+        "compound Box<T> {\n" ++
+        "  T val;\n" ++
+        "}\n\n" ++
+        "enum Json {\n" ++
+        "  Number(num),\n" ++
+        "  Point(Vec2),\n" ++
+        "  Boxed(Box<num>),\n" ++
+        "  Null,\n" ++
+        "}\n\n" ++
+        "fun score(Json j) num {\n" ++
+        "  fit j {\n" ++
+        "    Json.Point(p) -> {\n" ++
+        "      num t = p.x;\n" ++
+        "      ret t;\n" ++
+        "    }\n" ++
+        "    Json.Boxed(b) -> {\n" ++
+        "      num u = b.val;\n" ++
+        "      ret u;\n" ++
+        "    }\n" ++
+        "    _ -> { ret 0; }\n" ++
+        "  }\n" ++
+        "  ret -1;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-fit-binding.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // Hover on the binding `p` in `num t = p.x;` (the receiver) -> type Vec2.
+    const p_pos = try findPosition(doc_text, "      num t = p.x;\n", 0);
+    const hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, p_pos.line, p_pos.col + @as(i64, @intCast("      num t = ".len)) },
+    );
+    defer allocator.free(hover_params);
+    const hover_id = try lsp.request("textDocument/hover", hover_params);
+    var hover_res = try lsp.waitResponse(hover_id, 15000);
+    defer hover_res.deinit();
+    const hover_val = try jsonResultFromResponseObj(hover_res.parsed.value.object);
+    try expectHoverContains(allocator, hover_val, "Vec2");
+
+    // Member completion at `p.` (just after the dot) -> Vec2 fields x and y.
+    const comp_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, p_pos.line, p_pos.col + @as(i64, @intCast("      num t = p.".len)) },
+    );
+    defer allocator.free(comp_params);
+    const comp_id = try lsp.request("textDocument/completion", comp_params);
+    var comp_res = try lsp.waitResponse(comp_id, 15000);
+    defer comp_res.deinit();
+    const comp_result = try jsonResultFromResponseObj(comp_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, comp_result, "x");
+    try expectCompletionHasLabel(allocator, comp_result, "y");
+
+    // The GENERIC payload binding `b` keeps `Box<num>`, so hovering its field
+    // `b.val` resolves to the SUBSTITUTED `num` (not the bare type parameter `T`).
+    const bval_pos = try findPosition(doc_text, "      num u = b.val;\n", 0);
+    const bval_hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, bval_pos.line, bval_pos.col + @as(i64, @intCast("      num u = b.".len)) },
+    );
+    defer allocator.free(bval_hover_params);
+    const bval_hover_id = try lsp.request("textDocument/hover", bval_hover_params);
+    var bval_hover_res = try lsp.waitResponse(bval_hover_id, 15000);
+    defer bval_hover_res.deinit();
+    const bval_hover_val = try jsonResultFromResponseObj(bval_hover_res.parsed.value.object);
+    try expectHoverContains(allocator, bval_hover_val, "num");
 
     const shutdown_id = try lsp.request("shutdown", "{}");
     var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);

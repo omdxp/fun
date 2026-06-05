@@ -8,7 +8,13 @@ fun main() {
   printf("sin(45deg)=%f cos(45deg)=%f\n", sin_dec(angle), cos_dec(angle));
 
   dec v = 9.75;
-  printf("floor=%f ceil=%f round=%f trunc=%f\n", floor_dec(v), ceil_dec(v), round_dec(v), trunc_dec(v));
+  printf(
+    "floor=%f ceil=%f round=%f trunc=%f\n",
+    floor_dec(v),
+    ceil_dec(v),
+    round_dec(v),
+    trunc_dec(v)
+  );
 
   printf("exp(1)=%f log(e)=%f\n", exp_dec(1), log_dec(2.718281828459045));
 

@@ -385,6 +385,10 @@ pub fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path
         for (tp.nodes.items()) |n| {
             try collectSymbolsFromTopLevel(tmp_alloc, &symbols_out, n);
         }
+        // Index data-enum fit-arm payload bindings as typed locals (so hover and
+        // completion work on a destructured `Variant(x)` binding). Needs the full
+        // node list to resolve a variant's payload types from its enum declaration.
+        try ast_idx.appendFitBindingLocals(tmp_alloc, &symbols_out, tp.nodes.items());
 
         // If the AST missed pub flags, fall back to token-derived visibility for top-level symbols.
         var token_public = std.StringHashMap(bool).init(tmp_alloc);
@@ -806,6 +810,97 @@ test "fls index: locals are indexed inside fun bodies" {
         }
     }
     try std.testing.expect(found_p);
+}
+
+test "fls index: data-enum fit arm binding is a typed local" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const text =
+        "compound Vec2 {\n" ++
+        "  num x;\n" ++
+        "  num y;\n" ++
+        "}\n\n" ++
+        "compound Box<T> {\n" ++
+        "  T val;\n" ++
+        "}\n\n" ++
+        "enum Json {\n" ++
+        "  Number(num),\n" ++
+        "  Point(Vec2),\n" ++
+        "  Boxed(Box<num>),\n" ++
+        "  Null,\n" ++
+        "}\n\n" ++
+        "fun score(Json j) num {\n" ++
+        "  fit j {\n" ++
+        "    Json.Point(p) -> {\n" ++
+        "      num t = p.x;\n" ++
+        "      ret t;\n" ++
+        "    }\n" ++
+        "    Json.Boxed(b) -> {\n" ++
+        "      ret b.val;\n" ++
+        "    }\n" ++
+        "    _ -> { ret 0; }\n" ++
+        "  }\n" ++
+        "  ret -1;\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    // The compound payload binding `p` is typed `Vec2`; the GENERIC-instance
+    // payload binding `b` keeps its concrete args `Box<num>` (not the bare `Box`),
+    // so `b.val` can later resolve to the substituted `num` rather than `T`.
+    var found_p = false;
+    var found_b = false;
+    for (idx.symbols) |s| {
+        if (s.kind != .variable) continue;
+        if (std.mem.eql(u8, s.name, "p")) {
+            found_p = true;
+            try std.testing.expect(s.value_type != null);
+            try std.testing.expect(std.mem.eql(u8, s.value_type.?, "Vec2"));
+        }
+        if (std.mem.eql(u8, s.name, "b")) {
+            found_b = true;
+            try std.testing.expect(s.value_type != null);
+            try std.testing.expect(std.mem.eql(u8, s.value_type.?, "Box<num>"));
+        }
+    }
+    try std.testing.expect(found_p);
+    try std.testing.expect(found_b);
+}
+
+test "fls index: enum variant captures its trailing doc comment" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const text =
+        "enum Json {\n" ++
+        "  Number(num), // primitive payload\n" ++
+        "  Null,        // payload-free variant\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var saw_number = false;
+    var saw_null = false;
+    for (idx.symbols) |s| {
+        if (s.kind != .enumMember) continue;
+        if (std.mem.eql(u8, s.name, "Number")) {
+            saw_number = true;
+            try std.testing.expect(s.detail != null);
+            try std.testing.expect(std.mem.eql(u8, s.detail.?, "primitive payload"));
+        }
+        if (std.mem.eql(u8, s.name, "Null")) {
+            saw_null = true;
+            try std.testing.expect(s.detail != null);
+            try std.testing.expect(std.mem.eql(u8, s.detail.?, "payload-free variant"));
+        }
+    }
+    try std.testing.expect(saw_number);
+    try std.testing.expect(saw_null);
 }
 
 test "fls index: generic locals are indexed" {

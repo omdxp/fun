@@ -31,7 +31,14 @@ async fun main() {
     first_line = "";
   }
 
-  printf("copied=%lld sent=%lld exists_dst=%lld size_dst=%lld first=%s\n", copied, sent, exists_dst, size_dst, first_line);
+  printf(
+    "copied=%lld sent=%lld exists_dst=%lld size_dst=%lld first=%s\n",
+    copied,
+    sent,
+    exists_dst,
+    size_dst,
+    first_line
+  );
 
   if first_line_raw != NULL {
     free(first_line_raw);

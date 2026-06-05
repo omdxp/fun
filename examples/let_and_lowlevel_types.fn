@@ -89,7 +89,12 @@ fun main(str[] args) {
   // HasX inferred_quirk = as_hasx(&from_method_return);
 
   printf("total=%lld final=%lld s32=%d u64=%llu\n", total, final_total, signed_32, mask);
-  printf("point sum=%lld generic_num=%lld generic_point_x=%lld\n", from_method_num, from_generic_num, from_generic_compound.x);
+  printf(
+    "point sum=%lld generic_num=%lld generic_point_x=%lld\n",
+    from_method_num,
+    from_generic_num,
+    from_generic_compound.x
+  );
   printf("small mix=%lld dec=%f bool=%d\n", mixed_small, inferred_dec, inferred_bool);
   printf("quirk get_x=%lld\n", explicit_quirk.get_x());
   printf("chr=%c str=%s\n", inferred_chr, inferred_str);

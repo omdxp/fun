@@ -1,0 +1,47 @@
+// Private compound fields via a leading underscore.
+// 
+// A field whose name begins with `_` is module-private: it can only be read or
+// written from code in the same module as the compound's declaration. No keyword
+// is needed — the leading underscore is the marker. Within the type's own impl
+// methods (`self._field`) and anywhere else in the same file, the field is fully
+// accessible; another module must go through public accessors.
+
+imp std.c.io;
+
+compound BankAccount {
+  // Public: the account id is part of the type's external surface.
+  num id;
+  // Private: balance is an implementation detail, mutated only via methods.
+  num _balance;
+}
+
+impl BankAccount {
+  pub deposit(num amount) {
+    self._balance = self._balance + amount;
+  }
+
+  pub withdraw(num amount) bin {
+    if amount > self._balance {
+      ret false;
+    }
+    self._balance = self._balance - amount;
+    ret true;
+  }
+
+  // A public accessor exposes the private balance in a controlled way.
+  pub balance() num {
+    ret self._balance;
+  }
+}
+
+fun main() num {
+  // Same-module construction may set the private field directly.
+  BankAccount acc = BankAccount{id = 1, _balance = 100};
+
+  acc.deposit(50);
+  bin ok = acc.withdraw(30);
+  bin denied = acc.withdraw(1000);
+
+  printf("id=%lld balance=%lld ok=%d denied=%d\n", acc.id, acc.balance(), ok, denied);
+  ret 0;
+}

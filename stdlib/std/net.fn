@@ -275,7 +275,13 @@ compound TcpRoundtripOffloadJob {
   num result_rc;
 }
 
-fun _tcp_roundtrip_core(num fd, str send_buf, str recv_buf, num recv_len, ChannelCancelToken* cancel_token) num {
+fun _tcp_roundtrip_core(
+  num fd,
+  str send_buf,
+  str recv_buf,
+  num recv_len,
+  ChannelCancelToken* cancel_token
+) num {
   if recv_buf == NULL || recv_len <= 0 {
     ret -1;
   }
@@ -311,7 +317,13 @@ fun _tcp_roundtrip_offload_worker(raw* arg) raw* {
   }
 
   TcpRoundtripOffloadJob* job = arg;
-  job.result_rc = _tcp_roundtrip_core(job.fd, job.send_buf, job.recv_buf, job.recv_len, job.cancel_token);
+  job.result_rc = _tcp_roundtrip_core(
+    job.fd,
+    job.send_buf,
+    job.recv_buf,
+    job.recv_len,
+    job.cancel_token
+  );
 
   ret NULL;
 }
@@ -329,7 +341,13 @@ fun _tcp_roundtrip_offload_worker(raw* arg) raw* {
 // - >= 0 bytes read
 // - -1 on invalid args or socket write/read failure
 // - -3 when cancelled
-pub async fun tcp_roundtrip_async(num fd, str send_buf, str recv_buf, num recv_len, ChannelCancelToken* cancel_token) num {
+pub async fun tcp_roundtrip_async(
+  num fd,
+  str send_buf,
+  str recv_buf,
+  num recv_len,
+  ChannelCancelToken* cancel_token
+) num {
   ret _tcp_roundtrip_core(fd, send_buf, recv_buf, recv_len, cancel_token);
 }
 
@@ -342,7 +360,13 @@ pub async fun tcp_roundtrip_async(num fd, str send_buf, str recv_buf, num recv_l
 // Returns:
 // - same codes as tcp_roundtrip_async
 // - backend thread start/join error code when spawn/join fails
-pub async fun tcp_roundtrip_offload_async(num fd, str send_buf, str recv_buf, num recv_len, ChannelCancelToken* cancel_token) num {
+pub async fun tcp_roundtrip_offload_async(
+  num fd,
+  str send_buf,
+  str recv_buf,
+  num recv_len,
+  ChannelCancelToken* cancel_token
+) num {
   if recv_buf == NULL || recv_len <= 0 {
     ret -1;
   }
@@ -385,7 +409,11 @@ pub async fun tcp_roundtrip_offload_async(num fd, str send_buf, str recv_buf, nu
 // - -1 on invalid args or malformed url
 // - -2 when request allocation fails
 // - -3 when cancelled
-pub async fun build_http_get_to_channel_async(str raw_url, Channel<str>* out_requests, ChannelCancelToken* cancel_token) num {
+pub async fun build_http_get_to_channel_async(
+  str raw_url,
+  Channel<str>* out_requests,
+  ChannelCancelToken* cancel_token
+) num {
   if raw_url == NULL || out_requests == NULL {
     ret -1;
   }

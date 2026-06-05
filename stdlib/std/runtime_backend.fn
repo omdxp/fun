@@ -29,7 +29,10 @@ fun runtime_backend_id_from_name(str name) num {
     ret runtime_backend_posix_id();
   }
 
-  if strcmp(name, "2") == 0 || strcmp(name, "windows") == 0 || strcmp(name, "Windows") == 0 || strcmp(name, "WINDOWS") == 0 {
+  if strcmp(name, "2") == 0 || strcmp(name, "windows") == 0 || strcmp(name, "Windows") == 0 || strcmp(
+    name,
+    "WINDOWS"
+  ) == 0 {
     ret runtime_backend_windows_id();
   }
 
@@ -41,7 +44,10 @@ fun runtime_backend_id_from_os_name(str os_name) num {
     ret 0;
   }
 
-  if strcmp(os_name, "posix") == 0 || strcmp(os_name, "unix") == 0 || strcmp(os_name, "POSIX") == 0 || strcmp(os_name, "UNIX") == 0 {
+  if strcmp(os_name, "posix") == 0 || strcmp(os_name, "unix") == 0 || strcmp(os_name, "POSIX") == 0 || strcmp(
+    os_name,
+    "UNIX"
+  ) == 0 {
     ret runtime_backend_posix_id();
   }
 

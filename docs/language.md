@@ -60,6 +60,35 @@
     - `fit c { Color.Red -> { ... }, Color.Green -> { ... }, Color.Blue -> { ... } }`
 - **Exhaustiveness**: Missing enum variants in `fit` may emit `fit_non_exhaustive`; redundant branches or catch-alls may emit `fit_unreachable_branch`.
 
+#### Data-carrying enums (sum types / tagged unions)
+A variant may carry a positional payload, turning the enum into a tagged union (a
+Rust-style sum type). An enum becomes a tagged union as soon as *any* variant has a
+payload; payload-free variants still coexist.
+
+- **Declaration**: `enum Shape { Circle(num), Rect(num, num), Empty }`
+    - A payload is a parenthesized, comma-separated list of types: `Circle(num)`,
+      `Rect(num, num)`. Payloads can be primitives, compounds (by value), or
+      monomorphized generic instances (`Boxed(Box<num>)`).
+- **Construction**:
+    - Longhand: `Shape s = Shape.Circle(5);`  `Shape r = Shape.Rect(3, 4);`
+    - Shorthand (expected type known): `Shape s = .Circle(5);`  `ret .Some(x);`
+    - A payload-free variant is constructed like a normal enum value: `Shape e = Shape.Empty;`
+- **Pattern matching with destructuring**: each arm binds the matched variant's
+  payload into locals visible in the arm body.
+    ```fun
+    fit s {
+        Shape.Circle(r) -> { ret r * r; }       // r is the payload
+        Shape.Rect(w, h) -> { ret w * h; }       // w, h are the payload
+        Shape.Empty -> { ret 0; }
+    }
+    ```
+    - The shorthand arm form (`.Circle(r) -> ...`) works too, and a `_ -> { ... }`
+      catch-all covers the remaining variants.
+- **Lowering**: a tagged-union enum emits a C `struct { Enum_tag tag; union { ... } payload; }`;
+  payload-free (plain) enums keep the classic C `enum` lowering for full backward compatibility.
+- **Exhaustiveness**: the same `fit_non_exhaustive` check applies — cover every
+  variant or add a `_` catch-all.
+
 ### Control Flow
 - **If/Else**: Standard conditional branching.
 - **Elif**: Else-if chaining.
@@ -144,6 +173,21 @@ async fun main() {
 
 ### Compounds & Quirks
 - **Compounds**: Like C structs, can have methods via `impl`.
+- **Private fields (leading `_`)**: A compound field whose name begins with an
+  underscore is module-private — readable/writable only from code in the same
+  module as the compound's declaration (including its own `impl` methods via
+  `self._field`). No keyword is needed; the leading `_` is the marker. Another
+  module must go through public accessor methods. Example:
+    ```fun
+    compound Account {
+        num id;          // public
+        num _balance;    // private to this module
+    }
+    impl Account {
+        pub balance() num { ret self._balance; }   // self._balance is fine here
+    }
+    // In another module: `acc._balance` is rejected; `acc.balance()` works.
+    ```
 - **Quirks**: Like interfaces/traits, define required methods.
 - **Impl**: Attach methods to compounds or implement quirks for compounds.
 - **Method Dispatch**: Quirk values can be used for dynamic dispatch (like trait objects).

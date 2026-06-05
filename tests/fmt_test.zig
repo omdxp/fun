@@ -997,3 +997,128 @@ test "-fmt constrained generic impl keeps colon tight" {
     try std.testing.expect(std.mem.indexOf(u8, got, "impl Vec<T : num | dec>") == null);
     try expectFileParses(allocator, path);
 }
+
+test "-fmt keeps a data-carrying enum variant payload on one line" {
+    const allocator = std.testing.allocator;
+
+    // Regression: a multi-type variant payload `Pair(num, num)` once had its inner
+    // comma treated as a variant separator, splitting it across lines. The payload
+    // comma must stay inline; only top-level variant-separator commas break.
+    const ugly =
+        "enum Val{I(num),Pair(num,num),Nil}\n";
+
+    const path = try writeTempFnFile(allocator, "fmtenum", ugly);
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+
+    const expected =
+        "enum Val {\n" ++
+        "  I(num),\n" ++
+        "  Pair(num, num),\n" ++
+        "  Nil\n" ++
+        "}\n";
+
+    try std.testing.expectEqualStrings(expected, got);
+}
+
+test "-fmt keeps a trailing comment inline and aligns a run of them" {
+    const allocator = std.testing.allocator;
+
+    const path = try writeTempFnFile(allocator, "fmtcomment", "enum E { Nil }\n");
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+        allocator.free(path);
+    }
+
+    // Author with trailing comments; a trailing comment must stay on the same line
+    // as the code it follows (it once got pushed onto its own line), and a run of
+    // consecutive trailing comments in a block aligns to a common column.
+    {
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{ .truncate = true });
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(
+            std.testing.io,
+            "enum E {\n" ++
+                "  Number(num), // a\n" ++
+                "  Pair(num, num), // bb\n" ++
+                "  Nil // ccc\n" ++
+                "}\n",
+        );
+    }
+
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+
+    // Comments stay inline and align one past the widest code line
+    // (`  Pair(num, num),` is the widest at 17 chars).
+    const expected =
+        "enum E {\n" ++
+        "  Number(num),    // a\n" ++
+        "  Pair(num, num), // bb\n" ++
+        "  Nil             // ccc\n" ++
+        "}\n";
+
+    try std.testing.expectEqualStrings(expected, got);
+}
+
+test "-fmt wraps a comma list that exceeds the line-width budget" {
+    const allocator = std.testing.allocator;
+
+    const ugly =
+        "fun s(num a) num { ret a; }\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"%lld %lld %lld %lld %lld %lld %lld %lld %lld %lld\\n\", 11, 22, 33, 44, 55, 66, 77, 88, 99, 100);\n" ++
+        "  num x = s(1);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const path = try writeTempFnFile(allocator, "fmtwrap", ugly);
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+
+    // The long printf wraps one item per line; the short `s(1)` stays inline.
+    try std.testing.expect(std.mem.indexOf(u8, got, "  printf(\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "    11,\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "    100\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "  );\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "num x = s(1);") != null);
+}
+
+test "-fmt spaces a leading-dot enum shorthand after ret" {
+    const allocator = std.testing.allocator;
+
+    const ugly =
+        "enum E { N(num), Nil }\n" ++
+        "fun w(num n) E { ret .N(n); }\n";
+
+    const path = try writeTempFnFile(allocator, "fmtshorthand", ugly);
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+
+    // `ret .N(n)` keeps its space (it once glued to `ret.N`).
+    try std.testing.expect(std.mem.indexOf(u8, got, "ret .N(n);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "ret.N") == null);
+}

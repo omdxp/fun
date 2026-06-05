@@ -5845,6 +5845,186 @@ test "P3: a genuine by-value compound cycle is still rejected" {
     );
 }
 
+test "private field (leading underscore): same-module read/write/self access works" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_priv_field.fn";
+    const c_path = "codegen_priv_field.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_priv_field.exe" else "codegen_priv_field";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // A field named with a leading `_` is module-private. Within the SAME module
+    // (this file), it is freely readable/writable and reachable via `self._x` in a
+    // method body. The name emits verbatim into the C struct (`_password`).
+    const input =
+        "imp std.c.io;\n" ++
+        "compound User { num id; num _password; }\n" ++
+        "impl User {\n" ++
+        "  pub set_pw(num p) { self._password = p; }\n" ++
+        "  pub check(num p) bin { ret self._password == p; }\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  User u = User{id = 1, _password = 42};\n" ++
+        "  num a = u._password;\n" ++
+        "  u._password = 99;\n" ++
+        "  u.set_pw(7);\n" ++
+        "  printf(\"%lld %lld %d\\n\", a, u._password, u.check(7));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "_password") != null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("42 7 1\n", stdout);
+}
+
+test "data-carrying enum: construct + pattern-match with payload bindings" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_data_enum.fn";
+    const c_path = "codegen_data_enum.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_data_enum.exe" else "codegen_data_enum";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // A variant with a payload makes the enum a tagged union, emitted as
+    // `struct { Enum_tag tag; union { ... } payload; }`. Construction is a compound
+    // literal; `fit` switches on `.tag` and binds the matched payload into locals.
+    // A payload-free variant in a tagged union still constructs the struct.
+    const input =
+        "imp std.c.io;\n" ++
+        "enum Val { I(num), Pair(num, num), Nil }\n" ++
+        "fun sum(Val v) num {\n" ++
+        "  fit v {\n" ++
+        "    Val.I(x) -> { ret x; }\n" ++
+        "    Val.Pair(a, b) -> { ret a + b; }\n" ++
+        "    Val.Nil -> { ret 0; }\n" ++
+        "  }\n" ++
+        "  ret -1;\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  Val a = Val.I(7);\n" ++
+        "  Val b = Val.Pair(3, 4);\n" ++
+        "  Val c = Val.Nil;\n" ++
+        "  printf(\"%lld %lld %lld\\n\", sum(a), sum(b), sum(c));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    // Tagged-union shape: discriminant enum + payload union.
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Val_tag") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, ".payload.") != null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("7 7 0\n", stdout);
+}
+
+test "data-carrying enum: shorthand .Variant(x) and _ catch-all" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_data_enum_short.fn";
+    const c_path = "codegen_data_enum_short.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_data_enum_short.exe" else "codegen_data_enum_short";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    const input =
+        "imp std.c.io;\n" ++
+        "enum Opt { Some(num), None }\n" ++
+        "fun get(Opt o) num {\n" ++
+        "  fit o {\n" ++
+        "    Opt.Some(v) -> { ret v; }\n" ++
+        "    _ -> { ret -9; }\n" ++
+        "  }\n" ++
+        "  ret 0;\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"%lld %lld\\n\", get(Opt.Some(5)), get(Opt.None));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("5 -9\n", stdout);
+}
+
+test "data-carrying enum: shorthand construction in typed var-init and return" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_data_enum_shorthand.fn";
+    const c_path = "codegen_data_enum_shorthand.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_data_enum_shorthand.exe" else "codegen_data_enum_shorthand";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // `.Variant(args)` shorthand construction resolves the enum from the expected
+    // type: a typed var-init's declared type, and a function's return type.
+    const input =
+        "imp std.c.io;\n" ++
+        "enum Opt { Some(num), None }\n" ++
+        "fun mk(num x) Opt { ret .Some(x); }\n" ++ // shorthand in return position
+        "fun get(Opt o) num {\n" ++
+        "  fit o {\n" ++
+        "    Opt.Some(v) -> { ret v; }\n" ++
+        "    Opt.None -> { ret -1; }\n" ++
+        "  }\n" ++
+        "  ret 0;\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  Opt a = .Some(9);\n" ++ // shorthand in typed var-init
+        "  Opt b = .None;\n" ++ // payload-free shorthand still works
+        "  printf(\"%lld %lld %lld\\n\", get(a), get(b), get(mk(42)));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("9 -1 42\n", stdout);
+}
+
+test "plain (payload-free) enum still lowers to a C enum, unaffected by tagged unions" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_plain_enum_still.fn";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    const input =
+        "imp std.c.io;\n" ++
+        "enum Color { Red, Green, Blue }\n" ++
+        "fun main() num { Color c = Color.Green; ret 0; }\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    // No payload anywhere -> classic C enum, NOT a tagged union (no _tag struct).
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "typedef enum Color {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Color_tag") == null);
+}
+
 test "direct call-site quirk coercion: callee(&concrete) wraps in __fun_coerce" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_callsite_quirk_coerce.fn";

@@ -146,6 +146,91 @@ pub fn nextNonTrivialToken(tokens: []const token.Token, start_index: usize) ?usi
     return null;
 }
 
+/// Return the cleaned text of a trailing comment that sits on the SAME source line
+/// as the token at `from_i` (e.g. the `,` after an enum variant), or null. Used to
+/// surface `Variant(num), // primitive payload` as the variant's hover doc. The
+/// returned slice is owned by `allocator`. Stops at the first newline (a comment on
+/// the next line is not a trailing comment for this variant).
+fn trailingCommentTextOnLine(allocator: Allocator, tokens: []const token.Token, from_i: usize) ?[]const u8 {
+    const base_line = tokens[from_i].pos.line;
+    var i = from_i + 1;
+    while (i < tokens.len) : (i += 1) {
+        const t = tokens[i];
+        if (t.type == .NewLine) return null; // crossed onto a new line
+        if (t.pos.line != base_line) return null;
+        if (t.type == .Comment) {
+            const raw = tokenString(t);
+            // Strip a leading `//` and surrounding whitespace.
+            var s = std.mem.trim(u8, raw, " \t\r\n");
+            if (std.mem.startsWith(u8, s, "//")) s = std.mem.trim(u8, s[2..], " \t");
+            if (s.len == 0) return null;
+            return allocator.dupe(u8, s) catch null;
+        }
+    }
+    return null;
+}
+
+/// Read the full spelling of a type that starts at `start_i` — the base identifier
+/// plus any balanced generic argument run `<...>` and trailing `*`/`[]` suffixes —
+/// joined with no spaces (`Box < num >` -> "Box<num>"). Returns an allocator-owned
+/// slice, or null if `start_i` is not a type token. Used so an enum payload type
+/// keeps its concrete generic args (`Box<num>`), letting a destructured binding's
+/// member access resolve the substituted field type instead of the bare `T`.
+fn readPayloadTypeSpelling(allocator: Allocator, tokens: []const token.Token, start_i: usize) ?[]const u8 {
+    if (!(isIdent(tokens[start_i]) or isTypeToken(tokens[start_i]))) return null;
+    var out = ArrayList(u8).init(allocator);
+    errdefer out.deinit();
+    out.appendSlice(tokenString(tokens[start_i])) catch return null;
+
+    var i = nextNonTrivialToken(tokens, start_i + 1) orelse {
+        return out.toOwnedSlice() catch null;
+    };
+    // Optional `<...>` generic argument run (depth-balanced; angle brackets are
+    // lexed as `<`/`>` operators or symbols).
+    const opensAngle = isPunctChar(tokens[i], '<');
+    if (opensAngle) {
+        var angle: i64 = 0;
+        while (i < tokens.len) : (i += 1) {
+            const t = tokens[i];
+            if (t.type == .NewLine or t.type == .Comment) continue;
+            const s = tokenString(t);
+            if (s.len == 0) {
+                // A non-sval token (e.g. a bare symbol) — append its char form.
+                if (t.type == .Symbol and t.data == .cval) out.append(t.data.cval) catch return null;
+            } else {
+                out.appendSlice(s) catch return null;
+            }
+            if (isPunctChar(t, '<')) angle += 1;
+            if (isPunctChar(t, '>')) {
+                angle -= 1;
+                if (angle <= 0) {
+                    i += 1;
+                    break;
+                }
+            }
+        }
+    }
+    // Trailing pointer `*` / array `[]` suffixes.
+    while (i < tokens.len) : (i += 1) {
+        const t = tokens[i];
+        if (t.type == .NewLine or t.type == .Comment) continue;
+        if (isPunctChar(t, '*')) {
+            out.append('*') catch return null;
+            continue;
+        }
+        if (isPunctChar(t, '[')) {
+            out.append('[') catch return null;
+            continue;
+        }
+        if (isPunctChar(t, ']')) {
+            out.append(']') catch return null;
+            continue;
+        }
+        break;
+    }
+    return out.toOwnedSlice() catch null;
+}
+
 pub fn prevNonTrivialToken(tokens: []const token.Token, start_index: usize) ?usize {
     if (start_index == 0) return null;
     var i: isize = @intCast(start_index);
@@ -443,6 +528,71 @@ pub fn buildSignatureFromTokens(
     return .{ .detail = try buf.toOwnedSlice(), .return_type = rtype_owned };
 }
 
+/// Pre-scan all `enum Name { Variant(Type), ... }` blocks and record each
+/// data-carrying variant's FIRST payload type under both `Name.Variant` and the
+/// bare `Variant` (the latter for dot-shorthand patterns). Bare keys for a name
+/// shared by two enums are removed (ambiguous). Single-pass over the token stream;
+/// resolves forward references (a `fit` before the enum declaration still works).
+fn prescanEnumVariantPayloads(allocator: Allocator, tokens: []const token.Token, map: *std.StringHashMap([]const u8)) !void {
+    var ambiguous = std.StringHashMap(void).init(allocator);
+    defer ambiguous.deinit();
+    var i: usize = 0;
+    while (i < tokens.len) : (i += 1) {
+        if (!isKeyword(tokens[i], "enum")) continue;
+        const name_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
+        if (!isIdent(tokens[name_i])) continue;
+        const enum_name = tokenString(tokens[name_i]);
+        var open_i = nextNonTrivialToken(tokens, name_i + 1) orelse continue;
+        if (!(isSymbolChar(tokens[open_i], '{') or isPunctChar(tokens[open_i], '{'))) continue;
+
+        var depth: i64 = 1;
+        var k = open_i + 1;
+        while (k < tokens.len and depth > 0) : (k += 1) {
+            const tk = tokens[k];
+            if (isSymbolChar(tk, '{') or isPunctChar(tk, '{')) {
+                depth += 1;
+                continue;
+            }
+            if (isSymbolChar(tk, '}') or isPunctChar(tk, '}')) {
+                depth -= 1;
+                continue;
+            }
+            if (depth != 1 or !isIdent(tk)) continue;
+            // Variant name at top level of the enum body.
+            const after_i = nextNonTrivialToken(tokens, k + 1) orelse continue;
+            if (!(isPunctChar(tokens[after_i], '(') or isSymbolChar(tokens[after_i], '('))) continue;
+            // The (first) payload type spelling, INCLUDING generic args, e.g.
+            // `Box<num>` (not just `Box`) so a bound var keeps its concrete type.
+            const pt_i = nextNonTrivialToken(tokens, after_i + 1) orelse continue;
+            if (!(isIdent(tokens[pt_i]) or isTypeToken(tokens[pt_i]))) continue;
+            const ptype = readPayloadTypeSpelling(allocator, tokens, pt_i) orelse continue;
+            const vname = tokenString(tk);
+            const qkey = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ enum_name, vname });
+            try map.put(qkey, ptype);
+            if (map.contains(vname)) {
+                try ambiguous.put(try allocator.dupe(u8, vname), {});
+            } else {
+                try map.put(try allocator.dupe(u8, vname), try allocator.dupe(u8, ptype));
+            }
+            // Skip the balanced payload parens.
+            var pd: i64 = 0;
+            var m = after_i;
+            while (m < tokens.len) : (m += 1) {
+                if (isPunctChar(tokens[m], '(') or isSymbolChar(tokens[m], '(')) pd += 1;
+                if (isPunctChar(tokens[m], ')') or isSymbolChar(tokens[m], ')')) {
+                    pd -= 1;
+                    if (pd == 0) break;
+                }
+            }
+            k = m;
+        }
+        _ = &open_i;
+        i = if (k > 0) k - 1 else i;
+    }
+    var it = ambiguous.keyIterator();
+    while (it.next()) |key| _ = map.remove(key.*);
+}
+
 pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite), tokens: []const token.Token) !void {
     var brace_depth: i64 = 0;
     var paren_depth: i64 = 0;
@@ -480,6 +630,16 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
     defer locals_type_map.deinit();
     var globals_type_map = std.StringHashMap([]const u8).init(allocator);
     defer globals_type_map.deinit();
+
+    // Map of `Enum.Variant` and bare `Variant` -> the variant's first payload type
+    // (e.g. `Json.Point`/`Point` -> "Vec2"). Pre-scanned from all `enum` blocks up
+    // front so a `fit` arm that destructures a variant can type its binding even
+    // when the enum is declared later in the file. A `Variant` key is dropped if
+    // two enums share the name (ambiguous for dot-shorthand). Used to give a
+    // pattern-match payload binding (`Json.Point(p)` -> `p: Vec2`) a hover type.
+    var variant_payload_map = std.StringHashMap([]const u8).init(allocator);
+    defer variant_payload_map.deinit();
+    try prescanEnumVariantPayloads(allocator, tokens, &variant_payload_map);
 
     const putType = struct {
         // Populates a transient (arena-backed) name->type hint map used only to
@@ -2620,9 +2780,42 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                                 .is_public = is_public,
                                 .container_type = try allocator.dupe(u8, owner_name),
                                 .value_type = try allocator.dupe(u8, owner_name),
-                                .detail = null,
+                                .detail = trailingCommentTextOnLine(allocator, tokens, after_name_i),
                             });
                             k = after_name_i;
+                            continue;
+                        }
+
+                        // Data-carrying variant: `Variant(types...)`. Index the
+                        // variant name and skip past its parenthesized payload so the
+                        // payload's inner tokens aren't mistaken for more variants.
+                        if (isPunctChar(tokens[after_name_i], '(') or isSymbolChar(tokens[after_name_i], '(')) {
+                            const vname = tokenString(tk);
+                            const vr = rangeFromTokenPos(tk.pos);
+                            // Skip the balanced `( ... )` payload first so we can read
+                            // a trailing comment that follows the closing `)`.
+                            var pd: i64 = 0;
+                            var m: usize = after_name_i;
+                            while (m < tokens.len) : (m += 1) {
+                                if (isPunctChar(tokens[m], '(') or isSymbolChar(tokens[m], '(')) pd += 1;
+                                if (isPunctChar(tokens[m], ')') or isSymbolChar(tokens[m], ')')) {
+                                    pd -= 1;
+                                    if (pd == 0) break;
+                                }
+                            }
+                            // The trailing comment sits on the same line as the `)`
+                            // (after the optional `,`), so scan from `m`.
+                            try out.append(.{
+                                .name = try allocator.dupe(u8, vname),
+                                .kind = .enumMember,
+                                .decl_range = vr,
+                                .selection_range = vr,
+                                .is_public = is_public,
+                                .container_type = try allocator.dupe(u8, owner_name),
+                                .value_type = try allocator.dupe(u8, owner_name),
+                                .detail = trailingCommentTextOnLine(allocator, tokens, m),
+                            });
+                            k = m;
                             continue;
                         }
 
@@ -2646,7 +2839,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                                     .is_public = is_public,
                                     .container_type = try allocator.dupe(u8, owner_name),
                                     .value_type = try allocator.dupe(u8, owner_name),
-                                    .detail = null,
+                                    .detail = trailingCommentTextOnLine(allocator, tokens, m),
                                 });
                                 k = m;
                             }
@@ -2941,6 +3134,88 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
             });
             putType(&locals_type_map, item_name, item_type, allocator);
             continue;
+        }
+
+        // Data-enum pattern-match arm binding: `Enum.Variant(a, b) ->` or the
+        // shorthand `.Variant(a, b) ->`. Each binding `a`/`b` becomes a typed local
+        // (typed by the variant's payload) so hover and completion work on it. The
+        // `->` lookahead disambiguates this from an ordinary call expression.
+        if (in_body and body_range != null and isIdent(t)) {
+            // Find the variant-name identifier and its enum qualifier (if any).
+            var variant_i: ?usize = null;
+            var enum_qual: ?[]const u8 = null;
+            const after_first = nextNonTrivialToken(tokens, i + 1) orelse 0;
+            if (after_first != 0 and isPunctChar(tokens[after_first], '.')) {
+                // `Enum.Variant(...)`: current ident is the enum, next ident is the variant.
+                const v_i = nextNonTrivialToken(tokens, after_first + 1) orelse 0;
+                if (v_i != 0 and isIdent(tokens[v_i])) {
+                    variant_i = v_i;
+                    enum_qual = tokenString(t);
+                }
+            } else if (i > 0 and isPunctChar(tokens[i - 1], '.')) {
+                // `.Variant(...)` shorthand: ensure the `.` is not itself a member
+                // access (preceded by an ident/`)`), i.e. it begins the pattern.
+                const before_dot = prevNonTrivialToken(tokens, i - 1);
+                const is_member = before_dot != null and (isIdent(tokens[before_dot.?]) or isPunctChar(tokens[before_dot.?], ')') or isSymbolChar(tokens[before_dot.?], ')'));
+                if (!is_member) variant_i = i;
+            }
+
+            if (variant_i) |vi| {
+                const open_i = nextNonTrivialToken(tokens, vi + 1) orelse 0;
+                if (open_i != 0 and (isPunctChar(tokens[open_i], '(') or isSymbolChar(tokens[open_i], '('))) {
+                    // Find the matching `)` and confirm a `->` immediately follows.
+                    var pd: i64 = 0;
+                    var close_i: usize = open_i;
+                    var m = open_i;
+                    while (m < tokens.len) : (m += 1) {
+                        if (isPunctChar(tokens[m], '(') or isSymbolChar(tokens[m], '(')) pd += 1;
+                        if (isPunctChar(tokens[m], ')') or isSymbolChar(tokens[m], ')')) {
+                            pd -= 1;
+                            if (pd == 0) {
+                                close_i = m;
+                                break;
+                            }
+                        }
+                    }
+                    const arrow_i = nextNonTrivialToken(tokens, close_i + 1) orelse 0;
+                    const is_arrow = arrow_i != 0 and tokens[arrow_i].type == .Operator and std.mem.eql(u8, tokenString(tokens[arrow_i]), "->");
+                    if (is_arrow) {
+                        const vname = tokenString(tokens[vi]);
+                        // Resolve the variant's payload type for the bindings.
+                        const ptype: ?[]const u8 = blk: {
+                            if (enum_qual) |eq| {
+                                const qkey = std.fmt.allocPrint(allocator, "{s}.{s}", .{ eq, vname }) catch break :blk null;
+                                defer allocator.free(qkey);
+                                if (variant_payload_map.get(qkey)) |pt| break :blk pt;
+                            }
+                            break :blk variant_payload_map.get(vname);
+                        };
+                        // Emit a typed local per positional binding identifier.
+                        var b = open_i + 1;
+                        while (b < close_i) : (b += 1) {
+                            if (!isIdent(tokens[b])) continue;
+                            const bname = tokenString(tokens[b]);
+                            const br = rangeFromTokenPos(tokens[b].pos);
+                            const vt = if (ptype) |pt| (allocator.dupe(u8, pt) catch null) else null;
+                            const det = if (ptype) |pt| (std.fmt.allocPrint(allocator, "{s} {s}", .{ pt, bname }) catch null) else null;
+                            try out.append(.{
+                                .name = try allocator.dupe(u8, bname),
+                                .kind = .variable,
+                                .decl_range = br,
+                                .selection_range = br,
+                                .container_fn_range = body_range.?,
+                                .container_type = null,
+                                .value_type = vt,
+                                .detail = det,
+                            });
+                            if (vt) |v| putType(&locals_type_map, bname, v, allocator);
+                            // Skip a following comma separator.
+                            const c = nextNonTrivialToken(tokens, b + 1) orelse break;
+                            if (isPunctChar(tokens[c], ',')) b = c;
+                        }
+                    }
+                }
+            }
         }
 
         // Best-effort local variable indexing (token-based):

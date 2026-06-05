@@ -448,7 +448,13 @@ pub fun read_lines(str path, num max_len) Vec<str> {
 // - -1 on open/read/write/flush failure or null src/dst
 // - -2 when buffer allocation fails
 // - -3 when cancelled
-pub async fun copy_file_progress_async(str src, str dst, num chunk_size, Channel<num>* progress_updates, ChannelCancelToken* cancel_token) num {
+pub async fun copy_file_progress_async(
+  str src,
+  str dst,
+  num chunk_size,
+  Channel<num>* progress_updates,
+  ChannelCancelToken* cancel_token
+) num {
   if src == NULL || dst == NULL {
     ret -1;
   }
@@ -524,7 +530,12 @@ pub async fun copy_file_progress_async(str src, str dst, num chunk_size, Channel
 // - >= 0 number of lines sent on success
 // - -1 on invalid args or file open/read failure
 // - -3 when cancelled
-pub async fun read_lines_into_channel_async(str path, num max_len, Channel<str>* out_lines, ChannelCancelToken* cancel_token) num {
+pub async fun read_lines_into_channel_async(
+  str path,
+  num max_len,
+  Channel<str>* out_lines,
+  ChannelCancelToken* cancel_token
+) num {
   if path == NULL || out_lines == NULL || max_len <= 1 {
     ret -1;
   }

@@ -22,7 +22,15 @@ async fun main() {
   _ = channel_cancel_token_cancel(&token);
   num rc_cancel = await a.forward_one_to_with_token_async(&out, 20, &token);
 
-  printf("rc_forward=%lld moved=%lld rc_select_forward=%lld idx=%lld selected=%lld rc_cancel=%lld\n", rc_forward, moved, rc_select_forward, idx, selected, rc_cancel);
+  printf(
+    "rc_forward=%lld moved=%lld rc_select_forward=%lld idx=%lld selected=%lld rc_cancel=%lld\n",
+    rc_forward,
+    moved,
+    rc_select_forward,
+    idx,
+    selected,
+    rc_cancel
+  );
 
   _ = src.destroy();
   _ = dst.destroy();
