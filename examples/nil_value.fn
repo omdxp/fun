@@ -1,0 +1,33 @@
+// The `nil` literal: a null pointer/string sentinel that transpiles to C `NULL`.
+//
+// `nil` is a keyword (no import needed). It coerces to any pointer type, to `str`,
+// and compares against them with `==` / `!=`. Use it to initialize optional links,
+// signal "no value" for a pointer field, or check whether a pointer is unset.
+
+imp std.c.io;
+
+// A singly-linked list node whose `next` is nil at the tail.
+compound Node {
+  num val;
+  Node* next;
+}
+
+fun main() num {
+  num* p = nil; // an unset pointer
+  if p == nil {
+    printf("p is unset\n");
+  }
+
+  Node tail = Node{val = 2, next = nil};
+  Node head = Node{val = 1, next = &tail};
+
+  // Walk the list until we hit the nil terminator.
+  Node* cur = &head;
+  num sum = 0;
+  for cur != nil {
+    sum = sum + cur.val;
+    cur = cur.next;
+  }
+  printf("sum=%lld\n", sum);
+  ret 0;
+}

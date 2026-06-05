@@ -1,0 +1,41 @@
+// Virtual threads (`fork`) + channel operators (`<-`).
+// 
+// `fork f(args)` spawns a lightweight virtual thread — a fire-and-forget task
+// multiplexed (M:N) onto a small pool of OS worker threads by the runtime
+// scheduler. Many cheap `fork`s run on a few real threads; `main` automatically
+// drains all spawned tasks before it returns.
+// 
+// Channels carry values between virtual threads:
+// ch <- v    sends v into ch        (sugar for ch.send(v))
+// <-ch       receives from ch       (sugar for ch.recv())
+// 
+// The fork target is an `async fun`. Here three workers each square their input
+// and send it back; main sums the results in arrival order.
+
+imp std.c.io;
+imp std.channel;
+
+// A virtual-thread body: square `v` and hand the result back over the channel.
+async fun square_into(Channel<num>* out, num v) {
+  out <- v * v;
+}
+
+fun main() num {
+  Channel<num> results = channel_new_cap(0, 8);
+
+  // Spawn three virtual threads. None blocks main — they run on the scheduler.
+  fork square_into(&results, 2); // -> 4
+  fork square_into(&results, 3); // -> 9
+  fork square_into(&results, 4); // -> 16
+
+  // Collect the three results (order is arrival order, not spawn order).
+  num total = 0;
+  num got = 0;
+  for got < 3 {
+    total = total + <- results;
+    got = got + 1;
+  }
+
+  printf("total=%lld\n", total); // 4 + 9 + 16 = 29
+  ret 0;
+}

@@ -101,6 +101,10 @@ pub const NodeType = enum {
     StatementIf,
     /// Represents a boolean node.
     Boolean,
+    /// Represents the `nil` literal (a null pointer/string sentinel; emits C `NULL`).
+    Nil,
+    /// Represents a `fork` statement node (fire-and-forget virtual-thread spawn).
+    StatementFork,
     /// Represents an elif statement node.
     StatementElseIf,
     /// Represents an else statement node.
@@ -375,6 +379,11 @@ pub const Node = struct {
                 id: WarningId,
                 /// Intent rationale from source string literal.
                 reason: []const u8,
+            },
+            /// The `fork` (fire-and-forget virtual-thread spawn) statement node.
+            fork_stmt: struct {
+                /// The expression to spawn; must resolve to a function call at codegen.
+                expr: *Node,
             },
         },
     } = null,

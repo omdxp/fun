@@ -7054,3 +7054,228 @@ test "ra3: generic T[] param accepts a concrete array arg; extra pub method in a
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("20 5\n", stdout);
 }
+
+test "P3: nil literal lowers to NULL and coerces to pointer/str" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "p3_nil.fn";
+    const c_path = "p3_nil.c";
+    const exe_path = if (builtin.os.tag == .windows) "p3_nil.exe" else "p3_nil";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    const input =
+        "imp std.c.io;\n" ++
+        "compound Node { num val; Node* next; }\n" ++
+        "fun main() num {\n" ++
+        "  num* p = nil;\n" ++
+        "  Node tail = Node{val = 2, next = nil};\n" ++
+        "  Node head = Node{val = 1, next = &tail};\n" ++
+        "  num isnil = 0; if p == nil { isnil = 1; }\n" ++
+        "  num sum = 0; Node* cur = &head;\n" ++
+        "  for cur != nil { sum = sum + cur.val; cur = cur.next; }\n" ++
+        "  printf(\"%lld %lld\\n\", isnil, sum);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    // `nil` must emit the C null-pointer constant `NULL`.
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "NULL") != null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("1 3\n", stdout);
+}
+
+test "P3: fork spawns virtual threads onto the M:N scheduler" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "p3_fork.fn";
+    const c_path = "p3_fork.c";
+    const exe_path = if (builtin.os.tag == .windows) "p3_fork.exe" else "p3_fork";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.channel;\n" ++
+        "async fun worker(Channel<num>* ch, num v) { ch.send(v * 10); }\n" ++
+        "fun main() num {\n" ++
+        "  Channel<num> ch = channel_new_cap(0, 8);\n" ++
+        "  fork worker(&ch, 1);\n" ++
+        "  fork worker(&ch, 2);\n" ++
+        "  fork worker(&ch, 3);\n" ++
+        "  num sum = 0; num i = 0;\n" ++
+        "  for i < 3 { sum = sum + ch.recv(); i = i + 1; }\n" ++
+        "  printf(\"sum=%lld\\n\", sum);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    // The scheduler runtime + per-callee fork helper + main drain must be emitted.
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "__fun_go(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "__fun_fork_call_worker") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "__fun_sched_wait_idle();") != null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("sum=60\n", stdout);
+}
+
+test "P3: channel operators ch <- v and <-ch desugar to send/recv" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "p3_chan_ops.fn";
+    const c_path = "p3_chan_ops.c";
+    const exe_path = if (builtin.os.tag == .windows) "p3_chan_ops.exe" else "p3_chan_ops";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.channel;\n" ++
+        "fun main() num {\n" ++
+        "  Channel<num> ch = channel_new_cap(0, 4);\n" ++
+        "  ch <- 7;\n" ++ // statement send
+        "  ch <- 3 + 4;\n" ++ // expression send -> send(3 + 4)
+        "  let a = <-ch;\n" ++ // let-recv
+        "  num b = <-ch;\n" ++ // typed-recv
+        "  printf(\"%lld %lld\\n\", a, b);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    // Desugared to the existing send/recv method calls (no new codegen path).
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "send") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "recv") != null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("7 7\n", stdout);
+}
+
+test "P3: a <- b is a channel send, but x < -y stays a comparison (munch)" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "p3_munch.fn";
+    const c_path = "p3_munch.c";
+    const exe_path = if (builtin.os.tag == .windows) "p3_munch.exe" else "p3_munch";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // `a < -y` (with a space) must lex as `<` then `-y`, NOT as the `<-` channel op.
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() num {\n" ++
+        "  num a = 5; num y = 3;\n" ++
+        "  bin lt = a < -y;\n" ++ // 5 < -3 -> false
+        "  bin gt = a > -y;\n" ++ // 5 > -3 -> true
+        "  printf(\"%d %d\\n\", lt, gt);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("0 1\n", stdout);
+}
+
+test "fork target async fn is not flagged unused" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_fork_unused.fn";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+
+    // An `async fun` used ONLY as a `fork` target must NOT trigger the
+    // unused_function warning, and must type-check without the "async call must
+    // be awaited" error (fork invokes it fire-and-forget).
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.channel;\n" ++
+        "async fun worker(Channel<num>* out, num v) {\n" ++
+        "  out <- v * v;\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  Channel<num> ch = channel_new_cap(0, 4);\n" ++
+        "  fork worker(&ch, 5);\n" ++
+        "  num r = <- ch;\n" ++
+        "  printf(\"%lld\\n\", r);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    // It must transpile cleanly (no TypeMismatch from the must-await rule). The
+    // emitted C references the worker function, so it is genuinely used.
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "worker") != null);
+}
+
+test "channel of a data-carrying enum, received and matched with fit" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_channel_enum_fit.fn";
+    const c_path = "codegen_channel_enum_fit.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_channel_enum_fit.exe" else "codegen_channel_enum_fit";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: (1) a `Channel<Msg>` where Msg is a tagged-union enum must
+    // emit the enum's forward declaration before the channel specialization (a
+    // `Msg* data` field once referenced an undeclared `Msg`); (2) `fit <- ch`
+    // over a data-enum recv expression must switch on the variant `.tag`, not on
+    // the whole struct.
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.channel;\n" ++
+        "enum Msg { Compute(num), Result(num), Stop }\n" ++
+        "async fun worker(Channel<Msg>* inbox, Channel<Msg>* outbox) {\n" ++
+        "  fit <- inbox {\n" ++
+        "    Msg.Compute(v) -> { outbox <- Msg.Result(v * v); }\n" ++
+        "    Msg.Stop -> { outbox <- Msg.Stop; }\n" ++
+        "    _ -> {}\n" ++
+        "  }\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  Channel<Msg> inbox = channel_new_cap(Msg.Stop, 4);\n" ++
+        "  Channel<Msg> outbox = channel_new_cap(Msg.Stop, 4);\n" ++
+        "  fork worker(&inbox, &outbox);\n" ++
+        "  inbox <- Msg.Compute(6);\n" ++
+        "  fit <- outbox {\n" ++
+        "    Msg.Result(r) -> { printf(\"result=%lld\\n\", r); }\n" ++
+        "    _ -> { printf(\"other\\n\"); }\n" ++
+        "  }\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnvTimeout(allocator, exe_path, &.{}, 15_000);
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("result=36\n", stdout);
+}

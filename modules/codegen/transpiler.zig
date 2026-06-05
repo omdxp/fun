@@ -317,6 +317,11 @@ pub const TranspileProcess = struct {
     /// True while inferring the operand of an `await` unary expression.
     in_await_operand_inference: bool = false,
 
+    /// True while inferring the call expression of a `fork` statement. A fork
+    /// target is an async function invoked WITHOUT `await` (fire-and-forget), so
+    /// the "async call must be awaited" guard is suppressed in this mode.
+    in_fork_target_inference: bool = false,
+
     /// Source position of the top-level call currently being awaited.
     await_operand_target_pos: ?token.Pos = null,
 
@@ -431,6 +436,12 @@ pub const TranspileProcess = struct {
     /// When set, codegen emits a small Windows compatibility layer that maps
     /// pthread-shaped symbols onto Win32 synchronization/thread primitives.
     requires_thread_compat_layer: bool = false,
+
+    /// True when a `fork` statement appears anywhere in this module tree. Gates the
+    /// M:N scheduler runtime in the prelude and the `__fun_sched_wait_idle()` call at
+    /// each `main` exit, plus the per-callee `__fun_fork_*` support helpers. Set by a
+    /// pre-scan (uses_fork_recursive) before the prelude is emitted.
+    uses_fork: bool = false,
 
     /// True when `std.c.net` is imported anywhere in this module tree.
     /// When set, codegen emits host-specific socket headers and Windows
@@ -5591,6 +5602,10 @@ pub const TranspileProcess = struct {
             return;
         }
 
+        // A `fork` target is an async function invoked fire-and-forget (no await),
+        // so it is exempt from the must-be-awaited rule.
+        if (self.in_fork_target_inference) return;
+
         if (async_known and callee_is_async) {
             self.report_type_error(call_node, "call to async function '{s}' must be awaited", .{display});
             return TranspileError.TypeMismatch;
@@ -5822,6 +5837,10 @@ pub const TranspileProcess = struct {
             },
             .String => return .{ .base = .Str },
             .Boolean => return .{ .base = .Bin },
+            // `nil` types exactly like the `NULL` identifier: a null-pointer/string
+            // sentinel. The is_null_literal flag drives the existing coercions to
+            // pointer and str (and == comparisons against them).
+            .Nil => return .{ .base = .Num, .is_null_literal = true },
             .Character => return .{ .base = .Chr },
             .Identifier => {
                 if (node.data == null) return .{ .base = .Unknown };
@@ -7358,6 +7377,19 @@ pub const TranspileProcess = struct {
                         const ctrl = nv.statement.warning_ctrl;
                         try self.queue_warning_control(ctrl.action, ctrl.id, ctrl.reason, stmt.pos);
                     }
+                },
+                .StatementFork => {
+                    // `fork f(args)` — type-check the spawned call so its callee is
+                    // marked used (otherwise an async fn used ONLY as a fork target
+                    // false-positives the unused_function warning). Mirrors how a
+                    // bare call / `await f(x)` marks its callee via infer_expr_type.
+                    // The fork-target flag exempts the call from the must-be-awaited
+                    // rule (fork invokes an async fn fire-and-forget).
+                    const fk = stmt.node_variant.?.statement.fork_stmt;
+                    const prev_fork = self.in_fork_target_inference;
+                    self.in_fork_target_inference = true;
+                    defer self.in_fork_target_inference = prev_fork;
+                    _ = try self.infer_expr_type(fk.expr.*, env, fns);
                 },
                 else => {
                     // Expression statements, break/continue, etc.
@@ -9137,6 +9169,10 @@ pub const TranspileProcess = struct {
                         .warning_ctrl => {
                             // reason points into token memory and is not owned by AST nodes.
                         },
+                        .fork_stmt => |f| {
+                            self.deinit_node(f.expr.*);
+                            allocator.destroy(f.expr);
+                        },
                     }
                 },
                 else => {},
@@ -9333,6 +9369,15 @@ pub const TranspileProcess = struct {
         if (self.defer_scope_stack.items.len == 0) return;
         const frame = self.defer_scope_stack.items[self.defer_scope_stack.items.len - 1];
         try self.emit_defers_from_index(frame.start_index);
+    }
+
+    /// When `fork` is used, `main` must drain the scheduler before returning so
+    /// fire-and-forget tasks complete. Emit `__fun_sched_wait_idle();` immediately
+    /// before each `main` exit (body-end, bare `ret;`, `ret <expr>`).
+    fn emit_fork_wait_idle_if_main(self: *Self) TranspileError!void {
+        if (!self.in_main or !self.uses_fork) return;
+        try self.write_indent();
+        try self.write("__fun_sched_wait_idle();\n");
     }
 
     fn emit_function_scope_defers(self: *Self) TranspileError!void {
@@ -10116,13 +10161,25 @@ pub const TranspileProcess = struct {
     /// If the fit subject is a value of a tagged-union (data-carrying) enum, return
     /// that enum's name; otherwise null. Resolves via the subject's declared type
     /// (identifier) or its branch conditions' variant paths (fallback).
-    fn fit_subject_tagged_union_name(self: *Self, fit_exp: ast.Node) ?[]const u8 {
+    fn fit_subject_tagged_union_name(self: *Self, fit_exp: ast.Node, branches: []const ast.FitBranch) ?[]const u8 {
+        // A named local/param subject: use its declared base type.
         if (fit_exp.type == .Identifier and fit_exp.data != null) {
             if (self.identifier_declared_dtype(fit_exp.data.?.sval.items)) |dt| {
                 if (dt.pointer_depth == 0 and dt.type_str.items.len > 0) {
                     const nm = dt.type_str.items;
                     if (self.enum_name_is_tagged_union(nm)) return nm;
                 }
+            }
+        }
+        // A non-identifier subject (e.g. a channel recv `<- ch`, any call returning
+        // a data-enum) has no declared name to look up. Fall back to the arms: an
+        // `Enum.Variant` condition names the tagged-union enum being matched, so the
+        // subject is still switched on `.tag` (via emit_tagged_union_fit) rather than
+        // mis-emitted as a switch on the whole struct.
+        for (branches) |branch| {
+            const cond = branch.condition orelse continue;
+            if (self.enum_variant_path(cond)) |vp| {
+                if (self.enum_name_is_tagged_union(vp.enum_name)) return vp.enum_name;
             }
         }
         return null;
@@ -11409,6 +11466,25 @@ pub const TranspileProcess = struct {
             try self.write(c.name.items);
             try self.write(" ");
             try self.write(c.name.items);
+            try self.write(";\n");
+        }
+
+        // Forward declare tagged-union (data-carrying) enums BEFORE specializations.
+        // A data-enum lowers to `struct Name { tag; union; }`; its full definition is
+        // emitted late (PASS 4, after compounds, so by-value payloads see compound
+        // defs). But a generic specialization like `Channel<Msg>` has a pointer field
+        // `Msg* data` and is emitted earlier — without this forward `typedef struct
+        // Msg Msg;` that pointer references an undeclared `Msg`. Pointer fields only
+        // need the type name, so a forward decl is sufficient.
+        for (enum_nodes.items) |enode| {
+            if (enode.node_variant == null) continue;
+            if (self.is_std_c_signature_node(enode)) continue;
+            const e = enode.node_variant.?.enum_decl;
+            if (!enum_is_tagged_union(e)) continue;
+            try self.write("typedef struct ");
+            try self.write(e.name.items);
+            try self.write(" ");
+            try self.write(e.name.items);
             try self.write(";\n");
         }
 
@@ -13107,6 +13183,10 @@ pub const TranspileProcess = struct {
         // (e.g. `impl Vec<T: num | dec>` forces Vec<num> and Vec<dec>).
         try self.seed_constrained_impl_instantiations();
 
+        // Detect `fork` usage across the whole module tree BEFORE the prelude is
+        // emitted, so the scheduler runtime and wait-idle calls can be gated on it.
+        if (uses_fork_recursive(self)) self.uses_fork = true;
+
         // Write standard library includes and prelude
         try self.transpile_prelude();
 
@@ -13609,6 +13689,81 @@ pub const TranspileProcess = struct {
         }
         if (pos_opt) |pos| try self.write_pos_line_directive(pos);
         try self.write("}\n");
+
+        // ----- fork (fire-and-forget) support -----
+        // Only when `fork` is used anywhere. Reuses the async payload struct above.
+        // `__fun_fork_entry_<fn>` runs the function then FREES the payload (no join),
+        // and is the task body enqueued onto the scheduler. `__fun_fork_call_<fn>`
+        // mirrors `__fun_async_call_<fn>` but enqueues via `__fun_go` instead of
+        // spawning+joining, returning nothing (the result is discarded).
+        if (self.uses_fork) {
+            // Entry: unpack payload, call, free, done.
+            try self.write("static void __fun_fork_entry_");
+            try self.write(effective_name);
+            try self.write("(void* __arg) {\n");
+            try self.write("  __fun_async_payload_");
+            try self.write(effective_name);
+            try self.write("* __payload = (__fun_async_payload_");
+            try self.write(effective_name);
+            try self.write("*)__arg;\n  ");
+            try self.write(effective_name);
+            try self.write("(");
+            if (fnv.args) |args| {
+                for (args.items(), 0..) |_, i| {
+                    if (i > 0) try self.write(", ");
+                    try self.write("__payload->__arg");
+                    try self.print("{d}", .{i});
+                }
+            }
+            try self.write(");\n  free(__payload);\n}\n");
+
+            // Call wrapper: alloc payload, set args, enqueue (degrade to sync on OOM).
+            try self.write("static void __fun_fork_call_");
+            try self.write(effective_name);
+            try self.write("(");
+            self.in_function_params = true;
+            if (fnv.args) |args| {
+                for (args.items(), 0..) |arg, i| {
+                    if (i > 0) try self.write(", ");
+                    try self.transpile_node(arg.*);
+                }
+            }
+            self.in_function_params = false;
+            try self.write(") {\n");
+            try self.write("  __fun_async_payload_");
+            try self.write(effective_name);
+            try self.write("* __payload = (__fun_async_payload_");
+            try self.write(effective_name);
+            try self.write("*)malloc(sizeof(__fun_async_payload_");
+            try self.write(effective_name);
+            try self.write("));\n");
+            try self.write("  if (__payload == NULL) { ");
+            try self.write(effective_name);
+            try self.write("(");
+            if (fnv.args) |args| {
+                var wrote = false;
+                for (args.items()) |arg| {
+                    if (arg.type != .Variable or arg.node_variant == null) continue;
+                    if (wrote) try self.write(", ");
+                    try self.write(arg.node_variant.?.variable.name.items);
+                    wrote = true;
+                }
+            }
+            try self.write("); return; }\n");
+            if (fnv.args) |args| {
+                for (args.items(), 0..) |arg, i| {
+                    if (arg.type != .Variable or arg.node_variant == null) continue;
+                    try self.write("  __payload->__arg");
+                    try self.print("{d}", .{i});
+                    try self.write(" = ");
+                    try self.write(arg.node_variant.?.variable.name.items);
+                    try self.write(";\n");
+                }
+            }
+            try self.write("  __fun_go(__fun_fork_entry_");
+            try self.write(effective_name);
+            try self.write(", __payload);\n}\n");
+        }
     }
 
     fn write_function_prototype(self: *Self, node: ast.Node) TranspileError!void {
@@ -13864,6 +14019,15 @@ pub const TranspileProcess = struct {
             try self.write("static int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }\n");
             try self.write("#endif\n\n");
 
+            // M:N cooperative virtual-thread scheduler, emitted only when `fork` is
+            // used. A fixed pool of OS worker threads (sized to the CPU count) drains
+            // a shared FIFO task queue; each `fork f(args)` enqueues one task. The
+            // pool starts lazily on the first fork and `__fun_sched_wait_idle()` (run
+            // at every `main` exit) blocks until all queued tasks complete.
+            if (self.uses_fork) {
+                try self.emit_scheduler_runtime();
+            }
+
             try self.write("#define __fun_tag(x) _Generic((x), ");
             try self.write("char*: 's', const char*: 's', ");
             try self.write("long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', ");
@@ -13877,6 +14041,106 @@ pub const TranspileProcess = struct {
             try self.write("static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }\n");
             try self.write("static long long __fun_bytes_key_hash(const void* p, unsigned long n) { long long h = 2166136261LL; const unsigned char* b = (const unsigned char*)p; for (unsigned long i = 0; i < n; ++i) { h ^= b[i]; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } if (h < 0) h = -h; return h; }\n\n");
         }
+    }
+
+    /// Emit the M:N cooperative task scheduler runtime used by the `fork` keyword.
+    ///
+    /// Design: a fixed pool of OS worker threads (sized to the CPU count) drains a
+    /// shared FIFO task queue. Each `fork f(args)` enqueues one task — a function
+    /// pointer plus a heap-allocated argument payload — which a worker pops and runs
+    /// to completion. This is genuine M:N scheduling (many cheap `fork` tasks → a few
+    /// OS threads), not one-thread-per-spawn. The pool is started lazily on the first
+    /// fork; `__fun_sched_wait_idle()` (run at every `main` exit) blocks until every
+    /// queued task has run. Cooperative, not preemptive: a task that blocks (e.g. on a
+    /// channel op) holds its worker — the yield points are the blocking primitives.
+    /// Reuses the prelude's `__fun_thread_start`/`__fun_thread_t` (POSIX + Windows).
+    fn emit_scheduler_runtime(self: *Self) TranspileError!void {
+        try self.write(
+            \\// --- M:N cooperative virtual-thread scheduler (the `fork` keyword) ---
+            \\typedef void (*__fun_task_fn)(void*);
+            \\typedef struct __fun_task { __fun_task_fn fn; void* arg; } __fun_task;
+            \\#ifdef _WIN32
+            \\typedef CRITICAL_SECTION __fun_sched_mtx; typedef CONDITION_VARIABLE __fun_sched_cv;
+            \\static void __fun_sched_mtx_init(__fun_sched_mtx* m){InitializeCriticalSection(m);}
+            \\static void __fun_sched_mtx_lock(__fun_sched_mtx* m){EnterCriticalSection(m);}
+            \\static void __fun_sched_mtx_unlock(__fun_sched_mtx* m){LeaveCriticalSection(m);}
+            \\static void __fun_sched_cv_init(__fun_sched_cv* c){InitializeConditionVariable(c);}
+            \\static void __fun_sched_cv_wait(__fun_sched_cv* c, __fun_sched_mtx* m){SleepConditionVariableCS(c, m, INFINITE);}
+            \\static void __fun_sched_cv_signal(__fun_sched_cv* c){WakeConditionVariable(c);}
+            \\static void __fun_sched_cv_broadcast(__fun_sched_cv* c){WakeAllConditionVariable(c);}
+            \\static int __fun_cpu_count(void){SYSTEM_INFO si; GetSystemInfo(&si); int n=(int)si.dwNumberOfProcessors; return n>0?n:1;}
+            \\#else
+            \\typedef pthread_mutex_t __fun_sched_mtx; typedef pthread_cond_t __fun_sched_cv;
+            \\static void __fun_sched_mtx_init(__fun_sched_mtx* m){pthread_mutex_init(m,NULL);}
+            \\static void __fun_sched_mtx_lock(__fun_sched_mtx* m){pthread_mutex_lock(m);}
+            \\static void __fun_sched_mtx_unlock(__fun_sched_mtx* m){pthread_mutex_unlock(m);}
+            \\static void __fun_sched_cv_init(__fun_sched_cv* c){pthread_cond_init(c,NULL);}
+            \\static void __fun_sched_cv_wait(__fun_sched_cv* c, __fun_sched_mtx* m){pthread_cond_wait(c,m);}
+            \\static void __fun_sched_cv_signal(__fun_sched_cv* c){pthread_cond_signal(c);}
+            \\static void __fun_sched_cv_broadcast(__fun_sched_cv* c){pthread_cond_broadcast(c);}
+            \\#include <unistd.h>
+            \\static int __fun_cpu_count(void){long n=sysconf(_SC_NPROCESSORS_ONLN); return n>0?(int)n:1;}
+            \\#endif
+            \\#define __FUN_SCHED_QCAP 4096
+            \\typedef struct __fun_sched {
+            \\  __fun_sched_mtx mu; __fun_sched_cv not_empty; __fun_sched_cv idle;
+            \\  __fun_task q[__FUN_SCHED_QCAP]; int head, tail, count;
+            \\  long long pending; /* queued + running tasks */
+            \\  int started, shutting_down, nworkers;
+            \\} __fun_sched;
+            \\static __fun_sched __fun_g_sched;
+            \\static void* __fun_sched_worker(void* unused){ (void)unused;
+            \\  for(;;){
+            \\    __fun_sched_mtx_lock(&__fun_g_sched.mu);
+            \\    while(__fun_g_sched.count==0 && !__fun_g_sched.shutting_down)
+            \\      __fun_sched_cv_wait(&__fun_g_sched.not_empty, &__fun_g_sched.mu);
+            \\    if(__fun_g_sched.count==0 && __fun_g_sched.shutting_down){ __fun_sched_mtx_unlock(&__fun_g_sched.mu); return NULL; }
+            \\    __fun_task t = __fun_g_sched.q[__fun_g_sched.head];
+            \\    __fun_g_sched.head = (__fun_g_sched.head+1) % __FUN_SCHED_QCAP;
+            \\    __fun_g_sched.count--;
+            \\    __fun_sched_mtx_unlock(&__fun_g_sched.mu);
+            \\    if(t.fn) t.fn(t.arg);
+            \\    __fun_sched_mtx_lock(&__fun_g_sched.mu);
+            \\    __fun_g_sched.pending--;
+            \\    if(__fun_g_sched.pending==0) __fun_sched_cv_broadcast(&__fun_g_sched.idle);
+            \\    __fun_sched_mtx_unlock(&__fun_g_sched.mu);
+            \\  }
+            \\}
+            \\static void __fun_sched_init_once(void){
+            \\  static int once=0; if(once) return; once=1;
+            \\  __fun_sched_mtx_init(&__fun_g_sched.mu);
+            \\  __fun_sched_cv_init(&__fun_g_sched.not_empty);
+            \\  __fun_sched_cv_init(&__fun_g_sched.idle);
+            \\}
+            \\static void __fun_sched_ensure_started(void){
+            \\  __fun_sched_mtx_lock(&__fun_g_sched.mu);
+            \\  if(!__fun_g_sched.started){
+            \\    __fun_g_sched.started=1; __fun_g_sched.head=__fun_g_sched.tail=__fun_g_sched.count=0;
+            \\    __fun_g_sched.pending=0; __fun_g_sched.shutting_down=0;
+            \\    int n=__fun_cpu_count(); if(n<1)n=1; if(n>64)n=64; __fun_g_sched.nworkers=n;
+            \\    for(int i=0;i<n;i++){ __fun_thread_t th; __fun_thread_start(&th, __fun_sched_worker, NULL); }
+            \\  }
+            \\  __fun_sched_mtx_unlock(&__fun_g_sched.mu);
+            \\}
+            \\static void __fun_go(__fun_task_fn fn, void* arg){
+            \\  __fun_sched_init_once(); __fun_sched_ensure_started();
+            \\  __fun_sched_mtx_lock(&__fun_g_sched.mu);
+            \\  if(__fun_g_sched.count==__FUN_SCHED_QCAP){ /* queue full: run inline to avoid deadlock */
+            \\    __fun_sched_mtx_unlock(&__fun_g_sched.mu); if(fn) fn(arg); return; }
+            \\  __fun_g_sched.q[__fun_g_sched.tail].fn=fn; __fun_g_sched.q[__fun_g_sched.tail].arg=arg;
+            \\  __fun_g_sched.tail=(__fun_g_sched.tail+1)%__FUN_SCHED_QCAP; __fun_g_sched.count++; __fun_g_sched.pending++;
+            \\  __fun_sched_cv_signal(&__fun_g_sched.not_empty);
+            \\  __fun_sched_mtx_unlock(&__fun_g_sched.mu);
+            \\}
+            \\static void __fun_sched_wait_idle(void){
+            \\  if(!__fun_g_sched.started) return;
+            \\  __fun_sched_mtx_lock(&__fun_g_sched.mu);
+            \\  while(__fun_g_sched.pending>0) __fun_sched_cv_wait(&__fun_g_sched.idle, &__fun_g_sched.mu);
+            \\  __fun_sched_mtx_unlock(&__fun_g_sched.mu);
+            \\}
+            \\
+            \\
+        );
     }
 
     /// Transpiles a node to C code
@@ -14086,7 +14350,7 @@ pub const TranspileProcess = struct {
                                 const args = self.type_subst_args.?;
                                 for (params.items(), 0..) |p, i| {
                                     if (mem.eql(u8, p.items, type_name)) {
-                                        try self.write("(int)(sizeof(");
+                                        try self.write("(long long)(sizeof(");
                                         try self.write_type_no_subst(args[i].*);
                                         try self.write("))");
                                         return;
@@ -14104,7 +14368,7 @@ pub const TranspileProcess = struct {
                                     if (ent.node) |en| {
                                         if (en.type == .Variable and en.node_variant != null) {
                                             const vdt = en.node_variant.?.variable.type;
-                                            try self.write("(int)(sizeof(");
+                                            try self.write("(long long)(sizeof(");
                                             // Use the variable's full C TYPE, not its mangled
                                             // Fun name: for a primitive (`num`/`str`/`dec`/...)
                                             // the raw keyword is not a C type, so `sizeof(num)`
@@ -14130,7 +14394,7 @@ pub const TranspileProcess = struct {
                                 star_count += 1;
                             }
                             const c_type = map_type_to_c(type_name[0..base_len]);
-                            try self.write("(int)(sizeof(");
+                            try self.write("(long long)(sizeof(");
                             try self.write(c_type);
                             var si: usize = 0;
                             while (si < star_count) : (si += 1) try self.write("*");
@@ -15518,14 +15782,17 @@ pub const TranspileProcess = struct {
                 const body_statements = body.statements.items();
                 if (body_statements.len == 0 or !node_is_scope_terminator(body_statements[body_statements.len - 1])) {
                     try self.emit_current_scope_defers();
+                    // Drain forked tasks at main's implicit fall-off end.
+                    try self.emit_fork_wait_idle_if_main();
                 }
                 try self.write_indent();
                 try self.write("}");
             },
-            .StatementReturn, .StatementDefer, .StatementAsm, .StatementIf, .StatementElseIf, .StatementElse, .StatementFit, .StatementFor, .StatementAssert, .StatementWarningControl => {
+            .StatementReturn, .StatementDefer, .StatementAsm, .StatementIf, .StatementElseIf, .StatementElse, .StatementFit, .StatementFor, .StatementAssert, .StatementWarningControl, .StatementFork => {
                 // `ret;` is represented as StatementReturn with no node_variant.
                 if (node.type == .StatementReturn and node.node_variant == null) {
                     try self.emit_function_scope_defers();
+                    try self.emit_fork_wait_idle_if_main();
                     if (self.flags.debug_info) {
                         self.pending_line_directive = node.pos;
                     }
@@ -15693,18 +15960,39 @@ pub const TranspileProcess = struct {
                                     try self.transpile_node(rn.*);
                                     try self.write(");");
                                     try self.emit_function_scope_defers();
+                                    // Drain forked tasks before main returns its value.
+                                    try self.emit_fork_wait_idle_if_main();
                                     try self.write_indent();
                                     try self.write("return ");
                                     try self.write(tmp);
                                     try self.write(";");
                                 } else {
-                                    try self.write_indent();
-                                    try self.write("return (int)(");
-                                    try self.transpile_node(rn.*);
-                                    try self.write(");");
+                                    // Snapshot the value before draining the scheduler so
+                                    // the return expression isn't ordered after wait-idle.
+                                    if (self.uses_fork) {
+                                        const tmp = try self.next_tmp_name("ret");
+                                        defer self.allocator.free(tmp);
+                                        try self.write_indent();
+                                        try self.write("int ");
+                                        try self.write(tmp);
+                                        try self.write(" = (int)(");
+                                        try self.transpile_node(rn.*);
+                                        try self.write(");");
+                                        try self.emit_fork_wait_idle_if_main();
+                                        try self.write_indent();
+                                        try self.write("return ");
+                                        try self.write(tmp);
+                                        try self.write(";");
+                                    } else {
+                                        try self.write_indent();
+                                        try self.write("return (int)(");
+                                        try self.transpile_node(rn.*);
+                                        try self.write(");");
+                                    }
                                 }
                             } else {
                                 try self.emit_function_scope_defers();
+                                try self.emit_fork_wait_idle_if_main();
                                 try self.write_indent();
                                 // Default-void main ignores expression and returns success.
                                 try self.write("return 0;");
@@ -16070,7 +16358,7 @@ pub const TranspileProcess = struct {
 
                         // Tagged-union (data-carrying enum) subject: switch on the
                         // discriminant `.tag` and bind each arm's payload into locals.
-                        if (self.fit_subject_tagged_union_name(fit.exp.*)) |enum_name| {
+                        if (self.fit_subject_tagged_union_name(fit.exp.*, fit.branches.items())) |enum_name| {
                             try self.emit_tagged_union_fit(fit, enum_name);
                             return;
                         }
@@ -16219,6 +16507,44 @@ pub const TranspileProcess = struct {
                         try self.write_indent();
                         try self.write("}");
                     },
+                    .fork_stmt => |fk| {
+                        // `fork f(args);` — fire-and-forget spawn onto the M:N
+                        // scheduler. The target must be an `async fun` (so its
+                        // payload struct + entry trampoline already exist); we emit a
+                        // call to the fork wrapper `__fun_fork_call_<fn>(args)` which
+                        // packs the args and enqueues the entry via __fun_go(). The
+                        // wrapper + a payload-freeing entry are emitted in the async
+                        // support-definitions pass (gated by uses_fork).
+                        self.uses_fork = true;
+                        const call = fk.expr.*;
+                        const lowering = (try self.resolve_await_lowering_info(call)) orelse {
+                            self.report_type_error(node, "fork requires a statically resolvable async function call", .{});
+                            return TranspileError.TypeMismatch;
+                        };
+                        defer self.allocator.free(lowering.callee_name);
+
+                        const call_exp = call.node_variant.?.exp;
+                        try self.write("__fun_fork_call_");
+                        try self.write(lowering.callee_name);
+                        try self.write("(");
+                        var wrote_arg = false;
+                        if (lowering.receiver_expr) |recv| {
+                            if (lowering.receiver_pass_by_ref) try self.write("&");
+                            try self.transpile_node(recv.*);
+                            wrote_arg = true;
+                        }
+                        if (call_exp.right) |right| {
+                            const inner = if (right.type == .ExpressionParenthesis and right.node_variant != null)
+                                right.node_variant.?.paren.exp.*
+                            else
+                                right.*;
+                            if (inner.type != .Blank) {
+                                if (wrote_arg) try self.write(", ");
+                                try self.transpile_node(inner);
+                            }
+                        }
+                        try self.write(");");
+                    },
                     // return handled above with defers
                 }
             },
@@ -16307,6 +16633,8 @@ pub const TranspileProcess = struct {
                 const val = node.data.?.bval;
                 try self.write(if (val) "true" else "false");
             },
+            // The `nil` literal lowers to the C null-pointer constant `NULL`.
+            .Nil => try self.write("NULL"),
             else => {},
         }
     }
@@ -17121,6 +17449,55 @@ pub const TranspileProcess = struct {
         if (proc.requires_thread_compat_layer) return true;
         for (proc.children.items) |child| {
             if (requires_thread_compat_recursive(child)) return true;
+        }
+        return false;
+    }
+
+    /// True if a `fork` statement appears anywhere in `node`'s subtree. Walks the
+    /// statement/body shapes that can contain a `fork` (function bodies, blocks,
+    /// control-flow arms, fit arms). Only structural recursion is needed — a `fork`
+    /// is always a statement, never nested inside an expression.
+    fn node_contains_fork(node: *const ast.Node) bool {
+        if (node.type == .StatementFork) return true;
+        const v = node.node_variant orelse return false;
+        switch (v) {
+            .body => |b| {
+                for (b.statements.items()) |s| if (node_contains_fork(s)) return true;
+            },
+            .statement => |st| switch (st) {
+                .if_stmt => |s| return node_contains_fork(s.body),
+                .elif_stmt => |s| return node_contains_fork(s.body),
+                .else_stmt => |s| return node_contains_fork(s.body),
+                .defer_stmt => |s| return node_contains_fork(s.body),
+                .for_stmt => |fs| switch (fs) {
+                    .cond => |c| return node_contains_fork(c.body),
+                    .range => |r| return node_contains_fork(r.body),
+                    .iter => |it| return node_contains_fork(it.body),
+                },
+                .fit_stmt => |fit| {
+                    for (fit.branches.items()) |br| if (node_contains_fork(br.body)) return true;
+                },
+                else => {},
+            },
+            .function => |fnv| {
+                if (fnv.body) |b| return node_contains_fork(b);
+            },
+            .impl => |im| {
+                for (im.methods.items()) |m| if (node_contains_fork(m)) return true;
+            },
+            else => {},
+        }
+        return false;
+    }
+
+    /// True if any `fork` statement appears in this module or its imported children.
+    fn uses_fork_recursive(proc: *Self) bool {
+        if (proc.uses_fork) return true;
+        for (proc.nodes.items()) |*n| {
+            if (node_contains_fork(n)) return true;
+        }
+        for (proc.children.items) |child| {
+            if (uses_fork_recursive(child)) return true;
         }
         return false;
     }

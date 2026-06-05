@@ -1,0 +1,62 @@
+// A counting semaphore built from a buffered channel.
+// 
+// A `Channel<num>` of capacity K, pre-filled with K tokens, IS a counting
+// semaphore: receiving a token is `acquire` (blocks when none are left), sending
+// one back is `release`. This caps how many virtual threads (`fork`) may hold a
+// resource at once — the classic way to bound concurrency.
+// 
+// acquire:  <- sem        (take a token; blocks if the pool is empty)
+// release:  sem <- 1      (return a token; unblocks a waiter)
+// 
+// Here eight workers each do one unit of work, but the semaphore (capacity 3)
+// admits at most three into the critical section at any moment. Each worker
+// reports its result on `done`; main sums them to prove all eight ran.
+
+imp std.c.io;
+imp std.channel;
+
+// Acquire a permit, do the work, release the permit, report the result.
+async fun worker(Channel<num>* sem, Channel<num>* done, num id) {
+  num permit = <- sem;  // acquire (blocks until a slot is free)
+  num result = id * id; // the "critical section" work
+  sem <- permit;        // release the permit for the next waiter
+  done <- result;       // report
+}
+
+// Fill `sem` with `n` permits so up to `n` acquirers run concurrently.
+fun fill_permits(Channel<num>* sem, num n) {
+  num i = 0;
+  for i < n {
+    sem <- 1;
+    i = i + 1;
+  }
+}
+
+fun main() num {
+  num limit = 3; // at most 3 workers in the critical section at once
+  num workers = 8;
+
+  Channel<num> sem = channel_new_cap(0, limit);
+  Channel<num> done = channel_new_cap(0, workers);
+
+  // Seed the semaphore with `limit` permits.
+  fill_permits(&sem, limit);
+
+  // Spawn eight workers; the semaphore throttles them to `limit` at a time.
+  num spawned = 1;
+  for spawned <= workers {
+    fork worker(&sem, &done, spawned);
+    spawned = spawned + 1;
+  }
+
+  // Collect all eight results. sum of i*i for i in 1..8 = 1+4+9+16+25+36+49+64.
+  num total = 0;
+  num got = 0;
+  for got < workers {
+    total = total + <- done;
+    got = got + 1;
+  }
+
+  printf("workers=%lld limit=%lld total=%lld\n", workers, limit, total); // total=204
+  ret 0;
+}

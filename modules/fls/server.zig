@@ -1277,8 +1277,9 @@ pub const LspServer = struct {
                     "```fun\n" ++
                         "async fun name(...) Type { ... }\n" ++
                         "```\n" ++
-                        "Marks a function or method as asynchronous.\n" ++
-                        "Calls to async functions must use `await`.\n",
+                        "Marks a function or method as asynchronous. Invoke it with\n" ++
+                        "`await f(...)` to wait for and get its result, or with\n" ++
+                        "`fork f(...)` to spawn it as a fire-and-forget virtual thread.\n",
                 );
             } else if (std.mem.eql(u8, tok.text, "await")) {
                 try buf.appendSlice(
@@ -1287,6 +1288,23 @@ pub const LspServer = struct {
                         "```\n" ++
                         "Waits for an async call and yields its result.\n" ++
                         "`await` is only valid inside `async` functions.\n",
+                );
+            } else if (std.mem.eql(u8, tok.text, "nil")) {
+                try buf.appendSlice(
+                    "```fun\n" ++
+                        "nil\n" ++
+                        "```\n" ++
+                        "The null literal. Coerces to any pointer type and to `str`,\n" ++
+                        "and compares with `==` / `!=`. Transpiles to C `NULL`.\n",
+                );
+            } else if (std.mem.eql(u8, tok.text, "fork")) {
+                try buf.appendSlice(
+                    "```fun\n" ++
+                        "fork async_fn(args);\n" ++
+                        "```\n" ++
+                        "Spawns a fire-and-forget virtual thread: the call runs on an\n" ++
+                        "M:N scheduler pool. The target must be an `async fun`; results\n" ++
+                        "flow back over channels. `main` drains all forks before exiting.\n",
                 );
             } else {
                 try self.sendResponseJson(id_val, "null");
@@ -4538,9 +4556,9 @@ pub const LspServer = struct {
             }
 
             const keywords = [_][]const u8{
-                "imp",    "as",   "pub", "async", "fun",   "compound", "quirk", "impl", "enum", "asm", "volatile", "arch", "defer", "await", "ret",   "if",
-                "elif",   "else", "for", "fit",   "break", "continue", "void",  "raw",  "num",  "dec", "str",      "bin",  "chr",   "true",  "false", "allow",
-                "expect",
+                "imp",  "as",    "pub",    "async", "fun",   "compound", "quirk", "impl", "enum", "asm", "volatile", "arch", "defer", "await", "ret",   "if",
+                "elif", "else",  "for",    "fit",   "break", "continue", "void",  "raw",  "num",  "dec", "str",      "bin",  "chr",   "true",  "false", "nil",
+                "fork", "allow", "expect",
             };
             for (keywords) |kw| {
                 if (prefix.len == 0 or std.mem.startsWith(u8, kw, prefix)) {
@@ -4548,6 +4566,10 @@ pub const LspServer = struct {
                         try self.allocator.dupe(u8, "keyword: declare async function or method")
                     else if (std.mem.eql(u8, kw, "await"))
                         try self.allocator.dupe(u8, "keyword: await async call result (inside async functions)")
+                    else if (std.mem.eql(u8, kw, "nil"))
+                        try self.allocator.dupe(u8, "keyword: the null literal (transpiles to NULL)")
+                    else if (std.mem.eql(u8, kw, "fork"))
+                        try self.allocator.dupe(u8, "keyword: spawn a fire-and-forget virtual thread")
                     else
                         null;
                     try items.append(.{ .label = try self.allocator.dupe(u8, kw), .kind = 14, .detail = kw_detail });

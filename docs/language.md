@@ -32,6 +32,10 @@
     - `raw`: Opaque/"void" type (use `raw*` for C-style `void*`)
 - **Arrays**: `num[] arr = [1, 2, 3];`
 - **Pointers**: `Node* next;` (self-referential and forward-declared types supported)
+- **`nil`**: The null pointer/string sentinel (a keyword; lowers to C `NULL`). It
+  coerces to any pointer type and to `str`, and compares with `==` / `!=`:
+  `num* p = nil;`, `if p == nil { ... }`, `Node{next = nil}`. No import needed
+  (unlike the C macro `NULL`, which requires `imp std.c.def;`).
 - **Type Inference**: Supported for variables via `let name = expr;` (initializer required).
 
 #### Type Inference (let)
@@ -168,6 +172,39 @@ async fun main() {
     c.base = 41;
     num out = await c.add(1);
     _ = out;
+}
+```
+
+### Concurrency: virtual threads (`fork`) & channels
+- **`fork <call>;`** spawns a *virtual thread* — a fire-and-forget task that runs
+  on a runtime **M:N scheduler**: a small pool of OS worker threads (sized to the
+  CPU count) multiplexes many cheap `fork` tasks. The target is an `async fun`.
+  `fork` returns nothing; results flow back through channels.
+- **Automatic drain**: `main` blocks until every `fork`ed task has completed before
+  it returns, so spawned work always finishes.
+- **Cooperative**: a task that blocks on a channel op holds its worker (the yield
+  points are the blocking primitives). It is not preemptive.
+- **Channel operators** (sugar over `std.channel`):
+  - `ch <- v` — send `v` into `ch` (equivalent to `ch.send(v)`).
+  - `<-ch` — receive from `ch` (equivalent to `ch.recv()`, lossy; use
+    `ch.recv_into(&out)` for the error-aware form).
+  - Note: `a < -b` (a comparison against a negative) is unaffected — only the glued
+    `<-` (no space) is the channel operator.
+
+Example:
+```fun
+imp std.channel;
+
+async fun square_into(Channel<num>* out, num v) {
+    out <- v * v;
+}
+
+fun main() num {
+    Channel<num> results = channel_new_cap(0, 8);
+    fork square_into(&results, 2);
+    fork square_into(&results, 3);
+    num total = (<-results) + (<-results);
+    ret total; // 4 + 9 = 13
 }
 ```
 

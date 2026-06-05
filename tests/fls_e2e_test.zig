@@ -5565,6 +5565,101 @@ test "fls e2e: hover has no bold title, completion uses arg snippets, inlay hint
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: nil and fork keywords have hover docs and completion entries" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    // Prefix lines `ni;` and `fo;` (like the async/await test's `a;`/`aw;`) drive
+    // prefix-filtered keyword completion; `num* p = nil;` and the real `fork` give
+    // hover targets.
+    const doc_text =
+        "imp std.channel;\n\n" ++
+        "async fun worker(Channel<num>* out, num v) {\n" ++
+        "  out <- v;\n" ++
+        "}\n\n" ++
+        "fun main() num {\n" ++
+        "  num* p = nil;\n" ++
+        "  ni;\n" ++
+        "  fo;\n" ++
+        "  Channel<num> ch = channel_new_cap(0, 4);\n" ++
+        "  fork worker(&ch, 5);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-nil-fork.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // Hover on `nil` in `num* p = nil;` -> mentions the null literal / NULL.
+    const nil_pos = try findPosition(doc_text, "  num* p = nil;\n", 0);
+    const nil_hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, nil_pos.line, nil_pos.col + @as(i64, @intCast("  num* p = ".len)) },
+    );
+    defer allocator.free(nil_hover_params);
+    const nil_hover_id = try lsp.request("textDocument/hover", nil_hover_params);
+    var nil_hover_res = try lsp.waitResponse(nil_hover_id, 15000);
+    defer nil_hover_res.deinit();
+    const nil_hover_val = try jsonResultFromResponseObj(nil_hover_res.parsed.value.object);
+    try expectHoverContains(allocator, nil_hover_val, "null");
+
+    // Hover on `fork` -> mentions virtual thread.
+    const fork_pos = try findPosition(doc_text, "  fork worker(&ch, 5);\n", 0);
+    const fork_hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, fork_pos.line, fork_pos.col + @as(i64, @intCast("  fo".len)) },
+    );
+    defer allocator.free(fork_hover_params);
+    const fork_hover_id = try lsp.request("textDocument/hover", fork_hover_params);
+    var fork_hover_res = try lsp.waitResponse(fork_hover_id, 15000);
+    defer fork_hover_res.deinit();
+    const fork_hover_val = try jsonResultFromResponseObj(fork_hover_res.parsed.value.object);
+    try expectHoverContains(allocator, fork_hover_val, "virtual thread");
+
+    // Completion at the `ni` prefix offers `nil`; at the `fo` prefix offers `fork`.
+    // (Position right after the 2-char prefix, like the async test's `aw;` + 2.)
+    const ni_pos = try findPosition(doc_text, "ni;", 0);
+    const ni_comp_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, ni_pos.line, ni_pos.col + 2 },
+    );
+    defer allocator.free(ni_comp_params);
+    const ni_comp_id = try lsp.request("textDocument/completion", ni_comp_params);
+    var ni_comp_res = try lsp.waitResponse(ni_comp_id, 15000);
+    defer ni_comp_res.deinit();
+    const ni_comp_val = try jsonResultFromResponseObj(ni_comp_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, ni_comp_val, "nil");
+
+    const fo_pos = try findPosition(doc_text, "fo;", 0);
+    const fo_comp_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, fo_pos.line, fo_pos.col + 2 },
+    );
+    defer allocator.free(fo_comp_params);
+    const fo_comp_id = try lsp.request("textDocument/completion", fo_comp_params);
+    var fo_comp_res = try lsp.waitResponse(fo_comp_id, 15000);
+    defer fo_comp_res.deinit();
+    const fo_comp_val = try jsonResultFromResponseObj(fo_comp_res.parsed.value.object);
+    try expectCompletionHasLabel(allocator, fo_comp_val, "fork");
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: inlay hint shows the called function's own param name, not another fn's" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();

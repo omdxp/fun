@@ -1,0 +1,82 @@
+// Channels carrying a data-carrying enum, matched with `fit`.
+// 
+// This is a small request/response protocol between `main` and three virtual
+// threads (`fork`). The message type is a TAGGED-UNION enum — each variant
+// carries a different payload — and both the worker and `main` use `fit` to
+// destructure whichever variant arrives off the channel.
+// 
+// `fork f(args)`  spawns f (an `async fun`) on the M:N scheduler
+// `ch <- v`       sends v into ch        (sugar for ch.send(v))
+// `<- ch`         receives from ch       (sugar for ch.recv())
+// `fit <- ch {`   receives, then matches the variant in one step
+// 
+// A `Channel<Job>` / `Channel<Reply>` works exactly like any other generic
+// channel — the element type just happens to be a sum type.
+
+imp std.c.io;
+imp std.channel;
+
+// A unit of work sent to a worker.
+enum Job {
+  Square(num), // compute v*v
+  Negate(num), // compute -v
+  Quit,        // stop the worker
+}
+
+// A worker's response, sent back to main.
+enum Reply {
+  Done(num), // a finished result value
+  Bye,       // acknowledges Quit
+}
+
+// Worker: pull one Job off `inbox`, match it, push a Reply onto `outbox`.
+async fun worker(Channel<Job>* inbox, Channel<Reply>* outbox) {
+  fit <- inbox {
+    Job.Square(v) -> {
+      outbox <- Reply.Done(v * v);
+    }
+    Job.Negate(v) -> {
+      outbox <- Reply.Done(0 - v);
+    }
+    Job.Quit -> {
+      outbox <- Reply.Bye;
+    }
+  }
+}
+
+fun main() num {
+  // Capacity-8 buffered channels of the two enum types. The default value used
+  // to seed storage is a payload-free variant.
+  Channel<Job> inbox = channel_new_cap(Job.Quit, 8);
+  Channel<Reply> outbox = channel_new_cap(Reply.Bye, 8);
+
+  // Spawn three workers; each handles exactly one job below.
+  fork worker(&inbox, &outbox);
+  fork worker(&inbox, &outbox);
+  fork worker(&inbox, &outbox);
+
+  // Hand out three jobs. Workers race to take them off the shared inbox.
+  inbox <- Job.Square(5); // -> 25
+  inbox <- Job.Negate(7); // -> -7
+  inbox <- Job.Quit;      // -> Bye
+
+  // Collect three replies in arrival order, matching each variant with `fit`.
+  num sum = 0;
+  num byes = 0;
+  num got = 0;
+  for got < 3 {
+    fit <- outbox {
+      Reply.Done(r) -> {
+        sum = sum + r;
+      }
+      Reply.Bye -> {
+        byes = byes + 1;
+      }
+    }
+    got = got + 1;
+  }
+
+  // sum = 25 + (-7) = 18 (the Quit worker contributes a Bye, not a Done).
+  printf("sum=%lld byes=%lld\n", sum, byes); // sum=18 byes=1
+  ret 0;
+}

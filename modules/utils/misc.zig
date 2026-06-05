@@ -106,6 +106,8 @@ pub fn is_keyword(str: []const u8) bool {
         mem.eql(u8, "if", str) or mem.eql(u8, "elif", str) or
         mem.eql(u8, "else", str) or
         mem.eql(u8, "true", str) or mem.eql(u8, "false", str) or
+        mem.eql(u8, "nil", str) or
+        mem.eql(u8, "fork", str) or
         mem.eql(u8, "fit", str) or mem.eql(u8, "ret", str) or
         mem.eql(u8, "for", str) or
         mem.eql(u8, "async", str) or
@@ -185,6 +187,10 @@ pub fn op_valid(op: []const u8) bool {
         mem.eql(u8, "==", op) or mem.eql(u8, "(", op) or mem.eql(u8, "[", op) or
         mem.eql(u8, ",", op) or mem.eql(u8, ".", op) or mem.eql(u8, "..", op) or mem.eql(u8, "...", op) or
         mem.eql(u8, ":", op) or mem.eql(u8, "::", op) or mem.eql(u8, "~", op) or
+        // Channel operators: `ch <- v` (send, binary) and `<-ch` (recv, prefix unary).
+        // No collision with `<`/`<=`/`<<`/`<<=` (none start with `<-`); maximal munch
+        // lexes `<-` glued, while `x < -y` (space) stays `<` then `-`.
+        mem.eql(u8, "<-", op) or
         mem.eql(u8, "%", op) or mem.eql(u8, "->", op) or mem.eql(u8, "#", op) or mem.eql(u8, "$", op);
 }
 
@@ -902,6 +908,17 @@ pub fn print_node(node: ast.Node, writer: *std.Io.Writer, depth: usize) !void {
                 try print_indent(writer, depth + 1);
                 try writer.print("Value:\n", .{});
                 try print_node(node.node_variant.?.statement.return_stmt.*, writer, depth + 2);
+            }
+        },
+        .Nil => {
+            try print_indent(writer, depth + 1);
+            try writer.print("nil\n", .{});
+        },
+        .StatementFork => {
+            if (node.node_variant != null) {
+                try print_indent(writer, depth + 1);
+                try writer.print("Spawn:\n", .{});
+                try print_node(node.node_variant.?.statement.fork_stmt.expr.*, writer, depth + 2);
             }
         },
         .Blank => {

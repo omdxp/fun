@@ -291,6 +291,31 @@ async fun main() {
 }
 ```
 
+## Concurrency: `fork` & channels
+- `fork <async-call>;` spawns a **virtual thread** (fire-and-forget) onto an M:N
+  scheduler — a CPU-count-sized pool of OS worker threads runs many cheap tasks.
+- `main` automatically waits for all `fork`ed tasks to finish before returning.
+- Channel operators (sugar over `std.channel`):
+  - `ch <- v` ≡ `ch.send(v)` (send)
+  - `<-ch` ≡ `ch.recv()` (receive; lossy — use `ch.recv_into(&out)` for errors)
+- `<-` is the glued two-character operator; `a < -b` (with a space) is still a
+  comparison against a negation.
+
+```fun
+imp std.channel;
+
+async fun produce(Channel<num>* out, num v) {
+  out <- v * v;
+}
+
+fun main() num {
+  Channel<num> ch = channel_new_cap(0, 8);
+  fork produce(&ch, 2);
+  fork produce(&ch, 3);
+  ret (<-ch) + (<-ch); // 4 + 9 = 13 (arrival order)
+}
+```
+
 ## Control Flow
 ### If / Elif / Else
 ```fun

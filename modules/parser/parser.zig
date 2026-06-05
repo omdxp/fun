@@ -2031,6 +2031,56 @@ pub const ParseProcess = struct {
         try self.create_node(exp_node);
     }
 
+    /// Desugar a channel operator into a method call and PUSH the resulting node:
+    /// `ch <- v` -> `ch.send(v)`, `<-ch` -> `ch.recv()`. Builds two nested
+    /// `Expression` nodes — a `.` member-access (`recv.method`) and a `()` call —
+    /// so the rest of the pipeline (typecheck + codegen) sees only an ordinary
+    /// method call. `arg` is the send value, or null for a zero-arg recv.
+    fn push_channel_method_call(self: *Self, recv: *ast.Node, method_name: []const u8, arg: ?*ast.Node, op_pos: ?token.Pos) ParseError!void {
+        const alloc = self.transpile_proc.allocator;
+
+        // Method-name identifier node.
+        const method_ident = alloc.create(ast.Node) catch return ParseError.MemoryAllocationFailed;
+        var name_buf = ArrayList(u8).init(alloc);
+        name_buf.appendSlice(method_name) catch return ParseError.MemoryAllocationFailed;
+        method_ident.* = ast.Node{
+            .type = .Identifier,
+            .pos = op_pos,
+            .data = .{ .sval = name_buf },
+        };
+        method_ident.flags = .{ .inside_expression = true };
+
+        const recv_copy = alloc.create(ast.Node) catch return ParseError.MemoryAllocationFailed;
+        recv_copy.* = recv.*;
+
+        // `recv . method`
+        const dot = alloc.create(ast.Node) catch return ParseError.MemoryAllocationFailed;
+        dot.* = ast.Node{
+            .type = .Expression,
+            .pos = op_pos orelse recv.*.pos,
+            .node_variant = .{ .exp = .{ .left = recv_copy, .right = method_ident, .op = "." } },
+        };
+        dot.flags = .{ .inside_expression = true };
+
+        // Call argument: the send value, or a Blank (zero-arg) for recv.
+        const call_arg = alloc.create(ast.Node) catch return ParseError.MemoryAllocationFailed;
+        if (arg) |a| {
+            call_arg.* = a.*;
+        } else {
+            call_arg.* = ast.Node{ .type = .Blank, .pos = op_pos };
+        }
+
+        // `(recv.method)(arg)`
+        const call = alloc.create(ast.Node) catch return ParseError.MemoryAllocationFailed;
+        defer alloc.destroy(call);
+        call.* = ast.Node{
+            .type = .Expression,
+            .pos = op_pos orelse recv.*.pos,
+            .node_variant = .{ .exp = .{ .left = dot, .right = call_arg, .op = "()" } },
+        };
+        try self.create_node(call);
+    }
+
     /// Creates a body node.
     ///
     /// This function creates a body node with the given statements and adds it
@@ -2309,6 +2359,26 @@ pub const ParseProcess = struct {
                 };
                 return;
             }
+            // Prefix channel receive: `<-ch` -> `ch.recv()`. Parse the channel
+            // operand (bounded so a following binary op ends it), then desugar.
+            if (mem.eql(u8, op, "<-")) {
+                _ = self.token_next(); // consume '<-'
+                var recv_hist = utils.History.down(self.transpile_proc.allocator, hist, hist.flags);
+                defer recv_hist.deinit();
+                recv_hist.flags.stop_at_binary_op = true;
+                const before = self.transpile_proc.nodes.count;
+                try self.parse_expressionable(&recv_hist);
+                if (self.transpile_proc.nodes.count == before) {
+                    self.transpile_proc.err("expected a channel after '<-'", .{});
+                    return ParseError.InvalidExpression;
+                }
+                var ch_node = self.node_pop() orelse {
+                    self.transpile_proc.err("expected a channel after '<-'", .{});
+                    return ParseError.InvalidExpression;
+                };
+                try self.push_channel_method_call(&ch_node, "recv", null, op_pos);
+                return;
+            }
             if (!utils.is_unary_operator(op)) {
                 self.transpile_proc.err("expected left operand for '{s}' operator", .{op});
                 return ParseError.InvalidOperand;
@@ -2332,9 +2402,11 @@ pub const ParseProcess = struct {
                 defer hist_down.deinit();
                 hist_down.flags.parenthesis_not_function_call = true;
                 try self.parse_for_parenthesis(&hist_down);
-            } else if (mem.eql(u8, t.?.data.sval.items, ".")) {
-                // Allow enum variant shorthand `.Variant` as a valid RHS operand after
-                // binary operators like `==`, `!=`, `=` etc.
+            } else if (mem.eql(u8, t.?.data.sval.items, ".") or mem.eql(u8, t.?.data.sval.items, "<-")) {
+                // Allow enum variant shorthand `.Variant` AND a prefix channel
+                // receive `<-ch` as a valid RHS operand after a binary operator
+                // (`sum + <-ch`, `x == .Variant`). `parse_normal_expression` sees no
+                // left operand here and routes to the `.`/`<-` prefix handler.
                 try self.parse_normal_expression(hist);
             } else if (utils.is_unary_operator(t.?.data.sval.items)) {
                 try self.parse_for_unary(hist.flags);
@@ -2352,6 +2424,12 @@ pub const ParseProcess = struct {
             return ParseError.InvalidOperand;
         };
         node_right.flags = .{ .inside_expression = true };
+        // Binary channel send: `ch <- v` -> `ch.send(v)`. The RHS was already parsed
+        // as a full sub-expression, so `a <- b + c` desugars to `a.send(b + c)`.
+        if (mem.eql(u8, op, "<-")) {
+            try self.push_channel_method_call(&node_left.?, "send", &node_right, op_pos);
+            return;
+        }
         try self.make_expression_node(&node_left.?, &node_right, op, op_pos);
         var exp_node = self.node_pop() orelse {
             self.transpile_proc.err("expected expression node for '{s}' operator", .{op});
@@ -2624,6 +2702,53 @@ pub const ParseProcess = struct {
             return ParseError.MemoryAllocationFailed;
         };
         return true;
+    }
+
+    /// Parse a `fork <call>;` statement — a fire-and-forget virtual-thread spawn.
+    /// The operand is parsed as a call expression; whether it is actually a `()`
+    /// call is validated at codegen (mirroring `await`'s deferred validation).
+    fn parse_fork_statement(self: *Self, hist: *utils.History) ParseError!void {
+        const fork_tok = self.token_next(); // consume 'fork'
+        if (!hist.*.flags.inside_function_body) {
+            self.transpile_proc.err("fork statement outside of function", .{});
+            return ParseError.InvalidStatement;
+        }
+        const next_tok = self.token_peek_next() orelse {
+            self.transpile_proc.err("expected a function call after 'fork'", .{});
+            return ParseError.InvalidExpression;
+        };
+        if (next_tok.type == .Symbol and next_tok.data.cval == ';') {
+            self.transpile_proc.err("expected a function call after 'fork'", .{});
+            return ParseError.InvalidExpression;
+        }
+
+        const before_count = self.transpile_proc.nodes.count;
+        var fork_hist = utils.History.down(self.transpile_proc.allocator, hist, hist.flags);
+        defer fork_hist.deinit();
+        try self.parse_expressionable(&fork_hist);
+        if (self.transpile_proc.nodes.count == before_count) {
+            self.transpile_proc.err("expected a function call after 'fork'", .{});
+            return ParseError.InvalidExpression;
+        }
+
+        const call_node = self.node_pop() orelse {
+            self.transpile_proc.err("expected a function call after 'fork'", .{});
+            return ParseError.InvalidExpression;
+        };
+        const expr = self.transpile_proc.allocator.create(ast.Node) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+        errdefer self.transpile_proc.allocator.destroy(expr);
+        expr.* = call_node;
+
+        self.transpile_proc.nodes.push(ast.Node{
+            .type = .StatementFork,
+            .pos = if (fork_tok) |t| t.pos else expr.*.pos,
+            .node_variant = .{ .statement = .{ .fork_stmt = .{ .expr = expr } } },
+        }) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+        try self.expect_sym(';');
     }
 
     fn parse_expressionable_single(self: *Self, hist: *utils.History) ParseError!bool {
@@ -5107,6 +5232,17 @@ pub const ParseProcess = struct {
         } else if (mem.eql(u8, "await", sval)) {
             _ = try self.parse_await_operand(hist);
             try self.expect_sym(';');
+            return;
+        } else if (mem.eql(u8, "fork", sval)) {
+            return try self.parse_fork_statement(hist);
+        } else if (mem.eql(u8, "nil", sval)) {
+            // The `nil` literal (a null pointer/string sentinel). `parse_keyword`
+            // only PEEKS, so we must consume the token here (unlike `true`/`false`,
+            // which arrive as `.Boolean` tokens consumed by parse_single_token_to_node).
+            _ = self.token_next(); // consume 'nil'
+            self.transpile_proc.nodes.push(ast.Node{ .type = .Nil, .pos = t.?.pos }) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
             return;
         } else if (mem.eql(u8, "allow", sval)) {
             return try self.parse_warning_control(.allow);

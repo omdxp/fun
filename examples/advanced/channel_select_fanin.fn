@@ -1,0 +1,58 @@
+// Fan-in: merge two concurrent producers into one consumer via `select`.
+// 
+// Two virtual threads (`fork`) each produce a stream of numbers on their own
+// channel. `main` is the consumer: it `select`s across both channels, taking
+// whichever value is ready first, until it has drained the expected count.
+// 
+// fork f(args)                         spawn a virtual thread (M:N scheduler)
+// ch <- v                              send (sugar for ch.send(v))
+// a.select_recv_with_tuning(&b, ...)   block until `a` OR `b` has a value
+// 
+// `select_recv_with_tuning(other, out, out_index, slice_ms, backoff)` writes the
+// received value into `out`, sets `out_index` to which channel fired (0 = self,
+// 1 = other), and returns a status code (0 = ok, 1 = both closed).
+
+imp std.c.io;
+imp std.channel;
+
+// Push `count` multiples of `step` onto `out`, then stop.
+async fun produce(Channel<num>* out, num step, num count) {
+  num i = 1;
+  for i <= count {
+    out <- step * i;
+    i = i + 1;
+  }
+}
+
+fun main() num {
+  Channel<num> evens = channel_new_cap(0, 8);
+  Channel<num> odds = channel_new_cap(0, 8);
+
+  // Producer A emits 2, 4, 6; producer B emits 5, 10, 15 — concurrently.
+  fork produce(&evens, 2, 3);
+  fork produce(&odds, 5, 3);
+
+  // Consume all six values, merging the two streams with select.
+  num total = 0;
+  num from_a = 0;
+  num from_b = 0;
+  num got = 0;
+  num value = 0;
+  num which = -1;
+  for got < 6 {
+    num rc = evens.select_recv_with_tuning(&odds, &value, &which, 2, 1);
+    if rc == 0 {
+      total = total + value;
+      if which == 0 {
+        from_a = from_a + 1;
+      } else {
+        from_b = from_b + 1;
+      }
+      got = got + 1;
+    }
+  }
+
+  // evens: 2+4+6 = 12, odds: 5+10+15 = 30, total = 42; 3 values from each.
+  printf("total=%lld from_a=%lld from_b=%lld\n", total, from_a, from_b);
+  ret 0;
+}
