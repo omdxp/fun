@@ -121,6 +121,38 @@ pub fn main(init: std.process.Init) void {
         return;
     }
 
+    // Run the compilation pipeline (lex -> parse -> AST -> transpile -> compile/run)
+    // on a dedicated thread with a large stack. The recursive-descent parser, AST
+    // printer, type checker, and codegen all walk the expression tree with native
+    // recursion; on the default ~8-16 MB main-thread stack, deeply nested or very
+    // long expressions overflow and segfault. A large stack lets legitimate deep
+    // code compile, and the in-pass `max_expr_recursion_depth` guard reports a clean
+    // `ExpressionTooDeep` error before even this stack is exhausted on truly
+    // pathological input. `print_error_and_exit` calls `std.process.exit`, which
+    // terminates the whole process from the worker thread, so error handling is
+    // unaffected by running off the main thread.
+    const PipelineCtx = struct { allocator: std.mem.Allocator, io: std.Io, options: @TypeOf(options) };
+    const ctx = PipelineCtx{ .allocator = global_allocator, .io = init.io, .options = options };
+    const thread = std.Thread.spawn(.{ .stack_size = pipeline_stack_size }, run_pipeline, .{ctx}) catch {
+        // Spawn failed (e.g. resource limits) — fall back to running inline on the
+        // main thread. Correctness is unchanged; only the deep-recursion headroom
+        // is reduced (the in-pass depth guard still prevents a hard crash).
+        run_pipeline(.{ .allocator = global_allocator, .io = init.io, .options = options });
+        return;
+    };
+    thread.join();
+}
+
+/// Stack size for the compilation worker thread (256 MiB). Generous headroom for
+/// the recursive-descent passes on deeply nested expressions, well above what the
+/// `max_expr_recursion_depth` guard permits, so the guard fires first.
+const pipeline_stack_size: usize = 256 * 1024 * 1024;
+
+fn run_pipeline(ctx: anytype) void {
+    const global_allocator = ctx.allocator;
+    const options = ctx.options;
+    const io = ctx.io;
+
     var tp = codegen.TranspileProcess.init(
         global_allocator,
         options.input_file,
@@ -135,7 +167,7 @@ pub fn main(init: std.process.Init) void {
             .debug_info = options.debug_info,
             .emit_unused_warnings = options.warn_unused,
         },
-    ) catch |err| print_error_and_exit(init.io, err);
+    ) catch |err| print_error_and_exit(io, err);
 
     var lp = lexer.LexProcess.init(&tp);
     var pp = parser.ParseProcess.init(&tp);
@@ -144,24 +176,27 @@ pub fn main(init: std.process.Init) void {
         tp.deinit();
     }
 
-    lp.lex() catch |err| print_error_and_exit(init.io, err);
-    pp.parse() catch |err| print_error_and_exit(init.io, err);
+    lp.lex() catch |err| print_error_and_exit(io, err);
+    pp.parse() catch |err| print_error_and_exit(io, err);
 
     if (tp.flags.ast) {
         var ast_buf: [65536]u8 = undefined;
-        var ast_writer = std.Io.File.stdout().writer(init.io, &ast_buf);
+        var ast_writer = std.Io.File.stdout().writer(io, &ast_buf);
         for (tp.nodes.items()) |node| {
-            utils.print_node(node, &ast_writer.interface, 0) catch |err| print_error_and_exit(init.io, err);
+            utils.print_node(node, &ast_writer.interface, 0) catch |err| print_error_and_exit(io, err);
         }
+        // The writer buffers into `ast_buf`; without an explicit flush the AST
+        // output is silently dropped on exit (this is why `-ast` printed nothing).
+        ast_writer.interface.flush() catch |err| print_error_and_exit(io, err);
     }
 
-    tp.transpile() catch |err| print_error_and_exit(init.io, err);
+    tp.transpile() catch |err| print_error_and_exit(io, err);
 
     if (tp.flags.exec) {
         if (tp.flags.outf) {
-            cli.compile_and_run(global_allocator, init.io, options.output_file, true, options.input_file, options.program_args, options.debug_info) catch |err| print_error_and_exit(init.io, err);
+            cli.compile_and_run(global_allocator, io, options.output_file, true, options.input_file, options.program_args, options.debug_info) catch |err| print_error_and_exit(io, err);
         } else if (tp.get_output()) |output| {
-            cli.compile_and_run(global_allocator, init.io, output, false, options.input_file, options.program_args, options.debug_info) catch |err| print_error_and_exit(init.io, err);
+            cli.compile_and_run(global_allocator, io, output, false, options.input_file, options.program_args, options.debug_info) catch |err| print_error_and_exit(io, err);
         }
     }
 }

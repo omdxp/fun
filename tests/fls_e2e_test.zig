@@ -5460,3 +5460,102 @@ test "fls e2e: hover has no bold title, completion uses arg snippets, inlay hint
     shutdown_res.deinit();
     try lsp.notify("exit", "{}");
 }
+
+test "fun -ast flushes and prints the parsed AST" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    // Regression: `-ast` used a buffered stdout writer that was never flushed,
+    // so it printed nothing. Spawn the real binary and assert AST text appears.
+    const src =
+        "fun add(num a, num b) num {\n" ++
+        "  ret a + b;\n" ++
+        "}\n";
+    const ast_fn = "fls-e2e-ast.fn";
+    {
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, ast_fn, .{ .truncate = true });
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(std.testing.io, src);
+    }
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ast_fn) catch {};
+
+    const result = try std.process.run(allocator, std.testing.io, .{
+        .argv = &.{ setup.fun_abs, "-in", ast_fn, "-ast", "-no-exec" },
+        .stdout_limit = .limited(4 * 1024 * 1024),
+        .stderr_limit = .limited(1024 * 1024),
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    try std.testing.expect(result.stdout.len > 0);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Node Type: Function") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Name: add") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Return Type: num") != null);
+}
+
+test "fls e2e: hover on a generic method specializes type params to the receiver" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    // Self-contained generic so the test does not depend on stdlib internals.
+    const doc_text =
+        "compound Box<T> {\n" ++
+        "  T value;\n" ++
+        "}\n\n" ++
+        "impl Box<T> {\n" ++
+        "  pub get_or(T fallback) T {\n" ++
+        "    ret self.value;\n" ++
+        "  }\n" ++
+        "}\n\n" ++
+        "fun main() {\n" ++
+        "  Box<num> b;\n" ++
+        "  num r = b.get_or(0);\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-generic-hover.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // Hover on `get_or` in `b.get_or(0)`.
+    const call_pos = try findPosition(doc_text, "b.get_or", 0);
+    const hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, call_pos.line, call_pos.col + 2 }, // +2 to land on `get_or`
+    );
+    defer allocator.free(hover_params);
+    const hov_id = try lsp.request("textDocument/hover", hover_params);
+    var hov_res = try lsp.waitResponse(hov_id, 5000);
+    defer hov_res.deinit();
+
+    const hov_result = try jsonResultFromResponseObj(hov_res.parsed.value.object);
+    if (hov_result == .object) {
+        if (hov_result.object.get("contents")) |c| {
+            if (c == .object) {
+                if (c.object.get("value")) |v| {
+                    if (v == .string) {
+                        // The receiver is Box<num>, so T must be shown as num — not T.
+                        try std.testing.expect(std.mem.indexOf(u8, v.string, "get_or(num fallback) num") != null);
+                    }
+                }
+            }
+        }
+    }
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}

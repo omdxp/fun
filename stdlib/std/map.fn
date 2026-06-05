@@ -103,31 +103,16 @@ impl Map<K, V> {
   }
 
   hash_key(K key) num {
-    raw* key_ptr = &key;
-    u8* bytes = key_ptr;
-    let key_size = sizeof(K);
-    num mod = 1000000007;
-    num mul = 16777619;
-    num h = 2166136261 % mod;
-    num i = 0;
-    for i < key_size {
-      h = h ^ bytes[i];
-      if h < 0 {
-        h = -h;
-      }
-      h = h % mod;
-      h = h * mul;
-      h = h % mod;
-      i = i + 1;
-    }
-    if h < 0 {
-      h = -h;
-    }
-    ret h;
+    // Type-aware key hash: string keys hash by CONTENTS, value-typed keys by
+    // their raw bytes. The compiler lowers __fun_key_hash per the concrete key
+    // type (this method is monomorphized). Previously this hashed the raw bytes
+    // of the key, which for `str` keys hashed the POINTER, not the string.
+    ret __fun_key_hash(key);
   }
 
   keys_equal(K a, K b) bin {
-    ret memcmp(&a, &b, sizeof(K)) == 0;
+    // String keys compare by value (strcmp); value-typed keys by raw bytes.
+    ret __fun_key_eq(a, b);
   }
 
   find_live_index(K key) num {
@@ -352,9 +337,14 @@ impl Map<K, V> {
 
   // Insert only if absent; returns true when inserted.
   pub put_if_absent(K key, V value) bin {
-    let before_len = self.len;
+    // Only insert when the key is absent; do NOT overwrite an existing value.
+    // (Previously this always called put(), overwriting the existing value, then
+    // reported false — the report was right but the mutation was wrong.)
+    if self.find_live_index(key) != -1 {
+      ret false;
+    }
     self.put(key, value);
-    ret self.len > before_len;
+    ret true;
   }
 
   // Remove a key; returns true when removed.

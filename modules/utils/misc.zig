@@ -175,6 +175,9 @@ pub fn op_valid(op: []const u8) bool {
     return mem.eql(u8, "+", op) or mem.eql(u8, "-", op) or mem.eql(u8, "*", op) or mem.eql(u8, "/", op) or
         mem.eql(u8, "!", op) or mem.eql(u8, "^", op) or mem.eql(u8, "+=", op) or mem.eql(u8, "-=", op) or
         mem.eql(u8, "*=", op) or mem.eql(u8, "/=", op) or mem.eql(u8, ">>", op) or
+        // Compound-assignment operators for %, &, |, ^ (parity with += -= *= /= <<= >>=;
+        // also listed in the precedence table and `node_is_assignment`).
+        mem.eql(u8, "%=", op) or mem.eql(u8, "&=", op) or mem.eql(u8, "|=", op) or mem.eql(u8, "^=", op) or
         mem.eql(u8, ">>=", op) or mem.eql(u8, "<<", op) or mem.eql(u8, "<<=", op) or
         mem.eql(u8, ">", op) or mem.eql(u8, "<", op) or mem.eql(u8, ">=", op) or mem.eql(u8, "<=", op) or
         mem.eql(u8, "||", op) or mem.eql(u8, "&&", op) or mem.eql(u8, "|", op) or mem.eql(u8, "&", op) or
@@ -198,23 +201,29 @@ pub fn is_hex_number(c: u8) bool {
     return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
 }
 
-/// Converts an escape character to its corresponding value.
+/// Converts an escape character to its corresponding byte value.
 ///
-/// This function takes an escape character and returns its corresponding character value.
-/// For example, the escape character 'n' is converted to the newline character '\n'.
-///
-/// Returns:
-/// - `u8`: The character corresponding to the escape character, or `0` if the escape character is not recognized.
+/// Covers the standard C escape sequences. For example `'n'` -> `'\n'` (0x0A) and
+/// `'r'` -> `'\r'` (0x0D). Returns `null` for an UNRECOGNIZED escape so the caller
+/// can report a clean error instead of silently substituting NUL (which previously
+/// turned `'\r'`, `'\q'`, etc. into 0 with no diagnostic — a silent data-loss bug).
 ///
 /// Parameters:
-/// - `c (u8)`: The escape character to convert.
-pub fn get_escape_char(c: u8) u8 {
+/// - `c (u8)`: The escape character (the byte AFTER the backslash).
+pub fn get_escape_char(c: u8) ?u8 {
     return switch (c) {
-        'n' => '\n',
-        '\\' => '\\',
-        't' => '\t',
-        '\'' => '\'',
-        else => 0,
+        'n' => '\n', // newline
+        'r' => '\r', // carriage return
+        't' => '\t', // horizontal tab
+        '\\' => '\\', // backslash
+        '\'' => '\'', // single quote
+        '"' => '"', // double quote
+        '0' => 0, // NUL (explicitly requested, not a fallback)
+        'a' => 0x07, // bell
+        'b' => 0x08, // backspace
+        'f' => 0x0C, // form feed
+        'v' => 0x0B, // vertical tab
+        else => null,
     };
 }
 
@@ -341,6 +350,22 @@ pub fn is_parenthesis(op: []const u8) bool {
 /// - `t ( token.Token )`: The token to check.
 pub fn is_unary_operand_compatible(t: token.Token) bool {
     return is_access_operator(t.data.sval.items) or is_array_operator(t.data.sval.items) or is_parenthesis(t.data.sval.items);
+}
+
+/// True if `t` is an operator that, appearing AFTER a complete primary expression,
+/// is a binary/infix operator — i.e. it would combine the primary with a following
+/// operand rather than continue it. Postfix-continuation operators (`.`, `[`, `(`)
+/// return false (they extend the primary). Used to bound `await <call>` so the
+/// await operand is just the call, not the surrounding binary expression.
+pub fn is_binary_only_operator(t: token.Token) bool {
+    if (t.type != .Operator) return false;
+    const op = t.data.sval.items;
+    // Postfix continuations keep the primary going.
+    if (is_access_operator(op) or is_parenthesis(op)) return false;
+    if (op.len == 1 and op[0] == '[') return false;
+    // Everything else at this position is infix (+, -, *, /, %, <, >, <=, >=,
+    // ==, !=, &&, ||, &, |, ^, <<, >>, and the compound-assignments).
+    return true;
 }
 
 /// Checks if the given operator is a unary operator.

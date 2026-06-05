@@ -249,9 +249,16 @@ test "misc keyword and operator helpers" {
 }
 
 test "misc escape and datatype helpers" {
-    try std.testing.expectEqual(@as(u8, '\n'), utils.get_escape_char('n'));
-    try std.testing.expectEqual(@as(u8, '\\'), utils.get_escape_char('\\'));
-    try std.testing.expectEqual(@as(u8, 0), utils.get_escape_char('x'));
+    // get_escape_char returns ?u8: the decoded byte for a recognized escape, or
+    // null for an unrecognized one (so callers can error instead of silently
+    // substituting NUL — which previously turned '\r', '\q', etc. into 0).
+    try std.testing.expectEqual(@as(?u8, '\n'), utils.get_escape_char('n'));
+    try std.testing.expectEqual(@as(?u8, '\r'), utils.get_escape_char('r'));
+    try std.testing.expectEqual(@as(?u8, '\t'), utils.get_escape_char('t'));
+    try std.testing.expectEqual(@as(?u8, '\\'), utils.get_escape_char('\\'));
+    try std.testing.expectEqual(@as(?u8, 0), utils.get_escape_char('0'));
+    try std.testing.expectEqual(@as(?u8, null), utils.get_escape_char('x'));
+    try std.testing.expectEqual(@as(?u8, null), utils.get_escape_char('q'));
 
     try std.testing.expectEqual(@import("semantics").dtype.DataTypeType.Num, utils.get_datatype_type("num"));
     try std.testing.expectEqual(@import("semantics").dtype.DataTypeType.Unknown, utils.get_datatype_type("wat"));

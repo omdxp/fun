@@ -216,6 +216,17 @@ pub const LexProcess = struct {
         return if (readBytes == 0) null else buffer[0];
     }
 
+    /// Peeks the SECOND character ahead (at `file_pos + 1`) without advancing.
+    /// Used for two-char lookahead such as distinguishing a leading-dot float
+    /// literal (`.5`) from a member-access / range `.` operator.
+    pub fn peek_char2(self: *Self) LexError!?u8 {
+        var buffer: [1]u8 = undefined;
+        const readBytes = self.transpile_proc.ifile.readPositionalAll(self.transpile_proc.io, &buffer, self.transpile_proc.file_pos + 1) catch {
+            return LexError.FileReadError;
+        };
+        return if (readBytes == 0) null else buffer[0];
+    }
+
     /// Pushes a character back onto the input file stream.
     ///
     /// This function pushes the given character back onto the input file stream,
@@ -306,15 +317,49 @@ pub const LexProcess = struct {
         const c = try self.peek_char();
         if (c == '/') {
             _ = try self.next_char();
-            if (try self.peek_char() == '/') {
+            const nxt = try self.peek_char();
+            if (nxt == '/') {
                 _ = try self.next_char();
                 return try self.token_make_comment();
+            }
+            if (nxt == '*') {
+                _ = try self.next_char();
+                return try self.token_make_block_comment();
             }
             try self.push_char('/');
             return try self.token_make_operator();
         }
 
         return null;
+    }
+
+    /// Creates a comment token from a `/* ... */` block comment. Consumes through
+    /// the closing `*/`. An unterminated block comment (EOF before `*/`) is a clean
+    /// lex error rather than a crash. Newlines inside the comment are advanced
+    /// through `next_char`, which keeps line/column tracking correct.
+    fn token_make_block_comment(self: *Self) LexError!token.Token {
+        var buffer = ArrayList(u8).init(self.transpile_proc.allocator);
+        const start_pos = self.transpile_proc.pos;
+        while (true) {
+            const ch = try self.next_char() orelse {
+                self.transpile_proc.err("unterminated block comment (missing '*/')", .{});
+                buffer.deinit();
+                return LexError.InvalidExpression;
+            };
+            if (ch == '*' and (try self.peek_char()) == '/') {
+                _ = try self.next_char(); // consume the closing '/'
+                break;
+            }
+            buffer.append(ch) catch {
+                buffer.deinit();
+                return LexError.MemoryAllocationFailed;
+            };
+        }
+        return token.Token{
+            .type = .Comment,
+            .data = .{ .sval = buffer },
+            .pos = start_pos,
+        };
     }
 
     /// Handles whitespace characters in the input file.
@@ -487,8 +532,12 @@ pub const LexProcess = struct {
     }
 
     fn token_make_number_from_string(self: *Self, number_str: []const u8) LexError!?token.Token {
-        // If it looks like a decimal literal, parse it as f64.
-        if (std.mem.indexOfScalar(u8, number_str, '.')) |_| {
+        // A '.' OR an exponent ('e'/'E', e.g. "1e10" with no dot) makes this a
+        // decimal literal -> parse as f64.
+        const has_dot = std.mem.indexOfScalar(u8, number_str, '.') != null;
+        const has_exp = std.mem.indexOfScalar(u8, number_str, 'e') != null or
+            std.mem.indexOfScalar(u8, number_str, 'E') != null;
+        if (has_dot or has_exp) {
             const v: f64 = std.fmt.parseFloat(f64, number_str) catch {
                 self.transpile_proc.err("failed to parse number '{s}'", .{number_str});
                 return LexError.InvalidNumber;
@@ -567,11 +616,20 @@ pub const LexProcess = struct {
     /// Errors:
     /// - Returns an error if reading the number or next character fails.
     fn token_make_number(self: *Self) LexError!?token.Token {
-        // Read the integer part.
+        // Read the integer part. It may be EMPTY for a leading-dot literal (`.5`),
+        // which `read_next_token` routes here only when a digit follows the '.'.
         var buffer = try self.read_number_str();
         defer buffer.deinit();
 
-        // Decimal literals: <digits>.<digits>
+        // Leading-dot literal (`.5`): synthesize a leading "0" so the string is
+        // "0.5" for parseFloat.
+        if (buffer.items.len == 0) {
+            buffer.append('0') catch {
+                return LexError.MemoryAllocationFailed;
+            };
+        }
+
+        // Decimal literals: <digits>.<digits>, or a trailing dot (`1.` -> "1.0").
         const pc = try self.peek_char();
         if (pc != null and pc.? == '.') {
             _ = try self.next_char();
@@ -586,13 +644,62 @@ pub const LexProcess = struct {
                 buffer.appendSlice(frac.items) catch {
                     return LexError.MemoryAllocationFailed;
                 };
+            } else if (after_dot == null or
+                !(utils.is_alpha(after_dot.?) or after_dot.? == '_' or after_dot.? == '.'))
+            {
+                // Trailing dot with no fraction (`1.`) not followed by an identifier
+                // start OR another dot: a decimal literal "1.0". A following
+                // letter/underscore (`1.foo`) stays integer + '.' (member access);
+                // a following dot (`0..3`) is the range operator `..`, so we must
+                // NOT swallow its first dot into a float.
+                buffer.appendSlice(".0") catch {
+                    return LexError.MemoryAllocationFailed;
+                };
             } else {
-                // Not a decimal; unread the '.' so it can be tokenized as an operator.
+                // Not a decimal (identifier or another dot follows): unread the '.'
+                // so it lexes as the member-access / range operator.
                 try self.push_char('.');
             }
         }
 
+        // Optional exponent (`1e10`, `1.5e-3`, `2E+5`). Consumed only when real
+        // digits follow; otherwise the 'e'/'E' is left to be lexed normally.
+        try self.read_exponent(&buffer);
+
         return try self.token_make_number_from_string(buffer.items);
+    }
+
+    /// Consumes a floating-point exponent (`e`/`E`, optional `+`/`-`, digits) onto
+    /// `buffer` when the lookahead forms a valid exponent. If it does not (no digit
+    /// after the optional sign), every peeked character is pushed back so it lexes
+    /// normally — e.g. an identifier `e` after a number is untouched.
+    fn read_exponent(self: *Self, buffer: *ArrayList(u8)) LexError!void {
+        const e = try self.peek_char();
+        if (e == null or (e.? != 'e' and e.? != 'E')) return;
+        _ = try self.next_char(); // tentatively consume 'e'/'E'
+
+        const sign = try self.peek_char();
+        var consumed_sign = false;
+        if (sign != null and (sign.? == '+' or sign.? == '-')) {
+            _ = try self.next_char();
+            consumed_sign = true;
+        }
+
+        const d = try self.peek_char();
+        if (d == null or !utils.is_number(d.?)) {
+            // Not an exponent: unread what we consumed (sign first, then 'e').
+            if (consumed_sign) try self.push_char(sign.?);
+            try self.push_char(e.?);
+            return;
+        }
+
+        buffer.append(e.?) catch return LexError.MemoryAllocationFailed;
+        if (consumed_sign) {
+            buffer.append(sign.?) catch return LexError.MemoryAllocationFailed;
+        }
+        const digits = try self.read_number_str();
+        defer digits.deinit();
+        buffer.appendSlice(digits.items) catch return LexError.MemoryAllocationFailed;
     }
 
     /// Starts a new expression context.
@@ -689,17 +796,29 @@ pub const LexProcess = struct {
     /// Parameters:
     /// - `buffer (*ArrayList(u8))`: The buffer containing the characters to be pushed back.
     fn read_op_flush_back_keep_first(self: *Self, buffer: *ArrayList(u8)) LexError!void {
-        var i = buffer.items.len - 1;
-        while (i > 0) {
-            _ = try self.push_char(buffer.items[i]);
-            i -= 1;
+        // Keep the LONGEST valid operator prefix (maximal munch), not just the
+        // first character. The greedy reader can over-consume — e.g. `>=-` from
+        // `a >=-1` — producing an invalid operator; keeping only the first char
+        // would collapse `>=` to `>` and lose the negative RHS (and the same `=-`
+        // over-munch broke `enum E { A = -1 }`). We push back exactly the chars
+        // past the longest valid prefix so they re-lex. For a genuinely single-char
+        // operator only the 1-char prefix is valid, so the result is unchanged, and
+        // we never push back MORE chars than the original "keep first" code did.
+        var keep: usize = 1;
+        var k: usize = buffer.items.len;
+        while (k >= 1) : (k -= 1) {
+            if (utils.op_valid(buffer.items[0..k])) {
+                keep = k;
+                break;
+            }
         }
-
-        // IMPORTANT: We only want to keep the first operator character.
-        // The rest were pushed back into the input stream and must not remain
-        // in the returned operator token, otherwise we'd emit an invalid operator
-        // and then re-lex the pushed-back chars (duplicating tokens).
-        buffer.items.len = 1;
+        // Push back from the end down to `keep` (exclusive of indices < keep).
+        var bi: usize = buffer.items.len;
+        while (bi > keep) {
+            bi -= 1;
+            _ = try self.push_char(buffer.items[bi]);
+        }
+        buffer.items.len = keep;
     }
 
     /// Reads an operator from the input file.
@@ -973,7 +1092,10 @@ pub const LexProcess = struct {
             return;
         }
 
-        const ec = utils.get_escape_char(c.?);
+        const ec = utils.get_escape_char(c.?) orelse {
+            self.transpile_proc.err("unknown escape sequence '\\{c}'", .{c.?});
+            return LexError.InvalidCharacter;
+        };
         buf.append(ec) catch {
             return LexError.MemoryAllocationFailed;
         };
@@ -1005,13 +1127,25 @@ pub const LexProcess = struct {
                 break;
             }
 
-            // if (c.? == '\\') {
-            //     try self.handle_escape(&buffer);
-            // } else {
+            // Backslash starts an escape sequence. We pass escapes through
+            // verbatim into the buffer (the emitted C string literal interprets
+            // them — `\n`, `\t`, `\\`, `\0`, etc.). Critically, consuming the
+            // escaped character here means an escaped quote `\"` does NOT
+            // prematurely terminate the Fun string literal.
+            if (c.? == '\\') {
+                buffer.append(c.?) catch return LexError.MemoryAllocationFailed;
+                const next = try self.next_char();
+                if (next == null) {
+                    self.transpile_proc.err("unexpected end of file while reading string", .{});
+                    return LexError.FileReadError;
+                }
+                buffer.append(next.?) catch return LexError.MemoryAllocationFailed;
+                continue;
+            }
+
             buffer.append(c.?) catch {
                 return LexError.MemoryAllocationFailed;
             };
-            // }
         }
 
         return token.Token{
@@ -1048,7 +1182,12 @@ pub const LexProcess = struct {
                 self.transpile_proc.err("unexpected end of file while reading character escape", .{});
                 return LexError.InvalidCharacter;
             }
-            c = utils.get_escape_char(c.?);
+            // Reject unrecognized escapes (e.g. '\q') with a clean error rather
+            // than silently decoding them to NUL.
+            c = utils.get_escape_char(c.?) orelse {
+                self.transpile_proc.err("unknown escape sequence '\\{c}' in character literal", .{c.?});
+                return LexError.InvalidCharacter;
+            };
         }
 
         const nc = try self.next_char();
@@ -1109,6 +1248,18 @@ pub const LexProcess = struct {
         const c = try self.peek_char();
         if (c == null) {
             return t;
+        }
+
+        // Leading-dot float literal (`.5`): a '.' immediately followed by a digit
+        // starts a number, not a member-access / range operator. We must look two
+        // chars ahead because the single-char `switch` below would otherwise route
+        // '.' to `token_make_operator`. `peek_char2` restores the position.
+        if (c.? == '.') {
+            if (try self.peek_char2()) |c2| {
+                if (utils.is_number(c2)) {
+                    return try self.token_make_number();
+                }
+            }
         }
 
         switch (c.?) {

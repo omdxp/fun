@@ -1401,7 +1401,23 @@ pub const LspServer = struct {
                                 },
                                 .method => {
                                     if (h.sym.detail) |det| {
-                                        try buf.print("```fun\n{s}\n```\n", .{det});
+                                        // Specialize generic type params against the concrete
+                                        // receiver type so hovering `o.unwrap_or` on an
+                                        // `Option<num>` shows `unwrap_or(num ...) num` rather
+                                        // than the raw `unwrap_or(T ...) T`. Mirrors the
+                                        // signature-help specialization.
+                                        var spec_owned: ?[]u8 = null;
+                                        defer if (spec_owned) |s| self.allocator.free(s);
+                                        const shown: []const u8 = blk: {
+                                            if (h.sym.container_type) |declared_container| {
+                                                if (self.specializeMemberLabelForReceiver(self.allocator, declared_container, recv_type, det) catch null) |sv| {
+                                                    spec_owned = sv;
+                                                    break :blk sv;
+                                                }
+                                            }
+                                            break :blk det;
+                                        };
+                                        try buf.print("```fun\n{s}\n```\n", .{shown});
                                     } else {
                                         try buf.print("_method on {s}_\n", .{recv_type});
                                     }

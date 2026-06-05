@@ -22,6 +22,7 @@ pub const get_c_typedef_alias_datatype_type = misc_mod.get_c_typedef_alias_datat
 pub const is_access_operator = misc_mod.is_access_operator;
 pub const is_array_operator = misc_mod.is_array_operator;
 pub const is_parenthesis = misc_mod.is_parenthesis;
+pub const is_binary_only_operator = misc_mod.is_binary_only_operator;
 pub const is_unary_operand_compatible = misc_mod.is_unary_operand_compatible;
 pub const is_unary_operator = misc_mod.is_unary_operator;
 pub const is_indirection_operator = misc_mod.is_indirection_operator;

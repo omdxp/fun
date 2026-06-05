@@ -18,6 +18,11 @@ pub const HistoryFlags = packed struct {
     inside_expression: bool = false,
     /// Stop parsing when encountering a top-level comma.
     stop_at_comma: bool = false,
+    /// Stop parsing when encountering a top-level binary operator, so the parsed
+    /// unit is just a primary/postfix expression (call/index/member). Used by
+    /// `await <call>` so `await f(x) + 1` parses as `(await f(x)) + 1` rather than
+    /// `await (f(x) + 1)`.
+    stop_at_binary_op: bool = false,
 };
 
 /// Represents the branches in a fit statement.
@@ -77,6 +82,11 @@ pub const History = struct {
         if (flags.is_global_scope) new_history.flags.is_global_scope = true;
         if (flags.parenthesis_not_function_call) new_history.flags.parenthesis_not_function_call = true;
         if (flags.stop_at_comma) new_history.flags.stop_at_comma = true;
+        // `stop_at_binary_op` bounds only the IMMEDIATE `await <call>` operand; a
+        // nested context (parens, call args, brackets) is a fresh expression where
+        // operators are unbounded. `down` copies all flags wholesale (line above),
+        // so explicitly clear this one for the child unless the caller re-sets it.
+        new_history.flags.stop_at_binary_op = false;
         return new_history;
     }
 

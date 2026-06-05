@@ -1605,17 +1605,25 @@ test "defer emits in LIFO order before return" {
     const out_owned = try runTranspile(allocator, ifilepath, input);
     defer allocator.free(out_owned);
 
+    // The return value is snapshotted into a temp BEFORE the defers run (so a defer
+    // mutating a returned variable can't corrupt the value), then the defers emit in
+    // LIFO order (b before a), then the function returns the temp. So the ordering is:
+    //   __fun_ret_N = 1;  b();  a();  return __fun_ret_N;
+    const ret_assign_opt = std.mem.indexOf(u8, out_owned, "__fun_ret");
     const b_pos_opt = std.mem.lastIndexOf(u8, out_owned, "b();");
     const a_pos_opt = std.mem.lastIndexOf(u8, out_owned, "a();");
-    const ret_pos_opt = std.mem.lastIndexOf(u8, out_owned, "return 1;");
+    const ret_pos_opt = std.mem.lastIndexOf(u8, out_owned, "return __fun_ret");
+    try std.testing.expect(ret_assign_opt != null);
     try std.testing.expect(b_pos_opt != null);
     try std.testing.expect(a_pos_opt != null);
     try std.testing.expect(ret_pos_opt != null);
+    const ret_assign = ret_assign_opt.?;
     const b_pos = b_pos_opt.?;
     const a_pos = a_pos_opt.?;
     const ret_pos = ret_pos_opt.?;
-    try std.testing.expect(b_pos < a_pos);
-    try std.testing.expect(a_pos < ret_pos);
+    try std.testing.expect(ret_assign < b_pos); // value computed before defers
+    try std.testing.expect(b_pos < a_pos); // LIFO: b (last deferred) runs first
+    try std.testing.expect(a_pos < ret_pos); // defers before the actual return
 
     try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
@@ -5028,4 +5036,1841 @@ test "long type name with quirk impl does not overflow mangled C identifier buff
     defer allocator.free(stdout);
 
     try std.testing.expectEqualStrings("hi\n", stdout);
+}
+
+test "forward-referenced compound struct-initializer expression compiles and runs" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_fwd_struct_init.fn";
+    const c_path = "codegen_fwd_struct_init.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_fwd_struct_init.exe" else "codegen_fwd_struct_init";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: a `Name{...}` initializer EXPRESSION used before `Name` is
+    // declared (forward reference) was rejected with "unknown identifier",
+    // because the single-pass parser only recognized compound-init for types
+    // already in the symbol table. A token pre-scan now records forward type
+    // names. Covers both a plain compound and a generic one.
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() num {\n" ++
+        "  Point p = Point{x = 3, y = 4};\n" ++
+        "  let b = Box<num>{value = 7};\n" ++
+        "  printf(\"%lld %lld %lld\\n\", p.x, p.y, b.value);\n" ++
+        "  ret 0;\n" ++
+        "}\n" ++
+        "compound Point { num x; num y; }\n" ++
+        "compound Box<T> { T value; }\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("3 4 7\n", stdout);
+}
+
+test "compound-initializer with a genuinely unknown type is still rejected" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_unknown_struct_init.fn";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+
+    // False-negative guard: the forward pre-scan must NOT accept a type that is
+    // never declared anywhere — this must still be an error.
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() num {\n" ++
+        "  let z = Nonexistent{q = 1};\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    try runTranspileExpectFailure(allocator, ifilepath, input);
+}
+
+test "compound-assignment operators %= &= |= ^= compute correctly" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_compound_assign_ops.fn";
+    const c_path = "codegen_compound_assign_ops.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_compound_assign_ops.exe" else "codegen_compound_assign_ops";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: utils.op_valid() omitted %= &= |= ^=, so the lexer flushed them
+    // back to a bare %/&/|/^ and the parser saw a binary op with no RHS.
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() num {\n" ++
+        "  num a = 100; a %= 7;\n" ++
+        "  num b = 100; b &= 7;\n" ++
+        "  num c = 100; c |= 7;\n" ++
+        "  num d = 100; d ^= 7;\n" ++
+        "  printf(\"%lld %lld %lld %lld\\n\", a, b, c, d);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("2 4 103 99\n", stdout);
+}
+
+test "escaped double-quote inside a string literal compiles and prints" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_escaped_quote.fn";
+    const c_path = "codegen_escaped_quote.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_escaped_quote.exe" else "codegen_escaped_quote";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: the lexer's string escape handling was commented out, so an
+    // escaped quote \" prematurely terminated the Fun string literal.
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() num {\n" ++
+        "  str s = \"she said \\\"hi\\\" ok\";\n" ++
+        "  printf(\"%s\\n\", s);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("she said \"hi\" ok\n", stdout);
+}
+
+test "single-letter quirk name emits impl method bodies (links)" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_single_letter_quirk.fn";
+    const c_path = "codegen_single_letter_quirk.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_single_letter_quirk.exe" else "codegen_single_letter_quirk";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: a single-uppercase-letter quirk name (Q) was misread as an
+    // unresolved generic placeholder, so the impl method body was never emitted
+    // (link error). Also covers a single-letter generic compound (G<T>).
+    const input =
+        "imp std.c.io;\n" ++
+        "quirk Q { getX() num; }\n" ++
+        "compound Foo { num x; }\n" ++
+        "impl Foo as Q { getX() num { ret self.x; } }\n" ++
+        "compound G<T> { T x; }\n" ++
+        "fun main() num {\n" ++
+        "  Foo f = Foo{x = 5};\n" ++
+        "  Q q = &f;\n" ++
+        "  G<num> g; g.x = 9;\n" ++
+        "  printf(\"%lld %lld\\n\", q.getX(), g.x);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("5 9\n", stdout);
+}
+
+test "stacked unary operator does not crash the parser" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_stacked_unary.fn";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+
+    // Regression: two `~~a` statements panicked the parser (null unwrap in
+    // parse_for_normal_unary). The compiler must never panic — at worst a clean
+    // diagnostic. We accept either success or a Fun-level error, but NOT a crash.
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() {\n" ++
+        "  num a = 5;\n" ++
+        "  num b = ~~a;\n" ++
+        "  num c = ~~a;\n" ++
+        "  printf(\"%d %d\\n\", b, c);\n" ++
+        "}\n";
+
+    // runTranspile either returns output or a Fun error; the key property is that
+    // it returns (does not panic/abort the test process).
+    if (runTranspile(allocator, ifilepath, input)) |out| {
+        allocator.free(out);
+    } else |_| {
+        // A clean parse error is acceptable.
+    }
+}
+
+test "member-access multiplied by an identifier parses as multiplication" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_member_mul.fn";
+    const c_path = "codegen_member_mul.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_member_mul.exe" else "codegen_member_mul";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: `s.id * x` (field access times a bare identifier) was misparsed
+    // as a pointer declaration `id* x;` because, while parsing the `.`-RHS field
+    // `id`, the decl lookahead matched the trailing `* x ;`. Covers plain, self,
+    // and nested member access.
+    const input =
+        "imp std.c.io;\n" ++
+        "compound O { num v; }\n" ++
+        "compound W { O inner; }\n" ++
+        "compound S { num id; }\n" ++
+        "impl S { pub m(num x) num { ret self.id * x; } }\n" ++
+        "fun nested(W o, num x) num { ret o.inner.v * x; }\n" ++
+        "fun main() num {\n" ++
+        "  S s; s.id = 3;\n" ++
+        "  W w; w.inner.v = 5;\n" ++
+        "  printf(\"%lld %lld\\n\", s.m(4), nested(w, 6));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("12 30\n", stdout);
+}
+
+test "double pointer dereference emits two stars" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_double_deref.fn";
+    const c_path = "codegen_double_deref.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_double_deref.exe" else "codegen_double_deref";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: `**pp` emitted a single `*pp` (the codegen wrote the unary op
+    // once, ignoring indirection.depth). Covers write and read sides.
+    const input =
+        "imp std.c.io;\n" ++
+        "fun set_via(num** pp, num val) { **pp = val; }\n" ++
+        "fun main() num {\n" ++
+        "  num x = 5;\n" ++
+        "  num* p = &x;\n" ++
+        "  num** pp = &p;\n" ++
+        "  set_via(pp, 42);\n" ++
+        "  num v = **pp;\n" ++
+        "  printf(\"%lld %lld\\n\", x, v);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("42 42\n", stdout);
+}
+
+test "field access on element of array-of-pointers emits arrow" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_arr_ptr_arrow.fn";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+
+    // Regression: `arr[0].id` where `arr: Item*[]` emitted C `.` instead of `->`.
+    // The generated C must use `arr[0]->id`. (We only need the field-access
+    // codegen here, so assert on the emitted C — the array-literal call path has
+    // a separate, unrelated limitation.)
+    const input =
+        "imp std.c.io;\n" ++
+        "compound Item { num id; }\n" ++
+        "fun first_id(Item*[] arr) num { ret arr[0].id; }\n" ++
+        "fun main() { _ = first_id; printf(\"ok\\n\"); }\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "arr[0]->id") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "arr[0].id") == null);
+}
+
+test "fit on a string value lowers to strcmp chain and dispatches correctly" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_fit_str.fn";
+    const c_path = "codegen_fit_str.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_fit_str.exe" else "codegen_fit_str";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: `fit` on a str condition emitted invalid C `switch(char*)`.
+    // It now lowers to an if/else-if strcmp chain.
+    const input =
+        "imp std.c.io;\n" ++
+        "fun classify(str s) {\n" ++
+        "  fit s {\n" ++
+        "    \"go\" -> { printf(\"going\\n\"); },\n" ++
+        "    \"stop\" -> { printf(\"stopped\\n\"); },\n" ++
+        "    _ -> { printf(\"idle\\n\"); }\n" ++
+        "  }\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  classify(\"go\");\n" ++
+        "  classify(\"stop\");\n" ++
+        "  classify(\"wait\");\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    // Must NOT emit a switch on the string condition.
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "strcmp") != null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("going\nstopped\nidle\n", stdout);
+}
+
+test "local array of compound stays in function body (not hoisted to file scope)" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_local_compound_array.fn";
+    const c_path = "codegen_local_compound_array.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_local_compound_array.exe" else "codegen_local_compound_array";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: a local `P[]` declaration (user-defined element type) was not
+    // recognized by the statement-level decl detector (it only skipped `*`, not
+    // `[]`), so it fell to the expression path and was emitted at file scope —
+    // dragging the following statements out of the function and breaking codegen.
+    const input =
+        "imp std.c.io;\n" ++
+        "compound P { num x; }\n" ++
+        "fun main() num {\n" ++
+        "  P[] pts = [P{x = 1}, P{x = 2}, P{x = 3}];\n" ++
+        "  num sum = 0;\n" ++
+        "  for p : pts { sum = sum + p.x; }\n" ++
+        "  printf(\"sum=%lld\\n\", sum);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("sum=6\n", stdout);
+}
+
+test "local T[] initialized from a pointer emits a C pointer, not an array" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_array_from_ptr.fn";
+    const c_path = "codegen_array_from_ptr.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_array_from_ptr.exe" else "codegen_array_from_ptr";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: `num[] a = <pointer>` emitted `int64_t a[] = ptr;` (illegal C).
+    // It must emit `int64_t* a = ptr;`. This is the heap-as-array idiom (Vec/Array).
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.c.mem;\n" ++
+        "fun main() num {\n" ++
+        "  raw* mem = malloc(24);\n" ++
+        "  num[] a = mem;\n" ++
+        "  a[0] = 42;\n" ++
+        "  a[1] = 7;\n" ++
+        "  printf(\"%lld\\n\", a[0] + a[1]);\n" ++
+        "  free(mem);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t* a = ") != null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("49\n", stdout);
+}
+
+test "compound initializer field after an address-of-valued field parses correctly" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_initfield_after_addr.fn";
+    const c_path = "codegen_initfield_after_addr.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_initfield_after_addr.exe" else "codegen_initfield_after_addr";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: in `Car{motor = &e, wheels = 4}` the `&e` value parse ignored
+    // the enclosing `stop_at_comma`, consuming `, wheels` and rejecting `wheels`
+    // as an unknown identifier. The unary operand + trailing-expression parse now
+    // honor stop_at_comma.
+    const input =
+        "imp std.c.io;\n" ++
+        "compound Engine { num power; }\n" ++
+        "compound Car { Engine* motor; num wheels; }\n" ++
+        "fun main() num {\n" ++
+        "  Engine e; e.power = 50;\n" ++
+        "  Car c = Car{motor = &e, wheels = 4};\n" ++
+        "  printf(\"%lld %lld\\n\", c.motor.power, c.wheels);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("50 4\n", stdout);
+}
+
+test "generic compound coerces to a quirk (mangled coercion helper name)" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_generic_quirk_coerce.fn";
+    const c_path = "codegen_generic_quirk_coerce.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_generic_quirk_coerce.exe" else "codegen_generic_quirk_coerce";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: coercing a generic compound instance to a quirk emitted a call
+    // to `__fun_coerce_Box_<hash>` (base name) while the helper was DEFINED as
+    // `__fun_coerce_Box__num_<hash>` (mangled). Covers var-init, assignment, and
+    // compound-field positions.
+    const input =
+        "imp std.c.io;\n" ++
+        "quirk Lenable { size() num; }\n" ++
+        "compound Box<T> { T v; num count; }\n" ++
+        "impl Box<T> as Lenable { size() num { ret self.count; } }\n" ++
+        "compound Holder { Lenable item; }\n" ++
+        "fun main() num {\n" ++
+        "  Box<num> bn = Box<num>{v = 9, count = 3};\n" ++
+        "  Lenable la = &bn;\n" ++
+        "  Lenable lb;\n" ++
+        "  lb = &bn;\n" ++
+        "  Holder h = Holder{item = &bn};\n" ++
+        "  printf(\"%lld %lld %lld\\n\", la.size(), lb.size(), h.item.size());\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("3 3 3\n", stdout);
+}
+
+test "sizeof works with generic types, generic instances, and locals" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_sizeof_generics.fn";
+    const c_path = "codegen_sizeof_generics.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_sizeof_generics.exe" else "codegen_sizeof_generics";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: `sizeof(Box<num>)` failed to parse (the `<` was read as a
+    // comparison), and `sizeof(localVar)` reported "sizeof unknown type". Now
+    // sizeof accepts a generic type operand and a value operand (mangling generic
+    // instances to their concrete C struct, e.g. Box__num).
+    const input =
+        "imp std.c.io;\n" ++
+        "compound Box<T> { T v; }\n" ++ // 8 bytes for num
+        "compound Pair<A, B> { A a; B b; }\n" ++ // 16 bytes for <num,num>
+        "fun main() num {\n" ++
+        "  Box<num> b;\n" ++
+        "  num a = sizeof(Box<num>);\n" ++ // 8
+        "  num c = sizeof(b);\n" ++ // 8 (local generic instance)
+        "  num d = sizeof(Pair<num, num>);\n" ++ // 16
+        "  num e = sizeof(Box<Box<num>>);\n" ++ // 8 (nested)
+        "  printf(\"%lld %lld %lld %lld\\n\", a, c, d, e);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("8 8 16 8\n", stdout);
+}
+
+test "sizeof on an undeclared type is still rejected" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_sizeof_unknown.fn";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() num { num x = sizeof(Nope); ret 0; }\n";
+    try runTranspileExpectFailure(allocator, ifilepath, input);
+}
+
+test "P5: constant division by zero is rejected at compile time" {
+    const allocator = std.testing.allocator;
+    // A literal `/ 0` divisor previously passed straight through to C, where it
+    // is undefined behavior (garbage / SIGFPE at runtime). It must now be a clean
+    // compile error.
+    {
+        const ifilepath = "codegen_div_zero_lit.fn";
+        defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+        try runTranspileExpectFailure(allocator, ifilepath, "imp std.c.io;\nfun main() num { num c = 10 / 0; ret 0; }\n");
+    }
+    // The same for the modulo operator (`% 0`).
+    {
+        const ifilepath = "codegen_mod_zero_lit.fn";
+        defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+        try runTranspileExpectFailure(allocator, ifilepath, "imp std.c.io;\nfun main() num { num c = 7 % 0; ret 0; }\n");
+    }
+    // A divisor that constant-folds to zero (`(2 - 2)`) is rejected too.
+    {
+        const ifilepath = "codegen_div_zero_folded.fn";
+        defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+        try runTranspileExpectFailure(allocator, ifilepath, "imp std.c.io;\nfun main() num { num c = 8 / (2 - 2); ret 0; }\n");
+    }
+}
+
+test "P5: non-zero and runtime divisors still compile" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_div_ok.fn";
+    const c_path = "codegen_div_ok.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_div_ok.exe" else "codegen_div_ok";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // A non-zero constant divisor and a runtime (variable) divisor must both
+    // still compile and run — only a *constant-zero* divisor is rejected.
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() num {\n" ++
+        "  num x = 2;\n" ++
+        "  num a = 10 / 2;\n" ++
+        "  num b = 9 % x;\n" ++
+        "  printf(\"%lld %lld\\n\", a, b);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("5 1\n", stdout);
+}
+
+test "P4: multi-dimensional array indexing (2D/3D) type-checks and runs" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_multidim_index.fn";
+    const c_path = "codegen_multidim_index.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_multidim_index.exe" else "codegen_multidim_index";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: a 2D/3D array could be *declared* (`int64_t m[2][3]`), but the
+    // index typecheck dropped the array depth after one `[]`, so `m[i][j]` was
+    // wrongly rejected with "indexing requires an array". The result of indexing
+    // an N-deep array is now an (N-1)-deep array, so chained subscripts work and a
+    // 2D fixed-size initializer (`[[..],[..]]`) round-trips.
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() num {\n" ++
+        "  num[2][3] m;\n" ++
+        "  m[0][0] = 5;\n" ++
+        "  m[1][2] = 9;\n" ++
+        "  num[2][2] init = [[1, 2], [3, 4]];\n" ++
+        "  num[2][2][2] t;\n" ++
+        "  t[1][1][1] = 7;\n" ++
+        "  printf(\"%lld %lld %lld %lld %lld\\n\", m[0][0], m[1][2], init[0][1], init[1][0], t[1][1][1]);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    // The declaration must be a real C 2D array, not a flattened pointer.
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "m[2][3]") != null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("5 9 2 3 7\n", stdout);
+}
+
+test "P4: partial index of a 2D array yields an array, not a num" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_multidim_partial.fn";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    // Soundness guard for the multi-dim fix: a single index of `num[2][3]` is a
+    // `num[3]` (an array), so assigning it to a `num` must still be rejected.
+    try runTranspileExpectFailure(
+        allocator,
+        ifilepath,
+        "imp std.c.io;\nfun main() num { num[2][3] m; num x = m[0]; ret 0; }\n",
+    );
+}
+
+test "P3: float literals (scientific, leading-dot, trailing-dot) and the range operator coexist" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_float_literals.fn";
+    const c_path = "codegen_float_literals.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_float_literals.exe" else "codegen_float_literals";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Scientific notation (1e1, 1.5e-1, 2E+1), leading-dot (.5) and trailing-dot
+    // (3.) decimal literals all lex as f64. CRITICAL regression guard: the
+    // trailing-dot path must NOT swallow the first '.' of the range operator
+    // `0..3` (it once turned `0.` into `0.0`, breaking every literal `for i:0..N`).
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() num {\n" ++
+        "  dec a = 1e1;\n" ++
+        "  dec b = 1.5e-1;\n" ++
+        "  dec c = 2E+1;\n" ++
+        "  dec d = .5;\n" ++
+        "  dec e = 3.;\n" ++
+        "  num sum = 0;\n" ++
+        "  for i : 0..3 { sum = sum + i; }\n" ++
+        "  printf(\"%.1f %.2f %.1f %.1f %.1f %lld\\n\", a, b, c, d, e, sum);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    // 0..3 sums 0+1+2 = 3 (proving the range operator survived the float lexer).
+    try std.testing.expectEqualStrings("10.0 0.15 20.0 0.5 3.0 3\n", stdout);
+}
+
+test "P3: comparison operators do not maximal-munch a following minus" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_munch.fn";
+    const c_path = "codegen_munch.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_munch.exe" else "codegen_munch";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // `a >=-1` once lexed `>=-` as one (invalid) operator and kept only `>`, losing
+    // the negative RHS. The lexer now keeps the longest VALID operator prefix, so
+    // `>=` / `<=` / `==` / `!=` never absorb a trailing `-`. The compound-assign
+    // ops (`>>=`, `<<=`, `+=`) must remain intact (regression guards).
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() num {\n" ++
+        "  num a = 5;\n" ++
+        "  bin ge = a >=-1;\n" ++ // 5 >= -1 -> true
+        "  bin le = a <=-1;\n" ++ // 5 <= -1 -> false
+        "  bin eq = a ==-5;\n" ++ // 5 == -5 -> false
+        "  bin ne = a !=-5;\n" ++ // 5 != -5 -> true
+        "  num sh = 4; sh >>= 1;\n" ++ // 2
+        "  printf(\"%d %d %d %d %lld\\n\", ge, le, eq, ne, sh);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("1 0 0 1 2\n", stdout);
+}
+
+test "P3: enum variants accept explicit negative values" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_neg_enum.fn";
+    const c_path = "codegen_neg_enum.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_neg_enum.exe" else "codegen_neg_enum";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // `enum E { A = -1 }` once failed to parse (the lexer munched `=-`). It now
+    // parses and emits valid C (`E_A = -1`). We read the value through a `num`
+    // binding (the sound idiom: enums are int-width in C, so passing one straight
+    // to a `%lld` vararg would mis-read its width — assigning to num sign-extends).
+    const input =
+        "imp std.c.io;\n" ++
+        "enum E { A = -1, B = 0, C = 5 }\n" ++
+        "fun main() num {\n" ++
+        "  E a = E.A;\n" ++
+        "  E c = E.C;\n" ++
+        "  num na = a;\n" ++
+        "  num nc = c;\n" ++
+        "  printf(\"%lld %lld %lld\\n\", na, nc, na + 10);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "E_A = -1") != null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("-1 5 9\n", stdout);
+}
+
+test "P3: uninstantiated generic compound does not trip false cyclic-dependency" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_uninst_generic.fn";
+    const c_path = "codegen_uninst_generic.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_uninst_generic.exe" else "codegen_uninst_generic";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // A generic compound that is DECLARED but never instantiated used to drain to
+    // an empty work-list yet still trip the `!progress` guard -> false "cyclic
+    // by-value compound dependency". Removing a generic template now counts as
+    // progress. Here `Box<T>` and the self-referential-via-pointer `Node<T>` are
+    // both unused; only `Node<num>` is instantiated.
+    const input =
+        "imp std.c.io;\n" ++
+        "pub compound Box<T> { T v; }\n" ++
+        "pub compound Node<T> { T val; Node<T>* next; }\n" ++
+        "fun main() num {\n" ++
+        "  Node<num> a = Node<num>{val = 7, next = NULL};\n" ++
+        "  printf(\"%lld\\n\", a.val);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("7\n", stdout);
+}
+
+test "P3: a genuine by-value compound cycle is still rejected" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_real_cycle.fn";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    // Soundness guard for the false-cyclic fix: a real non-generic by-value cycle
+    // (A holds B by value, B holds A by value) must STILL be a clean error.
+    try runTranspileExpectFailure(
+        allocator,
+        ifilepath,
+        "imp std.c.io;\ncompound A { B b; }\ncompound B { A a; }\nfun main() num { ret 0; }\n",
+    );
+}
+
+test "direct call-site quirk coercion: callee(&concrete) wraps in __fun_coerce" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_callsite_quirk_coerce.fn";
+    const c_path = "codegen_callsite_quirk_coerce.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_callsite_quirk_coerce.exe" else "codegen_callsite_quirk_coerce";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: passing a concrete pointer directly to a quirk-typed parameter
+    // (`describe(7, &d, "hi")`) emitted a raw `Dog*` where a `Speaker` fat-pointer
+    // was expected (a C type error). Now the concrete-pointer arg is wrapped in the
+    // `__fun_coerce_<Type>_<hash>` helper, while sibling non-quirk args (`num`,
+    // `str`) and an entirely non-quirk call (`plain`) pass through untouched.
+    const input =
+        "imp std.c.io;\n" ++
+        "quirk Speaker { speak() str; }\n" ++
+        "compound Dog { num age; }\n" ++
+        "impl Dog as Speaker { speak() str { ret \"woof\"; } }\n" ++
+        "fun describe(num n, Speaker s, str tag) {\n" ++
+        "  printf(\"%lld %s %s\\n\", n, s.speak(), tag);\n" ++
+        "}\n" ++
+        "fun plain(num a, num b) num { ret a + b; }\n" ++
+        "fun main() num {\n" ++
+        "  Dog d = Dog{age = 3};\n" ++
+        "  describe(7, &d, \"hi\");\n" ++
+        "  printf(\"%lld\\n\", plain(2, 3));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    // The quirk arg is wrapped; the non-quirk call is left as a bare call.
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "__fun_coerce_Dog_") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "plain(2, 3)") != null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("7 woof hi\n5\n", stdout);
+}
+
+test "generic compound coerces to a quirk at a call site and via var-init" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_generic_callsite_quirk.fn";
+    const c_path = "codegen_generic_callsite_quirk.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_generic_callsite_quirk.exe" else "codegen_generic_callsite_quirk";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: a generic-compound instance (`Box<num>`) coerced to a quirk both
+    // through a direct call argument (`report(&b)`) and a var-init (`Sized sz=&b`)
+    // failed type-checking ("type mismatch"), and even when forced, codegen emitted
+    // the base-name helper `__fun_coerce_Box_...` instead of the mangled
+    // `__fun_coerce_Box__num_...` that is actually DEFINED. Now both compile and run.
+    const input =
+        "imp std.c.io;\n" ++
+        "quirk Sized { size() num; }\n" ++
+        "compound Box<T> { T v; }\n" ++
+        "impl Box<num> as Sized { size() num { ret 8; } }\n" ++
+        "fun report(Sized s) num { ret s.size(); }\n" ++
+        "fun main() num {\n" ++
+        "  Box<num> b = Box<num>{v = 42};\n" ++
+        "  num viaCall = report(&b);\n" ++
+        "  Sized sz = &b;\n" ++
+        "  num viaVar = sz.size();\n" ++
+        "  printf(\"%lld %lld\\n\", viaCall, viaVar);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    // Both coercions must use the MANGLED helper name (Box__num), matching the def.
+    // (If the base-name `__fun_coerce_Box_<hash>` were emitted instead, the call
+    // would reference an undeclared function and the C below would fail to compile.)
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "__fun_coerce_Box__num_") != null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("8 8\n", stdout);
+}
+
+test "quirk method dispatched on a call result materializes the receiver once" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_quirk_on_call_result.fn";
+    const c_path = "codegen_quirk_on_call_result.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_quirk_on_call_result.exe" else "codegen_quirk_on_call_result";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: calling a quirk method directly on a function-call result
+    // (`make(&st).weight()`) emitted a raw C `.member` access on the quirk
+    // fat-pointer (no `weight` member -> C error), instead of vtable dispatch.
+    // The receiver is an rvalue, so it must be materialized into a temp exactly
+    // once (emitting it twice would call `make` twice). Lowers to a statement
+    // expression `({ Q __t = make(&st); __t.vtable->weight(__t.self); })`.
+    const input =
+        "imp std.c.io;\n" ++
+        "quirk Weighable { weight() num; }\n" ++
+        "compound Stone { num kg; }\n" ++
+        "impl Stone as Weighable { weight() num { ret self.kg; } }\n" ++
+        "fun make(Stone* s) Weighable { ret s; }\n" ++
+        "fun main() num {\n" ++
+        "  Stone st = Stone{kg = 5};\n" ++
+        "  Weighable d = make(&st);\n" ++
+        "  printf(\"%lld\\n\", d.weight());\n" ++ // var-form (vtable dispatch)
+        "  printf(\"%lld\\n\", make(&st).weight());\n" ++ // call-result (materialized)
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    // The call-result form must dispatch through the vtable (statement-expr temp),
+    // never a bare `.weight()` member access on the quirk struct.
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, ".vtable->weight(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "make((&st)).weight()") == null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("5\n5\n", stdout);
+}
+
+// ===== P0 hardening regression tests (from the production-readiness audit) =====
+
+test "P0: fixed-size array compound field is inline, not a pointer" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "p0_fixed_array_field.fn";
+    const c_path = "p0_fixed_array_field.c";
+    const exe_path = if (builtin.os.tag == .windows) "p0_fixed_array_field.exe" else "p0_fixed_array_field";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: `num[3] data;` as a compound field was emitted as a bare pointer
+    // (`int64_t* data;`), giving the wrong layout (sizeof 8 not 24) and leaving the
+    // field uninitialized/dangling. It must be an inline C array `int64_t data[3];`.
+    const input =
+        "imp std.c.io;\n" ++
+        "compound Buf { num[3] data; num tag; }\n" ++
+        "fun main() num {\n" ++
+        "  Buf b;\n" ++
+        "  b.data[0] = 10; b.data[1] = 20; b.data[2] = 30; b.tag = 99;\n" ++
+        "  printf(\"%lld %lld %lld %lld %lld\\n\", b.data[0], b.data[1], b.data[2], b.tag, sizeof(Buf));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t data[3]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t* data") == null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("10 20 30 99 32\n", stdout);
+}
+
+test "P0: unsized array compound field stays a pointer" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "p0_unsized_array_field.fn";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    // The fixed-array fix must NOT change unsized `num[] data;` fields, which have
+    // no concrete extent and remain pointers.
+    const input =
+        "compound Dyn { num[] data; num n; }\n" ++
+        "fun main() num { ret 0; }\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t* data") != null);
+}
+
+test "P0: cross-enum equality is rejected, same-enum and enum-vs-num still allowed" {
+    const allocator = std.testing.allocator;
+    // Distinct enums must NOT be comparable by ordinal.
+    try runTranspileExpectFailure(allocator, "p0_cross_enum_eq.fn", "enum A { X }\nenum B { P }\nfun main() { A a = .X; B b = .P; if a == b {} }\n");
+    // Same enum compares fine.
+    {
+        const ok = try runTranspile(allocator, "p0_same_enum_eq.fn", "enum A { X, Y }\nfun main() { A a = .X; A a2 = .Y; if a == a2 {} }\n");
+        allocator.free(ok);
+        std.Io.Dir.cwd().deleteFile(std.testing.io, "p0_same_enum_eq.fn") catch {};
+    }
+    // Enum vs numeric literal still compares fine.
+    {
+        const ok = try runTranspile(allocator, "p0_enum_num_eq.fn", "enum A { X, Y }\nfun main() { A a = .Y; if a == 1 {} }\n");
+        allocator.free(ok);
+        std.Io.Dir.cwd().deleteFile(std.testing.io, "p0_enum_num_eq.fn") catch {};
+    }
+}
+
+test "P0: fit with a different enum's variant as a branch is rejected" {
+    const allocator = std.testing.allocator;
+    try runTranspileExpectFailure(allocator, "p0_cross_enum_fit.fn", "enum A { X, Y }\nenum B { P, Q }\n" ++
+        "fun main() { A a = .X; fit a { B.P -> {}, _ -> {} } }\n");
+}
+
+test "P0: char escape \\r decodes to 13, unknown escape is rejected" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "p0_char_escape.fn";
+    const c_path = "p0_char_escape.c";
+    const exe_path = if (builtin.os.tag == .windows) "p0_char_escape.exe" else "p0_char_escape";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+    // '\r' was silently decoded to NUL; it must be 13. Also '\t'=9, '\0'=0.
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() num { printf(\"%d %d %d\\n\", '\\r', '\\t', '\\0'); ret 0; }\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("13 9 0\n", stdout);
+
+    // An unrecognized escape in a char literal is a clean error, not silent NUL.
+    try runTranspileExpectFailure(allocator, "p0_bad_escape.fn", "fun main() { chr q = '\\q'; }\n");
+}
+
+test "P0: block comment is lexed; unterminated /* and stray top-level token error cleanly" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "p0_block_comment.fn";
+    const c_path = "p0_block_comment.c";
+    const exe_path = if (builtin.os.tag == .windows) "p0_block_comment.exe" else "p0_block_comment";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+    // A `/* ... */` block comment (top-level and multi-line) is now supported and
+    // skipped, where it previously triggered a compiler panic.
+    const input =
+        "/* a top-level block comment */\n" ++
+        "imp std.c.io;\n" ++
+        "fun main() num {\n" ++
+        "  /* multi\n     line */\n" ++
+        "  printf(\"ok\\n\");\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("ok\n", stdout);
+
+    // Unterminated block comment -> clean error (no panic).
+    try runTranspileExpectFailure(allocator, "p0_unterminated_bc.fn", "/* never closed\n");
+    // Stray top-level operator -> clean error (was `else => unreachable` panic).
+    try runTranspileExpectFailure(allocator, "p0_stray_op.fn", "* 5\nfun main() {}\n");
+}
+
+test "P0: pathologically deep expression errors cleanly instead of crashing" {
+    const allocator = std.testing.allocator;
+    // A nesting depth past the parser guard must yield ExpressionTooDeep, not a
+    // stack-overflow segfault. 1200 > the 600 guard limit.
+    const depth: usize = 1200;
+    var src = ArrayList(u8).init(allocator);
+    defer src.deinit();
+    try src.appendSlice("fun main() num { num x = ");
+    var i: usize = 0;
+    while (i < depth) : (i += 1) try src.append('(');
+    try src.append('1');
+    i = 0;
+    while (i < depth) : (i += 1) try src.append(')');
+    try src.appendSlice("; ret x; }\n");
+    try runTranspileExpectFailure(allocator, "p0_deep_expr.fn", src.items);
+}
+
+test "P0: typed format decodes escapes and treats unknown {foo} as literal" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "p0_format_escapes.fn";
+    const c_path = "p0_format_escapes.c";
+    const exe_path = if (builtin.os.tag == .windows) "p0_format_escapes.exe" else "p0_format_escapes";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Two miscompiles: (1) typed println_fmt rendered escape sequences literally
+    // (`\t` stayed backslash+t); (2) `{foo}` (not a type-name placeholder) was
+    // eaten by the runtime format path but kept by the compile-time path. After
+    // the fix `\t` is a real TAB and `{foo}` is literal text in both paths.
+    const input =
+        "imp std.io;\n" ++
+        "fun main() {\n" ++
+        "  println_fmt(\"a\\tb={num}\", 1);\n" ++
+        "  println_fmt(\"lit {foo} end {num}\", 2);\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    // Line 1: 'a' + real TAB + "b=1". Line 2: "lit {foo} end 2".
+    try std.testing.expectEqualStrings("a\tb=1\nlit {foo} end 2\n", stdout);
+}
+
+// ===== P1 invalid-c / soundness regression tests (production-readiness audit) =====
+
+test "P1: plain-impl method chaining on call results materializes once" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "p1_method_chain.fn";
+    const c_path = "p1_method_chain.c";
+    const exe_path = if (builtin.os.tag == .windows) "p1_method_chain.exe" else "p1_method_chain";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+    // Regression: `b.add(2).get()` / `a.add(5).add(10)` emitted raw C member access
+    // on a call result. Now the rvalue receiver is materialized into a temp.
+    const input =
+        "imp std.c.io;\n" ++
+        "compound C { num v; }\n" ++
+        "impl C { add(num n) C { C r; r.v = self.v + n; ret r; } get() num { ret self.v; } }\n" ++
+        "fun mk(num n) C { C c; c.v = n; ret c; }\n" ++
+        "fun main() num {\n" ++
+        "  C c; c.v = 1;\n" ++
+        "  printf(\"%lld %lld\\n\", c.add(2).add(3).get(), mk(7).get());\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("6 7\n", stdout);
+}
+
+test "P1: quirk coercion from &arr[i] and &struct.field, plus quirk array element dispatch" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "p1_quirk_coerce.fn";
+    const c_path = "p1_quirk_coerce.c";
+    const exe_path = if (builtin.os.tag == .windows) "p1_quirk_coerce.exe" else "p1_quirk_coerce";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+    const input =
+        "imp std.c.io;\n" ++
+        "compound Item { num v; }\n" ++
+        "compound Outer { Item it; }\n" ++
+        "quirk Valued { value() num; }\n" ++
+        "impl Item as Valued { value() num { ret self.v; } }\n" ++
+        "fun main() num {\n" ++
+        "  Item a; a.v = 10;\n" ++
+        "  Item[] items = [a];\n" ++
+        "  Valued q = &items[0];\n" ++ // &arr[i]
+        "  Outer o; o.it.v = 20;\n" ++
+        "  Valued g = &o.it;\n" ++ // &struct.field
+        "  Valued[1] arr; arr[0] = &a;\n" ++ // quirk array elem assign
+        "  printf(\"%lld %lld %lld\\n\", q.value(), g.value(), arr[0].value());\n" ++ // indexed dispatch
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("10 20 10\n", stdout);
+}
+
+test "P1: fit on dec, fit on str variable, comma multi-label, duplicate enum case" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "p1_fit.fn";
+    const c_path = "p1_fit.c";
+    const exe_path = if (builtin.os.tag == .windows) "p1_fit.exe" else "p1_fit";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+    const input =
+        "imp std.c.io;\n" ++
+        "enum Color { Red, Green, Blue }\n" ++
+        "fun main() num {\n" ++
+        "  dec d = 1.0;\n" ++
+        "  fit d { 1.0 -> { printf(\"d1\\n\"); }, _ -> { printf(\"d?\\n\"); } }\n" ++ // fit on dec
+        "  str s = \"b\"; str target = \"b\";\n" ++
+        "  fit s { target -> { printf(\"smatch\\n\"); }, _ -> { printf(\"sno\\n\"); } }\n" ++ // fit on str var
+        "  num x = 2;\n" ++
+        "  fit x { 1, 2 -> { printf(\"lo\\n\"); }, _ -> { printf(\"hi\\n\"); } }\n" ++ // comma multi-label
+        "  Color c = Color.Green;\n" ++
+        "  fit c { Color.Green -> { printf(\"g1\\n\"); }, Color.Green -> { printf(\"g2\\n\"); }, _ -> {} }\n" ++ // duplicate case
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("d1\nsmatch\nlo\ng1\n", stdout);
+}
+
+test "P1: sizeof of primitive/pointer/compound/generic variables" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "p1_sizeof_var.fn";
+    const c_path = "p1_sizeof_var.c";
+    const exe_path = if (builtin.os.tag == .windows) "p1_sizeof_var.exe" else "p1_sizeof_var";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+    // Regression: sizeof(num) on a primitive variable emitted the raw Fun keyword.
+    const input =
+        "imp std.c.io;\n" ++
+        "compound P { num x; num y; }\n" ++
+        "fun main() num {\n" ++
+        "  num n = 0; str s = \"\"; dec d = 0.0; bin b = true; num* p = &n; P pt;\n" ++
+        "  printf(\"%lld %lld %lld %lld %lld %lld\\n\", sizeof(n), sizeof(s), sizeof(d), sizeof(b), sizeof(p), sizeof(pt));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("8 8 8 1 8 16\n", stdout);
+}
+
+test "P1: pointer-as-array element field access uses dot, array-literal call arg, array fixes" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "p1_ptr_array.fn";
+    const c_path = "p1_ptr_array.c";
+    const exe_path = if (builtin.os.tag == .windows) "p1_ptr_array.exe" else "p1_ptr_array";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.c.mem;\n" ++
+        "compound Point { num x; num y; }\n" ++
+        "fun sum2(num[] a) num { ret a[0] + a[1]; }\n" ++
+        "fun main() num {\n" ++
+        "  Point* pts = malloc(2 * sizeof(Point));\n" ++
+        "  pts[0].x = 5; pts[1].x = 9;\n" ++ // pointer-as-array element field: must use .
+        "  num s = sum2([10, 20]);\n" ++ // array literal as call arg: compound literal
+        "  printf(\"%lld %lld %lld\\n\", pts[0].x, pts[1].x, s);\n" ++
+        "  free(pts);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "pts[0].x") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "(int64_t[]){10, 20}") != null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("5 9 30\n", stdout);
+}
+
+test "P1: let inference from dereferenced generic pointer yields the value type" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "p1_deref_let.fn";
+    const c_path = "p1_deref_let.c";
+    const exe_path = if (builtin.os.tag == .windows) "p1_deref_let.exe" else "p1_deref_let";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+    const input =
+        "imp std.c.io;\n" ++
+        "compound Box<T> { T v; }\n" ++
+        "fun main() num {\n" ++
+        "  Box<num> b; b.v = 7;\n" ++
+        "  Box<num>* pb = &b;\n" ++
+        "  let boxed = *pb;\n" ++
+        "  printf(\"%lld\\n\", boxed.v);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Box__num boxed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Box__num* boxed") == null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("7\n", stdout);
+}
+
+test "P1: hex string escape is bounded to two digits" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "p1_hex_escape.fn";
+    const c_path = "p1_hex_escape.c";
+    const exe_path = if (builtin.os.tag == .windows) "p1_hex_escape.exe" else "p1_hex_escape";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+    // `"\x42C"` must be byte 0x42 ('B') then 'C', not one out-of-range escape.
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() num { printf(\"%s\\n\", \"\\x42C\"); ret 0; }\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "\"\\x42\" \"C\"") != null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("BC\n", stdout);
+}
+
+test "P1: empty enum, let-from-void, and format arg-mismatch are rejected" {
+    const allocator = std.testing.allocator;
+    try runTranspileExpectFailure(allocator, "p1_empty_enum.fn", "enum Void {}\nfun main() {}\n");
+    try runTranspileExpectFailure(allocator, "p1_let_void.fn", "fun doit() { ret; }\nfun main() { let x = doit(); }\n");
+    try runTranspileExpectFailure(allocator, "p1_fmt_mismatch.fn", "imp std.io;\nfun main() { str r = format(\"{num} {num}\", 1); }\n");
+}
+
+// ===== Re-audit fixes (R1 + P1/P2/P3 after the post-fix re-audit) =====
+
+test "reaudit R1: generic compound fixed-size array field is inline" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "ra_r1_generic_array.fn";
+    const c_path = "ra_r1_generic_array.c";
+    const exe_path = if (builtin.os.tag == .windows) "ra_r1_generic_array.exe" else "ra_r1_generic_array";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+    // Regression: a fixed-size array field in a GENERIC compound was demoted to a
+    // pointer (the non-generic fix wasn't mirrored into the specialization path),
+    // crashing at runtime with sizeof 8 instead of 32.
+    const input =
+        "imp std.c.io;\n" ++
+        "compound Buf<T> { T[3] items; num n; }\n" ++
+        "fun main() num {\n" ++
+        "  Buf<num> b;\n" ++
+        "  b.items[0] = 10; b.items[1] = 20; b.items[2] = 30; b.n = 3;\n" ++
+        "  printf(\"%lld %llu\\n\", b.items[0] + b.items[1] + b.items[2], sizeof(Buf<num>));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t items[3]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t* items") == null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("60 32\n", stdout);
+}
+
+test "reaudit: distinct generic instantiations are not interchangeable types" {
+    const allocator = std.testing.allocator;
+    // Box<num> must NOT be accepted where Box<str> is expected.
+    try runTranspileExpectFailure(allocator, "ra_generic_typearg.fn", "compound Box<T> { T v; }\n" ++
+        "fun take(Box<str> b) {}\n" ++
+        "fun main() { Box<num> bn; take(bn); }\n");
+}
+
+test "reaudit: array-literal struct field init (single + multi element)" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "ra_arr_field.fn";
+    const c_path = "ra_arr_field.c";
+    const exe_path = if (builtin.os.tag == .windows) "ra_arr_field.exe" else "ra_arr_field";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+    // Single-element emitted invalid `(int64_t[]){7}`; multi-element failed to parse
+    // (stop_at_comma leaked into the bracket). Both must be bare brace-lists now.
+    const input =
+        "imp std.c.io;\n" ++
+        "compound Row { num[3] cols; }\n" ++
+        "fun main() num {\n" ++
+        "  Row a = Row{cols = [7]};\n" ++
+        "  Row b = Row{cols = [1, 2, 3]};\n" ++
+        "  printf(\"%lld %lld %lld %lld\\n\", a.cols[0], b.cols[0], b.cols[1], b.cols[2]);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "(int64_t[]){") == null); // not a compound literal
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("7 1 2 3\n", stdout);
+}
+
+test "reaudit: sizeof accepts pointer types" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "ra_sizeof_ptr.fn";
+    const c_path = "ra_sizeof_ptr.c";
+    const exe_path = if (builtin.os.tag == .windows) "ra_sizeof_ptr.exe" else "ra_sizeof_ptr";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() num { printf(\"%lld %lld %lld\\n\", sizeof(num*), sizeof(raw*), sizeof(num)); ret 0; }\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "sizeof(int64_t*)") != null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("8 8 8\n", stdout);
+}
+
+test "reaudit: await binds tighter than a following binary operator" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "ra_await_prec.fn";
+    const c_path = "ra_await_prec.c";
+    const exe_path = if (builtin.os.tag == .windows) "ra_await_prec.exe" else "ra_await_prec";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+    // `await inc(5) + 1` must be `(await inc(5)) + 1` = 7, not `await (inc(5)+1)`.
+    const input =
+        "imp std.c.io;\n" ++
+        "async fun inc(num x) num { ret x + 1; }\n" ++
+        "async fun main() {\n" ++
+        "  num r = await inc(5) + 1;\n" ++
+        "  printf(\"%lld\\n\", r);\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("7\n", stdout);
+}
+
+test "reaudit R2: Map and Set compare string keys by value, num keys by bytes" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "ra_r2_map_str.fn";
+    const c_path = "ra_r2_map_str.c";
+    const exe_path = if (builtin.os.tag == .windows) "ra_r2_map_str.exe" else "ra_r2_map_str";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+    // Regression: Map<str>/Set<str> compared keys by POINTER (memcmp(&a,&b,sizeof)),
+    // so a value-equal string at a different address was never found. The
+    // __fun_key_eq/__fun_key_hash intrinsics now use strcmp/string-hash for str
+    // keys and byte semantics for value keys.
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.map;\n" ++
+        "imp std.string;\n" ++
+        "fun main() num {\n" ++
+        "  Map<str, num> m;\n" ++
+        "  m.init(16);\n" ++
+        "  m.put(\"hello\", 1);\n" ++
+        "  str other = substr(\"xhellox\", 1, 5);\n" ++ // value-equal "hello", different address
+        "  Map<num, num> mn;\n" ++
+        "  mn.init(16);\n" ++
+        "  mn.put(42, 9); mn.put(42, 9);\n" ++ // num keys: same value -> one entry
+        "  printf(\"%lld %lld %lld\\n\", m.get(other), mn.get(42), mn.len);\n" ++
+        "  m.free();\n" ++
+        "  mn.free();\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    // str key found by value (1), num key found (9), num map has a single entry (1).
+    try std.testing.expectEqualStrings("1 9 1\n", stdout);
+}
+
+// ===== Re-audit round-2 fixes: quirk cluster + defer-ret + generic chaining =====
+
+test "reaudit Q: ptr->quirk coercion on field assign and array-literal elements" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "ra_q_coerce.fn";
+    const c_path = "ra_q_coerce.c";
+    const exe_path = if (builtin.os.tag == .windows) "ra_q_coerce.exe" else "ra_q_coerce";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+    const input =
+        "imp std.c.io;\n" ++
+        "compound Engine { num hp; }\n" ++
+        "quirk Powered { power() num; }\n" ++
+        "impl Engine as Powered { power() num { ret self.hp; } }\n" ++
+        "compound Car { Powered engine; }\n" ++
+        "fun main() num {\n" ++
+        "  Engine e; e.hp = 300;\n" ++
+        "  Car car; car.engine = &e;\n" ++ // ptr->quirk struct-field assign
+        "  Engine a; a.hp = 5;\n" ++
+        "  Engine b; b.hp = 7;\n" ++
+        "  Powered[] arr = [&a, &b];\n" ++ // ptr->quirk array-literal elements
+        "  printf(\"%lld %lld\\n\", car.engine.power(), arr[0].power() + arr[1].power());\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("300 12\n", stdout);
+}
+
+test "reaudit Q: return coerced self + chaining on a quirk-returning quirk method" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "ra_q_chain.fn";
+    const c_path = "ra_q_chain.c";
+    const exe_path = if (builtin.os.tag == .windows) "ra_q_chain.exe" else "ra_q_chain";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+    // `to_b()` returns a quirk over A's OWN embedded B (`&self.b`), which stays
+    // alive through `qa`'s self pointer — so the chained `.gv()` reads valid memory
+    // (avoids the dangling-stack-pointer UB of returning `&local`). This exercises:
+    // (1) returning coerced self (`self_q`), and (2) chaining a method on a
+    // quirk-returning quirk method result (`qa.to_b().gv()`).
+    const input =
+        "imp std.c.io;\n" ++
+        "compound B { num y; }\n" ++
+        "compound A { num x; B b; }\n" ++
+        "quirk QB { gv() num; }\n" ++
+        "quirk QA { to_b() QB; self_q() QA; }\n" ++
+        "impl B as QB { gv() num { ret self.y; } }\n" ++
+        "impl A as QA {\n" ++
+        "  to_b() QB { self.b.y = self.x + 1; ret &self.b; }\n" ++
+        "  self_q() QA { ret self; }\n" ++ // returning coerced self
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  A a; a.x = 7;\n" ++
+        "  QA qa = &a;\n" ++
+        "  printf(\"%lld\\n\", qa.to_b().gv());\n" ++ // chain on quirk-method result
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("8\n", stdout);
+}
+
+test "reaudit: defer that mutates a returned variable does not corrupt the value" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "ra_defer_ret.fn";
+    const c_path = "ra_defer_ret.c";
+    const exe_path = if (builtin.os.tag == .windows) "ra_defer_ret.exe" else "ra_defer_ret";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+    // `defer x = 999; ret x + 1` must return 6 — the return value is snapshotted
+    // before the defer runs.
+    const input =
+        "imp std.c.io;\n" ++
+        "fun expr_ret() num {\n" ++
+        "  num x = 5;\n" ++
+        "  defer x = 999;\n" ++
+        "  ret x + 1;\n" ++
+        "}\n" ++
+        "fun main() num { printf(\"%lld\\n\", expr_ret()); ret 0; }\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("6\n", stdout);
+}
+
+test "reaudit: method chaining on a generic function return is monomorphized" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "ra_generic_chain.fn";
+    const c_path = "ra_generic_chain.c";
+    const exe_path = if (builtin.os.tag == .windows) "ra_generic_chain.exe" else "ra_generic_chain";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+    // `some(7).unwrap_or(0)` must use the monomorphized `Option__num` type/method,
+    // not the un-monomorphized base `Option`.
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.option;\n" ++
+        "fun main() num { printf(\"%lld\\n\", some(7).unwrap_or(0)); ret 0; }\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Option__num __fun_mrecv") != null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("7\n", stdout);
+}
+
+// ===== Round-3 re-audit fixes: crash, deep chains, coercion shapes, resolver gaps =====
+
+test "ra3: no crash on field access of a generic-impl method returning a compound" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "ra3_crash.fn";
+    const c_path = "ra3_crash.c";
+    const exe_path = if (builtin.os.tag == .windows) "ra3_crash.exe" else "ra3_crash";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+    // Was a use-after-free segfault (stack-local return dtype). `b.get_inner().code`.
+    const input =
+        "imp std.c.io;\n" ++
+        "compound Inner { num code; }\n" ++
+        "compound Box<T> { T v; }\n" ++
+        "impl Box<T> { get_inner() Inner { Inner i; i.code = 42; ret i; } }\n" ++
+        "fun main() num { Box<num> b; printf(\"%lld\\n\", b.get_inner().code); ret 0; }\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("42\n", stdout);
+}
+
+test "ra3: deep method chains (3-level quirk, fn-returns-generic, generic-method chain)" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "ra3_chains.fn";
+    const c_path = "ra3_chains.c";
+    const exe_path = if (builtin.os.tag == .windows) "ra3_chains.exe" else "ra3_chains";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.option;\n" ++
+        "compound C { num val; }\n" ++
+        "quirk QC { gv() num; }\n" ++
+        "impl C as QC { gv() num { ret self.val; } }\n" ++
+        "compound B { C c; }\n" ++
+        "quirk QB { to_c() QC; }\n" ++
+        "impl B as QB { to_c() QC { ret &self.c; } }\n" ++
+        "compound A { B b; }\n" ++
+        "quirk QA { to_b() QB; }\n" ++
+        "impl A as QA { to_b() QB { ret &self.b; } }\n" ++
+        "compound Box<T> { T value; }\n" ++
+        "impl Box<T> { pub get() T { ret self.value; } pub with(T x) Box<T> { ret Box<T>{value = x}; } }\n" ++
+        "fun mk(num n) Option<num> { ret some(n); }\n" ++
+        "fun main() num {\n" ++
+        "  A a; a.b.c.val = 123; QA qa = &a;\n" ++
+        "  let bx = Box<num>{value = 10};\n" ++
+        "  printf(\"%lld %lld %lld\\n\", qa.to_b().to_c().gv(), mk(55).unwrap_or(0), bx.with(99).get());\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("123 55 99\n", stdout);
+}
+
+test "ra3: quirk coercion of deref, parenthesized address-of, and pointer-field" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "ra3_coerce.fn";
+    const c_path = "ra3_coerce.c";
+    const exe_path = if (builtin.os.tag == .windows) "ra3_coerce.exe" else "ra3_coerce";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+    const input =
+        "imp std.c.io;\n" ++
+        "compound Inner { num v; }\n" ++
+        "compound Outer { Inner* inner; }\n" ++
+        "quirk HasV { getV() num; }\n" ++
+        "impl Inner as HasV { getV() num { ret self.v; } }\n" ++
+        "fun extract(Outer* o) HasV { ret o.inner; }\n" ++ // pointer-field coerced
+        "fun main() num {\n" ++
+        "  Inner p = Inner{v = 55};\n" ++
+        "  Inner* pp = &p; Inner** ppp = &pp;\n" ++
+        "  HasV a = *ppp;\n" ++ // deref coerced
+        "  HasV b = (&p);\n" ++ // parenthesized address-of coerced
+        "  Inner i = Inner{v = 99};\n" ++
+        "  Outer o = Outer{inner = &i};\n" ++
+        "  printf(\"%lld %lld %lld\\n\", a.getV(), b.getV(), extract(&o).getV());\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    // a = *ppp and b = (&p) both reference p (v=55); extract(&o) references i (v=99).
+    try std.testing.expectEqualStrings("55 55 99\n", stdout);
+}
+
+test "ra3: generic T[] param accepts a concrete array arg; extra pub method in as-Quirk impl callable" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "ra3_resolver.fn";
+    const c_path = "ra3_resolver.c";
+    const exe_path = if (builtin.os.tag == .windows) "ra3_resolver.exe" else "ra3_resolver";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+    const input =
+        "imp std.c.io;\n" ++
+        "quirk Named { name() str; }\n" ++
+        "compound Box<T> { T[] data; num n; }\n" ++
+        "impl Box<T> { pub fill(T[] src, num c) { self.data = src; self.n = c; } pub at(num i) T { ret self.data[i]; } }\n" ++
+        "compound Dog { num age; }\n" ++
+        "impl Dog as Named { pub name() str { ret \"rex\"; } pub age_years() num { ret self.age; } }\n" ++
+        "fun main() num {\n" ++
+        "  Box<num> b;\n" ++
+        "  num[] arr = [10, 20, 30];\n" ++
+        "  b.fill(arr, 3);\n" ++ // num[] arg to generic T[] param
+        "  Dog d; d.age = 5;\n" ++
+        "  printf(\"%lld %lld\\n\", b.at(1), d.age_years());\n" ++ // extra pub method in as-Quirk impl
+        "  ret 0;\n" ++
+        "}\n";
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("20 5\n", stdout);
 }

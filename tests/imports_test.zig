@@ -238,3 +238,124 @@ test "diamond import: shared module reachable via two branches compiles once" {
     // And it must be referenced from both consumers (left=%d and right=%d call it).
     try std.testing.expect(std.mem.indexOf(u8, out, "shared_value") != null);
 }
+
+test "aliased generic function call is monomorphized" {
+    // Regression: `imp lib as g; g.ident(123)` emitted an undeclared `g__ident`
+    // because the generic was never instantiated through the alias. It must
+    // monomorphize to `ident__num` like the non-aliased form does.
+    const allocator = std.testing.allocator;
+    const lib_path = "agc_lib.fn";
+    const main_path = "agc_main.fn";
+    {
+        const lf = try std.Io.Dir.cwd().createFile(std.testing.io, lib_path, .{});
+        defer lf.close(std.testing.io);
+        try lf.writeStreamingAll(std.testing.io, "pub fun ident<T>(T x) T { ret x; }\n");
+    }
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, lib_path) catch {};
+
+    const main_input =
+        "imp std.c.io;\n" ++
+        "imp agc_lib as g;\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"%lld\\n\", g.ident(123));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    const out = try runTranspile(allocator, main_path, main_input);
+    defer allocator.free(out);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, main_path) catch {};
+
+    // The monomorphized instance is emitted and called; the bad alias-prefixed
+    // name is NOT present.
+    try std.testing.expect(std.mem.indexOf(u8, out, "ident__num") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "g__ident") == null);
+}
+
+test "alias-qualified call to a private (non-pub) function is rejected" {
+    // Regression: a private (non-`pub`) function in an aliased module could be
+    // called as `alias.fn(...)`, bypassing module visibility. It must now be a
+    // clean type error, while a `pub` sibling in the same module still works.
+    const allocator = std.testing.allocator;
+    const lib_path = "privalias_lib.fn";
+    {
+        const lf = try std.Io.Dir.cwd().createFile(std.testing.io, lib_path, .{});
+        defer lf.close(std.testing.io);
+        try lf.writeStreamingAll(
+            std.testing.io,
+            "fun secret() num { ret 42; }\n" ++
+                "pub fun visible() num { ret 7; }\n",
+        );
+    }
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, lib_path) catch {};
+
+    // Private call through the alias -> rejected.
+    {
+        const main_path = "privalias_main_bad.fn";
+        const bad =
+            "imp privalias_lib as a;\n" ++
+            "fun main() num { ret a.secret(); }\n";
+        const res = runTranspile(allocator, main_path, bad);
+        std.Io.Dir.cwd().deleteFile(std.testing.io, main_path) catch {};
+        if (res) |out| {
+            allocator.free(out);
+            return error.ExpectedRejection;
+        } else |_| {}
+    }
+
+    // Public sibling through the alias -> still compiles.
+    {
+        const main_path = "privalias_main_ok.fn";
+        const good =
+            "imp std.c.io;\n" ++
+            "imp privalias_lib as a;\n" ++
+            "fun main() num { printf(\"%lld\\n\", a.visible()); ret 0; }\n";
+        const out = try runTranspile(allocator, main_path, good);
+        defer allocator.free(out);
+        std.Io.Dir.cwd().deleteFile(std.testing.io, main_path) catch {};
+        try std.testing.expect(std.mem.indexOf(u8, out, "a__visible") != null);
+    }
+}
+
+test "alias-qualified access to a private (non-pub) global is rejected" {
+    // Regression: a private (non-`pub`) global variable in an aliased module could
+    // be read as `alias.global`, which emitted an undeclared `alias__global` ->
+    // INVALID C. It must now be a clean type error, while a `pub` global still works.
+    const allocator = std.testing.allocator;
+    const lib_path = "privglob_lib.fn";
+    {
+        const lf = try std.Io.Dir.cwd().createFile(std.testing.io, lib_path, .{});
+        defer lf.close(std.testing.io);
+        try lf.writeStreamingAll(
+            std.testing.io,
+            "num secret_g = 99;\n" ++
+                "pub num shared_g = 7;\n",
+        );
+    }
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, lib_path) catch {};
+
+    // Private global through the alias -> rejected.
+    {
+        const main_path = "privglob_main_bad.fn";
+        const bad =
+            "imp privglob_lib as g;\n" ++
+            "fun main() num { num x = g.secret_g; ret x; }\n";
+        const res = runTranspile(allocator, main_path, bad);
+        std.Io.Dir.cwd().deleteFile(std.testing.io, main_path) catch {};
+        if (res) |out| {
+            allocator.free(out);
+            return error.ExpectedRejection;
+        } else |_| {}
+    }
+
+    // Public global through the alias -> still compiles.
+    {
+        const main_path = "privglob_main_ok.fn";
+        const good =
+            "imp std.c.io;\n" ++
+            "imp privglob_lib as g;\n" ++
+            "fun main() num { printf(\"%lld\\n\", g.shared_g); ret 0; }\n";
+        const out = try runTranspile(allocator, main_path, good);
+        defer allocator.free(out);
+        std.Io.Dir.cwd().deleteFile(std.testing.io, main_path) catch {};
+        try std.testing.expect(std.mem.indexOf(u8, out, "shared_g") != null);
+    }
+}
