@@ -276,6 +276,11 @@ pub const Node = struct {
         enum_decl: struct {
             name: ArrayList(u8),
             variants: utils.Vector(EnumVariant),
+            /// Optional generic type parameters (e.g. Option<T> -> ["T"],
+            /// Result<T, E> -> ["T", "E"]). Variant payloads may reference these
+            /// parameters; the compiler monomorphizes per concrete instantiation
+            /// (Option<num> -> Option__num) like generic compounds.
+            type_params: ?utils.Vector(ArrayList(u8)) = null,
         },
 
         impl: struct {

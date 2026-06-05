@@ -7279,3 +7279,89 @@ test "channel of a data-carrying enum, received and matched with fit" {
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("result=36\n", stdout);
 }
+
+test "generic data enum: Option<num> construct, pass, fit, payload binding" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_generic_enum_option.fn";
+    const c_path = "codegen_generic_enum_option.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_generic_enum_option.exe" else "codegen_generic_enum_option";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // A GENERIC data enum monomorphizes per instantiation (Option<num> -> Option__num),
+    // constructs both a payload variant (Some) and a payload-free variant (None),
+    // passes as a parameter, and matches with `fit` binding the payload (typed `num`,
+    // not the bare `T`). Both `Enum.Variant` and shorthand `.Variant` forms.
+    const input =
+        "imp std.c.io;\n" ++
+        "enum Option<T> { Some(T), None }\n" ++
+        "fun describe(Option<num> o) num {\n" ++
+        "  fit o {\n" ++
+        "    Option.Some(v) -> { ret v; }\n" ++
+        "    Option.None -> { ret -1; }\n" ++
+        "  }\n" ++
+        "  ret -2;\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  Option<num> a = Option.Some(42);\n" ++
+        "  Option<num> b = .None;\n" ++
+        "  printf(\"%lld %lld\\n\", describe(a), describe(b));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    // The monomorphized type and tag must be mangled, never the bare template.
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Option__num") != null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("42 -1\n", stdout);
+}
+
+test "generic data enum: Result<T, E> with two type params and mixed payloads" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_generic_enum_result.fn";
+    const c_path = "codegen_generic_enum_result.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_generic_enum_result.exe" else "codegen_generic_enum_result";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Two type parameters with distinct payload types (Ok carries num, Err carries
+    // str). Each arm binds its payload at the substituted concrete type.
+    const input =
+        "imp std.c.io;\n" ++
+        "enum Result<T, E> { Ok(T), Err(E) }\n" ++
+        "fun main() num {\n" ++
+        "  Result<num, str> a = Result.Ok(7);\n" ++
+        "  Result<num, str> b = Result.Err(\"boom\");\n" ++
+        "  fit a {\n" ++
+        "    Result.Ok(v) -> { printf(\"ok %lld\\n\", v); }\n" ++
+        "    Result.Err(e) -> { printf(\"err %s\\n\", e); }\n" ++
+        "  }\n" ++
+        "  fit b {\n" ++
+        "    Result.Ok(v) -> { printf(\"ok %lld\\n\", v); }\n" ++
+        "    Result.Err(e) -> { printf(\"err %s\\n\", e); }\n" ++
+        "  }\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("ok 7\nerr boom\n", stdout);
+}

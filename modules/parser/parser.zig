@@ -3274,6 +3274,10 @@ pub const ParseProcess = struct {
             return ParseError.MemoryAllocationFailed;
         };
 
+        // Optional generic type parameters: `enum Option<T> { ... }`,
+        // `enum Result<T, E> { ... }`. Mirrors `parse_compound`.
+        const type_params = try self.parse_generic_type_params();
+
         try self.expect_sym('{');
 
         var variants = utils.Vector(ast.EnumVariant).init(self.transpile_proc.allocator);
@@ -3400,7 +3404,7 @@ pub const ParseProcess = struct {
             .type = .Enum,
             .pos = name_tok.?.pos,
             .flags = .{ .is_public = is_public },
-            .node_variant = .{ .enum_decl = .{ .name = name, .variants = variants } },
+            .node_variant = .{ .enum_decl = .{ .name = name, .variants = variants, .type_params = type_params } },
         };
 
         // Register as a symbol so it can be used as a datatype identifier.

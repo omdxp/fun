@@ -392,6 +392,13 @@ pub const TranspileProcess = struct {
     /// Call-site overrides for generic function names (keyed by position).
     generic_call_overrides: std.StringHashMap([]const u8),
 
+    /// Per-construction-site override mapping a generic data-enum variant
+    /// construction (`Option.Some(5)` / `.Some(5)`) to the MANGLED instance name
+    /// (`Option__num`) resolved from the expected type at typecheck. Codegen reads
+    /// it so the emitted compound literal/cast uses `Option__num` + `Option__num_Some`
+    /// instead of the bare template name. Keyed by call-position like the other maps.
+    enum_ctor_overrides: std.StringHashMap([]const u8),
+
     /// Call-site overrides for await lowering (resolved callee + receiver strategy).
     await_call_overrides: std.StringHashMap(AwaitCallOverride),
 
@@ -1636,6 +1643,28 @@ pub const TranspileProcess = struct {
         return self.get_root().generic_call_overrides.get(key);
     }
 
+    /// Record that the generic-data-enum construction at `node` resolves to the
+    /// monomorphized instance `mangled` (e.g. `Option__num`). Stored on the root so
+    /// it's visible regardless of which process emits the construction.
+    fn record_enum_ctor_override(self: *Self, node: ast.Node, mangled: []const u8) TranspileError!void {
+        const p = node.pos orelse return;
+        const root = self.get_root();
+        const key = root.call_pos_key_alloc(p) catch return;
+        const gop = root.enum_ctor_overrides.getOrPut(key) catch {
+            root.allocator.free(key);
+            return TranspileError.MemoryAllocationFailed;
+        };
+        if (gop.found_existing) root.allocator.free(key);
+        gop.value_ptr.* = root.allocator.dupe(u8, mangled) catch return TranspileError.MemoryAllocationFailed;
+    }
+
+    fn lookup_enum_ctor_override(self: *Self, node: ast.Node) ?[]const u8 {
+        const p = node.pos orelse return null;
+        var buf: [512]u8 = undefined;
+        const key = call_pos_key_buf(p, &buf) orelse return null;
+        return self.get_root().enum_ctor_overrides.get(key);
+    }
+
     fn record_await_call_override(
         self: *Self,
         node: ast.Node,
@@ -2457,6 +2486,35 @@ pub const TranspileProcess = struct {
         if (ci.dtype) |dt| {
             try self.validate_compound_init(init_node.*, dt, env, fns);
         }
+    }
+
+    /// When a value expression is a data-enum variant construction whose expected
+    /// type is a GENERIC enum instance (`Option<num> x = .Some(5)` /
+    /// `= Option.Some(5)`), record the construction site's monomorphized name
+    /// (`Option__num`) so codegen emits the mangled cast + tag. No-op for
+    /// non-generic enums (their construction already uses the plain name) or
+    /// non-construction values.
+    fn bind_enum_ctor_expected(self: *Self, value_node: *ast.Node, expected: CheckedType) TranspileError!void {
+        if (value_node.type != .Expression or value_node.node_variant == null) return;
+        const exp = value_node.node_variant.?.exp;
+        // The value is either a variant CONSTRUCTION `Enum.Variant(args)` (op "()")
+        // or a payload-free variant VALUE `Enum.Variant` (op "."). Both need the
+        // monomorphized name at codegen.
+        const ctor_node: *ast.Node = if (mem.eql(u8, exp.op, "()")) (exp.left orelse return) else value_node;
+        const path = self.enum_variant_path(ctor_node) orelse return;
+        _ = path;
+
+        // Determine the expected enum's mangled instance name from its dtype.
+        const dt = expected.dtype_ref orelse return;
+        if (dt.generic_args == null) return; // non-generic enum: nothing to mangle
+        const base = if (dt.type_str.items.len > 0) dt.type_str.items else (expected.name orelse return);
+        const reg = self.root_registry() orelse return;
+        if (!reg.enums_by_name.contains(base)) return;
+
+        const mangled = self.type_name_mangled(dt) catch return;
+        defer self.allocator.free(mangled);
+        if (mem.eql(u8, mangled, base)) return; // not actually mangled
+        try self.record_enum_ctor_override(value_node.*, mangled);
     }
 
     fn make_vec_str_dtype(self: *Self) TranspileError!*dtype.DataType {
@@ -3373,6 +3431,7 @@ pub const TranspileProcess = struct {
             .generic_fn_instantiations = ArrayList(GenericFnInstantiation).init(a),
             .generic_fn_instantiation_keys = std.StringHashMap(bool).init(a),
             .generic_call_overrides = std.StringHashMap([]const u8).init(a),
+            .enum_ctor_overrides = std.StringHashMap([]const u8).init(a),
             .await_call_overrides = std.StringHashMap(AwaitCallOverride).init(a),
             .input_file_path = input_file_path,
             .input_source = input_source,
@@ -4499,12 +4558,70 @@ pub const TranspileProcess = struct {
     /// the enum or the variant is unknown.
     fn lookup_enum_variant(self: *Self, enum_name: []const u8, variant_name: []const u8) ?ast.EnumVariant {
         const reg = self.root_registry() orelse return null;
-        const enode = reg.enums_by_name.get(enum_name) orelse return null;
+        // Accept a mangled instance name (`Option__num`) by falling back to its base
+        // enum (`Option`), so variant lookup works on monomorphized generic enums.
+        const enode = reg.enums_by_name.get(enum_name) orelse blk: {
+            const base = if (mem.indexOf(u8, enum_name, "__")) |idx| enum_name[0..idx] else break :blk null;
+            break :blk reg.enums_by_name.get(base);
+        } orelse return null;
         if (enode.node_variant == null) return null;
         for (enode.node_variant.?.enum_decl.variants.items()) |v| {
             if (mem.eql(u8, v.name.items, variant_name)) return v;
         }
         return null;
+    }
+
+    /// True when `dt` is exactly one of the (possibly mangled) enum's declared type
+    /// parameters (e.g. payload type `T` of `enum Option<T>`). Such a payload accepts
+    /// any argument at a variant constructor — the argument fixes the concrete type;
+    /// the surrounding `Option<num>` annotation drives monomorphization.
+    fn enum_payload_is_type_param(self: *Self, enum_name: []const u8, dt: *const dtype.DataType) bool {
+        if (dt.type != null and dt.type != .Unknown) return false;
+        if (dt.type_str.items.len == 0) return false;
+        const reg = self.root_registry() orelse return false;
+        const enode = reg.enums_by_name.get(enum_name) orelse blk: {
+            const base = if (mem.indexOf(u8, enum_name, "__")) |idx| enum_name[0..idx] else break :blk null;
+            break :blk reg.enums_by_name.get(base);
+        } orelse return false;
+        if (enode.node_variant == null) return false;
+        const params = enode.node_variant.?.enum_decl.type_params orelse return false;
+        for (params.items()) |p| {
+            if (mem.eql(u8, p.items, dt.type_str.items)) return true;
+        }
+        return false;
+    }
+
+    /// Compute the CheckedType of a fit-arm payload binding. For a concrete payload
+    /// (`Circle(num)`) it's just that type. For a generic enum's type-parameter
+    /// payload (`Some(T)` of `Option<num>`), substitute the parameter with the
+    /// concrete argument from the SUBJECT's generic args (`subject_t` is the
+    /// `Option<num>` value being matched) so the binding is typed `num`, not `T`.
+    fn fit_binding_type(self: *Self, enum_name: []const u8, subject_t: CheckedType, payload_dt: *dtype.DataType) CheckedType {
+        // Concrete (non-type-param) payload: use it directly.
+        if (!self.enum_payload_is_type_param(enum_name, payload_dt)) {
+            return type_from_dtype(payload_dt);
+        }
+        // Resolve the parameter index in the enum's declaration.
+        const reg = self.root_registry() orelse return CheckedType{ .base = .Unknown };
+        const enode = reg.enums_by_name.get(enum_name) orelse blk: {
+            const base = if (mem.indexOf(u8, enum_name, "__")) |idx| enum_name[0..idx] else break :blk null;
+            break :blk reg.enums_by_name.get(base);
+        } orelse return CheckedType{ .base = .Unknown };
+        if (enode.node_variant == null) return CheckedType{ .base = .Unknown };
+        const params = enode.node_variant.?.enum_decl.type_params orelse return CheckedType{ .base = .Unknown };
+        var pidx: ?usize = null;
+        for (params.items(), 0..) |p, i| {
+            if (mem.eql(u8, p.items, payload_dt.type_str.items)) {
+                pidx = i;
+                break;
+            }
+        }
+        const idx = pidx orelse return CheckedType{ .base = .Unknown };
+        // Map to the concrete arg from the subject's generic instantiation.
+        const sdt = subject_t.dtype_ref orelse return CheckedType{ .base = .Unknown };
+        const gargs = sdt.generic_args orelse return CheckedType{ .base = .Unknown };
+        if (idx >= gargs.count) return CheckedType{ .base = .Unknown };
+        return type_from_dtype(gargs.items()[idx]);
     }
 
     /// True when `name` is a declared enum that is a tagged union (sum type).
@@ -4554,6 +4671,15 @@ pub const TranspileProcess = struct {
             return TranspileError.WrongArgCount;
         }
         for (args, 0..) |arg, i| {
+            // A payload that is a generic type PARAMETER (`Some(T)` of `Option<T>`)
+            // accepts any argument — the argument fixes the concrete T, and the
+            // surrounding `Option<num>` annotation drives monomorphization. Still
+            // infer the arg (to mark callees used / register instantiations), but
+            // skip the strict match against the bare `T`.
+            if (self.enum_payload_is_type_param(path.enum_name, ptypes[i])) {
+                _ = try self.infer_expr_type(arg.*, env, fns);
+                continue;
+            }
             // Use the mangled form so a generic-instance payload (`Box<num>`) carries
             // its `Box__num` identity and matches the argument's inferred type.
             const expected = try self.type_from_dtype_with_mangled(ptypes[i]);
@@ -7147,6 +7273,10 @@ pub const TranspileProcess = struct {
                                 // Shorthand data-variant construction: `.Variant(args)`.
                                 try self.resolve_shorthand_enum_call(val, enum_name);
                             }
+                            // For a GENERIC enum (`Option<num>`), record the
+                            // monomorphized name at the construction site so codegen
+                            // emits `Option__num` + `Option__num_Some`.
+                            try self.bind_enum_ctor_expected(val, vtype);
                         }
                         const init_t = try self.infer_expr_type(val.*, env, fns);
                         if (is_known_type(vtype) and is_known_type(init_t) and !(try self.can_implicit_coerce(vtype, init_t))) {
@@ -7271,7 +7401,7 @@ pub const TranspileProcess = struct {
                             const payload = if (variant) |v| v.payload else null;
                             for (branch.bindings.?.items(), 0..) |bname, i| {
                                 const bt = if (payload != null and i < payload.?.count)
-                                    type_from_dtype(payload.?.items()[i])
+                                    self.fit_binding_type(target_enum.?, target_t, payload.?.items()[i])
                                 else
                                     CheckedType{ .base = .Unknown };
                                 try env.put_current(bname.items, bt);
@@ -10167,7 +10297,19 @@ pub const TranspileProcess = struct {
             if (self.identifier_declared_dtype(fit_exp.data.?.sval.items)) |dt| {
                 if (dt.pointer_depth == 0 and dt.type_str.items.len > 0) {
                     const nm = dt.type_str.items;
-                    if (self.enum_name_is_tagged_union(nm)) return nm;
+                    if (self.enum_name_is_tagged_union(nm)) {
+                        // A GENERIC enum subject (`Option<num>`) is the monomorphized
+                        // `Option__num`; switch on its mangled tag. Dupe onto the
+                        // arena (stable, auto-freed) so the return is always a
+                        // borrowed slice the caller need not free.
+                        if (dt.generic_args != null) {
+                            if (self.type_name_mangled(dt) catch null) |mangled| {
+                                defer self.allocator.free(mangled);
+                                return self.arena.allocator().dupe(u8, mangled) catch nm;
+                            }
+                        }
+                        return nm;
+                    }
                 }
             }
         }
@@ -10234,8 +10376,17 @@ pub const TranspileProcess = struct {
                         try self.write_indent();
                         if (payload) |pl| {
                             if (i < pl.count) {
-                                try self.write_type(pl.items()[i].*);
-                                try self.write(" ");
+                                // A type-parameter payload (`Some(T)` of a generic
+                                // enum) has no concrete spelling here — let C infer
+                                // the binding type from the (already-monomorphized)
+                                // payload field via `__auto_type`. Concrete payloads
+                                // (`Circle(num)`) emit their explicit type.
+                                if (self.enum_payload_is_type_param(enum_name, pl.items()[i])) {
+                                    try self.write("__auto_type ");
+                                } else {
+                                    try self.write_type(pl.items()[i].*);
+                                    try self.write(" ");
+                                }
                             } else {
                                 try self.write("__auto_type ");
                             }
@@ -11047,32 +11198,52 @@ pub const TranspileProcess = struct {
     ///   typedef struct E { E_tag tag; union { struct {..} A; ... } payload; } E;
     /// Variants with no payload occupy a tag slot but no union member.
     fn emit_tagged_union_enum(self: *Self, e: anytype) TranspileError!void {
+        // Non-generic data enum: the emitted C name IS the declared name, and
+        // payload types need no substitution.
+        try self.emit_tagged_union_enum_named(e, e.name.items, null, null);
+    }
+
+    /// Core tagged-union emitter. `emit_name` is the C type name to define (the
+    /// declared name for a plain enum, the mangled name like `Option__num` for a
+    /// monomorphized generic instance). When `params`/`args` are non-null, payload
+    /// types are emitted with type-parameter substitution (T -> the concrete arg).
+    fn emit_tagged_union_enum_named(
+        self: *Self,
+        e: anytype,
+        emit_name: []const u8,
+        params: ?utils.Vector(ArrayList(u8)),
+        args: ?[]*dtype.DataType,
+    ) TranspileError!void {
         // Discriminant enum.
         try self.write("typedef enum ");
-        try self.write(e.name.items);
+        try self.write(emit_name);
         try self.write("_tag {\n");
         for (e.variants.items()) |v| {
             try self.write("  ");
-            try self.write(e.name.items);
+            try self.write(emit_name);
             try self.write("_");
             try self.write(v.name.items);
             try self.write(",\n");
         }
         try self.write("} ");
-        try self.write(e.name.items);
+        try self.write(emit_name);
         try self.write("_tag;\n");
 
         // Tagged struct with a payload union.
         try self.write("typedef struct ");
-        try self.write(e.name.items);
+        try self.write(emit_name);
         try self.write(" {\n  ");
-        try self.write(e.name.items);
+        try self.write(emit_name);
         try self.write("_tag tag;\n  union {\n");
         for (e.variants.items()) |v| {
             const payload = v.payload orelse continue;
             try self.write("    struct { ");
             for (payload.items(), 0..) |pt, i| {
-                try self.write_type(pt.*);
+                if (params) |p| {
+                    try self.write_type_with_subst(pt, p, args.?);
+                } else {
+                    try self.write_type(pt.*);
+                }
                 try self.print(" _{d}; ", .{i});
             }
             try self.write("} ");
@@ -11080,8 +11251,81 @@ pub const TranspileProcess = struct {
             try self.write(";\n");
         }
         try self.write("  } payload;\n} ");
-        try self.write(e.name.items);
+        try self.write(emit_name);
         try self.write(";\n\n");
+    }
+
+    /// Emit every concrete monomorphized specialization of a GENERIC data enum
+    /// (`enum Option<T> { Some(T), None }` -> `Option__num`, `Option__str`, ...).
+    /// Mirrors `emit_generic_compound_specializations`: discover instantiations by
+    /// scanning all type annotations, then emit each unique concrete one.
+    fn emit_generic_enum_specializations(self: *Self, enode: *ast.Node) TranspileError!void {
+        const e = enode.node_variant.?.enum_decl;
+        const params = e.type_params orelse return;
+
+        var inst_keys = std.StringHashMap(bool).init(self.allocator);
+        defer {
+            var it = inst_keys.iterator();
+            while (it.next()) |entry| self.allocator.free(entry.key_ptr.*);
+            inst_keys.deinit();
+        }
+        var inst_list = ArrayList(*const dtype.DataType).init(self.allocator);
+        defer inst_list.deinit();
+
+        try self.collect_generic_instantiations_recursive(self, e.name.items, &inst_keys, &inst_list);
+
+        for (inst_list.items) |dt| {
+            if (dt.generic_args == null) continue;
+            const gargs = dt.generic_args.?.items();
+            if (gargs.len != params.count) continue;
+            if (!self.generic_args_are_concrete(&params, gargs)) continue;
+            if (self.dtype_contains_type_param(dt, &params)) continue;
+
+            const mangled = try self.type_name_mangled(dt);
+            defer self.allocator.free(mangled);
+            if (self.mangled_contains_type_param(mangled, &params)) continue;
+            if (self.mangled_contains_unresolved_placeholder(mangled)) continue;
+
+            try self.emit_tagged_union_enum_named(e, mangled, params, dt.generic_args.?.items());
+        }
+    }
+
+    /// Forward-declare each concrete monomorphized instance of a generic data enum
+    /// (`typedef struct Option__num Option__num;`) so pointer-typed references
+    /// (`Option__num* p`, `Channel<Option<num>>`) resolve before the full struct.
+    fn forward_declare_generic_enum_specializations(self: *Self, enode: *ast.Node) TranspileError!void {
+        const e = enode.node_variant.?.enum_decl;
+        const params = e.type_params orelse return;
+
+        var inst_keys = std.StringHashMap(bool).init(self.allocator);
+        defer {
+            var it = inst_keys.iterator();
+            while (it.next()) |entry| self.allocator.free(entry.key_ptr.*);
+            inst_keys.deinit();
+        }
+        var inst_list = ArrayList(*const dtype.DataType).init(self.allocator);
+        defer inst_list.deinit();
+
+        try self.collect_generic_instantiations_recursive(self, e.name.items, &inst_keys, &inst_list);
+
+        for (inst_list.items) |dt| {
+            if (dt.generic_args == null) continue;
+            const gargs = dt.generic_args.?.items();
+            if (gargs.len != params.count) continue;
+            if (!self.generic_args_are_concrete(&params, gargs)) continue;
+            if (self.dtype_contains_type_param(dt, &params)) continue;
+
+            const mangled = try self.type_name_mangled(dt);
+            defer self.allocator.free(mangled);
+            if (self.mangled_contains_type_param(mangled, &params)) continue;
+            if (self.mangled_contains_unresolved_placeholder(mangled)) continue;
+
+            try self.write("typedef struct ");
+            try self.write(mangled);
+            try self.write(" ");
+            try self.write(mangled);
+            try self.write(";\n");
+        }
     }
 
     /// Emit a tagged-union compound literal for `EnumName.Variant(args...)`:
@@ -11481,6 +11725,12 @@ pub const TranspileProcess = struct {
             if (self.is_std_c_signature_node(enode)) continue;
             const e = enode.node_variant.?.enum_decl;
             if (!enum_is_tagged_union(e)) continue;
+            if (e.type_params != null) {
+                // Generic data enum: forward-declare each concrete monomorphized
+                // instance (`Option__num`) rather than the template name.
+                try self.forward_declare_generic_enum_specializations(enode);
+                continue;
+            }
             try self.write("typedef struct ");
             try self.write(e.name.items);
             try self.write(" ");
@@ -11693,6 +11943,13 @@ pub const TranspileProcess = struct {
             if (self.is_std_c_signature_node(enode)) continue;
             const e = enode.node_variant.?.enum_decl;
             if (!enum_is_tagged_union(e)) continue;
+            // A GENERIC data enum (`enum Option<T>`) is a template — never emit it
+            // directly (its payload references `T`). Emit one monomorphized struct
+            // per concrete instantiation discovered in the program instead.
+            if (e.type_params != null) {
+                try self.emit_generic_enum_specializations(enode);
+                continue;
+            }
             if (emitted_enum_names.contains(e.name.items)) continue;
             emitted_enum_names.put(e.name.items, true) catch {
                 return TranspileError.MemoryAllocationFailed;
@@ -12589,6 +12846,18 @@ pub const TranspileProcess = struct {
             .Compound => if (node.node_variant) |*c| {
                 for (c.compound.fields.items()) |f| {
                     try self.collect_generic_instantiations_dtype(f.dtype, name, keys, out);
+                }
+            },
+            .Enum => if (node.node_variant) |*en| {
+                // Scan data-enum variant payload types so a payload that is itself a
+                // generic instance (`Branch(Box<num>)`, nested `Result<Option<T>,E>`)
+                // is discovered for monomorphization.
+                for (en.enum_decl.variants.items()) |v| {
+                    if (v.payload) |payload| {
+                        for (payload.items()) |pt| {
+                            try self.collect_generic_instantiations_dtype(pt, name, keys, out);
+                        }
+                    }
                 }
             },
             .Body => if (node.node_variant) |*b| {
@@ -14283,7 +14552,11 @@ pub const TranspileProcess = struct {
                         if (self.enum_variant_path(callee)) |path| {
                             if (self.lookup_enum_variant(path.enum_name, path.variant)) |variant| {
                                 if (variant.payload != null) {
-                                    try self.emit_enum_variant_construction(path.enum_name, path.variant, exp.right);
+                                    // For a generic enum, the construction site carries a
+                                    // monomorphized-name override (`Option__num`) recorded
+                                    // at typecheck; otherwise use the plain enum name.
+                                    const ctor_name = self.lookup_enum_ctor_override(node) orelse path.enum_name;
+                                    try self.emit_enum_variant_construction(ctor_name, path.variant, exp.right);
                                     return;
                                 }
                             }
@@ -15125,10 +15398,14 @@ pub const TranspileProcess = struct {
                                     // set: `((Enum){ .tag = Enum_Variant })`. The bare
                                     // `Enum_Variant` is only the discriminant constant.
                                     if (enum_is_tagged_union(enode.node_variant.?.enum_decl)) {
+                                        // A generic enum's payload-free variant value
+                                        // (`Option.None`) uses the monomorphized name
+                                        // recorded at the construction site.
+                                        const ctor_name = self.lookup_enum_ctor_override(node) orelse emit_enum_name;
                                         try self.write("((");
-                                        try self.write(emit_enum_name);
+                                        try self.write(ctor_name);
                                         try self.write("){ .tag = ");
-                                        try self.write(emit_enum_name);
+                                        try self.write(ctor_name);
                                         try self.write("_");
                                         try self.write(variant_name);
                                         try self.write(" })");
