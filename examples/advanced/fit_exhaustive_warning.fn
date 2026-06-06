@@ -15,8 +15,6 @@ fun main() {
 
   // Not exhaustive: missing a `false -> ...` branch and no `_ -> ...` default.
   fit x {
-    true -> {
-      printf("x was true\n");
-    }
+    true -> { printf("x was true\n"); }
   }
 }

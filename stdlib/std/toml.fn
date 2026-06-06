@@ -9,9 +9,7 @@
 imp std.map;
 imp std.serde;
 imp std.string;
-imp std.vec;
 imp std.result;
-imp std.error;
 
 fun _parse_line_into(TomlDoc* out, str line) {
   if len(line) <= 0 {
@@ -47,7 +45,7 @@ fun _toml_find_str_key_index(Map<str, str>* m, str key) num {
 
 // TOML document wrapper.
 pub compound TomlDoc {
-  // values: key/value map
+  // key/value map
   Map<str, str> values;
 }
 
@@ -130,7 +128,7 @@ impl TomlDoc as Serialize {
 impl TomlDoc as Deserialize {
   // Parse TOML text into this document.
   pub deserialize(str input) {
-    TomlDoc parsed = parse(input);
+    TomlDoc parsed = parse_document(input);
     defer parsed.free();
     if self.values.cap == 0 {
       self.values.init(8);
@@ -156,7 +154,7 @@ impl TomlDoc as Deserialize {
 // 
 // Returns:
 // - parsed TomlDoc
-pub fun parse(str s) TomlDoc {
+pub fun parse_document(str s) TomlDoc {
   TomlDoc out = toml_doc_init();
   num i = 0;
   num start = 0;
@@ -183,27 +181,10 @@ pub fun parse(str s) TomlDoc {
 }
 
 // Parse a TOML document with Result.
-pub fun try_parse(str s) Result<TomlDoc> {
-  TomlDoc out = parse(s);
+pub fun try_parse_document(str s) Result<TomlDoc> {
+  TomlDoc out = parse_document(s);
   ret ok(out);
 }
 
-// Serialize a TOML document.
-// 
-// Params:
-// - obj: TOML document
-// 
-// Returns:
-// - TOML string
-pub fun stringify(TomlDoc* obj) str {
-  ret obj.stringify();
-}
-
-// Serialize a TOML document with Result.
-pub fun try_stringify(TomlDoc* obj) Result<str> {
-  str out = obj.stringify();
-  if out == NULL {
-    ret err(1, "toml stringify failed", "");
-  }
-  ret ok(out);
-}
+// Serialization is done through the value methods: `doc.stringify()` and
+// `doc.try_stringify()` (the Result-returning form).

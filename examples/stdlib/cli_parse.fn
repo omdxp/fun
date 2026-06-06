@@ -19,7 +19,7 @@ fun main(str[] args) {
 
   num i = 0;
   for i < parsed.len() {
-    printf("pos[%d]=%s\n", i, parsed.positional(i));
+    printf("pos[%d]=%s\n", i, parsed.get_positional(i));
     i = i + 1;
   }
 

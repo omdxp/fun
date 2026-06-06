@@ -271,6 +271,11 @@ pub const Node = struct {
         quirk: struct {
             name: ArrayList(u8),
             methods: utils.Vector(QuirkMethodSig),
+            /// True for a generic quirk (`quirk Iterator<T> { ... }`). Generic quirks
+            /// support static dispatch only (direct method calls on a concrete impl);
+            /// no monomorphic vtable/quirk-object struct is emitted, since an unbound
+            /// type parameter cannot be represented in a single C signature.
+            is_generic: bool = false,
         },
 
         enum_decl: struct {

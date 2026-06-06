@@ -21,28 +21,18 @@ enum OptionalInt {
 
 fun area(Geometry s) num {
   fit s {
-    Geometry.Circle(r) -> {
-      ret r * r * 3;
-    }
+    Geometry.Circle(r) -> { ret r * r * 3; }
     // pi ~= 3 for the demo
-    Geometry.Rect(w, h) -> {
-      ret w * h;
-    }
-    Geometry.Empty -> {
-      ret 0;
-    }
+    Geometry.Rect(w, h) -> { ret w * h; }
+    Geometry.Empty -> { ret 0; }
   }
   ret -1;
 }
 
 fun unwrap_or(OptionalInt o, num fallback) num {
   fit o {
-    OptionalInt.Some(v) -> {
-      ret v;
-    }
-    OptionalInt.None -> {
-      ret fallback;
-    }
+    OptionalInt.Some(v) -> { ret v; }
+    OptionalInt.None -> { ret fallback; }
   }
   ret fallback;
 }

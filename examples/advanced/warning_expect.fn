@@ -13,8 +13,6 @@ fun main() {
   expect fit_non_exhaustive, "tracked intentional non-exhaustive fit";
 
   fit x {
-    true -> {
-      printf("intentional non-exhaustive fit\n");
-    }
+    true -> { printf("intentional non-exhaustive fit\n"); }
   }
 }

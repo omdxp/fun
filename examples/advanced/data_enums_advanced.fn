@@ -30,21 +30,11 @@ enum Json {
 // Sum to a single number, demonstrating destructuring of every payload shape.
 fun score(Json j) num {
   fit j {
-    Json.Number(n) -> {
-      ret n;
-    }
-    Json.Text(s) -> {
-      ret 100;
-    } // (length omitted for the demo)
-    Json.Point(p) -> {
-      ret p.x + p.y;
-    } // read the compound payload's fields
-    Json.Boxed(b) -> {
-      ret b.val;
-    } // read the generic payload's field
-    Json.Null -> {
-      ret 0;
-    }
+    Json.Number(n) -> { ret n; }
+    Json.Text(s) -> { ret 100; }        // (length omitted for the demo)
+    Json.Point(p) -> { ret p.x + p.y; } // read the compound payload's fields
+    Json.Boxed(b) -> { ret b.val; }     // read the generic payload's field
+    Json.Null -> { ret 0; }
   }
   ret -1;
 }

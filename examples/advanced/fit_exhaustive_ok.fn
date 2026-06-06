@@ -10,11 +10,7 @@ fun main() {
 
   // Exhaustive via default branch (`_`).
   fit x {
-    true -> {
-      printf("x was true\n");
-    },
-    _ -> {
-      printf("x was false\n");
-    }
+    true -> { printf("x was true\n"); },
+    _ -> { printf("x was false\n"); }
   }
 }

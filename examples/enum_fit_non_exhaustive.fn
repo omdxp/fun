@@ -12,11 +12,7 @@ fun main() {
   Color c = Color.Red;
 
   fit c {
-    Color.Red -> {
-      printf("red\n");
-    },
-    Color.Green -> {
-      printf("green\n");
-    }
+    Color.Red -> { printf("red\n"); },
+    Color.Green -> { printf("green\n"); }
   }
 }

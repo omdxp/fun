@@ -8,23 +8,21 @@
 
 imp std.string;
 imp std.vec;
-imp std.c.io;
 imp std.c.mem;
 imp std.c.net;
 imp std.channel;
 imp std.thread_runtime;
 imp std.result;
-imp std.error;
 
 // Parsed URL components.
 pub compound Url {
-  // scheme: protocol (http/https)
+  // protocol (http/https)
   str scheme;
-  // host: hostname
+  // hostname
   str host;
-  // port: port number
+  // port number
   num port;
-  // path: request path
+  // request path
   str path;
 }
 
@@ -120,9 +118,9 @@ pub fun sock_stream() num {
 // word0 packs: family (bytes 0-1), port (2-3), addr (4-7)
 // word1 packs: zero (8-15)
 pub compound SockAddrInPacked {
-  // word0: family/port/address packed
+  // family/port/address packed
   num word0;
-  // word1: trailing zero bytes
+  // trailing zero bytes
   num word1;
 }
 

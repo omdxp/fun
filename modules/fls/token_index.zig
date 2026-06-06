@@ -68,8 +68,11 @@ pub fn appendDocCommentAboveLine(allocator: Allocator, out: *ArrayList(u8), text
         if (trimmed.len == 0) break; // blank line -> stop (separates doc blocks)
         if (!std.mem.startsWith(u8, trimmed, "//")) break;
 
+        // Strip the `//` and AT MOST one following space (the canonical separator),
+        // preserving any deeper indentation. The render pass below decides whether to
+        // left-trim further, based on fenced-code-block state.
         var content = trimmed[2..];
-        content = trimLeftSpace(content);
+        if (content.len > 0 and content[0] == ' ') content = content[1..];
         try lines.append(content);
 
         cur_start = prev_start;
@@ -77,11 +80,24 @@ pub fn appendDocCommentAboveLine(allocator: Allocator, out: *ArrayList(u8), text
 
     if (lines.items.len == 0) return false;
 
-    // Render top-to-bottom.
+    // Render top-to-bottom. Track ``` fenced code blocks: inside a fence, keep each
+    // line's indentation verbatim so example code renders with its real structure;
+    // outside, left-trim so prose isn't accidentally indented into a code block by a
+    // stray leading space. Without this, indented example code (`  fit ...`) would be
+    // flattened to the first column in the rendered hover markdown.
+    var in_fence = false;
     var i: isize = @intCast(lines.items.len);
     while (i > 0) : (i -= 1) {
         const l = lines.items[@intCast(i - 1)];
-        try out.print("{s}\n", .{l});
+        const lt = trimLeftSpace(l);
+        const is_fence = std.mem.startsWith(u8, lt, "```");
+        if (in_fence) {
+            try out.print("{s}\n", .{l});
+            if (is_fence) in_fence = false;
+        } else {
+            try out.print("{s}\n", .{lt});
+            if (is_fence) in_fence = true;
+        }
     }
     try out.appendSlice("\n");
     return true;
@@ -128,6 +144,63 @@ pub fn isPrimitiveTypeKeywordName(s: []const u8) bool {
 
 pub fn isArrayTypeName(name: []const u8) bool {
     return name.len >= 2 and name[name.len - 2] == '[' and name[name.len - 1] == ']';
+}
+
+/// Best-effort element-type extraction for `for item : value` hover/typing (the FLS is
+/// token-based, so this is a structural heuristic, not full type resolution):
+///   `num[]`            -> `num`            (array)
+///   `Vec<num>`/`Set<T>`-> first generic arg (the element)
+///   `Map<K, V>`        -> first generic arg `K` (iterating keys)
+///   `XIter<T>`         -> first generic arg (an iterator yields its single param)
+/// Returns null when no element type can be derived (caller falls back to the raw type).
+pub fn iterableElementTypeName(name: []const u8) ?[]const u8 {
+    if (isArrayTypeName(name)) return name[0 .. name.len - 2];
+    const lt = std.mem.indexOfScalar(u8, name, '<') orelse return null;
+    if (name.len == 0 or name[name.len - 1] != '>') return null;
+    const inner = name[lt + 1 .. name.len - 1];
+    // First generic arg = element (Vec/Set/iterators) or key (Map). Split on the top
+    // level comma so `Map<str, num>` yields `str` and `Vec<Map<a,b>>` yields `Map<a,b>`.
+    var depth: usize = 0;
+    var i: usize = 0;
+    while (i < inner.len) : (i += 1) {
+        const c = inner[i];
+        if (c == '<') depth += 1;
+        if (c == '>') {
+            if (depth > 0) depth -= 1;
+        }
+        if (c == ',' and depth == 0) break;
+    }
+    const first = std.mem.trim(u8, inner[0..i], " ");
+    if (first.len == 0) return null;
+    return first;
+}
+
+/// For `for k, v :: map`: if `name` is a `Map<K, V>`, return the (K, V) type spellings.
+/// Returns null for non-Map types (caller then uses the `index:num, item:element` form).
+pub fn mapKeyValueTypeNames(name: []const u8) ?struct { key: []const u8, val: []const u8 } {
+    const base_end = std.mem.indexOfScalar(u8, name, '<') orelse return null;
+    if (!std.mem.eql(u8, std.mem.trim(u8, name[0..base_end], " "), "Map")) return null;
+    if (name.len == 0 or name[name.len - 1] != '>') return null;
+    const inner = name[base_end + 1 .. name.len - 1];
+    var depth: usize = 0;
+    var split: ?usize = null;
+    var i: usize = 0;
+    while (i < inner.len) : (i += 1) {
+        const c = inner[i];
+        if (c == '<') depth += 1;
+        if (c == '>') {
+            if (depth > 0) depth -= 1;
+        }
+        if (c == ',' and depth == 0) {
+            split = i;
+            break;
+        }
+    }
+    const at = split orelse return null;
+    const key = std.mem.trim(u8, inner[0..at], " ");
+    const val = std.mem.trim(u8, inner[at + 1 ..], " ");
+    if (key.len == 0 or val.len == 0) return null;
+    return .{ .key = key, .val = val };
 }
 
 pub fn isTypeToken(t: token.Token) bool {
@@ -3083,13 +3156,27 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
             }
 
             const iterable_type = inferExprTypeFromTokens(allocator, tokens, expr_start_i.?, expr_end_i, &locals_type_map, &globals_type_map, out.items);
-            const item_type = if (iterable_type) |it|
-                (if (isArrayTypeName(it)) it[0 .. it.len - 2] else it)
+            // `for k, v :: map` pair iteration: when the source is a Map and an index
+            // name is present, `k` is the KEY type and `v` is the VALUE type.
+            const map_kv = if (index_name_i != null and iterable_type != null)
+                mapKeyValueTypeNames(iterable_type.?)
+            else
+                null;
+            // Element type for `for item : value`: unwrap arrays, and the element/key of
+            // a Vec/Set/Map or an iterator (`Vec<num>` -> `num`, `Map<str,num>` -> `str`).
+            // For Map pair iteration the item (second) name is the VALUE type. Falls back
+            // to the raw type when nothing can be unwrapped.
+            const item_type = if (map_kv) |kv|
+                kv.val
+            else if (iterable_type) |it|
+                (iterableElementTypeName(it) orelse it)
             else
                 null;
 
-            // Indexed loop counter is always numeric.
+            // Index/key var: for Map pair iteration it is the KEY type; otherwise it is
+            // the numeric loop counter.
             if (index_name_i) |idx_i| {
+                const idx_type: []const u8 = if (map_kv) |kv| kv.key else "num";
                 const idx_name_raw = tokenString(tokens[idx_i]);
                 const idx_name = allocator.dupe(u8, idx_name_raw) catch idx_name_raw;
                 const idx_r = rangeFromTokenPos(tokens[idx_i].pos);
@@ -3100,15 +3187,15 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                     .selection_range = idx_r,
                     .container_fn_range = body_range.?,
                     .container_type = null,
-                    .value_type = try allocator.dupe(u8, "num"),
+                    .value_type = try allocator.dupe(u8, idx_type),
                     .detail = blk: {
                         var det_buf = ArrayList(u8).init(allocator);
                         defer det_buf.deinit();
-                        try det_buf.print("num {s}", .{idx_name});
+                        try det_buf.print("{s} {s}", .{ idx_type, idx_name });
                         break :blk try allocator.dupe(u8, det_buf.items);
                     },
                 });
-                putType(&locals_type_map, idx_name, "num", allocator);
+                putType(&locals_type_map, idx_name, idx_type, allocator);
             }
 
             const item_name_raw = tokenString(tokens[item_name_i]);
@@ -3543,4 +3630,26 @@ test "fls: appendDocCommentAboveLine returns false with no doc above" {
     const got = try appendDocCommentAboveLine(a, &out, text, 1);
     try std.testing.expect(!got);
     try std.testing.expectEqual(@as(usize, 0), out.items.len);
+}
+
+test "fls: appendDocCommentAboveLine preserves fenced-code indentation" {
+    const a = std.testing.allocator;
+    const text =
+        "// Use it:\n" ++ // line 0 (prose, trimmed)
+        "// ```\n" ++ // line 1 (opening fence)
+        "// for x {\n" ++ // line 2 (code, col 0)
+        "//   work(x);\n" ++ // line 3 (code, indented — must be PRESERVED)
+        "// }\n" ++ // line 4 (code, col 0)
+        "// ```\n" ++ // line 5 (closing fence)
+        "fun f() {}\n"; // line 6 (decl)
+
+    var out = ArrayList(u8).init(a);
+    defer out.deinit();
+    const got = try appendDocCommentAboveLine(a, &out, text, 6);
+    try std.testing.expect(got);
+    // The indented line keeps its two spaces; prose and fences are unaffected.
+    try std.testing.expectEqualStrings(
+        "Use it:\n```\nfor x {\n  work(x);\n}\n```\n\n",
+        out.items,
+    );
 }

@@ -28,35 +28,25 @@ pub enum ErrorKind {
 
 // Error representation used across stdlib.
 pub compound Error {
-  // kind: error category
+  // error category
   ErrorKind kind;
-  // code: numeric error code
+  // numeric error code
   num code;
-  // message: human-readable message
+  // human-readable message
   str message;
-  // context: optional context string
+  // optional context string
   str context;
-  // cause: optional cause detail
+  // optional cause detail
   str cause;
 }
 
 impl Error {
-  // Set context string (overwrites).
-  pub set_context(str context) {
-    self.context = context;
-  }
-
-  // Attach context (fluent).
+  // Attach context (overwrites any previous context).
   pub with_context(str context) {
     self.context = context;
   }
 
-  // Set cause string (overwrites).
-  pub set_cause(str cause) {
-    self.cause = cause;
-  }
-
-  // Attach cause (fluent).
+  // Attach cause (overwrites any previous cause).
   pub with_cause(str cause) {
     self.cause = cause;
   }
@@ -93,8 +83,9 @@ pub fun error_new(num code, str message) Error {
   ret error_new_kind(.System, code, message);
 }
 
-// Create an OK (no-error) value.
-pub fun error_ok() Error {
+// Create a no-error value (kind = None). Use this where a function must return an
+// `Error` to signal "nothing went wrong" (e.g. `Result.unwrap_err` on an Ok value).
+pub fun error_none() Error {
   Error e;
   e.kind = .None;
   e.code = 0;

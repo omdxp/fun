@@ -296,6 +296,12 @@ pub const TranspileProcess = struct {
     type_subst_params: ?*const utils.Vector(ArrayList(u8)) = null,
     type_subst_args: ?[]*dtype.DataType = null,
 
+    /// The declared return type of the method body currently being emitted, used to
+    /// monomorphize a constructed generic enum whose own param does not appear in the
+    /// active substitution (e.g. `ret Option.None` inside `impl MapIter<K,V> as
+    /// Iterator<K>`, whose return type `Option<K>` mangles to `Option__str`).
+    current_method_return_dtype: ?*const dtype.DataType = null,
+
     /// Optional override for specialized function names during emission.
     override_fn_name: ?[]const u8 = null,
 
@@ -1166,12 +1172,15 @@ pub const TranspileProcess = struct {
             impl_rtype.pointer_depth = rt.pointer_depth;
             impl_rtype.array = rt.array;
             impl_rtype.type = rt.type;
+            // Preserve generic args (e.g. `Option<T>`) so a generic-quirk signature
+            // like `next() Option<T>` compares equal to its impl's return type.
+            impl_rtype.generic_args = rt.generic_args;
         } else {
             impl_rtype.type = .Void;
             impl_rtype.type_str.appendSlice("void") catch return TranspileError.MemoryAllocationFailed;
         }
 
-        if (!dtype_sig_equal(&impl_rtype, &quirk_sig.rtype)) {
+        if (!dtype_sig_equal_relaxed(&impl_rtype, &quirk_sig.rtype)) {
             var want = ArrayList(u8).init(self.backing_allocator);
             defer want.deinit();
             var got = ArrayList(u8).init(self.backing_allocator);
@@ -1193,7 +1202,7 @@ pub const TranspileProcess = struct {
                 return TranspileError.UnsupportedNodeType;
             }
             const impl_dt = impl_arg_node.node_variant.?.variable.type;
-            if (!dtype_sig_equal(impl_dt, qa.dtype)) {
+            if (!dtype_sig_equal_relaxed(impl_dt, qa.dtype)) {
                 var want = ArrayList(u8).init(self.backing_allocator);
                 defer want.deinit();
                 var got = ArrayList(u8).init(self.backing_allocator);
@@ -1219,6 +1228,54 @@ pub const TranspileProcess = struct {
             if (ai.len != gb.len) return false;
             for (ai, 0..) |a_dt, i| {
                 if (!dtype_sig_equal(a_dt, gb[i])) return false;
+            }
+        }
+        if (a.pointer_depth != b.pointer_depth) return false;
+        const a_arr = a.array;
+        const b_arr = b.array;
+        if ((a_arr == null) != (b_arr == null)) return false;
+        if (a_arr) |aa| {
+            if (b_arr) |bb| {
+                if (aa.brackets.count != bb.brackets.count) return false;
+            } else return false;
+        }
+        return true;
+    }
+
+    /// Heuristic: a bare type-parameter spelling (`T`, `K`, `V`, `E`, `T1`, ...) — a
+    /// short all-uppercase identifier with no generic args, pointer, or array. Used to
+    /// match abstract type params across a generic-quirk signature and its impl, where
+    /// the param NAMES are free to differ (`Iterator<T>` satisfied by `Option<K>`).
+    fn dtype_is_bare_type_param(dt: *const dtype.DataType) bool {
+        if (dt.generic_args != null) return false;
+        if (dt.pointer_depth != 0) return false;
+        if (dt.array != null) return false;
+        const s = dt.type_str.items;
+        if (s.len == 0 or s.len > 2) return false;
+        for (s) |ch| {
+            if (!((ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9'))) return false;
+        }
+        return (s[0] >= 'A' and s[0] <= 'Z');
+    }
+
+    /// Like `dtype_sig_equal`, but for validating a GENERIC-quirk impl against the
+    /// quirk's abstract signature. `a` is the impl's type, `b` is the quirk's. A bare
+    /// type parameter ON THE QUIRK SIDE (`b`, e.g. the `T` in `Iterator<T>.next()
+    /// Option<T>`) matches WHATEVER the impl bound it to — whether another bare param
+    /// (`impl MapIter<K,V> as Iterator<K>`, K↔T) or a concrete type (`impl Counter as
+    /// Iterator<num>`, where `next()` returns `Option<num>`). This is sound because the
+    /// `as Quirk<...>` binding fixes the quirk's params for this impl.
+    fn dtype_sig_equal_relaxed(a: *const dtype.DataType, b: *const dtype.DataType) bool {
+        if (dtype_is_bare_type_param(b)) return true;
+        if (dtype_is_bare_type_param(a)) return true;
+        if (!mem.eql(u8, a.type_str.items, b.type_str.items)) return false;
+        if ((a.generic_args == null) != (b.generic_args == null)) return false;
+        if (a.generic_args) |ga| {
+            const gb = b.generic_args.?.items();
+            const ai = ga.items();
+            if (ai.len != gb.len) return false;
+            for (ai, 0..) |a_dt, i| {
+                if (!dtype_sig_equal_relaxed(a_dt, gb[i])) return false;
             }
         }
         if (a.pointer_depth != b.pointer_depth) return false;
@@ -2511,7 +2568,19 @@ pub const TranspileProcess = struct {
         const reg = self.root_registry() orelse return;
         if (!reg.enums_by_name.contains(base)) return;
 
-        const mangled = self.type_name_mangled(dt) catch return;
+        // Mangle the expected enum dtype to its concrete instance. Inside a
+        // monomorphized method the expected type may still mention the enclosing
+        // type's params (`Option<K>` in `impl MapIter<K,V> as Iterator<K>`), so apply
+        // the active substitution (`K`->`str`) to reach `Option__str` rather than the
+        // never-emitted `Option__K`.
+        const mangled = blk: {
+            if (self.type_subst_params) |params| {
+                if (self.type_subst_args) |sargs| {
+                    if (self.type_name_mangled_with_subst(dt, params.*, sargs) catch null) |m| break :blk m;
+                }
+            }
+            break :blk (self.type_name_mangled(dt) catch return);
+        };
         defer self.allocator.free(mangled);
         if (mem.eql(u8, mangled, base)) return; // not actually mangled
         // Skip the generic TEMPLATE typecheck pass, where the args are still type
@@ -4971,6 +5040,11 @@ pub const TranspileProcess = struct {
     }
 
     fn lookup_plain_impl_method_fn_proc(self: *Self, proc: *Self, ref_node: ?*const ast.Node, type_name: []const u8, method_name: []const u8) ?[]const u8 {
+        // First pass: plain impls only (the common, unambiguous case). A second pass
+        // below considers GENERIC quirk impls, whose static method bodies are emitted
+        // under `<Type>__<Quirk>__<method>` and so are callable directly on a concrete
+        // receiver (e.g. `it.next()` where `it: MapIter<num,bin>` implements
+        // `Iterator<num>`).
         for (proc.owned_nodes.items) |n| {
             if (n.type != .Impl or n.node_variant == null) continue;
             const im = n.node_variant.?.impl;
@@ -5009,6 +5083,36 @@ pub const TranspileProcess = struct {
                 if (!mem.eql(u8, full[type_name.len .. type_name.len + 2], "__")) continue;
                 if (!mem.eql(u8, full[type_name.len + 2 ..], method_name)) continue;
                 return full;
+            }
+        }
+
+        // Second pass: generic quirk impls. The emitted symbol carries the quirk
+        // segment (`<MangledType>__<Quirk>__<method>`).
+        for (proc.owned_nodes.items) |n| {
+            if (n.type != .Impl or n.node_variant == null) continue;
+            const im = n.node_variant.?.impl;
+            const quirk_name = if (im.quirk_name) |qn| qn.items else continue;
+            // Only generic quirks are dispatched statically by direct call; non-generic
+            // quirks go through the vtable/coercion path, not a bare method call.
+            const sig = (self.root_registry() orelse continue).quirk_sig_by_name.get(quirk_name) orelse continue;
+            const qnode = (self.root_registry() orelse continue).quirks_by_sig.get(sig) orelse continue;
+            if (qnode.node_variant == null or !qnode.node_variant.?.quirk.is_generic) continue;
+
+            const im_base = if (mem.indexOf(u8, im.type_name.items, "__")) |idx| im.type_name.items[0..idx] else im.type_name.items;
+            const recv_base = if (mem.indexOf(u8, type_name, "__")) |idx| type_name[0..idx] else type_name;
+            if (!mem.eql(u8, im_base, recv_base)) continue;
+
+            for (im.methods.items()) |m| {
+                if (m.type != .Function or m.node_variant == null) continue;
+                if (!self.can_access_method(ref_node, n, m)) continue;
+                const fnv = m.node_variant.?.function;
+                if (fnv.name == null) continue;
+                const base_name = base_method_name_from_generated(fnv.name.?.items) orelse continue;
+                if (!mem.eql(u8, base_name, method_name)) continue;
+                // `<receiver-instance>__<Quirk>__<method>`, e.g.
+                // `MapIter__num__bin__Iterator__next`. For a still-templated receiver
+                // (`MapIter__T__bin`) this yields the template name, monomorphized later.
+                return std.fmt.allocPrint(self.allocator, "{s}__{s}__{s}", .{ type_name, quirk_name, method_name }) catch null;
             }
         }
 
@@ -5058,10 +5162,46 @@ pub const TranspileProcess = struct {
         return self.find_plain_impl_method_node_proc(root, type_base, method_name);
     }
 
+    /// Like `find_plain_impl_method_node`, but also matches methods declared in a
+    /// quirk impl (`impl Type as Quirk { ... }`). Used for return-type resolution and
+    /// method chaining where a quirk-impl method (e.g. `Iterator.next`) is called
+    /// directly on a concrete receiver via static dispatch.
+    fn find_any_impl_method_node_proc(self: *Self, proc: *Self, type_base: []const u8, method_name: []const u8) ?PlainImplMethodHit {
+        for (proc.owned_nodes.items) |n| {
+            if (n.type != .Impl or n.node_variant == null) continue;
+            const im = n.node_variant.?.impl;
+            const base = if (mem.indexOf(u8, im.type_name.items, "__")) |idx| im.type_name.items[0..idx] else im.type_name.items;
+            if (!mem.eql(u8, base, type_base)) continue;
+
+            for (im.methods.items()) |m| {
+                if (m.type != .Function or m.node_variant == null) continue;
+                const fnv = m.node_variant.?.function;
+                if (fnv.name == null) continue;
+                const full = fnv.name.?.items;
+                const base_name = base_method_name_from_generated(full) orelse continue;
+                if (!mem.eql(u8, base_name, method_name)) continue;
+                return .{ .impl_node = n, .method_node = m };
+            }
+        }
+
+        for (proc.children.items) |child| {
+            if (self.find_any_impl_method_node_proc(child, type_base, method_name)) |hit| return hit;
+        }
+        return null;
+    }
+    fn find_any_impl_method_node(self: *Self, type_base: []const u8, method_name: []const u8) ?PlainImplMethodHit {
+        const root = self.get_root();
+        return self.find_any_impl_method_node_proc(root, type_base, method_name);
+    }
+
     fn synthesize_generic_plain_method_sig(self: *Self, recv_dt: *const dtype.DataType, recv_name: []const u8, method_name: []const u8) ?FnSig {
         if (recv_dt.generic_args == null) return null;
         const base = if (mem.indexOf(u8, recv_name, "__")) |idx| recv_name[0..idx] else recv_name;
-        const hit = self.find_plain_impl_method_node(base, method_name) orelse return null;
+        // Match plain- AND quirk-impl methods: a generic receiver may call a quirk
+        // method statically (`it.next()` where `it: MapIter<T,bin>` implements
+        // `Iterator<T>`). The sig is synthesized by substituting the receiver's type
+        // args, identical for plain and quirk impls.
+        const hit = self.find_any_impl_method_node(base, method_name) orelse return null;
         if (hit.method_node.node_variant == null) return null;
         const fnv = hit.method_node.node_variant.?.function;
         const params = self.impl_type_params(hit.impl_node) orelse return null;
@@ -5093,6 +5233,120 @@ pub const TranspileProcess = struct {
         else
             CheckedType{ .base = .Void };
         return .{ .rtype = rtype, .args = args_slice, .is_variadic = fnv.is_variadic, .is_async = fnv.is_async };
+    }
+
+    /// Synthesize a generic-method sig from a MANGLED instance name (`Box__str`) by
+    /// reconstructing its dtype (base + type args) and delegating to
+    /// `synthesize_generic_plain_method_sig`. Resolves the case where a concrete-typed
+    /// impl (`impl Box<str>`) — possibly for a type the program never instantiates —
+    /// calls a sibling method defined on the generic base `impl Box<T>`: the receiver's
+    /// scope dtype is the bare mangled name (no generic_args), so the earlier
+    /// generic_args-based paths miss it. Returns null when not applicable.
+    fn synthesize_generic_method_sig_from_mangled(self: *Self, mangled_name: []const u8, method_name: []const u8) ?FnSig {
+        if (mem.indexOf(u8, mangled_name, "__") == null) return null;
+        const dt = (self.dtype_from_mangled_type(mangled_name) catch return null) orelse return null;
+        if (dt.generic_args == null) return null;
+        return self.synthesize_generic_plain_method_sig(dt, mangled_name, method_name);
+    }
+
+    /// Result of resolving a value's iterability for `for item : value`.
+    const IterableElem = struct {
+        /// The element type yielded each step (the `T` in the iterator's `Option<T>`).
+        elem: *dtype.DataType,
+        /// When true, `value` is a collection exposing `iter()` that must be CALLED to
+        /// obtain the iterator; when false, `value` already IS an iterator (has `next`).
+        needs_iter_call: bool,
+        /// The iterator's own (monomorphized) type name to declare the loop temp with,
+        /// e.g. `VecIter__num`. Equals the receiver's mangled name when needs_iter_call
+        /// is false. Arena-owned.
+        iter_type_name: []const u8,
+    };
+
+    /// Given the dtype of a `for ... : value` iterable, decide how to drive it via the
+    /// Iterator protocol and what element type it yields. Mirrors how `{}` resolves
+    /// `Display.to_string()`: a value is iterable if its type (a) implements
+    /// `Iterator<T>` directly (has `next() Option<T>`), or (b) exposes `iter()`
+    /// returning such an iterator. Returns null when neither applies (caller then
+    /// falls back to the raw-array / Vec fast path or errors).
+    fn resolve_iterable_elem(self: *Self, dt: *const dtype.DataType) ?IterableElem {
+        if (dt.pointer_depth != 0 or dt.type_str.items.len == 0) return null;
+        const base = if (mem.indexOf(u8, dt.type_str.items, "__")) |i| dt.type_str.items[0..i] else dt.type_str.items;
+
+        // Reconstruct full args if dt is a bare mangled instance (e.g. `VecIter__num`).
+        var dt_full: *const dtype.DataType = dt;
+        if (dt.generic_args == null and mem.indexOf(u8, dt.type_str.items, "__") != null) {
+            if (self.dtype_from_mangled_type(dt.type_str.items) catch null) |recon| dt_full = recon;
+        }
+
+        // (a) `value` itself is an iterator: it has `next() Option<T>`.
+        if (self.iterator_next_elem(base, dt_full)) |elem| {
+            const itn = self.type_name_mangled(dt_full) catch dt.type_str.items;
+            return .{ .elem = elem, .needs_iter_call = false, .iter_type_name = self.arena.allocator().dupe(u8, itn) catch dt.type_str.items };
+        }
+
+        // (b) `value` is a collection exposing `iter() -> SomeIter<...>`.
+        const iter_hit = self.find_any_impl_method_node(base, "iter") orelse return null;
+        if (iter_hit.method_node.node_variant == null) return null;
+        const iter_rt = iter_hit.method_node.node_variant.?.function.rtype orelse return null;
+        if (iter_rt.pointer_depth != 0) return null;
+        // Monomorphize the iterator type with the collection's type args.
+        const iter_dt: *dtype.DataType = blk: {
+            if (self.impl_type_params(iter_hit.impl_node)) |params| {
+                if (dt_full.generic_args) |ga| {
+                    const gargs = ga.items();
+                    if (gargs.len == params.count) {
+                        if (self.clone_dtype_with_subst_for_inst(&iter_rt, params, gargs) catch null) |sub| break :blk sub;
+                    }
+                }
+            }
+            break :blk self.clone_dtype(&iter_rt) catch return null;
+        };
+        const iter_base = if (mem.indexOf(u8, iter_dt.type_str.items, "__")) |i| iter_dt.type_str.items[0..i] else iter_dt.type_str.items;
+        const elem = self.iterator_next_elem(iter_base, iter_dt) orelse return null;
+        const itn = self.type_name_mangled(iter_dt) catch iter_dt.type_str.items;
+        return .{ .elem = elem, .needs_iter_call = true, .iter_type_name = self.arena.allocator().dupe(u8, itn) catch iter_dt.type_str.items };
+    }
+
+    const MapKV = struct { key: *dtype.DataType, val: *dtype.DataType };
+
+    /// If `dt` is a `Map<K, V>` instance, return its (K, V) element dtypes — used to
+    /// type `for k, v :: map` pair iteration. Returns null for non-Map types.
+    fn map_kv_dtypes(self: *Self, dt: *const dtype.DataType) ?MapKV {
+        if (dt.pointer_depth != 0) return null;
+        const base = if (mem.indexOf(u8, dt.type_str.items, "__")) |i| dt.type_str.items[0..i] else dt.type_str.items;
+        if (!mem.eql(u8, base, "Map")) return null;
+        var dt_full: *const dtype.DataType = dt;
+        if (dt.generic_args == null and mem.indexOf(u8, dt.type_str.items, "__") != null) {
+            if (self.dtype_from_mangled_type(dt.type_str.items) catch null) |recon| dt_full = recon;
+        }
+        const ga = (dt_full.generic_args orelse return null).items();
+        if (ga.len != 2) return null;
+        return .{ .key = ga[0], .val = ga[1] };
+    }
+
+    /// If `base` (instantiated as `dt`) has a `next()` method returning `Option<T>`,
+    /// return the monomorphized `T` (substituting `dt`'s type args through the impl's
+    /// params). Returns null when there is no such method.
+    fn iterator_next_elem(self: *Self, base: []const u8, dt: *const dtype.DataType) ?*dtype.DataType {
+        const hit = self.find_any_impl_method_node(base, "next") orelse return null;
+        if (hit.method_node.node_variant == null) return null;
+        const rt = hit.method_node.node_variant.?.function.rtype orelse return null;
+        // Must return Option<...>.
+        const rbase = if (mem.indexOf(u8, rt.type_str.items, "__")) |i| rt.type_str.items[0..i] else rt.type_str.items;
+        if (!mem.eql(u8, rbase, "Option")) return null;
+        if (rt.generic_args == null) return null;
+        const opt_arg = rt.generic_args.?.items();
+        if (opt_arg.len != 1) return null;
+        // Substitute the impl's type params (e.g. `T`) with `dt`'s concrete args.
+        if (self.impl_type_params(hit.impl_node)) |params| {
+            if (dt.generic_args) |ga| {
+                const gargs = ga.items();
+                if (gargs.len == params.count) {
+                    if (self.clone_dtype_with_subst_for_inst(opt_arg[0], params, gargs) catch null) |sub| return sub;
+                }
+            }
+        }
+        return self.clone_dtype(opt_arg[0]) catch null;
     }
 
     fn find_function_node_proc(self: *Self, proc: *Self, name: []const u8) ?*ast.Node {
@@ -6505,6 +6759,20 @@ pub const TranspileProcess = struct {
                                         }
                                     }
                                 }
+                                // The receiver may be a bare MANGLED instance (`Box__str`) with no
+                                // generic_args on its scope dtype — typical inside a concrete-typed impl
+                                // (`impl Box<str>`) calling a sibling defined on the generic base. Recover
+                                // base+args from the mangled name and synthesize the method sig.
+                                if (plain_method_sig == null and (recv_dt == null or recv_dt.?.generic_args == null)) {
+                                    if (self.synthesize_generic_method_sig_from_mangled(recv_name_canon, mname)) |sig| {
+                                        plain_method_sig = sig;
+                                        plain_method_name = mname;
+                                        call_rtype = sig.rtype;
+                                        if (self.lookup_plain_impl_method_fn(&node, recv_name_canon, mname)) |fn_name| {
+                                            await_lowering_callee = fn_name;
+                                        }
+                                    }
+                                }
 
                                 if (plain_method_sig == null) {
                                     if (self.lookup_plain_impl_method_fn(&node, recv_name_canon, mname)) |fn_name| {
@@ -6597,6 +6865,17 @@ pub const TranspileProcess = struct {
                                             plain_method_name = mname;
                                             call_rtype = plain_method_sig.?.rtype;
                                             await_lowering_callee = qfn;
+                                        } else if (self.synthesize_generic_method_sig_from_mangled(recv_name_canon, mname)) |sig| {
+                                            // Concrete-typed impl (`impl Box<str>`) calling a sibling method
+                                            // defined on the generic base (`impl Box<T>`), where the receiver's
+                                            // scope dtype is the bare mangled name. Recover base+args from the
+                                            // mangled name and synthesize the generic method's sig.
+                                            plain_method_sig = sig;
+                                            plain_method_name = mname;
+                                            call_rtype = sig.rtype;
+                                            if (self.lookup_plain_impl_method_fn(&node, recv_name_canon, mname)) |fn_name| {
+                                                await_lowering_callee = fn_name;
+                                            }
                                         } else {
                                             self.report_type_error(node, "type '{s}' has no method '{s}'", .{ recv_name_canon, mname });
                                             return TranspileError.NotCallable;
@@ -7469,26 +7748,57 @@ pub const TranspileProcess = struct {
                                 if (gargs.len != 1) break :blk null;
                                 break :blk gargs[0];
                             };
-                            if (!it_t.is_array and vec_item_dt == null) {
-                                self.report_type_error(stmt, "for-iter expects array iterable", .{});
+                            // Any value whose type drives the Iterator protocol (a
+                            // collection with `iter()`, or an iterator with `next()`).
+                            // Vec keeps its direct fast path above; everything else
+                            // (Map/Set/user types/iterators) resolves its element type
+                            // here and is lowered to the next()/fit-Option loop.
+                            const iter_elem = if (vec_item_dt == null and !it_t.is_array)
+                                (if (it_t.dtype_ref) |dt| self.resolve_iterable_elem(dt) else null)
+                            else
+                                null;
+                            // `for k, v :: map` — pair iteration: `k` binds each key, `v`
+                            // its value. Only valid over a Map (and only with an index name).
+                            const map_kv = if (fi.index_name != null)
+                                (if (it_t.dtype_ref) |dt| self.map_kv_dtypes(dt) else null)
+                            else
+                                null;
+                            if (!it_t.is_array and vec_item_dt == null and iter_elem == null and map_kv == null) {
+                                self.report_type_error(stmt, "for-iter expects an array, a Vec, a Map (for 'k, v :: map'), or a value implementing Iterator (or exposing iter())", .{});
+                                return TranspileError.TypeMismatch;
+                            }
+                            // An index counter (`for i, item : ...`) is only meaningful for
+                            // indexable sources (arrays/Vec). A non-Map Iterator is
+                            // positionless, so reject the index form there.
+                            if (fi.index_name != null and iter_elem != null and map_kv == null) {
+                                self.report_type_error(stmt, "for-iter with an index ('i, item') requires an array, a Vec, or a Map", .{});
                                 return TranspileError.TypeMismatch;
                             }
                             try env.push();
                             defer env.pop();
-                            if (fi.index_name) |iname| {
-                                try env.put_current(iname, .{ .base = .Num });
+                            if (map_kv) |kv| {
+                                // k : K, v : V
+                                try env.put_current(fi.index_name.?, try self.type_from_dtype_with_mangled(kv.key));
+                                try env.put_current(fi.item_name, try self.type_from_dtype_with_mangled(kv.val));
+                                try self.check_body(fi.body, env, fns, fn_rtype);
+                            } else {
+                                if (fi.index_name) |iname| {
+                                    try env.put_current(iname, .{ .base = .Num });
+                                }
+                                var item_t = if (iter_elem) |ie|
+                                    try self.type_from_dtype_with_mangled(ie.elem)
+                                else if (vec_item_dt) |elem_dt|
+                                    try self.type_from_dtype_with_mangled(elem_dt)
+                                else
+                                    it_t;
+                                if (vec_item_dt == null and iter_elem == null) {
+                                    // Element is one dimension fewer than the iterable.
+                                    item_t.array_depth = if (it_t.array_depth > 0) it_t.array_depth - 1 else 0;
+                                    item_t.is_array = item_t.array_depth > 0;
+                                }
+                                try env.put_current(fi.item_name, item_t);
+                                try self.check_body(fi.body, env, fns, fn_rtype);
                             }
-                            var item_t = if (vec_item_dt) |elem_dt|
-                                try self.type_from_dtype_with_mangled(elem_dt)
-                            else
-                                it_t;
-                            if (vec_item_dt == null) {
-                                // Element is one dimension fewer than the iterable.
-                                item_t.array_depth = if (it_t.array_depth > 0) it_t.array_depth - 1 else 0;
-                                item_t.is_array = item_t.array_depth > 0;
-                            }
-                            try env.put_current(fi.item_name, item_t);
-                            try self.check_body(fi.body, env, fns, fn_rtype);
                         },
                     }
                 },
@@ -10334,6 +10644,18 @@ pub const TranspileProcess = struct {
                 }
             }
         }
+        // A call/method-call subject (`it.next()`, `some(7)`, `box.at()`) returning a
+        // data enum: resolve the call's MONOMORPHIZED return type so the switch uses
+        // the mangled instance (`Option__num`/`Option__num_Some`) rather than the bare
+        // base. This must precede the arm-based fallback, which cannot recover the
+        // type args from `Option.Some` alone.
+        if (self.expr_compound_return_type_name(fit_exp)) |rtn| {
+            // `rtn` may be a monomorphized instance (`Option__num`); test the base
+            // (`Option`) for tagged-union-ness, then return the mangled instance so the
+            // switch uses `Option__num`/`Option__num_Some`.
+            const rbase = if (mem.indexOf(u8, rtn, "__")) |bi| rtn[0..bi] else rtn;
+            if (self.enum_name_is_tagged_union(rbase)) return rtn;
+        }
         // A non-identifier subject (e.g. `*self` inside an impl method, a channel
         // recv `<- ch`, any call returning a data-enum) has no simple declared name.
         // Fall back to the arms: an `Enum.Variant` condition names the tagged-union
@@ -10381,7 +10703,25 @@ pub const TranspileProcess = struct {
                     break;
                 }
             }
-            const rt = resolved orelse return null; // unresolved param -> not concrete
+            // The enum's own param (`T`) may not appear among the active params (which
+            // are the enclosing TYPE's params, e.g. `K`/`V` for `MapIter<K,V>`). In
+            // that case derive the instance from the current method's declared return
+            // type (`Option<K>` -> mangle K via the subst -> `Option__str`).
+            if (resolved == null) {
+                if (self.current_method_return_dtype) |rdt| {
+                    if (mem.eql(u8, rdt.type_str.items, enum_name)) {
+                        if (self.type_name_mangled_with_subst(rdt, params.*, args) catch null) |m| {
+                            // m is owned by the allocator; copy onto the arena for a
+                            // stable, no-free return, matching this function's contract.
+                            defer self.allocator.free(m);
+                            buf.deinit();
+                            return self.arena.allocator().dupe(u8, m) catch null;
+                        }
+                    }
+                }
+                return null; // unresolved param -> not concrete
+            }
+            const rt = resolved.?;
             const arg_name = self.type_name_mangled(rt) catch return null;
             defer self.allocator.free(arg_name);
             buf.appendSlice("__") catch return null;
@@ -10392,10 +10732,159 @@ pub const TranspileProcess = struct {
 
     /// Lower a `fit` over a tagged-union subject:
     ///   { Enum __fitN = <subj>; switch (__fitN.tag) {
-    ///       case Enum_Variant: { <Type b = __fitN.payload.Variant._i;>* <body> break; }
-    ///       ... default: { <body> break; } } }
+    ///       if (__fitN.tag == Enum_Variant) { <Type b = __fitN.payload.Variant._i;>* <body> }
+    ///       else if (...) { ... } else { <default body> } }
     /// The subject is snapshotted into a temp so payload reads and a possibly
     /// side-effecting subject expression are evaluated exactly once.
+    ///
+    /// An `if`/`else-if` chain (rather than a `switch`) is used deliberately: a user
+    /// `break`/`continue` inside a `fit` arm must escape the ENCLOSING LOOP, not a
+    /// `switch`. With a switch, `fit it.next() { Option.None -> { break; } }` inside
+    /// `for true { ... }` would break only the switch and loop forever. The chain has
+    /// no such hidden control-flow target, so user `break`/`continue` behave naturally.
+    /// Register a for-loop binding (`name`, typed `elem_dt`) as a scope variable so the
+    /// body's references to it resolve with the right type. The C declaration line was
+    /// already emitted by the caller via `__auto_type`.
+    fn bind_loop_var(self: *Self, name: []const u8, elem_dt: *const dtype.DataType) TranspileError!void {
+        const item_dt = try self.clone_dtype(elem_dt);
+        const item_node = self.allocator.create(ast.Node) catch return TranspileError.MemoryAllocationFailed;
+        var item_name_buf = ArrayList(u8).init(self.allocator);
+        item_name_buf.appendSlice(name) catch return TranspileError.MemoryAllocationFailed;
+        item_node.* = .{
+            .type = .Variable,
+            .node_variant = .{ .variable = .{ .type = item_dt, .name = item_name_buf, .val = null } },
+        };
+        const item_ent = self.allocator.create(scope.ScopeEntity) catch return TranspileError.MemoryAllocationFailed;
+        item_ent.* = .{ .flags = .{ .on_stack = false }, .node = item_node, .name = name };
+        try self.push_scope_entity(item_ent);
+        self.owned_scope_entities.append(item_ent) catch return TranspileError.MemoryAllocationFailed;
+    }
+
+    /// Lower `for item : iterable { body }` via the Iterator protocol when `iterable`
+    /// is a Map/Set/user iterator/collection (anything `resolve_iterable_elem` accepts).
+    /// Returns true when handled; false to defer to the legacy array/Vec fast path.
+    ///
+    /// Emitted shape (the established next()/Option consumption idiom, with an
+    /// if/else-if `fit` so a user `break`/`continue` targets THIS loop):
+    ///   { <IterT> __it = <iterable>[.iter()]; for (;;) {
+    ///       <OptT> __o = __it.next();
+    ///       if (__o.tag == Opt_None) break;
+    ///       <ElemT> item = __o.payload.Some._0;  <body> } }
+    fn emit_iter_protocol_for(self: *Self, fi: anytype) TranspileError!bool {
+        // Resolve the iterable expression's compound/instance type name.
+        const ty = self.expr_resolved_compound_type_name(fi.iterable.*) orelse return false;
+        const dt = (self.dtype_from_mangled_type(self.canonical_compound_name(ty)) catch null) orelse
+            (self.lookup_receiver_dtype(fi.iterable.*) orelse return false);
+        const base = if (mem.indexOf(u8, dt.type_str.items, "__")) |i| dt.type_str.items[0..i] else dt.type_str.items;
+        // A plain Vec identifier keeps the faster direct-index legacy path.
+        if (mem.eql(u8, base, "Vec") and fi.iterable.type == .Identifier) return false;
+        const ie = self.resolve_iterable_elem(dt) orelse return false;
+
+        // Resolve the EMITTED C function names for `iter` (on the collection) and
+        // `next` (on the iterator). Fun method calls lower to mangled free functions
+        // (`Set__num__iter`, `SetIter__num__Iterator__next`), so we cannot write
+        // `.iter()`/`.next()` as C member access — resolve and call them directly.
+        const coll_canon = self.canonical_compound_name(ty);
+        const next_fn = self.lookup_plain_impl_method_fn(null, ie.iter_type_name, "next") orelse return false;
+        const iter_fn: ?[]const u8 = if (ie.needs_iter_call)
+            (self.lookup_plain_impl_method_fn(null, coll_canon, "iter") orelse return false)
+        else
+            null;
+
+        const it_tmp = try self.next_tmp_name("iter");
+        defer self.allocator.free(it_tmp);
+        const opt_tmp = try self.next_tmp_name("opt");
+        defer self.allocator.free(opt_tmp);
+
+        const opt_name = self.type_name_mangled(ie.elem) catch return false;
+        defer self.allocator.free(opt_name);
+        // The iterator's next() returns Option<ElemT>; mangle that instance name.
+        const opt_inst = std.fmt.allocPrint(self.allocator, "Option__{s}", .{opt_name}) catch return TranspileError.MemoryAllocationFailed;
+        defer self.allocator.free(opt_inst);
+
+        try self.write("{");
+        self.indent();
+
+        // Materialize the iterator into a temp (call iter() when the source is a
+        // collection; otherwise the value already IS the iterator). The iterator is
+        // taken by address since iter()/next() receive `self` by pointer.
+        try self.write_indent();
+        try self.write(ie.iter_type_name);
+        try self.write(" ");
+        try self.write(it_tmp);
+        try self.write(" = ");
+        if (iter_fn) |ifn| {
+            try self.write(ifn);
+            try self.write("(&(");
+            try self.transpile_node(fi.iterable.*);
+            try self.write("))");
+        } else {
+            try self.transpile_node(fi.iterable.*);
+        }
+        try self.write(";");
+
+        try self.write_indent();
+        try self.write("for (;;) {");
+        self.indent();
+
+        // Pull the next Option<Elem>; break on None.
+        try self.write_indent();
+        try self.write(opt_inst);
+        try self.write(" ");
+        try self.write(opt_tmp);
+        try self.print(" = {s}(&{s});", .{ next_fn, it_tmp });
+        try self.write_indent();
+        try self.print("if ({s}.tag == {s}_None) break;", .{ opt_tmp, opt_inst });
+
+        try self.push_defer_scope(.loop);
+        defer self.pop_defer_scope();
+        _ = try self.new_scope();
+        defer self.finish_scope();
+
+        // `for k, v :: map` — pair iteration over a Map. The iterator yields KEYS, so
+        // the payload binds to the index/key name and the value is looked up via the
+        // map's `get`. Detected when an index name is present AND the source is a Map.
+        const map_kv: ?MapKV = if (fi.index_name != null) self.map_kv_dtypes(dt) else null;
+        if (map_kv) |kv| {
+            const get_fn = self.lookup_plain_impl_method_fn(null, coll_canon, "get") orelse return false;
+            // key = the yielded Some payload
+            try self.write_indent();
+            try self.write("__auto_type ");
+            try self.write(fi.index_name.?);
+            try self.print(" = {s}.payload.Some._0;\n", .{opt_tmp});
+            // value = map.get(key)
+            try self.write_indent();
+            try self.write("__auto_type ");
+            try self.write(fi.item_name);
+            try self.print(" = {s}(&(", .{get_fn});
+            try self.transpile_node(fi.iterable.*);
+            try self.print("), {s});\n", .{fi.index_name.?});
+
+            try self.bind_loop_var(fi.index_name.?, kv.key);
+            try self.bind_loop_var(fi.item_name, kv.val);
+        } else {
+            // Bind the Some payload as the loop item.
+            try self.write_indent();
+            try self.write("__auto_type ");
+            try self.write(fi.item_name);
+            try self.print(" = {s}.payload.Some._0;\n", .{opt_tmp});
+            try self.bind_loop_var(fi.item_name, ie.elem);
+        }
+
+        try self.transpile_block_contents(fi.body);
+        if (!self.block_ends_with_scope_terminator(fi.body)) {
+            try self.emit_current_scope_defers();
+        }
+
+        self.dedent();
+        try self.write_indent();
+        try self.write("}");
+        self.dedent();
+        try self.write_indent();
+        try self.write("}");
+        return true;
+    }
+
     fn emit_tagged_union_fit(self: *Self, fit: anytype, enum_name: []const u8) TranspileError!void {
         const tmp = try self.next_tmp_name("fit");
         defer self.allocator.free(tmp);
@@ -10410,12 +10899,7 @@ pub const TranspileProcess = struct {
         try self.transpile_node(fit.exp.*);
         try self.write(";");
 
-        try self.write_indent();
-        try self.write("switch (");
-        try self.write(tmp);
-        try self.write(".tag) {");
-        self.indent();
-
+        var first = true;
         for (fit.branches.items()) |branch| {
             if (branch.condition) |condition| {
                 // The condition is the variant path `Enum.Variant` (or `.Variant`).
@@ -10424,11 +10908,13 @@ pub const TranspileProcess = struct {
                     return TranspileError.TypeMismatch;
                 };
                 try self.write_indent();
-                try self.write("case ");
-                try self.write(enum_name);
-                try self.write("_");
-                try self.write(variant_name);
-                try self.write(": {");
+                if (first) {
+                    try self.write("if (");
+                } else {
+                    try self.write("else if (");
+                }
+                first = false;
+                try self.print("{s}.tag == {s}_{s}) {{", .{ tmp, enum_name, variant_name });
                 self.indent();
 
                 // Bind the matched variant's payload fields into locals.
@@ -10464,29 +10950,29 @@ pub const TranspileProcess = struct {
                 try self.write_indent();
                 try self.transpile_node(branch.body.*);
                 if (self.node_needs_trailing_semicolon(branch.body.*)) try self.write(";");
-                try self.write_indent();
-                try self.write("break;");
                 self.dedent();
                 try self.write_indent();
                 try self.write("}");
             } else {
+                // A catch-all arm. Without any prior arm it is an unconditional block;
+                // otherwise it is the chain's trailing `else`.
                 try self.write_indent();
-                try self.write("default: {");
+                if (first) {
+                    try self.write("{");
+                } else {
+                    try self.write("else {");
+                }
+                first = false;
                 self.indent();
                 try self.write_indent();
                 try self.transpile_node(branch.body.*);
                 if (self.node_needs_trailing_semicolon(branch.body.*)) try self.write(";");
-                try self.write_indent();
-                try self.write("break;");
                 self.dedent();
                 try self.write_indent();
                 try self.write("}");
             }
         }
 
-        self.dedent();
-        try self.write_indent();
-        try self.write("}");
         self.dedent();
         try self.write_indent();
         try self.write("}");
@@ -10738,7 +11224,10 @@ pub const TranspileProcess = struct {
             const recv_type = self.expr_resolved_compound_type_name(recv.*) orelse return null;
             const recv_canon = self.canonical_compound_name(recv_type);
             const base = if (mem.indexOf(u8, recv_canon, "__")) |idx| recv_canon[0..idx] else recv_canon;
-            const hit = self.find_plain_impl_method_node(base, member.data.?.sval.items) orelse return null;
+            // Match plain- AND quirk-impl methods: a quirk method like `Iterator.next`
+            // is dispatched statically on a concrete receiver and has a real return
+            // type to monomorphize (so `it.next()` resolves to `Option__num`).
+            const hit = self.find_any_impl_method_node(base, member.data.?.sval.items) orelse return null;
             if (hit.method_node.node_variant == null) return null;
             const rt = hit.method_node.node_variant.?.function.rtype orelse return null;
             if (rt.pointer_depth != 0) return null;
@@ -10756,7 +11245,10 @@ pub const TranspileProcess = struct {
                             const mangled = self.type_name_mangled_with_subst(&rt, params.*, gargs) catch return null;
                             const mbase = if (mem.indexOf(u8, mangled, "__")) |bi| mangled[0..bi] else mangled;
                             const reg = self.get_root().type_registry;
-                            if (reg != null and reg.?.compounds_by_name.contains(mbase)) return mangled; // arena-owned
+                            // Accept a compound OR a (data) enum instance, so a method
+                            // returning `Option<T>`/`Result<T>` supports chaining
+                            // (`box.at().unwrap_or(0)`).
+                            if (reg != null and (reg.?.compounds_by_name.contains(mbase) or reg.?.enums_by_name.contains(mbase))) return mangled; // arena-owned
                             self.allocator.free(@constCast(mangled));
                         }
                     }
@@ -10764,8 +11256,11 @@ pub const TranspileProcess = struct {
             }
 
             if (rt.type != .Unknown) return null;
-            if (!self.is_compound_named(rt.type_str.items)) return null;
-            return rt.type_str.items;
+            if (self.is_compound_named(rt.type_str.items)) return rt.type_str.items;
+            // A non-generic data enum return (`fun f() Option<num>`... but here a
+            // method returning a plain data enum) also supports chaining.
+            if (self.enum_name_is_tagged_union(rt.type_str.items)) return rt.type_str.items;
+            return null;
         }
         return null;
     }
@@ -11822,6 +12317,9 @@ pub const TranspileProcess = struct {
         var qf_sig_it = registry.quirks_by_sig.iterator();
         while (qf_sig_it.next()) |entry| {
             const sig = entry.key_ptr.*;
+            const qnode = entry.value_ptr.*;
+            // Generic quirks have no monomorphic quirk-object/vtable (see vtable pass).
+            if (qnode.node_variant != null and qnode.node_variant.?.quirk.is_generic) continue;
             const h = self.quirk_sig_hash_cached(sig);
             const names = try write_quirk_c_names_hash(h);
             const quirk_c = names.quirk[0..names.quirk_len];
@@ -11849,6 +12347,10 @@ pub const TranspileProcess = struct {
         while (qf_name_it.next()) |entry| {
             const qname = entry.key_ptr.*;
             const sig = entry.value_ptr.*;
+            // Generic quirks have no quirk-object struct to alias to.
+            if (registry.quirks_by_sig.get(sig)) |qn| {
+                if (qn.node_variant != null and qn.node_variant.?.quirk.is_generic) continue;
+            }
             const h = self.quirk_sig_hash_cached(sig);
             const names = try write_quirk_c_names_hash(h);
             const quirk_c = names.quirk[0..names.quirk_len];
@@ -12107,6 +12609,9 @@ pub const TranspileProcess = struct {
             const qnode = entry.value_ptr.*;
             if (qnode.node_variant == null) continue;
             const q = qnode.node_variant.?.quirk;
+            // Generic quirks (`Iterator<T>`) dispatch statically; an unbound `T` in a
+            // method return/arg cannot be expressed in one C vtable signature, so skip.
+            if (q.is_generic) continue;
 
             const h = self.quirk_sig_hash_cached(sig);
             const names = try write_quirk_c_names_hash(h);
@@ -12146,6 +12651,25 @@ pub const TranspileProcess = struct {
         q: anytype,
         params: ?*const utils.Vector(ArrayList(u8)),
         gargs: ?[]*dtype.DataType,
+    ) TranspileError!void {
+        return self.emit_quirk_impl_instance_opt(impl_node, type_name, quirk_name, sig_h, q, params, gargs, false);
+    }
+
+    /// `protos_only`: emit just the method forward-declarations and return. Used to
+    /// pre-declare all generic-quirk-impl methods up front, so one quirk-impl body can
+    /// call another's method (`SetIter.next` -> `MapIter.next`) regardless of emission
+    /// order. The full call (protos_only=false) additionally emits bodies and, for
+    /// non-generic quirks, the vtable/wrapper/coercion machinery.
+    fn emit_quirk_impl_instance_opt(
+        self: *Self,
+        impl_node: *ast.Node,
+        type_name: []const u8,
+        quirk_name: []const u8,
+        sig_h: u64,
+        q: anytype,
+        params: ?*const utils.Vector(ArrayList(u8)),
+        gargs: ?[]*dtype.DataType,
+        protos_only: bool,
     ) TranspileError!void {
         if (impl_node.node_variant == null) return;
         const im = impl_node.node_variant.?.impl;
@@ -12216,17 +12740,29 @@ pub const TranspileProcess = struct {
             }
         }
 
+        // Prototype-only pass stops here: the method forward-declarations above are all
+        // that other quirk-impl bodies need to call across emission order.
+        if (protos_only) return;
+
+        // A generic quirk has no monomorphic vtable/quirk-object struct, so dispatch is
+        // purely static (direct calls to the method bodies below). Skip the coercion
+        // forward-decl, the `void* self` wrappers, the vtable instance, and the
+        // coercion definition — all of which reference the (absent) quirk-object type.
+        const emit_vtable = !q.is_generic;
+
         // Forward-declare the coercion helper BEFORE the method bodies. A quirk-impl
         // method may `ret self;` (returning the concrete coerced to the quirk), which
         // calls this helper — but its definition is emitted at the end of this
         // function, so without a prototype the body referenced an undeclared function.
-        try self.write("static inline ");
-        try self.write(quirk_c);
-        try self.write(" ");
-        try self.write(coerce_name);
-        try self.write("(");
-        try self.write(type_name);
-        try self.write("* self);\n");
+        if (emit_vtable) {
+            try self.write("static inline ");
+            try self.write(quirk_c);
+            try self.write(" ");
+            try self.write(coerce_name);
+            try self.write("(");
+            try self.write(type_name);
+            try self.write("* self);\n");
+        }
 
         try self.write("\n");
 
@@ -12250,109 +12786,117 @@ pub const TranspileProcess = struct {
             self.override_fn_name = impl_fn_name;
             defer self.override_fn_name = prev_override;
 
+            // Expose the method's return type so a constructed generic enum whose own
+            // param isn't in the active subst (`Option<K>` here) can be monomorphized.
+            const prev_ret = self.current_method_return_dtype;
+            self.current_method_return_dtype = if (fnv.rtype) |*rt| rt else null;
+            defer self.current_method_return_dtype = prev_ret;
+
             try self.transpile_node(m.*);
             if (impl_fn_owned) self.allocator.free(impl_fn_name);
             try self.write("\n\n");
         }
 
         // Wrappers with `void* self` to match vtable signature.
-        for (q.methods.items()) |m| {
-            var impl_fn_name: ?[]const u8 = null;
-            var impl_fn_owned = false;
-            if (!mem.eql(u8, type_name, im.type_name.items)) {
-                impl_fn_name = std.fmt.allocPrint(self.allocator, "{s}__{s}__{s}", .{ type_name, quirk_name, m.name.items }) catch {
-                    return TranspileError.MemoryAllocationFailed;
-                };
-                impl_fn_owned = true;
-            } else {
-                for (im.methods.items()) |fm| {
-                    if (fm.type != .Function or fm.node_variant == null) continue;
-                    const fnv = fm.node_variant.?.function;
-                    if (fnv.name == null) continue;
-                    const base = base_method_name_from_generated(fnv.name.?.items) orelse continue;
-                    if (mem.eql(u8, base, m.name.items)) {
-                        impl_fn_name = fnv.name.?.items;
-                        break;
+        if (emit_vtable) {
+            for (q.methods.items()) |m| {
+                var impl_fn_name: ?[]const u8 = null;
+                var impl_fn_owned = false;
+                if (!mem.eql(u8, type_name, im.type_name.items)) {
+                    impl_fn_name = std.fmt.allocPrint(self.allocator, "{s}__{s}__{s}", .{ type_name, quirk_name, m.name.items }) catch {
+                        return TranspileError.MemoryAllocationFailed;
+                    };
+                    impl_fn_owned = true;
+                } else {
+                    for (im.methods.items()) |fm| {
+                        if (fm.type != .Function or fm.node_variant == null) continue;
+                        const fnv = fm.node_variant.?.function;
+                        if (fnv.name == null) continue;
+                        const base = base_method_name_from_generated(fnv.name.?.items) orelse continue;
+                        if (mem.eql(u8, base, m.name.items)) {
+                            impl_fn_name = fnv.name.?.items;
+                            break;
+                        }
                     }
                 }
+                if (impl_fn_name == null) continue;
+                defer if (impl_fn_owned) self.allocator.free(impl_fn_name.?);
+
+                var m_stack: [128]u8 = undefined;
+                const m_s = try self.c_ident_sanitize_temp(m.name.items, &m_stack);
+                defer if (m_s.owned) self.backing_allocator.free(m_s.slice);
+                const wrap_name = try self.c_name_alloc("__fun_wrap_{s}_{x}_{s}", .{ type_s.slice, sig_h, m_s.slice });
+                defer self.backing_allocator.free(wrap_name);
+
+                try self.write("static ");
+                try self.write_type(m.rtype);
+                try self.write(" ");
+                try self.write(wrap_name);
+                try self.write("(void* self");
+                for (m.args.items(), 0..) |a, i| {
+                    try self.write(", ");
+                    try self.write_type(a.dtype.*);
+                    var an: [16]u8 = undefined;
+                    const aname = (std.fmt.bufPrint(&an, " a{d}", .{i}) catch unreachable);
+                    try self.write(aname);
+                }
+                try self.write(") {\n");
+
+                try self.write("  ");
+                if (m.rtype.type != .Void) {
+                    try self.write("return ");
+                }
+                if (m.is_async) {
+                    try self.write("__fun_async_call_");
+                }
+                try self.write(impl_fn_name.?);
+                try self.write("((");
+                try self.write(type_name);
+                try self.write("*)self");
+                for (m.args.items(), 0..) |_, i| {
+                    var an2: [16]u8 = undefined;
+                    const aname2 = (std.fmt.bufPrint(&an2, ", a{d}", .{i}) catch unreachable);
+                    try self.write(aname2);
+                }
+                try self.write(");\n");
+                try self.write("}\n\n");
             }
-            if (impl_fn_name == null) continue;
-            defer if (impl_fn_owned) self.allocator.free(impl_fn_name.?);
 
-            var m_stack: [128]u8 = undefined;
-            const m_s = try self.c_ident_sanitize_temp(m.name.items, &m_stack);
-            defer if (m_s.owned) self.backing_allocator.free(m_s.slice);
-            const wrap_name = try self.c_name_alloc("__fun_wrap_{s}_{x}_{s}", .{ type_s.slice, sig_h, m_s.slice });
-            defer self.backing_allocator.free(wrap_name);
-
-            try self.write("static ");
-            try self.write_type(m.rtype);
+            // Vtable instance
+            try self.write("static const ");
+            try self.write(vtable_c);
             try self.write(" ");
-            try self.write(wrap_name);
-            try self.write("(void* self");
-            for (m.args.items(), 0..) |a, i| {
-                try self.write(", ");
-                try self.write_type(a.dtype.*);
-                var an: [16]u8 = undefined;
-                const aname = (std.fmt.bufPrint(&an, " a{d}", .{i}) catch unreachable);
-                try self.write(aname);
+            try self.write(vtbl_name);
+            try self.write(" = {\n");
+            for (q.methods.items()) |m| {
+                var m_stack2: [128]u8 = undefined;
+                const m_s = try self.c_ident_sanitize_temp(m.name.items, &m_stack2);
+                defer if (m_s.owned) self.backing_allocator.free(m_s.slice);
+                const wrap_name2 = try self.c_name_alloc("__fun_wrap_{s}_{x}_{s}", .{ type_s.slice, sig_h, m_s.slice });
+                defer self.backing_allocator.free(wrap_name2);
+                try self.write("  .");
+                try self.write(m.name.items);
+                try self.write(" = ");
+                try self.write(wrap_name2);
+                try self.write(",\n");
             }
-            try self.write(") {\n");
+            try self.write("};\n\n");
 
-            try self.write("  ");
-            if (m.rtype.type != .Void) {
-                try self.write("return ");
-            }
-            if (m.is_async) {
-                try self.write("__fun_async_call_");
-            }
-            try self.write(impl_fn_name.?);
-            try self.write("((");
+            // Coercion helper
+            try self.write("static inline ");
+            try self.write(quirk_c);
+            try self.write(" ");
+            try self.write(coerce_name);
+            try self.write("(");
             try self.write(type_name);
-            try self.write("*)self");
-            for (m.args.items(), 0..) |_, i| {
-                var an2: [16]u8 = undefined;
-                const aname2 = (std.fmt.bufPrint(&an2, ", a{d}", .{i}) catch unreachable);
-                try self.write(aname2);
-            }
-            try self.write(");\n");
+            try self.write("* self) {\n");
+            try self.write("  return (");
+            try self.write(quirk_c);
+            try self.write("){ .self = self, .vtable = &");
+            try self.write(vtbl_name);
+            try self.write(" };\n");
             try self.write("}\n\n");
         }
-
-        // Vtable instance
-        try self.write("static const ");
-        try self.write(vtable_c);
-        try self.write(" ");
-        try self.write(vtbl_name);
-        try self.write(" = {\n");
-        for (q.methods.items()) |m| {
-            var m_stack2: [128]u8 = undefined;
-            const m_s = try self.c_ident_sanitize_temp(m.name.items, &m_stack2);
-            defer if (m_s.owned) self.backing_allocator.free(m_s.slice);
-            const wrap_name2 = try self.c_name_alloc("__fun_wrap_{s}_{x}_{s}", .{ type_s.slice, sig_h, m_s.slice });
-            defer self.backing_allocator.free(wrap_name2);
-            try self.write("  .");
-            try self.write(m.name.items);
-            try self.write(" = ");
-            try self.write(wrap_name2);
-            try self.write(",\n");
-        }
-        try self.write("};\n\n");
-
-        // Coercion helper
-        try self.write("static inline ");
-        try self.write(quirk_c);
-        try self.write(" ");
-        try self.write(coerce_name);
-        try self.write("(");
-        try self.write(type_name);
-        try self.write("* self) {\n");
-        try self.write("  return (");
-        try self.write(quirk_c);
-        try self.write("){ .self = self, .vtable = &");
-        try self.write(vtbl_name);
-        try self.write(" };\n");
-        try self.write("}\n\n");
     }
 
     fn emit_impls_and_vtables(self: *Self) TranspileError!void {
@@ -12396,6 +12940,12 @@ pub const TranspileProcess = struct {
                 if (self.mangled_contains_unresolved_placeholder(im.type_name.items)) continue;
                 const quirk_name = im.quirk_name.?.items;
                 const sig = reg.quirk_sig_by_name.get(quirk_name) orelse continue;
+                // Generic quirks have no canonical quirk-object/coercion (dispatch is
+                // static), so a concrete impl of one (`Counter as Iterator<num>`) must
+                // not emit a coercion forward-decl referencing the absent quirk struct.
+                if (reg.quirks_by_sig.get(sig)) |qn| {
+                    if (qn.node_variant != null and qn.node_variant.?.quirk.is_generic) continue;
+                }
                 const sig_h = self.quirk_sig_hash_cached(sig);
                 var ts: [128]u8 = undefined;
                 const ts_s = try self.c_ident_sanitize_temp(im.type_name.items, &ts);
@@ -12416,6 +12966,53 @@ pub const TranspileProcess = struct {
             try self.write("\n");
         }
 
+        // Pre-pass: forward-declare every generic-quirk-impl method up front, so a
+        // quirk-impl body can call another quirk-impl's method irrespective of the
+        // order their bodies are emitted (`SetIter.next` -> `MapIter.next`).
+        {
+            var proto_it = reg.impls_by_key.iterator();
+            while (proto_it.next()) |entry| {
+                const impl_node = entry.value_ptr.*;
+                if (impl_node.node_variant == null) continue;
+                const im = impl_node.node_variant.?.impl;
+                if (self.mangled_contains_unresolved_placeholder(im.type_name.items)) continue;
+                const quirk_name = if (im.quirk_name) |qn| qn.items else continue;
+                const sig = reg.quirk_sig_by_name.get(quirk_name) orelse continue;
+                const sig_h = self.quirk_sig_hash_cached(sig);
+                const qnode = reg.quirks_by_sig.get(sig) orelse continue;
+                if (qnode.node_variant == null) continue;
+                const q = qnode.node_variant.?.quirk;
+                if (!q.is_generic) continue; // non-generic quirk methods are not called directly
+
+                if (self.impl_type_params(impl_node)) |params| {
+                    var inst_keys = std.StringHashMap(bool).init(self.allocator);
+                    defer {
+                        var it = inst_keys.iterator();
+                        while (it.next()) |e| self.allocator.free(e.key_ptr.*);
+                        inst_keys.deinit();
+                    }
+                    var inst_list = ArrayList(*const dtype.DataType).init(self.allocator);
+                    defer inst_list.deinit();
+                    const base_name = if (mem.indexOf(u8, im.type_name.items, "__")) |idx| im.type_name.items[0..idx] else im.type_name.items;
+                    try self.collect_generic_instantiations_recursive(self, base_name, &inst_keys, &inst_list);
+                    for (inst_list.items) |dt| {
+                        if (dt.generic_args == null) continue;
+                        const gargs = dt.generic_args.?.items();
+                        if (gargs.len != params.items().len) continue;
+                        if (!self.generic_args_are_concrete(params, gargs)) continue;
+                        if (self.dtype_contains_type_param(dt, params)) continue;
+                        const mangled = try self.type_name_mangled(dt);
+                        defer self.allocator.free(mangled);
+                        if (self.mangled_contains_type_param(mangled, params)) continue;
+                        if (self.mangled_contains_unresolved_placeholder(mangled)) continue;
+                        try self.emit_quirk_impl_instance_opt(impl_node, mangled, quirk_name, sig_h, q, params, gargs, true);
+                    }
+                } else {
+                    try self.emit_quirk_impl_instance_opt(impl_node, im.type_name.items, quirk_name, sig_h, q, null, null, true);
+                }
+            }
+        }
+
         // Impl wrappers/vtables/coercions
         try self.write("// --- Quirk impl vtables ---\n\n");
         var impl_it = reg.impls_by_key.iterator();
@@ -12430,6 +13027,10 @@ pub const TranspileProcess = struct {
             const qnode = reg.quirks_by_sig.get(sig) orelse continue;
             if (qnode.node_variant == null) continue;
             const q = qnode.node_variant.?.quirk;
+            // NOTE: generic quirks still flow through emit_quirk_impl_instance so their
+            // monomorphized method bodies are emitted; that function internally skips
+            // the vtable/wrapper/coercion machinery (which has no monomorphic form for
+            // an unbound `T`) and emits only the static method bodies.
 
             if (self.impl_type_params(impl_node)) |params| {
                 var inst_keys = std.StringHashMap(bool).init(self.allocator);
@@ -13430,13 +14031,16 @@ pub const TranspileProcess = struct {
                         const prev_params = self.type_subst_params;
                         const prev_args = self.type_subst_args;
                         const prev_override = self.override_fn_name;
+                        const prev_ret = self.current_method_return_dtype;
                         self.type_subst_params = params;
                         self.type_subst_args = gargs;
                         self.override_fn_name = spec_name;
+                        self.current_method_return_dtype = if (fnv.rtype) |*rt| rt else null;
                         defer {
                             self.type_subst_params = prev_params;
                             self.type_subst_args = prev_args;
                             self.override_fn_name = prev_override;
+                            self.current_method_return_dtype = prev_ret;
                         }
 
                         try self.transpile_node(m.*);
@@ -13479,13 +14083,16 @@ pub const TranspileProcess = struct {
                         const prev_params = self.type_subst_params;
                         const prev_args = self.type_subst_args;
                         const prev_override = self.override_fn_name;
+                        const prev_ret = self.current_method_return_dtype;
                         self.type_subst_params = params;
                         self.type_subst_args = gargs;
                         self.override_fn_name = spec_name;
+                        self.current_method_return_dtype = if (fnv.rtype) |*rt| rt else null;
                         defer {
                             self.type_subst_params = prev_params;
                             self.type_subst_args = prev_args;
                             self.override_fn_name = prev_override;
+                            self.current_method_return_dtype = prev_ret;
                         }
 
                         try self.transpile_node(m.*);
@@ -16602,7 +17209,16 @@ pub const TranspileProcess = struct {
                                 try self.write("++) ");
                                 try self.transpile_scoped_block(fr.body, .loop);
                             },
-                            .iter => |fi| {
+                            .iter => |fi| iter_blk: {
+                                // Iterator-protocol path (Map/Set/user types/iterators):
+                                // any non-array, non-Vec iterable whose type drives the
+                                // Iterator protocol is lowered to a next()/Option loop.
+                                // Vec and raw arrays keep their direct indexed fast path
+                                // below. The iterable may be any expression here (an
+                                // identifier or a call like `m.iter()`), not just a name.
+                                if (try self.emit_iter_protocol_for(fi)) {
+                                    break :iter_blk;
+                                }
                                 // We only support iterating array identifiers for now.
                                 if (fi.iterable.type != .Identifier) {
                                     self.err("for-each loops currently require an array identifier", .{});

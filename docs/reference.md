@@ -334,7 +334,13 @@ fun main() {
 ### For
 - Range: `for i : 0..10 { ... }`
 - Array: `for item : arr { ... }`
-- Indexed: `for i, item :: arr { ... }`
+- Indexed: `for i, item :: arr { ... }` (arrays and `Vec` only — the source must be indexable)
+- Iterator: `for item : collection { ... }` — any value whose type implements the
+  `Iterator` quirk, or exposes an `iter()` method returning one, can be iterated. The
+  compiler desugars it to the iterator's `next()`/`Option` protocol, so `Vec`, `Set`,
+  and `Map` (over its keys) all work: `for n : my_vec { ... }`, `for x : my_set { ... }`,
+  `for key : my_map { ... }`. `break`/`continue` in the body target the loop as usual.
+- Map pairs: `for k, v :: map { ... }` binds each key to `k` and its value to `v`.
 - While-style (condition): `for i < len { ... }`
 - Infinite loop: `for true { ... }`
 - This style is used in stdlib (for example `std/string.fn`, `std/net.fn`, and `std/fs.fn`).

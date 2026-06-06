@@ -7,6 +7,6 @@ fun main() {
   Error e = error_new(1, "bad");
   printf("e ok=%d code=%d msg=%s\n", error_is_ok(&e), e.code, e.message);
 
-  Error ok = error_ok();
+  Error ok = error_none();
   printf("ok=%d code=%d kind=%d\n", error_is_ok(&ok), ok.code, ok.kind);
 }

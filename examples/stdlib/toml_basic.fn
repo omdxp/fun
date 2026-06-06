@@ -5,7 +5,7 @@ imp std.toml;
 
 fun main() {
   str src = "name = fun\nversion = 1\n";
-  TomlDoc obj = parse(src);
+  TomlDoc obj = parse_document(src);
 
   printf("name=%s\n", obj.get("name"));
   str out = obj.stringify();

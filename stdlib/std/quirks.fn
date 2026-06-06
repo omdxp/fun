@@ -1,6 +1,5 @@
-// Common quirks for stdlib compounds.
+// Common quirks (traits) implemented across stdlib types.
 // 
-// Usage:
 // ```
 // fun len_of(Sized s) num { ret s.len(); }
 // ```
@@ -13,14 +12,33 @@ pub quirk Sized {
   is_empty() bin;
 }
 
-// Types that can render themselves as a string.
+// Types that can render themselves as a string. Implemented by the collections,
+// Error, and the serialization value types so any of them can be `to_string`-ed.
 pub quirk Display {
   // Render the value as text.
   to_string() str;
 }
 
-// Types that can clear internal state.
+// Types that can clear internal state (Vec, Map, Set, StringBuilder).
 pub quirk Clearable {
   // Reset the value to an empty/cleared state.
   clear() void;
+}
+
+// A uniform iteration protocol: `next()` yields `Some(item)` until exhausted,
+// then `None` forever. Collections expose an iterator via `iter()`; consume it
+// with a loop:
+// 
+// ```
+// let it = v.iter();
+// for true {
+//   fit it.next() {
+//     Option.Some(x) -> { use(x); }
+//     Option.None -> { break; }
+//   }
+// }
+// ```
+pub quirk Iterator<T> {
+  // Advance and return the next element, or None when exhausted.
+  next() Option<T>;
 }

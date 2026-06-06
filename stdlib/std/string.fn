@@ -15,9 +15,9 @@ imp std.quirks;
 
 // String builder for efficient concatenation.
 pub compound StringBuilder {
-  // parts: vector of string fragments
+  // vector of string fragments
   Vec<str> parts;
-  // total_len: total length of fragments
+  // total length of fragments
   num total_len;
 }
 

@@ -9,11 +9,7 @@ fun main() {
   expect fit_non_exhaustive, "should fail when fit is exhaustive";
 
   fit x {
-    true -> {
-      printf("true\n");
-    },
-    false -> {
-      printf("false\n");
-    }
+    true -> { printf("true\n"); },
+    false -> { printf("false\n"); }
   }
 }

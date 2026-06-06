@@ -3130,6 +3130,20 @@ pub const ParseProcess = struct {
             return ParseError.MemoryAllocationFailed;
         };
 
+        // Allow a generic quirk, e.g. `quirk Iterator<T> { next() Option<T>; }`.
+        // The type parameters are abstract over the method signatures; an `impl`
+        // binds them. Method signatures treat `T` as an unresolved type name, so we
+        // only need to consume the params here (they are not stored on the node) and
+        // record that the quirk is generic so codegen skips its monomorphic vtable.
+        var quirk_is_generic = false;
+        const quirk_type_params = try self.parse_generic_type_params();
+        if (quirk_type_params) |*tp| {
+            quirk_is_generic = true;
+            for (tp.items()) |*p| p.deinit();
+            var mtp = tp.*;
+            mtp.deinit();
+        }
+
         try self.expect_sym('{');
 
         var methods = utils.Vector(ast.QuirkMethodSig).init(self.transpile_proc.allocator);
@@ -3243,7 +3257,7 @@ pub const ParseProcess = struct {
             .type = .Quirk,
             .pos = name_tok.?.pos,
             .flags = .{ .is_public = is_public },
-            .node_variant = .{ .quirk = .{ .name = name, .methods = methods } },
+            .node_variant = .{ .quirk = .{ .name = name, .methods = methods, .is_generic = quirk_is_generic } },
         };
 
         // Register as a symbol so it can be used as a datatype identifier.
@@ -3479,6 +3493,23 @@ pub const ParseProcess = struct {
                 return ParseError.InvalidIdentifier;
             }
             quirk_tok = maybe_quirk;
+
+            // Allow a generic quirk binding, e.g. `impl VecIter<T> as Iterator<T>`.
+            // The type arguments describe which T the quirk is satisfied for; method
+            // mangling keys off only the base quirk name, so parse and discard them.
+            if (self.next_token_is_angle_open()) {
+                var quirk_dt: dtype.DataType = .{
+                    .array = null,
+                    .pointer_depth = 0,
+                    .type = .Unknown,
+                    .type_str = ArrayList(u8).init(self.transpile_proc.allocator),
+                    .flags = .{},
+                    .generic_args = null,
+                };
+                defer quirk_dt.type_str.deinit();
+                quirk_dt.type_str.appendSlice(maybe_quirk.?.data.sval.items) catch return ParseError.MemoryAllocationFailed;
+                try self.parse_generic_type_args(&quirk_dt);
+            }
         } else if (peek_after_type != null and peek_after_type.?.type == .Identifier) {
             self.transpile_proc.err("expected 'as' before quirk name in impl header", .{});
             return ParseError.InvalidIdentifier;

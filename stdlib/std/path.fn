@@ -11,11 +11,10 @@ imp std.c.def;
 imp std.string;
 imp std.vec;
 imp std.result;
-imp std.error;
 
 // Path wrapper.
 pub compound Path {
-  // value: path string
+  // path string
   str value;
 }
 

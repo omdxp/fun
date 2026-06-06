@@ -32,15 +32,9 @@ enum Reply {
 // Worker: pull one Job off `inbox`, match it, push a Reply onto `outbox`.
 async fun worker(Channel<Job>* inbox, Channel<Reply>* outbox) {
   fit <- inbox {
-    Job.Square(v) -> {
-      outbox <- Reply.Done(v * v);
-    }
-    Job.Negate(v) -> {
-      outbox <- Reply.Done(0 - v);
-    }
-    Job.Quit -> {
-      outbox <- Reply.Bye;
-    }
+    Job.Square(v) -> { outbox <- Reply.Done(v * v); }
+    Job.Negate(v) -> { outbox <- Reply.Done(0 - v); }
+    Job.Quit -> { outbox <- Reply.Bye; }
   }
 }
 
@@ -66,12 +60,8 @@ fun main() num {
   num got = 0;
   for got < 3 {
     fit <- outbox {
-      Reply.Done(r) -> {
-        sum = sum + r;
-      }
-      Reply.Bye -> {
-        byes = byes + 1;
-      }
+      Reply.Done(r) -> { sum = sum + r; }
+      Reply.Bye -> { byes = byes + 1; }
     }
     got = got + 1;
   }

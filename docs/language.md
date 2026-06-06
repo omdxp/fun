@@ -102,7 +102,9 @@ payload; payload-free variants still coexist.
 - **For Loops**:
     - Range: `for i : 0..10 { ... }`
     - Array: `for item : arr { ... }`
-    - Indexed: `for i, item :: arr { ... }`
+    - Indexed: `for i, item :: arr { ... }` (indexable sources only — arrays and `Vec`)
+    - Iterator: `for item : collection { ... }` — drives any value whose type implements the `Iterator` quirk (`next() Option<T>`) or exposes an `iter()` returning one. Desugars to the `next()`/`Option` protocol, so `Vec`, `Set`, and `Map` (keys) iterate directly.
+    - Map pairs: `for k, v :: map { ... }` binds each key to `k` and its value to `v`.
     - While-style (condition): `for i < len { ... }`
     - Infinite loop: `for true { ... }`
     - Common in stdlib (for example `std/string.fn`, `std/net.fn`, and `std/fs.fn`).

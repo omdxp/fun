@@ -59,28 +59,16 @@ fun main() {
 
   // Fit with shorthand variants (exhaustive)
   fit c {
-    .Red -> {
-      printf("fit shorthand: red\n");
-    },
-    .Green -> {
-      printf("fit shorthand: green\n");
-    },
-    .Blue -> {
-      printf("fit shorthand: blue\n");
-    }
+    .Red -> { printf("fit shorthand: red\n"); },
+    .Green -> { printf("fit shorthand: green\n"); },
+    .Blue -> { printf("fit shorthand: blue\n"); }
   }
 
   // Fit with longhand variants + catch-all
   fit d {
-    Direction.North -> {
-      printf("fit longhand: north\n");
-    },
-    Direction.East -> {
-      printf("fit longhand: east\n");
-    },
-    _ -> {
-      printf("fit longhand: other\n");
-    }
+    Direction.North -> { printf("fit longhand: north\n"); },
+    Direction.East -> { printf("fit longhand: east\n"); },
+    _ -> { printf("fit longhand: other\n"); }
   }
 }
 

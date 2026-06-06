@@ -7365,3 +7365,98 @@ test "generic data enum: Result<T, E> with two type params and mixed payloads" {
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("ok 7\nerr boom\n", stdout);
 }
+
+test "for item : iterable drives a user Iterator via next()/Option; break exits the loop" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_for_iter_quirk.fn";
+    const c_path = "codegen_for_iter_quirk.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_for_iter_quirk.exe" else "codegen_for_iter_quirk";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // A self-contained Iterator: `Counter` yields 0,1,2,... up to `limit`. `for x : c`
+    // must desugar to the next()/Option loop, and a `break` inside the body must exit
+    // the generated loop (not just a fit/switch). No stdlib collections involved.
+    const input =
+        "imp std.c.io;\n" ++
+        "enum Option<T> { Some(T), None }\n" ++
+        "quirk Iterator<T> { next() Option<T>; }\n" ++
+        "compound Counter { num cur; num limit; }\n" ++
+        "impl Counter as Iterator<num> {\n" ++
+        "  pub next() Option<num> {\n" ++
+        "    if self.cur >= self.limit { ret Option.None; }\n" ++
+        "    num v = self.cur;\n" ++
+        "    self.cur = self.cur + 1;\n" ++
+        "    ret Option.Some(v);\n" ++
+        "  }\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  Counter c = Counter{cur = 0, limit = 5};\n" ++
+        "  num sum = 0;\n" ++
+        "  for x : c {\n" ++
+        "    if x == 3 { break; }\n" ++ // break must exit the for-iter loop
+        "    sum = sum + x;\n" ++
+        "  }\n" ++
+        "  printf(\"%lld\\n\", sum);\n" ++ // 0+1+2 = 3
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("3\n", stdout);
+}
+
+test "for k, v :: map iterates key/value pairs" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_for_map_kv.fn";
+    const c_path = "codegen_for_map_kv.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_for_map_kv.exe" else "codegen_for_map_kv";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // `for k, v :: map` binds each key to k and its value to v. Order is hash-defined,
+    // so the program reduces to an order-independent total to keep the assertion stable.
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.map;\n" ++
+        "imp std.option;\n" ++
+        "imp std.quirks;\n" ++
+        "fun main() num {\n" ++
+        "  Map<str, num> m;\n" ++
+        "  m.init(8);\n" ++
+        "  m.put(\"a\", 10);\n" ++
+        "  m.put(\"b\", 20);\n" ++
+        "  m.put(\"c\", 30);\n" ++
+        "  num klen = 0;\n" ++
+        "  num vsum = 0;\n" ++
+        "  for k, v :: m {\n" ++
+        "    klen = klen + _slen(k);\n" ++ // sum of key lengths (each key is 1 char => 3)
+        "    vsum = vsum + v;\n" ++ // 10+20+30 = 60
+        "  }\n" ++
+        "  printf(\"%lld %lld\\n\", klen, vsum);\n" ++
+        "  ret 0;\n" ++
+        "}\n" ++
+        "fun _slen(str s) num { num i = 0; for s[i] != 0 { i = i + 1; } ret i; }\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("3 60\n", stdout);
+}

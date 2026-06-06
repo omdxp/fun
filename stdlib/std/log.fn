@@ -22,7 +22,7 @@ pub enum LogLevel {
 
 // Logger with a minimum severity threshold.
 pub compound Logger {
-  // level: minimum severity to emit
+  // minimum severity to emit
   LogLevel level;
 }
 
@@ -48,36 +48,20 @@ pub fun logger_init(LogLevel level) Logger {
 // - label string
 pub fun level_name(LogLevel level) str {
   fit level {
-    .Debug -> {
-      ret "DEBUG";
-    }
-    .Info -> {
-      ret "INFO";
-    }
-    .Warn -> {
-      ret "WARN";
-    }
-    .Error -> {
-      ret "ERROR";
-    }
+    .Debug -> { ret "DEBUG"; }
+    .Info -> { ret "INFO"; }
+    .Warn -> { ret "WARN"; }
+    .Error -> { ret "ERROR"; }
   }
   ret "INFO";
 }
 
 fun level_value(LogLevel level) num {
   fit level {
-    .Debug -> {
-      ret 0;
-    }
-    .Info -> {
-      ret 1;
-    }
-    .Warn -> {
-      ret 2;
-    }
-    .Error -> {
-      ret 3;
-    }
+    .Debug -> { ret 0; }
+    .Info -> { ret 1; }
+    .Warn -> { ret 2; }
+    .Error -> { ret 3; }
   }
   ret 1;
 }

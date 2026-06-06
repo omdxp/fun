@@ -12,8 +12,6 @@ fun main() {
   allow fit_non_exhaustive, "temporary partial branch set during migration";
 
   fit x {
-    true -> {
-      printf("only true branch handled\n");
-    }
+    true -> { printf("only true branch handled\n"); }
   }
 }

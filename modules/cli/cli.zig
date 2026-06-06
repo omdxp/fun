@@ -844,6 +844,11 @@ const EmitState = struct {
     prev_token: *?token.Token,
     out: *ArrayList(u8),
     allocator: mem.Allocator,
+    /// True while emitting comment lines INSIDE a fenced code block (between ```
+    /// markers in a doc comment). Inside a fence the comment body is preserved
+    /// verbatim so code indentation survives; outside it is trimmed to one space
+    /// after `//`. Persists across the import/global/rest emit passes.
+    in_doc_fence: *bool,
 };
 
 const AsmRawRange = struct {
@@ -1109,9 +1114,29 @@ fn next_significant_index(toks: []const token.Token, idx: usize) ?usize {
 fn has_paren_before_brace(toks: []const token.Token, idx: usize) bool {
     if (idx == 0) return false;
     var i: isize = @as(isize, @intCast(idx)) - 1;
+    // Scanning back from a `{`, a generic return type like `Map<K, V>` sits between
+    // the param-list `)` and the `{`. Its INTERNAL comma (`<K, V>`) must NOT be treated
+    // as a statement/argument separator that aborts the scan — otherwise a method whose
+    // return type has multiple type args is mis-detected as a non-block brace. Track
+    // angle depth (seen right-to-left: `>` opens, `<` closes) and ignore commas inside.
+    var angle_depth: usize = 0;
     while (i >= 0) : (i -= 1) {
         const t = toks[@intCast(i)];
         if (t.type == .NewLine or t.type == .Comment) continue;
+
+        const is_gt = (t.type == .Operator and is_all_gt(t.data.sval.items)) or (t.type == .Symbol and t.data.cval == '>');
+        const is_lt = (t.type == .Operator and std.mem.eql(u8, t.data.sval.items, "<")) or (t.type == .Symbol and t.data.cval == '<');
+        if (is_gt) {
+            // A `>>`/`>>>` token closes multiple nested generics at once.
+            angle_depth += if (t.type == .Operator) t.data.sval.items.len else 1;
+            continue;
+        }
+        if (is_lt and angle_depth > 0) {
+            angle_depth -= 1;
+            continue;
+        }
+        if (angle_depth > 0) continue; // inside a generic arg list: ignore commas etc.
+
         if (t.type == .Symbol) {
             const c = t.data.cval;
             if (c == ')') return true;
@@ -1123,6 +1148,16 @@ fn has_paren_before_brace(toks: []const token.Token, idx: usize) bool {
         }
     }
     return false;
+}
+
+/// True when `s` is a run of one or more `>` (a `>`, `>>`, or `>>>` operator token,
+/// which the lexer emits for stacked generic closes like `Vec<Map<K, V>>`).
+fn is_all_gt(s: []const u8) bool {
+    if (s.len == 0) return false;
+    for (s) |c| {
+        if (c != '>') return false;
+    }
+    return true;
 }
 
 fn generic_angle_sequence_followed_by_lbrace(toks: []const token.Token, open_idx: usize, first_arg_idx: usize) bool {
@@ -1177,7 +1212,8 @@ fn is_generic_angle_open(toks: []const token.Token, idx: usize, in_decl_only_ctx
     const before_prev = toks[before_prev_idx.?];
     if (before_prev.type == .Keyword) {
         const kw = before_prev.data.sval.items;
-        if (std.mem.eql(u8, kw, "impl") or std.mem.eql(u8, kw, "compound") or std.mem.eql(u8, kw, "fun") or std.mem.eql(u8, kw, "pub") or std.mem.eql(u8, kw, "enum") or std.mem.eql(u8, kw, "quirk")) return true;
+        // `as` covers a generic quirk binding in an impl header: `impl T as Iterator<U>`.
+        if (std.mem.eql(u8, kw, "impl") or std.mem.eql(u8, kw, "compound") or std.mem.eql(u8, kw, "fun") or std.mem.eql(u8, kw, "pub") or std.mem.eql(u8, kw, "enum") or std.mem.eql(u8, kw, "quirk") or std.mem.eql(u8, kw, "as")) return true;
         if (std.mem.eql(u8, kw, "ret") and generic_angle_sequence_followed_by_lbrace(toks, idx, next_idx)) return true;
     }
     if (before_prev.type == .Symbol) {
@@ -1753,7 +1789,27 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
             if (state.at_line_start.*) {
                 try state.out.appendNTimes(' ', state.indent.* * fmt_indent_width);
             }
-            try state.out.appendSlice(s2);
+
+            // Fenced code blocks in doc comments: a ``` line opens/closes a fence.
+            // INSIDE a fence the body is preserved VERBATIM (after the `// ` prefix)
+            // so code indentation survives instead of being flattened to one space.
+            // Outside, the body is trimmed to exactly one space after `//`.
+            const raw_body = t2.data.sval.items;
+            const trimmed_body = std.mem.trim(u8, raw_body, " \t");
+            const is_fence_marker = std.mem.startsWith(u8, trimmed_body, "```");
+
+            if (state.in_doc_fence.*) {
+                // Preserve the body VERBATIM after `//` (including the leading-space
+                // run that encodes code indentation). Emitting `//` + raw_body — with
+                // no extra inserted space and no trimming — keeps re-runs idempotent.
+                try state.out.appendSlice("//");
+                try state.out.appendSlice(raw_body);
+                if (is_fence_marker) state.in_doc_fence.* = false; // closing fence
+            } else {
+                try state.out.appendSlice(s2);
+                if (is_fence_marker) state.in_doc_fence.* = true; // opening fence
+            }
+
             try state.out.append('\n');
             state.at_line_start.* = true;
             state.prev_token.* = null;
@@ -1894,6 +1950,21 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                     const last = if (state.out.items.len > 0) state.out.items[state.out.items.len - 1] else 0;
                     if (last != ' ') try state.out.append(' ');
                     try state.out.append('}');
+                    // A fit-branch separator comma must stay glued to THIS arm's close
+                    // (`... },`) rather than leading the next line (`, next -> ...`).
+                    // Mirror the multi-line arm path: look past trivia for a `,` and,
+                    // when there is no intervening comment, consume + glue it here.
+                    {
+                        var jc = idx + 1;
+                        var saw_comment = false;
+                        while (jc < toks.len and (toks[jc].type == .NewLine or toks[jc].type == .Comment)) : (jc += 1) {
+                            if (toks[jc].type == .Comment) saw_comment = true;
+                        }
+                        if (!saw_comment and jc < toks.len and toks[jc].type == .Operator and std.mem.eql(u8, toks[jc].data.sval.items, ",")) {
+                            try state.out.append(',');
+                            idx = jc; // skip the comma; the next arm starts on a fresh line
+                        }
+                    }
                     // The next fit arm (or the fit's own closing `}`) starts on a new
                     // line. Emit only the newline; the standard line-start path emits
                     // the indent for the next token (avoid double-indenting).
@@ -2467,6 +2538,7 @@ pub fn format_file_in_place(allocator: mem.Allocator, io: std.Io, input_file: []
     var indent: usize = 0;
     var at_line_start = true;
     var prev_token: ?token.Token = null;
+    var in_doc_fence = false;
 
     const tokens = tp.tokens.items();
 
@@ -2636,7 +2708,7 @@ pub fn format_file_in_place(allocator: mem.Allocator, io: std.Io, input_file: []
         pending_group = null;
     }
 
-    var state: EmitState = .{ .indent = &indent, .at_line_start = &at_line_start, .prev_token = &prev_token, .out = &out, .allocator = allocator };
+    var state: EmitState = .{ .indent = &indent, .at_line_start = &at_line_start, .prev_token = &prev_token, .out = &out, .allocator = allocator, .in_doc_fence = &in_doc_fence };
 
     if (imports.items.len > 0) {
         try emitTokens(&state, imports.items, source, line_starts.items);
@@ -2701,6 +2773,7 @@ pub fn format_file_check(allocator: mem.Allocator, io: std.Io, input_file: []con
     var indent: usize = 0;
     var at_line_start = true;
     var prev_token: ?token.Token = null;
+    var in_doc_fence = false;
 
     const tokens = tp.tokens.items();
 
@@ -2863,7 +2936,7 @@ pub fn format_file_check(allocator: mem.Allocator, io: std.Io, input_file: []con
         pending_group = null;
     }
 
-    var state: EmitState = .{ .indent = &indent, .at_line_start = &at_line_start, .prev_token = &prev_token, .out = &out, .allocator = allocator };
+    var state: EmitState = .{ .indent = &indent, .at_line_start = &at_line_start, .prev_token = &prev_token, .out = &out, .allocator = allocator, .in_doc_fence = &in_doc_fence };
 
     if (imports.items.len > 0) {
         try emitTokens(&state, imports.items, source, line_starts.items);

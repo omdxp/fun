@@ -12,11 +12,10 @@ imp std.c.mem;
 imp std.c.string;
 imp std.c.def;
 imp std.result;
-imp std.error;
 
 // Timestamp wrapper (epoch seconds).
 pub compound Timestamp {
-  // epoch: seconds since Unix epoch
+  // seconds since Unix epoch
   num epoch;
 }
 

@@ -9,9 +9,11 @@
 
 imp std.c.mem;
 imp std.c.string;
+imp std.c.io;
 imp std.c.def;
 imp std.vec;
 imp std.quirks;
+imp std.option;
 
 // Generic open-addressing hash map.
 pub compound Map<K, V> {
@@ -195,13 +197,13 @@ impl Map<K, V> {
     ret out;
   }
 
-  // Read a value at a live slot index.
-  pub load_value_idx(num idx) V {
+  // Read a value at a live slot index (internal).
+  load_value_idx(num idx) V {
     ret self.value_slots[idx];
   }
 
-  // Write a value at a slot index.
-  pub store_value_idx(num idx, V value) {
+  // Write a value at a slot index (internal).
+  store_value_idx(num idx, V value) {
     self.value_slots[idx] = value;
   }
 
@@ -301,6 +303,16 @@ impl Map<K, V> {
     }
     *out = self.value_slots[idx];
     ret true;
+  }
+
+  // Look up a key as an Option: Some(value) when present, None when absent.
+  // (The safe counterpart to `get`/`get_or`; mirrors `Vec.at`.)
+  pub at(K key) Option<V> {
+    let idx = self.find_live_index(key);
+    if idx == -1 {
+      ret Option.None;
+    }
+    ret Option.Some(self.load_value_idx(idx));
   }
 
   // Insert or update a value.
@@ -406,6 +418,52 @@ impl Map<K, V> {
     }
     ret out;
   }
+
+  // A forward iterator over the live keys (unordered). Pair with `get`/`at`
+  // to visit values:
+  // 
+  // ```
+  // let it = m.iter_keys();
+  // for true {
+  //   fit it.next() {
+  //     Option.Some(k) -> { use(k, m.get(k)); }
+  //     Option.None -> { break; }
+  //   }
+  // }
+  // ```
+  pub iter_keys() MapIter<K, V> {
+    MapIter<K, V> it;
+    it.src = self;
+    it.idx = 0;
+    ret it;
+  }
+
+  // Alias for `iter_keys()` so `for key : map { ... }` iterates the keys.
+  pub iter() MapIter<K, V> {
+    ret self.iter_keys();
+  }
+}
+
+// Forward iterator over a Map's live keys, produced by `Map.iter_keys()`.
+pub compound MapIter<K, V> {
+  // the map being iterated (borrowed, not owned)
+  Map<K, V>* src;
+  // index of the next slot to examine
+  num idx;
+}
+
+impl MapIter<K, V> as Iterator<K> {
+  // Advance to the next live key, skipping empty and tombstoned slots.
+  pub next() Option<K> {
+    for self.idx < self.src.cap {
+      num at = self.idx;
+      self.idx = self.idx + 1;
+      if self.src.used[at] != false && self.src.tomb[at] == false {
+        ret Option.Some(self.src.key_slots[at]);
+      }
+    }
+    ret Option.None;
+  }
 }
 
 impl Map<K, V> as Clearable {
@@ -418,5 +476,110 @@ impl Map<K, V> as Clearable {
       memset(self.tomb, 0, self.cap * sizeof(bin));
     }
     self.len = 0;
+  }
+}
+
+fun _map_str_len(str s) num {
+  num i = 0;
+  for s[i] != 0 {
+    i = i + 1;
+  }
+  ret i;
+}
+
+fun _map_append(str dst, num pos, str part) num {
+  num n = _map_str_len(part);
+  num j = 0;
+  for j < n {
+    dst[pos + j] = part[j];
+    j = j + 1;
+  }
+  ret pos + n;
+}
+
+impl Map<str, num> as Display {
+  // Render as `{"k": v, ...}` (entries are unordered).
+  pub to_string() str {
+    // Generously size: per entry "\"\": " + key + 20-digit value + ", ".
+    num budget = 2;
+    num i = 0;
+    for i < self.cap {
+      if self.used[i] != false && self.tomb[i] == false {
+        budget = budget + _map_str_len(self.key_slots[i]) + 30;
+      }
+      i = i + 1;
+    }
+    str out = malloc(budget);
+    if out == NULL {
+      ret NULL;
+    }
+    num pos = 0;
+    out[pos] = '{';
+    pos = pos + 1;
+    num written = 0;
+    i = 0;
+    for i < self.cap {
+      if self.used[i] != false && self.tomb[i] == false {
+        if written > 0 {
+          pos = _map_append(out, pos, ", ");
+        }
+        pos = _map_append(out, pos, "\"");
+        pos = _map_append(out, pos, self.key_slots[i]);
+        pos = _map_append(out, pos, "\": ");
+        chr[24] cell;
+        num c = snprintf(cell, 24, "%lld", self.value_slots[i]);
+        num k = 0;
+        for k < c {
+          out[pos + k] = cell[k];
+          k = k + 1;
+        }
+        pos = pos + c;
+        written = written + 1;
+      }
+      i = i + 1;
+    }
+    out[pos] = '}';
+    out[pos + 1] = '\0';
+    ret out;
+  }
+}
+
+impl Map<str, str> as Display {
+  // Render as `{"k": "v", ...}` (entries are unordered).
+  pub to_string() str {
+    num budget = 2;
+    num i = 0;
+    for i < self.cap {
+      if self.used[i] != false && self.tomb[i] == false {
+        budget = budget + _map_str_len(self.key_slots[i]) + _map_str_len(self.value_slots[i]) + 10;
+      }
+      i = i + 1;
+    }
+    str out = malloc(budget);
+    if out == NULL {
+      ret NULL;
+    }
+    num pos = 0;
+    out[pos] = '{';
+    pos = pos + 1;
+    num written = 0;
+    i = 0;
+    for i < self.cap {
+      if self.used[i] != false && self.tomb[i] == false {
+        if written > 0 {
+          pos = _map_append(out, pos, ", ");
+        }
+        pos = _map_append(out, pos, "\"");
+        pos = _map_append(out, pos, self.key_slots[i]);
+        pos = _map_append(out, pos, "\": \"");
+        pos = _map_append(out, pos, self.value_slots[i]);
+        pos = _map_append(out, pos, "\"");
+        written = written + 1;
+      }
+      i = i + 1;
+    }
+    out[pos] = '}';
+    out[pos + 1] = '\0';
+    ret out;
   }
 }

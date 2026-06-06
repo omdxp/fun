@@ -8,7 +8,6 @@
 
 imp std.c.mem;
 imp std.result;
-imp std.error;
 
 // Read an environment variable.
 // 

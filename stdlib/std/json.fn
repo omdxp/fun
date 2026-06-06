@@ -11,17 +11,16 @@ imp std.serde;
 imp std.string;
 imp std.vec;
 imp std.result;
-imp std.error;
 
 // JSON object with string values.
 pub compound JsonObject {
-  // values: key/value map (string values)
+  // key/value map (string values)
   Map<str, str> values;
 }
 
 // JSON array of strings.
 pub compound JsonArray {
-  // values: vector of string values
+  // vector of string values
   Vec<str> values;
 }
 
@@ -410,42 +409,5 @@ pub fun try_parse_array(str s) Result<JsonArray> {
   ret ok(out);
 }
 
-// Serialize a JSON object.
-// 
-// Params:
-// - obj: JSON object
-// 
-// Returns:
-// - JSON string
-pub fun stringify_object(JsonObject* obj) str {
-  ret obj.stringify();
-}
-
-// Serialize a JSON object with Result.
-pub fun try_stringify_object(JsonObject* obj) Result<str> {
-  str out = obj.stringify();
-  if out == NULL {
-    ret err(1, "json stringify failed", "");
-  }
-  ret ok(out);
-}
-
-// Serialize a JSON array.
-// 
-// Params:
-// - arr: JSON array
-// 
-// Returns:
-// - JSON string
-pub fun stringify_array(JsonArray* arr) str {
-  ret arr.stringify();
-}
-
-// Serialize a JSON array with Result.
-pub fun try_stringify_array(JsonArray* arr) Result<str> {
-  str out = arr.stringify();
-  if out == NULL {
-    ret err(1, "json stringify failed", "");
-  }
-  ret ok(out);
-}
+// Serialization is done through the value methods: `obj.stringify()` /
+// `arr.stringify()` (and `try_stringify()` for the Result-returning form).

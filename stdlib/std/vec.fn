@@ -10,16 +10,18 @@
 
 imp std.c.mem;
 imp std.c.string;
+imp std.c.io;
 imp std.c.def;
 imp std.quirks;
+imp std.option;
 
 // Dynamic vector.
 pub compound Vec<T> {
-  // data: backing storage
+  // backing storage
   T[] data;
-  // len: number of elements
+  // number of elements
   num len;
-  // cap: allocated capacity
+  // allocated capacity
   num cap;
 }
 
@@ -142,21 +144,41 @@ impl Vec<T> {
     }
   }
 
-  // Return last element (zero if empty).
-  pub last() T {
-    if self.len == 0 {
-      ret self.zero_value();
-    }
-    ret self.data[self.len - 1];
-  }
-
-  // Pop last element (zero if empty).
+  // Pop the last element (zero value if empty). The mutating, ergonomic form; pair
+  // with `is_empty()` when the empty case matters, or read `last()` first.
   pub pop() T {
     if self.len == 0 {
       ret self.zero_value();
     }
     self.len = self.len - 1;
     ret self.data[self.len];
+  }
+
+  // Bounds-checked element access: Some(value) in range, None otherwise.
+  pub at(num i) Option<T> {
+    if i < 0 {
+      ret Option.None;
+    }
+    if i >= self.len {
+      ret Option.None;
+    }
+    ret Option.Some(self.data[i]);
+  }
+
+  // First element as Some, or None when empty.
+  pub first() Option<T> {
+    if self.len == 0 {
+      ret Option.None;
+    }
+    ret Option.Some(self.data[0]);
+  }
+
+  // Last element as Some, or None when empty (the safe counterpart to `pop()`).
+  pub last() Option<T> {
+    if self.len == 0 {
+      ret Option.None;
+    }
+    ret Option.Some(self.data[self.len - 1]);
   }
 
   // Insert a value at index (clamped to [0, len]).
@@ -269,6 +291,64 @@ impl Vec<T> {
     }
     self.data = realloc(self.data, self.len * sizeof(T));
     self.cap = self.len;
+  }
+
+  // A shallow copy holding the same elements (independent backing storage).
+  pub clone() Vec<T> {
+    Vec<T> out;
+    out.init(self.len);
+    num i = 0;
+    for i < self.len {
+      out.push(self.data[i]);
+      i = i + 1;
+    }
+    ret out;
+  }
+
+  // A new Vec with the elements in [start, end) (indices are clamped to range).
+  pub slice(num start, num end) Vec<T> {
+    if start < 0 {
+      start = 0;
+    }
+    if end > self.len {
+      end = self.len;
+    }
+    Vec<T> out;
+    out.init(0);
+    num i = start;
+    for i < end {
+      out.push(self.data[i]);
+      i = i + 1;
+    }
+    ret out;
+  }
+
+  // A forward iterator over the elements (yields each value once, in order).
+  pub iter() VecIter<T> {
+    VecIter<T> it;
+    it.src = self;
+    it.idx = 0;
+    ret it;
+  }
+}
+
+// Forward iterator over a Vec produced by `Vec.iter()`.
+pub compound VecIter<T> {
+  // the vector being iterated (borrowed, not owned)
+  Vec<T>* src;
+  // index of the next element to yield
+  num idx;
+}
+
+impl VecIter<T> as Iterator<T> {
+  // Yield the next element, or None once the end is reached.
+  pub next() Option<T> {
+    if self.idx >= self.src.len {
+      ret Option.None;
+    }
+    T value = self.src.data[self.idx];
+    self.idx = self.idx + 1;
+    ret Option.Some(value);
   }
 }
 
@@ -438,6 +518,42 @@ impl Vec<T: num | dec> {
   }
 }
 
+impl Vec<num> as Display {
+  // Render as a bracketed list, e.g. "[1, 2, 3]".
+  pub to_string() str {
+    // Each 64-bit integer needs at most 20 digits plus a sign; allow 24 per
+    // element, two bytes per separator, and the surrounding brackets.
+    num budget = self.len * 24 + self.len * 2 + 3;
+    str out = malloc(budget);
+    if out == NULL {
+      ret NULL;
+    }
+    chr[24] cell;
+    num pos = 0;
+    out[pos] = '[';
+    pos = pos + 1;
+    num i = 0;
+    for i < self.len {
+      num written = snprintf(cell, 24, "%lld", self.data[i]);
+      num k = 0;
+      for k < written {
+        out[pos + k] = cell[k];
+        k = k + 1;
+      }
+      pos = pos + written;
+      if i + 1 < self.len {
+        out[pos] = ',';
+        out[pos + 1] = ' ';
+        pos = pos + 2;
+      }
+      i = i + 1;
+    }
+    out[pos] = ']';
+    out[pos + 1] = '\0';
+    ret out;
+  }
+}
+
 fun _str_cmp(str a, str b) num {
   num i = 0;
   for a[i] != 0 {
@@ -520,4 +636,48 @@ impl Vec<str> {
   }
 }
 
-// Backwards-compatible helpers were removed in favor of generic Vec<T>.
+impl Vec<str> as Display {
+  // Render as a bracketed list of quoted strings, e.g. `["a", "b"]`.
+  pub to_string() str {
+    num total = 2;
+    num i = 0;
+    for i < self.len {
+      total = total + _str_len(self.data[i]) + 2;
+      if i + 1 < self.len {
+        total = total + 2;
+      }
+      i = i + 1;
+    }
+    str out = malloc(total + 1);
+    if out == NULL {
+      ret NULL;
+    }
+    num pos = 0;
+    out[pos] = '[';
+    pos = pos + 1;
+    i = 0;
+    for i < self.len {
+      out[pos] = '"';
+      pos = pos + 1;
+      str part = self.data[i];
+      num plen = _str_len(part);
+      num j = 0;
+      for j < plen {
+        out[pos + j] = part[j];
+        j = j + 1;
+      }
+      pos = pos + plen;
+      out[pos] = '"';
+      pos = pos + 1;
+      if i + 1 < self.len {
+        out[pos] = ',';
+        out[pos + 1] = ' ';
+        pos = pos + 2;
+      }
+      i = i + 1;
+    }
+    out[pos] = ']';
+    out[pos + 1] = '\0';
+    ret out;
+  }
+}

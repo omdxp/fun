@@ -13,9 +13,9 @@ imp std.quirks;
 
 // Parsed command-line arguments.
 pub compound CliArgs {
-  // opts: parsed --key/--key=value flags
+  // parsed --key/--key=value flags
   Map<str, str> opts;
-  // positionals: non-flag arguments
+  // non-flag arguments
   Vec<str> positionals;
 }
 
@@ -165,7 +165,7 @@ impl CliArgs {
   }
 
   // Read a positional argument by index.
-  pub positional(num i) str {
+  pub get_positional(num i) str {
     ret self.positionals.get(i);
   }
 

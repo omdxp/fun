@@ -8,11 +8,13 @@
 
 imp std.map;
 imp std.vec;
+imp std.c.io;
 imp std.quirks;
+imp std.option;
 
 // Generic set backed by Map<T, bin>.
 pub compound Set<T> {
-  // map: backing map
+  // backing map
   Map<T, bin> map;
 }
 
@@ -71,5 +73,210 @@ impl Set<T> {
   // Return all values as a Vec<T>.
   pub values() Vec<T> {
     ret self.map.keys();
+  }
+
+  // A new set with every element from both this set and `other`.
+  pub union(Set<T>* other) Set<T> {
+    Set<T> out;
+    out.map.init(self.map.len + other.map.len + 1);
+    MapIter<T, bin> ia = self.map.iter_keys();
+    for true {
+      fit ia.next() {
+        Option.Some(k) -> { out.add(k); }
+        Option.None -> { break; }
+      }
+    }
+    MapIter<T, bin> ib = other.map.iter_keys();
+    for true {
+      fit ib.next() {
+        Option.Some(k) -> { out.add(k); }
+        Option.None -> { break; }
+      }
+    }
+    ret out;
+  }
+
+  // A new set with only the elements present in both this set and `other`.
+  pub intersection(Set<T>* other) Set<T> {
+    Set<T> out;
+    out.map.init(self.map.len + 1);
+    MapIter<T, bin> it = self.map.iter_keys();
+    for true {
+      fit it.next() {
+        Option.Some(k) -> {
+          if other.has(k) {
+            out.add(k);
+          }
+        }
+        Option.None -> { break; }
+      }
+    }
+    ret out;
+  }
+
+  // A new set with the elements of this set that are not in `other`.
+  pub difference(Set<T>* other) Set<T> {
+    Set<T> out;
+    out.map.init(self.map.len + 1);
+    MapIter<T, bin> it = self.map.iter_keys();
+    for true {
+      fit it.next() {
+        Option.Some(k) -> {
+          if other.has(k) == false {
+            out.add(k);
+          }
+        }
+        Option.None -> { break; }
+      }
+    }
+    ret out;
+  }
+
+  // True when every element of this set is also in `other`.
+  pub is_subset(Set<T>* other) bin {
+    MapIter<T, bin> it = self.map.iter_keys();
+    for true {
+      fit it.next() {
+        Option.Some(k) -> {
+          if other.has(k) == false {
+            ret false;
+          }
+        }
+        Option.None -> { break; }
+      }
+    }
+    ret true;
+  }
+
+  // A forward iterator over the elements (unordered):
+  // 
+  // ```
+  // let it = s.iter();
+  // for true {
+  // fit it.next() {
+  // Option.Some(x) -> { use(x); }
+  // Option.None -> { break; }
+  // }
+  // }
+  // ```
+  pub iter() SetIter<T> {
+    SetIter<T> it;
+    it.inner = self.map.iter_keys();
+    ret it;
+  }
+}
+
+// Forward iterator over a Set's elements, produced by `Set.iter()`.
+pub compound SetIter<T> {
+  // the backing map's key iterator
+  MapIter<T, bin> inner;
+}
+
+impl SetIter<T> as Iterator<T> {
+  // Advance to the next element, or None when exhausted.
+  pub next() Option<T> {
+    ret self.inner.next();
+  }
+}
+
+impl Set<T> as Clearable {
+  // Clear all elements (keeps capacity).
+  pub clear() {
+    self.map.clear();
+  }
+}
+
+impl Set<num> as Display {
+  // Render as `{1, 2, 3}` (elements are unordered).
+  pub to_string() str {
+    num budget = self.map.len * 26 + 3;
+    str out = malloc(budget);
+    if out == NULL {
+      ret NULL;
+    }
+    num pos = 0;
+    out[pos] = '{';
+    pos = pos + 1;
+    num written = 0;
+    SetIter<num> it = self.iter();
+    for true {
+      fit it.next() {
+        Option.Some(x) -> {
+          if written > 0 {
+            out[pos] = ',';
+            out[pos + 1] = ' ';
+            pos = pos + 2;
+          }
+          chr[24] cell;
+          num c = snprintf(cell, 24, "%lld", x);
+          num k = 0;
+          for k < c {
+            out[pos + k] = cell[k];
+            k = k + 1;
+          }
+          pos = pos + c;
+          written = written + 1;
+        }
+        Option.None -> { break; }
+      }
+    }
+    out[pos] = '}';
+    out[pos + 1] = '\0';
+    ret out;
+  }
+}
+
+impl Set<str> as Display {
+  // Render as `{"a", "b"}` (elements are unordered).
+  pub to_string() str {
+    num budget = 3;
+    SetIter<str> measure = self.iter();
+    for true {
+      fit measure.next() {
+        Option.Some(x) -> {
+          num m = 0;
+          for x[m] != 0 {
+            m = m + 1;
+          }
+          budget = budget + m + 4;
+        }
+        Option.None -> { break; }
+      }
+    }
+    str out = malloc(budget);
+    if out == NULL {
+      ret NULL;
+    }
+    num pos = 0;
+    out[pos] = '{';
+    pos = pos + 1;
+    num written = 0;
+    SetIter<str> it = self.iter();
+    for true {
+      fit it.next() {
+        Option.Some(x) -> {
+          if written > 0 {
+            out[pos] = ',';
+            out[pos + 1] = ' ';
+            pos = pos + 2;
+          }
+          out[pos] = '"';
+          pos = pos + 1;
+          num k = 0;
+          for x[k] != 0 {
+            out[pos + k] = x[k];
+            k = k + 1;
+          }
+          pos = pos + k;
+          out[pos] = '"';
+          pos = pos + 1;
+          written = written + 1;
+        }
+        Option.None -> { break; }
+      }
+    }
+    out[pos] = '}';
+    out[pos + 1] = '\0';
+    ret out;
   }
 }

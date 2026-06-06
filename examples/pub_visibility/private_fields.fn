@@ -9,9 +9,9 @@
 imp std.c.io;
 
 compound BankAccount {
-  // Public: the account id is part of the type's external surface.
+  // the account id is part of the type's external surface.
   num id;
-  // Private: balance is an implementation detail, mutated only via methods.
+  // balance is an implementation detail, mutated only via methods.
   num _balance;
 }
 

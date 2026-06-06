@@ -10,9 +10,9 @@
 
 // View over a generic array.
 pub compound Array<T> {
-  // data: backing storage
+  // backing storage
   T[] data;
-  // len: number of elements
+  // number of elements
   num len;
 }
 

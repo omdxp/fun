@@ -2,19 +2,26 @@
 // 
 // Option is a data-carrying enum (a sum type), so you pattern-match it with `fit`:
 // 
+// ```
 // Option<num> o = some(42);
 // fit o {
-// Option.Some(v) -> { print_num(v); }
-// Option.None    -> { print("nothing"); }
+//   Option.Some(v) -> { print_num(v); }
+//   Option.None -> { print("nothing"); }
 // }
+// ```
 // 
 // Or use the combinator methods for the common cases:
 // 
-// num n = find_user(id).unwrap_or(0);   // value, or a fallback when None
+// ```
+// num n = find_user(id).unwrap_or(0); // value, or a fallback when None
+// ```
 // 
 // Construct with `some(v)` (infers T from v) or the variant directly:
+// 
+// ```
 // Option<num> a = some(42);
-// Option<num> b = Option.None;   // or the shorthand `.None`
+// Option<num> b = Option.None; // or the shorthand `.None`
+// ```
 
 imp std.result;
 
@@ -110,7 +117,7 @@ pub fun some<T>(T value) Option<T> {
 // Convert an Option to a Result: Some(v) -> Ok(v); None -> Err(error_new(code, msg)).
 // Provided as a free function (rather than a method) so the Result type parameter
 // resolves from the call site.
-pub fun option_ok_or<T>(Option<T> o, num code, str message) Result<T> {
+pub fun ok_or<T>(Option<T> o, num code, str message) Result<T> {
   fit o {
     Option.Some(v) -> { ret ok(v); }
     Option.None -> {

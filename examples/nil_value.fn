@@ -1,5 +1,5 @@
 // The `nil` literal: a null pointer/string sentinel that transpiles to C `NULL`.
-//
+// 
 // `nil` is a keyword (no import needed). It coerces to any pointer type, to `str`,
 // and compares against them with `==` / `!=`. Use it to initialize optional links,
 // signal "no value" for a pointer field, or check whether a pointer is unset.

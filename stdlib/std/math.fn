@@ -11,9 +11,9 @@ imp std.c.math as cmath;
 
 // 2D vector for simple math utilities.
 pub compound Vec2 {
-  // x: x component
+  // x component
   dec x;
-  // y: y component
+  // y component
   dec y;
 }
 

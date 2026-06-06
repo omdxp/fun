@@ -1,0 +1,62 @@
+// Iterating collections with `for item : collection`, plus the Option-returning
+// `at()` accessors and `Display` rendering.
+// 
+// Any value whose type implements the `Iterator` quirk (or exposes `iter()`) can be
+// driven by a `for` loop. The compiler desugars it to the iterator's `next()`/`Option`
+// protocol, so Vec, Set, and Map (over its keys) all just work.
+
+imp std.c.io;
+imp std.vec;
+imp std.set;
+imp std.map;
+imp std.option;
+imp std.quirks;
+
+fun main() num {
+  // --- Vec: for-each + Option accessors + Display ---
+  Vec<num> v;
+  v.init(0);
+  v.push(10);
+  v.push(20);
+  v.push(30);
+
+  num total = 0;
+  for n : v {
+    total = total + n;
+  }
+  printf("vec=%s sum=%lld\n", v.to_string(), total);
+
+  // `at` returns Option<T>; `unwrap_or` supplies a fallback when out of range.
+  printf("v.at(1)=%lld v.at(9)=%lld\n", v.at(1).unwrap_or(-1), v.at(9).unwrap_or(-1));
+
+  // --- Set: union, then iterate the result ---
+  Set<num> a = set_init(0, 8);
+  a.add(1);
+  a.add(2);
+  a.add(3);
+  Set<num> b = set_init(0, 8);
+  b.add(3);
+  b.add(4);
+  Set<num> u = a.union(&b);
+  num count = 0;
+  for _ : u {
+    count = count + 1;
+  }
+  printf("union=%s size=%lld\n", u.to_string(), count);
+
+  // --- Map: `for key : map` iterates keys; `for k, v :: map` yields key/value pairs ---
+  Map<str, num> scores;
+  scores.init(8);
+  scores.put("ada", 95);
+  scores.put("alan", 88);
+  num best = 0;
+  for name, score :: scores {
+    printf("  %s -> %lld\n", name, score);
+    if score > best {
+      best = score;
+    }
+  }
+  printf("scores=%s best=%lld\n", scores.to_string(), best);
+
+  ret 0;
+}

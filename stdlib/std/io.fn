@@ -11,9 +11,7 @@ imp std.c.mem;
 imp std.c.def;
 imp std.string;
 imp std.vec;
-imp std.quirks;
 imp std.result;
-imp std.error;
 
 // Print a string to stdout (no newline).
 // 
@@ -244,7 +242,7 @@ pub fun println_fmt(str fmt, ...) {
 
 // File handle wrapper.
 pub compound File {
-  // handle: C FILE pointer (null if unopened)
+  // C FILE pointer (null if unopened)
   FILE* handle;
 }
 

@@ -11,15 +11,9 @@ enum Color {
 
 fun takes(Color c) {
   fit c {
-    .Red -> {
-      printf("R\n");
-    },
-    .Green -> {
-      printf("G\n");
-    },
-    .Blue -> {
-      printf("B\n");
-    }
+    .Red -> { printf("R\n"); },
+    .Green -> { printf("G\n"); },
+    .Blue -> { printf("B\n"); }
   }
 }
 

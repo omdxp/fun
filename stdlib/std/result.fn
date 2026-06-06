@@ -2,15 +2,19 @@
 // 
 // Result is a data-carrying enum (a sum type), matched with `fit`:
 // 
+// ```
 // Result<str> r = read_file("config.toml");
 // fit r {
-// Result.Ok(text) -> { use(text); }
-// Result.Err(e)   -> { log_error(e); }
+//   Result.Ok(text) -> { use(text); }
+//   Result.Err(e) -> { log_error(e); }
 // }
+// ```
 // 
 // Or use the combinators for the common cases:
 // 
-// str text = read_file(path).unwrap_or("");   // value, or a fallback on Err
+// ```
+// str text = read_file(path).unwrap_or(""); // value, or a fallback on Err
+// ```
 // 
 // Construct with `ok(v)`, `err(code, message, default)`, or `err_error(e, default)`.
 // The error arm carries a full `Error` (kind + code + message + context).
@@ -64,10 +68,10 @@ impl Result<T> {
   // The Err value, or a no-error `Error` when Ok.
   pub unwrap_err() Error {
     fit *self {
-      Result.Ok(v) -> { ret error_ok(); }
+      Result.Ok(v) -> { ret error_none(); }
       Result.Err(e) -> { ret e; }
     }
-    ret error_ok();
+    ret error_none();
   }
 
   // A zero-initialized T, used as the empty fallback for `unwrap`.

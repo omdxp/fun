@@ -14,14 +14,8 @@ fun main() {
   bin x = true;
 
   fit x {
-    true -> {
-      printf("x was true\n");
-    },
-    false -> {
-      printf("x was false\n");
-    },
-    _ -> {
-      printf("unreachable fallback\n");
-    }
+    true -> { printf("x was true\n"); },
+    false -> { printf("x was false\n"); },
+    _ -> { printf("unreachable fallback\n"); }
   }
 }
