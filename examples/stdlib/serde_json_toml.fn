@@ -1,38 +1,62 @@
-// Serialize/Deserialize quirks with JSON and TOML.
+// Structured (de)serialization: a compound converts to/from a typed JsonValue via the
+// ToJson/FromJson quirks (the reflection-free equivalent of derive), plus the text-layer
+// Serialize quirk shared by JsonValue and TomlDoc.
 
 imp std.c.io;
-imp std.serde;
 imp std.json;
 imp std.toml;
+imp std.serde;
+imp std.option;
+imp std.result;
 
-fun main() {
-  JsonObject j = json_object_init();
-  defer j.free();
-  j.set("name", "fun");
-  j.set("version", "1");
+pub compound Config {
+  str name;
+  dec version;
+  bin stable;
+}
 
-  Serialize js = &j;
-  str json_text = to_string(js);
-  printf("json_text=%s\n", json_text);
+impl Config as ToJson {
+  pub to_json() JsonValue {
+    let o = json_object();
+    o.put("name", json_str(self.name));
+    o.put("version", json_num(self.version));
+    o.put("stable", json_bool(self.stable));
+    ret JsonValue.Object(o);
+  }
+}
 
-  JsonObject j2 = json_object_init();
-  defer j2.free();
-  Deserialize jd = &j2;
-  from_string(jd, json_text);
-  printf("json.name=%s json.version=%s\n", j2.get("name"), j2.get("version"));
+impl Config as FromJson {
+  pub from_json(JsonValue value) {
+    let n = value.get("name").unwrap_or(JsonValue.Null);
+    self.name = n.as_str().unwrap_or("");
+    let v = value.get("version").unwrap_or(JsonValue.Null);
+    self.version = v.as_num().unwrap_or(0.0);
+    let s = value.get("stable").unwrap_or(JsonValue.Null);
+    self.stable = s.as_bool().unwrap_or(false);
+  }
+}
 
-  TomlDoc t = toml_doc_init();
-  defer t.free();
-  t.set("name", "fun");
-  t.set("channel", "stable");
+fun main() num {
+  Config c = Config{name = "fun", version = 1.0, stable = true};
 
+  // Compound -> typed JSON -> text.
+  str json_text = to_json_string(&c);
+  printf("json=%s\n", json_text);
+
+  // text -> typed JSON -> compound.
+  fit parse(json_text) {
+    Result.Ok(doc) -> {
+      Config back;
+      back.from_json(doc);
+      printf("back: name=%s version=%g stable=%d\n", back.name, back.version, back.stable);
+    }
+    Result.Err(e) -> { printf("parse failed\n"); }
+  }
+
+  // Text-layer Serialize quirk over a TomlDoc.
+  let t = parse_document("channel = \"stable\"\n");
   Serialize ts = &t;
-  str toml_text = to_string(ts);
-  printf("toml_text=\n%s", toml_text);
+  printf("toml=%s", to_string(ts));
 
-  TomlDoc t2 = toml_doc_init();
-  defer t2.free();
-  Deserialize td = &t2;
-  from_string(td, toml_text);
-  printf("toml.name=%s toml.channel=%s\n", t2.get("name"), t2.get("channel"));
+  ret 0;
 }

@@ -188,7 +188,7 @@ pub fun try_tcp_listen(num port) Result<num> {
 // Returns:
 // - client fd, or -1
 pub fun tcp_accept(num server_fd) num {
-  ret accept(server_fd, NULL, NULL);
+  ret accept(server_fd, nil, nil);
 }
 
 // Accept a client connection with Result.
@@ -268,7 +268,7 @@ fun _tcp_roundtrip_core(
   num recv_len,
   ChannelCancelToken* cancel_token
 ) num {
-  if recv_buf == NULL || recv_len <= 0 {
+  if recv_buf == nil || recv_len <= 0 {
     ret -1;
   }
 
@@ -276,7 +276,7 @@ fun _tcp_roundtrip_core(
     ret -3;
   }
 
-  if send_buf != NULL {
+  if send_buf != nil {
     num send_len = len(send_buf);
     if send_len > 0 {
       num wrote = tcp_write(fd, send_buf, send_len);
@@ -298,8 +298,8 @@ fun _tcp_roundtrip_core(
 }
 
 fun _tcp_roundtrip_offload_worker(raw* arg) raw* {
-  if arg == NULL {
-    ret NULL;
+  if arg == nil {
+    ret nil;
   }
 
   TcpRoundtripOffloadJob* job = arg;
@@ -311,7 +311,7 @@ fun _tcp_roundtrip_offload_worker(raw* arg) raw* {
     job.cancel_token
   );
 
-  ret NULL;
+  ret nil;
 }
 
 // Perform a best-effort request/response exchange on an existing socket.
@@ -353,7 +353,7 @@ pub async fun tcp_roundtrip_offload_async(
   num recv_len,
   ChannelCancelToken* cancel_token
 ) num {
-  if recv_buf == NULL || recv_len <= 0 {
+  if recv_buf == nil || recv_len <= 0 {
     ret -1;
   }
   if channel_cancel_token_is_cancelled(cancel_token) == true {
@@ -373,7 +373,7 @@ pub async fun tcp_roundtrip_offload_async(
     ret task.last_start_rc();
   }
 
-  num join_rc = await task.join_async(NULL);
+  num join_rc = await task.join_async(nil);
   if join_rc != 0 {
     ret join_rc;
   }
@@ -400,7 +400,7 @@ pub async fun build_http_get_to_channel_async(
   Channel<str>* out_requests,
   ChannelCancelToken* cancel_token
 ) num {
-  if raw_url == NULL || out_requests == NULL {
+  if raw_url == nil || out_requests == nil {
     ret -1;
   }
 
@@ -409,12 +409,12 @@ pub async fun build_http_get_to_channel_async(
   }
 
   Url u = parse_url(raw_url);
-  if u.host == NULL || len(u.host) == 0 {
+  if u.host == nil || len(u.host) == 0 {
     ret -1;
   }
 
   str req = u.build_http_get();
-  if req == NULL {
+  if req == nil {
     ret -2;
   }
 
@@ -447,7 +447,7 @@ pub fun http_serve_once(num port, str body) num {
   }
 
   str buf = malloc(1024);
-  if buf != NULL {
+  if buf != nil {
     tcp_read(client, buf, 1023);
     free(buf);
   }
@@ -483,7 +483,7 @@ pub fun http_serve_forever(num port, str body) num {
     }
 
     str buf = malloc(1024);
-    if buf != NULL {
+    if buf != nil {
       tcp_read(client, buf, 1023);
       free(buf);
     }

@@ -7,7 +7,6 @@
 // ```
 
 imp std.c.mem;
-imp std.c.def;
 imp std.string;
 imp std.vec;
 imp std.result;
@@ -86,8 +85,8 @@ pub fun path_join(str a, str b) str {
   }
 
   str out = malloc(alen + blen + extra + 1);
-  if out == NULL {
-    ret NULL;
+  if out == nil {
+    ret nil;
   }
 
   num pos = 0;
@@ -120,7 +119,7 @@ pub fun path_join(str a, str b) str {
 // Join two path segments with Result.
 pub fun try_path_join(str a, str b) Result<str> {
   str out = path_join(a, b);
-  if out == NULL {
+  if out == nil {
     ret err(1, "path_join failed", "");
   }
   ret ok(out);
@@ -149,7 +148,7 @@ pub fun path_join_many(Vec<str>* parts) str {
 // Join multiple segments with Result.
 pub fun try_path_join_many(Vec<str>* parts) Result<str> {
   str out = path_join_many(parts);
-  if out == NULL {
+  if out == nil {
     ret err(1, "path_join_many failed", "");
   }
   ret ok(out);
@@ -297,8 +296,8 @@ pub fun change_ext(str path, str new_ext) str {
   }
 
   str out = malloc(base_len + ext_len + extra + 1);
-  if out == NULL {
-    ret NULL;
+  if out == nil {
+    ret nil;
   }
 
   num i = 0;
@@ -325,7 +324,7 @@ pub fun change_ext(str path, str new_ext) str {
 // Change or add an extension with Result.
 pub fun try_change_ext(str path, str new_ext) Result<str> {
   str out = change_ext(path, new_ext);
-  if out == NULL {
+  if out == nil {
     ret err(1, "change_ext failed", "");
   }
   ret ok(out);

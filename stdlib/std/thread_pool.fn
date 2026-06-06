@@ -7,7 +7,6 @@
 imp std.thread;
 imp std.thread_runtime;
 imp std.c.mem;
-imp std.c.def;
 
 // Managed pool of worker threads.
 pub compound ThreadPool {
@@ -28,7 +27,7 @@ pub compound ThreadPool {
 // - initialized pool; `has_storage == false` when allocation fails
 pub fun thread_pool_new(num size) ThreadPool {
   ThreadPool pool;
-  raw* workers_ptr = NULL;
+  raw* workers_ptr = nil;
   pool.workers = workers_ptr;
   pool.size = 0;
   pool.has_storage = true;
@@ -43,7 +42,7 @@ pub fun thread_pool_new(num size) ThreadPool {
 
   raw* data_ptr = malloc(sizeof(Thread) * size);
   pool.workers = data_ptr;
-  if data_ptr == NULL {
+  if data_ptr == nil {
     pool.has_storage = false;
     ret pool;
   }
@@ -85,8 +84,8 @@ impl ThreadPool {
 
     num i = 0;
     for i < self.size {
-      raw* arg = NULL;
-      if args != NULL {
+      raw* arg = nil;
+      if args != nil {
         arg = args[i];
       }
 
@@ -119,8 +118,8 @@ impl ThreadPool {
 
     num i = 0;
     for i < self.size {
-      raw* out_ret = NULL;
-      if out_rets != NULL {
+      raw* out_ret = nil;
+      if out_rets != nil {
         out_ret = out_rets[i];
       }
 
@@ -171,7 +170,7 @@ impl ThreadPool {
     if self.has_storage == true && self.size > 0 {
       free(self.workers);
     }
-    raw* workers_ptr = NULL;
+    raw* workers_ptr = nil;
     self.workers = workers_ptr;
     self.size = 0;
     self.has_storage = true;

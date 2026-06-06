@@ -191,8 +191,8 @@ impl Set<num> as Display {
   pub to_string() str {
     num budget = self.map.len * 26 + 3;
     str out = malloc(budget);
-    if out == NULL {
-      ret NULL;
+    if out == nil {
+      ret nil;
     }
     num pos = 0;
     out[pos] = '{';
@@ -244,8 +244,8 @@ impl Set<str> as Display {
       }
     }
     str out = malloc(budget);
-    if out == NULL {
-      ret NULL;
+    if out == nil {
+      ret nil;
     }
     num pos = 0;
     out[pos] = '{';

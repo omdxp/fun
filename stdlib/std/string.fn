@@ -8,7 +8,6 @@
 // ```
 
 imp std.c.mem;
-imp std.c.def;
 imp std.c.io;
 imp std.vec;
 imp std.quirks;
@@ -57,7 +56,7 @@ impl StringBuilder {
   // Append a single character.
   pub append_char(chr c) {
     str tmp = malloc(2);
-    if tmp == NULL {
+    if tmp == nil {
       ret;
     }
     tmp[0] = c;
@@ -69,7 +68,7 @@ impl StringBuilder {
   // Append a num as decimal digits.
   pub append_num(num n) {
     str s = format_num(n);
-    if s == NULL {
+    if s == nil {
       ret;
     }
     self.total_len = self.total_len + _string_len(s);
@@ -79,7 +78,7 @@ impl StringBuilder {
   // Append a dec with the given number of decimal places.
   pub append_dec(dec d, num places) {
     str s = format_dec(d, places);
-    if s == NULL {
+    if s == nil {
       ret;
     }
     self.total_len = self.total_len + _string_len(s);
@@ -248,8 +247,8 @@ pub fun contains(str s, str needle) bin {
 // - new string (or null on alloc failure)
 pub fun substr(str s, num start, num length) str {
   str out = malloc(length + 1);
-  if out == NULL {
-    ret NULL;
+  if out == nil {
+    ret nil;
   }
   num i = 0;
   for i < length {
@@ -602,8 +601,8 @@ pub fun split_lines(str s) Vec<str> {
 pub fun to_lower(str s) str {
   num n = _string_len(s);
   str out = malloc(n + 1);
-  if out == NULL {
-    ret NULL;
+  if out == nil {
+    ret nil;
   }
   str upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
   str lower = "abcdefghijklmnopqrstuvwxyz";
@@ -639,8 +638,8 @@ pub fun to_lower(str s) str {
 pub fun to_upper(str s) str {
   num n = _string_len(s);
   str out = malloc(n + 1);
-  if out == NULL {
-    ret NULL;
+  if out == nil {
+    ret nil;
   }
   str upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
   str lower = "abcdefghijklmnopqrstuvwxyz";
@@ -681,8 +680,8 @@ pub fun repeat(str s, num times) str {
   num sl = _string_len(s);
   num total = sl * times;
   str out = malloc(total + 1);
-  if out == NULL {
-    ret NULL;
+  if out == nil {
+    ret nil;
   }
   num i = 0;
   for i < times {
@@ -709,8 +708,8 @@ pub fun repeat(str s, num times) str {
 pub fun replace_char(str s, chr from, chr to) str {
   num n = _string_len(s);
   str out = malloc(n + 1);
-  if out == NULL {
-    ret NULL;
+  if out == nil {
+    ret nil;
   }
   num i = 0;
   for i < n {
@@ -809,8 +808,8 @@ pub fun parse_int(str s) num {
 pub fun format_num(num n) str {
   // Max i64 is 19 digits + sign + NUL = 21 bytes.
   str buf = malloc(21);
-  if buf == NULL {
-    ret NULL;
+  if buf == nil {
+    ret nil;
   }
   if n == 0 {
     buf[0] = '0';
@@ -865,14 +864,14 @@ pub fun format_dec(dec d, num places) str {
   }
   // 48 bytes is enough for any double with up to 9 decimal places.
   str buf = malloc(48);
-  if buf == NULL {
-    ret NULL;
+  if buf == nil {
+    ret nil;
   }
   // Build format string "%.Nf" where N is the places digit.
   str fmt = malloc(6);
-  if fmt == NULL {
+  if fmt == nil {
     free(buf);
-    ret NULL;
+    ret nil;
   }
   str digits = "0123456789";
   fmt[0] = '%';

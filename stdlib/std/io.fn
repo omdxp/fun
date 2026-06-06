@@ -8,7 +8,6 @@
 
 imp std.c.io;
 imp std.c.mem;
-imp std.c.def;
 imp std.string;
 imp std.vec;
 imp std.result;
@@ -61,8 +60,8 @@ pub fun print_bin(bin b) {
 fun _dup_str(str s) str {
   num n = len(s);
   str out = malloc(n + 1);
-  if out == NULL {
-    ret NULL;
+  if out == nil {
+    ret nil;
   }
   num i = 0;
   for i < n {
@@ -75,7 +74,7 @@ fun _dup_str(str s) str {
 
 fun _io_err(str message, str context) Error {
   Error e = error_new_simple(.Io, message);
-  if context != NULL {
+  if context != nil {
     e.with_context(context);
   }
   ret e;
@@ -84,8 +83,8 @@ fun _io_err(str message, str context) Error {
 // Format a number into a new string buffer.
 pub fun fmt_num(num n) str {
   str buf = malloc(32);
-  if buf == NULL {
-    ret NULL;
+  if buf == nil {
+    ret nil;
   }
   snprintf(buf, 32, "%lld", n);
   ret buf;
@@ -94,8 +93,8 @@ pub fun fmt_num(num n) str {
 // Format a decimal into a new string buffer.
 pub fun fmt_dec(dec d) str {
   str buf = malloc(64);
-  if buf == NULL {
-    ret NULL;
+  if buf == nil {
+    ret nil;
   }
   snprintf(buf, 64, "%g", d);
   ret buf;
@@ -112,8 +111,8 @@ pub fun fmt_bin(bin b) str {
 // Format a character into a new string buffer.
 pub fun fmt_chr(chr c) str {
   str buf = malloc(2);
-  if buf == NULL {
-    ret NULL;
+  if buf == nil {
+    ret nil;
   }
   buf[0] = c;
   buf[1] = '\0';
@@ -128,8 +127,8 @@ pub fun fmt_str(str s) str {
 // Format a raw pointer into a new string buffer.
 pub fun fmt_raw(raw* p) str {
   str buf = malloc(32);
-  if buf == NULL {
-    ret NULL;
+  if buf == nil {
+    ret nil;
   }
   snprintf(buf, 32, "%p", p);
   ret buf;
@@ -224,7 +223,7 @@ pub fun format(str fmt, ...) str {
 // See format() for placeholder types.
 pub fun print_fmt(str fmt, ...) {
   str out = format_impl(fmt, &vargs);
-  if out != NULL {
+  if out != nil {
     print(out);
     free(out);
   }
@@ -234,7 +233,7 @@ pub fun print_fmt(str fmt, ...) {
 // See format() for placeholder types.
 pub fun println_fmt(str fmt, ...) {
   str out = format_impl(fmt, &vargs);
-  if out != NULL {
+  if out != nil {
     println(out);
     free(out);
   }
@@ -262,7 +261,7 @@ pub fun open_read(str path) File {
 // Open file for reading (binary) with Result.
 pub fun try_open_read(str path) Result<File> {
   File f = open_read(path);
-  if f.handle == NULL {
+  if f.handle == nil {
     ret err(1, "open_read failed", f);
   }
   ret ok(f);
@@ -284,7 +283,7 @@ pub fun open_write(str path) File {
 // Open file for writing (binary) with Result.
 pub fun try_open_write(str path) Result<File> {
   File f = open_write(path);
-  if f.handle == NULL {
+  if f.handle == nil {
     ret err(1, "open_write failed", f);
   }
   ret ok(f);
@@ -306,7 +305,7 @@ pub fun open_append(str path) File {
 // Open file for appending (binary) with Result.
 pub fun try_open_append(str path) Result<File> {
   File f = open_append(path);
-  if f.handle == NULL {
+  if f.handle == nil {
     ret err(1, "open_append failed", f);
   }
   ret ok(f);
@@ -315,16 +314,16 @@ pub fun try_open_append(str path) Result<File> {
 impl File {
   // Close the file handle.
   pub close() {
-    if self.handle != NULL {
+    if self.handle != nil {
       fclose(self.handle);
-      self.handle = NULL;
+      self.handle = nil;
     }
   }
 
   // Read entire file into a new string.
   pub read_all() str {
-    if self.handle == NULL {
-      ret NULL;
+    if self.handle == nil {
+      ret nil;
     }
 
     fseek(self.handle, 0, 2);
@@ -332,12 +331,12 @@ impl File {
     fseek(self.handle, 0, 0);
 
     if size < 0 {
-      ret NULL;
+      ret nil;
     }
 
     str buf = malloc(size + 1);
-    if buf == NULL {
-      ret NULL;
+    if buf == nil {
+      ret nil;
     }
 
     num read = fread(buf, 1, size, self.handle);
@@ -347,11 +346,11 @@ impl File {
 
   // Read entire file into a new string with Result.
   pub try_read_all() Result<str> {
-    if self.handle == NULL {
+    if self.handle == nil {
       ret err(1, "read_all on closed file", "");
     }
     str out = self.read_all();
-    if out == NULL {
+    if out == nil {
       ret err(1, "read_all failed", "");
     }
     ret ok(out);
@@ -359,12 +358,12 @@ impl File {
 
   // Read up to max_len bytes (binary-safe). Returns allocated buffer (NUL-terminated).
   pub read_bytes(num max_len) str {
-    if self.handle == NULL || max_len <= 0 {
-      ret NULL;
+    if self.handle == nil || max_len <= 0 {
+      ret nil;
     }
     str buf = malloc(max_len + 1);
-    if buf == NULL {
-      ret NULL;
+    if buf == nil {
+      ret nil;
     }
     num read = fread(buf, 1, max_len, self.handle);
     buf[read] = '\0';
@@ -373,11 +372,11 @@ impl File {
 
   // Read up to max_len bytes with Result.
   pub try_read_bytes(num max_len) Result<str> {
-    if self.handle == NULL || max_len <= 0 {
+    if self.handle == nil || max_len <= 0 {
       ret err(1, "read_bytes invalid", "");
     }
     str out = self.read_bytes(max_len);
-    if out == NULL {
+    if out == nil {
       ret err(1, "read_bytes failed", "");
     }
     ret ok(out);
@@ -385,28 +384,28 @@ impl File {
 
   // Read a line up to max_len (including newline if present).
   pub read_line_max(num max_len) str {
-    if self.handle == NULL || max_len <= 1 {
-      ret NULL;
+    if self.handle == nil || max_len <= 1 {
+      ret nil;
     }
     str buf = malloc(max_len);
-    if buf == NULL {
-      ret NULL;
+    if buf == nil {
+      ret nil;
     }
     str res = fgets(buf, max_len, self.handle);
-    if res == NULL {
+    if res == nil {
       free(buf);
-      ret NULL;
+      ret nil;
     }
     ret buf;
   }
 
   // Read a line up to max_len with Result.
   pub try_read_line_max(num max_len) Result<str> {
-    if self.handle == NULL || max_len <= 1 {
+    if self.handle == nil || max_len <= 1 {
       ret err(1, "read_line_max invalid", "");
     }
     str out = self.read_line_max(max_len);
-    if out == NULL {
+    if out == nil {
       ret err(1, "read_line_max failed", "");
     }
     ret ok(out);
@@ -417,12 +416,12 @@ impl File {
     Vec<str> out;
     out.len = 0;
     out.cap = 0;
-    if self.handle == NULL {
+    if self.handle == nil {
       ret out;
     }
     for true {
       str line = self.read_line_max(max_len);
-      if line == NULL {
+      if line == nil {
         break;
       }
       out.push(line);
@@ -433,7 +432,7 @@ impl File {
   // Read all lines (up to max_len per line) with Result.
   pub try_read_lines(num max_len) Result<Vec<str>> {
     Result<Vec<str>> r;
-    if self.handle == NULL {
+    if self.handle == nil {
       Vec<str> empty;
       empty.len = 0;
       empty.cap = 0;
@@ -445,7 +444,7 @@ impl File {
 
   // Write raw bytes to the file.
   pub write_bytes(raw* data, num len) bin {
-    if self.handle == NULL || data == NULL {
+    if self.handle == nil || data == nil {
       ret false;
     }
     num wrote = fwrite(data, 1, len, self.handle);
@@ -454,7 +453,7 @@ impl File {
 
   // Write raw bytes to the file with Result.
   pub try_write_bytes(raw* data, num len) Result<bin> {
-    if self.handle == NULL || data == NULL {
+    if self.handle == nil || data == nil {
       ret err(1, "write_bytes invalid", false);
     }
     bin ok_write = self.write_bytes(data, len);
@@ -466,7 +465,7 @@ impl File {
 
   // Read raw bytes into a buffer; returns bytes read.
   pub read_into(raw* dst, num len) num {
-    if self.handle == NULL || dst == NULL {
+    if self.handle == nil || dst == nil {
       ret 0;
     }
     ret fread(dst, 1, len, self.handle);
@@ -474,7 +473,7 @@ impl File {
 
   // Read raw bytes into a buffer with Result.
   pub try_read_into(raw* dst, num len) Result<num> {
-    if self.handle == NULL || dst == NULL {
+    if self.handle == nil || dst == nil {
       ret err(1, "read_into invalid", 0);
     }
     num n = self.read_into(dst, len);
@@ -483,7 +482,7 @@ impl File {
 
   // Seek within the file (whence: 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END).
   pub seek(num offset, num whence) bin {
-    if self.handle == NULL {
+    if self.handle == nil {
       ret false;
     }
     ret fseek(self.handle, offset, whence) == 0;
@@ -491,7 +490,7 @@ impl File {
 
   // Seek within the file with Result.
   pub try_seek(num offset, num whence) Result<bin> {
-    if self.handle == NULL {
+    if self.handle == nil {
       ret err(1, "seek on closed file", false);
     }
     bin ok_seek = self.seek(offset, whence);
@@ -503,7 +502,7 @@ impl File {
 
   // Tell current file position.
   pub tell() num {
-    if self.handle == NULL {
+    if self.handle == nil {
       ret -1;
     }
     ret ftell(self.handle);
@@ -511,7 +510,7 @@ impl File {
 
   // Tell current file position with Result.
   pub try_tell() Result<num> {
-    if self.handle == NULL {
+    if self.handle == nil {
       ret err(1, "tell on closed file", -1);
     }
     num pos = self.tell();
@@ -523,7 +522,7 @@ impl File {
 
   // Rewind to start of file.
   pub rewind() {
-    if self.handle == NULL {
+    if self.handle == nil {
       ret;
     }
     rewind(self.handle);
@@ -531,7 +530,7 @@ impl File {
 
   // Flush buffered output.
   pub flush() bin {
-    if self.handle == NULL {
+    if self.handle == nil {
       ret false;
     }
     ret fflush(self.handle) == 0;
@@ -539,7 +538,7 @@ impl File {
 
   // Flush buffered output with Result.
   pub try_flush() Result<bin> {
-    if self.handle == NULL {
+    if self.handle == nil {
       ret err(1, "flush on closed file", false);
     }
     bin ok_flush = self.flush();
@@ -551,7 +550,7 @@ impl File {
 
   // Get file size (best-effort; returns -1 on failure).
   pub size() num {
-    if self.handle == NULL {
+    if self.handle == nil {
       ret -1;
     }
     let cur = ftell(self.handle);
@@ -568,7 +567,7 @@ impl File {
 
   // Write a string to the file.
   pub write(str data) bin {
-    if self.handle == NULL {
+    if self.handle == nil {
       ret false;
     }
     num n = len(data);
@@ -586,8 +585,8 @@ impl File {
 // - file contents or null
 pub fun read_all(str path) str {
   File f = open_read(path);
-  if f.handle == NULL {
-    ret NULL;
+  if f.handle == nil {
+    ret nil;
   }
   defer f.close();
   str out = f.read_all();
@@ -604,7 +603,7 @@ pub fun read_all(str path) str {
 // - true on success
 pub fun write_all(str path, str data) bin {
   File f = open_write(path);
-  if f.handle == NULL {
+  if f.handle == nil {
     ret false;
   }
   defer f.close();

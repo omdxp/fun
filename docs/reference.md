@@ -514,7 +514,9 @@ Examples:
 - `std.sync_backend_windows`: Windows sync backend module (`sync_backend_windows_*`) with direct mutex/condvar operations over `std.c.thread_windows`
 - `std.sync_runtime`: backend-facing sync runtime shim (`runtime_mutex_*`, `runtime_condvar_*`) plus backend selector helpers (`sync_runtime_backend_*`), routed through `std.runtime_backend` and backend modules
 - `std.sync`: POSIX-backed mutex/condition variable helpers (method and helper forms)
-- `std.json`, `std.toml`: minimal serialization helpers
+- `std.json`: typed JSON via the `JsonValue` data enum (`Null`/`Bool`/`Num`/`Str`/`Array`/`Object`); `parse(str) -> Result<JsonValue>`, Option-returning accessors (`as_num`/`as_str`/`as_bool`/`as_array`/`get(key)`/`index(i)`/`len`/`is_null`), and `to_string`/`stringify`. Structured (de)serialization of your own compounds via the `ToJson`/`FromJson` quirks (hand-implemented — Fun has no reflection).
+- `std.toml`: typed flat `key = value` TOML via the `TomlValue` enum (`Str`/`Int`/`Float`/`Bool`); `parse_document`, typed `get(key) -> Option<TomlValue>`, `as_int`/`as_float`/`as_str`/`as_bool`, and `stringify`.
+- `std.serde`: the text-layer `Serialize`/`Deserialize` quirks + `to_string`/`from_string`, shared by `JsonValue` and `TomlDoc`.
 - `std.time`, `std.rand`, `std.math`, `std.path`, `std.net`, etc.
 - `std.sys`: environment and process helpers (`sys_exit`, `sys_abort`, `sys_system`)
 - `std.net`: URL parsing + pure Fun POSIX TCP/HTTP helpers (POSIX sockets)

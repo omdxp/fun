@@ -1,22 +1,30 @@
-// JSON/TOML stringify is fallible, so it returns a Result; use `unwrap_or` or
-// match it with `fit`.
+// Parsing is fallible, so `parse` / `try_parse_document` return a Result. Match it
+// with `fit`, or recover a fallback with `unwrap_or` after mapping.
 
 imp std.c.io;
 imp std.json;
 imp std.toml;
+imp std.option;
 imp std.result;
 
 fun main() num {
-  JsonObject j = json_object_init();
-  defer j.free();
-  j.set("name", "fun");
-  Result<str> js = j.try_stringify();
-  printf("json: %s\n", js.unwrap_or("<error>"));
+  // JSON parse returns Result<JsonValue>.
+  fit parse("{\"ok\": true}") {
+    Result.Ok(doc) -> { printf("json ok, len=%lld\n", doc.len()); }
+    Result.Err(e) -> { printf("json err\n"); }
+  }
 
-  TomlDoc t = toml_doc_init();
-  defer t.free();
-  t.set("name", "fun");
-  Result<str> ts = t.try_stringify();
-  printf("toml: %s\n", ts.unwrap_or("<error>"));
+  // A malformed document surfaces as Err.
+  fit parse("{ broken") {
+    Result.Ok(doc) -> { printf("unexpected ok\n"); }
+    Result.Err(e) -> { printf("json err as expected\n"); }
+  }
+
+  // TOML try-parse + stringify.
+  fit try_parse_document("name = \"fun\"\n") {
+    Result.Ok(doc) -> { printf("toml: %s", doc.stringify()); }
+    Result.Err(e) -> { printf("toml err\n"); }
+  }
+
   ret 0;
 }

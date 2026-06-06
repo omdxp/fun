@@ -1,10 +1,17 @@
-// Serialization quirks and helpers.
+// Serialization quirks (text layer).
 // 
-// Usage:
+// `Serialize`/`Deserialize` turn a whole value to/from a string. The document types
+// (`JsonValue`, `TomlDoc`) implement them, so any of them can be handled uniformly:
+// 
 // ```
-// Serialize s = &obj;
+// Serialize s = &doc;
 // str text = to_string(s);
 // ```
+// 
+// For STRUCTURED, typed (de)serialization of your own compounds, see the `ToJson` /
+// `FromJson` quirks in `std.json`: Fun has no reflection or derive macros, so each
+// type hand-implements the conversion to/from a `JsonValue` — the explicit,
+// reflection-free equivalent of `#[derive(Serialize, Deserialize)]`.
 
 // Types that can serialize themselves to text.
 pub quirk Serialize {
@@ -18,12 +25,12 @@ pub quirk Deserialize {
   deserialize(str input);
 }
 
-// Serialize any Serialize implementer to text.
+// Serialize any `Serialize` implementer to text.
 pub fun to_string(Serialize value) str {
   ret value.serialize();
 }
 
-// Deserialize text into any Deserialize implementer.
+// Deserialize text into any `Deserialize` implementer.
 pub fun from_string(Deserialize value, str input) {
   value.deserialize(input);
 }

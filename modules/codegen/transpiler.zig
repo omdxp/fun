@@ -4673,6 +4673,69 @@ pub const TranspileProcess = struct {
         return false;
     }
 
+    /// Resolve a fit-arm payload's concrete dtype for SCOPE REGISTRATION (codegen),
+    /// given the (possibly mangled) subject enum name. A concrete payload (`Circle(num)`,
+    /// `Array(Vec<JsonValue>)`) returns itself. A type-parameter payload (`Ok(T)` of a
+    /// mangled `Result__JsonValue`) is mapped to the instance's concrete arg (`JsonValue`)
+    /// by reconstructing the subject's dtype from its mangled name. Returns null when the
+    /// payload can't be resolved to something registrable (caller leaves it `__auto_type`).
+    /// Build an arena-owned dtype naming a non-generic type (`JsonValue`), for binding
+    /// resolution when no structured dtype is available.
+    fn simple_dtype_named(self: *Self, name: []const u8) ?*dtype.DataType {
+        const out = self.arena.allocator().create(dtype.DataType) catch return null;
+        out.* = .{
+            .array = null,
+            .pointer_depth = 0,
+            .type = .Unknown,
+            .type_str = ArrayList(u8).init(self.arena.allocator()),
+            .flags = .{},
+            .generic_args = null,
+        };
+        out.type_str.appendSlice(name) catch return null;
+        return out;
+    }
+
+    fn resolve_fit_payload_dtype(self: *Self, enum_name: []const u8, payload_dt: *dtype.DataType) ?*dtype.DataType {
+        if (!self.enum_payload_is_type_param(enum_name, payload_dt)) {
+            return payload_dt;
+        }
+        // Type-param payload: find its index in the base enum's params, then map to the
+        // mangled subject instance's concrete arg.
+        const reg = self.root_registry() orelse return null;
+        const enode = reg.enums_by_name.get(enum_name) orelse blk: {
+            const base = if (mem.indexOf(u8, enum_name, "__")) |idx| enum_name[0..idx] else break :blk null;
+            break :blk reg.enums_by_name.get(base);
+        } orelse return null;
+        if (enode.node_variant == null) return null;
+        const params = enode.node_variant.?.enum_decl.type_params orelse return null;
+        var pidx: ?usize = null;
+        for (params.items(), 0..) |p, i| {
+            if (mem.eql(u8, p.items, payload_dt.type_str.items)) {
+                pidx = i;
+                break;
+            }
+        }
+        const idx = pidx orelse return null;
+        // Reconstruct the subject instance's concrete args. Prefer the structured
+        // `dtype_from_mangled_type`; if it can't recover generic_args (it doesn't for
+        // some recursive instances), fall back to splitting the mangled suffix. For a
+        // SINGLE-parameter enum (`Option<T>`, `Result<T>`) the whole suffix after the
+        // first `__` is that one arg's mangled name (`Result__JsonValue` -> `JsonValue`,
+        // `Option__Vec__JsonValue` -> `Vec__JsonValue`).
+        if (self.dtype_from_mangled_type(enum_name) catch null) |sdt| {
+            if (sdt.generic_args) |gargs| {
+                if (idx < gargs.count) return gargs.items()[idx];
+            }
+        }
+        if (params.count == 1 and idx == 0) {
+            const sep = mem.indexOf(u8, enum_name, "__") orelse return null;
+            const arg_name = enum_name[sep + 2 ..];
+            if (arg_name.len == 0) return null;
+            return self.dtype_from_mangled_type(arg_name) catch null orelse self.simple_dtype_named(arg_name);
+        }
+        return null;
+    }
+
     /// Compute the CheckedType of a fit-arm payload binding. For a concrete payload
     /// (`Circle(num)`) it's just that type. For a generic enum's type-parameter
     /// payload (`Some(T)` of `Option<num>`), substitute the parameter with the
@@ -10917,6 +10980,10 @@ pub const TranspileProcess = struct {
                 try self.print("{s}.tag == {s}_{s}) {{", .{ tmp, enum_name, variant_name });
                 self.indent();
 
+                // Each arm body gets its own scope so payload bindings are visible to
+                // method/field resolution inside it (and don't leak to sibling arms).
+                _ = try self.new_scope();
+
                 // Bind the matched variant's payload fields into locals.
                 if (branch.bindings) |binds| {
                     const variant = self.lookup_enum_variant(enum_name, variant_name);
@@ -10944,12 +11011,27 @@ pub const TranspileProcess = struct {
                         }
                         try self.write(bname.items);
                         try self.print(" = {s}.payload.{s}._{d};", .{ tmp, variant_name, i });
+
+                        // Register the payload binding in scope with its RESOLVED type so
+                        // the arm body can call methods on it (`a.len()` where `a:
+                        // Vec<Json>`, or `doc.get()` where `doc: JsonValue` bound from
+                        // `Result__JsonValue.Ok`); without this, resolution falls back to
+                        // field access (`a.len`). A type-parameter payload (`Ok(T)`) is
+                        // resolved to the mangled subject's concrete arg.
+                        if (payload) |pl| {
+                            if (i < pl.count) {
+                                if (self.resolve_fit_payload_dtype(enum_name, pl.items()[i])) |bdt| {
+                                    try self.bind_loop_var(bname.items, bdt);
+                                }
+                            }
+                        }
                     }
                 }
 
                 try self.write_indent();
                 try self.transpile_node(branch.body.*);
                 if (self.node_needs_trailing_semicolon(branch.body.*)) try self.write(";");
+                self.finish_scope();
                 self.dedent();
                 try self.write_indent();
                 try self.write("}");
@@ -11255,6 +11337,17 @@ pub const TranspileProcess = struct {
                 }
             }
 
+            // A method on a NON-generic type whose return type is a GENERIC INSTANCE
+            // (`JsonParser.parse_string() Result<str>`) must yield the MONOMORPHIZED name
+            // `Result__str` so a `fit` over the call switches on the right tag.
+            if (rt.generic_args != null) {
+                const mangled = self.type_name_mangled(&rt) catch return null;
+                const mbase = if (mem.indexOf(u8, mangled, "__")) |bi| mangled[0..bi] else mangled;
+                const reg = self.get_root().type_registry;
+                if (reg != null and (reg.?.compounds_by_name.contains(mbase) or reg.?.enums_by_name.contains(mbase))) return mangled; // arena-owned
+                self.allocator.free(@constCast(mangled));
+                return null;
+            }
             if (rt.type != .Unknown) return null;
             if (self.is_compound_named(rt.type_str.items)) return rt.type_str.items;
             // A non-generic data enum return (`fun f() Option<num>`... but here a
@@ -11284,7 +11377,9 @@ pub const TranspileProcess = struct {
             }
         }
         if (self.expr_named_type_from_scope(node)) |n| {
-            if (self.is_compound_named(n)) return n;
+            // Accept a compound OR a data enum: a method receiver can be an enum value
+            // (`v.as_num()` where `v: JsonValue`), not just a compound.
+            if (self.is_compound_named(n) or self.enum_name_is_tagged_union(n)) return n;
         }
         return self.expr_compound_return_type_name(node);
     }
@@ -12429,7 +12524,25 @@ pub const TranspileProcess = struct {
             }
         }
 
-        while (remaining.items.len > 0 or remaining_specs.items.len > 0 or remaining_enum_specs.items.len > 0) {
+        // Non-generic data (tagged-union) enums participate in the SAME topo-sort as
+        // compounds/specs so a RECURSIVE enum (`Json { Arr(Vec<Json>), Obj(Map<str,Json>) }`)
+        // and its by-value wrappers (`Option<Json>`, `Vec__Json`, `Map__str__Json`) all
+        // order correctly: `Json` is forward-declared early (so `Vec__Json`'s `Json* data`
+        // resolves), emitted once its by-value payload deps are met, and recorded in
+        // `emitted_compounds` so wrappers that embed `Json` BY VALUE wait for it.
+        var remaining_nongeneric_enums = ArrayList(*ast.Node).init(self.allocator);
+        defer remaining_nongeneric_enums.deinit();
+        for (enum_nodes.items) |enode| {
+            if (enode.node_variant == null) continue;
+            if (self.is_std_c_signature_node(enode)) continue;
+            const e = enode.node_variant.?.enum_decl;
+            if (!enum_is_tagged_union(e)) continue;
+            if (e.type_params != null) continue;
+            if (emitted_enum_names.contains(e.name.items)) continue;
+            remaining_nongeneric_enums.append(enode) catch return TranspileError.MemoryAllocationFailed;
+        }
+
+        while (remaining.items.len > 0 or remaining_specs.items.len > 0 or remaining_enum_specs.items.len > 0 or remaining_nongeneric_enums.items.len > 0) {
             var progress = false;
 
             var si: usize = 0;
@@ -12473,6 +12586,30 @@ pub const TranspileProcess = struct {
                     return TranspileError.MemoryAllocationFailed;
                 };
                 _ = remaining_enum_specs.swapRemove(ei);
+                progress = true;
+            }
+
+            // Emit a non-generic data enum once its by-value payload deps are emitted.
+            // Record it in `emitted_compounds` (alongside compounds/enum-instances) so
+            // anything embedding it by value (Option<Json>, Vec__Json) orders after it.
+            var ni: usize = 0;
+            while (ni < remaining_nongeneric_enums.items.len) {
+                const enode = remaining_nongeneric_enums.items[ni];
+                const e = enode.node_variant.?.enum_decl;
+                if (!self.nongeneric_enum_deps_satisfied(e, &emitted_compounds)) {
+                    ni += 1;
+                    continue;
+                }
+                if (!emitted_enum_names.contains(e.name.items)) {
+                    try self.emit_tagged_union_enum(e);
+                    emitted_enum_names.put(e.name.items, true) catch {
+                        return TranspileError.MemoryAllocationFailed;
+                    };
+                }
+                emitted_compounds.put(e.name.items, true) catch {
+                    return TranspileError.MemoryAllocationFailed;
+                };
+                _ = remaining_nongeneric_enums.swapRemove(ni);
                 progress = true;
             }
 
@@ -13451,7 +13588,13 @@ pub const TranspileProcess = struct {
                 // instance must be fully emitted first. Other names (primitives,
                 // plain enums that are emitted up front) impose no ordering.
                 const is_compound_dep = reg.compounds_by_name.contains(dep_base);
-                const is_enum_inst_dep = reg.enums_by_name.contains(dep_base) and !mem.eql(u8, dep, dep_base);
+                // A by-value enum dep is either a MANGLED generic instance (`Option__num`,
+                // dep != dep_base) OR a non-generic tagged-union enum named directly
+                // (`Json`, dep == dep_base) — the latter matters for RECURSIVE enums where
+                // a spec embeds the enum by value. Plain (payload-free) enums emit up front
+                // and impose no ordering.
+                const is_enum_inst_dep = reg.enums_by_name.contains(dep_base) and
+                    (!mem.eql(u8, dep, dep_base) or self.enum_name_is_tagged_union(dep_base));
                 if (!is_compound_dep and !is_enum_inst_dep) continue;
                 if (!emitted.contains(dep)) return false;
             }
@@ -13504,10 +13647,50 @@ pub const TranspileProcess = struct {
                     defer if (needs_free) self.allocator.free(dep);
                     const dep_base = if (mem.indexOf(u8, dep, "__")) |idx| dep[0..idx] else dep;
                     const is_compound = reg.compounds_by_name.contains(dep_base);
-                    const is_enum_inst = reg.enums_by_name.contains(dep_base) and !mem.eql(u8, dep, dep_base);
+                    // See generic_spec_deps_satisfied: accept a directly-named non-generic
+                    // tagged-union enum (recursive-enum by-value payload) as a dep too.
+                    const is_enum_inst = reg.enums_by_name.contains(dep_base) and
+                        (!mem.eql(u8, dep, dep_base) or self.enum_name_is_tagged_union(dep_base));
                     if (!is_compound and !is_enum_inst) continue;
                     if (!emitted.contains(dep)) return false;
                 }
+            }
+        }
+        return true;
+    }
+
+    /// True once every BY-VALUE payload type of a NON-GENERIC data enum has been emitted
+    /// (tracked in `emitted`). Pointer/array payloads impose no ordering — which is why a
+    /// recursive `Json { Arr(Vec<Json>) }` resolves: `Vec<Json>`'s only Json reference is
+    /// `Json* data` (a pointer), so `Vec__Json` emits with just Json's forward decl, then
+    /// satisfies this check for `Json` itself.
+    fn nongeneric_enum_deps_satisfied(self: *Self, e: anytype, emitted: *std.StringHashMap(bool)) bool {
+        const reg = self.root_registry() orelse return true;
+        for (e.variants.items()) |v| {
+            const payload = v.payload orelse continue;
+            for (payload.items()) |pt| {
+                if (pt.pointer_depth != 0) continue;
+                if (pt.flags != null and pt.flags.?.is_array) continue;
+                if (pt.type != null and pt.type != .Unknown) continue;
+                if (pt.type_str.items.len == 0) continue;
+                var needs_free = false;
+                const dep = if (pt.generic_args != null) blk: {
+                    needs_free = true;
+                    break :blk self.type_name_mangled(pt) catch return true;
+                } else pt.type_str.items;
+                defer if (needs_free) self.allocator.free(dep);
+                const dep_base = if (mem.indexOf(u8, dep, "__")) |idx| dep[0..idx] else dep;
+                const is_compound = reg.compounds_by_name.contains(dep_base);
+                // A directly-named non-generic data enum payload (mutual recursion between
+                // two data enums) or a generic enum/compound instance is a real dep.
+                const is_enum_dep = reg.enums_by_name.contains(dep_base) and
+                    (!mem.eql(u8, dep, dep_base) or self.enum_name_is_tagged_union(dep_base));
+                if (!is_compound and !is_enum_dep) continue;
+                // A variant payload that is the enum ITSELF by value would be an infinite
+                // size (illegal in C anyway); only pointer self-reference is valid, already
+                // skipped above. So a self-named by-value dep can't be satisfied — but that
+                // case doesn't arise for well-formed enums (Vec/Map wrap the recursion).
+                if (!emitted.contains(dep)) return false;
             }
         }
         return true;

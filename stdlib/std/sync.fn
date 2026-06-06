@@ -7,7 +7,6 @@
 // - unlock/signal/destroy on uninitialized wrappers are treated as no-ops.
 
 imp std.c.thread;
-imp std.c.def;
 
 // Managed mutex.
 pub compound Mutex {
@@ -54,7 +53,7 @@ impl Mutex {
     if self.initialized == true {
       ret 0;
     }
-    num rc = pthread_mutex_init(&self.inner, NULL);
+    num rc = pthread_mutex_init(&self.inner, nil);
     if rc == 0 {
       self.initialized = true;
     }
@@ -137,7 +136,7 @@ impl CondVar {
     if self.initialized == true {
       ret 0;
     }
-    num rc = pthread_cond_init(&self.inner, NULL);
+    num rc = pthread_cond_init(&self.inner, nil);
     if rc == 0 {
       self.initialized = true;
     }
@@ -160,7 +159,7 @@ impl CondVar {
         ret init_rc;
       }
     }
-    if mutex == NULL {
+    if mutex == nil {
       ret -1;
     }
     if mutex.initialized == false {
@@ -190,10 +189,10 @@ impl CondVar {
         ret init_rc;
       }
     }
-    if mutex == NULL {
+    if mutex == nil {
       ret -1;
     }
-    if abs_time == NULL {
+    if abs_time == nil {
       ret -2;
     }
     if mutex.initialized == false {
@@ -259,7 +258,7 @@ impl CondVar {
 // - -1 when mutex is null
 // - pthread return code on failure
 pub fun mutex_init(Mutex* mutex) num {
-  if mutex == NULL {
+  if mutex == nil {
     ret -1;
   }
 
@@ -267,7 +266,7 @@ pub fun mutex_init(Mutex* mutex) num {
     ret 0;
   }
 
-  num rc = pthread_mutex_init(&mutex.inner, NULL);
+  num rc = pthread_mutex_init(&mutex.inner, nil);
   if rc == 0 {
     mutex.initialized = true;
   }
@@ -281,7 +280,7 @@ pub fun mutex_init(Mutex* mutex) num {
 // - -1 when mutex is null
 // - pthread return code on failure
 pub fun mutex_lock(Mutex* mutex) num {
-  if mutex == NULL {
+  if mutex == nil {
     ret -1;
   }
 
@@ -303,7 +302,7 @@ pub fun mutex_lock(Mutex* mutex) num {
 // - -1 when mutex is null
 // - pthread return code on failure
 pub fun mutex_try_lock(Mutex* mutex) num {
-  if mutex == NULL {
+  if mutex == nil {
     ret -1;
   }
 
@@ -325,7 +324,7 @@ pub fun mutex_try_lock(Mutex* mutex) num {
 // - -1 when mutex is null
 // - pthread return code on failure
 pub fun mutex_unlock(Mutex* mutex) num {
-  if mutex == NULL {
+  if mutex == nil {
     ret -1;
   }
 
@@ -344,7 +343,7 @@ pub fun mutex_unlock(Mutex* mutex) num {
 // - -1 when mutex is null
 // - pthread return code on failure
 pub fun mutex_destroy(Mutex* mutex) num {
-  if mutex == NULL {
+  if mutex == nil {
     ret -1;
   }
 
@@ -366,7 +365,7 @@ pub fun mutex_destroy(Mutex* mutex) num {
 // - -1 when cond is null
 // - pthread return code on failure
 pub fun condvar_init(CondVar* cond) num {
-  if cond == NULL {
+  if cond == nil {
     ret -1;
   }
 
@@ -374,7 +373,7 @@ pub fun condvar_init(CondVar* cond) num {
     ret 0;
   }
 
-  num rc = pthread_cond_init(&cond.inner, NULL);
+  num rc = pthread_cond_init(&cond.inner, nil);
   if rc == 0 {
     cond.initialized = true;
   }
@@ -388,7 +387,7 @@ pub fun condvar_init(CondVar* cond) num {
 // - -1 when cond or mutex is null
 // - pthread return code on failure
 pub fun condvar_wait(CondVar* cond, Mutex* mutex) num {
-  if cond == NULL || mutex == NULL {
+  if cond == nil || mutex == nil {
     ret -1;
   }
 
@@ -418,11 +417,11 @@ pub fun condvar_wait(CondVar* cond, Mutex* mutex) num {
 // - -2 when abs_time is null
 // - pthread return code on timeout/failure
 pub fun condvar_timed_wait(CondVar* cond, Mutex* mutex, raw* abs_time) num {
-  if cond == NULL || mutex == NULL {
+  if cond == nil || mutex == nil {
     ret -1;
   }
 
-  if abs_time == NULL {
+  if abs_time == nil {
     ret -2;
   }
 
@@ -451,7 +450,7 @@ pub fun condvar_timed_wait(CondVar* cond, Mutex* mutex, raw* abs_time) num {
 // - -1 when cond is null
 // - pthread return code on failure
 pub fun condvar_signal(CondVar* cond) num {
-  if cond == NULL {
+  if cond == nil {
     ret -1;
   }
 
@@ -470,7 +469,7 @@ pub fun condvar_signal(CondVar* cond) num {
 // - -1 when cond is null
 // - pthread return code on failure
 pub fun condvar_broadcast(CondVar* cond) num {
-  if cond == NULL {
+  if cond == nil {
     ret -1;
   }
 
@@ -489,7 +488,7 @@ pub fun condvar_broadcast(CondVar* cond) num {
 // - -1 when cond is null
 // - pthread return code on failure
 pub fun condvar_destroy(CondVar* cond) num {
-  if cond == NULL {
+  if cond == nil {
     ret -1;
   }
 

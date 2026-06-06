@@ -153,6 +153,18 @@ pub fn callParenIsDeclaration(tokens: []const TokenLite, name_i: usize, lparen_i
         }
     }
 
+    // Signal 2 guard: a declaration name sits at a statement boundary — preceded by
+    // `{`/`}`/`;` or nothing (Signal 1 already handled `fun`/`pub`/`async`). If `name`
+    // is instead preceded by an expression-introducing token, `name(...)` is a CALL,
+    // and the `)`-then-`{` brace heuristic below would misfire. The canonical case is
+    // a `fit`/`if`/`while`/`for` subject whose body brace follows: `fit parse(src) {`.
+    if (prevNonTrivialTokenLite(tokens, name_i)) |pi| {
+        const p = tokens[pi];
+        const at_stmt_boundary = (p.kind == .symbol or p.kind == .operator) and
+            (std.mem.eql(u8, p.text, "{") or std.mem.eql(u8, p.text, "}") or std.mem.eql(u8, p.text, ";"));
+        if (!at_stmt_boundary) return false;
+    }
+
     // Signal 2: matching `)` eventually followed by `{`, over only type-ish tokens.
     const rparen = findMatchingRParenLite(tokens, lparen_i) orelse return false;
     var k = nextNonTrivialTokenLite(tokens, rparen + 1) orelse return false;
@@ -1133,4 +1145,20 @@ test "fls: callParenIsDeclaration treats a method call (recv.m(...)) as NOT a de
         .{ .k = .symbol, .t = ";" }, // 8
     });
     try std.testing.expect(!callParenIsDeclaration(toks, 2, 3));
+}
+
+test "fls: callParenIsDeclaration treats a fit-subject call (fit f(x) {) as NOT a declaration" {
+    var buf: [16]TokenLite = undefined;
+    // fit parse ( src ) {  — the `)`-then-`{` looks like a decl, but `fit` before the
+    // name makes it a call expression (the fit subject). Must NOT be a declaration,
+    // otherwise inlay parameter hints are wrongly suppressed on the subject call.
+    const toks = mkToks(&buf, &.{
+        .{ .k = .keyword, .t = "fit" }, // 0
+        .{ .k = .identifier, .t = "parse" }, // 1 (name)
+        .{ .k = .symbol, .t = "(" }, // 2 (lparen)
+        .{ .k = .identifier, .t = "src" }, // 3
+        .{ .k = .symbol, .t = ")" }, // 4
+        .{ .k = .symbol, .t = "{" }, // 5
+    });
+    try std.testing.expect(!callParenIsDeclaration(toks, 1, 2));
 }

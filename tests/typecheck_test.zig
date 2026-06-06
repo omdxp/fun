@@ -892,17 +892,23 @@ test "typecheck std serde quirks with json" {
     const input =
         "imp stdlib.std.serde;\n" ++
         "imp stdlib.std.json;\n" ++
+        "imp stdlib.std.option;\n" ++
+        "imp stdlib.std.result;\n" ++
+        "imp stdlib.std.string;\n" ++
         "fun main() {\n" ++
-        "  JsonObject j = json_object_init();\n" ++
-        "  j.set(\"name\", \"fun\");\n" ++
-        "  Serialize js = &j;\n" ++
+        "  let o = json_object();\n" ++
+        "  o.put(\"name\", json_str(\"fun\"));\n" ++
+        "  JsonValue doc = JsonValue.Object(o);\n" ++
+        "  Serialize js = &doc;\n" ++
         "  str json_text = to_string(js);\n" ++
         "\n" ++
-        "  JsonObject j2 = json_object_init();\n" ++
-        "  Deserialize jd = &j2;\n" ++
-        "  from_string(jd, json_text);\n" ++
-        "\n" ++
-        "  if j2.get(\"name\") == \"fun\" { ret; }\n" ++
+        "  fit parse(json_text) {\n" ++
+        "    Result.Ok(parsed) -> {\n" ++
+        "      let name = parsed.get(\"name\").unwrap_or(JsonValue.Null);\n" ++
+        "      if equals(name.as_str().unwrap_or(\"\"), \"fun\") { ret; }\n" ++
+        "    }\n" ++
+        "    Result.Err(e) -> { ret; }\n" ++
+        "  }\n" ++
         "}\n";
 
     try runTranspileExpectOk(std.testing.allocator, "typecheck_std_serde_json_ok.fn", input);
@@ -912,9 +918,11 @@ test "typecheck std serde quirks with toml" {
     const input =
         "imp stdlib.std.serde;\n" ++
         "imp stdlib.std.toml;\n" ++
+        "imp stdlib.std.option;\n" ++
+        "imp stdlib.std.string;\n" ++
         "fun main() {\n" ++
         "  TomlDoc t = toml_doc_init();\n" ++
-        "  t.set(\"channel\", \"stable\");\n" ++
+        "  t.set(\"channel\", TomlValue.Str(\"stable\"));\n" ++
         "  Serialize ts = &t;\n" ++
         "  str toml_text = to_string(ts);\n" ++
         "\n" ++
@@ -922,7 +930,8 @@ test "typecheck std serde quirks with toml" {
         "  Deserialize td = &t2;\n" ++
         "  from_string(td, toml_text);\n" ++
         "\n" ++
-        "  if t2.get(\"channel\") == \"stable\" { ret; }\n" ++
+        "  let v = t2.get(\"channel\").unwrap_or(TomlValue.Str(\"\"));\n" ++
+        "  if equals(v.as_str().unwrap_or(\"\"), \"stable\") { ret; }\n" ++
         "}\n";
 
     try runTranspileExpectOk(std.testing.allocator, "typecheck_std_serde_toml_ok.fn", input);

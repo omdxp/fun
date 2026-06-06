@@ -1,28 +1,22 @@
-imp std.io as io;
+// Iterate the elements of a parsed JSON array, reading each typed value.
+
+imp std.c.io;
 imp std.json;
-imp std.string;
+imp std.option;
+imp std.result;
+imp std.vec;
 
-fun main() {
-  StringBuilder b = string_builder_init(4);
-  b.append_char('{');
-  b.append_char('"');
-  b.append("key");
-  b.append_char('"');
-  b.append(": ");
-  b.append_char('"');
-  b.append("value");
-  b.append_char('"');
-  b.append_char('}');
-  str src = b.build();
-  b.free();
-
-  JsonObject obj = parse_object(src);
-  defer obj.free();
-
-  let vals = obj.values.values();
-  defer vals.free();
-
-  for val : vals {
-    io.println(val);
+fun main() num {
+  fit parse("[10, 20, 30]") {
+    Result.Ok(doc) -> {
+      let items = doc.as_array().unwrap_or(json_array());
+      dec sum = 0.0;
+      for item : items {
+        sum = sum + item.as_num().unwrap_or(0.0);
+      }
+      printf("count=%lld sum=%g\n", items.len(), sum);
+    }
+    Result.Err(e) -> { printf("parse failed\n"); }
   }
+  ret 0;
 }

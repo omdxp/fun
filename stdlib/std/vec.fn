@@ -11,7 +11,6 @@
 imp std.c.mem;
 imp std.c.string;
 imp std.c.io;
-imp std.c.def;
 imp std.quirks;
 imp std.option;
 
@@ -366,8 +365,8 @@ impl Vec<str> {
     num count = self.len;
     if count == 0 {
       str out_empty = malloc(1);
-      if out_empty == NULL {
-        ret NULL;
+      if out_empty == nil {
+        ret nil;
       }
       out_empty[0] = '\0';
       ret out_empty;
@@ -382,8 +381,8 @@ impl Vec<str> {
     total = total + sep_len * (count - 1);
 
     str out = malloc(total + 1);
-    if out == NULL {
-      ret NULL;
+    if out == nil {
+      ret nil;
     }
 
     num pos = 0;
@@ -525,8 +524,8 @@ impl Vec<num> as Display {
     // element, two bytes per separator, and the surrounding brackets.
     num budget = self.len * 24 + self.len * 2 + 3;
     str out = malloc(budget);
-    if out == NULL {
-      ret NULL;
+    if out == nil {
+      ret nil;
     }
     chr[24] cell;
     num pos = 0;
@@ -649,8 +648,8 @@ impl Vec<str> as Display {
       i = i + 1;
     }
     str out = malloc(total + 1);
-    if out == NULL {
-      ret NULL;
+    if out == nil {
+      ret nil;
     }
     num pos = 0;
     out[pos] = '[';

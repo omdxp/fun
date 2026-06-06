@@ -1,33 +1,28 @@
-// JSON helpers example.
+// Typed JSON: parse text into a JsonValue, read fields with typed accessors, and
+// render back with stringify.
 
 imp std.c.io;
 imp std.json;
-imp std.string;
+imp std.option;
+imp std.result;
 
-fun main() {
-  StringBuilder b = string_builder_init(8);
-  b.append_char('{');
-  b.append_char('"');
-  b.append("name");
-  b.append_char('"');
-  b.append(": ");
-  b.append_char('"');
-  b.append("fun");
-  b.append_char('"');
-  b.append(", ");
-  b.append_char('"');
-  b.append("version");
-  b.append_char('"');
-  b.append(": 1");
-  b.append_char('}');
-  str src = b.build();
-  b.free();
+fun main() num {
+  let src = "{\"name\": \"fun\", \"version\": 1, \"stable\": true}";
 
-  JsonObject obj = parse_object(src);
-  printf("name=%s\n", obj.get("name"));
+  fit parse(src) {
+    Result.Ok(doc) -> {
+      // get(key) returns Option<JsonValue>; the as_* accessors narrow the type.
+      let name = doc.get("name").unwrap_or(JsonValue.Null);
+      printf("name=%s\n", name.as_str().unwrap_or("?"));
 
-  str out = obj.stringify();
-  printf("json=%s\n", out);
+      let version = doc.get("version").unwrap_or(JsonValue.Null);
+      printf("version=%g\n", version.as_num().unwrap_or(0.0));
 
-  obj.free();
+      // Round-trips back to JSON text.
+      printf("json=%s\n", doc.to_string());
+    }
+    Result.Err(e) -> { printf("parse failed\n"); }
+  }
+
+  ret 0;
 }

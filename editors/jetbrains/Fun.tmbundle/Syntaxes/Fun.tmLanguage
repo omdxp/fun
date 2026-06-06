@@ -191,7 +191,7 @@
         <string>keyword.control.fun</string>
         <key>match</key>
         <string>
-          \b(imp|as|pub|fun|compound|quirk|impl|enum|let|asm|volatile|arch|defer|ret|if|elif|else|for|fit|async|await|break|continue|assert|allow|expect)\b</string>
+          \b(imp|as|pub|fun|compound|quirk|impl|enum|let|asm|volatile|arch|defer|ret|if|elif|else|for|fit|async|await|fork|break|continue|assert|allow|expect)\b</string>
       </dict>
       <dict>
         <key>name</key>
@@ -211,6 +211,12 @@
         <string>constant.language.boolean.fun</string>
         <key>match</key>
         <string>\b(true|false)\b</string>
+      </dict>
+      <dict>
+        <key>name</key>
+        <string>constant.language.null.fun</string>
+        <key>match</key>
+        <string>\b(nil)\b</string>
       </dict>
       <dict>
         <key>name</key>

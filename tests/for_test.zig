@@ -109,15 +109,15 @@ test "for Vec values transpiles via len and data" {
 
     const input =
         "imp std.io as io;\n" ++
-        "imp std.json;\n" ++
+        "imp std.vec;\n" ++
         "fun main() {\n" ++
-        "  JsonObject obj = parse_object(\"{'key': 'value'}\");\n" ++
-        "  let vals = obj.values.values();\n" ++
+        "  Vec<str> vals;\n" ++
+        "  vals.init(0);\n" ++
+        "  vals.push(\"value\");\n" ++
         "  for val : vals {\n" ++
         "    io.println(val);\n" ++
         "  }\n" ++
         "  vals.free();\n" ++
-        "  obj.free();\n" ++
         "}\n";
 
     const out_owned = try runTranspile(allocator, ifilepath, input);

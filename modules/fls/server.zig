@@ -4237,7 +4237,9 @@ pub const LspServer = struct {
             }
         }
 
-        // 3) Fit context: `fit <enum_expr> { .Variant -> ... }`.
+        // 3) Fit context: `fit <enum_expr> { .Variant -> ... }`. The subject may be a
+        // bare variable/enum name OR a call whose return type is the enum (`fit
+        // parse(src) { .Ok -> ... }` where parse returns `Result<JsonValue>`).
         var f: isize = @as(isize, @intCast(dot_i)) - 1;
         while (f >= 0) : (f -= 1) {
             const t = idx.tokens[@intCast(f)];
@@ -4250,11 +4252,42 @@ pub const LspServer = struct {
                 if (self.guessVariableType(idx, uri, name, dot_pos)) |vt| {
                     if (self.isEnumTypeName(uri, vt)) return vt;
                 }
+                // Call subject: resolve the callee's return type and, if it names an
+                // enum (possibly generic, `Result<JsonValue>` -> `Result`), use it.
+                const next_after = nextNonTrivialTokenLite(idx.tokens, after_i + 1) orelse return null;
+                if (isOpenParen(idx.tokens[next_after])) {
+                    if (self.calleeSignatureDetail(uri, idx, after_i)) |detail| {
+                        if (returnTypeNameFromSignatureLabel(detail)) |rt| {
+                            if (self.isEnumTypeName(uri, rt)) return rt;
+                        }
+                    }
+                }
                 return null;
             }
         }
 
         return null;
+    }
+
+    /// Extract the base type name from a function signature label's return type, e.g.
+    /// `parse(str src) Result<JsonValue>` -> `Result`. Returns null when there is no
+    /// return type. The base name strips any generic args (`<...>`).
+    fn returnTypeNameFromSignatureLabel(detail: []const u8) ?[]const u8 {
+        // The return type follows the parameter list's closing `)`.
+        const close = std.mem.lastIndexOfScalar(u8, detail, ')') orelse return null;
+        var s = detail[close + 1 ..];
+        // Trim leading spaces.
+        while (s.len != 0 and (s[0] == ' ' or s[0] == '\t')) s = s[1..];
+        if (s.len == 0) return null;
+        // Base name = up to the first non-identifier char (`<`, space, `*`, `[`).
+        var end: usize = 0;
+        while (end < s.len) : (end += 1) {
+            const c = s[end];
+            const ok = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_';
+            if (!ok) break;
+        }
+        if (end == 0) return null;
+        return s[0..end];
     }
 
     fn guessEnclosingImplType(self: *LspServer, idx: *const Index, at: Position) ?[]const u8 {
@@ -5872,12 +5905,12 @@ pub const LspServer = struct {
     }
 
     fn appendCMacroCompletionsForImports(self: *LspServer, items: *ArrayList(CompletionItem), idx: *const Index, prefix: []const u8) !void {
-        // Avoid noisy global completion: only suggest macros when user is typing an
-        // ALL_CAPS-ish prefix.
         if (prefix.len == 0) return;
+        // Macros are ALL_CAPS; only offer them for an uppercase/underscore prefix to
+        // avoid noise. Lowercase prefixes may still match a stddef TYPE name (`size_t`),
+        // so we don't bail outright — `offer_macros` just gates the macro lists.
         const c0 = prefix[0];
-        const is_macro_prefix = (c0 >= 'A' and c0 <= 'Z') or c0 == '_';
-        if (!is_macro_prefix) return;
+        const offer_macros = (c0 >= 'A' and c0 <= 'Z') or c0 == '_';
 
         var has_limits = false;
         var has_stddef = false;
@@ -5895,8 +5928,29 @@ pub const LspServer = struct {
 
         const Macro = struct { name: []const u8, detail: []const u8 };
 
+        // `std.c.def` (stddef.h) — value macros. Ownership mirrors the compiler's
+        // `c_builtin_owner_module` table (transpiler.zig), so completion matches what
+        // actually resolves at compile time.
         const stddef_macros = [_]Macro{
-            .{ .name = "NULL", .detail = "stddef.h macro" },
+            .{ .name = "NULL", .detail = "stddef.h macro (prefer the `nil` keyword)" },
+            .{ .name = "SIZE_MAX", .detail = "stddef.h-related macro" },
+            .{ .name = "RSIZE_MAX", .detail = "stddef.h-related macro" },
+            .{ .name = "PTRDIFF_MIN", .detail = "stddef.h-related macro" },
+            .{ .name = "PTRDIFF_MAX", .detail = "stddef.h-related macro" },
+            .{ .name = "WCHAR_MIN", .detail = "stddef.h-related macro" },
+            .{ .name = "WCHAR_MAX", .detail = "stddef.h-related macro" },
+            .{ .name = "WINT_MIN", .detail = "stddef.h-related macro" },
+            .{ .name = "WINT_MAX", .detail = "stddef.h-related macro" },
+        };
+
+        // `std.c.def` type names (offered as types when the user opts in).
+        const stddef_types = [_]Macro{
+            .{ .name = "size_t", .detail = "stddef.h type (numeric-compatible)" },
+            .{ .name = "ptrdiff_t", .detail = "stddef.h type (numeric-compatible)" },
+            .{ .name = "wchar_t", .detail = "stddef.h type (numeric-compatible)" },
+            .{ .name = "rsize_t", .detail = "stddef.h type (numeric-compatible)" },
+            .{ .name = "va_list", .detail = "stdarg.h opaque type" },
+            .{ .name = "max_align_t", .detail = "stddef.h opaque alignment type" },
         };
 
         const limits_macros = [_]Macro{
@@ -5924,31 +5978,33 @@ pub const LspServer = struct {
             .{ .name = "LLONG_MIN", .detail = "limits.h macro" },
             .{ .name = "LLONG_MAX", .detail = "limits.h macro" },
             .{ .name = "ULLONG_MAX", .detail = "limits.h macro" },
-
-            // Often available via related headers; still useful to offer when the user
-            // opts into `limits`.
-            .{ .name = "SIZE_MAX", .detail = "limits.h-related macro" },
-            .{ .name = "RSIZE_MAX", .detail = "limits.h-related macro" },
-            .{ .name = "PTRDIFF_MIN", .detail = "limits.h-related macro" },
-            .{ .name = "PTRDIFF_MAX", .detail = "limits.h-related macro" },
-            .{ .name = "WCHAR_MIN", .detail = "limits.h-related macro" },
-            .{ .name = "WCHAR_MAX", .detail = "limits.h-related macro" },
-            .{ .name = "WINT_MIN", .detail = "limits.h-related macro" },
-            .{ .name = "WINT_MAX", .detail = "limits.h-related macro" },
+            // Note: SIZE_MAX / RSIZE_MAX / PTRDIFF_* / WCHAR_* / WINT_* are owned by
+            // `std.c.def` (see the compiler's c_builtin_owner_module table), so they are
+            // offered from `stddef_macros` above, not here.
         };
 
         if (has_stddef) {
-            for (stddef_macros) |m| {
+            if (offer_macros) {
+                for (stddef_macros) |m| {
+                    if (!std.mem.startsWith(u8, m.name, prefix)) continue;
+                    try items.append(.{
+                        .label = try self.allocator.dupe(u8, m.name),
+                        .kind = 21, // CompletionItemKind.Constant
+                        .detail = try self.allocator.dupe(u8, m.detail),
+                    });
+                }
+            }
+            for (stddef_types) |m| {
                 if (!std.mem.startsWith(u8, m.name, prefix)) continue;
                 try items.append(.{
                     .label = try self.allocator.dupe(u8, m.name),
-                    .kind = 21, // CompletionItemKind.Constant
+                    .kind = 22, // CompletionItemKind.Struct (a type)
                     .detail = try self.allocator.dupe(u8, m.detail),
                 });
             }
         }
 
-        if (has_limits) {
+        if (has_limits and offer_macros) {
             for (limits_macros) |m| {
                 if (!std.mem.startsWith(u8, m.name, prefix)) continue;
                 try items.append(.{

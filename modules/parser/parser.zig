@@ -2929,6 +2929,20 @@ pub const ParseProcess = struct {
             .Keyword => {
                 const kw = t.?.data.sval.items;
 
+                // `nil` as a primary EXPRESSION operand. Handling it here (rather than
+                // only in parse_keyword) ensures a following binary operator binds to it
+                // as its left/right operand: `x != nil && y` must parse `nil` as the RHS
+                // of `!=`, leaving the `!=` expression as the left operand of `&&`.
+                // Routing through parse_keyword instead pushed a bare .Nil node without
+                // the operand-completion the binary-op loop relies on.
+                if (mem.eql(u8, kw, "nil")) {
+                    const nil_tok = self.token_next();
+                    self.transpile_proc.nodes.push(ast.Node{ .type = .Nil, .pos = nil_tok.?.pos }) catch {
+                        return ParseError.MemoryAllocationFailed;
+                    };
+                    return true;
+                }
+
                 // Phase 1 async surface: parse `await expr` and lower it as `expr`.
                 if (mem.eql(u8, kw, "await")) {
                     return try self.parse_await_operand(hist);

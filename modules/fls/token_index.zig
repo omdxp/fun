@@ -616,6 +616,21 @@ fn prescanEnumVariantPayloads(allocator: Allocator, tokens: []const token.Token,
         if (!isIdent(tokens[name_i])) continue;
         const enum_name = tokenString(tokens[name_i]);
         var open_i = nextNonTrivialToken(tokens, name_i + 1) orelse continue;
+        // Skip an optional generic type-parameter list: `enum Box<T> { ... }`. Without
+        // this, a generic enum's `<...>` was mistaken for "not a body" and the whole
+        // enum (its variant payloads) was skipped.
+        if (isPunctChar(tokens[open_i], '<')) {
+            var angle: i64 = 0;
+            var s = open_i;
+            while (s < tokens.len) : (s += 1) {
+                if (isPunctChar(tokens[s], '<')) angle += 1;
+                if (isPunctChar(tokens[s], '>')) {
+                    angle -= 1;
+                    if (angle <= 0) break;
+                }
+            }
+            open_i = nextNonTrivialToken(tokens, s + 1) orelse continue;
+        }
         if (!(isSymbolChar(tokens[open_i], '{') or isPunctChar(tokens[open_i], '{'))) continue;
 
         var depth: i64 = 1;
@@ -666,6 +681,129 @@ fn prescanEnumVariantPayloads(allocator: Allocator, tokens: []const token.Token,
     while (it.next()) |key| _ = map.remove(key.*);
 }
 
+/// Pre-scan `enum Name<A, B> { ... }` blocks and record each generic enum's
+/// type-parameter spellings (`Name` -> ["A", "B"]). Used to substitute a bare
+/// type-param payload (`Ok(T)`) with the fit subject's concrete arg.
+fn prescanEnumTypeParams(allocator: Allocator, tokens: []const token.Token, map: *std.StringHashMap([]const []const u8)) !void {
+    var i: usize = 0;
+    while (i < tokens.len) : (i += 1) {
+        if (!isKeyword(tokens[i], "enum")) continue;
+        const name_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
+        if (!isIdent(tokens[name_i])) continue;
+        const enum_name = tokenString(tokens[name_i]);
+        const after_name = nextNonTrivialToken(tokens, name_i + 1) orelse continue;
+        if (!isPunctChar(tokens[after_name], '<')) continue;
+        // Collect comma-separated identifiers until the matching `>`.
+        var params = ArrayList([]const u8).init(allocator);
+        errdefer params.deinit();
+        var angle: i64 = 1;
+        var k = after_name + 1;
+        while (k < tokens.len and angle > 0) : (k += 1) {
+            const t = tokens[k];
+            if (isPunctChar(t, '<')) {
+                angle += 1;
+                continue;
+            }
+            if (isPunctChar(t, '>')) {
+                angle -= 1;
+                continue;
+            }
+            if (angle == 1 and isIdent(t)) {
+                params.append(tokenString(t)) catch {};
+            }
+        }
+        if (params.items.len != 0) {
+            map.put(enum_name, params.toOwnedSlice() catch continue) catch {};
+        } else {
+            params.deinit();
+        }
+    }
+}
+
+/// Given a fit-arm variant token index, scan back to the enclosing `fit <subject> {`
+/// header, resolve the subject's type (a local/global var), and return its generic
+/// args spelled out (e.g. `Result<JsonValue>` -> ["JsonValue"]). Returns null when
+/// the subject is not a simple typed variable. Best-effort, allocation-light.
+fn fitSubjectGenericArgs(
+    allocator: Allocator,
+    tokens: []const token.Token,
+    variant_i: usize,
+    locals: *const std.StringHashMap([]const u8),
+    globals: *const std.StringHashMap([]const u8),
+) ?[]const []const u8 {
+    // Walk back to the nearest `fit` keyword at the start of an enclosing statement.
+    var depth: i64 = 0;
+    var j: isize = @as(isize, @intCast(variant_i)) - 1;
+    while (j >= 0) : (j -= 1) {
+        const t = tokens[@intCast(j)];
+        if (isPunctChar(t, '}') or isSymbolChar(t, '}')) {
+            depth += 1;
+            continue;
+        }
+        if (isPunctChar(t, '{') or isSymbolChar(t, '{')) {
+            if (depth == 0) {
+                // This `{` opens the fit body; the subject is between `fit` and here.
+                break;
+            }
+            depth -= 1;
+            continue;
+        }
+    }
+    if (j < 0) return null;
+    const lbrace_j: usize = @intCast(j);
+    // The token right after `fit` is the subject's first token; find the `fit` keyword.
+    var f: isize = @as(isize, @intCast(lbrace_j)) - 1;
+    var subject_first: ?usize = null;
+    while (f >= 0) : (f -= 1) {
+        const t = tokens[@intCast(f)];
+        if (isKeyword(t, "fit")) {
+            subject_first = nextNonTrivialToken(tokens, @as(usize, @intCast(f)) + 1);
+            break;
+        }
+        // Bail if we cross a statement boundary without finding `fit`.
+        if (isPunctChar(t, ';') or isSymbolChar(t, ';')) return null;
+    }
+    const sf = subject_first orelse return null;
+    if (sf >= lbrace_j) return null;
+    // Only a bare-identifier subject is resolved (e.g. `fit r {`). A call subject
+    // (`fit parse(x) {`) would need cross-symbol return-type resolution — out of scope.
+    if (!isIdent(tokens[sf])) return null;
+    const next_after = nextNonTrivialToken(tokens, sf + 1) orelse lbrace_j;
+    if (next_after < lbrace_j) return null; // subject is more than one token (call/member)
+    const sname = tokenString(tokens[sf]);
+    const stype = (locals.get(sname) orelse globals.get(sname)) orelse return null;
+    return genericArgSpellings(allocator, stype);
+}
+
+/// Split the generic args of a type spelling: `Result<JsonValue>` -> ["JsonValue"],
+/// `Map<str, num>` -> ["str", "num"]. Returns null when there are no args.
+fn genericArgSpellings(allocator: Allocator, type_str: []const u8) ?[]const []const u8 {
+    const lt = std.mem.indexOfScalar(u8, type_str, '<') orelse return null;
+    const gt = std.mem.lastIndexOfScalar(u8, type_str, '>') orelse return null;
+    if (gt <= lt + 1) return null;
+    const inner = type_str[lt + 1 .. gt];
+    var out = ArrayList([]const u8).init(allocator);
+    errdefer out.deinit();
+    var depth: i64 = 0;
+    var start: usize = 0;
+    var idx: usize = 0;
+    while (idx < inner.len) : (idx += 1) {
+        const c = inner[idx];
+        if (c == '<') depth += 1;
+        if (c == '>') depth -= 1;
+        if (c == ',' and depth == 0) {
+            out.append(std.mem.trim(u8, inner[start..idx], " ")) catch {};
+            start = idx + 1;
+        }
+    }
+    out.append(std.mem.trim(u8, inner[start..], " ")) catch {};
+    if (out.items.len == 0) {
+        out.deinit();
+        return null;
+    }
+    return out.toOwnedSlice() catch null;
+}
+
 pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite), tokens: []const token.Token) !void {
     var brace_depth: i64 = 0;
     var paren_depth: i64 = 0;
@@ -713,6 +851,12 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
     var variant_payload_map = std.StringHashMap([]const u8).init(allocator);
     defer variant_payload_map.deinit();
     try prescanEnumVariantPayloads(allocator, tokens, &variant_payload_map);
+
+    // Generic enum type params (`Result` -> ["T"]), so a bare type-param payload
+    // (`Ok(T)`) can be substituted with the fit subject's concrete arg.
+    var enum_type_params_map = std.StringHashMap([]const []const u8).init(allocator);
+    defer enum_type_params_map.deinit();
+    try prescanEnumTypeParams(allocator, tokens, &enum_type_params_map);
 
     const putType = struct {
         // Populates a transient (arena-backed) name->type hint map used only to
@@ -3269,7 +3413,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                     if (is_arrow) {
                         const vname = tokenString(tokens[vi]);
                         // Resolve the variant's payload type for the bindings.
-                        const ptype: ?[]const u8 = blk: {
+                        var ptype: ?[]const u8 = blk: {
                             if (enum_qual) |eq| {
                                 const qkey = std.fmt.allocPrint(allocator, "{s}.{s}", .{ eq, vname }) catch break :blk null;
                                 defer allocator.free(qkey);
@@ -3277,6 +3421,27 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                             }
                             break :blk variant_payload_map.get(vname);
                         };
+                        // If the payload is a bare type parameter of a GENERIC enum
+                        // (`Result<T>.Ok(T)`), substitute it with the fit subject's
+                        // concrete arg (`fit r {` where `r: Result<JsonValue>` -> `JsonValue`).
+                        if (ptype) |pt| {
+                            if (enum_qual) |eq| {
+                                if (enum_type_params_map.get(eq)) |params| {
+                                    var pidx: ?usize = null;
+                                    for (params, 0..) |p, pi| {
+                                        if (std.mem.eql(u8, p, pt)) {
+                                            pidx = pi;
+                                            break;
+                                        }
+                                    }
+                                    if (pidx) |pi| {
+                                        if (fitSubjectGenericArgs(allocator, tokens, vi, &locals_type_map, &globals_type_map)) |args| {
+                                            if (pi < args.len) ptype = args[pi];
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         // Emit a typed local per positional binding identifier.
                         var b = open_i + 1;
                         while (b < close_i) : (b += 1) {

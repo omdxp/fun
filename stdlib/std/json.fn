@@ -1,48 +1,183 @@
-// Basic JSON object parsing/serialization (string values).
+// Typed JSON values.
 // 
-// Usage:
+// `JsonValue` is a data-carrying enum (sum type) modelling any JSON value: a null,
+// boolean, number, string, array, or object. Parse text into one with `parse`, inspect
+// it with the `as_*` accessors (each returns an `Option`), and render it back with
+// `stringify` / `to_string`.
+// 
 // ```
-// JsonObject o = json_object_init();
-// o.set("a", "1");
+// fit parse("{\"name\": \"fun\", \"version\": 1}") {
+//   Result.Ok(doc) -> {
+//     let name = doc.get("name").unwrap_or(JsonValue.Null).as_str().unwrap_or("?");
+//     print(name);
+//   }
+//   Result.Err(e) -> { log_error(e); }
+// }
 // ```
 
 imp std.map;
-imp std.serde;
-imp std.string;
 imp std.vec;
+imp std.option;
 imp std.result;
+imp std.error;
+imp std.string;
+imp std.math;
+imp std.quirks;
+imp std.serde;
+imp std.c.io;
 
-// JSON object with string values.
-pub compound JsonObject {
-  // key/value map (string values)
-  Map<str, str> values;
+// Any JSON value. Arrays and objects nest recursively.
+pub enum JsonValue {
+  Null,
+  Bool(bin),
+  // JSON numbers are decimals; integer-looking values still round-trip as integers.
+  Num(dec),
+  Str(str),
+  Array(Vec<JsonValue>),
+  Object(Map<str, JsonValue>),
 }
 
-// JSON array of strings.
-pub compound JsonArray {
-  // vector of string values
-  Vec<str> values;
+impl JsonValue {
+  // True when this value is JSON null.
+  pub is_null() bin {
+    fit *self {
+      JsonValue.Null -> { ret true; }
+      JsonValue.Bool(b) -> { ret false; }
+      JsonValue.Num(n) -> { ret false; }
+      JsonValue.Str(s) -> { ret false; }
+      JsonValue.Array(a) -> { ret false; }
+      JsonValue.Object(o) -> { ret false; }
+    }
+    ret false;
+  }
+
+  // The boolean, or None when this is not a Bool.
+  pub as_bool() Option<bin> {
+    fit *self {
+      JsonValue.Bool(b) -> { ret Option.Some(b); }
+      JsonValue.Null -> { ret Option.None; }
+      JsonValue.Num(n) -> { ret Option.None; }
+      JsonValue.Str(s) -> { ret Option.None; }
+      JsonValue.Array(a) -> { ret Option.None; }
+      JsonValue.Object(o) -> { ret Option.None; }
+    }
+    ret Option.None;
+  }
+
+  // The number (as a dec), or None when this is not a Num.
+  pub as_num() Option<dec> {
+    fit *self {
+      JsonValue.Num(n) -> { ret Option.Some(n); }
+      JsonValue.Null -> { ret Option.None; }
+      JsonValue.Bool(b) -> { ret Option.None; }
+      JsonValue.Str(s) -> { ret Option.None; }
+      JsonValue.Array(a) -> { ret Option.None; }
+      JsonValue.Object(o) -> { ret Option.None; }
+    }
+    ret Option.None;
+  }
+
+  // The string, or None when this is not a Str.
+  pub as_str() Option<str> {
+    fit *self {
+      JsonValue.Str(s) -> { ret Option.Some(s); }
+      JsonValue.Null -> { ret Option.None; }
+      JsonValue.Bool(b) -> { ret Option.None; }
+      JsonValue.Num(n) -> { ret Option.None; }
+      JsonValue.Array(a) -> { ret Option.None; }
+      JsonValue.Object(o) -> { ret Option.None; }
+    }
+    ret Option.None;
+  }
+
+  // The array elements, or None when this is not an Array. The Vec is a copy of the
+  // header (its elements are shared); treat it as read-only.
+  pub as_array() Option<Vec<JsonValue>> {
+    fit *self {
+      JsonValue.Array(a) -> { ret Option.Some(a); }
+      JsonValue.Null -> { ret Option.None; }
+      JsonValue.Bool(b) -> { ret Option.None; }
+      JsonValue.Num(n) -> { ret Option.None; }
+      JsonValue.Str(s) -> { ret Option.None; }
+      JsonValue.Object(o) -> { ret Option.None; }
+    }
+    ret Option.None;
+  }
+
+  // Look up a key on an Object: Some(value) when present, None otherwise (also None
+  // when this value is not an Object).
+  pub get(str key) Option<JsonValue> {
+    fit *self {
+      JsonValue.Object(o) -> { ret o.at(key); }
+      JsonValue.Null -> { ret Option.None; }
+      JsonValue.Bool(b) -> { ret Option.None; }
+      JsonValue.Num(n) -> { ret Option.None; }
+      JsonValue.Str(s) -> { ret Option.None; }
+      JsonValue.Array(a) -> { ret Option.None; }
+    }
+    ret Option.None;
+  }
+
+  // The element at array index `i`: Some(value) in range, None otherwise (also None
+  // when this value is not an Array).
+  pub index(num i) Option<JsonValue> {
+    fit *self {
+      JsonValue.Array(a) -> { ret a.at(i); }
+      JsonValue.Null -> { ret Option.None; }
+      JsonValue.Bool(b) -> { ret Option.None; }
+      JsonValue.Num(n) -> { ret Option.None; }
+      JsonValue.Str(s) -> { ret Option.None; }
+      JsonValue.Object(o) -> { ret Option.None; }
+    }
+    ret Option.None;
+  }
+
+  // Number of entries (Object) or elements (Array); 0 for scalars.
+  pub len() num {
+    fit *self {
+      JsonValue.Array(a) -> { ret a.len(); }
+      JsonValue.Object(o) -> { ret o.len(); }
+      JsonValue.Null -> { ret 0; }
+      JsonValue.Bool(b) -> { ret 0; }
+      JsonValue.Num(n) -> { ret 0; }
+      JsonValue.Str(s) -> { ret 0; }
+    }
+    ret 0;
+  }
 }
 
-// Create a new empty JSON object.
-// 
-// Returns:
-// - JsonObject with empty map
-pub fun json_object_init() JsonObject {
-  JsonObject o;
-  o.values.init(8);
-  ret o;
+// --- Convenience constructors --------------------------------------------------------
+
+// A JSON number from a decimal.
+pub fun json_num(dec n) JsonValue {
+  ret JsonValue.Num(n);
 }
 
-// Create a new empty JSON array.
-// 
-// Returns:
-// - JsonArray with empty vector
-pub fun json_array_init() JsonArray {
-  JsonArray a;
-  a.values.init(8);
-  ret a;
+// A JSON string.
+pub fun json_str(str s) JsonValue {
+  ret JsonValue.Str(s);
 }
+
+// A JSON boolean.
+pub fun json_bool(bin b) JsonValue {
+  ret JsonValue.Bool(b);
+}
+
+// An empty JSON object map you can fill with `put`, then wrap as `JsonValue.Object`.
+pub fun json_object() Map<str, JsonValue> {
+  Map<str, JsonValue> m;
+  m.init(8);
+  ret m;
+}
+
+// An empty JSON array vector you can fill with `push`, then wrap as `JsonValue.Array`.
+pub fun json_array() Vec<JsonValue> {
+  Vec<JsonValue> v;
+  v.init(8);
+  ret v;
+}
+
+// --- Serialization (stringify) -------------------------------------------------------
 
 fun _append_escaped(StringBuilder* b, str s) {
   num i = 0;
@@ -57,9 +192,6 @@ fun _append_escaped(StringBuilder* b, str s) {
     } elif c == '\n' {
       b.append_char('\\');
       b.append_char('n');
-    } elif c == '\0' {
-      b.append_char('\\');
-      b.append_char('r');
     } elif c == '\t' {
       b.append_char('\\');
       b.append_char('t');
@@ -70,344 +202,356 @@ fun _append_escaped(StringBuilder* b, str s) {
   }
 }
 
-fun _json_find_str_key_index(Map<str, str>* m, str key) num {
-  if m.key_slots == NULL {
-    ret -1;
-  }
-
-  num i = 0;
-  for i < m.cap {
-    if m.used[i] != false && m.tomb[i] == false {
-      if equals(m.key_slots[i], key) {
-        ret i;
+fun _append_value(StringBuilder* b, JsonValue* v) {
+  fit *v {
+    JsonValue.Null -> { b.append("null"); }
+    JsonValue.Bool(x) -> {
+      if x {
+        b.append("true");
+      } else {
+        b.append("false");
       }
     }
-    i = i + 1;
+    JsonValue.Num(n) -> {
+      // Render integer-valued decimals without a fractional part (42, not 42.000000).
+      if trunc_dec(n) == n {
+        b.append_dec(n, 0);
+      } else {
+        b.append_dec(n, 6);
+      }
+    }
+    JsonValue.Str(s) -> {
+      b.append_char('"');
+      _append_escaped(b, s);
+      b.append_char('"');
+    }
+    JsonValue.Array(a) -> {
+      b.append_char('[');
+      num i = 0;
+      for i < a.len() {
+        if i > 0 {
+          b.append(", ");
+        }
+        let elem = a.get(i);
+        _append_value(b, &elem);
+        i = i + 1;
+      }
+      b.append_char(']');
+    }
+    JsonValue.Object(o) -> {
+      b.append_char('{');
+      let keys = o.keys();
+      defer keys.free();
+      num i = 0;
+      for i < keys.len() {
+        if i > 0 {
+          b.append(", ");
+        }
+        let key = keys.get(i);
+        b.append_char('"');
+        _append_escaped(b, key);
+        b.append("\": ");
+        let val = o.get(key);
+        _append_value(b, &val);
+        i = i + 1;
+      }
+      b.append_char('}');
+    }
   }
-  ret -1;
 }
 
-impl JsonObject {
-  // Get a value by key.
-  pub get(str key) str {
-    let idx = _json_find_str_key_index(&self.values, key);
-    if idx == -1 {
-      ret NULL;
+impl JsonValue as Display {
+  // Render this value as compact JSON text.
+  pub to_string() str {
+    StringBuilder b = string_builder_init(32);
+    _append_value(&b, self);
+    str out = b.build();
+    b.free();
+    ret out;
+  }
+}
+
+impl JsonValue {
+  // Render this value as compact JSON text (same as `to_string`).
+  pub stringify() str {
+    ret self.to_string();
+  }
+}
+
+// --- Parsing (recursive descent) -----------------------------------------------------
+
+fun _json_is_digit(chr c) bin {
+  ret c >= '0' && c <= '9';
+}
+
+// A character that can appear inside a JSON number literal.
+fun _json_is_number_char(chr c) bin {
+  if _json_is_digit(c) {
+    ret true;
+  }
+  ret c == '-' || c == '+' || c == '.' || c == 'e' || c == 'E';
+}
+
+// Cursor state threaded through the parser: the source plus the current offset.
+pub compound JsonParser {
+  str src;
+  num pos;
+}
+
+impl JsonParser {
+  skip_ws() {
+    for true {
+      chr c = self.src[self.pos];
+      if c == ' ' || c == '\n' || c == '\t' {
+        self.pos = self.pos + 1;
+      } else {
+        ret;
+      }
     }
-    ret self.values.value_slots[idx];
   }
 
-  // Check if a key exists.
-  pub has(str key) bin {
-    ret _json_find_str_key_index(&self.values, key) != -1;
+  peek() chr {
+    ret self.src[self.pos];
   }
 
-  // Set a string value by key.
-  pub set(str key, str value) {
-    let idx = _json_find_str_key_index(&self.values, key);
-    if idx != -1 {
-      self.values.value_slots[idx] = value;
-      ret;
+  // Parse a JSON string literal (assumes the opening quote is current).
+  parse_string() Result<str> {
+    if self.peek() != '"' {
+      ret err(1, "expected '\"'", "");
     }
-    self.values.put(key, value);
+    self.pos = self.pos + 1;
+    StringBuilder b = string_builder_init(16);
+    for true {
+      chr c = self.src[self.pos];
+      if c == 0 {
+        b.free();
+        ret err(1, "unterminated string", "");
+      }
+      if c == '"' {
+        self.pos = self.pos + 1;
+        str out = b.build();
+        b.free();
+        ret ok(out);
+      }
+      if c == '\\' {
+        self.pos = self.pos + 1;
+        chr e = self.src[self.pos];
+        if e == 'n' {
+          b.append_char('\n');
+        } elif e == 't' {
+          b.append_char('\t');
+        } elif e == '"' {
+          b.append_char('"');
+        } elif e == '\\' {
+          b.append_char('\\');
+        } else {
+          b.append_char(e);
+        }
+        self.pos = self.pos + 1;
+      } else {
+        b.append_char(c);
+        self.pos = self.pos + 1;
+      }
+    }
+    b.free();
+    ret err(1, "unterminated string", "");
   }
 
-  // Remove a key.
-  pub remove(str key) bin {
-    let idx = _json_find_str_key_index(&self.values, key);
-    if idx == -1 {
-      ret false;
+  // Collect the raw text of a number literal (caller converts with parse_dec).
+  parse_number_text() str {
+    num start = self.pos;
+    for _json_is_number_char(self.src[self.pos]) {
+      self.pos = self.pos + 1;
     }
-    self.values.value_slots[idx] = self.values.zero_value();
-    self.values.tomb[idx] = true;
-    self.values.len = self.values.len - 1;
+    ret substr(self.src, start, self.pos - start);
+  }
+
+  // Does the source at the cursor start with `word`?
+  starts_with(str word) bin {
+    num i = 0;
+    for word[i] != 0 {
+      if self.src[self.pos + i] != word[i] {
+        ret false;
+      }
+      i = i + 1;
+    }
     ret true;
   }
 
-  // Return all keys.
-  pub keys() Vec<str> {
-    ret self.values.keys();
-  }
+  parse_value() Result<JsonValue> {
+    self.skip_ws();
+    chr c = self.peek();
 
-  // Free internal storage.
-  pub free() {
-    self.values.free();
-  }
-
-  // Serialize object to JSON (string values).
-  pub stringify() str {
-    StringBuilder b = string_builder_init(self.values.len() * 2 + 4);
-    b.append_char('{');
-
-    num i = 0;
-    num added = 0;
-    for i < self.values.cap {
-      if self.values.used[i] == false || self.values.tomb[i] != false {
-        i = i + 1;
-        continue;
-      }
-
-      if added > 0 {
-        b.append(", ");
-      }
-
-      str key = self.values.key_slots[i];
-      str value = self.values.value_slots[i];
-      b.append_char('"');
-      _append_escaped(&b, key);
-      b.append_char('"');
-      b.append(": ");
-      b.append_char('"');
-      _append_escaped(&b, value);
-      b.append_char('"');
-      added = added + 1;
-      i = i + 1;
+    if c == '{' {
+      ret self.parse_object();
     }
-
-    b.append_char('}');
-    str out = b.build();
-    b.free();
-    ret out;
+    if c == '[' {
+      ret self.parse_array();
+    }
+    if c == '"' {
+      fit self.parse_string() {
+        Result.Ok(s) -> { ret ok(JsonValue.Str(s)); }
+        Result.Err(e) -> { ret err_error(e, JsonValue.Null); }
+      }
+    }
+    if self.starts_with("true") {
+      self.pos = self.pos + 4;
+      ret ok(JsonValue.Bool(true));
+    }
+    if self.starts_with("false") {
+      self.pos = self.pos + 5;
+      ret ok(JsonValue.Bool(false));
+    }
+    if self.starts_with("null") {
+      self.pos = self.pos + 4;
+      ret ok(JsonValue.Null);
+    }
+    if _json_is_digit(c) || c == '-' {
+      str numtext = self.parse_number_text();
+      ret ok(JsonValue.Num(parse_dec(numtext)));
+    }
+    ret err(1, "unexpected character in JSON", JsonValue.Null);
   }
 
-  // Serialize object to JSON with Result.
-  pub try_stringify() Result<str> {
-    str out = self.stringify();
-    if out == NULL {
-      ret err(1, "json stringify failed", "");
+  parse_array() Result<JsonValue> {
+    self.pos = self.pos + 1;
+    Vec<JsonValue> items;
+    items.init(8);
+    self.skip_ws();
+    if self.peek() == ']' {
+      self.pos = self.pos + 1;
+      ret ok(JsonValue.Array(items));
     }
-    ret ok(out);
+    for true {
+      fit self.parse_value() {
+        Result.Ok(v) -> { items.push(v); }
+        Result.Err(e) -> {
+          items.free();
+          ret err_error(e, JsonValue.Null);
+        }
+      }
+      self.skip_ws();
+      chr c = self.peek();
+      if c == ',' {
+        self.pos = self.pos + 1;
+      } elif c == ']' {
+        self.pos = self.pos + 1;
+        ret ok(JsonValue.Array(items));
+      } else {
+        items.free();
+        ret err(1, "expected ',' or ']' in array", JsonValue.Null);
+      }
+    }
+    ret ok(JsonValue.Array(items));
+  }
+
+  parse_object() Result<JsonValue> {
+    self.pos = self.pos + 1;
+    Map<str, JsonValue> entries;
+    entries.init(8);
+    self.skip_ws();
+    if self.peek() == '}' {
+      self.pos = self.pos + 1;
+      ret ok(JsonValue.Object(entries));
+    }
+    for true {
+      self.skip_ws();
+      str key = "";
+      fit self.parse_string() {
+        Result.Ok(k) -> { key = k; }
+        Result.Err(e) -> {
+          entries.free();
+          ret err_error(e, JsonValue.Null);
+        }
+      }
+      self.skip_ws();
+      if self.peek() != ':' {
+        entries.free();
+        ret err(1, "expected ':' in object", JsonValue.Null);
+      }
+      self.pos = self.pos + 1;
+      fit self.parse_value() {
+        Result.Ok(v) -> { entries.put(key, v); }
+        Result.Err(e) -> {
+          entries.free();
+          ret err_error(e, JsonValue.Null);
+        }
+      }
+      self.skip_ws();
+      chr c = self.peek();
+      if c == ',' {
+        self.pos = self.pos + 1;
+      } elif c == '}' {
+        self.pos = self.pos + 1;
+        ret ok(JsonValue.Object(entries));
+      } else {
+        entries.free();
+        ret err(1, "expected ',' or '}' in object", JsonValue.Null);
+      }
+    }
+    ret ok(JsonValue.Object(entries));
   }
 }
 
-impl JsonObject as Serialize {
-  // Encode this object as JSON text.
+// Parse JSON text into a typed `JsonValue`. Returns `Err` on malformed input.
+pub fun parse(str src) Result<JsonValue> {
+  JsonParser p = JsonParser{src = src, pos = 0};
+  ret p.parse_value();
+}
+
+// A `JsonValue` serializes to its JSON text (the text-layer serde quirk).
+impl JsonValue as Serialize {
   pub serialize() str {
-    ret self.stringify();
+    ret self.to_string();
   }
 }
 
-impl JsonObject as Deserialize {
-  // Parse JSON text into this object.
-  pub deserialize(str input) {
-    JsonObject parsed = parse_object(input);
-    defer parsed.free();
-    if self.values.cap == 0 {
-      self.values.init(8);
-    } else {
-      self.values.clear();
-    }
+// --- Structured (de)serialization for your own compounds -----------------------------
 
-    num i = 0;
-    for i < parsed.values.cap {
-      if parsed.values.used[i] != false && parsed.values.tomb[i] == false {
-        self.values.put(parsed.values.key_slots[i], parsed.values.value_slots[i]);
-      }
-      i = i + 1;
-    }
-
-  }
-}
-
-impl JsonArray {
-  // Append a string value.
-  pub push(str value) {
-    self.values.push(value);
-  }
-
-  // Free internal storage.
-  pub free() {
-    self.values.free();
-  }
-
-  // Serialize array to JSON (string values).
-  pub stringify() str {
-    StringBuilder b = string_builder_init(self.values.len() * 2 + 4);
-    b.append_char('[');
-    num i = 0;
-    for i < self.values.len {
-      if i > 0 {
-        b.append(", ");
-      }
-      b.append_char('"');
-      _append_escaped(&b, self.values.get(i));
-      b.append_char('"');
-      i = i + 1;
-    }
-    b.append_char(']');
-    str out = b.build();
-    b.free();
-    ret out;
-  }
-
-  // Serialize array to JSON with Result.
-  pub try_stringify() Result<str> {
-    str out = self.stringify();
-    if out == NULL {
-      ret err(1, "json stringify failed", "");
-    }
-    ret ok(out);
-  }
-}
-
-impl JsonArray as Serialize {
-  // Encode this array as JSON text.
-  pub serialize() str {
-    ret self.stringify();
-  }
-}
-
-impl JsonArray as Deserialize {
-  // Parse JSON text into this array.
-  pub deserialize(str input) {
-    JsonArray parsed = parse_array(input);
-    defer parsed.free();
-    if self.values.cap == 0 {
-      self.values.init(8);
-    } else {
-      self.values.clear();
-    }
-
-    num i = 0;
-    for i < parsed.values.len {
-      self.values.push(parsed.values.get(i));
-      i = i + 1;
-    }
-
-  }
-}
-
-fun _skip_ws(str s, num* i) {
-  for s[*i] != 0 {
-    let c = s[*i];
-    if c == ' ' || c == '\n' || c == '\t' || c == '\0' {
-      *i = *i + 1;
-      continue;
-    }
-    break;
-  }
-}
-
-fun _parse_string(str s, num* i) str {
-  if s[*i] != '"' {
-    ret "";
-  }
-  *i = *i + 1;
-  num start = *i;
-  for s[*i] != 0 {
-    if s[*i] == '"' {
-      break;
-    }
-    *i = *i + 1;
-  }
-  num len = *i - start;
-  str out = substr(s, start, len);
-  if s[*i] == '"' {
-    *i = *i + 1;
-  }
-  ret out;
-}
-
-fun _parse_value(str s, num* i) str {
-  _skip_ws(s, i);
-  if s[*i] == '"' {
-    ret _parse_string(s, i);
-  }
-
-  num start = *i;
-  for s[*i] != 0 {
-    if s[*i] == ',' {
-      break;
-    }
-    if s[*i] == '}' {
-      break;
-    }
-    *i = *i + 1;
-  }
-  num len = *i - start;
-  str out = trim(substr(s, start, len));
-  ret out;
-}
-
-// Parse a JSON object with string values.
+// A compound that can convert itself into a structured `JsonValue`. Fun has no
+// reflection/derive, so implement this by hand — the explicit equivalent of a derived
+// serializer:
 // 
-// Params:
-// - s: JSON string
+// ```
+// impl Point as ToJson {
+//   pub to_json() JsonValue {
+//     let o = json_object();
+//     o.put("x", json_num(self.x));
+//     o.put("y", json_num(self.y));
+//     ret JsonValue.Object(o);
+//   }
+// }
+// ```
+pub quirk ToJson {
+  // Build a `JsonValue` representing this value.
+  to_json() JsonValue;
+}
+
+// A compound that can rebuild itself from a structured `JsonValue`. Read fields with
+// `value.get(key)` + the `as_*` accessors:
 // 
-// Returns:
-// - parsed JsonObject
-pub fun parse_object(str s) JsonObject {
-  JsonObject out = json_object_init();
-  num i = 0;
-  _skip_ws(s, &i);
-  if s[i] == '{' {
-    i = i + 1;
-  }
-
-  for s[i] != 0 {
-    _skip_ws(s, &i);
-    if s[i] == '}' {
-      break;
-    }
-
-    str key = _parse_string(s, &i);
-    _skip_ws(s, &i);
-    if s[i] == ':' {
-      i = i + 1;
-    }
-    str value = _parse_value(s, &i);
-    out.set(key, value);
-    _skip_ws(s, &i);
-    if s[i] == ',' {
-      i = i + 1;
-    }
-  }
-
-  ret out;
+// ```
+// impl Point as FromJson {
+//   pub from_json(JsonValue value) {
+//     let x = value.get("x").unwrap_or(JsonValue.Null);
+//     self.x = x.as_num().unwrap_or(0.0);
+//     let y = value.get("y").unwrap_or(JsonValue.Null);
+//     self.y = y.as_num().unwrap_or(0.0);
+//   }
+// }
+// ```
+pub quirk FromJson {
+  // Apply state from a `JsonValue` (best-effort: missing fields take defaults).
+  from_json(JsonValue value);
 }
 
-// Parse a JSON object with Result.
-pub fun try_parse_object(str s) Result<JsonObject> {
-  JsonObject out = parse_object(s);
-  ret ok(out);
+// Convert any `ToJson` implementer into a `JsonValue`.
+pub fun to_json_value(ToJson value) JsonValue {
+  ret value.to_json();
 }
 
-// Parse a JSON array of string values.
-// 
-// Params:
-// - s: JSON array string
-// 
-// Returns:
-// - parsed JsonArray
-pub fun parse_array(str s) JsonArray {
-  JsonArray out = json_array_init();
-  num i = 0;
-  _skip_ws(s, &i);
-  if s[i] == '[' {
-    i = i + 1;
-  }
-
-  for s[i] != 0 {
-    _skip_ws(s, &i);
-    if s[i] == ']' {
-      break;
-    }
-    let value = _parse_value(s, &i);
-    out.push(value);
-    _skip_ws(s, &i);
-    if s[i] == ',' {
-      i = i + 1;
-    }
-  }
-
-  ret out;
+// Serialize any `ToJson` implementer straight to JSON text.
+pub fun to_json_string(ToJson value) str {
+  let v = value.to_json();
+  ret v.to_string();
 }
-
-// Parse a JSON array with Result.
-pub fun try_parse_array(str s) Result<JsonArray> {
-  JsonArray out = parse_array(s);
-  ret ok(out);
-}
-
-// Serialization is done through the value methods: `obj.stringify()` /
-// `arr.stringify()` (and `try_stringify()` for the Result-returning form).

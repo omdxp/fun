@@ -10,7 +10,6 @@ imp std.c.time;
 imp std.c.io;
 imp std.c.mem;
 imp std.c.string;
-imp std.c.def;
 imp std.result;
 
 // Timestamp wrapper (epoch seconds).
@@ -25,12 +24,12 @@ pub compound Timestamp {
 // - Timestamp with epoch seconds
 pub fun now() Timestamp {
   Timestamp t;
-  t.epoch = time(NULL);
+  t.epoch = time(nil);
   ret t;
 }
 
 fun _copy_str(str dst, num dst_len, str src) num {
-  if dst == NULL {
+  if dst == nil {
     ret 0;
   }
   if dst_len <= 0 {
@@ -50,8 +49,8 @@ fun _copy_str(str dst, num dst_len, str src) num {
 
 fun _time_buf_from_epoch(num epoch) raw* {
   raw* buf = malloc(8);
-  if buf == NULL {
-    ret NULL;
+  if buf == nil {
+    ret nil;
   }
   memset(buf, 0, 8);
   num* p = buf;
@@ -61,8 +60,8 @@ fun _time_buf_from_epoch(num epoch) raw* {
 
 fun _localtime_from_epoch(num epoch) raw* {
   raw* tbuf = _time_buf_from_epoch(epoch);
-  if tbuf == NULL {
-    ret NULL;
+  if tbuf == nil {
+    ret nil;
   }
   raw* tm = localtime(tbuf);
   free(tbuf);
@@ -71,8 +70,8 @@ fun _localtime_from_epoch(num epoch) raw* {
 
 fun _gmtime_from_epoch(num epoch) raw* {
   raw* tbuf = _time_buf_from_epoch(epoch);
-  if tbuf == NULL {
-    ret NULL;
+  if tbuf == nil {
+    ret nil;
   }
   raw* tm = gmtime(tbuf);
   free(tbuf);
@@ -83,7 +82,7 @@ impl Timestamp {
   // Format using a custom strftime format.
   pub format_local(str buf, num buf_len, str format) num {
     raw* t = _localtime_from_epoch(self.epoch);
-    if t == NULL {
+    if t == nil {
       ret 0;
     }
     ret strftime(buf, buf_len, format, t);
@@ -92,7 +91,7 @@ impl Timestamp {
   // Format using a custom strftime format (UTC).
   pub format_utc(str buf, num buf_len, str format) num {
     raw* t = _gmtime_from_epoch(self.epoch);
-    if t == NULL {
+    if t == nil {
       ret 0;
     }
     ret strftime(buf, buf_len, format, t);
@@ -101,7 +100,7 @@ impl Timestamp {
   // Format using a default pattern.
   pub to_string(str buf, num buf_len) num {
     raw* t = _localtime_from_epoch(self.epoch);
-    if t == NULL {
+    if t == nil {
       ret 0;
     }
     ret strftime(buf, buf_len, "%Y-%m-%d %H:%M:%S", t);
@@ -110,7 +109,7 @@ impl Timestamp {
   // Format using a default pattern (UTC).
   pub to_string_utc(str buf, num buf_len) num {
     raw* t = _gmtime_from_epoch(self.epoch);
-    if t == NULL {
+    if t == nil {
       ret 0;
     }
     ret strftime(buf, buf_len, "%Y-%m-%d %H:%M:%S", t);
@@ -211,12 +210,12 @@ pub fun try_format_utc(num epoch, str buf, num buf_len, str format) Result<num> 
 // - number of bytes written
 pub fun format_human(num epoch, str buf, num buf_len) num {
   raw* tbuf = _time_buf_from_epoch(epoch);
-  if tbuf == NULL {
+  if tbuf == nil {
     ret 0;
   }
   str cstr = ctime(tbuf);
   num n = 0;
-  if cstr != NULL {
+  if cstr != nil {
     n = _copy_str(buf, buf_len, cstr);
   }
   free(tbuf);
@@ -232,8 +231,8 @@ pub fun format_human(num epoch, str buf, num buf_len) num {
 // - pointer to static C string (or null)
 pub fun format_human_cstr(num epoch) str {
   raw* tbuf = _time_buf_from_epoch(epoch);
-  if tbuf == NULL {
-    ret NULL;
+  if tbuf == nil {
+    ret nil;
   }
   str cstr = ctime(tbuf);
   free(tbuf);

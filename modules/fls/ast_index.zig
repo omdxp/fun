@@ -674,19 +674,24 @@ fn collectFitBindingLocals(
     n: *ast.Node,
     payload_by_key: *const std.StringHashMap([]const *dt_mod.DataType),
     variant_to_enum: *const std.StringHashMap([]const u8),
+    enum_type_params: *const std.StringHashMap([]const []const u8),
+    fn_body: *ast.Node,
 ) Allocator.Error!void {
     if (n.node_variant == null) return;
     switch (n.type) {
         .Body => {
             for (n.node_variant.?.body.statements.items()) |s| {
-                try collectFitBindingLocals(allocator, out, s, payload_by_key, variant_to_enum);
+                try collectFitBindingLocals(allocator, out, s, payload_by_key, variant_to_enum, enum_type_params, fn_body);
             }
         },
         .StatementFit => {
             const fitv = n.node_variant.?.statement.fit_stmt;
+            // The subject's concrete generic args (e.g. `Result<JsonValue>`), used to
+            // substitute a generic variant payload param. Resolved best-effort.
+            const subject_dt = fitSubjectGenericType(fitv.exp, fn_body);
             for (fitv.branches.items()) |branch| {
                 // Recurse into the arm body for nested fits regardless of bindings.
-                try collectFitBindingLocals(allocator, out, branch.body, payload_by_key, variant_to_enum);
+                try collectFitBindingLocals(allocator, out, branch.body, payload_by_key, variant_to_enum, enum_type_params, fn_body);
 
                 const binds = branch.bindings orelse continue;
                 if (binds.count == 0) continue;
@@ -712,13 +717,17 @@ fn collectFitBindingLocals(
                     const name = bind_name.items;
                     if (name.len == 0) continue;
 
+                    // Substitute a generic payload param (`T`) with the subject's
+                    // concrete arg (`Result<JsonValue>.Ok(T)` -> binding is `JsonValue`).
+                    const eff = substitutedPayloadType(pt, resolved_enum, subject_dt, enum_type_params) orelse pt;
+
                     var vtype_buf = ArrayList(u8).init(allocator);
                     defer vtype_buf.deinit();
-                    try appendDTypeFull(&vtype_buf, pt.*);
+                    try appendDTypeFull(&vtype_buf, eff.*);
 
                     var detail_buf = ArrayList(u8).init(allocator);
                     errdefer detail_buf.deinit();
-                    try appendDTypeFull(&detail_buf, pt.*);
+                    try appendDTypeFull(&detail_buf, eff.*);
                     try detail_buf.print(" {s}", .{name});
 
                     try out.append(.{
@@ -739,20 +748,45 @@ fn collectFitBindingLocals(
             if (n.node_variant) |v| switch (v) {
                 .statement => |st| switch (st) {
                     .for_stmt => |fs| switch (fs) {
-                        .cond => |c| try collectFitBindingLocals(allocator, out, c.body, payload_by_key, variant_to_enum),
-                        .range => |r| try collectFitBindingLocals(allocator, out, r.body, payload_by_key, variant_to_enum),
-                        .iter => |it| try collectFitBindingLocals(allocator, out, it.body, payload_by_key, variant_to_enum),
+                        .cond => |c| try collectFitBindingLocals(allocator, out, c.body, payload_by_key, variant_to_enum, enum_type_params, fn_body),
+                        .range => |r| try collectFitBindingLocals(allocator, out, r.body, payload_by_key, variant_to_enum, enum_type_params, fn_body),
+                        .iter => |it| try collectFitBindingLocals(allocator, out, it.body, payload_by_key, variant_to_enum, enum_type_params, fn_body),
                     },
-                    .if_stmt => |ifs| try collectFitBindingLocals(allocator, out, ifs.body, payload_by_key, variant_to_enum),
-                    .elif_stmt => |es| try collectFitBindingLocals(allocator, out, es.body, payload_by_key, variant_to_enum),
-                    .else_stmt => |es| try collectFitBindingLocals(allocator, out, es.body, payload_by_key, variant_to_enum),
-                    .defer_stmt => |dn| try collectFitBindingLocals(allocator, out, dn.body, payload_by_key, variant_to_enum),
+                    .if_stmt => |ifs| try collectFitBindingLocals(allocator, out, ifs.body, payload_by_key, variant_to_enum, enum_type_params, fn_body),
+                    .elif_stmt => |es| try collectFitBindingLocals(allocator, out, es.body, payload_by_key, variant_to_enum, enum_type_params, fn_body),
+                    .else_stmt => |es| try collectFitBindingLocals(allocator, out, es.body, payload_by_key, variant_to_enum, enum_type_params, fn_body),
+                    .defer_stmt => |dn| try collectFitBindingLocals(allocator, out, dn.body, payload_by_key, variant_to_enum, enum_type_params, fn_body),
                     else => {},
                 },
                 else => {},
             };
         },
     }
+}
+
+/// When `pt` is a bare type parameter of `resolved_enum` (e.g. `T` of `Result<T>`),
+/// and the fit subject's concrete type is known (`Result<JsonValue>`), return the
+/// substituted concrete payload type (`JsonValue`). Returns null when no substitution
+/// applies (concrete payloads, unknown subject, arity mismatch) — caller uses `pt`.
+fn substitutedPayloadType(
+    pt: *dt_mod.DataType,
+    resolved_enum: []const u8,
+    subject_dt: ?*const dt_mod.DataType,
+    enum_type_params: *const std.StringHashMap([]const []const u8),
+) ?*dt_mod.DataType {
+    const sdt = subject_dt orelse return null;
+    const gargs = sdt.generic_args orelse return null;
+    // The payload must be a bare named type with no generic args / pointer / array.
+    if (pt.type != null and pt.type != .Unknown) return null;
+    if (pt.generic_args != null) return null;
+    if (pt.pointer_depth != 0) return null;
+    if (pt.type_str.items.len == 0) return null;
+    const params = enum_type_params.get(resolved_enum) orelse return null;
+    if (params.len != gargs.count) return null;
+    for (params, 0..) |p, i| {
+        if (std.mem.eql(u8, p, pt.type_str.items)) return gargs.items()[i];
+    }
+    return null;
 }
 
 /// Build payload + variant->enum maps from all top-level enum declarations, then
@@ -765,11 +799,21 @@ pub fn appendFitBindingLocals(allocator: Allocator, out: *ArrayList(SymbolLite),
     defer variant_to_enum.deinit();
     var ambiguous = std.StringHashMap(void).init(allocator);
     defer ambiguous.deinit();
+    // enum name -> its type-parameter spellings (e.g. `Result` -> ["T"]). Used to
+    // substitute a generic variant payload (`Ok(T)`) with the fit subject's concrete
+    // arg (`Result<JsonValue>` -> the `doc` binding is `JsonValue`, not a bare `T`).
+    var enum_type_params = std.StringHashMap([]const []const u8).init(allocator);
+    defer enum_type_params.deinit();
 
     for (nodes) |n| {
         if (n.type != .Enum or n.node_variant == null) continue;
         const ev = n.node_variant.?.enum_decl;
         const enum_name = ev.name.items;
+        if (ev.type_params) |tps| {
+            const names = try allocator.alloc([]const u8, tps.count);
+            for (tps.items(), 0..) |tp, i| names[i] = tp.items;
+            try enum_type_params.put(enum_name, names);
+        }
         for (ev.variants.items()) |variant| {
             const payload = variant.payload orelse continue;
             const vname = variant.name.items;
@@ -794,9 +838,41 @@ pub fn appendFitBindingLocals(allocator: Allocator, out: *ArrayList(SymbolLite),
         if (n.type != .Function or n.node_variant == null) continue;
         const fnv = n.node_variant.?.function;
         if (fnv.body) |b| {
-            try collectFitBindingLocals(allocator, out, b, &payload_by_key, &variant_to_enum);
+            try collectFitBindingLocals(allocator, out, b, &payload_by_key, &variant_to_enum, &enum_type_params, b);
         }
     }
+}
+
+/// Find the declared type of a local variable `name` within a function body subtree.
+/// Returns the variable's DataType when it carries generic args (e.g. `Result<JsonValue>`),
+/// else null. Best-effort: only `Type<Args> name [= ...]` local declarations are resolved.
+fn findVarDeclTypeInBody(name: []const u8, n: *ast.Node) ?*const dt_mod.DataType {
+    if (n.node_variant == null) return null;
+    switch (n.type) {
+        .Variable => {
+            const v = n.node_variant.?.variable;
+            if (v.name.items.len != 0 and std.mem.eql(u8, v.name.items, name) and v.type.generic_args != null) {
+                return v.type;
+            }
+            return null;
+        },
+        .Body => {
+            for (n.node_variant.?.body.statements.items()) |s| {
+                if (findVarDeclTypeInBody(name, s)) |dt| return dt;
+            }
+            return null;
+        },
+        else => return null,
+    }
+}
+
+/// Given a fit subject expression and the enclosing function body, resolve the
+/// subject's concrete generic args. Handles a bare-identifier subject (`fit r {`)
+/// by locating `r`'s declaration. Returns the DataType (with generic_args) or null.
+fn fitSubjectGenericType(subject: *ast.Node, fn_body: *ast.Node) ?*const dt_mod.DataType {
+    if (subject.type != .Identifier) return null;
+    const sname = if (subject.data) |d| (if (d == .sval) d.sval.items else return null) else return null;
+    return findVarDeclTypeInBody(sname, fn_body);
 }
 
 test "fls completion: generic insert text helper" {

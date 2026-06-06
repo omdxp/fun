@@ -870,6 +870,40 @@ test "fls index: data-enum fit arm binding is a typed local" {
     try std.testing.expect(found_b);
 }
 
+test "fls index: generic enum fit binding substitutes the subject's concrete arg" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // `Box<T>.Full(T)` matched on a `Box<Widget>` subject: the binding `w` must be
+    // typed `Widget` (the subject's concrete arg), not the bare param `T`.
+    const text =
+        "compound Widget { num id; }\n" ++
+        "enum Box<T> { Full(T), Empty }\n" ++
+        "fun main() num {\n" ++
+        "  Box<Widget> b = Box.Full(Widget{id = 1});\n" ++
+        "  fit b {\n" ++
+        "    Box.Full(w) -> { ret w.id; }\n" ++
+        "    Box.Empty -> { ret 0; }\n" ++
+        "  }\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found_w = false;
+    for (idx.symbols) |s| {
+        if (s.kind != .variable) continue;
+        if (std.mem.eql(u8, s.name, "w")) {
+            found_w = true;
+            try std.testing.expect(s.value_type != null);
+            try std.testing.expectEqualStrings("Widget", s.value_type.?);
+        }
+    }
+    try std.testing.expect(found_w);
+}
+
 test "fls index: enum variant captures its trailing doc comment" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();

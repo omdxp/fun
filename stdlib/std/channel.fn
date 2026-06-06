@@ -12,7 +12,6 @@ imp std.sync_runtime;
 imp std.c.mem;
 imp std.c.string;
 imp std.c.time;
-imp std.c.def;
 
 // Bounded blocking channel implemented as a ring buffer.
 pub compound Channel<T> {
@@ -75,7 +74,7 @@ pub fun channel_new<T>(T default_value) Channel<T> {
 
   raw* data_ptr = malloc(sizeof(T));
   ch.data = data_ptr;
-  if data_ptr != NULL {
+  if data_ptr != nil {
     ch.has_buffer = true;
     ch.data[0] = default_value;
   }
@@ -118,7 +117,7 @@ pub fun channel_new_cap<T>(T default_value, num capacity) Channel<T> {
 
   raw* data_ptr = malloc(sizeof(T) * capacity);
   ch.data = data_ptr;
-  if data_ptr != NULL {
+  if data_ptr != nil {
     ch.has_buffer = true;
     num i = 0;
     for i < capacity {
@@ -138,7 +137,7 @@ compound ChannelAbsTime {
 
 // Normalize absolute time values so tv_nsec always stays in [0, 1e9).
 fun channel_normalize_abs_time(ChannelAbsTime* ts) {
-  if ts == NULL {
+  if ts == nil {
     ret;
   }
 
@@ -158,7 +157,7 @@ fun channel_normalize_abs_time(ChannelAbsTime* ts) {
 // Note:
 // - Uses `clock_gettime` and keeps millisecond-scale precision.
 fun channel_make_abs_time(num timeout_ms, ChannelAbsTime* out) num {
-  if out == NULL {
+  if out == nil {
     ret channel_rc_null_arg();
   }
   if timeout_ms < 0 {
@@ -189,7 +188,7 @@ fun channel_make_abs_time(num timeout_ms, ChannelAbsTime* out) num {
 
 // Returns true when the absolute timeout is reached.
 fun channel_deadline_reached(ChannelAbsTime* abs_time) bin {
-  if abs_time == NULL {
+  if abs_time == nil {
     ret true;
   }
 
@@ -242,7 +241,7 @@ fun channel_sanitize_backoff_steps(num backoff_steps) num {
 // - remaining milliseconds rounded up
 // - 0 when already expired or on clock failure
 fun channel_deadline_remaining_ms(ChannelAbsTime* abs_time) num {
-  if abs_time == NULL {
+  if abs_time == nil {
     ret 0;
   }
 
@@ -321,10 +320,10 @@ fun channel_compute_wait_slice_ms(
 // Returns true when an optional cancellation flag is set.
 // 
 // Convention:
-// - NULL flag pointer means cancellation is disabled.
+// - nil flag pointer means cancellation is disabled.
 // - nonzero flag value means cancelled.
 fun channel_is_cancelled(num* cancel_flag) bin {
-  if cancel_flag == NULL {
+  if cancel_flag == nil {
     ret false;
   }
   ret cancel_flag[0] != 0;
@@ -352,7 +351,7 @@ pub fun channel_cancel_token_cancelled() ChannelCancelToken {
 
 // Set cancellation state to cancelled.
 pub fun channel_cancel_token_cancel(ChannelCancelToken* token) num {
-  if token == NULL {
+  if token == nil {
     ret channel_rc_null_arg();
   }
   token.flag = 1;
@@ -361,7 +360,7 @@ pub fun channel_cancel_token_cancel(ChannelCancelToken* token) num {
 
 // Set cancellation state to not-cancelled.
 pub fun channel_cancel_token_reset(ChannelCancelToken* token) num {
-  if token == NULL {
+  if token == nil {
     ret channel_rc_null_arg();
   }
   token.flag = 0;
@@ -370,7 +369,7 @@ pub fun channel_cancel_token_reset(ChannelCancelToken* token) num {
 
 // Read cancellation state.
 pub fun channel_cancel_token_is_cancelled(ChannelCancelToken* token) bin {
-  if token == NULL {
+  if token == nil {
     ret false;
   }
   ret token.flag != 0;
@@ -378,8 +377,8 @@ pub fun channel_cancel_token_is_cancelled(ChannelCancelToken* token) bin {
 
 // Convert optional token pointer into optional raw cancellation flag pointer.
 fun channel_cancel_token_flag_ptr(ChannelCancelToken* token) num* {
-  if token == NULL {
-    ret NULL;
+  if token == nil {
+    ret nil;
   }
   ret &token.flag;
 }
@@ -562,7 +561,7 @@ impl Channel<T> {
   // - -2 when storage allocation failed
   // - nonzero pthread error codes on synchronization failures
   pub send_timeout(T value, num timeout_ms) num {
-    ret self.send_timeout_with_cancel(value, timeout_ms, NULL);
+    ret self.send_timeout_with_cancel(value, timeout_ms, nil);
   }
 
   // Send one value, blocking up to timeout_ms while full, with optional cancellation.
@@ -790,7 +789,7 @@ impl Channel<T> {
   // - -1 when out is null
   // - nonzero pthread error codes on synchronization failures
   pub recv_into(T* out) num {
-    if out == NULL {
+    if out == nil {
       ret channel_rc_null_arg();
     }
 
@@ -840,7 +839,7 @@ impl Channel<T> {
   // - -1 when out is null
   // - nonzero pthread error codes on synchronization failures
   pub recv_timeout_into(T* out, num timeout_ms) num {
-    ret self.recv_timeout_into_with_cancel(out, timeout_ms, NULL);
+    ret self.recv_timeout_into_with_cancel(out, timeout_ms, nil);
   }
 
   // Receive one value into out, blocking up to timeout_ms while empty,
@@ -859,7 +858,7 @@ impl Channel<T> {
   // - -1 when out is null
   // - nonzero pthread error codes on synchronization failures
   pub recv_timeout_into_with_cancel(T* out, num timeout_ms, num* cancel_flag) num {
-    if out == NULL {
+    if out == nil {
       ret channel_rc_null_arg();
     }
 
@@ -1122,7 +1121,7 @@ impl Channel<T> {
   // - -1 when out is null
   // - nonzero pthread error codes on synchronization failures
   pub try_recv(T* out) num {
-    if out == NULL {
+    if out == nil {
       ret channel_rc_null_arg();
     }
 
@@ -1163,7 +1162,7 @@ impl Channel<T> {
   // - -1 when hint is null
   // - other nonzero codes on synchronization failures
   pub wait_recv_hint_timeout(Channel<T>* hint, num timeout_ms) num {
-    if hint == NULL {
+    if hint == nil {
       ret channel_rc_null_arg();
     }
     if timeout_ms < 0 {
@@ -1216,7 +1215,7 @@ impl Channel<T> {
   // - -1 when other/out/out_index is null
   // - other nonzero codes on synchronization failures
   pub select_try_recv_with(Channel<T>* other, T* out, num* out_index) num {
-    if other == NULL || out == NULL || out_index == NULL {
+    if other == nil || out == nil || out_index == nil {
       ret channel_rc_null_arg();
     }
 
@@ -1360,7 +1359,7 @@ impl Channel<T> {
       timeout_ms,
       wait_slice_ms,
       backoff_steps,
-      NULL
+      nil
     );
   }
 
@@ -1392,7 +1391,7 @@ impl Channel<T> {
     num backoff_steps,
     num* cancel_flag
   ) num {
-    if other == NULL || out == NULL || out_index == NULL {
+    if other == nil || out == nil || out_index == nil {
       ret channel_rc_null_arg();
     }
 
@@ -1720,7 +1719,7 @@ impl Channel<T> {
     T* out,
     num* out_index
   ) num {
-    if other_a == NULL || other_b == NULL || next_index == NULL || out == NULL || out_index == NULL {
+    if other_a == nil || other_b == nil || next_index == nil || out == nil || out_index == nil {
       ret channel_rc_null_arg();
     }
 
@@ -1920,7 +1919,7 @@ impl Channel<T> {
       timeout_ms,
       wait_slice_ms,
       backoff_steps,
-      NULL
+      nil
     );
   }
 
@@ -1945,7 +1944,7 @@ impl Channel<T> {
     num backoff_steps,
     num* cancel_flag
   ) num {
-    if other_a == NULL || other_b == NULL || next_index == NULL || out == NULL || out_index == NULL {
+    if other_a == nil || other_b == nil || next_index == nil || out == nil || out_index == nil {
       ret channel_rc_null_arg();
     }
 
@@ -2325,7 +2324,7 @@ impl Channel<T> {
   // - 0 on success
   // - timeout/closed/cancelled/null_arg values propagated from recv/send paths
   pub async forward_one_to_async(Channel<T>* dst, num timeout_ms) num {
-    if dst == NULL {
+    if dst == nil {
       ret channel_rc_null_arg();
     }
 
@@ -2348,7 +2347,7 @@ impl Channel<T> {
     num timeout_ms,
     ChannelCancelToken* cancel_token
   ) num {
-    if dst == NULL {
+    if dst == nil {
       ret channel_rc_null_arg();
     }
 
@@ -2378,7 +2377,7 @@ impl Channel<T> {
     num timeout_ms,
     num* out_index
   ) num {
-    if other == NULL || dst == NULL || out_index == NULL {
+    if other == nil || dst == nil || out_index == nil {
       ret channel_rc_null_arg();
     }
 
@@ -2403,7 +2402,7 @@ impl Channel<T> {
     num* out_index,
     ChannelCancelToken* cancel_token
   ) num {
-    if other == NULL || dst == NULL || out_index == NULL {
+    if other == nil || dst == nil || out_index == nil {
       ret channel_rc_null_arg();
     }
 

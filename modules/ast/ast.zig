@@ -509,6 +509,9 @@ pub fn node_is_expressionable(n: Node) bool {
     return n.type == .Expression or n.type == .ExpressionParenthesis or
         n.type == .Unary or n.type == .Identifier or
         n.type == .Number or n.type == .String or n.type == .Character or n.type == .Boolean or
+        // `nil` is a primary value literal: it can be the operand of a binary operator
+        // (`x != nil && y`), so it must count as expressionable like other literals.
+        n.type == .Nil or
         n.type == .CompoundInit;
 }
 

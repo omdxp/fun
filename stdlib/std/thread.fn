@@ -9,7 +9,6 @@
 // num rc = t.start(entry_ptr, arg_ptr);
 
 imp std.c.thread;
-imp std.c.def;
 
 // Managed thread handle.
 pub compound Thread {
@@ -44,7 +43,7 @@ impl Thread {
     if self.started == true {
       ret 0;
     }
-    num rc = pthread_create(&self.handle, NULL, entry, arg);
+    num rc = pthread_create(&self.handle, nil, entry, arg);
     if rc == 0 {
       self.started = true;
     }
@@ -102,7 +101,7 @@ impl Thread {
 // - -1 when thread is null
 // - nonzero backend error code on failure
 pub fun thread_start(Thread* thread, raw* entry, raw* arg) num {
-  if thread == NULL {
+  if thread == nil {
     ret -1;
   }
 
@@ -124,7 +123,7 @@ pub fun thread_start(Thread* thread, raw* entry, raw* arg) num {
 // - -1 when thread is null
 // - nonzero backend error code on failure
 pub fun thread_join(Thread* thread, raw* out_ret) num {
-  if thread == NULL {
+  if thread == nil {
     ret -1;
   }
 
@@ -145,7 +144,7 @@ pub fun thread_join(Thread* thread, raw* out_ret) num {
 // - -1 when thread is null
 // - nonzero backend error code on failure
 pub fun thread_detach(Thread* thread) num {
-  if thread == NULL {
+  if thread == nil {
     ret -1;
   }
 

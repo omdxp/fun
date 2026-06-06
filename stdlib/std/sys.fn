@@ -3,7 +3,7 @@
 // Usage:
 // ```
 // str home = env("HOME");
-// if home == NULL { sys_exit(1); }
+// if home == nil { sys_exit(1); }
 // ```
 
 imp std.c.mem;
@@ -23,7 +23,7 @@ pub fun env(str name) str {
 // Read an environment variable with Result.
 pub fun try_env(str name) Result<str> {
   str out = env(name);
-  if out == NULL {
+  if out == nil {
     ret err(1, "env missing", "");
   }
   ret ok(out);

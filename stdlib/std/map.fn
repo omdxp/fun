@@ -10,7 +10,6 @@
 imp std.c.mem;
 imp std.c.string;
 imp std.c.io;
-imp std.c.def;
 imp std.vec;
 imp std.quirks;
 imp std.option;
@@ -51,10 +50,10 @@ impl Map<K, V> as Sized {
 impl Map<K, V> {
   // Initialize the map with a capacity.
   pub init(num cap) {
-    self.key_slots = NULL;
-    self.value_slots = NULL;
-    self.used = NULL;
-    self.tomb = NULL;
+    self.key_slots = nil;
+    self.value_slots = nil;
+    self.used = nil;
+    self.tomb = nil;
     self.len = 0;
     self.cap = 0;
 
@@ -84,16 +83,16 @@ impl Map<K, V> {
     self.used = malloc(cap * sizeof(bin));
     self.tomb = malloc(cap * sizeof(bin));
 
-    if self.key_slots == NULL {
+    if self.key_slots == nil {
       ret;
     }
-    if self.value_slots == NULL {
+    if self.value_slots == nil {
       ret;
     }
-    if self.used == NULL {
+    if self.used == nil {
       ret;
     }
-    if self.tomb == NULL {
+    if self.tomb == nil {
       ret;
     }
 
@@ -214,16 +213,16 @@ impl Map<K, V> {
     bin* old_tomb = self.tomb;
     num old_cap = self.cap;
 
-    self.key_slots = NULL;
-    self.value_slots = NULL;
-    self.used = NULL;
-    self.tomb = NULL;
+    self.key_slots = nil;
+    self.value_slots = nil;
+    self.used = nil;
+    self.tomb = nil;
     self.cap = 0;
     self.len = 0;
 
     self.alloc(new_cap);
 
-    if old_keys == NULL {
+    if old_keys == nil {
       ret;
     }
 
@@ -251,23 +250,23 @@ impl Map<K, V> {
   // Free internal storage.
   pub free() {
     self.clear();
-    if self.key_slots != NULL {
+    if self.key_slots != nil {
       free(self.key_slots);
     }
-    if self.value_slots != NULL {
+    if self.value_slots != nil {
       free(self.value_slots);
     }
-    if self.used != NULL {
+    if self.used != nil {
       free(self.used);
     }
-    if self.tomb != NULL {
+    if self.tomb != nil {
       free(self.tomb);
     }
 
-    self.key_slots = NULL;
-    self.value_slots = NULL;
-    self.used = NULL;
-    self.tomb = NULL;
+    self.key_slots = nil;
+    self.value_slots = nil;
+    self.used = nil;
+    self.tomb = nil;
     self.len = 0;
     self.cap = 0;
   }
@@ -374,7 +373,7 @@ impl Map<K, V> {
 
   // Clear all entries (keeps capacity).
   pub clear() {
-    if self.value_slots != NULL {
+    if self.value_slots != nil {
       memset(self.key_slots, 0, self.cap * sizeof(K));
       memset(self.value_slots, 0, self.cap * sizeof(V));
       memset(self.used, 0, self.cap * sizeof(bin));
@@ -387,7 +386,7 @@ impl Map<K, V> {
   pub keys() Vec<K> {
     Vec<K> out;
     out.init(self.len);
-    if self.key_slots == NULL {
+    if self.key_slots == nil {
       ret out;
     }
 
@@ -405,7 +404,7 @@ impl Map<K, V> {
   pub values() Vec<V> {
     Vec<V> out;
     out.init(self.len);
-    if self.value_slots == NULL {
+    if self.value_slots == nil {
       ret out;
     }
 
@@ -469,7 +468,7 @@ impl MapIter<K, V> as Iterator<K> {
 impl Map<K, V> as Clearable {
   // Clear all entries (keeps capacity).
   pub clear() {
-    if self.value_slots != NULL {
+    if self.value_slots != nil {
       memset(self.key_slots, 0, self.cap * sizeof(K));
       memset(self.value_slots, 0, self.cap * sizeof(V));
       memset(self.used, 0, self.cap * sizeof(bin));
@@ -510,8 +509,8 @@ impl Map<str, num> as Display {
       i = i + 1;
     }
     str out = malloc(budget);
-    if out == NULL {
-      ret NULL;
+    if out == nil {
+      ret nil;
     }
     num pos = 0;
     out[pos] = '{';
@@ -556,8 +555,8 @@ impl Map<str, str> as Display {
       i = i + 1;
     }
     str out = malloc(budget);
-    if out == NULL {
-      ret NULL;
+    if out == nil {
+      ret nil;
     }
     num pos = 0;
     out[pos] = '{';

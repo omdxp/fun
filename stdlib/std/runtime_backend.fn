@@ -21,7 +21,7 @@ pub fun runtime_backend_windows_id() num {
 }
 
 fun runtime_backend_id_from_name(str name) num {
-  if name == NULL {
+  if name == nil {
     ret 0;
   }
 
@@ -40,7 +40,7 @@ fun runtime_backend_id_from_name(str name) num {
 }
 
 fun runtime_backend_id_from_os_name(str os_name) num {
-  if os_name == NULL {
+  if os_name == nil {
     ret 0;
   }
 
@@ -60,12 +60,12 @@ fun runtime_backend_id_from_os_name(str os_name) num {
 
 fun runtime_backend_detect_windows_hint() bin {
   str os_env = env("OS");
-  if os_env != NULL && strcmp(os_env, "Windows_NT") == 0 {
+  if os_env != nil && strcmp(os_env, "Windows_NT") == 0 {
     ret true;
   }
 
   str os_type = env("OSTYPE");
-  if os_type == NULL {
+  if os_type == nil {
     ret false;
   }
 

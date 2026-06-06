@@ -10,7 +10,6 @@ imp std.io;
 imp std.channel;
 imp std.c.io;
 imp std.c.mem;
-imp std.c.def;
 imp std.vec;
 imp std.result;
 imp std.error;
@@ -30,7 +29,7 @@ pub fun fs() Fs {
 
 fun _fs_err(str message, str context) Error {
   Error e = error_new_simple(.Io, message);
-  if context != NULL {
+  if context != nil {
     e.with_context(context);
   }
   ret e;
@@ -46,7 +45,7 @@ impl Fs {
   // - true if the file can be opened
   pub exists(str path) bin {
     FILE* f = fopen(path, "rb");
-    if f == NULL {
+    if f == nil {
       ret false;
     }
     fclose(f);
@@ -73,7 +72,7 @@ impl Fs {
   // - Result<str> with contents or error
   pub try_read_to_string(str path) Result<str> {
     str out = read_all(path);
-    if out == NULL {
+    if out == nil {
       ret err(1, "read_to_string failed", "");
     }
     ret ok(out);
@@ -89,16 +88,16 @@ impl Fs {
   // - bytes string or null
   pub read_bytes(str path, num max_len) str {
     if max_len <= 0 {
-      ret NULL;
+      ret nil;
     }
     FILE* h = fopen(path, "rb");
-    if h == NULL {
-      ret NULL;
+    if h == nil {
+      ret nil;
     }
     defer fclose(h);
     str buf = malloc(max_len + 1);
-    if buf == NULL {
-      ret NULL;
+    if buf == nil {
+      ret nil;
     }
     num read = fread(buf, 1, max_len, h);
     buf[read] = '\0';
@@ -115,7 +114,7 @@ impl Fs {
   // - Result<str> with bytes or error
   pub try_read_bytes(str path, num max_len) Result<str> {
     str out = self.read_bytes(path, max_len);
-    if out == NULL {
+    if out == nil {
       ret err(1, "read_bytes failed", "");
     }
     ret ok(out);
@@ -159,7 +158,7 @@ impl Fs {
   // - true on success
   pub append_string(str path, str data) bin {
     FILE* h = fopen(path, "ab");
-    if h == NULL {
+    if h == nil {
       ret false;
     }
     defer fclose(h);
@@ -194,7 +193,7 @@ impl Fs {
   // - true on success
   pub copy_file(str src, str dst) bin {
     str data = read_all(src);
-    if data == NULL {
+    if data == nil {
       ret false;
     }
     ret write_all(dst, data);
@@ -210,7 +209,7 @@ impl Fs {
   // - Result<bin> with success flag or error
   pub try_copy_file(str src, str dst) Result<bin> {
     str data = read_all(src);
-    if data == NULL {
+    if data == nil {
       ret err(1, "copy_file read failed", false);
     }
     if write_all(dst, data) == false {
@@ -228,7 +227,7 @@ impl Fs {
   // - size in bytes or -1
   pub size(str path) num {
     FILE* h = fopen(path, "rb");
-    if h == NULL {
+    if h == nil {
       ret -1;
     }
     defer fclose(h);
@@ -269,7 +268,7 @@ impl Fs {
     Vec<str> out;
     out.init(8);
     FILE* h = fopen(path, "rb");
-    if h == NULL {
+    if h == nil {
       ret out;
     }
     defer fclose(h);
@@ -278,11 +277,11 @@ impl Fs {
         break;
       }
       str buf = malloc(max_len);
-      if buf == NULL {
+      if buf == nil {
         break;
       }
       str res = fgets(buf, max_len, h);
-      if res == NULL {
+      if res == nil {
         free(buf);
         break;
       }
@@ -434,7 +433,7 @@ pub async fun copy_file_progress_async(
   Channel<num>* progress_updates,
   ChannelCancelToken* cancel_token
 ) num {
-  if src == NULL || dst == NULL {
+  if src == nil || dst == nil {
     ret -1;
   }
 
@@ -447,19 +446,19 @@ pub async fun copy_file_progress_async(
   }
 
   File in_file = open_read(src);
-  if in_file.handle == NULL {
+  if in_file.handle == nil {
     ret -1;
   }
   defer in_file.close();
 
   File out_file = open_write(dst);
-  if out_file.handle == NULL {
+  if out_file.handle == nil {
     ret -1;
   }
   defer out_file.close();
 
   raw* buf = malloc(chunk_size);
-  if buf == NULL {
+  if buf == nil {
     ret -2;
   }
   defer free(buf);
@@ -483,7 +482,7 @@ pub async fun copy_file_progress_async(
     }
     total = total + n;
 
-    if progress_updates != NULL {
+    if progress_updates != nil {
       num rc = await progress_updates.send_timeout_with_token_async(total, 0, cancel_token);
       if rc == channel_rc_cancelled() {
         ret -3;
@@ -515,7 +514,7 @@ pub async fun read_lines_into_channel_async(
   Channel<str>* out_lines,
   ChannelCancelToken* cancel_token
 ) num {
-  if path == NULL || out_lines == NULL || max_len <= 1 {
+  if path == nil || out_lines == nil || max_len <= 1 {
     ret -1;
   }
 
@@ -524,7 +523,7 @@ pub async fun read_lines_into_channel_async(
   }
 
   File f = open_read(path);
-  if f.handle == NULL {
+  if f.handle == nil {
     ret -1;
   }
   defer f.close();
@@ -536,7 +535,7 @@ pub async fun read_lines_into_channel_async(
     }
 
     str line = f.read_line_max(max_len);
-    if line == NULL {
+    if line == nil {
       break;
     }
 

@@ -1,58 +1,137 @@
-// Basic TOML parsing/serialization (flat key=value).
+// Typed TOML values (flat `key = value` documents).
 // 
-// Usage:
+// `TomlValue` is a data-carrying enum modelling a TOML scalar: a string, integer,
+// float, or boolean. `parse_document` reads `key = value` lines into a `TomlDoc`
+// (a `Map<str, TomlValue>`), auto-detecting each value's type, and `get` returns the
+// typed value.
+// 
 // ```
-// TomlDoc d = toml_doc_init();
-// d.set("key", "value");
+// let doc = parse_document("name = \"fun\"\nversion = 1\nstable = true\n");
+// let v = doc.get("version").unwrap_or(TomlValue.Str(""));
+// print_num(v.as_int().unwrap_or(0));   // 1
 // ```
 
 imp std.map;
-imp std.serde;
-imp std.string;
+imp std.option;
 imp std.result;
+imp std.string;
+imp std.quirks;
+imp std.serde;
 
-fun _parse_line_into(TomlDoc* out, str line) {
-  if len(line) <= 0 {
-    ret;
-  }
-
-  let eq_idx = index_of_char(line, '=');
-  if eq_idx == -1 {
-    ret;
-  }
-
-  let key = trim(substr(line, 0, eq_idx));
-  let val = trim(substr(line, eq_idx + 1, len(line) - (eq_idx + 1)));
-  out.set(key, val);
+// A TOML scalar value.
+pub enum TomlValue {
+  Str(str),
+  Int(num),
+  Float(dec),
+  Bool(bin),
 }
 
-fun _toml_find_str_key_index(Map<str, str>* m, str key) num {
-  if m.key_slots == NULL {
-    ret -1;
+impl TomlValue {
+  // The string, or None when this is not a Str.
+  pub as_str() Option<str> {
+    fit *self {
+      TomlValue.Str(s) -> { ret Option.Some(s); }
+      TomlValue.Int(n) -> { ret Option.None; }
+      TomlValue.Float(d) -> { ret Option.None; }
+      TomlValue.Bool(b) -> { ret Option.None; }
+    }
+    ret Option.None;
   }
 
-  num i = 0;
-  for i < m.cap {
-    if m.used[i] != false && m.tomb[i] == false {
-      if equals(m.key_slots[i], key) {
-        ret i;
+  // The integer, or None when this is not an Int.
+  pub as_int() Option<num> {
+    fit *self {
+      TomlValue.Int(n) -> { ret Option.Some(n); }
+      TomlValue.Str(s) -> { ret Option.None; }
+      TomlValue.Float(d) -> { ret Option.None; }
+      TomlValue.Bool(b) -> { ret Option.None; }
+    }
+    ret Option.None;
+  }
+
+  // The float, or None when this is not a Float.
+  pub as_float() Option<dec> {
+    fit *self {
+      TomlValue.Float(d) -> { ret Option.Some(d); }
+      TomlValue.Str(s) -> { ret Option.None; }
+      TomlValue.Int(n) -> { ret Option.None; }
+      TomlValue.Bool(b) -> { ret Option.None; }
+    }
+    ret Option.None;
+  }
+
+  // The boolean, or None when this is not a Bool.
+  pub as_bool() Option<bin> {
+    fit *self {
+      TomlValue.Bool(b) -> { ret Option.Some(b); }
+      TomlValue.Str(s) -> { ret Option.None; }
+      TomlValue.Int(n) -> { ret Option.None; }
+      TomlValue.Float(d) -> { ret Option.None; }
+    }
+    ret Option.None;
+  }
+}
+
+impl TomlValue as Display {
+  // Render the value in TOML syntax (strings are quoted).
+  pub to_string() str {
+    fit *self {
+      TomlValue.Str(s) -> {
+        StringBuilder b = string_builder_init(_tv_strlen(s) + 2);
+        b.append_char('"');
+        b.append(s);
+        b.append_char('"');
+        str out = b.build();
+        b.free();
+        ret out;
+      }
+      TomlValue.Int(n) -> {
+        StringBuilder b = string_builder_init(16);
+        b.append_num(n);
+        str out = b.build();
+        b.free();
+        ret out;
+      }
+      TomlValue.Float(d) -> {
+        StringBuilder b = string_builder_init(24);
+        b.append_dec(d, 6);
+        str out = b.build();
+        b.free();
+        ret out;
+      }
+      TomlValue.Bool(x) -> {
+        if x {
+          ret _tv_dup("true");
+        }
+        ret _tv_dup("false");
       }
     }
+    ret _tv_dup("");
+  }
+}
+
+fun _tv_strlen(str s) num {
+  num i = 0;
+  for s[i] != 0 {
     i = i + 1;
   }
-  ret -1;
+  ret i;
 }
 
-// TOML document wrapper.
+fun _tv_dup(str s) str {
+  StringBuilder b = string_builder_init(_tv_strlen(s) + 1);
+  b.append(s);
+  str out = b.build();
+  b.free();
+  ret out;
+}
+
+// A parsed TOML document: keys mapped to typed values.
 pub compound TomlDoc {
-  // key/value map
-  Map<str, str> values;
+  Map<str, TomlValue> values;
 }
 
-// Create a new TOML document.
-// 
-// Returns:
-// - TomlDoc with empty map
+// Create an empty TOML document.
 pub fun toml_doc_init() TomlDoc {
   TomlDoc d;
   d.values.init(8);
@@ -60,23 +139,19 @@ pub fun toml_doc_init() TomlDoc {
 }
 
 impl TomlDoc {
-  // Get a value by key.
-  pub get(str key) str {
-    let idx = _toml_find_str_key_index(&self.values, key);
-    if idx == -1 {
-      ret NULL;
-    }
-    ret self.values.value_slots[idx];
+  // Look up a key: Some(value) when present, None otherwise.
+  pub get(str key) Option<TomlValue> {
+    ret self.values.at(key);
   }
 
-  // Set a value by key.
-  pub set(str key, str value) {
-    let idx = _toml_find_str_key_index(&self.values, key);
-    if idx != -1 {
-      self.values.value_slots[idx] = value;
-      ret;
-    }
+  // Insert or replace a typed value.
+  pub set(str key, TomlValue value) {
     self.values.put(key, value);
+  }
+
+  // Number of entries.
+  pub len() num {
+    ret self.values.len();
   }
 
   // Free internal storage.
@@ -84,38 +159,128 @@ impl TomlDoc {
     self.values.free();
   }
 
-  // Serialize the document to a string.
+  // Render the document back to `key = value` lines.
   pub stringify() str {
-    StringBuilder b = string_builder_init(self.values.len() * 8 + 8);
+    StringBuilder b = string_builder_init(self.values.len() * 16 + 8);
+    defer b.free();
+    let keys = self.values.keys();
+    defer keys.free();
     num i = 0;
-    for i < self.values.cap {
-      if self.values.used[i] == false || self.values.tomb[i] != false {
-        i = i + 1;
-        continue;
-      }
-
-      str key = self.values.key_slots[i];
-      str value = self.values.value_slots[i];
+    for i < keys.len() {
+      let key = keys.get(i);
+      let val = self.values.get(key);
       b.append(key);
       b.append(" = ");
-      b.append(value);
-      b.append("\n");
+      str vs = val.to_string();
+      b.append(vs);
+      b.append_char('\n');
       i = i + 1;
     }
-
-    str out = b.build();
-    b.free();
-    ret out;
+    ret b.build();
   }
 
-  // Serialize the document to a string with Result.
+  // Render with Result (for the fallible serde surface).
   pub try_stringify() Result<str> {
     str out = self.stringify();
-    if out == NULL {
+    if out == nil {
       ret err(1, "toml stringify failed", "");
     }
     ret ok(out);
   }
+}
+
+// --- Value classification ------------------------------------------------------------
+
+fun _toml_is_digit(chr c) bin {
+  ret c >= '0' && c <= '9';
+}
+
+// Classify a raw (trimmed) TOML value string into a typed TomlValue.
+fun _classify(str text) TomlValue {
+  num n = _tv_strlen(text);
+  if n == 0 {
+    ret TomlValue.Str(text);
+  }
+
+  // Quoted string: strip the surrounding quotes.
+  if text[0] == '"' {
+    if n >= 2 && text[n - 1] == '"' {
+      ret TomlValue.Str(substr(text, 1, n - 2));
+    }
+    ret TomlValue.Str(text);
+  }
+
+  // Booleans.
+  if equals(text, "true") {
+    ret TomlValue.Bool(true);
+  }
+  if equals(text, "false") {
+    ret TomlValue.Bool(false);
+  }
+
+  // Numbers: a leading digit or sign, with a '.' meaning float.
+  chr c0 = text[0];
+  if _toml_is_digit(c0) || c0 == '-' || c0 == '+' {
+    num has_dot = 0;
+    num i = 0;
+    for i < n {
+      if text[i] == '.' {
+        has_dot = 1;
+      }
+      i = i + 1;
+    }
+    if has_dot == 1 {
+      ret TomlValue.Float(parse_dec(text));
+    }
+    ret TomlValue.Int(parse_int(text));
+  }
+
+  // Anything else is a bare string.
+  ret TomlValue.Str(text);
+}
+
+fun _parse_line_into(TomlDoc* out, str line) {
+  if len(line) <= 0 {
+    ret;
+  }
+  let eq_idx = index_of_char(line, '=');
+  if eq_idx == -1 {
+    ret;
+  }
+  let key = trim(substr(line, 0, eq_idx));
+  let value_text = trim(substr(line, eq_idx + 1, len(line) - (eq_idx + 1)));
+  if len(key) <= 0 {
+    ret;
+  }
+  out.set(key, _classify(value_text));
+}
+
+// Parse a flat TOML document (`key = value` per line).
+pub fun parse_document(str s) TomlDoc {
+  TomlDoc out = toml_doc_init();
+  num i = 0;
+  num start = 0;
+  for s[i] != 0 {
+    if s[i] == '\n' {
+      let line = substr(s, start, i - start);
+      _parse_line_into(&out, line);
+      i = i + 1;
+      start = i;
+    } else {
+      i = i + 1;
+    }
+  }
+  if i > start {
+    let line = substr(s, start, i - start);
+    _parse_line_into(&out, line);
+  }
+  ret out;
+}
+
+// Parse a flat TOML document with Result.
+pub fun try_parse_document(str s) Result<TomlDoc> {
+  TomlDoc out = parse_document(s);
+  ret ok(out);
 }
 
 impl TomlDoc as Serialize {
@@ -126,65 +291,28 @@ impl TomlDoc as Serialize {
 }
 
 impl TomlDoc as Deserialize {
-  // Parse TOML text into this document.
+  // Parse TOML text into this document (replacing any current contents).
   pub deserialize(str input) {
-    TomlDoc parsed = parse_document(input);
-    defer parsed.free();
     if self.values.cap == 0 {
       self.values.init(8);
     } else {
       self.values.clear();
     }
-
     num i = 0;
-    for i < parsed.values.cap {
-      if parsed.values.used[i] != false && parsed.values.tomb[i] == false {
-        self.values.put(parsed.values.key_slots[i], parsed.values.value_slots[i]);
+    num start = 0;
+    for input[i] != 0 {
+      if input[i] == '\n' {
+        let line = substr(input, start, i - start);
+        _parse_line_into(self, line);
+        i = i + 1;
+        start = i;
+      } else {
+        i = i + 1;
       }
-      i = i + 1;
     }
-
-  }
-}
-
-// Parse a TOML document (flat key=value).
-// 
-// Params:
-// - s: TOML string
-// 
-// Returns:
-// - parsed TomlDoc
-pub fun parse_document(str s) TomlDoc {
-  TomlDoc out = toml_doc_init();
-  num i = 0;
-  num start = 0;
-
-  for s[i] != 0 {
-    if s[i] == '\n' {
-      let line_len = i - start;
-      let line = substr(s, start, line_len);
-      _parse_line_into(&out, line);
-      i = i + 1;
-      start = i;
-    } else {
-      i = i + 1;
+    if i > start {
+      let line = substr(input, start, i - start);
+      _parse_line_into(self, line);
     }
   }
-
-  if i > start {
-    let line_len = i - start;
-    let line = substr(s, start, line_len);
-    _parse_line_into(&out, line);
-  }
-
-  ret out;
 }
-
-// Parse a TOML document with Result.
-pub fun try_parse_document(str s) Result<TomlDoc> {
-  TomlDoc out = parse_document(s);
-  ret ok(out);
-}
-
-// Serialization is done through the value methods: `doc.stringify()` and
-// `doc.try_stringify()` (the Result-returning form).

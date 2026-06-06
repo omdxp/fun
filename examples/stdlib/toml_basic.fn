@@ -1,15 +1,22 @@
-// TOML helpers example.
+// Typed TOML: parse `key = value` lines into typed values and read them back.
 
 imp std.c.io;
 imp std.toml;
+imp std.option;
 
-fun main() {
-  str src = "name = fun\nversion = 1\n";
-  TomlDoc obj = parse_document(src);
+fun main() num {
+  let doc = parse_document("name = \"fun\"\nversion = 2\nratio = 1.5\nstable = true\n");
 
-  printf("name=%s\n", obj.get("name"));
-  str out = obj.stringify();
-  printf("toml=\n%s", out);
+  // get(key) returns Option<TomlValue>; as_* accessors narrow the scalar type.
+  let name = doc.get("name").unwrap_or(TomlValue.Str(""));
+  printf("name=%s\n", name.as_str().unwrap_or("?"));
 
-  obj.free();
+  let version = doc.get("version").unwrap_or(TomlValue.Str(""));
+  printf("version=%lld\n", version.as_int().unwrap_or(0));
+
+  let stable = doc.get("stable").unwrap_or(TomlValue.Str(""));
+  printf("stable=%d\n", stable.as_bool().unwrap_or(false));
+
+  printf("toml=\n%s", doc.stringify());
+  ret 0;
 }
