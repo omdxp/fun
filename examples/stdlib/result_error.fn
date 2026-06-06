@@ -1,18 +1,21 @@
+// A Result's error arm carries a full Error (kind + code + message + context).
+// Build one with the `error_*` constructors, attach context, then match the
+// Result with `fit` to read it.
+
 imp std.c.io;
 imp std.result;
 imp std.error;
 
-fun main() {
+fun main() num {
   Error e = error_new_kind(.Invalid, 7, "bad input");
   e.with_context("field: age");
 
   Result<num> r = err_error(e, 0);
-  printf(
-    "ok=%d val=%d err=%d %s ctx=%s\n",
-    r.is_ok(),
-    r.value,
-    r.err.code,
-    r.err.message,
-    r.err.context
-  );
+  fit r {
+    Result.Ok(v) -> { printf("ok val=%lld\n", v); }
+    Result.Err(err) -> {
+      printf("err=%lld %s ctx=%s\n", err.code, err.message, err.context);
+    }
+  }
+  ret 0;
 }

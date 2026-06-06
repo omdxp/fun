@@ -112,14 +112,11 @@ impl TomlDoc {
 
   // Serialize the document to a string with Result.
   pub try_stringify() Result<str> {
-    Result<str> r;
     str out = self.stringify();
     if out == NULL {
-      r.set_err(1, "toml stringify failed", "");
-      ret r;
+      ret err(1, "toml stringify failed", "");
     }
-    r.set_ok(out);
-    ret r;
+    ret ok(out);
   }
 }
 
@@ -187,10 +184,8 @@ pub fun parse(str s) TomlDoc {
 
 // Parse a TOML document with Result.
 pub fun try_parse(str s) Result<TomlDoc> {
-  Result<TomlDoc> r;
   TomlDoc out = parse(s);
-  r.set_ok(out);
-  ret r;
+  ret ok(out);
 }
 
 // Serialize a TOML document.
@@ -206,12 +201,9 @@ pub fun stringify(TomlDoc* obj) str {
 
 // Serialize a TOML document with Result.
 pub fun try_stringify(TomlDoc* obj) Result<str> {
-  Result<str> r;
   str out = obj.stringify();
   if out == NULL {
-    r.set_err(1, "toml stringify failed", "");
-    ret r;
+    ret err(1, "toml stringify failed", "");
   }
-  r.set_ok(out);
-  ret r;
+  ret ok(out);
 }

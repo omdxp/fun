@@ -178,14 +178,11 @@ pub fun tcp_listen(num port) num {
 
 // Create a TCP listening socket with Result.
 pub fun try_tcp_listen(num port) Result<num> {
-  Result<num> r;
   num fd = tcp_listen(port);
   if fd < 0 {
-    r.set_err(1, "tcp_listen failed", -1);
-    ret r;
+    ret err(1, "tcp_listen failed", -1);
   }
-  r.set_ok(fd);
-  ret r;
+  ret ok(fd);
 }
 
 // Accept a client connection.
@@ -198,14 +195,11 @@ pub fun tcp_accept(num server_fd) num {
 
 // Accept a client connection with Result.
 pub fun try_tcp_accept(num server_fd) Result<num> {
-  Result<num> r;
   num fd = tcp_accept(server_fd);
   if fd < 0 {
-    r.set_err(1, "tcp_accept failed", -1);
-    ret r;
+    ret err(1, "tcp_accept failed", -1);
   }
-  r.set_ok(fd);
-  ret r;
+  ret ok(fd);
 }
 
 // Read from a socket.
@@ -223,14 +217,11 @@ pub fun tcp_read(num fd, str buf, num len) num {
 
 // Read from a socket with Result.
 pub fun try_tcp_read(num fd, str buf, num len) Result<num> {
-  Result<num> r;
   num n = tcp_read(fd, buf, len);
   if n < 0 {
-    r.set_err(1, "tcp_read failed", -1);
-    ret r;
+    ret err(1, "tcp_read failed", -1);
   }
-  r.set_ok(n);
-  ret r;
+  ret ok(n);
 }
 
 // Write to a socket.
@@ -248,14 +239,11 @@ pub fun tcp_write(num fd, str buf, num len) num {
 
 // Write to a socket with Result.
 pub fun try_tcp_write(num fd, str buf, num len) Result<num> {
-  Result<num> r;
   num n = tcp_write(fd, buf, len);
   if n < 0 {
-    r.set_err(1, "tcp_write failed", -1);
-    ret r;
+    ret err(1, "tcp_write failed", -1);
   }
-  r.set_ok(n);
-  ret r;
+  ret ok(n);
 }
 
 // Close a socket.
@@ -475,14 +463,11 @@ pub fun http_serve_once(num port, str body) num {
 
 // Serve a single HTTP request with Result.
 pub fun try_http_serve_once(num port, str body) Result<num> {
-  Result<num> r;
   num rc = http_serve_once(port, body);
   if rc != 0 {
-    r.set_err(1, "http_serve_once failed", rc);
-    ret r;
+    ret err(1, "http_serve_once failed", rc);
   }
-  r.set_ok(rc);
-  ret r;
+  ret ok(rc);
 }
 
 // Serve HTTP requests forever (blocking loop).
@@ -515,12 +500,9 @@ pub fun http_serve_forever(num port, str body) num {
 
 // Serve HTTP requests forever with Result.
 pub fun try_http_serve_forever(num port, str body) Result<num> {
-  Result<num> r;
   num rc = http_serve_forever(port, body);
   if rc != 0 {
-    r.set_err(1, "http_serve_forever failed", rc);
-    ret r;
+    ret err(1, "http_serve_forever failed", rc);
   }
-  r.set_ok(rc);
-  ret r;
+  ret ok(rc);
 }

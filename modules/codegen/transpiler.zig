@@ -2514,6 +2514,14 @@ pub const TranspileProcess = struct {
         const mangled = self.type_name_mangled(dt) catch return;
         defer self.allocator.free(mangled);
         if (mem.eql(u8, mangled, base)) return; // not actually mangled
+        // Skip the generic TEMPLATE typecheck pass, where the args are still type
+        // parameters (mangled name like `Option__T`). Only record a concrete
+        // instance (`Option__num`), which codegen actually emits. Without this the
+        // template method would emit a reference to the never-defined `Option__T`.
+        if (self.mangled_contains_unresolved_placeholder(mangled)) return;
+        if (self.type_subst_params) |params| {
+            if (self.mangled_contains_type_param(mangled, params)) return;
+        }
         try self.record_enum_ctor_override(value_node.*, mangled);
     }
 
@@ -2632,12 +2640,17 @@ pub const TranspileProcess = struct {
 
     fn register_generic_fn_instantiation(self: *Self, fn_node: *ast.Node, params: *const utils.Vector(ArrayList(u8)), gargs: []*dtype.DataType, name: []const u8) TranspileError!void {
         const root = self.get_root();
-        var key_buf = ArrayList(u8).init(self.allocator);
+        // The key is stored on (and freed by) `root`, so it MUST be allocated with
+        // root's allocator. When a generic fn is instantiated from an IMPORTED
+        // module, `self` is a child process with a different arena; using
+        // `self.allocator` here would let root free a child-arena pointer (a
+        // cross-arena free → corruption). Allocate on root.
+        var key_buf = ArrayList(u8).init(root.allocator);
         defer key_buf.deinit();
         key_buf.appendSlice(name) catch return TranspileError.MemoryAllocationFailed;
         const key = key_buf.toOwnedSlice() catch return TranspileError.MemoryAllocationFailed;
         if (root.generic_fn_instantiation_keys.contains(key)) {
-            self.allocator.free(key);
+            root.allocator.free(key);
             return;
         }
         root.generic_fn_instantiation_keys.put(key, true) catch return TranspileError.MemoryAllocationFailed;
@@ -7308,6 +7321,10 @@ pub const TranspileProcess = struct {
                                 // Shorthand data-variant construction in return position.
                                 try self.resolve_shorthand_enum_call(rv, enum_name);
                             }
+                            // Generic enum returned (`ret Option.Some(x)` in a fn whose
+                            // return type is `Option<num>`): record the monomorphized
+                            // construction name so codegen emits `Option__num`.
+                            try self.bind_enum_ctor_expected(rv, fn_rtype);
                         }
                         const rt = try self.infer_expr_type(rv.*, env, fns);
                         if (is_known_type(fn_rtype) and is_known_type(rt) and !(try self.can_implicit_coerce(fn_rtype, rt))) {
@@ -9409,6 +9426,10 @@ pub const TranspileProcess = struct {
         // teardown below releases all allocations in one pass.
         self.generic_call_overrides.deinit();
 
+        // Same ownership model as generic_call_overrides (keys + values are arena-
+        // allocated; the arena teardown below frees them in one pass).
+        self.enum_ctor_overrides.deinit();
+
         // Same ownership model as generic_call_overrides.
         self.await_call_overrides.deinit();
 
@@ -10313,18 +10334,60 @@ pub const TranspileProcess = struct {
                 }
             }
         }
-        // A non-identifier subject (e.g. a channel recv `<- ch`, any call returning
-        // a data-enum) has no declared name to look up. Fall back to the arms: an
-        // `Enum.Variant` condition names the tagged-union enum being matched, so the
-        // subject is still switched on `.tag` (via emit_tagged_union_fit) rather than
-        // mis-emitted as a switch on the whole struct.
+        // A non-identifier subject (e.g. `*self` inside an impl method, a channel
+        // recv `<- ch`, any call returning a data-enum) has no simple declared name.
+        // Fall back to the arms: an `Enum.Variant` condition names the tagged-union
+        // enum being matched, so the subject is switched on `.tag` (via
+        // emit_tagged_union_fit) rather than mis-emitted as a switch on the struct.
         for (branches) |branch| {
             const cond = branch.condition orelse continue;
             if (self.enum_variant_path(cond)) |vp| {
-                if (self.enum_name_is_tagged_union(vp.enum_name)) return vp.enum_name;
+                if (self.enum_name_is_tagged_union(vp.enum_name)) {
+                    // Inside a monomorphized generic-enum method (`impl Option<T>`),
+                    // `fit *self` matches `Option.Some` — but the concrete subject is
+                    // `Option__num`. Mangle the base with the active substitution
+                    // context so the switch uses `Option__num`/`Option__num_Some`.
+                    if (self.mangled_enum_with_active_subst(vp.enum_name)) |m| return m;
+                    return vp.enum_name;
+                }
             }
         }
         return null;
+    }
+
+    /// If `enum_name` is a generic data enum AND a type-parameter substitution is
+    /// active (we're emitting a monomorphized method), return the mangled instance
+    /// name (`Option__num`) by substituting the enum's type params through the
+    /// active args. Returns null when the enum isn't generic or no subst is active.
+    /// The result is arena-owned (stable, no manual free).
+    fn mangled_enum_with_active_subst(self: *Self, enum_name: []const u8) ?[]const u8 {
+        const params = self.type_subst_params orelse return null;
+        const args = self.type_subst_args orelse return null;
+        const reg = self.root_registry() orelse return null;
+        const enode = reg.enums_by_name.get(enum_name) orelse return null;
+        if (enode.node_variant == null) return null;
+        const eparams = enode.node_variant.?.enum_decl.type_params orelse return null;
+
+        // Build mangled name: `<enum>__<arg0>[__<arg1>...]`, where each enum type
+        // param is mapped to its concrete type via the active (impl) substitution.
+        var buf = ArrayList(u8).init(self.arena.allocator());
+        buf.appendSlice(enum_name) catch return null;
+        for (eparams.items()) |ep| {
+            // Find the active substitution for this enum param name.
+            var resolved: ?*dtype.DataType = null;
+            for (params.items(), 0..) |p, i| {
+                if (mem.eql(u8, p.items, ep.items) and i < args.len) {
+                    resolved = args[i];
+                    break;
+                }
+            }
+            const rt = resolved orelse return null; // unresolved param -> not concrete
+            const arg_name = self.type_name_mangled(rt) catch return null;
+            defer self.allocator.free(arg_name);
+            buf.appendSlice("__") catch return null;
+            buf.appendSlice(arg_name) catch return null;
+        }
+        return buf.items;
     }
 
     /// Lower a `fit` over a tagged-union subject:
@@ -10629,11 +10692,12 @@ pub const TranspileProcess = struct {
                     for (root.generic_fn_instantiations.items) |inst| {
                         if (!mem.eql(u8, inst.name, spec_name)) continue;
                         const mangled = self.type_name_mangled_with_subst(&rt, inst.params.*, inst.args) catch return null;
-                        // The result is an owned, mangled compound name like `Option__num`.
-                        // Keep it only if it names a compound (after stripping generic args).
+                        // The result is an owned, mangled type name like `Option__num`.
+                        // Keep it when it names a compound OR a (data) enum (so a chain
+                        // like `some(7).unwrap_or(0)` materializes the rvalue receiver).
                         const base = if (mem.indexOf(u8, mangled, "__")) |bi| mangled[0..bi] else mangled;
                         const reg = root.type_registry;
-                        if (reg != null and reg.?.compounds_by_name.contains(base)) {
+                        if (reg != null and (reg.?.compounds_by_name.contains(base) or reg.?.enums_by_name.contains(base))) {
                             // NOTE: caller treats the returned slice as borrowed; we leak
                             // this small allocation into the arena (freed at process end).
                             return mangled;
@@ -10652,12 +10716,14 @@ pub const TranspileProcess = struct {
                 const mangled = self.type_name_mangled(&rt) catch return null;
                 const base = if (mem.indexOf(u8, mangled, "__")) |bi| mangled[0..bi] else mangled;
                 const reg = self.get_root().type_registry;
-                if (reg != null and reg.?.compounds_by_name.contains(base)) return mangled; // arena-owned
+                if (reg != null and (reg.?.compounds_by_name.contains(base) or reg.?.enums_by_name.contains(base))) return mangled; // arena-owned
                 self.allocator.free(@constCast(mangled));
                 return null;
             }
-            if (!self.is_compound_named(rt.type_str.items)) return null;
-            return rt.type_str.items;
+            if (self.is_compound_named(rt.type_str.items)) return rt.type_str.items;
+            // A non-generic data enum returned by value also supports method chaining.
+            if (self.enum_name_is_tagged_union(rt.type_str.items)) return rt.type_str.items;
+            return null;
         }
 
         if (callee.type == .Expression and callee.node_variant != null and
@@ -11801,7 +11867,67 @@ pub const TranspileProcess = struct {
             return TranspileError.MemoryAllocationFailed;
         };
 
-        while (remaining.items.len > 0 or remaining_specs.items.len > 0) {
+        // Generic data-enum instances (`Option__str`, `Result__File`) join the
+        // topological pass as first-class nodes: each is emitted once its by-value
+        // payload dependencies (other compounds/enums) are emitted, and compounds
+        // that hold one by value wait for it. This resolves the mutual ordering —
+        // `Person { Option<str> }` needs `Option__str` first, while `Result<File>`
+        // needs `File` first.
+        const EnumSpec = struct { enode: *ast.Node, dt: *const dtype.DataType, mangled: []const u8 };
+        var remaining_enum_specs = ArrayList(EnumSpec).init(self.allocator);
+        defer remaining_enum_specs.deinit();
+        {
+            for (enum_nodes.items) |enode| {
+                if (enode.node_variant == null) continue;
+                if (self.is_std_c_signature_node(enode)) continue;
+                const e = enode.node_variant.?.enum_decl;
+                if (!enum_is_tagged_union(e)) continue;
+                if (e.type_params == null) continue;
+                const params = e.type_params.?;
+                // Discover concrete instantiations of this generic enum.
+                var inst_keys = std.StringHashMap(bool).init(self.allocator);
+                defer {
+                    var it = inst_keys.iterator();
+                    while (it.next()) |entry| self.allocator.free(entry.key_ptr.*);
+                    inst_keys.deinit();
+                }
+                var inst_list = ArrayList(*const dtype.DataType).init(self.allocator);
+                defer inst_list.deinit();
+                try self.collect_generic_instantiations_recursive(self, e.name.items, &inst_keys, &inst_list);
+                for (inst_list.items) |dt| {
+                    if (dt.generic_args == null) continue;
+                    const gargs = dt.generic_args.?.items();
+                    if (gargs.len != params.count) continue;
+                    if (!self.generic_args_are_concrete(&params, gargs)) continue;
+                    if (self.dtype_contains_type_param(dt, &params)) continue;
+                    const mangled = try self.type_name_mangled(dt);
+                    if (self.mangled_contains_type_param(mangled, &params) or self.mangled_contains_unresolved_placeholder(mangled)) {
+                        self.allocator.free(mangled);
+                        continue;
+                    }
+                    // Dedup by mangled name (arena-owned for the loop's lifetime).
+                    var dup = false;
+                    for (remaining_enum_specs.items) |es| {
+                        if (mem.eql(u8, es.mangled, mangled)) {
+                            dup = true;
+                            break;
+                        }
+                    }
+                    if (dup) {
+                        self.allocator.free(mangled);
+                        continue;
+                    }
+                    const owned = self.arena.allocator().dupe(u8, mangled) catch {
+                        self.allocator.free(mangled);
+                        return TranspileError.MemoryAllocationFailed;
+                    };
+                    remaining_enum_specs.append(.{ .enode = enode, .dt = dt, .mangled = owned }) catch {};
+                    self.allocator.free(mangled);
+                }
+            }
+        }
+
+        while (remaining.items.len > 0 or remaining_specs.items.len > 0 or remaining_enum_specs.items.len > 0) {
             var progress = false;
 
             var si: usize = 0;
@@ -11826,6 +11952,25 @@ pub const TranspileProcess = struct {
                     };
                 }
                 _ = remaining_specs.swapRemove(si);
+                progress = true;
+            }
+
+            // Emit a generic data-enum instance once its by-value payload type
+            // dependencies are emitted (tracked in `emitted_compounds`, which also
+            // records emitted enum instances).
+            var ei: usize = 0;
+            while (ei < remaining_enum_specs.items.len) {
+                const es = remaining_enum_specs.items[ei];
+                if (!self.generic_enum_spec_deps_satisfied(es.enode, es.dt, &emitted_compounds)) {
+                    ei += 1;
+                    continue;
+                }
+                const e = es.enode.node_variant.?.enum_decl;
+                try self.emit_tagged_union_enum_named(e, es.mangled, e.type_params, es.dt.generic_args.?.items());
+                emitted_compounds.put(es.mangled, true) catch {
+                    return TranspileError.MemoryAllocationFailed;
+                };
+                _ = remaining_enum_specs.swapRemove(ei);
                 progress = true;
             }
 
@@ -11944,12 +12089,10 @@ pub const TranspileProcess = struct {
             const e = enode.node_variant.?.enum_decl;
             if (!enum_is_tagged_union(e)) continue;
             // A GENERIC data enum (`enum Option<T>`) is a template — never emit it
-            // directly (its payload references `T`). Emit one monomorphized struct
-            // per concrete instantiation discovered in the program instead.
-            if (e.type_params != null) {
-                try self.emit_generic_enum_specializations(enode);
-                continue;
-            }
+            // directly. Its monomorphized instances were already emitted before the
+            // compound pass (so by-value enum fields see the full definition); skip
+            // here to avoid a duplicate definition.
+            if (e.type_params != null) continue;
             if (emitted_enum_names.contains(e.name.items)) continue;
             emitted_enum_names.put(e.name.items, true) catch {
                 return TranspileError.MemoryAllocationFailed;
@@ -12703,11 +12846,69 @@ pub const TranspileProcess = struct {
                 defer if (needs_free) self.allocator.free(dep);
                 const reg = self.root_registry() orelse return true;
                 const dep_base = if (mem.indexOf(u8, dep, "__")) |idx| dep[0..idx] else dep;
-                if (!reg.compounds_by_name.contains(dep_base)) continue;
+                // A by-value field that is a compound OR a (generic) data-enum
+                // instance must be fully emitted first. Other names (primitives,
+                // plain enums that are emitted up front) impose no ordering.
+                const is_compound_dep = reg.compounds_by_name.contains(dep_base);
+                const is_enum_inst_dep = reg.enums_by_name.contains(dep_base) and !mem.eql(u8, dep, dep_base);
+                if (!is_compound_dep and !is_enum_inst_dep) continue;
                 if (!emitted.contains(dep)) return false;
             }
         }
 
+        return true;
+    }
+
+    /// Like `generic_spec_deps_satisfied` but for a generic data-enum instance:
+    /// true once every BY-VALUE payload type that is a compound or another data-enum
+    /// instance has been emitted (tracked in `emitted`). Pointer payloads and
+    /// primitives impose no ordering.
+    fn generic_enum_spec_deps_satisfied(self: *Self, enode: *ast.Node, dt: *const dtype.DataType, emitted: *std.StringHashMap(bool)) bool {
+        const e = enode.node_variant.?.enum_decl;
+        const params = e.type_params orelse return true;
+        const gargs = dt.generic_args orelse return true;
+        const reg = self.root_registry() orelse return true;
+        for (e.variants.items()) |v| {
+            const payload = v.payload orelse continue;
+            for (payload.items()) |pt| {
+                if (pt.pointer_depth != 0) continue; // pointer: incomplete type is fine
+                if (pt.flags != null and pt.flags.?.is_array) continue;
+                if (pt.type != null and pt.type != .Unknown) continue;
+                if (pt.type_str.items.len == 0) continue;
+                // Resolve the payload type after substituting the enum's type params.
+                var dep_name: ?[]const u8 = null;
+                var needs_free = false;
+                if (pt.generic_args != null) {
+                    dep_name = self.type_name_mangled_with_subst(pt, params, gargs.items()) catch return true;
+                    needs_free = true;
+                } else {
+                    // Maybe the payload IS a type param -> map to the concrete arg.
+                    var matched = false;
+                    for (params.items(), 0..) |p, i| {
+                        if (!mem.eql(u8, p.items, pt.type_str.items)) continue;
+                        matched = true;
+                        const arg = gargs.items()[i];
+                        if (arg.pointer_depth != 0 or (arg.flags != null and arg.flags.?.is_array)) break;
+                        if (arg.type != null and arg.type != .Unknown) break;
+                        if (arg.type_str.items.len == 0) break;
+                        dep_name = if (arg.generic_args != null) blk: {
+                            needs_free = true;
+                            break :blk self.type_name_mangled(arg) catch return true;
+                        } else arg.type_str.items;
+                        break;
+                    }
+                    if (!matched) dep_name = pt.type_str.items;
+                }
+                if (dep_name) |dep| {
+                    defer if (needs_free) self.allocator.free(dep);
+                    const dep_base = if (mem.indexOf(u8, dep, "__")) |idx| dep[0..idx] else dep;
+                    const is_compound = reg.compounds_by_name.contains(dep_base);
+                    const is_enum_inst = reg.enums_by_name.contains(dep_base) and !mem.eql(u8, dep, dep_base);
+                    if (!is_compound and !is_enum_inst) continue;
+                    if (!emitted.contains(dep)) return false;
+                }
+            }
+        }
         return true;
     }
 
@@ -14552,10 +14753,15 @@ pub const TranspileProcess = struct {
                         if (self.enum_variant_path(callee)) |path| {
                             if (self.lookup_enum_variant(path.enum_name, path.variant)) |variant| {
                                 if (variant.payload != null) {
-                                    // For a generic enum, the construction site carries a
-                                    // monomorphized-name override (`Option__num`) recorded
-                                    // at typecheck; otherwise use the plain enum name.
-                                    const ctor_name = self.lookup_enum_ctor_override(node) orelse path.enum_name;
+                                    // For a generic enum, the construction site uses a
+                                    // monomorphized name: from a typecheck-recorded
+                                    // override (`Option<num> x = Option.Some(..)`), or —
+                                    // when the construction is INSIDE a monomorphized
+                                    // generic method body (no per-site override exists,
+                                    // only the template was typechecked) — from the
+                                    // active type-parameter substitution. Else plain.
+                                    const ctor_name = self.lookup_enum_ctor_override(node) orelse
+                                        (self.mangled_enum_with_active_subst(path.enum_name) orelse path.enum_name);
                                     try self.emit_enum_variant_construction(ctor_name, path.variant, exp.right);
                                     return;
                                 }
@@ -15399,9 +15605,11 @@ pub const TranspileProcess = struct {
                                     // `Enum_Variant` is only the discriminant constant.
                                     if (enum_is_tagged_union(enode.node_variant.?.enum_decl)) {
                                         // A generic enum's payload-free variant value
-                                        // (`Option.None`) uses the monomorphized name
-                                        // recorded at the construction site.
-                                        const ctor_name = self.lookup_enum_ctor_override(node) orelse emit_enum_name;
+                                        // (`Option.None`) uses the monomorphized name:
+                                        // a typecheck-recorded override, or the active
+                                        // substitution inside a monomorphized method.
+                                        const ctor_name = self.lookup_enum_ctor_override(node) orelse
+                                            (self.mangled_enum_with_active_subst(emit_enum_name) orelse emit_enum_name);
                                         try self.write("((");
                                         try self.write(ctor_name);
                                         try self.write("){ .tag = ");

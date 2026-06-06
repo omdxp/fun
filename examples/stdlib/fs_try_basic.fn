@@ -1,14 +1,24 @@
+// Fallible filesystem ops return a Result — match it with `fit` (or use a
+// combinator like `unwrap_or`) instead of reading raw fields.
+
 imp std.c.io;
 imp std.fs;
 imp std.result;
 
-fun main() {
+fun main() num {
   Fs f = fs();
   str path = "_tmp_fs_try.txt";
 
   Result<bin> w = f.try_write_string(path, "hello from try");
-  printf("write ok=%d err=%d\n", w.is_ok(), w.err.code);
+  fit w {
+    Result.Ok(done) -> { printf("write ok\n"); }
+    Result.Err(e) -> { printf("write failed: %s\n", e.message); }
+  }
 
   Result<str> r = f.try_read_to_string(path);
-  printf("read ok=%d val=%s\n", r.is_ok(), r.value);
+  fit r {
+    Result.Ok(text) -> { printf("read ok: %s\n", text); }
+    Result.Err(e) -> { printf("read failed: %s\n", e.message); }
+  }
+  ret 0;
 }

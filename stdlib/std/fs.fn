@@ -72,14 +72,11 @@ impl Fs {
   // Returns:
   // - Result<str> with contents or error
   pub try_read_to_string(str path) Result<str> {
-    Result<str> r;
     str out = read_all(path);
     if out == NULL {
-      r.set_err(1, "read_to_string failed", "");
-      ret r;
+      ret err(1, "read_to_string failed", "");
     }
-    r.set_ok(out);
-    ret r;
+    ret ok(out);
   }
 
   // Read up to max_len bytes into a string.
@@ -117,14 +114,11 @@ impl Fs {
   // Returns:
   // - Result<str> with bytes or error
   pub try_read_bytes(str path, num max_len) Result<str> {
-    Result<str> r;
     str out = self.read_bytes(path, max_len);
     if out == NULL {
-      r.set_err(1, "read_bytes failed", "");
-      ret r;
+      ret err(1, "read_bytes failed", "");
     }
-    r.set_ok(out);
-    ret r;
+    ret ok(out);
   }
 
   // Write a string to a file.
@@ -148,14 +142,11 @@ impl Fs {
   // Returns:
   // - Result<bin> with success flag or error
   pub try_write_string(str path, str data) Result<bin> {
-    Result<bin> r;
     bin ok_write = write_all(path, data);
     if ok_write == false {
-      r.set_err(1, "write_string failed", false);
-      ret r;
+      ret err(1, "write_string failed", false);
     }
-    r.set_ok(true);
-    ret r;
+    ret ok(true);
   }
 
   // Append a string to a file.
@@ -186,14 +177,11 @@ impl Fs {
   // Returns:
   // - Result<bin> with success flag or error
   pub try_append_string(str path, str data) Result<bin> {
-    Result<bin> r;
     bin ok_append = self.append_string(path, data);
     if ok_append == false {
-      r.set_err(1, "append_string failed", false);
-      ret r;
+      ret err(1, "append_string failed", false);
     }
-    r.set_ok(true);
-    ret r;
+    ret ok(true);
   }
 
   // Copy a file by reading into memory and writing out.
@@ -221,18 +209,14 @@ impl Fs {
   // Returns:
   // - Result<bin> with success flag or error
   pub try_copy_file(str src, str dst) Result<bin> {
-    Result<bin> r;
     str data = read_all(src);
     if data == NULL {
-      r.set_err(1, "copy_file read failed", false);
-      ret r;
+      ret err(1, "copy_file read failed", false);
     }
     if write_all(dst, data) == false {
-      r.set_err(1, "copy_file write failed", false);
-      ret r;
+      ret err(1, "copy_file write failed", false);
     }
-    r.set_ok(true);
-    ret r;
+    ret ok(true);
   }
 
   // Get file size (bytes), or -1.
@@ -266,14 +250,11 @@ impl Fs {
   // Returns:
   // - Result<num> with size or error
   pub try_size(str path) Result<num> {
-    Result<num> r;
     num out = self.size(path);
     if out < 0 {
-      r.set_err(1, "size failed", -1);
-      ret r;
+      ret err(1, "size failed", -1);
     }
-    r.set_ok(out);
-    ret r;
+    ret ok(out);
   }
 
   // Read all lines into a Vec<str>.
@@ -324,12 +305,10 @@ impl Fs {
     if out.len == 0 {
       // Best-effort: treat empty as ok unless file can't be opened.
       if self.exists(path) == false {
-        r.set_err(1, "read_lines failed", out);
-        ret r;
+        ret err(1, "read_lines failed", out);
       }
     }
-    r.set_ok(out);
-    ret r;
+    ret ok(out);
   }
 }
 

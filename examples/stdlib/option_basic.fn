@@ -1,18 +1,34 @@
-// Option helpers example.
+// Option<T>: a value that may be present (`Some`) or absent (`None`).
+// 
+// Option is a sum type — construct it with `some(v)` or the `None` variant, then
+// either match it with `fit` or reach for a combinator like `unwrap_or`.
 
 imp std.c.io;
 imp std.option;
 
-fun main() {
+fun main() num {
   Option<num> a = some(7);
-  printf("a some=%d val=%d\n", a.is_some(), a.unwrap_or(0));
+  printf("a some=%d val=%lld\n", a.is_some(), a.unwrap_or(0));
 
-  Option<num> b = none(0);
-  printf("b none=%d val=%d\n", b.is_none(), b.unwrap_or(9));
+  Option<num> b = Option.None;
+  printf("b none=%d val=%lld\n", b.is_none(), b.unwrap_or(9));
+
+  // Pattern-match a present value directly.
+  fit a {
+    Option.Some(v) -> { printf("matched some(%lld)\n", v); }
+    Option.None -> { printf("matched none\n"); }
+  }
 
   Option<str> s = some("hi");
   printf("s=%s\n", s.unwrap_or("none"));
 
-  Option<str> s2 = none("fallback");
-  printf("s2=%s\n", s2.unwrap_or("none"));
+  Option<str> s2 = Option.None;
+  printf("s2=%s\n", s2.unwrap_or("fallback"));
+
+  // `filter` keeps the value only when the predicate holds.
+  Option<num> ten = some(10);
+  Option<num> kept = ten.filter(true);
+  Option<num> dropped = ten.filter(false);
+  printf("kept=%lld dropped=%lld\n", kept.unwrap_or(-1), dropped.unwrap_or(-1));
+  ret 0;
 }

@@ -1177,7 +1177,7 @@ fn is_generic_angle_open(toks: []const token.Token, idx: usize, in_decl_only_ctx
     const before_prev = toks[before_prev_idx.?];
     if (before_prev.type == .Keyword) {
         const kw = before_prev.data.sval.items;
-        if (std.mem.eql(u8, kw, "impl") or std.mem.eql(u8, kw, "compound") or std.mem.eql(u8, kw, "fun") or std.mem.eql(u8, kw, "pub")) return true;
+        if (std.mem.eql(u8, kw, "impl") or std.mem.eql(u8, kw, "compound") or std.mem.eql(u8, kw, "fun") or std.mem.eql(u8, kw, "pub") or std.mem.eql(u8, kw, "enum") or std.mem.eql(u8, kw, "quirk")) return true;
         if (std.mem.eql(u8, kw, "ret") and generic_angle_sequence_followed_by_lbrace(toks, idx, next_idx)) return true;
     }
     if (before_prev.type == .Symbol) {
@@ -1353,6 +1353,50 @@ fn currentColumn(out: *const ArrayList(u8)) usize {
         col += 1;
     }
     return col;
+}
+
+/// A `fit` arm body `{ ... }` is eligible to stay on ONE line when it holds a
+/// single simple statement: no nested `{}`/blocks, no comments, no inner `;` except
+/// a single trailing one, and short enough to fit the width budget. `open_idx` is
+/// the `{` token. Returns the matching `}` index when eligible (so the caller emits
+/// it inline and jumps past it), else null. Keeps short pattern-match arms compact:
+///   `Option.Some(v) -> { ret v; }`  instead of exploding to three lines.
+fn fitArmInlineClose(toks: []const token.Token, open_idx: usize, source: []const u8, line_starts: []const usize, allocator: mem.Allocator, start_col: usize) ?usize {
+    var depth: usize = 0;
+    var i = open_idx;
+    var semis: usize = 0;
+    var width: usize = start_col + 2; // "{ "
+    var close_idx: ?usize = null;
+    while (i < toks.len) : (i += 1) {
+        const t = toks[i];
+        if (t.type == .Comment) return null; // comments force multi-line
+        if (t.type == .NewLine) continue;
+        if (t.type == .Symbol and t.data.cval == '{') {
+            depth += 1;
+            if (depth > 1) return null; // nested block -> multi-line
+            continue;
+        }
+        if (t.type == .Symbol and t.data.cval == '}') {
+            depth -= 1;
+            if (depth == 0) {
+                close_idx = i;
+                break;
+            }
+            continue;
+        }
+        // A `;` at the arm-body's top level: allow at most one (single statement).
+        if (t.type == .Symbol and t.data.cval == ';' and depth == 1) {
+            semis += 1;
+            if (semis > 1) return null;
+            continue;
+        }
+        const s = token_text(allocator, t, source, line_starts) catch return null;
+        defer allocator.free(s);
+        width += s.len + 1; // approximate: token + a separating space
+        if (width > fmt_max_line_width) return null;
+    }
+    const ci = close_idx orelse return null;
+    return ci;
 }
 
 /// Find the byte index of a line's trailing-comment `//`, or null if the line has
@@ -1533,6 +1577,11 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
     // the top entry, we emit the closing delimiter on its own dedented line.
     var wrap_close_stack = ArrayList(usize).init(state.allocator);
     defer wrap_close_stack.deinit();
+    // When set, we are emitting a short `fit` arm body inline on one line; this is
+    // the index of its closing `}`. Until then, `;`/`,` inside emit a space rather
+    // than a newline, keeping `Option.Some(v) -> { ret v; }` on one line. Reset
+    // when we emit that close brace.
+    var inline_arm_close: ?usize = null;
     // Running nesting depth of `(`/`[`/`{` as the emit loop sees them, used to tell
     // a wrap group's OWN top-level commas from commas in nested groups.
     var bracket_depth: isize = 0;
@@ -1837,6 +1886,23 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
 
         // Handle closing brace with optional same-line `elif`/`else`.
         if (t2.type == .Symbol and t2.data.cval == '}') {
+            // Closing brace of an inline `fit` arm body: emit ` }` on the same line
+            // (the open `{` did not push to brace_stack, so match by index).
+            if (inline_arm_close) |close_i| {
+                if (idx == close_i) {
+                    inline_arm_close = null;
+                    const last = if (state.out.items.len > 0) state.out.items[state.out.items.len - 1] else 0;
+                    if (last != ' ') try state.out.append(' ');
+                    try state.out.append('}');
+                    // The next fit arm (or the fit's own closing `}`) starts on a new
+                    // line. Emit only the newline; the standard line-start path emits
+                    // the indent for the next token (avoid double-indenting).
+                    try state.out.append('\n');
+                    state.at_line_start.* = true;
+                    state.prev_token.* = null;
+                    continue;
+                }
+            }
             const is_block_close = if (brace_stack.items.len > 0) brace_stack.items[brace_stack.items.len - 1] else true;
             if (brace_stack.items.len > 0) _ = brace_stack.pop();
 
@@ -1992,7 +2058,9 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                 {
                     break :blk true;
                 }
-                if (pt2.type == .Keyword and std.mem.eql(u8, pt2.data.sval.items, "ret")) {
+                if (pt2.type == .Keyword and (std.mem.eql(u8, pt2.data.sval.items, "ret") or std.mem.eql(u8, pt2.data.sval.items, "fit"))) {
+                    // `ret *p` / `fit *self`: a space separates the keyword from the
+                    // unary-prefixed operand (the `*`/`&` then glues to its operand).
                     if (t2.type == .Operator and (std.mem.eql(u8, t2.data.sval.items, "+") or std.mem.eql(u8, t2.data.sval.items, "-") or std.mem.eql(u8, t2.data.sval.items, "&") or std.mem.eql(u8, t2.data.sval.items, "*"))) {
                         break :blk true;
                     }
@@ -2006,7 +2074,7 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                         const unary_ctx = blk_unary: {
                             if (pt2.type == .Keyword) {
                                 const kw = pt2.data.sval.items;
-                                if (std.mem.eql(u8, kw, "ret") or std.mem.eql(u8, kw, "if") or std.mem.eql(u8, kw, "elif") or std.mem.eql(u8, kw, "for")) break :blk_unary true;
+                                if (std.mem.eql(u8, kw, "ret") or std.mem.eql(u8, kw, "if") or std.mem.eql(u8, kw, "elif") or std.mem.eql(u8, kw, "for") or std.mem.eql(u8, kw, "fit")) break :blk_unary true;
                             }
                             if (is_word_like(pt2)) break :blk_unary false;
                             if (pt2.type == .Symbol and is_closing_symbol(pt2.data.cval)) break :blk_unary false;
@@ -2032,7 +2100,7 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                     const unary_ctx = blk_unary_sym: {
                         if (pt2.type == .Keyword) {
                             const kw = pt2.data.sval.items;
-                            if (std.mem.eql(u8, kw, "ret") or std.mem.eql(u8, kw, "if") or std.mem.eql(u8, kw, "elif") or std.mem.eql(u8, kw, "for")) break :blk_unary_sym true;
+                            if (std.mem.eql(u8, kw, "ret") or std.mem.eql(u8, kw, "if") or std.mem.eql(u8, kw, "elif") or std.mem.eql(u8, kw, "for") or std.mem.eql(u8, kw, "fit")) break :blk_unary_sym true;
                         }
                         if (is_word_like(pt2)) break :blk_unary_sym false;
                         if (pt2.type == .Symbol and is_closing_symbol(pt2.data.cval)) break :blk_unary_sym false;
@@ -2178,6 +2246,18 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
         if (t2.type == .Symbol) {
             const c2 = t2.data.cval;
             if (c2 == '{') {
+                // Short `fit` arm body after `->`: keep it on one line when it holds
+                // a single simple statement and fits the width budget.
+                if (is_block_brace and prev_sig_is_arrow and inline_arm_close == null) {
+                    if (fitArmInlineClose(toks, idx, source, line_starts, state.allocator, currentColumn(state.out))) |close_i| {
+                        inline_arm_close = close_i;
+                        try state.out.append('{');
+                        try state.out.append(' ');
+                        state.at_line_start.* = false;
+                        state.prev_token.* = null;
+                        continue;
+                    }
+                }
                 if (is_block_brace) {
                     if (pending_decl_block_open) {
                         decl_block_depth += 1;
@@ -2215,6 +2295,13 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                     try state.out.append(',');
                 } else {
                     try state.out.append(';');
+                }
+                // Inside an inline `fit` arm body the statement separator stays on
+                // the same line (`{ ret v; }`); a `}` close follows shortly.
+                if (inline_arm_close != null) {
+                    try state.out.append(' ');
+                    state.prev_token.* = null;
+                    continue;
                 }
                 try state.out.append('\n');
                 state.at_line_start.* = true;
@@ -2324,7 +2411,7 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                     if (pt.type == .Keyword) {
                         const kw = pt.data.sval.items;
                         // Keywords that are followed by an expression.
-                        if (std.mem.eql(u8, kw, "ret") or std.mem.eql(u8, kw, "if") or std.mem.eql(u8, kw, "elif") or std.mem.eql(u8, kw, "for")) break :blk true;
+                        if (std.mem.eql(u8, kw, "ret") or std.mem.eql(u8, kw, "if") or std.mem.eql(u8, kw, "elif") or std.mem.eql(u8, kw, "for") or std.mem.eql(u8, kw, "fit")) break :blk true;
                     }
                     if (is_word_like(pt)) break :blk false;
                     if (pt.type == .Symbol and is_closing_symbol(pt.data.cval)) break :blk false;

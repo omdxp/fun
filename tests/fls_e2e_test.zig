@@ -3169,8 +3169,8 @@ test "fls e2e: aliased stdlib inference and option members" {
     var sig_res = try lsp.waitResponse(sig_id, 15000);
     defer sig_res.deinit();
     const sig_val = try jsonResultFromResponseObj(sig_res.parsed.value.object);
-    try expectSignatureHelpLabelContains(allocator, sig_val, "unwrap_or(str default_value)");
-    try expectSignatureHelpHasParameter(allocator, sig_val, "str default_value");
+    try expectSignatureHelpLabelContains(allocator, sig_val, "unwrap_or(str fallback)");
+    try expectSignatureHelpHasParameter(allocator, sig_val, "str fallback");
     try expectSignatureHelpActiveParameter(allocator, sig_val, 0);
 
     const Case = struct { needle: []const u8, expect: []const u8 };

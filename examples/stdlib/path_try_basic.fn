@@ -1,11 +1,18 @@
+// Fallible path operations return a Result; read the value with `unwrap_or` or
+// match with `fit`.
+
 imp std.c.io;
 imp std.path;
 imp std.result;
 
-fun main() {
+fun main() num {
   Result<str> j = try_path_join("/tmp", "file.txt");
-  printf("join ok=%d val=%s\n", j.is_ok(), j.value);
+  printf("join: %s\n", j.unwrap_or("<error>"));
 
   Result<str> c = try_change_ext("/tmp/file.txt", ".log");
-  printf("chg ok=%d val=%s\n", c.is_ok(), c.value);
+  fit c {
+    Result.Ok(p) -> { printf("changed ext: %s\n", p); }
+    Result.Err(e) -> { printf("change ext failed: %s\n", e.message); }
+  }
+  ret 0;
 }

@@ -1,127 +1,123 @@
-// Option container for optional values.
+// Option<T>: a value that may be present (`Some`) or absent (`None`).
 // 
-// Usage:
-// ```
-// Option<num> v = some(1);
-// Option<num> w = none(0);
-// if v.is_some() { ... }
-// ```
-imp std.result;
-imp std.error;
+// Option is a data-carrying enum (a sum type), so you pattern-match it with `fit`:
+// 
+// Option<num> o = some(42);
+// fit o {
+// Option.Some(v) -> { print_num(v); }
+// Option.None    -> { print("nothing"); }
+// }
+// 
+// Or use the combinator methods for the common cases:
+// 
+// num n = find_user(id).unwrap_or(0);   // value, or a fallback when None
+// 
+// Construct with `some(v)` (infers T from v) or the variant directly:
+// Option<num> a = some(42);
+// Option<num> b = Option.None;   // or the shorthand `.None`
 
-// Generic optional value container.
-pub compound Option<T> {
-  // Whether a value is present.
-  bin has;
-  // Stored value (meaningful when `has == true`).
-  T value;
+imp std.result;
+
+// An optional value: `Some(v)` holds a `T`; `None` holds nothing.
+pub enum Option<T> {
+  Some(T),
+  None,
 }
 
 impl Option<T> {
-  // Returns true when a value is present.
+  // True when a value is present.
   pub is_some() bin {
-    ret self.has;
+    fit *self {
+      Option.Some(v) -> { ret true; }
+      Option.None -> { ret false; }
+    }
+    ret false;
   }
 
-  // Returns true when no value is present.
+  // True when no value is present.
   pub is_none() bin {
-    ret self.has == false;
-  }
-
-  // Returns the stored value or a default when empty.
-  pub unwrap_or(T default_value) T {
-    if self.has {
-      ret self.value;
+    fit *self {
+      Option.Some(v) -> { ret false; }
+      Option.None -> { ret true; }
     }
-    ret default_value;
+    ret true;
   }
 
-  // Returns the stored value (uses internal default when empty).
+  // The contained value, or `fallback` when None.
+  pub unwrap_or(T fallback) T {
+    fit *self {
+      Option.Some(v) -> { ret v; }
+      Option.None -> { ret fallback; }
+    }
+    ret fallback;
+  }
+
+  // The contained value. Prefer `unwrap_or`: on None this returns a zero value
+  // (there is no panic mechanism), so only use it when you have already checked
+  // `is_some()` or matched the variant.
   pub unwrap() T {
-    ret self.value;
-  }
-
-  // Set the option to a value.
-  pub set_some(T value) {
-    self.has = true;
-    self.value = value;
-  }
-
-  // Clear the option and store a default value.
-  pub set_none(T default_value) {
-    self.has = false;
-    self.value = default_value;
-  }
-
-  // Convert to a Result with the provided error if empty.
-  pub ok_or(num code, str message) Result<T> {
-    Result<T> r;
-    if self.has {
-      r.ok = true;
-      r.value = self.value;
-      r.err = error_ok();
-      ret r;
+    fit *self {
+      Option.Some(v) -> { ret v; }
+      Option.None -> { ret self.zero(); }
     }
-    r.ok = false;
-    r.value = self.value;
-    r.err = error_new(code, message);
-    ret r;
+    ret self.zero();
   }
 
-  // Convert to a Result with a provided Error if empty.
-  pub ok_or_error(Error err) Result<T> {
-    Result<T> r;
-    if self.has {
-      r.ok = true;
-      r.value = self.value;
-      r.err = error_ok();
-      ret r;
-    }
-    r.ok = false;
-    r.value = self.value;
-    r.err = err;
-    ret r;
+  // A zero-initialized T, used as the empty fallback for `unwrap`.
+  zero() T {
+    T out;
+    ret out;
   }
 
-  // Return other if empty; otherwise keep this value.
+  // This option if it is Some, otherwise `other`.
   pub or(Option<T> other) Option<T> {
-    if self.has {
-      Option<T> out;
-      out.has = self.has;
-      out.value = self.value;
-      ret out;
+    fit *self {
+      Option.Some(v) -> { ret Option.Some(v); }
+      Option.None -> { ret other; }
     }
-    Option<T> out;
-    out.has = other.has;
-    out.value = other.value;
-    ret out;
+    ret other;
   }
 
-  // Return other if present; otherwise return none.
+  // `other` if this is Some, otherwise None (logical AND of presence).
   pub and(Option<T> other) Option<T> {
-    if self.has {
-      Option<T> out;
-      out.has = other.has;
-      out.value = other.value;
-      ret out;
+    fit *self {
+      Option.Some(v) -> { ret other; }
+      Option.None -> { ret Option.None; }
     }
-    Option<T> out;
-    out.has = self.has;
-    out.value = self.value;
-    ret out;
+    ret Option.None;
+  }
+
+  // Keep the value only if it satisfies `keep`; otherwise None.
+  pub filter(bin keep) Option<T> {
+    fit *self {
+      Option.Some(v) -> {
+        if keep {
+          ret Option.Some(v);
+        }
+        ret Option.None;
+      }
+      Option.None -> { ret Option.None; }
+    }
+    ret Option.None;
   }
 }
 
-// Construct an Option with a value.
+// Construct `Some(value)` (T is inferred from `value`).
 pub fun some<T>(T value) Option<T> {
-  Option<T> o;
-  o.set_some(value);
-  ret o;
+  ret Option.Some(value);
 }
 
-// Construct an empty Option with a default value.
-pub fun none<T>(T default_value) Option<T> {
-  Option<T> o;
-  o.set_none(default_value);
-  ret o;
+// Convert an Option to a Result: Some(v) -> Ok(v); None -> Err(error_new(code, msg)).
+// Provided as a free function (rather than a method) so the Result type parameter
+// resolves from the call site.
+pub fun option_ok_or<T>(Option<T> o, num code, str message) Result<T> {
+  fit o {
+    Option.Some(v) -> { ret ok(v); }
+    Option.None -> {
+      T zero;
+      ret err(code, message, zero);
+    }
+  }
+  T zero;
+  ret err(code, message, zero);
 }

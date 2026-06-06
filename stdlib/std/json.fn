@@ -173,14 +173,11 @@ impl JsonObject {
 
   // Serialize object to JSON with Result.
   pub try_stringify() Result<str> {
-    Result<str> r;
     str out = self.stringify();
     if out == NULL {
-      r.set_err(1, "json stringify failed", "");
-      ret r;
+      ret err(1, "json stringify failed", "");
     }
-    r.set_ok(out);
-    ret r;
+    ret ok(out);
   }
 }
 
@@ -246,14 +243,11 @@ impl JsonArray {
 
   // Serialize array to JSON with Result.
   pub try_stringify() Result<str> {
-    Result<str> r;
     str out = self.stringify();
     if out == NULL {
-      r.set_err(1, "json stringify failed", "");
-      ret r;
+      ret err(1, "json stringify failed", "");
     }
-    r.set_ok(out);
-    ret r;
+    ret ok(out);
   }
 }
 
@@ -375,10 +369,8 @@ pub fun parse_object(str s) JsonObject {
 
 // Parse a JSON object with Result.
 pub fun try_parse_object(str s) Result<JsonObject> {
-  Result<JsonObject> r;
   JsonObject out = parse_object(s);
-  r.set_ok(out);
-  ret r;
+  ret ok(out);
 }
 
 // Parse a JSON array of string values.
@@ -414,10 +406,8 @@ pub fun parse_array(str s) JsonArray {
 
 // Parse a JSON array with Result.
 pub fun try_parse_array(str s) Result<JsonArray> {
-  Result<JsonArray> r;
   JsonArray out = parse_array(s);
-  r.set_ok(out);
-  ret r;
+  ret ok(out);
 }
 
 // Serialize a JSON object.
@@ -433,14 +423,11 @@ pub fun stringify_object(JsonObject* obj) str {
 
 // Serialize a JSON object with Result.
 pub fun try_stringify_object(JsonObject* obj) Result<str> {
-  Result<str> r;
   str out = obj.stringify();
   if out == NULL {
-    r.set_err(1, "json stringify failed", "");
-    ret r;
+    ret err(1, "json stringify failed", "");
   }
-  r.set_ok(out);
-  ret r;
+  ret ok(out);
 }
 
 // Serialize a JSON array.
@@ -456,12 +443,9 @@ pub fun stringify_array(JsonArray* arr) str {
 
 // Serialize a JSON array with Result.
 pub fun try_stringify_array(JsonArray* arr) Result<str> {
-  Result<str> r;
   str out = arr.stringify();
   if out == NULL {
-    r.set_err(1, "json stringify failed", "");
-    ret r;
+    ret err(1, "json stringify failed", "");
   }
-  r.set_ok(out);
-  ret r;
+  ret ok(out);
 }

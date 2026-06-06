@@ -264,13 +264,10 @@ pub fun open_read(str path) File {
 // Open file for reading (binary) with Result.
 pub fun try_open_read(str path) Result<File> {
   File f = open_read(path);
-  Result<File> r;
   if f.handle == NULL {
-    r.set_err(1, "open_read failed", f);
-    ret r;
+    ret err(1, "open_read failed", f);
   }
-  r.set_ok(f);
-  ret r;
+  ret ok(f);
 }
 
 // Open file for writing (binary).
@@ -289,13 +286,10 @@ pub fun open_write(str path) File {
 // Open file for writing (binary) with Result.
 pub fun try_open_write(str path) Result<File> {
   File f = open_write(path);
-  Result<File> r;
   if f.handle == NULL {
-    r.set_err(1, "open_write failed", f);
-    ret r;
+    ret err(1, "open_write failed", f);
   }
-  r.set_ok(f);
-  ret r;
+  ret ok(f);
 }
 
 // Open file for appending (binary).
@@ -314,13 +308,10 @@ pub fun open_append(str path) File {
 // Open file for appending (binary) with Result.
 pub fun try_open_append(str path) Result<File> {
   File f = open_append(path);
-  Result<File> r;
   if f.handle == NULL {
-    r.set_err(1, "open_append failed", f);
-    ret r;
+    ret err(1, "open_append failed", f);
   }
-  r.set_ok(f);
-  ret r;
+  ret ok(f);
 }
 
 impl File {
@@ -358,18 +349,14 @@ impl File {
 
   // Read entire file into a new string with Result.
   pub try_read_all() Result<str> {
-    Result<str> r;
     if self.handle == NULL {
-      r.set_err(1, "read_all on closed file", "");
-      ret r;
+      ret err(1, "read_all on closed file", "");
     }
     str out = self.read_all();
     if out == NULL {
-      r.set_err(1, "read_all failed", "");
-      ret r;
+      ret err(1, "read_all failed", "");
     }
-    r.set_ok(out);
-    ret r;
+    ret ok(out);
   }
 
   // Read up to max_len bytes (binary-safe). Returns allocated buffer (NUL-terminated).
@@ -388,18 +375,14 @@ impl File {
 
   // Read up to max_len bytes with Result.
   pub try_read_bytes(num max_len) Result<str> {
-    Result<str> r;
     if self.handle == NULL || max_len <= 0 {
-      r.set_err(1, "read_bytes invalid", "");
-      ret r;
+      ret err(1, "read_bytes invalid", "");
     }
     str out = self.read_bytes(max_len);
     if out == NULL {
-      r.set_err(1, "read_bytes failed", "");
-      ret r;
+      ret err(1, "read_bytes failed", "");
     }
-    r.set_ok(out);
-    ret r;
+    ret ok(out);
   }
 
   // Read a line up to max_len (including newline if present).
@@ -421,18 +404,14 @@ impl File {
 
   // Read a line up to max_len with Result.
   pub try_read_line_max(num max_len) Result<str> {
-    Result<str> r;
     if self.handle == NULL || max_len <= 1 {
-      r.set_err(1, "read_line_max invalid", "");
-      ret r;
+      ret err(1, "read_line_max invalid", "");
     }
     str out = self.read_line_max(max_len);
     if out == NULL {
-      r.set_err(1, "read_line_max failed", "");
-      ret r;
+      ret err(1, "read_line_max failed", "");
     }
-    r.set_ok(out);
-    ret r;
+    ret ok(out);
   }
 
   // Read all lines (up to max_len per line).
@@ -460,12 +439,10 @@ impl File {
       Vec<str> empty;
       empty.len = 0;
       empty.cap = 0;
-      r.set_err(1, "read_lines on closed file", empty);
-      ret r;
+      ret err(1, "read_lines on closed file", empty);
     }
     Vec<str> out = self.read_lines(max_len);
-    r.set_ok(out);
-    ret r;
+    ret ok(out);
   }
 
   // Write raw bytes to the file.
@@ -479,18 +456,14 @@ impl File {
 
   // Write raw bytes to the file with Result.
   pub try_write_bytes(raw* data, num len) Result<bin> {
-    Result<bin> r;
     if self.handle == NULL || data == NULL {
-      r.set_err(1, "write_bytes invalid", false);
-      ret r;
+      ret err(1, "write_bytes invalid", false);
     }
     bin ok_write = self.write_bytes(data, len);
     if ok_write == false {
-      r.set_err(1, "write_bytes failed", false);
-      ret r;
+      ret err(1, "write_bytes failed", false);
     }
-    r.set_ok(true);
-    ret r;
+    ret ok(true);
   }
 
   // Read raw bytes into a buffer; returns bytes read.
@@ -503,14 +476,11 @@ impl File {
 
   // Read raw bytes into a buffer with Result.
   pub try_read_into(raw* dst, num len) Result<num> {
-    Result<num> r;
     if self.handle == NULL || dst == NULL {
-      r.set_err(1, "read_into invalid", 0);
-      ret r;
+      ret err(1, "read_into invalid", 0);
     }
     num n = self.read_into(dst, len);
-    r.set_ok(n);
-    ret r;
+    ret ok(n);
   }
 
   // Seek within the file (whence: 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END).
@@ -523,18 +493,14 @@ impl File {
 
   // Seek within the file with Result.
   pub try_seek(num offset, num whence) Result<bin> {
-    Result<bin> r;
     if self.handle == NULL {
-      r.set_err(1, "seek on closed file", false);
-      ret r;
+      ret err(1, "seek on closed file", false);
     }
     bin ok_seek = self.seek(offset, whence);
     if ok_seek == false {
-      r.set_err(1, "seek failed", false);
-      ret r;
+      ret err(1, "seek failed", false);
     }
-    r.set_ok(true);
-    ret r;
+    ret ok(true);
   }
 
   // Tell current file position.
@@ -547,18 +513,14 @@ impl File {
 
   // Tell current file position with Result.
   pub try_tell() Result<num> {
-    Result<num> r;
     if self.handle == NULL {
-      r.set_err(1, "tell on closed file", -1);
-      ret r;
+      ret err(1, "tell on closed file", -1);
     }
     num pos = self.tell();
     if pos < 0 {
-      r.set_err(1, "tell failed", -1);
-      ret r;
+      ret err(1, "tell failed", -1);
     }
-    r.set_ok(pos);
-    ret r;
+    ret ok(pos);
   }
 
   // Rewind to start of file.
@@ -579,18 +541,14 @@ impl File {
 
   // Flush buffered output with Result.
   pub try_flush() Result<bin> {
-    Result<bin> r;
     if self.handle == NULL {
-      r.set_err(1, "flush on closed file", false);
-      ret r;
+      ret err(1, "flush on closed file", false);
     }
     bin ok_flush = self.flush();
     if ok_flush == false {
-      r.set_err(1, "flush failed", false);
-      ret r;
+      ret err(1, "flush failed", false);
     }
-    r.set_ok(true);
-    ret r;
+    ret ok(true);
   }
 
   // Get file size (best-effort; returns -1 on failure).

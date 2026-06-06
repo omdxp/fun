@@ -120,14 +120,11 @@ pub fun path_join(str a, str b) str {
 
 // Join two path segments with Result.
 pub fun try_path_join(str a, str b) Result<str> {
-  Result<str> r;
   str out = path_join(a, b);
   if out == NULL {
-    r.set_err(1, "path_join failed", "");
-    ret r;
+    ret err(1, "path_join failed", "");
   }
-  r.set_ok(out);
-  ret r;
+  ret ok(out);
 }
 
 // Join multiple segments.
@@ -152,14 +149,11 @@ pub fun path_join_many(Vec<str>* parts) str {
 
 // Join multiple segments with Result.
 pub fun try_path_join_many(Vec<str>* parts) Result<str> {
-  Result<str> r;
   str out = path_join_many(parts);
   if out == NULL {
-    r.set_err(1, "path_join_many failed", "");
-    ret r;
+    ret err(1, "path_join_many failed", "");
   }
-  r.set_ok(out);
-  ret r;
+  ret ok(out);
 }
 
 // True if path is absolute (posix).
@@ -331,12 +325,9 @@ pub fun change_ext(str path, str new_ext) str {
 
 // Change or add an extension with Result.
 pub fun try_change_ext(str path, str new_ext) Result<str> {
-  Result<str> r;
   str out = change_ext(path, new_ext);
   if out == NULL {
-    r.set_err(1, "change_ext failed", "");
-    ret r;
+    ret err(1, "change_ext failed", "");
   }
-  r.set_ok(out);
-  ret r;
+  ret ok(out);
 }

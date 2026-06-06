@@ -1,118 +1,114 @@
-// Result compounds for stdlib operations.
+// Result<T>: the outcome of a fallible operation — `Ok(value)` or `Err(error)`.
+// 
+// Result is a data-carrying enum (a sum type), matched with `fit`:
+// 
+// Result<str> r = read_file("config.toml");
+// fit r {
+// Result.Ok(text) -> { use(text); }
+// Result.Err(e)   -> { log_error(e); }
+// }
+// 
+// Or use the combinators for the common cases:
+// 
+// str text = read_file(path).unwrap_or("");   // value, or a fallback on Err
+// 
+// Construct with `ok(v)`, `err(code, message, default)`, or `err_error(e, default)`.
+// The error arm carries a full `Error` (kind + code + message + context).
 
 imp std.error;
 
-// Generic result container for stdlib operations.
-pub compound Result<T> {
-  // ok: success flag
-  bin ok;
-  // value: return value
-  T value;
-  // err: error details
-  Error err;
+// A fallible result: `Ok(value)` on success, `Err(error)` on failure.
+pub enum Result<T> {
+  Ok(T),
+  Err(Error),
 }
 
 impl Result<T> {
-  // Returns true when the result is ok.
+  // True when the result is Ok.
   pub is_ok() bin {
-    ret self.ok;
+    fit *self {
+      Result.Ok(v) -> { ret true; }
+      Result.Err(e) -> { ret false; }
+    }
+    ret false;
   }
 
-  // Returns true when the result is an error.
+  // True when the result is an Err.
   pub is_err() bin {
-    ret self.ok == false;
-  }
-
-  // Returns the stored value or a default when in error state.
-  pub unwrap_or(T default_value) T {
-    if self.ok {
-      ret self.value;
+    fit *self {
+      Result.Ok(v) -> { ret false; }
+      Result.Err(e) -> { ret true; }
     }
-    ret default_value;
+    ret true;
   }
 
-  // Returns the stored value (even if error).
+  // The Ok value, or `fallback` when Err.
+  pub unwrap_or(T fallback) T {
+    fit *self {
+      Result.Ok(v) -> { ret v; }
+      Result.Err(e) -> { ret fallback; }
+    }
+    ret fallback;
+  }
+
+  // The Ok value. Prefer `unwrap_or`: on Err this returns a zero value (there is no
+  // panic), so use it only after checking `is_ok()` or matching the variant.
   pub unwrap() T {
-    ret self.value;
+    fit *self {
+      Result.Ok(v) -> { ret v; }
+      Result.Err(e) -> { ret self.zero(); }
+    }
+    ret self.zero();
   }
 
-  // Returns the stored error.
+  // The Err value, or a no-error `Error` when Ok.
   pub unwrap_err() Error {
-    ret self.err;
+    fit *self {
+      Result.Ok(v) -> { ret error_ok(); }
+      Result.Err(e) -> { ret e; }
+    }
+    ret error_ok();
   }
 
-  // Set the result to ok and clear error fields.
-  pub set_ok(T value) {
-    self.ok = true;
-    self.value = value;
-    self.err = error_ok();
+  // A zero-initialized T, used as the empty fallback for `unwrap`.
+  zero() T {
+    T out;
+    ret out;
   }
 
-  // Set the result to error and store error fields.
-  pub set_err(num code, str message, T default_value) {
-    self.ok = false;
-    self.value = default_value;
-    self.err = error_new(code, message);
-  }
-
-  // Set the result to error using a provided Error.
-  pub set_err_error(Error err, T default_value) {
-    self.ok = false;
-    self.value = default_value;
-    self.err = err;
-  }
-
-  // Return other if ok; otherwise keep this error.
+  // `other` if this is Ok, otherwise keep this Err.
   pub and(Result<T> other) Result<T> {
-    if self.ok {
-      Result<T> out;
-      out.ok = other.ok;
-      out.value = other.value;
-      out.err = other.err;
-      ret out;
+    fit *self {
+      Result.Ok(v) -> { ret other; }
+      Result.Err(e) -> { ret Result.Err(e); }
     }
-    Result<T> out;
-    out.ok = self.ok;
-    out.value = self.value;
-    out.err = self.err;
-    ret out;
+    ret other;
   }
 
-  // Return this if ok; otherwise return other.
+  // This result if it is Ok, otherwise `other`.
   pub or(Result<T> other) Result<T> {
-    if self.ok {
-      Result<T> out;
-      out.ok = self.ok;
-      out.value = self.value;
-      out.err = self.err;
-      ret out;
+    fit *self {
+      Result.Ok(v) -> { ret Result.Ok(v); }
+      Result.Err(e) -> { ret other; }
     }
-    Result<T> out;
-    out.ok = other.ok;
-    out.value = other.value;
-    out.err = other.err;
-    ret out;
+    ret other;
   }
-
 }
 
-// Construct a successful generic result.
+// Construct a successful `Ok(value)`.
 pub fun ok<T>(T value) Result<T> {
-  Result<T> r;
-  r.set_ok(value);
-  ret r;
+  ret Result.Ok(value);
 }
 
-// Construct an error generic result (backwards-compatible).
+// Construct an `Err` from a code + message. `default_value` is unused by the enum
+// representation (Err carries only the Error) but is kept in the signature so
+// existing call sites — `err(1, "msg", fallback)` — continue to compile.
 pub fun err<T>(num code, str message, T default_value) Result<T> {
-  Result<T> r;
-  r.set_err(code, message, default_value);
-  ret r;
+  ret Result.Err(error_new(code, message));
 }
 
-// Construct an error generic result from an Error.
-pub fun err_error<T>(Error err, T default_value) Result<T> {
-  Result<T> r;
-  r.set_err_error(err, default_value);
-  ret r;
+// Construct an `Err` from a pre-built Error. `default_value` is accepted for
+// call-site compatibility (the enum stores only the Error).
+pub fun err_error<T>(Error e, T default_value) Result<T> {
+  ret Result.Err(e);
 }
