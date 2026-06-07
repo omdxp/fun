@@ -10,6 +10,7 @@ imp std.map;
 imp std.vec;
 imp std.string;
 imp std.quirks;
+imp std.option;
 
 // Parsed command-line arguments.
 pub compound CliArgs {
@@ -151,9 +152,14 @@ impl CliArgs {
     ret self.opts.has(key);
   }
 
-  // Get an option value.
+  // Get an option value (raw; null when absent). Prefer `at()` for safe access.
   pub get(str key) str {
     ret self.opts.get(key);
+  }
+
+  // An option value as `Some(value)` when present, `None` otherwise.
+  pub at(str key) Option<str> {
+    ret self.opts.at(key);
   }
 
   // Get an option value or default if missing.
@@ -164,9 +170,15 @@ impl CliArgs {
     ret default_value;
   }
 
-  // Read a positional argument by index.
+  // Read a positional argument by index (raw; out-of-range is unchecked).
+  // Prefer `at_positional()` for safe access.
   pub get_positional(num i) str {
     ret self.positionals.get(i);
+  }
+
+  // A positional argument as `Some(value)` when in range, `None` otherwise.
+  pub at_positional(num i) Option<str> {
+    ret self.positionals.at(i);
   }
 
   // Free internal storage.

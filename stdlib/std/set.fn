@@ -70,8 +70,9 @@ impl Set<T> {
     self.map.clear();
   }
 
-  // Return all values as a Vec<T>.
-  pub values() Vec<T> {
+  // All members as a Vec<T>. (A Set stores its members as the backing map's keys,
+  // so this returns those keys — hence `keys`, matching Map's terminology.)
+  pub keys() Vec<T> {
     ret self.map.keys();
   }
 

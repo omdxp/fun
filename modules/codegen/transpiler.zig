@@ -3961,6 +3961,10 @@ pub const TranspileProcess = struct {
     fn should_warn_unused_variable(name: []const u8) bool {
         if (name.len == 0) return false;
         if (mem.eql(u8, name, "_")) return false;
+        // A leading underscore marks a binding/parameter as intentionally unused
+        // (e.g. a generic-type witness param like `_default_value`), suppressing
+        // the warning without dropping the name — the same convention as Zig/Rust.
+        if (name[0] == '_') return false;
         if (mem.eql(u8, name, "self")) return false;
         if (mem.eql(u8, name, "vargs")) return false;
         return true;
@@ -8489,6 +8493,15 @@ pub const TranspileProcess = struct {
                 try proc.check_body(body, &fn_env, fns, fn_rtype);
 
                 proc.warn_unused_bindings_in_current_scope(&fn_env);
+
+                // Missing-return check (top-level function only, NOT nested blocks): a
+                // non-void function must return on every path, else the emitted C falls
+                // off the end with an indeterminate value. This is a correctness warning
+                // (like return_local_ptr) so it is NOT gated on -warn-unused.
+                // `body_always_returns` is conservative (only provable fall-through fires).
+                if (fn_rtype.base != .Void and is_known_type(fn_rtype) and !proc.body_always_returns(body)) {
+                    proc.report_warning(.missing_return, node, "function may reach the end of its body without returning a value", .{});
+                }
             }
         }
 
@@ -8605,6 +8618,11 @@ pub const TranspileProcess = struct {
                     try proc.check_body(body, &fn_env, fns, fn_rtype);
 
                     proc.warn_unused_bindings_in_current_scope(&fn_env);
+
+                    // Missing-return check for methods (see the free-function site above).
+                    if (fn_rtype.base != .Void and is_known_type(fn_rtype) and !proc.body_always_returns(body)) {
+                        proc.report_warning(.missing_return, m, "method may reach the end of its body without returning a value", .{});
+                    }
                 }
             }
         }
@@ -9994,6 +10012,122 @@ pub const TranspileProcess = struct {
             .StatementReturn, .StatementBreak, .StatementContinue => true,
             else => false,
         };
+    }
+
+    /// True when a `Body` node is GUARANTEED to exit its scope on every path (a `ret`
+    /// on all branches). Conservative: when it can't prove termination it returns false
+    /// (so a genuine fall-through is flagged), but it never claims termination it can't
+    /// justify (so it won't false-positive on code that does return everywhere).
+    fn body_always_returns(self: *Self, body: *ast.Node) bool {
+        if (body.type != .Body or body.node_variant == null) return false;
+        const stmts = body.node_variant.?.body.statements.items();
+        return self.stmts_always_return(stmts);
+    }
+
+    /// True when executing this flat statement list always ends in a scope exit. Walks
+    /// statements in order; an if/elif/else chain counts only when an `else` is present
+    /// AND every branch body always-returns; an exhaustive `fit` counts when every arm
+    /// body always-returns. A bare `ret`/`break`/`continue` ends the analysis as true.
+    fn stmts_always_return(self: *Self, stmts: []const *ast.Node) bool {
+        var i: usize = 0;
+        while (i < stmts.len) : (i += 1) {
+            const s = stmts[i];
+            switch (s.type) {
+                .StatementReturn, .StatementBreak, .StatementContinue => return true,
+                .StatementIf => {
+                    // Gather the if + following elif* + optional else (siblings).
+                    const if_v = s.node_variant.?.statement.if_stmt;
+                    var all_branches_return = self.body_always_returns(if_v.body);
+                    var has_else = false;
+                    var j = i + 1;
+                    while (j < stmts.len) : (j += 1) {
+                        const nb = stmts[j];
+                        if (nb.type == .StatementElseIf) {
+                            const ev = nb.node_variant.?.statement.elif_stmt;
+                            if (!self.body_always_returns(ev.body)) all_branches_return = false;
+                            continue;
+                        }
+                        if (nb.type == .StatementElse) {
+                            const elv = nb.node_variant.?.statement.else_stmt;
+                            if (!self.body_always_returns(elv.body)) all_branches_return = false;
+                            has_else = true;
+                        }
+                        break;
+                    }
+                    // Without an `else`, the if-chain can fall through, so it does not by
+                    // itself guarantee a return — keep scanning the statements after it.
+                    if (has_else and all_branches_return) return true;
+                    i = j - 1; // skip the consumed elif/else siblings
+                },
+                .StatementFit => {
+                    // A `fit` guarantees return only if it's exhaustive (no fall-through)
+                    // AND every arm body always-returns. Exhaustiveness is signalled by a
+                    // default branch or by covering all variants; we conservatively treat
+                    // a fit WITHOUT a default branch as possibly-falling-through (the same
+                    // assumption the codegen's trailing `ret` after a fit relies on).
+                    const fit_v = s.node_variant.?.statement.fit_stmt;
+                    if (!fit_v.has_default_branch) {
+                        // Not provably exhaustive here — don't count it; keep scanning.
+                        continue;
+                    }
+                    var all_arms_return = true;
+                    for (fit_v.branches.items()) |br| {
+                        if (!self.body_always_returns(br.body)) {
+                            all_arms_return = false;
+                            break;
+                        }
+                    }
+                    if (all_arms_return) return true;
+                },
+                .StatementFor => {
+                    // An UNCONDITIONAL loop (`for { ... }` or `for true { ... }`) that
+                    // contains no `break` never falls through to the statements after it
+                    // — control either loops forever or exits via a `ret` inside. So the
+                    // function can't reach its end past such a loop. Idiom: `for true {
+                    // ... ret x; ... }` (e.g. string.fn `equals`).
+                    const fv = s.node_variant.?.statement.for_stmt;
+                    switch (fv) {
+                        .cond => |c| {
+                            const is_infinite = c.condition == null or
+                                (c.condition.?.type == .Boolean and c.condition.?.data != null and c.condition.?.data.?.bval);
+                            if (is_infinite and !self.body_has_break(c.body)) return true;
+                        },
+                        else => {},
+                    }
+                },
+                else => {},
+            }
+        }
+        return false;
+    }
+
+    /// True if `body` contains a `break` that targets THIS loop (does not descend into
+    /// nested loops, whose `break`s target the inner loop, nor into nested functions).
+    /// Used to decide whether an unconditional loop can fall through.
+    fn body_has_break(self: *Self, body: *ast.Node) bool {
+        if (body.type != .Body or body.node_variant == null) return false;
+        for (body.node_variant.?.body.statements.items()) |st| {
+            if (self.node_has_break_for_this_loop(st)) return true;
+        }
+        return false;
+    }
+
+    fn node_has_break_for_this_loop(self: *Self, n: *ast.Node) bool {
+        switch (n.type) {
+            .StatementBreak => return true,
+            // Nested loops capture their own `break`s — don't descend.
+            .StatementFor => return false,
+            .StatementIf => return self.body_has_break(n.node_variant.?.statement.if_stmt.body),
+            .StatementElseIf => return self.body_has_break(n.node_variant.?.statement.elif_stmt.body),
+            .StatementElse => return self.body_has_break(n.node_variant.?.statement.else_stmt.body),
+            .StatementFit => {
+                for (n.node_variant.?.statement.fit_stmt.branches.items()) |br| {
+                    if (self.body_has_break(br.body)) return true;
+                }
+                return false;
+            },
+            else => return false,
+        }
     }
 
     fn block_ends_with_scope_terminator(self: *Self, body_node: *ast.Node) bool {

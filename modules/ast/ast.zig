@@ -34,6 +34,7 @@ pub const WarningId = enum {
     unused_import,
     unused_function,
     unused_compound,
+    missing_return,
 };
 
 /// Intent controls for warning diagnostics.
@@ -52,6 +53,7 @@ pub fn warning_id_from_string(name: []const u8) ?WarningId {
     if (mem.eql(u8, name, "unused_import")) return .unused_import;
     if (mem.eql(u8, name, "unused_function")) return .unused_function;
     if (mem.eql(u8, name, "unused_compound")) return .unused_compound;
+    if (mem.eql(u8, name, "missing_return")) return .missing_return;
     return null;
 }
 
@@ -66,6 +68,7 @@ pub fn warning_id_to_string(id: WarningId) []const u8 {
         .unused_import => "unused_import",
         .unused_function => "unused_function",
         .unused_compound => "unused_compound",
+        .missing_return => "missing_return",
     };
 }
 

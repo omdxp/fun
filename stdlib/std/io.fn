@@ -72,14 +72,6 @@ fun _dup_str(str s) str {
   ret out;
 }
 
-fun _io_err(str message, str context) Error {
-  Error e = error_new_simple(.Io, message);
-  if context != nil {
-    e.with_context(context);
-  }
-  ret e;
-}
-
 // Format a number into a new string buffer.
 pub fun fmt_num(num n) str {
   str buf = malloc(32);
@@ -431,7 +423,6 @@ impl File {
 
   // Read all lines (up to max_len per line) with Result.
   pub try_read_lines(num max_len) Result<Vec<str>> {
-    Result<Vec<str>> r;
     if self.handle == nil {
       Vec<str> empty;
       empty.len = 0;
@@ -573,6 +564,18 @@ impl File {
     num n = len(data);
     num wrote = fwrite(data, 1, n, self.handle);
     ret wrote == n;
+  }
+
+  // Write a string to the file with Result.
+  pub try_write(str data) Result<bin> {
+    if self.handle == nil {
+      ret err(1, "write on closed file", false);
+    }
+    bin ok_write = self.write(data);
+    if ok_write == false {
+      ret err(1, "write failed", false);
+    }
+    ret ok(true);
   }
 }
 

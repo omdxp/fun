@@ -60,6 +60,11 @@ impl Mutex {
     ret rc;
   }
 
+  // True once initialized and not yet destroyed.
+  pub is_initialized() bin {
+    ret self.initialized;
+  }
+
   // Lock the mutex.
   // 
   // Note:
@@ -141,6 +146,11 @@ impl CondVar {
       self.initialized = true;
     }
     ret rc;
+  }
+
+  // True once initialized and not yet destroyed.
+  pub is_initialized() bin {
+    ret self.initialized;
   }
 
   // Wait on the condition variable.

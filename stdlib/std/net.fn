@@ -87,6 +87,17 @@ pub fun parse_url(str s) Url {
   ret u;
 }
 
+// Parse a URL with validation. `Ok(url)` when a non-empty host is present,
+// otherwise `Err` — unlike `parse_url`, which returns a Url with an empty host
+// on malformed input (a silent footgun).
+pub fun try_parse_url(str s) Result<Url> {
+  Url u = parse_url(s);
+  if is_empty(u.host) {
+    ret err(1, "parse_url: missing host", u);
+  }
+  ret ok(u);
+}
+
 // Build a simple HTTP GET request from a Url.
 // 
 // Params:

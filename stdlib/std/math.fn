@@ -8,6 +8,7 @@
 // ```
 
 imp std.c.math as cmath;
+imp std.result;
 
 // 2D vector for simple math utilities.
 pub compound Vec2 {
@@ -486,7 +487,8 @@ pub fun rad_to_deg(dec radians) dec {
 // 
 // Params:
 // - base: base value
-// - exp: exponent
+// - exp: exponent (a NEGATIVE exponent yields 1, since integer powers can't
+// represent fractions; use `try_pow_int` to reject negative exponents)
 // 
 // Returns:
 // - base^exp
@@ -498,6 +500,15 @@ pub fun pow_int(num base, num exp) num {
     i = i + 1;
   }
   ret result;
+}
+
+// Integer power with validation. `Ok(base^exp)` for `exp >= 0`, `Err` for a negative
+// exponent (which `pow_int` silently treats as 0, returning 1).
+pub fun try_pow_int(num base, num exp) Result<num> {
+  if exp < 0 {
+    ret err(1, "pow_int: negative exponent", 1);
+  }
+  ret ok(pow_int(base, exp));
 }
 
 // Convenience function for Vec2 distance.

@@ -39,12 +39,77 @@ impl JsonValue {
   // True when this value is JSON null.
   pub is_null() bin {
     fit *self {
-      JsonValue.Null -> { ret true; }
-      JsonValue.Bool(b) -> { ret false; }
-      JsonValue.Num(n) -> { ret false; }
-      JsonValue.Str(s) -> { ret false; }
-      JsonValue.Array(a) -> { ret false; }
-      JsonValue.Object(o) -> { ret false; }
+      .Null -> { ret true; }
+      .Bool(b) -> { ret false; }
+      .Num(n) -> { ret false; }
+      .Str(s) -> { ret false; }
+      .Array(a) -> { ret false; }
+      .Object(o) -> { ret false; }
+    }
+    ret false;
+  }
+
+  // True when this value is a JSON boolean.
+  pub is_bool() bin {
+    fit *self {
+      .Bool(b) -> { ret true; }
+      .Null -> { ret false; }
+      .Num(n) -> { ret false; }
+      .Str(s) -> { ret false; }
+      .Array(a) -> { ret false; }
+      .Object(o) -> { ret false; }
+    }
+    ret false;
+  }
+
+  // True when this value is a JSON number.
+  pub is_num() bin {
+    fit *self {
+      .Num(n) -> { ret true; }
+      .Null -> { ret false; }
+      .Bool(b) -> { ret false; }
+      .Str(s) -> { ret false; }
+      .Array(a) -> { ret false; }
+      .Object(o) -> { ret false; }
+    }
+    ret false;
+  }
+
+  // True when this value is a JSON string.
+  pub is_str() bin {
+    fit *self {
+      .Str(s) -> { ret true; }
+      .Null -> { ret false; }
+      .Bool(b) -> { ret false; }
+      .Num(n) -> { ret false; }
+      .Array(a) -> { ret false; }
+      .Object(o) -> { ret false; }
+    }
+    ret false;
+  }
+
+  // True when this value is a JSON array.
+  pub is_array() bin {
+    fit *self {
+      .Array(a) -> { ret true; }
+      .Null -> { ret false; }
+      .Bool(b) -> { ret false; }
+      .Num(n) -> { ret false; }
+      .Str(s) -> { ret false; }
+      .Object(o) -> { ret false; }
+    }
+    ret false;
+  }
+
+  // True when this value is a JSON object.
+  pub is_object() bin {
+    fit *self {
+      .Object(o) -> { ret true; }
+      .Null -> { ret false; }
+      .Bool(b) -> { ret false; }
+      .Num(n) -> { ret false; }
+      .Str(s) -> { ret false; }
+      .Array(a) -> { ret false; }
     }
     ret false;
   }
@@ -52,12 +117,12 @@ impl JsonValue {
   // The boolean, or None when this is not a Bool.
   pub as_bool() Option<bin> {
     fit *self {
-      JsonValue.Bool(b) -> { ret Option.Some(b); }
-      JsonValue.Null -> { ret Option.None; }
-      JsonValue.Num(n) -> { ret Option.None; }
-      JsonValue.Str(s) -> { ret Option.None; }
-      JsonValue.Array(a) -> { ret Option.None; }
-      JsonValue.Object(o) -> { ret Option.None; }
+      .Bool(b) -> { ret Option.Some(b); }
+      .Null -> { ret Option.None; }
+      .Num(n) -> { ret Option.None; }
+      .Str(s) -> { ret Option.None; }
+      .Array(a) -> { ret Option.None; }
+      .Object(o) -> { ret Option.None; }
     }
     ret Option.None;
   }
@@ -65,12 +130,12 @@ impl JsonValue {
   // The number (as a dec), or None when this is not a Num.
   pub as_num() Option<dec> {
     fit *self {
-      JsonValue.Num(n) -> { ret Option.Some(n); }
-      JsonValue.Null -> { ret Option.None; }
-      JsonValue.Bool(b) -> { ret Option.None; }
-      JsonValue.Str(s) -> { ret Option.None; }
-      JsonValue.Array(a) -> { ret Option.None; }
-      JsonValue.Object(o) -> { ret Option.None; }
+      .Num(n) -> { ret Option.Some(n); }
+      .Null -> { ret Option.None; }
+      .Bool(b) -> { ret Option.None; }
+      .Str(s) -> { ret Option.None; }
+      .Array(a) -> { ret Option.None; }
+      .Object(o) -> { ret Option.None; }
     }
     ret Option.None;
   }
@@ -78,12 +143,12 @@ impl JsonValue {
   // The string, or None when this is not a Str.
   pub as_str() Option<str> {
     fit *self {
-      JsonValue.Str(s) -> { ret Option.Some(s); }
-      JsonValue.Null -> { ret Option.None; }
-      JsonValue.Bool(b) -> { ret Option.None; }
-      JsonValue.Num(n) -> { ret Option.None; }
-      JsonValue.Array(a) -> { ret Option.None; }
-      JsonValue.Object(o) -> { ret Option.None; }
+      .Str(s) -> { ret Option.Some(s); }
+      .Null -> { ret Option.None; }
+      .Bool(b) -> { ret Option.None; }
+      .Num(n) -> { ret Option.None; }
+      .Array(a) -> { ret Option.None; }
+      .Object(o) -> { ret Option.None; }
     }
     ret Option.None;
   }
@@ -92,12 +157,12 @@ impl JsonValue {
   // header (its elements are shared); treat it as read-only.
   pub as_array() Option<Vec<JsonValue>> {
     fit *self {
-      JsonValue.Array(a) -> { ret Option.Some(a); }
-      JsonValue.Null -> { ret Option.None; }
-      JsonValue.Bool(b) -> { ret Option.None; }
-      JsonValue.Num(n) -> { ret Option.None; }
-      JsonValue.Str(s) -> { ret Option.None; }
-      JsonValue.Object(o) -> { ret Option.None; }
+      .Array(a) -> { ret Option.Some(a); }
+      .Null -> { ret Option.None; }
+      .Bool(b) -> { ret Option.None; }
+      .Num(n) -> { ret Option.None; }
+      .Str(s) -> { ret Option.None; }
+      .Object(o) -> { ret Option.None; }
     }
     ret Option.None;
   }
@@ -106,12 +171,12 @@ impl JsonValue {
   // when this value is not an Object).
   pub get(str key) Option<JsonValue> {
     fit *self {
-      JsonValue.Object(o) -> { ret o.at(key); }
-      JsonValue.Null -> { ret Option.None; }
-      JsonValue.Bool(b) -> { ret Option.None; }
-      JsonValue.Num(n) -> { ret Option.None; }
-      JsonValue.Str(s) -> { ret Option.None; }
-      JsonValue.Array(a) -> { ret Option.None; }
+      .Object(o) -> { ret o.at(key); }
+      .Null -> { ret Option.None; }
+      .Bool(b) -> { ret Option.None; }
+      .Num(n) -> { ret Option.None; }
+      .Str(s) -> { ret Option.None; }
+      .Array(a) -> { ret Option.None; }
     }
     ret Option.None;
   }
@@ -120,12 +185,12 @@ impl JsonValue {
   // when this value is not an Array).
   pub index(num i) Option<JsonValue> {
     fit *self {
-      JsonValue.Array(a) -> { ret a.at(i); }
-      JsonValue.Null -> { ret Option.None; }
-      JsonValue.Bool(b) -> { ret Option.None; }
-      JsonValue.Num(n) -> { ret Option.None; }
-      JsonValue.Str(s) -> { ret Option.None; }
-      JsonValue.Object(o) -> { ret Option.None; }
+      .Array(a) -> { ret a.at(i); }
+      .Null -> { ret Option.None; }
+      .Bool(b) -> { ret Option.None; }
+      .Num(n) -> { ret Option.None; }
+      .Str(s) -> { ret Option.None; }
+      .Object(o) -> { ret Option.None; }
     }
     ret Option.None;
   }
@@ -133,12 +198,12 @@ impl JsonValue {
   // Number of entries (Object) or elements (Array); 0 for scalars.
   pub len() num {
     fit *self {
-      JsonValue.Array(a) -> { ret a.len(); }
-      JsonValue.Object(o) -> { ret o.len(); }
-      JsonValue.Null -> { ret 0; }
-      JsonValue.Bool(b) -> { ret 0; }
-      JsonValue.Num(n) -> { ret 0; }
-      JsonValue.Str(s) -> { ret 0; }
+      .Array(a) -> { ret a.len(); }
+      .Object(o) -> { ret o.len(); }
+      .Null -> { ret 0; }
+      .Bool(b) -> { ret 0; }
+      .Num(n) -> { ret 0; }
+      .Str(s) -> { ret 0; }
     }
     ret 0;
   }
@@ -202,15 +267,15 @@ fun _append_escaped(StringBuilder* b, str s) {
 
 fun _append_value(StringBuilder* b, JsonValue* v) {
   fit *v {
-    JsonValue.Null -> { b.append("null"); }
-    JsonValue.Bool(x) -> {
+    .Null -> { b.append("null"); }
+    .Bool(x) -> {
       if x {
         b.append("true");
       } else {
         b.append("false");
       }
     }
-    JsonValue.Num(n) -> {
+    .Num(n) -> {
       // Render integer-valued decimals without a fractional part (42, not 42.000000).
       if trunc_dec(n) == n {
         b.append_dec(n, 0);
@@ -218,12 +283,12 @@ fun _append_value(StringBuilder* b, JsonValue* v) {
         b.append_dec(n, 6);
       }
     }
-    JsonValue.Str(s) -> {
+    .Str(s) -> {
       b.append_char('"');
       _append_escaped(b, s);
       b.append_char('"');
     }
-    JsonValue.Array(a) -> {
+    .Array(a) -> {
       b.append_char('[');
       num i = 0;
       for i < a.len() {
@@ -236,7 +301,7 @@ fun _append_value(StringBuilder* b, JsonValue* v) {
       }
       b.append_char(']');
     }
-    JsonValue.Object(o) -> {
+    .Object(o) -> {
       b.append_char('{');
       let keys = o.keys();
       defer keys.free();

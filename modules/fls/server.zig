@@ -1,8 +1,24 @@
 const std = @import("std");
-// libc `setenv` — used to propagate the resolved stdlib root into this process's
-// environment so EVERY child compiler subprocess (diagnostics, etc.) inherits a
-// deterministic `FUN_STDLIB_DIR` instead of relying on its own best-effort discovery.
-extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+const builtin = @import("builtin");
+
+// Set an environment variable in THIS process so EVERY child compiler subprocess
+// (diagnostics, etc.) inherits a deterministic `FUN_STDLIB_DIR` instead of relying
+// on its own best-effort discovery. Cross-platform: POSIX libc has `setenv`, but the
+// Windows CRT does not export it (lld-link: "undefined symbol: setenv") — the MSVCRT
+// equivalent is `_putenv_s(name, value)`, which always overwrites. Best-effort; the
+// caller ignores failure. Returns 0 on success to mirror both CRT functions.
+const setEnvVar = if (builtin.os.tag == .windows) struct {
+    extern "c" fn _putenv_s(name: [*:0]const u8, value: [*:0]const u8) c_int;
+    fn call(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int {
+        _ = overwrite; // _putenv_s always overwrites
+        return _putenv_s(name, value);
+    }
+}.call else struct {
+    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+    fn call(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int {
+        return setenv(name, value, overwrite);
+    }
+}.call;
 const ast = @import("ast");
 const codegen = @import("codegen");
 const parser = @import("parser");
@@ -677,7 +693,7 @@ pub const LspServer = struct {
         // as "unknown function" on a cold open. Best-effort; ignore failure.
         if (self.allocator.dupeZ(u8, abs)) |abs_z| {
             defer self.allocator.free(abs_z);
-            _ = setenv("FUN_STDLIB_DIR", abs_z.ptr, 1);
+            _ = setEnvVar("FUN_STDLIB_DIR", abs_z.ptr, 1);
         } else |_| {}
         if (self.debug_imports) self.dbg(true, "imports", "accepted stdlib root abs={s}", .{abs});
         return true;
@@ -4398,6 +4414,107 @@ pub const LspServer = struct {
             }
         }
 
+        // 4) Return context: `ret .Variant` inside a function/method whose declared
+        // return type is an enum (e.g. `pub index_of_opt(...) Option<num> { ret .Some(i); }`).
+        // Confirm a `ret` precedes the dot in the same statement, then read the
+        // enclosing function's return-type base name.
+        var r: isize = @as(isize, @intCast(dot_i)) - 1;
+        while (r >= 0) : (r -= 1) {
+            const t = idx.tokens[@intCast(r)];
+            if (t.kind == .comment) continue;
+            // Stop at a statement/block boundary that means we're not in a `ret` expr.
+            if ((t.kind == .symbol or t.kind == .operator) and
+                (std.mem.eql(u8, t.text, ";") or std.mem.eql(u8, t.text, "{") or std.mem.eql(u8, t.text, "}"))) break;
+            if (t.kind == .keyword and std.mem.eql(u8, t.text, "ret")) {
+                const rt_opt = self.enclosingFunctionReturnTypeName(idx, dot_i);
+                if (self.debug_definitions) self.dbg(true, "defs", "shorthand ret-ctx: enclosing_return={s} is_enum={}", .{ rt_opt orelse "<none>", if (rt_opt) |rt| self.isEnumTypeName(uri, rt) else false });
+                if (rt_opt) |rt| {
+                    if (self.isEnumTypeName(uri, rt)) return rt;
+                }
+                break;
+            }
+        }
+
+        return null;
+    }
+
+    /// Base name of the return type of the function/method whose body lexically encloses
+    /// `tok_i`. Climbs OUT through nested blocks (`if`/`for`/`fit` arms/bare blocks),
+    /// and for each enclosing block checks whether its opening `{` is preceded by a
+    /// function-header `) RetType {`; the first such header found is the enclosing
+    /// function (e.g. `... ) Option<num> {` -> "Option"). Returns null if not inside a
+    /// typed function body, or the nearest enclosing function has no named return type.
+    fn enclosingFunctionReturnTypeName(self: *LspServer, idx: *const Index, tok_i: usize) ?[]const u8 {
+        _ = self;
+        const toks = idx.tokens;
+        var search_from: isize = @as(isize, @intCast(tok_i)) - 1;
+
+        // Climb one enclosing block per iteration until we find a function header or run out.
+        while (search_from >= 0) {
+            // Find the `{` opening the block that encloses search_from (net depth 0).
+            var depth: i64 = 0;
+            var open_i: ?usize = null;
+            var k: isize = search_from;
+            while (k >= 0) : (k -= 1) {
+                const t = toks[@intCast(k)];
+                if (t.kind != .symbol and t.kind != .operator) continue;
+                if (std.mem.eql(u8, t.text, "}")) {
+                    depth += 1;
+                } else if (std.mem.eql(u8, t.text, "{")) {
+                    if (depth == 0) {
+                        open_i = @intCast(k);
+                        break;
+                    }
+                    depth -= 1;
+                }
+            }
+            const oi = open_i orelse return null;
+            if (oi == 0) return null;
+
+            // Does this `{` open a function body? Look left for a `) RetType {` shape:
+            // the matching `)` of a param list, with a return-type run between it and `{`.
+            var j: isize = @as(isize, @intCast(oi)) - 1;
+            var rparen_i: ?usize = null;
+            var angle: i64 = 0;
+            var hit_boundary = false;
+            while (j >= 0) : (j -= 1) {
+                const t = toks[@intCast(j)];
+                if (t.kind == .symbol or t.kind == .operator) {
+                    if (std.mem.eql(u8, t.text, ">")) {
+                        angle += 1;
+                    } else if (std.mem.eql(u8, t.text, "<")) {
+                        if (angle > 0) angle -= 1;
+                    } else if (angle == 0 and std.mem.eql(u8, t.text, ")")) {
+                        rparen_i = @intCast(j);
+                        break;
+                    } else if (angle == 0 and (std.mem.eql(u8, t.text, "{") or std.mem.eql(u8, t.text, "}") or std.mem.eql(u8, t.text, ";"))) {
+                        // This block is NOT a function body (e.g. `if (...) {`, `for ... {`,
+                        // a `fit` arm `-> {`, or a bare block). Keep climbing outward.
+                        hit_boundary = true;
+                        break;
+                    }
+                }
+            }
+            if (hit_boundary or rparen_i == null) {
+                // Climb to the block enclosing THIS `{`.
+                search_from = @as(isize, @intCast(oi)) - 1;
+                continue;
+            }
+            const rp = rparen_i.?;
+            // Return-type base name = first identifier token after `)` (before `{`).
+            var m: usize = rp + 1;
+            while (m < oi) : (m += 1) {
+                const t = toks[m];
+                if (t.kind == .comment) continue;
+                if (t.kind == .identifier) return baseTypeNameForLookup(t.text);
+                if (t.kind == .symbol or t.kind == .operator) {
+                    // `) {` with nothing between -> a void function (or a non-fn header like
+                    // `if (...) {`). No named return type here; stop (don't misclimb).
+                    if (std.mem.eql(u8, t.text, "{")) return null;
+                }
+            }
+            return null;
+        }
         return null;
     }
 

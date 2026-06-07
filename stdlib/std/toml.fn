@@ -30,10 +30,10 @@ impl TomlValue {
   // The string, or None when this is not a Str.
   pub as_str() Option<str> {
     fit *self {
-      TomlValue.Str(s) -> { ret Option.Some(s); }
-      TomlValue.Int(n) -> { ret Option.None; }
-      TomlValue.Float(d) -> { ret Option.None; }
-      TomlValue.Bool(b) -> { ret Option.None; }
+      .Str(s) -> { ret Option.Some(s); }
+      .Int(n) -> { ret Option.None; }
+      .Float(d) -> { ret Option.None; }
+      .Bool(b) -> { ret Option.None; }
     }
     ret Option.None;
   }
@@ -41,10 +41,10 @@ impl TomlValue {
   // The integer, or None when this is not an Int.
   pub as_int() Option<num> {
     fit *self {
-      TomlValue.Int(n) -> { ret Option.Some(n); }
-      TomlValue.Str(s) -> { ret Option.None; }
-      TomlValue.Float(d) -> { ret Option.None; }
-      TomlValue.Bool(b) -> { ret Option.None; }
+      .Int(n) -> { ret Option.Some(n); }
+      .Str(s) -> { ret Option.None; }
+      .Float(d) -> { ret Option.None; }
+      .Bool(b) -> { ret Option.None; }
     }
     ret Option.None;
   }
@@ -52,10 +52,10 @@ impl TomlValue {
   // The float, or None when this is not a Float.
   pub as_float() Option<dec> {
     fit *self {
-      TomlValue.Float(d) -> { ret Option.Some(d); }
-      TomlValue.Str(s) -> { ret Option.None; }
-      TomlValue.Int(n) -> { ret Option.None; }
-      TomlValue.Bool(b) -> { ret Option.None; }
+      .Float(d) -> { ret Option.Some(d); }
+      .Str(s) -> { ret Option.None; }
+      .Int(n) -> { ret Option.None; }
+      .Bool(b) -> { ret Option.None; }
     }
     ret Option.None;
   }
@@ -63,10 +63,10 @@ impl TomlValue {
   // The boolean, or None when this is not a Bool.
   pub as_bool() Option<bin> {
     fit *self {
-      TomlValue.Bool(b) -> { ret Option.Some(b); }
-      TomlValue.Str(s) -> { ret Option.None; }
-      TomlValue.Int(n) -> { ret Option.None; }
-      TomlValue.Float(d) -> { ret Option.None; }
+      .Bool(b) -> { ret Option.Some(b); }
+      .Str(s) -> { ret Option.None; }
+      .Int(n) -> { ret Option.None; }
+      .Float(d) -> { ret Option.None; }
     }
     ret Option.None;
   }
@@ -76,7 +76,7 @@ impl TomlValue as Display {
   // Render the value in TOML syntax (strings are quoted).
   pub to_string() str {
     fit *self {
-      TomlValue.Str(s) -> {
+      .Str(s) -> {
         StringBuilder b = string_builder_init(_tv_strlen(s) + 2);
         b.append_char('"');
         b.append(s);
@@ -85,21 +85,21 @@ impl TomlValue as Display {
         b.free();
         ret out;
       }
-      TomlValue.Int(n) -> {
+      .Int(n) -> {
         StringBuilder b = string_builder_init(16);
         b.append_num(n);
         str out = b.build();
         b.free();
         ret out;
       }
-      TomlValue.Float(d) -> {
+      .Float(d) -> {
         StringBuilder b = string_builder_init(24);
         b.append_dec(d, 6);
         str out = b.build();
         b.free();
         ret out;
       }
-      TomlValue.Bool(x) -> {
+      .Bool(x) -> {
         if x {
           ret _tv_dup("true");
         }

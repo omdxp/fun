@@ -140,6 +140,11 @@ pub fun path_join_many(Vec<str>* parts) str {
   num i = 1;
   for i < parts.len() {
     out = path_join(out, parts.get(i));
+    // A failed allocation in path_join yields nil; feeding it back in would
+    // deref a null pointer on the next len() call. Stop and propagate nil.
+    if out == nil {
+      ret nil;
+    }
     i = i + 1;
   }
   ret out;

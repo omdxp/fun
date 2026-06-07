@@ -450,7 +450,7 @@ pub fun channel_select_index_other_b() num {
 
 impl Channel<T> {
   // Return a zeroed value for T.
-  pub zero_value() T {
+  zero_value() T {
     T out;
     memset(&out, 0, sizeof(T));
     ret out;
@@ -2461,6 +2461,14 @@ impl Channel<T> {
   // - For coordinated checks, guard state with the channel mutex.
   pub len() num {
     ret self.count;
+  }
+
+  // True when no values are currently queued (unsynchronized snapshot).
+  // 
+  // Note:
+  // - For coordinated checks, guard state with the channel mutex.
+  pub is_empty() bin {
+    ret self.count == 0;
   }
 
   // Configured channel capacity.

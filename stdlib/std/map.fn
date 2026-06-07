@@ -190,7 +190,7 @@ impl Map<K, V> {
   }
 
   // Return a zero-initialized V.
-  pub zero_value() V {
+  zero_value() V {
     V out;
     memset(&out, 0, sizeof(V));
     ret out;

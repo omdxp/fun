@@ -7,6 +7,7 @@
 // ```
 
 imp std.vec;
+imp std.result;
 
 // Pseudo-random number generator.
 pub compound Rand {
@@ -46,6 +47,15 @@ impl Rand {
     ret min + (v % span);
   }
 
+  // Random integer in [min, max] with validation. `Ok(value)` when `min <= max`,
+  // `Err` otherwise (where `range` silently returns `min`).
+  pub try_range(num min, num max) Result<num> {
+    if min > max {
+      ret err(1, "range: min > max", min);
+    }
+    ret ok(self.range(min, max));
+  }
+
   // Next pseudo-random decimal in [0, 1).
   pub next_dec() dec {
     dec v = self.next();
@@ -56,6 +66,15 @@ impl Rand {
   pub range_dec(dec min, dec max) dec {
     dec v = self.next_dec();
     ret min + (max - min) * v;
+  }
+
+  // Random decimal in [min, max) with validation. `Ok(value)` when `min <= max`,
+  // `Err` otherwise (where `range_dec` would produce a value outside the intended span).
+  pub try_range_dec(dec min, dec max) Result<dec> {
+    if min > max {
+      ret err(1, "range_dec: min > max", min);
+    }
+    ret ok(self.range_dec(min, max));
   }
 
   // True with probability p (0..1).

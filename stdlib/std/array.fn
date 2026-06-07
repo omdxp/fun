@@ -8,6 +8,8 @@
 // num v = a.get(1);
 // ```
 
+imp std.option;
+
 // View over a generic array.
 pub compound Array<T> {
   // backing storage
@@ -17,14 +19,29 @@ pub compound Array<T> {
 }
 
 impl Array<T> {
-  // Get element at index.
+  // Element at index, unchecked. The caller must guarantee `0 <= i < len`;
+  // an out-of-range index reads past the backing storage. For safe,
+  // bounds-checked access, use `at()`.
   pub get(num i) T {
     ret self.data[i];
   }
 
-  // Set element at index.
+  // Bounds-checked element access: `Some(value)` when in range, `None` otherwise.
+  pub at(num i) Option<T> {
+    if i < 0 || i >= self.len {
+      ret Option.None;
+    }
+    ret Option.Some(self.data[i]);
+  }
+
+  // Set element at index, unchecked. The caller must guarantee `0 <= i < len`.
   pub set(num i, T value) {
     self.data[i] = value;
+  }
+
+  // True when the array holds no elements.
+  pub is_empty() bin {
+    ret self.len == 0;
   }
 
   // Fill array with a value.

@@ -60,7 +60,7 @@ impl Vec<T> {
   }
 
   // Create a zero value for T.
-  pub zero_value() T {
+  zero_value() T {
     T out;
     memset(&out, 0, sizeof(T));
     ret out;
@@ -473,6 +473,19 @@ impl Vec<T: num | dec> {
     ret -1;
   }
 
+  // Index of first occurrence as `Some(i)`, or `None` when not present.
+  // Prefer this over `index_of` when 0 is a valid index and -1 is easy to mishandle.
+  pub index_of_opt(T value) Option<num> {
+    num i = 0;
+    for i < self.len {
+      if self.data[i] == value {
+        ret .Some(i);
+      }
+      i = i + 1;
+    }
+    ret .None;
+  }
+
   // Return the minimum value, or zero if empty.
   pub min() T {
     if self.len == 0 {
@@ -489,6 +502,15 @@ impl Vec<T: num | dec> {
     ret m;
   }
 
+  // Minimum value as `Some(m)`, or `None` when empty (distinguishes an empty Vec
+  // from a real minimum of zero).
+  pub min_opt() Option<T> {
+    if self.len == 0 {
+      ret .None;
+    }
+    ret .Some(self.min());
+  }
+
   // Return the maximum value, or zero if empty.
   pub max() T {
     if self.len == 0 {
@@ -503,6 +525,14 @@ impl Vec<T: num | dec> {
       i = i + 1;
     }
     ret m;
+  }
+
+  // Maximum value as `Some(m)`, or `None` when empty.
+  pub max_opt() Option<T> {
+    if self.len == 0 {
+      ret .None;
+    }
+    ret .Some(self.max());
   }
 
   // Return the sum of all elements.
@@ -632,6 +662,18 @@ impl Vec<str> {
       i = i + 1;
     }
     ret -1;
+  }
+
+  // Index of first occurrence as `Some(i)`, or `None` when not present.
+  pub index_of_opt(str value) Option<num> {
+    num i = 0;
+    for i < self.len {
+      if _str_cmp(self.data[i], value) == 0 {
+        ret .Some(i);
+      }
+      i = i + 1;
+    }
+    ret .None;
   }
 }
 

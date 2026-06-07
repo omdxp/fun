@@ -11,6 +11,7 @@ imp std.c.mem;
 imp std.c.io;
 imp std.vec;
 imp std.quirks;
+imp std.result;
 
 // String builder for efficient concatenation.
 pub compound StringBuilder {
@@ -257,6 +258,22 @@ pub fun substr(str s, num start, num length) str {
   }
   out[length] = '\0';
   ret out;
+}
+
+// Bounds-checked substring. `Ok(slice)` when `start`/`length` fall within `s`,
+// otherwise `Err` — unlike `substr`, which reads past the string on a bad range.
+pub fun try_substr(str s, num start, num length) Result<str> {
+  if start < 0 || length < 0 {
+    ret err(1, "substr: negative start or length", "");
+  }
+  if start + length > _string_len(s) {
+    ret err(1, "substr: range exceeds string length", "");
+  }
+  str out = substr(s, start, length);
+  if out == nil {
+    ret err(1, "substr: allocation failed", "");
+  }
+  ret ok(out);
 }
 
 // Trim whitespace from both ends.
@@ -770,7 +787,9 @@ pub fun replace_str(str s, str needle, str repl) str {
   ret out;
 }
 
-// Parse a signed integer from a string.
+// Parse a signed integer from a string (lenient: stops at the first non-digit and
+// returns what it parsed, so `"12x"` -> 12 and `"abc"` -> 0). When you need to know
+// the string was a *valid* integer, use `try_parse_int`.
 // 
 // Params:
 // - s: input string
@@ -796,6 +815,30 @@ pub fun parse_int(str s) num {
     i = i + 1;
   }
   ret value * sign;
+}
+
+// Parse a signed integer, validating the WHOLE string. `Ok(n)` only when `s` is a
+// non-empty run of digits (with an optional leading `-`); otherwise `Err`. Use this
+// for untrusted input where `parse_int`'s silent 0/partial result is a footgun.
+pub fun try_parse_int(str s) Result<num> {
+  num n = _string_len(s);
+  if n == 0 {
+    ret err(1, "parse_int: empty string", 0);
+  }
+  num i = 0;
+  if s[0] == '-' {
+    i = 1;
+    if n == 1 {
+      ret err(1, "parse_int: lone '-'", 0);
+    }
+  }
+  for i < n {
+    if s[i] < '0' || s[i] > '9' {
+      ret err(1, "parse_int: invalid digit", 0);
+    }
+    i = i + 1;
+  }
+  ret ok(parse_int(s));
 }
 
 // Format a num as a decimal string.
@@ -898,7 +941,8 @@ pub fun format_bin(bin b) str {
   ret "false";
 }
 
-// Parse a decimal string into a dec.
+// Parse a decimal string into a dec (lenient: stops at the first invalid char, so
+// malformed input yields a partial/0.0 result). Use `try_parse_dec` to validate.
 // 
 // Params:
 // - s: string like "3.14" or "-0.5"
@@ -940,4 +984,38 @@ pub fun parse_dec(str s) dec {
     i = i + 1;
   }
   ret value * sign;
+}
+
+// Parse a decimal, validating the WHOLE string. `Ok(d)` only when `s` is a non-empty
+// number — optional leading `-`, digits, at most one `.` — otherwise `Err`. Use this
+// for untrusted input where `parse_dec`'s silent partial result is a footgun.
+pub fun try_parse_dec(str s) Result<dec> {
+  num n = _string_len(s);
+  if n == 0 {
+    ret err(1, "parse_dec: empty string", 0.0);
+  }
+  num i = 0;
+  if s[0] == '-' {
+    i = 1;
+  }
+  num digits = 0;
+  num dots = 0;
+  for i < n {
+    chr c = s[i];
+    if c == '.' {
+      dots = dots + 1;
+      if dots > 1 {
+        ret err(1, "parse_dec: multiple '.'", 0.0);
+      }
+    } elif c >= '0' && c <= '9' {
+      digits = digits + 1;
+    } else {
+      ret err(1, "parse_dec: invalid char", 0.0);
+    }
+    i = i + 1;
+  }
+  if digits == 0 {
+    ret err(1, "parse_dec: no digits", 0.0);
+  }
+  ret ok(parse_dec(s));
 }

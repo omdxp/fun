@@ -5360,7 +5360,7 @@ pub const ParseProcess = struct {
 
         const warning_id = ast.warning_id_from_string(id_tok.?.data.sval.items) orelse {
             self.transpile_proc.err(
-                "unknown warning id '{s}' (expected one of: return_local_ptr, fit_non_exhaustive, fit_unreachable_branch, unreachable_code, assert_constant, unused_variable, unused_import, unused_function, unused_compound)",
+                "unknown warning id '{s}' (expected one of: return_local_ptr, fit_non_exhaustive, fit_unreachable_branch, unreachable_code, assert_constant, unused_variable, unused_import, unused_function, unused_compound, missing_return)",
                 .{id_tok.?.data.sval.items},
             );
             return ParseError.InvalidIdentifier;

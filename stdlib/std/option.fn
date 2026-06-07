@@ -35,8 +35,8 @@ impl Option<T> {
   // True when a value is present.
   pub is_some() bin {
     fit *self {
-      Option.Some(v) -> { ret true; }
-      Option.None -> { ret false; }
+      .Some(v) -> { ret true; }
+      .None -> { ret false; }
     }
     ret false;
   }
@@ -44,8 +44,8 @@ impl Option<T> {
   // True when no value is present.
   pub is_none() bin {
     fit *self {
-      Option.Some(v) -> { ret false; }
-      Option.None -> { ret true; }
+      .Some(v) -> { ret false; }
+      .None -> { ret true; }
     }
     ret true;
   }
@@ -53,8 +53,8 @@ impl Option<T> {
   // The contained value, or `fallback` when None.
   pub unwrap_or(T fallback) T {
     fit *self {
-      Option.Some(v) -> { ret v; }
-      Option.None -> { ret fallback; }
+      .Some(v) -> { ret v; }
+      .None -> { ret fallback; }
     }
     ret fallback;
   }
@@ -64,8 +64,8 @@ impl Option<T> {
   // `is_some()` or matched the variant.
   pub unwrap() T {
     fit *self {
-      Option.Some(v) -> { ret v; }
-      Option.None -> { ret self.zero(); }
+      .Some(v) -> { ret v; }
+      .None -> { ret self.zero(); }
     }
     ret self.zero();
   }
@@ -79,8 +79,8 @@ impl Option<T> {
   // This option if it is Some, otherwise `other`.
   pub or(Option<T> other) Option<T> {
     fit *self {
-      Option.Some(v) -> { ret Option.Some(v); }
-      Option.None -> { ret other; }
+      .Some(v) -> { ret .Some(v); }
+      .None -> { ret other; }
     }
     ret other;
   }
@@ -88,30 +88,32 @@ impl Option<T> {
   // `other` if this is Some, otherwise None (logical AND of presence).
   pub and(Option<T> other) Option<T> {
     fit *self {
-      Option.Some(v) -> { ret other; }
-      Option.None -> { ret Option.None; }
+      .Some(v) -> { ret other; }
+      .None -> { ret .None; }
     }
-    ret Option.None;
+    ret .None;
   }
 
-  // Keep the value only if it satisfies `keep`; otherwise None.
+  // Keep the value when `keep` is true; otherwise None. `keep` is a plain
+  // boolean you compute at the call site (Fun has no first-class predicate
+  // functions), e.g. `opt.filter(n > 0)`.
   pub filter(bin keep) Option<T> {
     fit *self {
-      Option.Some(v) -> {
+      .Some(v) -> {
         if keep {
-          ret Option.Some(v);
+          ret .Some(v);
         }
-        ret Option.None;
+        ret .None;
       }
-      Option.None -> { ret Option.None; }
+      .None -> { ret .None; }
     }
-    ret Option.None;
+    ret .None;
   }
 }
 
 // Construct `Some(value)` (T is inferred from `value`).
 pub fun some<T>(T value) Option<T> {
-  ret Option.Some(value);
+  ret .Some(value);
 }
 
 // Convert an Option to a Result: Some(v) -> Ok(v); None -> Err(error_new(code, msg)).
@@ -119,8 +121,8 @@ pub fun some<T>(T value) Option<T> {
 // resolves from the call site.
 pub fun ok_or<T>(Option<T> o, num code, str message) Result<T> {
   fit o {
-    Option.Some(v) -> { ret ok(v); }
-    Option.None -> {
+    .Some(v) -> { ret ok(v); }
+    .None -> {
       T zero;
       ret err(code, message, zero);
     }

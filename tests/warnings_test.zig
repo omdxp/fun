@@ -899,3 +899,144 @@ test "diagnostic: std.c.time import used via time_t type is not unused" {
     }
     std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
+
+test "diagnostic: non-void function with no ret warns missing_return" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "missing_return_none.fn";
+
+    const input =
+        "fun f(num x) num {\n" ++
+        "  let y = x + 1;\n" ++
+        "  _ = y;\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, false);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(res.warnings != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "without returning a value") != null);
+
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "diagnostic: ret only in if-branch warns missing_return" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "missing_return_partial.fn";
+
+    const input =
+        "fun f(num x) num {\n" ++
+        "  if x > 0 {\n" ++
+        "    ret 1;\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, false);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(res.warnings != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "without returning a value") != null);
+
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "diagnostic: exhaustive if/else does not warn missing_return" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "missing_return_ifelse_ok.fn";
+
+    const input =
+        "fun f(bin b) num {\n" ++
+        "  if b {\n" ++
+        "    ret 1;\n" ++
+        "  } else {\n" ++
+        "    ret 0;\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, false);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    if (res.warnings) |w| {
+        try std.testing.expect(std.mem.indexOf(u8, w, "without returning a value") == null);
+    }
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "diagnostic: infinite loop with ret does not warn missing_return" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "missing_return_forloop_ok.fn";
+
+    const input =
+        "fun f(num x) num {\n" ++
+        "  for true {\n" ++
+        "    if x > 0 {\n" ++
+        "      ret 1;\n" ++
+        "    }\n" ++
+        "    ret 0;\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, false);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    if (res.warnings) |w| {
+        try std.testing.expect(std.mem.indexOf(u8, w, "without returning a value") == null);
+    }
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "diagnostic: void function does not warn missing_return" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "missing_return_void_ok.fn";
+
+    const input =
+        "fun f(num x) {\n" ++
+        "  let y = x + 1;\n" ++
+        "  _ = y;\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, false);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    if (res.warnings) |w| {
+        try std.testing.expect(std.mem.indexOf(u8, w, "without returning a value") == null);
+    }
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "diagnostic: allow missing_return suppresses warning" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "missing_return_allow.fn";
+
+    const input =
+        "fun f(num x) num {\n" ++
+        "  allow missing_return, \"intentional fall-through for migration\";\n" ++
+        "  let y = x + 1;\n" ++
+        "  _ = y;\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, false);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    if (res.warnings) |w| {
+        try std.testing.expect(std.mem.indexOf(u8, w, "without returning a value") == null);
+    }
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}

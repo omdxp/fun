@@ -31,8 +31,8 @@ impl Result<T> {
   // True when the result is Ok.
   pub is_ok() bin {
     fit *self {
-      Result.Ok(v) -> { ret true; }
-      Result.Err(e) -> { ret false; }
+      .Ok(v) -> { ret true; }
+      .Err(e) -> { ret false; }
     }
     ret false;
   }
@@ -40,8 +40,8 @@ impl Result<T> {
   // True when the result is an Err.
   pub is_err() bin {
     fit *self {
-      Result.Ok(v) -> { ret false; }
-      Result.Err(e) -> { ret true; }
+      .Ok(v) -> { ret false; }
+      .Err(e) -> { ret true; }
     }
     ret true;
   }
@@ -49,8 +49,8 @@ impl Result<T> {
   // The Ok value, or `fallback` when Err.
   pub unwrap_or(T fallback) T {
     fit *self {
-      Result.Ok(v) -> { ret v; }
-      Result.Err(e) -> { ret fallback; }
+      .Ok(v) -> { ret v; }
+      .Err(e) -> { ret fallback; }
     }
     ret fallback;
   }
@@ -59,8 +59,8 @@ impl Result<T> {
   // panic), so use it only after checking `is_ok()` or matching the variant.
   pub unwrap() T {
     fit *self {
-      Result.Ok(v) -> { ret v; }
-      Result.Err(e) -> { ret self.zero(); }
+      .Ok(v) -> { ret v; }
+      .Err(e) -> { ret self.zero(); }
     }
     ret self.zero();
   }
@@ -68,8 +68,8 @@ impl Result<T> {
   // The Err value, or a no-error `Error` when Ok.
   pub unwrap_err() Error {
     fit *self {
-      Result.Ok(v) -> { ret error_none(); }
-      Result.Err(e) -> { ret e; }
+      .Ok(v) -> { ret error_none(); }
+      .Err(e) -> { ret e; }
     }
     ret error_none();
   }
@@ -80,11 +80,11 @@ impl Result<T> {
     ret out;
   }
 
-  // `other` if this is Ok, otherwise keep this Err.
+  // `other` if this is Ok, otherwise keep this Err (logical AND of success).
   pub and(Result<T> other) Result<T> {
     fit *self {
-      Result.Ok(v) -> { ret other; }
-      Result.Err(e) -> { ret Result.Err(e); }
+      .Ok(v) -> { ret other; }
+      .Err(e) -> { ret .Err(e); }
     }
     ret other;
   }
@@ -92,8 +92,8 @@ impl Result<T> {
   // This result if it is Ok, otherwise `other`.
   pub or(Result<T> other) Result<T> {
     fit *self {
-      Result.Ok(v) -> { ret Result.Ok(v); }
-      Result.Err(e) -> { ret other; }
+      .Ok(v) -> { ret .Ok(v); }
+      .Err(e) -> { ret other; }
     }
     ret other;
   }
@@ -101,18 +101,19 @@ impl Result<T> {
 
 // Construct a successful `Ok(value)`.
 pub fun ok<T>(T value) Result<T> {
-  ret Result.Ok(value);
+  ret .Ok(value);
 }
 
-// Construct an `Err` from a code + message. `default_value` is unused by the enum
-// representation (Err carries only the Error) but is kept in the signature so
-// existing call sites — `err(1, "msg", fallback)` — continue to compile.
-pub fun err<T>(num code, str message, T default_value) Result<T> {
-  ret Result.Err(error_new(code, message));
+// Construct an `Err` from a code + message. The trailing value is not stored (an Err
+// carries only the Error); it exists purely as a generic-type WITNESS so `T` is
+// inferred from the call site — `err(1, "msg", fallback)` resolves `Result<T>`. The
+// leading underscore marks it intentionally unused.
+pub fun err<T>(num code, str message, T _default_value) Result<T> {
+  ret .Err(error_new(code, message));
 }
 
-// Construct an `Err` from a pre-built Error. `default_value` is accepted for
-// call-site compatibility (the enum stores only the Error).
-pub fun err_error<T>(Error e, T default_value) Result<T> {
-  ret Result.Err(e);
+// Construct an `Err` from a pre-built Error. The trailing value is the same
+// generic-type witness as in `err` (the enum stores only the Error).
+pub fun err_error<T>(Error e, T _default_value) Result<T> {
+  ret .Err(e);
 }
