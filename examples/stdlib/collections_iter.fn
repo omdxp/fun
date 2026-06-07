@@ -9,8 +9,6 @@ imp std.c.io;
 imp std.vec;
 imp std.set;
 imp std.map;
-imp std.option;
-imp std.quirks;
 
 fun main() num {
   // --- Vec: for-each + Option accessors + Display ---

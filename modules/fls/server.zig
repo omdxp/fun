@@ -1,4 +1,8 @@
 const std = @import("std");
+// libc `setenv` — used to propagate the resolved stdlib root into this process's
+// environment so EVERY child compiler subprocess (diagnostics, etc.) inherits a
+// deterministic `FUN_STDLIB_DIR` instead of relying on its own best-effort discovery.
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 const ast = @import("ast");
 const codegen = @import("codegen");
 const parser = @import("parser");
@@ -368,6 +372,11 @@ pub const LspServer = struct {
     debug_imports: bool = false,
     debug_definitions: bool = false,
     did_log_stdlib_root_resolution: bool = false,
+    /// Recursion guard for the query-time type engine: `guessVariableType` may
+    /// re-infer a binding's initializer expression, which can recurse back into
+    /// `guessVariableType` (e.g. `let b = a.f()` where `a` is itself inferred). Bound
+    /// the depth so a cyclic/self-referential chain can't blow the stack.
+    type_infer_depth: u32 = 0,
 
     /// Per-URI diagnostic result cache.  Keyed by URI string (owned by map).
     /// Each entry stores the Wyhash of the formatted source text and the raw
@@ -662,6 +671,14 @@ pub const LspServer = struct {
         if (self.stdlib_root_path) |p| self.allocator.free(p);
         self.stdlib_root_path = abs;
         keep = true;
+        // Propagate to this process's env so child compiler subprocesses (diagnostics)
+        // resolve imports deterministically via FUN_STDLIB_DIR rather than their own
+        // discovery — which intermittently mis-flagged stdlib symbols (e.g. `parse`)
+        // as "unknown function" on a cold open. Best-effort; ignore failure.
+        if (self.allocator.dupeZ(u8, abs)) |abs_z| {
+            defer self.allocator.free(abs_z);
+            _ = setenv("FUN_STDLIB_DIR", abs_z.ptr, 1);
+        } else |_| {}
         if (self.debug_imports) self.dbg(true, "imports", "accepted stdlib root abs={s}", .{abs});
         return true;
     }
@@ -1388,16 +1405,19 @@ pub const LspServer = struct {
             }
         }
 
-        // Member hover: show info for `a.b` / `a.b.c` by resolving receiver type.
+        // Member hover: show info for `a.b` / `a.b.c` / `a.f().g` by resolving the
+        // receiver's type. The receiver may be an identifier OR a method-call result
+        // (`as_array()` -> `Option<...>`), an indexing, etc. — `resolveTypeOfExprEndingAtToken`
+        // follows all of those (a `)`-ending receiver routes through resolveCallReturnType).
         if (findTokenIndexAt(idx.tokens, pos)) |tok_i| {
             if (tok_i > 0 and isDotToken(idx.tokens[tok_i - 1])) {
-                if (tok_i >= 2 and idx.tokens[tok_i - 2].kind == .identifier) {
-                    if (self.resolveTypeOfChainUpTo(idx, uri, pos, tok_i - 2)) |recv_type| {
+                if (tok_i >= 2) {
+                    if (self.resolveTypeOfExprEndingAtToken(idx, uri, pos, tok_i - 2)) |recv_type| {
                         const name = tok.text;
-                        const hit = self.findMemberByContainer(uri, recv_type, name, .field) orelse
-                            self.findMemberByContainer(uri, recv_type, name, .property) orelse
-                            self.findMemberByContainer(uri, recv_type, name, .enumMember) orelse
-                            self.findMemberByContainer(uri, recv_type, name, .method);
+                        const hit = self.findMemberByContainerFresh(uri, recv_type, name, .field) orelse
+                            self.findMemberByContainerFresh(uri, recv_type, name, .property) orelse
+                            self.findMemberByContainerFresh(uri, recv_type, name, .enumMember) orelse
+                            self.findMemberByContainerFresh(uri, recv_type, name, .method);
                         if (hit) |h| {
                             var buf = ArrayList(u8).init(self.allocator);
                             defer buf.deinit();
@@ -1601,6 +1621,8 @@ pub const LspServer = struct {
                 }
             }
             if (d.kind == .variable and (d.detail == null or let_infer_detail)) {
+                // `guessVariableType` now also resolves `fit`-arm payload bindings
+                // (incl. imported generic enums), so a single call covers all cases.
                 const vt = d.value_type orelse self.guessVariableType(idx, uri, tok.text, pos);
                 if (vt) |vts| {
                     if (!isLetInferTypeName(vts)) {
@@ -1827,15 +1849,24 @@ pub const LspServer = struct {
             const field = self.findMemberByContainer(uri, current_type.?, seg, .field) orelse
                 self.findMemberByContainer(uri, current_type.?, seg, .property);
             if (field) |hit| {
-                if (self.debug_definitions) {
-                    self.dbg(true, "defs", "chain segment owner={s} seg={s} field_type={s}", .{
-                        current_type.?,
-                        seg,
-                        hit.sym.value_type orelse "",
-                    });
-                }
                 if (hit.sym.value_type) |vt| {
-                    current_type = vt;
+                    // Substitute the field type's generic params against the owner's
+                    // concrete args: `Box<AsyncCounter>.v` where `v: T` -> `AsyncCounter`,
+                    // so the next segment (`.add`) resolves on the real type instead of a
+                    // bare `T` (which triggered an O(files) member-miss scan and failed).
+                    var spec: ?[]const u8 = null;
+                    if (hit.sym.container_type) |declared_container| {
+                        if (self.specializeMemberTypeForReceiver(declared_container, current_type.?, vt) catch null) |sv| {
+                            const arena = @constCast(&idx.arena).allocator();
+                            spec = arena.dupe(u8, sv) catch null;
+                            self.allocator.free(sv);
+                        }
+                    }
+                    const eff = spec orelse vt;
+                    if (self.debug_definitions) {
+                        self.dbg(true, "defs", "chain segment owner={s} seg={s} field_type={s}", .{ current_type.?, seg, eff });
+                    }
+                    current_type = eff;
                     continue;
                 }
             }
@@ -1873,6 +1904,63 @@ pub const LspServer = struct {
             return stripOneArraySuffix(base_type);
         }
 
+        // Method/free call: the expression ends in `)`. Resolve `recv.method(args)` to
+        // the method's RETURN type, specializing the callee's generic params against the
+        // receiver's concrete type (so `doc.as_array()` on JsonValue -> Option<Vec<JsonValue>>,
+        // and a further `.unwrap_or(x)` -> Vec<JsonValue>). This is what lets a whole
+        // method chain — and any `let`/for binding derived from one — be typed.
+        if ((tok.kind == .symbol or tok.kind == .operator) and std.mem.eql(u8, tok.text, ")")) {
+            return self.resolveCallReturnType(idx, uri, at, expr_last_i);
+        }
+
+        return null;
+    }
+
+    /// Resolve the return type of a call expression whose closing `)` is at `rparen_i`.
+    /// Handles `recv.method(...)` (method on a resolved receiver, with generic-param
+    /// substitution) and a bare `name(...)` free function. Returns the FULL return type
+    /// spelling (e.g. `Vec<JsonValue>`), or null.
+    fn resolveCallReturnType(self: *LspServer, idx: *const Index, uri: []const u8, at: Position, rparen_i: usize) ?[]const u8 {
+        const toks = idx.tokens;
+        const lparen_i = findMatchingLParenLite(toks, rparen_i) orelse return null;
+        const name_i = prevNonTrivialTokenLite(toks, lparen_i) orelse return null;
+        if (toks[name_i].kind != .identifier) return null;
+        const method_name = toks[name_i].text;
+
+        // Is this a method call (`recv.method(`) or a free function (`name(`)?
+        const before_name = prevNonTrivialTokenLite(toks, name_i);
+        const is_method = before_name != null and isDotToken(toks[before_name.?]);
+
+        if (is_method) {
+            const recv_end_i = prevNonTrivialTokenLite(toks, before_name.?) orelse return null;
+            const recv_type = self.resolveTypeOfExprEndingAtToken(idx, uri, at, recv_end_i) orelse return null;
+            const mhit = self.findMemberByContainer(uri, baseTypeNameForLookup(recv_type), method_name, .method) orelse return null;
+            const detail = mhit.sym.detail orelse return null;
+            // Specialize the method label's generic params against the concrete receiver
+            // (`unwrap_or(T) T` on `Option<Vec<JsonValue>>` -> `unwrap_or(Vec<JsonValue>) Vec<JsonValue>`),
+            // then read the (now concrete) return type.
+            const declared_container = mhit.sym.container_type orelse recv_type;
+            var spec_owned: ?[]u8 = null;
+            defer if (spec_owned) |s| self.allocator.free(s);
+            const eff_label: []const u8 = blk: {
+                if (self.specializeMemberLabelForReceiver(self.allocator, declared_container, recv_type, detail) catch null) |sv| {
+                    spec_owned = sv;
+                    break :blk sv;
+                }
+                break :blk detail;
+            };
+            const rt = returnTypeFullFromSignatureLabel(eff_label) orelse return null;
+            // Copy into the index arena so the result outlives `spec_owned`.
+            const arena = @constCast(&idx.arena).allocator();
+            return arena.dupe(u8, rt) catch null;
+        }
+
+        // Free function: resolve via its signature (current doc + imports).
+        if (self.calleeSignatureDetail(uri, idx, name_i)) |detail| {
+            const rt = returnTypeFullFromSignatureLabel(detail) orelse return null;
+            const arena = @constCast(&idx.arena).allocator();
+            return arena.dupe(u8, rt) catch null;
+        }
         return null;
     }
 
@@ -3660,8 +3748,43 @@ pub const LspServer = struct {
     }
 
     fn tryHandleMemberChainDefinition(self: *LspServer, id_val: ?std.json.Value, uri: []const u8, pos: Position, idx: *const Index, tok_i: usize) !bool {
-        // Find chain start by scanning left through `. <ident>` pairs.
         if (tok_i == 0) return false;
+
+        // Receiver-is-an-expression fast path: `recv.member` where `recv` ends in a
+        // call/index (`doc.as_array().unwrap_or`). The pure-identifier chain walk below
+        // can't cross `()`/`[]`, so resolve the receiver via the general expression
+        // engine and jump straight to the member's definition.
+        if (idx.tokens[tok_i].kind == .identifier and tok_i >= 2 and isDotToken(idx.tokens[tok_i - 1])) {
+            const before = idx.tokens[tok_i - 2];
+            const recv_is_expr = (before.kind == .symbol or before.kind == .operator) and
+                (std.mem.eql(u8, before.text, ")") or std.mem.eql(u8, before.text, "]"));
+            if (recv_is_expr) {
+                const member_name = idx.tokens[tok_i].text;
+                const recv_opt = self.resolveTypeOfExprEndingAtToken(idx, uri, pos, tok_i - 2);
+                if (self.debug_definitions) {
+                    self.dbg(true, "defs", "chained-recv def member='{s}' recv_type='{s}'", .{ member_name, recv_opt orelse "<null>" });
+                }
+                if (recv_opt) |recv_type| {
+                    const base = baseTypeNameForLookup(recv_type);
+                    const hit = self.findMemberByContainerFresh(uri, base, member_name, .method) orelse
+                        self.findMemberByContainerFresh(uri, base, member_name, .field) orelse
+                        self.findMemberByContainerFresh(uri, base, member_name, .property) orelse
+                        self.findMemberByContainerFresh(uri, base, member_name, .enumMember);
+                    if (self.debug_definitions) {
+                        self.dbg(true, "defs", "chained-recv def base='{s}' hit={s}", .{ base, if (hit) |h| h.uri else "<none>" });
+                    }
+                    if (hit) |h| {
+                        const locs = [_]Location{.{ .uri = h.uri, .range = h.sym.selection_range }};
+                        const json = try jsonStringifyAlloc(self.allocator, locs);
+                        defer self.allocator.free(json);
+                        try self.sendResponseJson(id_val, json);
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Find chain start by scanning left through `. <ident>` pairs.
         var start_i: usize = tok_i;
         while (start_i >= 2) {
             const dot = idx.tokens[start_i - 1];
@@ -4006,13 +4129,22 @@ pub const LspServer = struct {
     }
 
     fn guessVariableType(self: *LspServer, idx: *const Index, preferred_uri: []const u8, var_name: []const u8, at: Position) ?[]const u8 {
-        _ = self;
-        _ = preferred_uri;
         // Prefer symbol table (locals + globals) when available.
         if (findBestDefinition(idx.symbols, var_name, at)) |d| {
             if (d.kind == .variable) {
                 if (d.value_type) |vt| {
                     if (!isLetInferTypeName(vt)) return vt;
+                }
+                // Untyped local: it may be a `fit`-arm payload binding, or a `let`/`for`
+                // binding whose initializer is a method chain the index-time typing
+                // couldn't resolve (e.g. it bottoms out at a fit payload). Re-infer it
+                // through the query-time engine. Bounded recursion depth (these paths can
+                // re-enter guessVariableType for the chain's base receiver).
+                if (self.type_infer_depth < 16) {
+                    self.type_infer_depth += 1;
+                    defer self.type_infer_depth -= 1;
+                    if (self.resolveFitBindingType(idx, preferred_uri, d.decl_range.start)) |ft| return ft;
+                    if (self.resolveBindingInitType(idx, preferred_uri, d.decl_range.start)) |bt| return bt;
                 }
             }
         }
@@ -4288,6 +4420,545 @@ pub const LspServer = struct {
         }
         if (end == 0) return null;
         return s[0..end];
+    }
+
+    /// Re-infer the type of a binding whose initializer is an expression the index-time
+    /// typing couldn't resolve: `let X = <expr>;` and the `for`-loop forms
+    /// (`for X : <iter>`, `for i, X :: <map>`). Resolves the initializer/iterable through
+    /// the query-time expression engine (which now follows method chains + generics), so
+    /// a binding derived from a `fit` payload (`let items = doc.as_array().unwrap_or(...)`,
+    /// then `for item : items`) gets a real type. Arena-owned result, or null.
+    fn resolveBindingInitType(self: *LspServer, idx: *const Index, uri: []const u8, at: Position) ?[]const u8 {
+        const toks = idx.tokens;
+        const bind_i = findTokenIndexAt(toks, at) orelse return null;
+        if (toks[bind_i].kind != .identifier) return null;
+
+        // Find the statement keyword introducing this binding by scanning left to a
+        // boundary. We care about `let` and `for`.
+        var kw_i: ?usize = null;
+        var is_for = false;
+        {
+            var k: isize = @as(isize, @intCast(bind_i)) - 1;
+            var guard: usize = 0;
+            while (k >= 0 and guard < 12) : (k -= 1) {
+                const t = toks[@intCast(k)];
+                if (t.kind == .keyword and std.mem.eql(u8, t.text, "let")) {
+                    kw_i = @intCast(k);
+                    break;
+                }
+                if (t.kind == .keyword and std.mem.eql(u8, t.text, "for")) {
+                    kw_i = @intCast(k);
+                    is_for = true;
+                    break;
+                }
+                // Stop at a clear statement boundary.
+                if ((t.kind == .symbol or t.kind == .operator) and
+                    (std.mem.eql(u8, t.text, ";") or std.mem.eql(u8, t.text, "{") or std.mem.eql(u8, t.text, "}")))
+                    return null;
+                guard += 1;
+            }
+        }
+        if (kw_i == null) return null;
+
+        if (!is_for) {
+            // `let X = <RHS> ;` — resolve the RHS expression's type.
+            var eq_i: ?usize = null;
+            var p = bind_i + 1;
+            while (p < toks.len) : (p += 1) {
+                const t = toks[p];
+                if (t.kind == .comment) continue;
+                if ((t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, "=")) {
+                    eq_i = p;
+                    break;
+                }
+                // `let X = ...` has `=` directly after the name; anything else => not it.
+                if (t.kind != .identifier) break;
+            }
+            const eqi = eq_i orelse return null;
+            // Find the last significant token of the RHS (just before the terminating `;`).
+            var end_i: ?usize = null;
+            var q = eqi + 1;
+            var depth: i64 = 0;
+            while (q < toks.len) : (q += 1) {
+                const t = toks[q];
+                if (isOpenParen(t) or (t.kind == .symbol and std.mem.eql(u8, t.text, "["))) depth += 1;
+                if (isCloseParen(t) or (t.kind == .symbol and std.mem.eql(u8, t.text, "]"))) depth -= 1;
+                if (depth <= 0 and (t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, ";")) break;
+                if (t.kind != .comment) end_i = q;
+            }
+            const ei = end_i orelse return null;
+            return self.resolveTypeOfExprEndingAtToken(idx, uri, at, ei);
+        }
+
+        // for-loop binding: `for <bind> : <iter> {` or `for i, <bind> :: <map> {`.
+        // The iterable is between the separator (`:`/`::`) and the body `{`.
+        var sep_i: ?usize = null;
+        var double = false;
+        {
+            var p = bind_i + 1;
+            while (p < toks.len) : (p += 1) {
+                const t = toks[p];
+                if (t.kind == .comment) continue;
+                if ((t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, "::")) {
+                    sep_i = p;
+                    double = true;
+                    break;
+                }
+                if ((t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, ":")) {
+                    sep_i = p;
+                    break;
+                }
+                if ((t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, "{")) return null;
+            }
+        }
+        const sepi = sep_i orelse return null;
+        // Iterable expression ends just before the body `{`.
+        var iter_end: ?usize = null;
+        {
+            var q = sepi + 1;
+            while (q < toks.len) : (q += 1) {
+                const t = toks[q];
+                if ((t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, "{")) break;
+                if (t.kind != .comment) iter_end = q;
+            }
+        }
+        const ie = iter_end orelse return null;
+        const iter_type = self.resolveTypeOfExprEndingAtToken(idx, uri, at, ie) orelse return null;
+        // Element type of the iterable's collection type:
+        //   `for x : Vec<T>` / `Set<T>`           -> T
+        //   `for k : Map<K,V>` (single binding)   -> K
+        //   `for i, v :: Map<K,V>` (double, value) -> V (the 2nd binding); `i` is num
+        const args = genericArgSpellingsArena(idx, iter_type) orelse return null;
+        if (args.len == 0) return null;
+        const base = baseTypeNameForLookup(iter_type);
+        if (double and std.mem.eql(u8, base, "Map")) {
+            // The binding at `bind_i` is the VALUE (second name) in `for i, v :: map`.
+            // (The index/key binding is a separate symbol typed `num`/the key type.)
+            return if (args.len >= 2) args[1] else null;
+        }
+        // Single binding: Vec/Set element is arg[0]; Map key is arg[0].
+        return args[0];
+    }
+
+    /// Split a type spelling's top-level generic args into arena-owned slices, e.g.
+    /// `Map<str, num>` -> ["str", "num"]. Null when there are no args.
+    fn genericArgSpellingsArena(idx: *const Index, type_str: []const u8) ?[]const []const u8 {
+        const arena = @constCast(&idx.arena).allocator();
+        const lt = std.mem.indexOfScalar(u8, type_str, '<') orelse return null;
+        const gt = std.mem.lastIndexOfScalar(u8, type_str, '>') orelse return null;
+        if (gt <= lt + 1) return null;
+        const inner = type_str[lt + 1 .. gt];
+        var out = ArrayList([]const u8).init(arena);
+        var depth: i64 = 0;
+        var start: usize = 0;
+        var i: usize = 0;
+        while (i < inner.len) : (i += 1) {
+            const c = inner[i];
+            if (c == '<') depth += 1;
+            if (c == '>') depth -= 1;
+            if (c == ',' and depth == 0) {
+                out.append(arena.dupe(u8, std.mem.trim(u8, inner[start..i], " ")) catch return null) catch return null;
+                start = i + 1;
+            }
+        }
+        out.append(arena.dupe(u8, std.mem.trim(u8, inner[start..], " ")) catch return null) catch return null;
+        return out.toOwnedSlice() catch null;
+    }
+
+    /// Resolve the type of a `fit`-arm payload BINDING at `at`, working CROSS-FILE.
+    /// For `fit s { Result.Ok(doc) -> ... }` where `s: Result<JsonValue>` and `Result`
+    /// is imported, returns `JsonValue` for `doc`. The single-file token prescan can't
+    /// type these (the enum lives in another doc), so this consults imported enum
+    /// definitions on demand. Returns a slice owned by the index's arena (lives with
+    /// the doc index; callers treat it as borrowed, like other type lookups), or null.
+    fn resolveFitBindingType(self: *LspServer, idx: *const Index, uri: []const u8, at: Position) ?[]const u8 {
+        const arena = @constCast(&idx.arena).allocator();
+        const toks = idx.tokens;
+        const ti = findTokenIndexAt(toks, at) orelse return null;
+        if (toks[ti].kind != .identifier) return null;
+
+        // Walk back to the pattern's `(`, counting which positional binding `ti` is.
+        var depth: i64 = 0;
+        var arg_index: usize = 0;
+        var open_i: ?usize = null;
+        var k: isize = @as(isize, @intCast(ti)) - 1;
+        while (k >= 0) : (k -= 1) {
+            const t = toks[@intCast(k)];
+            if (isCloseParen(t)) {
+                depth += 1;
+                continue;
+            }
+            if (isOpenParen(t)) {
+                if (depth == 0) {
+                    open_i = @intCast(k);
+                    break;
+                }
+                depth -= 1;
+                continue;
+            }
+            if (depth == 0 and isCommaToken(t)) arg_index += 1;
+            // A `->`/`{`/`;`/`}` before the `(` means we're not in a pattern arg list.
+            if (depth == 0 and (t.kind == .symbol or t.kind == .operator)) {
+                const s = t.text;
+                if (std.mem.eql(u8, s, "->") or std.mem.eql(u8, s, "{") or std.mem.eql(u8, s, "}") or std.mem.eql(u8, s, ";")) return null;
+            }
+        }
+        const oi = open_i orelse return null;
+
+        // The variant identifier sits immediately before `(`.
+        const var_i = prevNonTrivialTokenLite(toks, oi) orelse return null;
+        if (toks[var_i].kind != .identifier) return null;
+        const variant_name = toks[var_i].text;
+
+        // Confirm a `->` follows the matching `)` (this is a fit arm, not a call).
+        var d2: i64 = 0;
+        var m: usize = oi;
+        var close_i: usize = oi;
+        while (m < toks.len) : (m += 1) {
+            if (isOpenParen(toks[m])) d2 += 1;
+            if (isCloseParen(toks[m])) {
+                d2 -= 1;
+                if (d2 == 0) {
+                    close_i = m;
+                    break;
+                }
+            }
+        }
+        const after = nextNonTrivialTokenLite(toks, close_i + 1) orelse return null;
+        if (!((toks[after].kind == .operator or toks[after].kind == .symbol) and std.mem.eql(u8, toks[after].text, "->"))) return null;
+
+        // Resolve the enum the variant belongs to. A qualified pattern (`Result.Ok`)
+        // names the enum directly in the token before the `.`; a shorthand (`.Ok`)
+        // defers to the dot-shorthand inference (which reads the fit subject's type).
+        const enum_name = blk: {
+            const before_var = prevNonTrivialTokenLite(toks, var_i);
+            if (before_var) |bv| {
+                if ((toks[bv].kind == .operator or toks[bv].kind == .symbol) and std.mem.eql(u8, toks[bv].text, ".")) {
+                    const enum_tok = prevNonTrivialTokenLite(toks, bv);
+                    if (enum_tok) |et| {
+                        if (toks[et].kind == .identifier) break :blk toks[et].text;
+                    }
+                }
+            }
+            break :blk self.guessEnumTypeForDotShorthand(uri, idx, var_i) orelse return null;
+        };
+        const enum_base = baseTypeNameForLookup(enum_name);
+
+        // The enum may live in an imported doc not yet indexed (the per-file index
+        // doesn't preload imports). Index the direct imports from disk so the enum
+        // definition lookup below can find them.
+        {
+            var import_uris = ArrayList([]u8).init(self.allocator);
+            defer {
+                for (import_uris.items) |u| self.allocator.free(u);
+                import_uris.deinit();
+            }
+            self.collectDirectImportUris(&import_uris, uri, idx) catch {};
+            for (import_uris.items) |iu| self.ensureDocIndexedFromDisk(iu) catch {};
+        }
+
+        // Locate the enum's declaring document, then read the variant's payload type +
+        // the enum's type params straight from THAT doc's tokens (the cross-file
+        // enumMember symbol carries neither — only its trailing doc comment).
+        const ehit = self.findEnumDefinitionAnyDoc(uri, enum_base) orelse return null;
+        const edoc = self.docs.get(ehit.uri) orelse return null;
+        const eidx = edoc.index orelse return null;
+        // FULL payload spelling, e.g. `T`, `Box<num>`, `Node*`, `num[]`. Owned via
+        // self.allocator here; the final RESULT is copied into the index arena below.
+        const payload_type = enumVariantPayloadFromDoc(self.allocator, eidx, enum_base, variant_name, arg_index) orelse return null;
+        defer self.allocator.free(payload_type);
+
+        // Substitute only when the WHOLE payload is a bare type parameter of the enum
+        // (`Ok(T)`). A payload that merely mentions a param inside generics
+        // (`Boxed(Box<T>)`) is returned verbatim — fully resolving nested params would
+        // need a recursive rewrite; the common cases (`T`, concrete `Vec2`/`Box<num>`)
+        // are exact.
+        const eparams = enumTypeParamsFromDoc(eidx, enum_base);
+        var pidx: ?usize = null;
+        for (eparams, 0..) |p, i| {
+            if (std.mem.eql(u8, p, payload_type)) {
+                pidx = i;
+                break;
+            }
+        }
+        if (pidx == null) {
+            // Concrete payload (e.g. `Point(Vec2)`, `Box<num>`): return it directly.
+            return arena.dupe(u8, payload_type) catch null;
+        }
+
+        // Resolve the fit subject's concrete generic args and substitute the bare param.
+        // (Arena-owned — no manual free; see fitSubjectConcreteArgs.)
+        const subj_args = self.fitSubjectConcreteArgs(idx, uri, var_i, at) orelse return null;
+        if (pidx.? >= subj_args.len) return null;
+        return arena.dupe(u8, subj_args[pidx.?]) catch null;
+    }
+
+    /// Locate the `enum <name>` declaration's `{` token index in a doc's TokenLite
+    /// stream, having skipped an optional `<...>` type-param list. Returns the index of
+    /// the enum-name token, the body `{` index, and the type-param token indices.
+    const EnumDeclLoc = struct { name_i: usize, lbrace_i: usize, param_names: [8][]const u8, param_count: usize };
+    fn locateEnumDeclInDoc(idx: *const Index, enum_base: []const u8) ?EnumDeclLoc {
+        const toks = idx.tokens;
+        var i: usize = 0;
+        while (i < toks.len) : (i += 1) {
+            if (!(toks[i].kind == .keyword and std.mem.eql(u8, toks[i].text, "enum"))) continue;
+            const name_i = nextNonTrivialTokenLite(toks, i + 1) orelse continue;
+            if (toks[name_i].kind != .identifier or !std.mem.eql(u8, toks[name_i].text, enum_base)) continue;
+            var loc = EnumDeclLoc{ .name_i = name_i, .lbrace_i = 0, .param_names = undefined, .param_count = 0 };
+            var k = nextNonTrivialTokenLite(toks, name_i + 1) orelse continue;
+            // Optional `<A, B>` type-param list.
+            if ((toks[k].kind == .operator or toks[k].kind == .symbol) and std.mem.eql(u8, toks[k].text, "<")) {
+                var angle: i64 = 0;
+                while (k < toks.len) : (k += 1) {
+                    const t = toks[k];
+                    if ((t.kind == .operator or t.kind == .symbol) and std.mem.eql(u8, t.text, "<")) angle += 1;
+                    if ((t.kind == .operator or t.kind == .symbol) and std.mem.eql(u8, t.text, ">")) {
+                        angle -= 1;
+                        if (angle <= 0) break;
+                    }
+                    if (angle == 1 and t.kind == .identifier and loc.param_count < loc.param_names.len) {
+                        loc.param_names[loc.param_count] = t.text;
+                        loc.param_count += 1;
+                    }
+                }
+                k = nextNonTrivialTokenLite(toks, k + 1) orelse continue;
+            }
+            if (!((toks[k].kind == .symbol or toks[k].kind == .operator) and std.mem.eql(u8, toks[k].text, "{"))) continue;
+            loc.lbrace_i = k;
+            return loc;
+        }
+        return null;
+    }
+
+    /// The generic type-param spellings of `enum_base` declared in `idx`'s doc
+    /// (`Result` -> ["T"]). Empty for a non-generic enum. Slices borrow from the doc.
+    fn enumTypeParamsFromDoc(idx: *const Index, enum_base: []const u8) []const []const u8 {
+        const Holder = struct {
+            var store: [8][]const u8 = undefined;
+        };
+        const loc = locateEnumDeclInDoc(idx, enum_base) orelse return &.{};
+        var n: usize = 0;
+        while (n < loc.param_count) : (n += 1) Holder.store[n] = loc.param_names[n];
+        return Holder.store[0..loc.param_count];
+    }
+
+    /// The FULL payload type spelling at positional index `arg_index` of
+    /// `enum_base.variant` declared in `idx`'s doc — base name plus any generic args,
+    /// pointer (`*`) and array (`[]`) suffixes: `Ok(T)`->"T", `Boxed(Box<num>)`->"Box<num>",
+    /// `Node(Node*)`->"Node*". Returns an allocated string (caller frees), or null when
+    /// the variant/payload is absent.
+    fn enumVariantPayloadFromDoc(allocator: Allocator, idx: *const Index, enum_base: []const u8, variant: []const u8, arg_index: usize) ?[]u8 {
+        const toks = idx.tokens;
+        const loc = locateEnumDeclInDoc(idx, enum_base) orelse return null;
+        // Walk the enum body at depth 1 looking for `variant (` .
+        var depth: i64 = 1;
+        var i: usize = loc.lbrace_i + 1;
+        while (i < toks.len and depth > 0) : (i += 1) {
+            const t = toks[i];
+            if ((t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, "{")) {
+                depth += 1;
+                continue;
+            }
+            if ((t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, "}")) {
+                depth -= 1;
+                continue;
+            }
+            if (depth != 1 or t.kind != .identifier or !std.mem.eql(u8, t.text, variant)) continue;
+            const open = nextNonTrivialTokenLite(toks, i + 1) orelse return null;
+            if (!isOpenParen(toks[open])) return null;
+            // Find the start token of the arg at positional index `arg_index`.
+            var pidx: usize = 0;
+            var j = nextNonTrivialTokenLite(toks, open + 1) orelse return null;
+            var pdepth: i64 = 0;
+            while (j < toks.len) : (j = nextNonTrivialTokenLite(toks, j + 1) orelse break) {
+                const tj = toks[j];
+                if (isOpenParen(tj)) {
+                    pdepth += 1;
+                    continue;
+                }
+                if (isCloseParen(tj)) {
+                    if (pdepth == 0) break;
+                    pdepth -= 1;
+                    continue;
+                }
+                if (pdepth == 0 and (tj.kind == .symbol or tj.kind == .operator) and std.mem.eql(u8, tj.text, ",")) {
+                    pidx += 1;
+                    continue;
+                }
+                if (pdepth == 0 and pidx == arg_index and (tj.kind == .identifier or tj.kind == .keyword)) {
+                    return spellPayloadType(allocator, toks, j);
+                }
+            }
+            return null;
+        }
+        return null;
+    }
+
+    /// Build the full type spelling starting at token `start` (a type name): the base
+    /// name, a balanced `<...>` generic-arg run, and trailing `*`/`[]` suffixes. Owned.
+    fn spellPayloadType(allocator: Allocator, toks: []const TokenLite, start: usize) ?[]u8 {
+        var buf = ArrayList(u8).init(allocator);
+        errdefer buf.deinit();
+        buf.appendSlice(toks[start].text) catch return null;
+        var i = nextNonTrivialTokenLite(toks, start + 1) orelse return buf.toOwnedSlice() catch null;
+        // Optional `<...>` generic args (depth-balanced).
+        if ((toks[i].kind == .operator or toks[i].kind == .symbol) and std.mem.eql(u8, toks[i].text, "<")) {
+            var angle: i64 = 0;
+            while (i < toks.len) : (i += 1) {
+                const t = toks[i];
+                const txt = t.text;
+                // Emit `<`/`>`/`,` with the spacing used elsewhere (`Map<str, num>`).
+                if ((t.kind == .operator or t.kind == .symbol) and std.mem.eql(u8, txt, "<")) {
+                    buf.append('<') catch return null;
+                    angle += 1;
+                    continue;
+                }
+                if ((t.kind == .operator or t.kind == .symbol) and std.mem.eql(u8, txt, ">")) {
+                    buf.append('>') catch return null;
+                    angle -= 1;
+                    if (angle <= 0) {
+                        i += 1;
+                        break;
+                    }
+                    continue;
+                }
+                if ((t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, txt, ",")) {
+                    buf.appendSlice(", ") catch return null;
+                    continue;
+                }
+                if (txt.len != 0) buf.appendSlice(txt) catch return null;
+            }
+        }
+        // Trailing pointer / array suffixes.
+        while (i < toks.len) : (i = nextNonTrivialTokenLite(toks, i + 1) orelse break) {
+            const t = toks[i];
+            if ((t.kind == .operator or t.kind == .symbol) and std.mem.eql(u8, t.text, "*")) {
+                buf.append('*') catch return null;
+            } else if ((t.kind == .operator or t.kind == .symbol) and std.mem.eql(u8, t.text, "[")) {
+                buf.append('[') catch return null;
+            } else if ((t.kind == .operator or t.kind == .symbol) and std.mem.eql(u8, t.text, "]")) {
+                buf.append(']') catch return null;
+            } else break;
+        }
+        return buf.toOwnedSlice() catch null;
+    }
+
+    /// Resolve the concrete generic args of the `fit` subject enclosing the variant
+    /// token `var_i` (e.g. `Result<JsonValue>` -> ["JsonValue"]). Handles a variable
+    /// subject (`fit r {`) and a call subject (`fit parse(x) {`). The returned slice and
+    /// its element strings are allocated in the INDEX ARENA (freed with the doc), so the
+    /// caller treats the result as borrowed — no manual free (a previous manual
+    /// `free(slice)` leaked every element string and corrupted the allocator over time).
+    fn fitSubjectConcreteArgs(self: *LspServer, idx: *const Index, uri: []const u8, var_i: usize, at: Position) ?[]const []const u8 {
+        const arena = @constCast(&idx.arena).allocator();
+        // Find the enclosing `fit` keyword and its subject token span.
+        var f: isize = @as(isize, @intCast(var_i)) - 1;
+        var subj_first: ?usize = null;
+        while (f >= 0) : (f -= 1) {
+            const t = idx.tokens[@intCast(f)];
+            if (t.kind == .keyword and std.mem.eql(u8, t.text, "fit")) {
+                subj_first = nextNonTrivialTokenLite(idx.tokens, @as(usize, @intCast(f)) + 1);
+                break;
+            }
+        }
+        const sf = subj_first orelse return null;
+        const subj_tok = idx.tokens[sf];
+        if (subj_tok.kind != .identifier) return null;
+
+        // Resolve the subject's type spelling.
+        var subj_type: ?[]const u8 = null;
+        const next_after = nextNonTrivialTokenLite(idx.tokens, sf + 1);
+        if (next_after != null and isOpenParen(idx.tokens[next_after.?])) {
+            // Call subject: use the callee return type.
+            if (self.calleeSignatureDetail(uri, idx, sf)) |detail| {
+                subj_type = returnTypeFullFromSignatureLabel(detail);
+            }
+        } else {
+            subj_type = self.guessVariableType(idx, uri, subj_tok.text, at);
+        }
+        const st = subj_type orelse return null;
+
+        // Split the subject type's generic args into owned strings.
+        const lt = std.mem.indexOfScalar(u8, st, '<') orelse return null;
+        const gt = std.mem.lastIndexOfScalar(u8, st, '>') orelse return null;
+        if (gt <= lt + 1) return null;
+        const inner = st[lt + 1 .. gt];
+        var out = ArrayList([]const u8).init(arena);
+        var depth: i64 = 0;
+        var start: usize = 0;
+        var i: usize = 0;
+        while (i < inner.len) : (i += 1) {
+            const c = inner[i];
+            if (c == '<') depth += 1;
+            if (c == '>') depth -= 1;
+            if (c == ',' and depth == 0) {
+                const piece = std.mem.trim(u8, inner[start..i], " ");
+                out.append(arena.dupe(u8, piece) catch return null) catch return null;
+                start = i + 1;
+            }
+        }
+        const last = std.mem.trim(u8, inner[start..], " ");
+        out.append(arena.dupe(u8, last) catch return null) catch return null;
+        return out.toOwnedSlice() catch null;
+    }
+
+    /// The FULL return-type spelling (with generic args) from a function/method
+    /// signature label: `parse(str src) Result<JsonValue>` -> `Result<JsonValue>`,
+    /// `unwrap_or(Vec<JsonValue> fallback) Vec<JsonValue>` -> `Vec<JsonValue>`.
+    ///
+    /// Robust against labels that also contain a method BODY (some index details carry
+    /// the whole declaration): it closes the FIRST balanced parameter `(...)`, then
+    /// reads only the return-type token-run (base name + balanced `<...>` + `*`/`[]`),
+    /// stopping at the body `{` / a second declaration. Returns null when void/absent.
+    fn returnTypeFullFromSignatureLabel(detail: []const u8) ?[]const u8 {
+        // Close the first balanced parameter list.
+        const open = std.mem.indexOfScalar(u8, detail, '(') orelse return null;
+        var depth: i64 = 0;
+        var i = open;
+        var close: ?usize = null;
+        while (i < detail.len) : (i += 1) {
+            if (detail[i] == '(') depth += 1;
+            if (detail[i] == ')') {
+                depth -= 1;
+                if (depth == 0) {
+                    close = i;
+                    break;
+                }
+            }
+        }
+        const ci = close orelse return null;
+        var s = detail[ci + 1 ..];
+        // Skip whitespace between `)` and the return type.
+        while (s.len != 0 and (s[0] == ' ' or s[0] == '\t' or s[0] == '\n' or s[0] == '\r')) s = s[1..];
+        if (s.len == 0) return null;
+        // No return type when a body `{` (or another decl) follows immediately.
+        if (s[0] == '{') return null;
+        // Read base name.
+        var end: usize = 0;
+        while (end < s.len) {
+            const c = s[end];
+            const ok = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_';
+            if (!ok) break;
+            end += 1;
+        }
+        if (end == 0) return null;
+        // Optional balanced `<...>` generic args.
+        if (end < s.len and s[end] == '<') {
+            var ad: i64 = 0;
+            while (end < s.len) : (end += 1) {
+                if (s[end] == '<') ad += 1;
+                if (s[end] == '>') {
+                    ad -= 1;
+                    if (ad == 0) {
+                        end += 1;
+                        break;
+                    }
+                }
+            }
+        }
+        // Trailing `*` / `[]`.
+        while (end < s.len and (s[end] == '*' or s[end] == '[' or s[end] == ']')) end += 1;
+        return std.mem.trim(u8, s[0..end], " ");
     }
 
     fn guessEnclosingImplType(self: *LspServer, idx: *const Index, at: Position) ?[]const u8 {
@@ -8662,6 +9333,76 @@ pub const LspServer = struct {
         }
     }
 
+    /// On-disk last-modified time (ns since epoch) for a `file:` URI, or null if the
+    /// file can't be stat'd. Cheap (metadata only, no read). Used as a staleness key
+    /// so we re-index a library doc only when it actually changed on disk.
+    fn fileMtimeNs(self: *LspServer, uri: []const u8) ?i128 {
+        const path = uriToPath(self.allocator, uri) catch return null;
+        defer self.allocator.free(path);
+        var f = blk: {
+            if (std.fs.path.isAbsolute(path)) {
+                break :blk std.Io.Dir.openFileAbsolute(globalIo(), path, .{}) catch return null;
+            }
+            break :blk std.Io.Dir.cwd().openFile(globalIo(), path, .{}) catch return null;
+        };
+        defer f.close(globalIo());
+        const st = f.stat(globalIo()) catch return null;
+        return st.mtime.nanoseconds;
+    }
+
+    /// Re-read + re-index a doc from disk even if it is already cached — but ONLY when
+    /// it was FLS-loaded (version 0), never when the editor is actively editing it
+    /// (clobbering an unsaved buffer would be wrong). Used to recover from a stale or
+    /// method-less cached index of a library file (e.g. `option.fn` indexed token-only
+    /// or before a fix), which otherwise silently fails a member lookup.
+    ///
+    /// Staleness is detected via the file's on-disk mtime: if the cached index was
+    /// built from the same mtime the file currently has, the index is already current
+    /// and we skip the re-read entirely. This keeps the cost of a *genuine* member
+    /// miss (e.g. a typo'd method name) to one cheap stat — no full re-read/re-parse —
+    /// while still self-healing when the library file truly changed since indexing.
+    fn refreshLibraryDocFromDisk(self: *LspServer, uri: []const u8) void {
+        if (self.docs.get(uri)) |doc| {
+            if (doc.version != 0) return; // editor-owned; don't clobber
+        }
+        const disk_mtime = self.fileMtimeNs(uri);
+        // If we already indexed this exact on-disk version, the cached index is
+        // current — re-reading would be pure waste (the member legitimately isn't there).
+        if (self.docs.get(uri)) |doc| {
+            if (doc.index != null and disk_mtime != null and doc.index_mtime == disk_mtime.?) return;
+        }
+        const path = uriToPath(self.allocator, uri) catch return;
+        defer self.allocator.free(path);
+        const text = blk: {
+            if (std.fs.path.isAbsolute(path)) {
+                var f = std.Io.Dir.openFileAbsolute(globalIo(), path, .{}) catch return;
+                defer f.close(globalIo());
+                break :blk fileReadAlloc(self.allocator, f, 25 * 1024 * 1024) catch return;
+            }
+            break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), path, self.allocator, .limited(25 * 1024 * 1024)) catch return;
+        };
+        defer self.allocator.free(text);
+        self.upsertDoc(uri, 0, text) catch return;
+        self.rebuildIndex(uri) catch return;
+        // Stamp the mtime we just indexed so a later miss on the same file is a no-op.
+        if (disk_mtime) |m| {
+            if (self.docs.getPtr(uri)) |dp| dp.index_mtime = m;
+        }
+    }
+
+    /// Member lookup with a self-healing retry: if the first lookup misses, locate the
+    /// receiver type's declaring doc, refresh its index from disk (if FLS-loaded), and
+    /// retry once. Recovers go-to-def/hover on a transitively-imported type whose
+    /// declaring doc had a stale/method-less cached index.
+    fn findMemberByContainerFresh(self: *LspServer, preferred_uri: []const u8, container_type: []const u8, name: []const u8, kind: SymbolKind) ?MemberHit {
+        if (self.findMemberByContainer(preferred_uri, container_type, name, kind)) |hit| return hit;
+        if (self.findTypeDefinitionAnyDoc(preferred_uri, container_type)) |type_def| {
+            self.refreshLibraryDocFromDisk(type_def.uri);
+            if (self.findMemberByContainer(preferred_uri, container_type, name, kind)) |hit| return hit;
+        }
+        return null;
+    }
+
     fn ensureDocIndexedFromDisk(self: *LspServer, uri: []const u8) !void {
         if (self.docs.get(uri) != null) return;
         const path = try uriToPath(self.allocator, uri);
@@ -8682,6 +9423,11 @@ pub const LspServer = struct {
 
         try self.upsertDoc(uri, 0, text);
         try self.rebuildIndex(uri);
+        // Baseline the staleness key so a later member miss on this unchanged file
+        // is a cheap stat-and-skip rather than a full re-read (see refreshLibraryDocFromDisk).
+        if (self.fileMtimeNs(uri)) |m| {
+            if (self.docs.getPtr(uri)) |dp| dp.index_mtime = m;
+        }
     }
 
     fn resolveImportUri(self: *LspServer, current_uri: []const u8, raw_import: []const u8) !?[]u8 {

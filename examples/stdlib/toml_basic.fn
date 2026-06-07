@@ -2,7 +2,6 @@
 
 imp std.c.io;
 imp std.toml;
-imp std.option;
 
 fun main() num {
   let doc = parse_document("name = \"fun\"\nversion = 2\nratio = 1.5\nstable = true\n");

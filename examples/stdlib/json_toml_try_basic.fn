@@ -4,7 +4,6 @@
 imp std.c.io;
 imp std.json;
 imp std.toml;
-imp std.option;
 imp std.result;
 
 fun main() num {

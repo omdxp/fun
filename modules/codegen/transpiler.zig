@@ -7723,6 +7723,17 @@ pub const TranspileProcess = struct {
                     const target_t = try self.infer_expr_type(fit.exp.*, env, fns);
                     const target_enum = self.expected_enum_name(target_t);
                     const subject_is_tagged = if (target_enum) |en| self.enum_name_is_tagged_union(en) else false;
+                    // Matching `fit s { Enum.Variant -> ... }` USES the enum `Enum`, so
+                    // mark the import that provides it. Variant-path conditions are
+                    // patterns (not value expressions), so they otherwise never reach
+                    // type resolution → the import was wrongly flagged unused. Use the
+                    // base name (a monomorphized subject may carry `Result__JsonValue`).
+                    if (subject_is_tagged) {
+                        if (target_enum) |en| {
+                            const en_base = if (mem.indexOf(u8, en, "__")) |i| en[0..i] else en;
+                            try self.ensure_named_type_visible(stmt, en_base);
+                        }
+                    }
                     for (fit.branches.items()) |branch| {
                         if (branch.condition) |cond| {
                             if (target_enum) |enum_name| {

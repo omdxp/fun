@@ -2,7 +2,6 @@
 
 imp std.c.io;
 imp std.json;
-imp std.option;
 imp std.result;
 imp std.vec;
 

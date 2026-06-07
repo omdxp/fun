@@ -1288,3 +1288,46 @@ test "fls hover: signatures include custom return types" {
     }
     try std.testing.expect(found);
 }
+
+test "fls index: method with nested-generic return type has a bounded signature (no body leak)" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // `as_array()` returns `Option<Vec<JsonValue>>` — the close fuses into a `>>`
+    // operator token. The signature builder must close BOTH generic levels and stop;
+    // otherwise it ran into the method body and slurped the whole declaration into
+    // `detail` (a 5000+ char blob that hover/sig-help then rendered as garbage).
+    const text =
+        "enum JsonValue { Null, Arr(num) }\n" ++
+        "compound Vec<T> { T v; }\n" ++
+        "compound Option<T> { T v; }\n" ++
+        "compound Box {\n" ++
+        "  num x;\n" ++
+        "}\n" ++
+        "impl Box {\n" ++
+        "  pub as_array() Option<Vec<JsonValue>> {\n" ++
+        "    Option<Vec<JsonValue>> o;\n" ++
+        "    ret o;\n" ++
+        "  }\n" ++
+        "  pub other() num { ret 1; }\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found = false;
+    for (idx.symbols) |s| {
+        if (s.kind != .method) continue;
+        if (!std.mem.eql(u8, s.name, "as_array")) continue;
+        found = true;
+        const det = s.detail orelse continue;
+        // Bounded: body keywords/identifiers must NOT leak into the signature detail.
+        try std.testing.expect(std.mem.indexOf(u8, det, "ret") == null);
+        try std.testing.expect(std.mem.indexOf(u8, det, "other") == null);
+        // The full nested-generic return type is preserved.
+        try std.testing.expect(std.mem.indexOf(u8, det, "Option<Vec<JsonValue>>") != null);
+        if (s.value_type) |vt| try std.testing.expectEqualStrings("Option<Vec<JsonValue>>", vt);
+    }
+    try std.testing.expect(found);
+}

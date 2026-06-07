@@ -1727,6 +1727,161 @@ test "fls e2e: enum dot shorthand completion/hover/definition" {
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: cross-file generic fit-binding hover resolves the imported enum's payload" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    // `Result` is the IMPORTED generic enum (std.result). The `Ok(T)` payload binding
+    // `doc` must hover as `JsonValue` (the subject's concrete arg) and the `Err(Error)`
+    // payload `e` as `Error` — resolved cross-file from the imported enum definition.
+    const doc_text =
+        "imp std.c.io;\n" ++
+        "imp std.json;\n" ++
+        "imp std.result;\n\n" ++
+        "fun main() num {\n" ++
+        "  Result<JsonValue> r = parse(\"{}\");\n" ++
+        "  fit r {\n" ++
+        "    Result.Ok(doc) -> { printf(\"ok\\n\"); }\n" ++
+        "    Result.Err(e) -> { printf(\"err\\n\"); }\n" ++
+        "  }\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-xfile-fitbind.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // Hover the `doc` binding -> `JsonValue`.
+    const doc_pos = try findPosition(doc_text, "Ok(doc)", 0);
+    const doc_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, doc_pos.line, doc_pos.col + @as(i64, @intCast("Ok(".len)) },
+    );
+    defer allocator.free(doc_params);
+    const doc_id = try lsp.request("textDocument/hover", doc_params);
+    var doc_res = try lsp.waitResponse(doc_id, 15000);
+    defer doc_res.deinit();
+    try expectHoverContains(allocator, try jsonResultFromResponseObj(doc_res.parsed.value.object), "JsonValue");
+
+    // Hover the `e` binding -> `Error` (concrete payload of Result.Err).
+    const e_pos = try findPosition(doc_text, "Err(e)", 0);
+    const e_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, e_pos.line, e_pos.col + @as(i64, @intCast("Err(".len)) },
+    );
+    defer allocator.free(e_params);
+    const e_id = try lsp.request("textDocument/hover", e_params);
+    var e_res = try lsp.waitResponse(e_id, 15000);
+    defer e_res.deinit();
+    try expectHoverContains(allocator, try jsonResultFromResponseObj(e_res.parsed.value.object), "Error");
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: query-time engine resolves a fit->let-chain->for-each binding cascade" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    // The hard cascade: `doc` is an imported-generic-enum fit payload (JsonValue);
+    // `items` is a `let` from the method chain `doc.as_array().unwrap_or(...)` (which
+    // must follow `as_array(): Option<Vec<JsonValue>>` then specialize `unwrap_or` to
+    // `Vec<JsonValue>`); `item` is the for-each element type of `items` (JsonValue).
+    // All three are typed by the query-time expression engine, not the index.
+    const doc_text =
+        "imp std.c.io;\n" ++
+        "imp std.json;\n" ++
+        "imp std.option;\n" ++
+        "imp std.result;\n" ++
+        "imp std.vec;\n\n" ++
+        "fun main() num {\n" ++
+        "  fit parse(\"[1,2,3]\") {\n" ++
+        "    Result.Ok(doc) -> {\n" ++
+        "      let items = doc.as_array().unwrap_or(json_array());\n" ++
+        "      for item : items {\n" ++
+        "        printf(\"%g\\n\", item.as_num().unwrap_or(0.0));\n" ++
+        "      }\n" ++
+        "    }\n" ++
+        "    Result.Err(e) -> { printf(\"err\\n\"); }\n" ++
+        "  }\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-cascade.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const Case = struct { find: []const u8, off: usize, want: []const u8 };
+    const cases = [_]Case{
+        .{ .find = "Ok(doc)", .off = "Ok(".len, .want = "JsonValue" }, // fit payload
+        .{ .find = "let items", .off = "let ".len, .want = "Vec<JsonValue>" }, // let from chain
+        .{ .find = "for item :", .off = "for ".len, .want = "JsonValue" }, // for-each element
+        // A method whose RECEIVER is itself a call (`as_array().unwrap_or`): hover must
+        // show the specialized signature (receiver `Option<Vec<JsonValue>>` -> `T` is
+        // `Vec<JsonValue>`), not empty. Regresses the chained-receiver resolution.
+        .{ .find = ".unwrap_or(json_array())", .off = ".".len, .want = "Vec<JsonValue>" },
+    };
+    for (cases) |c| {
+        const pos = try findPosition(doc_text, c.find, 0);
+        const params = try std.fmt.allocPrint(
+            allocator,
+            "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+            .{ doc_uri, pos.line, pos.col + @as(i64, @intCast(c.off)) },
+        );
+        defer allocator.free(params);
+        const hid = try lsp.request("textDocument/hover", params);
+        var res = try lsp.waitResponse(hid, 15000);
+        defer res.deinit();
+        try expectHoverContains(allocator, try jsonResultFromResponseObj(res.parsed.value.object), c.want);
+    }
+
+    // Go-to-definition on the chained `unwrap_or` must jump into std/option.fn
+    // (not return an empty result).
+    {
+        const pos = try findPosition(doc_text, ".unwrap_or(json_array())", 0);
+        const params = try std.fmt.allocPrint(
+            allocator,
+            "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+            .{ doc_uri, pos.line, pos.col + @as(i64, @intCast(".".len)) },
+        );
+        defer allocator.free(params);
+        const did = try lsp.request("textDocument/definition", params);
+        var dres = try lsp.waitResponse(did, 15000);
+        defer dres.deinit();
+        const dval = try jsonResultFromResponseObj(dres.parsed.value.object);
+        // Expect a non-empty location array pointing at option.fn.
+        try std.testing.expect(dval == .array and dval.array.items.len > 0);
+        const loc0 = dval.array.items[0];
+        const def_uri = loc0.object.get("uri").?.string;
+        try std.testing.expect(std.mem.indexOf(u8, def_uri, "option.fn") != null);
+    }
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: data-carrying enum shorthand completion" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();

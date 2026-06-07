@@ -36,9 +36,9 @@
 // 
 // Common macros
 // - `NULL`
-// - Null pointer constant.
-// - In Fun, `NULL` is treated like the literal `0` for pointer assignment and
-// comparisons (best-effort).
+// - Null pointer constant. In Fun code, prefer the `nil` literal for null
+// pointer assignment and comparisons; `NULL` is also accepted (treated as the
+// literal `0`) for parity with C sources (best-effort).
 // 
 // Notes
 // - Function-like macros such as `offsetof(type, member)` cannot be expressed as

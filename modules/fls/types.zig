@@ -13,6 +13,11 @@ pub const Doc = struct {
     text: []u8,
     index: ?*Index = null,
     last_diag_ms: i64 = 0,
+    /// On-disk mtime (ns) captured the last time this doc's `index` was built
+    /// from file contents. Only meaningful for version-0 (FLS-loaded library)
+    /// docs; editor-owned buffers (version > 0) are the source of truth and
+    /// are never reconciled against disk. 0 = unknown / never stamped.
+    index_mtime: i128 = 0,
 };
 
 pub const Position = struct { line: i64, character: i64 };

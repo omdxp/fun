@@ -464,11 +464,27 @@ pub fn buildSignatureFromTokens(
                     continue;
                 }
 
-                if (isPunctChar(tk, '>')) {
-                    generic_depth -= 1;
-                    try out_buf.append('>');
-                    if (generic_depth == 0) {
-                        return nextNonTrivialToken(all_tokens, i + 1) orelse (i + 1);
+                // A closing `>` — but the lexer may fuse adjacent closers into one
+                // `>>`/`>>>` operator token (e.g. `Option<Vec<JsonValue>>`). Count the
+                // `>` chars so nested generics close correctly; otherwise the depth
+                // never returns to 0 and the scan runs into the method body (EOF),
+                // dumping the whole declaration into the signature `detail`.
+                const close_count = blk: {
+                    const ts = tokenString(tk);
+                    if (ts.len == 0) break :blk @as(usize, 0);
+                    for (ts) |c| {
+                        if (c != '>') break :blk @as(usize, 0);
+                    }
+                    break :blk ts.len;
+                };
+                if (close_count > 0) {
+                    var c: usize = 0;
+                    while (c < close_count) : (c += 1) {
+                        generic_depth -= 1;
+                        try out_buf.append('>');
+                        if (generic_depth == 0) {
+                            return nextNonTrivialToken(all_tokens, i + 1) orelse (i + 1);
+                        }
                     }
                     continue;
                 }

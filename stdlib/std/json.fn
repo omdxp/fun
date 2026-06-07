@@ -19,12 +19,10 @@ imp std.map;
 imp std.vec;
 imp std.option;
 imp std.result;
-imp std.error;
 imp std.string;
 imp std.math;
 imp std.quirks;
 imp std.serde;
-imp std.c.io;
 
 // Any JSON value. Arrays and objects nest recursively.
 pub enum JsonValue {
