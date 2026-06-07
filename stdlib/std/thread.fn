@@ -9,6 +9,7 @@
 // num rc = t.start(entry_ptr, arg_ptr);
 
 imp std.c.thread;
+imp std.result;
 
 // Managed thread handle.
 pub compound Thread {
@@ -111,6 +112,16 @@ pub fun thread_start(Thread* thread, raw* entry, raw* arg) num {
   ret rc;
 }
 
+// Start a thread with Result. `Ok(true)` on success, `Err` with the backend code
+// otherwise (where `thread_start` returns a raw nonzero/-1 code that's easy to ignore).
+pub fun try_thread_start(Thread* thread, raw* entry, raw* arg) Result<bin> {
+  let rc = thread_start(thread, entry, arg);
+  if rc != 0 {
+    ret err(rc, "thread_start failed", false);
+  }
+  ret ok(true);
+}
+
 // Join a thread via pointer receiver helper.
 // 
 // Params:
@@ -133,6 +144,15 @@ pub fun thread_join(Thread* thread, raw* out_ret) num {
   ret rc;
 }
 
+// Join a thread with Result. `Ok(true)` on success, `Err` with the backend code otherwise.
+pub fun try_thread_join(Thread* thread, raw* out_ret) Result<bin> {
+  let rc = thread_join(thread, out_ret);
+  if rc != 0 {
+    ret err(rc, "thread_join failed", false);
+  }
+  ret ok(true);
+}
+
 // Detach a thread via pointer receiver helper.
 // 
 // Params:
@@ -152,6 +172,15 @@ pub fun thread_detach(Thread* thread) num {
   let rc = t.detach();
   thread[0] = t;
   ret rc;
+}
+
+// Detach a thread with Result. `Ok(true)` on success, `Err` with the backend code otherwise.
+pub fun try_thread_detach(Thread* thread) Result<bin> {
+  let rc = thread_detach(thread);
+  if rc != 0 {
+    ret err(rc, "thread_detach failed", false);
+  }
+  ret ok(true);
 }
 
 // Return the current thread id.

@@ -10,6 +10,22 @@
 imp std.c.math as cmath;
 imp std.result;
 
+// The sign of a value, as a type-safe alternative to the -1/0/1 returned by
+// `sign_num`/`sign_dec`. Match it with `fit`:
+// 
+// ```
+// fit sign_of(x) {
+//   Sign.Negative -> { ... }
+//   Sign.Zero -> { ... }
+//   Sign.Positive -> { ... }
+// }
+// ```
+pub enum Sign {
+  Negative,
+  Zero,
+  Positive,
+}
+
 // 2D vector for simple math utilities.
 pub compound Vec2 {
   // x component
@@ -348,6 +364,29 @@ pub fun sign_dec(dec x) dec {
     ret 1;
   }
   ret 0;
+}
+
+// Sign of a number as a type-safe `Sign`. Prefer this over `sign_num` when you want
+// to `fit`-match the cases rather than compare against -1/0/1.
+pub fun sign_of(num x) Sign {
+  if x < 0 {
+    ret Sign.Negative;
+  }
+  if x > 0 {
+    ret Sign.Positive;
+  }
+  ret Sign.Zero;
+}
+
+// Sign of a decimal as a type-safe `Sign` (see `sign_of`).
+pub fun sign_of_dec(dec x) Sign {
+  if x < 0 {
+    ret Sign.Negative;
+  }
+  if x > 0 {
+    ret Sign.Positive;
+  }
+  ret Sign.Zero;
 }
 
 // Minimum of two numbers.

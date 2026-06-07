@@ -7,6 +7,8 @@
 imp std.thread;
 imp std.thread_runtime;
 imp std.c.mem;
+imp std.result;
+imp std.quirks;
 
 // Managed pool of worker threads.
 pub compound ThreadPool {
@@ -56,13 +58,25 @@ pub fun thread_pool_new(num size) ThreadPool {
   ret pool;
 }
 
+impl ThreadPool as Sized {
+  // Number of worker handles in this pool.
+  pub len() num {
+    ret self.size;
+  }
+
+  // True when the pool has no worker handles.
+  pub is_empty() bin {
+    ret self.size == 0;
+  }
+}
+
 impl ThreadPool {
   // Returns true when worker storage is usable.
   pub is_ready() bin {
     ret self.has_storage;
   }
 
-  // Number of worker handles in this pool.
+  // Number of worker handles in this pool (alias for `len`, kept for clarity at call sites).
   pub count() num {
     ret self.size;
   }
@@ -102,6 +116,17 @@ impl ThreadPool {
     ret 0;
   }
 
+  // Start all workers with Result. `Ok(count)` (workers started) on success, `Err`
+  // when storage failed or a worker couldn't start — clearer than the -2/raw-code
+  // sentinels of `start_all`.
+  pub try_start_all(raw* entry, raw** args) Result<num> {
+    let rc = self.start_all(entry, args);
+    if rc != 0 {
+      ret err(rc, "thread pool start_all failed", rc);
+    }
+    ret ok(self.size);
+  }
+
   // Join all started workers.
   // 
   // Params:
@@ -136,6 +161,15 @@ impl ThreadPool {
     ret 0;
   }
 
+  // Join all started workers with Result. `Ok(count)` on success, `Err` otherwise.
+  pub try_join_all(raw** out_rets) Result<num> {
+    let rc = self.join_all(out_rets);
+    if rc != 0 {
+      ret err(rc, "thread pool join_all failed", rc);
+    }
+    ret ok(self.size);
+  }
+
   // Detach all started workers.
   // 
   // Returns:
@@ -160,6 +194,15 @@ impl ThreadPool {
     }
 
     ret 0;
+  }
+
+  // Detach all started workers with Result. `Ok(count)` on success, `Err` otherwise.
+  pub try_detach_all() Result<num> {
+    let rc = self.detach_all();
+    if rc != 0 {
+      ret err(rc, "thread pool detach_all failed", rc);
+    }
+    ret ok(self.size);
   }
 
   // Free worker storage and reset the pool to an empty ready state.

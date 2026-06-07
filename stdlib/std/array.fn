@@ -9,6 +9,7 @@
 // ```
 
 imp std.option;
+imp std.quirks;
 
 // View over a generic array.
 pub compound Array<T> {
@@ -37,11 +38,6 @@ impl Array<T> {
   // Set element at index, unchecked. The caller must guarantee `0 <= i < len`.
   pub set(num i, T value) {
     self.data[i] = value;
-  }
-
-  // True when the array holds no elements.
-  pub is_empty() bin {
-    ret self.len == 0;
   }
 
   // Fill array with a value.
@@ -81,6 +77,54 @@ impl Array<T> {
       i = i + 1;
       j = j - 1;
     }
+  }
+
+  // A forward iterator over the elements (yields each value once, in order).
+  pub iter() ArrayIter<T> {
+    ArrayIter<T> it;
+    it.src = self;
+    it.idx = 0;
+    ret it;
+  }
+}
+
+impl Array<T> as Sized {
+  // Number of elements.
+  pub len() num {
+    ret self.len;
+  }
+
+  // True when the array holds no elements.
+  pub is_empty() bin {
+    ret self.len == 0;
+  }
+}
+
+impl Array<T> as Clearable {
+  // Reset the element count to zero (the backing storage is the caller's; this only
+  // marks the view as empty, it does not free `data`).
+  pub clear() {
+    self.len = 0;
+  }
+}
+
+// Forward iterator over an Array produced by `Array.iter()`.
+pub compound ArrayIter<T> {
+  // the array being iterated (borrowed, not owned)
+  Array<T>* src;
+  // index of the next element to yield
+  num idx;
+}
+
+impl ArrayIter<T> as Iterator<T> {
+  // Yield the next element, or None once the end is reached.
+  pub next() Option<T> {
+    if self.idx >= self.src.len {
+      ret Option.None;
+    }
+    T value = self.src.data[self.idx];
+    self.idx = self.idx + 1;
+    ret Option.Some(value);
   }
 }
 
