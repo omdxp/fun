@@ -1,0 +1,104 @@
+// Virtual threads (lightweight tasks) built on the `fork` scheduler.
+// 
+// `fork f(args)` spawns a fire-and-forget virtual thread: a cheap task
+// multiplexed (M:N) onto a small pool of OS worker threads by the runtime
+// scheduler. Many `fork`s run on a few real threads, and `main` automatically
+// drains all spawned tasks before it returns. This is distinct from `std.thread`,
+// which gives you explicit 1:1 OS threads with manual join — use `std.thread`
+// when you need real OS threads (CPU affinity, deterministic join); use `fork` +
+// this module for cheap concurrency coordinated through channels.
+// 
+// `fork` is fire-and-forget and has no native join handle, so to wait for a batch
+// of tasks to finish you use a `WaitGroup`: a completion barrier built on a
+// channel, in the style of Go's `sync.WaitGroup`.
+// 
+// Usage:
+// ```
+// imp std.task;
+// imp std.channel;
+//
+// // A virtual-thread body. Takes the shared WaitGroup so it can signal done.
+// async fun worker(Channel<num>* out, WaitGroup* wg, num v) {
+//   out <- v * v;
+//   wg.done();
+// }
+//
+// fun main() num {
+//   Channel<num> results = channel_new_cap(0, 8);
+//   WaitGroup wg = wait_group_new(3);
+//
+//   // You write the `fork` yourself — fork needs a literal call to a named
+//   // `async fun`, so it cannot be hidden behind a generic spawn() helper.
+//   fork worker(&results, &wg, 2);
+//   fork worker(&results, &wg, 3);
+//   fork worker(&results, &wg, 4);
+//
+//   wg.wait();        // blocks until all 3 tasks call wg.done()
+//   wg.destroy();
+//   ret 0;
+// }
+// ```
+
+imp std.channel;
+
+// A completion barrier for a known number of virtual tasks. Each task calls
+// `done()` when it finishes; `wait()` blocks until every expected task has.
+// 
+// Internally backed by a buffered channel sized to the expected count, so a task
+// may call `done()` before anyone is waiting without blocking — the signals queue
+// up and `wait()` drains them.
+pub compound WaitGroup {
+  // Receives one signal per completed task.
+  Channel<num> signals;
+  // Number of `done()` signals `wait()` should consume.
+  num expected;
+}
+
+// Create a WaitGroup expecting `n` tasks to complete.
+// 
+// Params:
+// - n: number of virtual tasks that will each call `done()` once
+// 
+// Returns:
+// - a WaitGroup whose `wait()` blocks until `n` completions arrive
+pub fun wait_group_new(num n) WaitGroup {
+  WaitGroup wg;
+  wg.expected = n;
+  num cap = n;
+  if cap < 1 {
+    cap = 1;
+  }
+  // Buffer the full expected count so `done()` never blocks waiting for `wait()`.
+  wg.signals = channel_new_cap(0, cap);
+  ret wg;
+}
+
+impl WaitGroup {
+  // Signal that one task has finished. Called from inside a forked task body.
+  pub done() {
+    self.signals <- 1;
+  }
+
+  // Block until all expected tasks have signalled `done()`.
+  pub wait() {
+    num got = 0;
+    for got < self.expected {
+      let _sig = <- self.signals;
+      got = got + 1;
+    }
+  }
+
+  // Number of tasks this group is still waiting on (best-effort, unsynchronized).
+  pub remaining() num {
+    let pending = self.expected - self.signals.len();
+    if pending < 0 {
+      ret 0;
+    }
+    ret pending;
+  }
+
+  // Free the underlying channel. Call after `wait()` returns.
+  pub destroy() {
+    let _rc = self.signals.destroy();
+  }
+}

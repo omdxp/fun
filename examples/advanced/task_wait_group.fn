@@ -1,0 +1,46 @@
+// Virtual threads + WaitGroup: spawn a batch of `fork` tasks and wait for them all.
+//
+// `std.task` gives you a Go-style `WaitGroup` — a completion barrier over a channel
+// — so you can wait for a group of fire-and-forget `fork` tasks to finish. This is
+// the M:N (virtual-thread) path; for explicit 1:1 OS threads with manual join, use
+// `std.thread` instead.
+//
+// Each worker squares its input, sends the result over a channel, then signals the
+// WaitGroup. Main waits for all workers, then drains the results.
+
+imp std.c.io;
+imp std.channel;
+imp std.task;
+
+// A virtual-thread body: square `v`, hand the result back, and signal completion.
+async fun square_into(Channel<num>* out, WaitGroup* wg, num v) {
+  out <- v * v;
+  wg.done();
+}
+
+fun main() num {
+  Channel<num> results = channel_new_cap(0, 8);
+  WaitGroup wg = wait_group_new(3);
+
+  // Spawn three virtual threads. `fork` is fire-and-forget; the WaitGroup is how
+  // we wait for them. (You write the `fork` literally — it can't be hidden behind
+  // a generic spawn helper.)
+  fork square_into(&results, &wg, 2); // -> 4
+  fork square_into(&results, &wg, 3); // -> 9
+  fork square_into(&results, &wg, 4); // -> 16
+
+  // Block until all three workers have called wg.done().
+  wg.wait();
+
+  // All results are now queued; sum them (arrival order, not spawn order).
+  num total = 0;
+  num got = 0;
+  for got < 3 {
+    total = total + <- results;
+    got = got + 1;
+  }
+
+  wg.destroy();
+  printf("total=%lld\n", total); // 4 + 9 + 16 = 29
+  ret 0;
+}
