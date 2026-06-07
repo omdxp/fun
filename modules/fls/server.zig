@@ -4410,6 +4410,35 @@ pub const LspServer = struct {
                         }
                     }
                 }
+                // Method-call / chain subject: `fit ch.recv_result() { .Ok -> ... }`.
+                // The subject is an expression ending in `)`, not a bare name or a
+                // direct free call. Find the subject's closing `)` (the last paren
+                // before the fit body `{`) and resolve its type through the general
+                // expression engine (which follows method-call returns + generics).
+                {
+                    var s: usize = after_i;
+                    var depth: i64 = 0;
+                    var subj_close: ?usize = null;
+                    while (s < @as(usize, @intCast(dot_i))) : (s += 1) {
+                        const st = idx.tokens[s];
+                        if (st.kind == .symbol or st.kind == .operator) {
+                            if (std.mem.eql(u8, st.text, "(")) {
+                                depth += 1;
+                            } else if (std.mem.eql(u8, st.text, ")")) {
+                                depth -= 1;
+                                if (depth == 0) subj_close = s;
+                            } else if (depth == 0 and std.mem.eql(u8, st.text, "{")) {
+                                break;
+                            }
+                        }
+                    }
+                    if (subj_close) |sc| {
+                        if (self.resolveTypeOfExprEndingAtToken(idx, uri, dot_pos, sc)) |ty| {
+                            const base = baseTypeNameForLookup(ty);
+                            if (self.isEnumTypeName(uri, base)) return base;
+                        }
+                    }
+                }
                 return null;
             }
         }

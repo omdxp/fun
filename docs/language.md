@@ -148,6 +148,22 @@ payload; payload-free variants still coexist.
 - **No Nested Functions**: Functions cannot be declared inside other functions.
 - **Generic Functions**: `fun id<T>(T x) T { ret x; }`
     - Type arguments are inferred from call sites: `num v = id(1);`.
+- **Default parameter values**: A parameter may declare a default with `= expr`; a
+  call that omits it uses the default.
+    ```fun
+    fun greet(str name, num times = 1, str sep = ", ") { /* ... */ }
+    greet("a");           // times = 1, sep = ", "
+    greet("a", 3);        // times = 3, sep = ", "
+    greet("a", 3, "; ");  // all explicit
+    ```
+    - **Trailing only**: defaulted parameters must come last — a required parameter
+      cannot follow a defaulted one.
+    - **Self-contained defaults**: a default expression is evaluated at the *call site*,
+      so it may not reference `self` or an earlier parameter (use a constant, a global,
+      `nil`, an enum variant, or another self-contained expression). Pointer defaults
+      like `num* p = nil` are allowed.
+    - Works for free functions and methods (including generic, `async`, and
+      pointer-receiver methods).
 
 ### Async / Await
 - **Async function declaration**: `async fun name(args) type { ... }`
@@ -192,6 +208,24 @@ async fun main() {
     `ch.recv_into(&out)` for the error-aware form).
   - Note: `a < -b` (a comparison against a negative) is unaffected — only the glued
     `<-` (no space) is the channel operator.
+- **Result-style send/recv** (`std.channel`): the low-level `recv_into`/`send` return a
+  numeric status code, but the ergonomic layer returns a value you can `fit` on:
+  - `ch.recv_result()` → `RecvResult<T>` with variants `Ok(T)`, `Closed`, `Timeout`,
+    `Cancelled`, `Error(num)` (also `recv_result_timeout`, `recv_result_with_token`,
+    `try_recv_result`, and `*_async` variants).
+  - `ch.send_result(v)` → `SendResult` with variants `Ok`, `Closed`, `Full`,
+    `Cancelled`, `Error(num)` (also `send_result_timeout`, `try_send_result`, async).
+    ```fun
+    fit ch.recv_result() {
+        RecvResult.Ok(v)   -> { /* use v */ }
+        RecvResult.Closed  -> { /* drained */ }
+        RecvResult.Timeout -> { /* retry */ }
+        RecvResult.Cancelled -> { }
+        RecvResult.Error(e)  -> { }
+    }
+    ```
+- **`std.task` WaitGroup**: wait for a batch of `fork`ed tasks. `wait_group_new(n)`,
+  each task calls `wg.done()`, and `wg.wait()` blocks until all `n` complete.
 
 Example:
 ```fun
@@ -279,6 +313,12 @@ fun main() num {
     - `unused_import` (with `-warn-unused`)
     - `unused_function` (with `-warn-unused`)
     - `unused_compound` (with `-warn-unused`)
+    - `missing_return` — a non-`void` function/method that can reach the end of its
+      body without returning a value (the emitted C would return an indeterminate
+      value). The analysis is conservative: a trailing `ret`, an exhaustive
+      `if/elif/else` where every branch returns, a `fit` with a default branch whose
+      arms all return, and infinite loops (`for {}` / `for true {}` with no `break`)
+      all count as returning. Always checked (not gated behind `-warn-unused`).
 - **Suppress next warning intentionally**:
         - `allow <warning_id>, "reason";`
 - **Require next warning to appear**:

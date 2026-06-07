@@ -1567,6 +1567,12 @@ pub const ParseProcess = struct {
             // are not bounded by an enclosing `await <call>` operand. Clear the flag
             // so e.g. `await (*p).f()` parses the full `(*p)` group.
             hist_inner.flags.stop_at_binary_op = false;
+            // Likewise, commas INSIDE `(...)` separate call arguments / grouping — they
+            // are not the enclosing context's terminator. Clear any inherited
+            // `stop_at_comma` (e.g. from a parameter default `= snprintf(a, b, c)` or a
+            // compound-init field value) so nested call args parse fully instead of
+            // stopping at the first inner comma. Mirrors the `[...]` element handling.
+            hist_inner.flags.stop_at_comma = false;
             try self.parse_expressionable_root(&hist_inner);
             exp_node = self.node_pop().?;
         }
@@ -3924,7 +3930,15 @@ pub const ParseProcess = struct {
         }
         if (has_value) {
             _ = self.token_next(); // skip =
-            try self.parse_expressionable_root(hist);
+            // Stop the value expression at a TOP-LEVEL comma so a function PARAMETER
+            // default (`fun f(num b = 2, num c = 3)`) terminates at the param-separator
+            // `,` rather than greedily consuming the next parameter. Commas inside nested
+            // `(...)`/`[...]` are NOT terminators — `parse_for_parenthesis`/bracket
+            // parsing clear this flag — so call/array defaults (`= f(a, b)`) parse fully.
+            // Harmless for `let`/var decls (a top-level comma after the value is invalid).
+            var val_hist = utils.History.down(self.transpile_proc.allocator, hist, hist.flags);
+            val_hist.flags.stop_at_comma = true;
+            try self.parse_expressionable_root(&val_hist);
             value_node = self.node_pop();
             const val = self.transpile_proc.allocator.create(ast.Node) catch {
                 return ParseError.MemoryAllocationFailed;

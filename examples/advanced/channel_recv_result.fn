@@ -1,0 +1,61 @@
+// Ergonomic channel receive with RecvResult: `fit` on the outcome instead of
+// decoding a raw status code + out-pointer.
+// 
+// The core recv API returns a `channel_rc_*` status and writes the value through an
+// out-pointer (`recv_into(&out) -> num`). `recv_result()` layers over that and hands
+// back a `RecvResult<T>` you can pattern-match — each outcome the status codes encode
+// (value / closed / timeout / cancelled / error) is its own variant. This is purely
+// additive: the num-rc methods still exist for low-level / await-friendly use.
+
+imp std.c.io;
+imp std.channel;
+imp std.task;
+
+// A virtual-thread body: hand a value back, then signal completion.
+// `defer wg.done()` guarantees the WaitGroup is signalled however this task exits.
+async fun producer(Channel<num>* ch, WaitGroup* wg, num v) {
+  defer wg.done();
+  ch <- v;
+}
+
+fun main() num {
+  Channel<num> ch = channel_new_cap(0, 4);
+  WaitGroup wg = wait_group_new(1);
+  // Clean up on the way out, no matter which branch returns: `defer` runs these at
+  // scope exit (LIFO), so the channel storage and WaitGroup channel are always freed.
+  defer ch.destroy();
+  defer wg.destroy();
+
+  fork producer(&ch, &wg, 7);
+  wg.wait();
+
+  // A value is queued: RecvResult.Ok.
+  fit ch.recv_result() {
+    .Ok(v) -> { printf("got %lld\n", v); }
+    .Closed -> { printf("closed\n"); }
+    RecvResult.Timeout -> { printf("timeout\n"); }
+    RecvResult.Cancelled -> { printf("cancelled\n"); }
+    RecvResult.Error(e) -> { printf("error %lld\n", e); }
+  }
+
+  // try_recv on an empty (still open) channel: RecvResult.Timeout.
+  fit ch.try_recv_result() {
+    RecvResult.Ok(v) -> { printf("got %lld\n", v); }
+    RecvResult.Timeout -> { printf("empty\n"); }
+    RecvResult.Closed -> { printf("closed\n"); }
+    RecvResult.Cancelled -> { printf("cancelled\n"); }
+    RecvResult.Error(e) -> { printf("error %lld\n", e); }
+  }
+
+  // After close, a drained channel reports RecvResult.Closed.
+  let _rc = ch.close();
+  fit ch.recv_result() {
+    RecvResult.Ok(v) -> { printf("got %lld\n", v); }
+    RecvResult.Closed -> { printf("done\n"); }
+    RecvResult.Timeout -> { printf("timeout\n"); }
+    RecvResult.Cancelled -> { printf("cancelled\n"); }
+    RecvResult.Error(e) -> { printf("error %lld\n", e); }
+  }
+
+  ret 0;
+}

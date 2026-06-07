@@ -448,12 +448,85 @@ pub fun channel_select_index_other_b() num {
   ret 2;
 }
 
+// The outcome of a receive, as a value you can `fit` on instead of decoding a raw
+// status code. This is the ergonomic layer over the `recv_*_into` core (which returns
+// a `channel_rc_*` code + writes the value through an out-pointer): each distinct
+// outcome the status codes encode becomes its own variant.
+pub enum RecvResult<T> {
+  // A value was received.
+  Ok(T),
+  // The channel was closed and drained — no more values will ever arrive.
+  Closed,
+  // The receive timed out while the channel was still empty.
+  Timeout,
+  // The receive was cancelled via a cancel flag/token.
+  Cancelled,
+  // A lower-level failure (the underlying channel_rc_* / pthread error code).
+  Error(num),
+}
+
+// The outcome of a send, as a value you can `fit` on. The ergonomic layer over the
+// `send*` core (which returns a `channel_rc_*` code). Send carries no value back, so
+// this is a plain (non-generic) enum.
+pub enum SendResult {
+  // The value was enqueued.
+  Ok,
+  // The channel was closed, so the value could not be sent.
+  Closed,
+  // The channel was full and the (timed/non-blocking) send gave up without enqueuing.
+  Full,
+  // The send was cancelled via a cancel flag/token.
+  Cancelled,
+  // A lower-level failure (the underlying channel_rc_* / pthread error code).
+  Error(num),
+}
+
 impl Channel<T> {
   // Return a zeroed value for T.
   zero_value() T {
     T out;
     memset(&out, 0, sizeof(T));
     ret out;
+  }
+
+  // Map a recv status code + received value into a RecvResult<T>. (A method rather
+  // than a free function so it monomorphizes with this channel's concrete T.)
+  // Codes 2/3 mean timeout/cancelled in a recv context.
+  result_from_rc(num rc, T value) RecvResult<T> {
+    if rc == channel_rc_ok() {
+      ret RecvResult.Ok(value);
+    }
+    if rc == channel_rc_closed() {
+      ret RecvResult.Closed;
+    }
+    if rc == channel_rc_timeout() {
+      ret RecvResult.Timeout;
+    }
+    if rc == channel_rc_cancelled() {
+      ret RecvResult.Cancelled;
+    }
+    ret RecvResult.Error(rc);
+  }
+
+  // Map a send status code into a SendResult. Codes 2/3 mean full/cancelled in a send
+  // context (full and timeout share code 2; in a send the meaning is "couldn't enqueue").
+  send_result_from_rc(num rc) SendResult {
+    if rc == channel_rc_ok() {
+      ret SendResult.Ok;
+    }
+    if rc == channel_rc_closed() {
+      ret SendResult.Closed;
+    }
+    if rc == channel_rc_send_closed_blocking() {
+      ret SendResult.Closed;
+    }
+    if rc == channel_rc_full() {
+      ret SendResult.Full;
+    }
+    if rc == channel_rc_cancelled() {
+      ret SendResult.Cancelled;
+    }
+    ret SendResult.Error(rc);
   }
 
   // Initialize internal synchronization primitives.
@@ -1107,6 +1180,113 @@ impl Channel<T> {
   // Await-friendly wrapper for recv_timeout_with_token.
   pub async recv_timeout_with_token_async(num timeout_ms, ChannelCancelToken* cancel_token) T {
     ret self.recv_timeout_with_token(timeout_ms, cancel_token);
+  }
+
+  // Receive one value as a RecvResult you can `fit` on. Blocks while empty; resolves
+  // to Ok(value)/Closed/Error — never Timeout (no deadline) or Cancelled (no token).
+  // 
+  // Returns:
+  // - RecvResult.Ok(value) on success; Closed when drained+closed; Error(rc) otherwise
+  pub recv_result() RecvResult<T> {
+    let out = self.zero_value();
+    let rc = self.recv_into(&out);
+    ret self.result_from_rc(rc, out);
+  }
+
+  // Receive within `timeout_ms` as a RecvResult. Resolves to Ok/Closed/Timeout/Error.
+  // A negative timeout waits forever (never Timeout).
+  pub recv_result_timeout(num timeout_ms) RecvResult<T> {
+    let out = self.zero_value();
+    let rc = self.recv_timeout_into(&out, timeout_ms);
+    ret self.result_from_rc(rc, out);
+  }
+
+  // Receive within `timeout_ms` with token cancellation, as a RecvResult. Resolves to
+  // Ok/Closed/Timeout/Cancelled/Error.
+  pub recv_result_timeout_with_token(num timeout_ms, ChannelCancelToken* cancel_token) RecvResult<T> {
+    let out = self.zero_value();
+    let rc = self.recv_timeout_into_with_token(&out, timeout_ms, cancel_token);
+    ret self.result_from_rc(rc, out);
+  }
+
+  // Receive forever-or-until-cancelled with a token, as a RecvResult. Resolves to
+  // Ok/Closed/Cancelled/Error (never Timeout).
+  pub recv_result_with_token(ChannelCancelToken* cancel_token) RecvResult<T> {
+    let out = self.zero_value();
+    let rc = self.recv_into_with_token(&out, cancel_token);
+    ret self.result_from_rc(rc, out);
+  }
+
+  // Try to receive without blocking, as a RecvResult. Resolves to Ok when a value is
+  // ready, Closed when drained+closed, Timeout when open-but-empty, or Error.
+  pub try_recv_result() RecvResult<T> {
+    let out = self.zero_value();
+    let rc = self.try_recv(&out);
+    ret self.result_from_rc(rc, out);
+  }
+
+  // Await-friendly wrapper for recv_result.
+  pub async recv_result_async() RecvResult<T> {
+    ret self.recv_result();
+  }
+
+  // Await-friendly wrapper for recv_result_timeout.
+  pub async recv_result_timeout_async(num timeout_ms) RecvResult<T> {
+    ret self.recv_result_timeout(timeout_ms);
+  }
+
+  // Await-friendly wrapper for recv_result_timeout_with_token.
+  pub async recv_result_timeout_with_token_async(num timeout_ms, ChannelCancelToken* cancel_token) RecvResult<T> {
+    ret self.recv_result_timeout_with_token(timeout_ms, cancel_token);
+  }
+
+  // Send `value`, returning a SendResult you can `fit` on (blocks while full; resolves
+  // to Ok/Closed/Error — never Full/Cancelled since there's no deadline/token).
+  pub send_result(T value) SendResult {
+    ret self.send_result_from_rc(self.send(value));
+  }
+
+  // Send within `timeout_ms`, as a SendResult (Ok/Closed/Full/Error). A negative
+  // timeout waits forever; on a full channel within the deadline, resolves to Full.
+  pub send_result_timeout(T value, num timeout_ms) SendResult {
+    ret self.send_result_from_rc(self.send_timeout(value, timeout_ms));
+  }
+
+  // Send within `timeout_ms` with token cancellation, as a SendResult
+  // (Ok/Closed/Full/Cancelled/Error).
+  pub send_result_timeout_with_token(T value, num timeout_ms, ChannelCancelToken* cancel_token) SendResult {
+    ret self.send_result_from_rc(self.send_timeout_with_token(value, timeout_ms, cancel_token));
+  }
+
+  // Send forever-or-until-cancelled with a token, as a SendResult
+  // (Ok/Closed/Cancelled/Error).
+  pub send_result_with_token(T value, ChannelCancelToken* cancel_token) SendResult {
+    ret self.send_result_from_rc(self.send_with_token(value, cancel_token));
+  }
+
+  // Try to send without blocking, as a SendResult: Ok when enqueued, Full when the
+  // channel is full, Closed when closed, or Error.
+  pub try_send_result(T value) SendResult {
+    ret self.send_result_from_rc(self.try_send(value));
+  }
+
+  // Await-friendly wrapper for send_result.
+  pub async send_result_async(T value) SendResult {
+    ret self.send_result(value);
+  }
+
+  // Await-friendly wrapper for send_result_timeout.
+  pub async send_result_timeout_async(T value, num timeout_ms) SendResult {
+    ret self.send_result_timeout(value, timeout_ms);
+  }
+
+  // Await-friendly wrapper for send_result_timeout_with_token.
+  pub async send_result_timeout_with_token_async(
+    T value,
+    num timeout_ms,
+    ChannelCancelToken* cancel_token
+  ) SendResult {
+    ret self.send_result_timeout_with_token(value, timeout_ms, cancel_token);
   }
 
   // Try receiving one value without blocking.

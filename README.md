@@ -45,6 +45,9 @@
 - Modular imports
 - Pattern matching (`fit` statement)
 - Type-safe variables and functions
+- Default parameter values (`fun f(num x, num y = 1)`)
+- Data-carrying enums (sum types) with payload binding
+- Concurrency: virtual threads (`fork`, M:N scheduler), channels, and a `std.task` WaitGroup
 - CLI with multiple output and debug options
 - AST printing and analysis
 - Comprehensive error handling

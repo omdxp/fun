@@ -3839,7 +3839,100 @@ pub const TranspileProcess = struct {
         is_variadic: bool = false,
         is_async: bool = false,
         type_params: ?*const utils.Vector(ArrayList(u8)) = null,
+        /// Minimum required positional args = count of params with NO default value.
+        /// Sentinel `maxInt` means "unset" → treated as `args.len` (no defaults), so any
+        /// FnSig built without explicitly setting this behaves exactly as before. A call
+        /// may pass between `effectiveMinArgs()` and `args.len` args; the missing trailing
+        /// ones are filled with the callee's default expressions at emission.
+        min_args: usize = std.math.maxInt(usize),
+
+        fn effectiveMinArgs(self: FnSig) usize {
+            return if (self.min_args == std.math.maxInt(usize)) self.args.len else self.min_args;
+        }
     };
+
+    /// Count leading params that have no default value (the minimum a caller must pass).
+    /// Trailing-only enforcement (Phase: validate_default_param_order) guarantees all
+    /// defaulted params come last, so this is simply the index of the first defaulted param.
+    /// True if an expression node references the bare identifier `name` anywhere.
+    /// Conservative recursive walk over the common expression shapes; used to reject a
+    /// parameter default that depends on `self` or an earlier parameter (such defaults are
+    /// materialized in the CALLER's scope where those names don't exist).
+    fn default_expr_references_name(node: *const ast.Node, name: []const u8) bool {
+        if (node.node_variant == null) {
+            if (node.type == .Identifier and node.data != null) {
+                return mem.eql(u8, node.data.?.sval.items, name);
+            }
+            return false;
+        }
+        switch (node.type) {
+            .Identifier => {
+                if (node.data) |d| return mem.eql(u8, d.sval.items, name);
+                return false;
+            },
+            .Expression => {
+                const e = node.node_variant.?.exp;
+                if (e.left) |l| if (default_expr_references_name(l, name)) return true;
+                if (e.right) |r| if (default_expr_references_name(r, name)) return true;
+                return false;
+            },
+            .ExpressionParenthesis => return default_expr_references_name(node.node_variant.?.paren.exp, name),
+            .Unary => return default_expr_references_name(node.node_variant.?.unary.operand, name),
+            else => return false,
+        }
+    }
+
+    /// Validate a function/method's parameter defaults:
+    /// 1. Defaults must be TRAILING (`fun f(num x = 1, num y)` is rejected) — a call fills
+    ///    the omitted tail, so a required param can't follow a defaulted one.
+    /// 2. A default expression must be SELF-CONTAINED: it may not reference `self` or an
+    ///    earlier parameter, because the default is materialized at the CALL SITE where
+    ///    those names aren't in scope (emitting `f(&c, self.cfg)` would be invalid C).
+    /// Reports a type error and returns it on violation; no-op when valid.
+    fn validate_default_param_order(self: *Self, fnv_args: ?utils.Vector(*ast.Node), node: ast.Node) TranspileError!void {
+        const args = (fnv_args orelse return).items();
+        var seen_default = false;
+        for (args, 0..) |arg_ptr, i| {
+            const arg = arg_ptr.*;
+            if (arg.type != .Variable or arg.node_variant == null) continue;
+            const v = arg.node_variant.?.variable;
+            if (v.val) |dflt| {
+                seen_default = true;
+                // Reject reference to `self`.
+                if (default_expr_references_name(dflt, "self")) {
+                    self.report_type_error(node, "a parameter default cannot reference 'self' (defaults are evaluated at the call site)", .{});
+                    return TranspileError.TypeMismatch;
+                }
+                // Reject reference to any EARLIER parameter.
+                var j: usize = 0;
+                while (j < i) : (j += 1) {
+                    const prev = args[j].*;
+                    if (prev.type != .Variable or prev.node_variant == null) continue;
+                    const pname = prev.node_variant.?.variable.name.items;
+                    if (default_expr_references_name(dflt, pname)) {
+                        self.report_type_error(node, "a parameter default cannot reference an earlier parameter '{s}'", .{pname});
+                        return TranspileError.TypeMismatch;
+                    }
+                }
+            } else if (seen_default) {
+                self.report_type_error(node, "a parameter without a default cannot follow a parameter with a default", .{});
+                return TranspileError.WrongArgCount;
+            }
+        }
+    }
+
+    fn count_required_args_from_node(args_vec: utils.Vector(*ast.Node)) usize {
+        const items = args_vec.items();
+        var n: usize = 0;
+        for (items) |arg_ptr| {
+            const arg = arg_ptr.*;
+            const has_default = arg.type == .Variable and arg.node_variant != null and
+                arg.node_variant.?.variable.val != null;
+            if (has_default) break;
+            n += 1;
+        }
+        return n;
+    }
 
     const AwaitLoweringInfo = struct {
         callee_name: []const u8,
@@ -5299,7 +5392,7 @@ pub const TranspileProcess = struct {
             self.type_from_dtype_with_subst(&hit.method_node.node_variant.?.function.rtype.?, params.*, gargs) catch return null
         else
             CheckedType{ .base = .Void };
-        return .{ .rtype = rtype, .args = args_slice, .is_variadic = fnv.is_variadic, .is_async = fnv.is_async };
+        return .{ .rtype = rtype, .args = args_slice, .is_variadic = fnv.is_variadic, .is_async = fnv.is_async, .min_args = count_required_args_from_node(args_vec) };
     }
 
     /// Synthesize a generic-method sig from a MANGLED instance name (`Box__str`) by
@@ -5442,6 +5535,93 @@ pub const TranspileProcess = struct {
     fn find_function_node(self: *Self, name: []const u8) ?*ast.Node {
         const root = self.get_root();
         return self.find_function_node_proc(root, name);
+    }
+
+    /// Append the callee's default-value expressions for any TRAILING params the call
+    /// omitted. `right` is the call's (flattened) argument expression; `passed` is how
+    /// many args the caller actually wrote. For each param index in [passed, param_count)
+    /// whose AST node carries a default (`Variable.val`), emit `, <default>`. Emitted in
+    /// the general (non-variadic) call path so a single chokepoint covers free-function
+    /// calls; methods/generics route through their own paths and are handled separately.
+    /// No-op when the callee isn't found, has no defaults, or the call is already full.
+    fn emit_trailing_default_args(self: *Self, left: *ast.Node, right: ?*ast.Node) TranspileError!void {
+        // Derive the callee name from `left` (a bare identifier; member-call `a.f` and
+        // other forms route through their own emission paths and are skipped here).
+        if (left.type != .Identifier or left.data == null) return;
+        const fname = left.data.?.sval.items;
+        const fname_base = if (std.mem.lastIndexOf(u8, fname, "__")) |sep| fname[sep + 2 ..] else fname;
+        const fn_node = self.find_function_node(fname) orelse self.find_function_node(fname_base) orelse return;
+        if (fn_node.node_variant == null) return;
+        const fnv = fn_node.node_variant.?.function;
+        if (fnv.is_variadic) return; // variadic path handles its own arg list
+        const args_vec = fnv.args orelse return;
+        const params = args_vec.items();
+        if (params.len == 0) return;
+
+        // Count how many args the caller actually passed.
+        var passed: usize = 0;
+        if (right) |r| {
+            var tmp = ArrayList(*ast.Node).init(self.allocator);
+            defer tmp.deinit();
+            self.flatten_call_args_ptr(r, &tmp) catch return;
+            passed = tmp.items.len;
+        }
+        if (passed >= params.len) return;
+
+        // `wrote_any` tracks whether anything precedes the next arg inside the parens,
+        // so we emit a separating comma iff the caller passed >=1 arg OR we've already
+        // emitted a prior default this loop.
+        var wrote_any = passed > 0;
+        var idx: usize = passed;
+        while (idx < params.len) : (idx += 1) {
+            const p = params[idx].*;
+            if (p.type != .Variable or p.node_variant == null) return;
+            const dflt = p.node_variant.?.variable.val orelse return; // trailing-only guarantees the rest also have defaults
+            if (wrote_any) try self.write(", ");
+            try self.transpile_node(dflt.*);
+            wrote_any = true;
+        }
+    }
+
+    /// Method variant: fill omitted trailing default args for a resolved method whose
+    /// C function is `fn_name` (e.g. `Box__add`). `c_args_emitted` is how many C args were
+    /// already written (the receiver counts as one, plus the user args). The method node's
+    /// own param list does NOT include `self`, so a param at user-index `u` maps to
+    /// C-arg-index `u + 1`; we fill the method-node params from `c_args_emitted - 1`.
+    /// `wrote_any` must be true (the receiver is always emitted first). No-op when no
+    /// defaults apply.
+    fn emit_trailing_default_args_for_method(self: *Self, type_name_canon: []const u8, method_base: []const u8, c_args_emitted: usize) TranspileError!void {
+        // Resolve the method's AST node by TYPE + METHOD base name (not the mangled C
+        // name): a generic method's node is stored under its template name (`get`), so a
+        // mangled-name lookup like `Gen__num__get` would miss it. find_any_impl_method_node
+        // matches the BASE type (no generic suffix) + method across plain and quirk impls,
+        // so strip any `__<args>` mangling from the receiver type first.
+        const canon = self.canonical_compound_name(type_name_canon);
+        const type_base = if (mem.indexOf(u8, canon, "__")) |idx| canon[0..idx] else canon;
+        const hit = self.find_any_impl_method_node(type_base, method_base) orelse return;
+        const fn_node = hit.method_node;
+        if (fn_node.node_variant == null) return;
+        const fnv = fn_node.node_variant.?.function;
+        if (fnv.is_variadic) return;
+        const args_vec = fnv.args orelse return;
+        const params = args_vec.items();
+        // Whether the method node's first param is an explicit `self`.
+        var first_is_self = false;
+        if (params.len > 0 and params[0].*.type == .Variable and params[0].*.node_variant != null) {
+            first_is_self = mem.eql(u8, params[0].*.node_variant.?.variable.name.items, "self");
+        }
+        const self_offset: usize = if (first_is_self) 1 else 0;
+        // C arg 0 is the receiver. User args occupy C args [1, c_args_emitted). So the
+        // next method-node param to consider is at index (c_args_emitted - 1) + self_offset.
+        if (c_args_emitted == 0) return;
+        var idx: usize = (c_args_emitted - 1) + self_offset;
+        while (idx < params.len) : (idx += 1) {
+            const p = params[idx].*;
+            if (p.type != .Variable or p.node_variant == null) return;
+            const dflt = p.node_variant.?.variable.val orelse return;
+            try self.write(", ");
+            try self.transpile_node(dflt.*);
+        }
     }
 
     fn any_accessible_function_named_proc(self: *Self, proc: *Self, ref_node: ?*const ast.Node, name: []const u8) bool {
@@ -7088,15 +7268,22 @@ pub const TranspileProcess = struct {
                     }
 
                     if (maybe_sig) |sig| {
-                        // Function call.
-                        if (!sig.is_variadic and args_nodes.items.len != sig.args.len) {
+                        // Function call. With default params the accepted count is the
+                        // range [effectiveMinArgs(), args.len]; too few or (non-variadic)
+                        // too many is an error.
+                        const sig_min = sig.effectiveMinArgs();
+                        if (args_nodes.items.len < sig_min) {
                             const fname = callee.data.?.sval.items;
-                            self.report_type_error(node, "function '{s}' expects {d} args, got {d}", .{ fname, sig.args.len, args_nodes.items.len });
+                            if (sig_min == sig.args.len) {
+                                self.report_type_error(node, "function '{s}' expects {d} args, got {d}", .{ fname, sig.args.len, args_nodes.items.len });
+                            } else {
+                                self.report_type_error(node, "function '{s}' expects at least {d} args, got {d}", .{ fname, sig_min, args_nodes.items.len });
+                            }
                             return TranspileError.WrongArgCount;
                         }
-                        if (sig.is_variadic and args_nodes.items.len < sig.args.len) {
+                        if (!sig.is_variadic and args_nodes.items.len > sig.args.len) {
                             const fname = callee.data.?.sval.items;
-                            self.report_type_error(node, "function '{s}' expects at least {d} args, got {d}", .{ fname, sig.args.len, args_nodes.items.len });
+                            self.report_type_error(node, "function '{s}' expects {d} args, got {d}", .{ fname, sig.args.len, args_nodes.items.len });
                             return TranspileError.WrongArgCount;
                         }
                         for (args_nodes.items, 0..) |arg_node, idx| {
@@ -7155,13 +7342,22 @@ pub const TranspileProcess = struct {
                             return TranspileError.NotCallable;
                         }
 
+                        // User args = params minus the implicit `self`. With defaults the
+                        // accepted count is [min_user, max_user]; min subtracts self from
+                        // the required-param count too.
                         const expected_user_args = if (psig.args.len > 0) psig.args.len - 1 else 0;
-                        if (!psig.is_variadic and args_nodes.items.len != expected_user_args) {
-                            self.report_type_error(node, "method '{s}' expects {d} args, got {d}", .{ plain_method_name orelse "<method>", expected_user_args, args_nodes.items.len });
+                        const psig_min = psig.effectiveMinArgs();
+                        const min_user_args = if (psig_min > 0) psig_min - 1 else 0;
+                        if (args_nodes.items.len < min_user_args) {
+                            if (min_user_args == expected_user_args) {
+                                self.report_type_error(node, "method '{s}' expects {d} args, got {d}", .{ plain_method_name orelse "<method>", expected_user_args, args_nodes.items.len });
+                            } else {
+                                self.report_type_error(node, "method '{s}' expects at least {d} args, got {d}", .{ plain_method_name orelse "<method>", min_user_args, args_nodes.items.len });
+                            }
                             return TranspileError.WrongArgCount;
                         }
-                        if (psig.is_variadic and args_nodes.items.len < expected_user_args) {
-                            self.report_type_error(node, "method '{s}' expects at least {d} args, got {d}", .{ plain_method_name orelse "<method>", expected_user_args, args_nodes.items.len });
+                        if (!psig.is_variadic and args_nodes.items.len > expected_user_args) {
+                            self.report_type_error(node, "method '{s}' expects {d} args, got {d}", .{ plain_method_name orelse "<method>", expected_user_args, args_nodes.items.len });
                             return TranspileError.WrongArgCount;
                         }
 
@@ -7974,12 +8170,14 @@ pub const TranspileProcess = struct {
                 break :blk try self.type_from_dtype_with_mangled(rt_heap);
             } else .{ .base = .Void };
             try self.register_generic_instantiation_from_checked_type(fn_rtype);
+            const fn_min_args = count_required_args_from_node(args_vec);
             fns.put(name, .{
                 .rtype = fn_rtype,
                 .args = args_slice,
                 .is_variadic = fnv.is_variadic,
                 .is_async = fnv.is_async,
                 .type_params = if (fnv.type_params) |*params| params else null,
+                .min_args = fn_min_args,
             }) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
@@ -7993,6 +8191,7 @@ pub const TranspileProcess = struct {
                         .is_variadic = fnv.is_variadic,
                         .is_async = fnv.is_async,
                         .type_params = if (fnv.type_params) |*params| params else null,
+                        .min_args = fn_min_args,
                     }) catch {
                         return TranspileError.MemoryAllocationFailed;
                     };
@@ -8041,12 +8240,14 @@ pub const TranspileProcess = struct {
                 break :blk try self.type_from_dtype_with_mangled(rt_heap);
             } else .{ .base = .Void };
             try self.register_generic_instantiation_from_checked_type(fn_rtype);
+            const fn_min_args = count_required_args_from_node(args_vec);
             fns.put(name, .{
                 .rtype = fn_rtype,
                 .args = args_slice,
                 .is_variadic = fnv.is_variadic,
                 .is_async = fnv.is_async,
                 .type_params = if (fnv.type_params) |*params| params else null,
+                .min_args = fn_min_args,
             }) catch {
                 return TranspileError.MemoryAllocationFailed;
             };
@@ -8060,6 +8261,7 @@ pub const TranspileProcess = struct {
                         .is_variadic = fnv.is_variadic,
                         .is_async = fnv.is_async,
                         .type_params = if (fnv.type_params) |*params| params else null,
+                        .min_args = fn_min_args,
                     }) catch {
                         return TranspileError.MemoryAllocationFailed;
                     };
@@ -8152,6 +8354,7 @@ pub const TranspileProcess = struct {
                             .is_variadic = fnv.is_variadic,
                             .is_async = fnv.is_async,
                             .type_params = null,
+                            .min_args = count_required_args_from_node(args_vec),
                         }) catch {
                             return TranspileError.MemoryAllocationFailed;
                         };
@@ -8203,6 +8406,7 @@ pub const TranspileProcess = struct {
                     .is_variadic = fnv.is_variadic,
                     .is_async = fnv.is_async,
                     .type_params = null,
+                    .min_args = count_required_args_from_node(args_vec),
                 }) catch {
                     return TranspileError.MemoryAllocationFailed;
                 };
@@ -8439,6 +8643,9 @@ pub const TranspileProcess = struct {
                 return TranspileError.TypeMismatch;
             }
 
+            // Default params must be trailing.
+            try proc.validate_default_param_order(fnv.args, node);
+
             const fn_rtype: CheckedType = if (fnv.rtype) |rt| try proc.type_from_dtype_with_mangled(&rt) else CheckedType{ .base = .Void };
 
             var allow_params: ?[]const []const u8 = null;
@@ -8573,6 +8780,10 @@ pub const TranspileProcess = struct {
                     proc.report_type_error(m, "async variadic methods are not supported yet", .{});
                     return TranspileError.TypeMismatch;
                 }
+
+                // Default params must be trailing. (The implicit leading `self` has no
+                // default and precedes user params, so it never triggers a false positive.)
+                try proc.validate_default_param_order(fnv.args, m);
 
                 const fn_rtype: CheckedType = if (fnv.rtype) |rt| try proc.type_from_dtype_with_mangled(&rt) else CheckedType{ .base = .Void };
 
@@ -13926,6 +14137,28 @@ pub const TranspileProcess = struct {
                 self.allocator.free(key);
             }
         }
+
+        // Monomorphized generic FUNCTIONS reference a generic enum only through the
+        // template's type params (e.g. `wrap<T>() RecvResult<T>` instantiated at
+        // `T = num` needs `RecvResult__num`). The template node still says
+        // `RecvResult<T>`, so the concrete `RecvResult<num>` is invisible to the
+        // node scan above. Substitute each instantiation's params->args into its
+        // return type and argument types so the concrete enum instance is collected.
+        for (root.generic_fn_instantiations.items) |inst| {
+            const fnv = inst.fn_node.node_variant.?.function;
+            if (fnv.rtype) |*rt| {
+                const sub = self.clone_dtype_with_subst_for_inst(rt, inst.params, inst.args) catch null;
+                if (sub) |s| try self.collect_generic_instantiations_dtype(s, name, keys, out);
+            }
+            if (fnv.args) |fargs| {
+                for (fargs.items()) |a| {
+                    if (a.node_variant) |av| {
+                        const sub = self.clone_dtype_with_subst_for_inst(av.variable.type, inst.params, inst.args) catch null;
+                        if (sub) |s| try self.collect_generic_instantiations_dtype(s, name, keys, out);
+                    }
+                }
+            }
+        }
     }
 
     fn concrete_impl_is_instantiated(self: *Self, type_name: []const u8) TranspileError!bool {
@@ -16060,6 +16293,7 @@ pub const TranspileProcess = struct {
                                             } else {
                                                 try self.transpile_node(recv.?.*);
                                             }
+                                            var c_args: usize = 1; // receiver
 
                                             if (exp.right) |right| {
                                                 const inner = if (right.type == .ExpressionParenthesis and right.node_variant != null)
@@ -16069,8 +16303,14 @@ pub const TranspileProcess = struct {
                                                 if (inner.type != .Blank) {
                                                     try self.write(", ");
                                                     try self.transpile_node(inner);
+                                                    var ua = ArrayList(*ast.Node).init(self.allocator);
+                                                    defer ua.deinit();
+                                                    self.flatten_call_args_ptr(right, &ua) catch {};
+                                                    c_args += ua.items.len;
                                                 }
                                             }
+                                            // Fill omitted trailing params with defaults.
+                                            try self.emit_trailing_default_args_for_method(type_name_canon, mname, c_args);
 
                                             try self.write(")");
                                             try self.write(")");
@@ -16460,6 +16700,8 @@ pub const TranspileProcess = struct {
                         if (exp.right) |right| {
                             try self.transpile_node(right.*);
                         }
+                        // Fill omitted trailing params with their default expressions.
+                        try self.emit_trailing_default_args(left, exp.right);
                         try self.write(")");
                     }
                 } else if (mem.eql(u8, exp.op, ",")) {
@@ -16839,6 +17081,14 @@ pub const TranspileProcess = struct {
                     } else {
                         try self.write("[]");
                     }
+                }
+
+                // A parameter's default value (`fun f(num x = 10)`) lives in `variable.val`
+                // but must NOT be emitted into the C parameter list — C has no default
+                // args. The default is materialized at each call site instead
+                // (emit_trailing_default_args). So suppress the initializer in param position.
+                if (self.in_function_params) {
+                    return;
                 }
 
                 if (variable.val) |val| {
@@ -17998,12 +18248,14 @@ pub const TranspileProcess = struct {
                         try self.write("(");
 
                         var wrote_arg = false;
+                        var c_args: usize = 0;
                         if (lowering.receiver_expr) |recv| {
                             if (lowering.receiver_pass_by_ref) {
                                 try self.write("&");
                             }
                             try self.transpile_node(recv.*);
                             wrote_arg = true;
+                            c_args = 1;
                         }
 
                         if (call_exp.right) |right| {
@@ -18016,6 +18268,21 @@ pub const TranspileProcess = struct {
                                     try self.write(", ");
                                 }
                                 try self.transpile_node(inner);
+                                var ua = ArrayList(*ast.Node).init(self.allocator);
+                                defer ua.deinit();
+                                self.flatten_call_args_ptr(right, &ua) catch {};
+                                c_args += ua.items.len;
+                            }
+                        }
+
+                        // Fill omitted trailing default args for an awaited method call.
+                        // `callee_name` is the mangled `Type__method` (or `Type__args__method`
+                        // for generics); split off the method base name to resolve the node.
+                        if (lowering.receiver_expr != null) {
+                            if (std.mem.lastIndexOf(u8, lowering.callee_name, "__")) |sep| {
+                                const recv_type = lowering.callee_name[0..sep];
+                                const method_base = lowering.callee_name[sep + 2 ..];
+                                try self.emit_trailing_default_args_for_method(recv_type, method_base, c_args);
                             }
                         }
 

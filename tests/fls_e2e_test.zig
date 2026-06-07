@@ -1727,6 +1727,66 @@ test "fls e2e: enum dot shorthand completion/hover/definition" {
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: dot-shorthand in a fit whose subject is a method call returning a generic enum" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    // The fit SUBJECT is a method call returning a generic enum (`b.peek()` -> `RR<num>`).
+    // A shorthand `.Ok` arm must resolve to `RR.Ok` via the subject's method-call return
+    // type — not just bare-variable or free-call subjects. (Regression: previously only
+    // those simpler subject forms resolved; a method-call subject gave empty hover/def.)
+    const doc_text =
+        "imp std.c.io;\n\n" ++
+        "enum RR<T> {\n" ++
+        "  Ok(T),\n" ++
+        "  Empty,\n" ++
+        "}\n\n" ++
+        "compound Box<T> {\n" ++
+        "  T v;\n" ++
+        "}\n\n" ++
+        "impl Box<T> {\n" ++
+        "  pub peek() RR<T> {\n" ++
+        "    ret RR.Ok(self.v);\n" ++
+        "  }\n" ++
+        "}\n\n" ++
+        "fun main() num {\n" ++
+        "  Box<num> b;\n" ++
+        "  b.v = 5;\n" ++
+        "  fit b.peek() {\n" ++
+        "    .Ok(v) -> { printf(\"%lld\\n\", v); }\n" ++
+        "    .Empty -> { printf(\"empty\\n\"); }\n" ++
+        "  }\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-fit-methodcall-shorthand.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // Hover the shorthand `.Ok` arm -> resolves to the RR.Ok variant.
+    const ok_pos = try findPosition(doc_text, ".Ok(v) ->", 0);
+    const ok_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, ok_pos.line, ok_pos.col + 1 },
+    );
+    defer allocator.free(ok_params);
+    try waitForHoverContains(allocator, &lsp, ok_params, "RR.Ok", 15000);
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: cross-file generic fit-binding hover resolves the imported enum's payload" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
@@ -5855,6 +5915,61 @@ test "fls e2e: inlay hint shows the called function's own param name, not anothe
     }
     try std.testing.expect(saw_a); // score's own param
     try std.testing.expect(!saw_j); // never the other function's param
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: a parameter default does not corrupt inlay hints or completion snippets" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    // `times = 42` is a parameter DEFAULT. FLS must not mistake the default value `42`
+    // for the parameter name: the inlay hint at the call must be `name:` (the first
+    // param), never `42:`, and the completion snippet must use `${1:name}`, not `${1:42}`.
+    const doc_text =
+        "fun greet(str name, num times = 42) num {\n" ++
+        "  _ = name;\n" ++
+        "  ret times;\n" ++
+        "}\n\n" ++
+        "fun main() num {\n" ++
+        "  ret greet(\"a\");\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-default-param.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // Inlay hint at the `greet("a")` call -> first-param hint is `name:`, never `42:`.
+    const inlay_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"range\":{{\"start\":{{\"line\":0,\"character\":0}},\"end\":{{\"line\":100,\"character\":0}}}}}}",
+        .{doc_uri},
+    );
+    defer allocator.free(inlay_params);
+    const inlay_id = try lsp.request("textDocument/inlayHint", inlay_params);
+    var inlay_res = try lsp.waitResponse(inlay_id, 5000);
+    defer inlay_res.deinit();
+    const inlay_result = try jsonResultFromResponseObj(inlay_res.parsed.value.object);
+    if (inlay_result == .array) {
+        for (inlay_result.array.items) |h| {
+            if (h != .object) continue;
+            const lbl = h.object.get("label") orelse continue;
+            if (lbl != .string) continue;
+            // The default value must never leak as a hint label.
+            try std.testing.expect(std.mem.indexOf(u8, lbl.string, "42") == null);
+        }
+    }
 
     const shutdown_id = try lsp.request("shutdown", "{}");
     var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);

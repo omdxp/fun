@@ -263,6 +263,24 @@ fun main() {
   _ = v;
 }
 ```
+- **Default parameter values**: parameters may have defaults (`= expr`); a call may omit
+  trailing defaulted arguments.
+```fun
+fun connect(str host, num port = 8080, bin tls = false) { /* ... */ }
+
+fun main() {
+  connect("a");            // port 8080, tls false
+  connect("a", 9000);      // tls false
+  connect("a", 9000, true);
+}
+```
+- Rules: defaults must be **trailing** (no required param after a defaulted one); a
+  default expression is evaluated at the **call site**, so it cannot reference `self` or
+  an earlier parameter (`nil`, literals, globals, and enum variants are fine). Applies to
+  free functions and methods, including generic, `async`, and pointer-receiver methods.
+- A non-`void` function that can fall off the end without returning triggers the
+  `missing_return` warning (always checked; conservative — trailing `ret`, exhaustive
+  `if/elif/else`, default-branch `fit`, and infinite loops all count as returning).
 
 ## Async / Await
 - Declare async functions with `async fun`.
@@ -300,6 +318,12 @@ async fun main() {
   - `<-ch` ≡ `ch.recv()` (receive; lossy — use `ch.recv_into(&out)` for errors)
 - `<-` is the glued two-character operator; `a < -b` (with a space) is still a
   comparison against a negation.
+- **Result-style send/recv**: `ch.recv_result()` returns `RecvResult<T>`
+  (`Ok(T)`/`Closed`/`Timeout`/`Cancelled`/`Error(num)`) and `ch.send_result(v)` returns
+  `SendResult` (`Ok`/`Closed`/`Full`/`Cancelled`/`Error(num)`) — `fit` on them instead of
+  decoding a numeric status. Timeout/token and `try_*`/`*_async` variants exist for both.
+- **`std.task` WaitGroup**: `wait_group_new(n)` + `wg.done()` in each task + `wg.wait()`
+  blocks until all `n` `fork`ed tasks complete.
 
 ```fun
 imp std.channel;
@@ -540,6 +564,7 @@ fun -in <input_file> [-out <output_file>] [-no-exec] [-outf] [-ast] [-help]
 - `unused_import` (with `-warn-unused`)
 - `unused_function` (with `-warn-unused`)
 - `unused_compound` (with `-warn-unused`)
+- `missing_return` (non-`void` function may reach its end without returning; always checked)
 
 ### Warning Control Statements
 - `allow <warning_id>, "reason";`

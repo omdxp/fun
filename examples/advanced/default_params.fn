@@ -1,0 +1,37 @@
+// Default parameter values: a parameter may declare `= expr`, and a call that omits
+// the trailing argument uses the default. Defaults must be trailing, and the default
+// expression is evaluated at the call site (so it can't reference `self` or an earlier
+// parameter — use constants, globals, `nil`, or enum variants).
+
+imp std.c.io;
+
+// Free function with two defaulted params.
+fun greet(str name, num times = 2, str sep = "-") str {
+  // (return the separator just to show the defaulted str arg flows through)
+  _ = name;
+  _ = times;
+  ret sep;
+}
+
+compound Counter {
+  num base;
+}
+
+impl Counter {
+  // Method with a defaulted param. The implicit `self` is unaffected.
+  pub add(num x = 10) num {
+    ret self.base + x;
+  }
+}
+
+fun main() num {
+  // Free function: omit both, omit one, pass all.
+  printf("%s %s %s\n", greet("a"), greet("a", 5), greet("a", 5, "+"));
+
+  // Method: default vs explicit.
+  Counter c;
+  c.base = 100;
+  printf("%lld %lld\n", c.add(), c.add(1)); // 110, 101
+
+  ret 0;
+}

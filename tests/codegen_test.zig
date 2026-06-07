@@ -7366,6 +7366,120 @@ test "generic data enum: Result<T, E> with two type params and mixed payloads" {
     try std.testing.expectEqualStrings("ok 7\nerr boom\n", stdout);
 }
 
+test "generic fn returning a generic enum monomorphizes the enum type (regression)" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_generic_fn_returns_enum.fn";
+    const c_path = "codegen_generic_fn_returns_enum.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_generic_fn_returns_enum.exe" else "codegen_generic_fn_returns_enum";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: a GENERIC FREE FUNCTION whose body constructs the enum via BOTH a
+    // `T`-payload variant (Ok) and a different concrete-payload variant (Error(num)),
+    // returning `RR<T>`. Instantiated at T=num, the monomorphized `RR__num` type
+    // appears only through the generic fn's return type — the template node still says
+    // `RR<T>`. Previously the `RR__num` typedef was never emitted (used-but-undefined).
+    const input =
+        "imp std.c.io;\n" ++
+        "enum RR<T> { Ok(T), Closed, Error(num) }\n" ++
+        "fun wrap<T>(num rc, T value) RR<T> {\n" ++
+        "  if rc == 0 { ret RR.Ok(value); }\n" ++
+        "  ret RR.Error(rc);\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  fit wrap(0, 42) {\n" ++
+        "    RR.Ok(v) -> { printf(\"ok %lld\\n\", v); }\n" ++
+        "    RR.Closed -> { printf(\"closed\\n\"); }\n" ++
+        "    RR.Error(e) -> { printf(\"err %lld\\n\", e); }\n" ++
+        "  }\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    // The monomorphized enum typedef MUST be present (not used-but-undefined).
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "RR__num") != null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("ok 42\n", stdout);
+}
+
+test "default parameter values: free fn, method, multi-default, explicit override" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_default_params.fn";
+    const c_path = "codegen_default_params.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_default_params.exe" else "codegen_default_params";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // A call omitting trailing args fills them from the callee's defaults — for a free
+    // function (multiple defaults), and for a method (the implicit `self` is unaffected).
+    const input =
+        "imp std.c.io;\n" ++
+        "fun three(num a, num b = 2, num c = 3) num { ret a * 100 + b * 10 + c; }\n" ++
+        "compound Box { num v; }\n" ++
+        "impl Box {\n" ++
+        "  pub add(num x, num y = 100) num { ret self.v + x + y; }\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"%lld %lld %lld\\n\", three(1), three(1, 5), three(1, 5, 9));\n" ++
+        "  Box b; b.v = 1000;\n" ++
+        "  printf(\"%lld %lld\\n\", b.add(1), b.add(1, 1));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    // The C function signature must NOT carry the default (`= 2`) — C has no default args.
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "= 2)") == null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("123 153 159\n1101 1002\n", stdout);
+}
+
+test "default parameter rejected: required param after a defaulted one" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_default_params_bad_order.fn";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    const input =
+        "fun f(num x = 1, num y) num { ret x + y; }\n" ++
+        "fun main() num { ret f(1, 2); }\n";
+    const res = runTranspile(allocator, ifilepath, input);
+    if (res) |out| {
+        allocator.free(out);
+        return error.TestExpectedError; // should have failed
+    } else |_| {}
+}
+
+test "default parameter rejected: default references self" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_default_params_self_ref.fn";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    const input =
+        "compound C { num cfg; }\n" ++
+        "impl C { pub poll(num slice = self.cfg) num { ret slice; } }\n" ++
+        "fun main() num { C c; c.cfg = 1; ret c.poll(); }\n";
+    const res = runTranspile(allocator, ifilepath, input);
+    if (res) |out| {
+        allocator.free(out);
+        return error.TestExpectedError;
+    } else |_| {}
+}
+
 test "for item : iterable drives a user Iterator via next()/Option; break exits the loop" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_for_iter_quirk.fn";
