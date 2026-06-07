@@ -1289,6 +1289,11 @@ impl Channel<T> {
     ret self.send_result_timeout_with_token(value, timeout_ms, cancel_token);
   }
 
+  // Await-friendly wrapper for send_result_with_token (waits forever or until cancelled).
+  pub async send_result_with_token_async(T value, ChannelCancelToken* cancel_token) SendResult {
+    ret self.send_result_with_token(value, cancel_token);
+  }
+
   // Try receiving one value without blocking.
   // 
   // Params:
@@ -1447,102 +1452,6 @@ impl Channel<T> {
     ret rc;
   }
 
-  // Receive from self or another channel, polling until timeout.
-  // 
-  // Notes:
-  // - This uses polling with `try_recv` plus short condvar-assisted waits.
-  // 
-  // Params:
-  // - other: second channel pointer
-  // - out: destination pointer
-  // - out_index: destination pointer for selected channel index (0 for self, 1 for other)
-  // - timeout_ms: max wait in ms (negative means wait forever)
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when both channels are closed and empty
-  // - 2 on timeout
-  // - -1 when other/out/out_index is null
-  // - other nonzero codes on synchronization failures
-  pub select_recv_timeout_with(Channel<T>* other, T* out, num* out_index, num timeout_ms) num {
-    ret self.select_recv_timeout_with_slice(
-      other,
-      out,
-      out_index,
-      timeout_ms,
-      self.select_wait_slice_ms
-    );
-  }
-
-  // Receive from self or another channel, polling until timeout, with
-  // an explicit wait-slice override.
-  // 
-  // Params:
-  // - other: second channel pointer
-  // - out: destination pointer
-  // - out_index: destination pointer for selected channel index (0 for self, 1 for other)
-  // - timeout_ms: max wait in ms (negative means wait forever)
-  // - wait_slice_ms: wait duration per polling round (clamped to >= 1)
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when both channels are closed and empty
-  // - 2 on timeout
-  // - -1 when other/out/out_index is null
-  // - other nonzero codes on synchronization failures
-  pub select_recv_timeout_with_slice(
-    Channel<T>* other,
-    T* out,
-    num* out_index,
-    num timeout_ms,
-    num wait_slice_ms
-  ) num {
-    ret self.select_recv_timeout_with_tuning(
-      other,
-      out,
-      out_index,
-      timeout_ms,
-      wait_slice_ms,
-      self.select_wait_backoff_steps
-    );
-  }
-
-  // Receive from self or another channel, polling until timeout, with
-  // explicit wait-slice and backoff-step overrides.
-  // 
-  // Params:
-  // - other: second channel pointer
-  // - out: destination pointer
-  // - out_index: destination pointer for selected channel index (0 for self, 1 for other)
-  // - timeout_ms: max wait in ms (negative means wait forever)
-  // - wait_slice_ms: wait duration per polling round (clamped to >= 1)
-  // - backoff_steps: max adaptive backoff steps (clamped to 0..8)
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when both channels are closed and empty
-  // - 2 on timeout
-  // - -1 when other/out/out_index is null
-  // - other nonzero codes on synchronization failures
-  pub select_recv_timeout_with_tuning(
-    Channel<T>* other,
-    T* out,
-    num* out_index,
-    num timeout_ms,
-    num wait_slice_ms,
-    num backoff_steps
-  ) num {
-    ret self.select_recv_timeout_with_tuning_cancel(
-      other,
-      out,
-      out_index,
-      timeout_ms,
-      wait_slice_ms,
-      backoff_steps,
-      nil
-    );
-  }
-
   // Receive from self or another channel, polling until timeout, with
   // explicit wait-slice/backoff-step overrides and optional cancellation.
   // 
@@ -1566,17 +1475,28 @@ impl Channel<T> {
     Channel<T>* other,
     T* out,
     num* out_index,
-    num timeout_ms,
-    num wait_slice_ms,
-    num backoff_steps,
-    num* cancel_flag
+    num timeout_ms = -1,
+    num wait_slice_ms = -1,
+    num backoff_steps = -1,
+    num* cancel_flag = nil
   ) num {
     if other == nil || out == nil || out_index == nil {
       ret channel_rc_null_arg();
     }
 
-    let base_wait_slice_ms = channel_sanitize_wait_slice_ms(wait_slice_ms);
-    let max_backoff_steps = channel_sanitize_backoff_steps(backoff_steps);
+    // `-1` sentinels mean "use this channel's configured tuning" (default params
+    // can't reference `self`, so the substitution happens here in the body).
+    num eff_slice_ms = wait_slice_ms;
+    if eff_slice_ms < 0 {
+      eff_slice_ms = self.select_wait_slice_ms;
+    }
+    num eff_backoff_steps = backoff_steps;
+    if eff_backoff_steps < 0 {
+      eff_backoff_steps = self.select_wait_backoff_steps;
+    }
+
+    let base_wait_slice_ms = channel_sanitize_wait_slice_ms(eff_slice_ms);
+    let max_backoff_steps = channel_sanitize_backoff_steps(eff_backoff_steps);
 
     let wait_forever = timeout_ms < 0;
     ChannelAbsTime abs_time;
@@ -1687,193 +1607,48 @@ impl Channel<T> {
     );
   }
 
-  // Receive from self or another channel, polling until timeout, with
-  // optional cancellation and default wait tuning.
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when both channels are closed and empty
-  // - 2 on timeout
-  // - 3 when cancelled
-  // - -1 when other/out/out_index is null
-  // - other nonzero codes on synchronization failures
-  pub select_recv_timeout_with_cancel(
+  // Await-friendly select-recv (2-channel). All tuning knobs default to this
+  // channel's configuration (-1 sentinels), so `await a.select_recv_..._async(&b, &out, &idx)`
+  // blocks-on-the-scheduler until a value arrives on either channel.
+  pub async select_recv_timeout_with_tuning_cancel_async(
     Channel<T>* other,
     T* out,
     num* out_index,
-    num timeout_ms,
-    num* cancel_flag
+    num timeout_ms = -1,
+    num wait_slice_ms = -1,
+    num backoff_steps = -1,
+    num* cancel_flag = nil
   ) num {
     ret self.select_recv_timeout_with_tuning_cancel(
       other,
       out,
       out_index,
       timeout_ms,
-      self.select_wait_slice_ms,
-      self.select_wait_backoff_steps,
-      cancel_flag
-    );
-  }
-
-  // Receive from self or another channel, polling until timeout,
-  // with optional token cancellation and default wait tuning.
-  // 
-  // Returns:
-  // - same return codes as select_recv_timeout_with_cancel
-  pub select_recv_timeout_with_token(
-    Channel<T>* other,
-    T* out,
-    num* out_index,
-    num timeout_ms,
-    ChannelCancelToken* cancel_token
-  ) num {
-    ret self.select_recv_timeout_with_cancel(
-      other,
-      out,
-      out_index,
-      timeout_ms,
-      channel_cancel_token_flag_ptr(cancel_token)
-    );
-  }
-
-  // Receive from self or another channel, polling until one is ready,
-  // with optional cancellation and default wait tuning.
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when both channels are closed and empty
-  // - 3 when cancelled
-  // - -1 when other/out/out_index is null
-  // - other nonzero codes on synchronization failures
-  pub select_recv_with_cancel(Channel<T>* other, T* out, num* out_index, num* cancel_flag) num {
-    ret self.select_recv_timeout_with_tuning_cancel(
-      other,
-      out,
-      out_index,
-      -1,
-      self.select_wait_slice_ms,
-      self.select_wait_backoff_steps,
-      cancel_flag
-    );
-  }
-
-  // Receive from self or another channel, polling until one is ready,
-  // with optional token cancellation and default wait tuning.
-  // 
-  // Returns:
-  // - same return codes as select_recv_with_cancel
-  pub select_recv_with_token(
-    Channel<T>* other,
-    T* out,
-    num* out_index,
-    ChannelCancelToken* cancel_token
-  ) num {
-    ret self.select_recv_with_cancel(
-      other,
-      out,
-      out_index,
-      channel_cancel_token_flag_ptr(cancel_token)
-    );
-  }
-
-  // Receive from self or another channel, polling until one is ready,
-  // with an explicit wait-slice override.
-  // 
-  // Params:
-  // - other: second channel pointer
-  // - out: destination pointer
-  // - out_index: destination pointer for selected channel index (0 for self, 1 for other)
-  // - wait_slice_ms: wait duration per polling round (clamped to >= 1)
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when both channels are closed and empty
-  // - -1 when other/out/out_index is null
-  // - other nonzero codes on synchronization failures
-  pub select_recv_with_slice(Channel<T>* other, T* out, num* out_index, num wait_slice_ms) num {
-    ret self.select_recv_timeout_with_tuning(
-      other,
-      out,
-      out_index,
-      -1,
       wait_slice_ms,
-      self.select_wait_backoff_steps
+      backoff_steps,
+      cancel_flag
     );
   }
 
-  // Receive from self or another channel, polling until one is ready,
-  // with explicit wait-slice and backoff-step overrides.
-  // 
-  // Params:
-  // - other: second channel pointer
-  // - out: destination pointer
-  // - out_index: destination pointer for selected channel index (0 for self, 1 for other)
-  // - wait_slice_ms: wait duration per polling round (clamped to >= 1)
-  // - backoff_steps: max adaptive backoff steps (clamped to 0..8)
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when both channels are closed and empty
-  // - -1 when other/out/out_index is null
-  // - other nonzero codes on synchronization failures
-  pub select_recv_with_tuning(
+  // Await-friendly select-recv (2-channel) with token cancellation.
+  pub async select_recv_timeout_with_tuning_token_async(
     Channel<T>* other,
     T* out,
     num* out_index,
+    num timeout_ms,
     num wait_slice_ms,
-    num backoff_steps
-  ) num {
-    ret self.select_recv_timeout_with_tuning(
-      other,
-      out,
-      out_index,
-      -1,
-      wait_slice_ms,
-      backoff_steps
-    );
-  }
-
-  // Receive from self or another channel, polling until one is ready.
-  // 
-  // Params:
-  // - other: second channel pointer
-  // - out: destination pointer
-  // - out_index: destination pointer for selected channel index (0 for self, 1 for other)
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when both channels are closed and empty
-  // - -1 when other/out/out_index is null
-  // - other nonzero codes on synchronization failures
-  pub select_recv_with(Channel<T>* other, T* out, num* out_index) num {
-    ret self.select_recv_with_tuning(
-      other,
-      out,
-      out_index,
-      self.select_wait_slice_ms,
-      self.select_wait_backoff_steps
-    );
-  }
-
-  // Await-friendly wrapper for select_recv_with.
-  pub async select_recv_with_async(Channel<T>* other, T* out, num* out_index) num {
-    ret self.select_recv_with(other, out, out_index);
-  }
-
-  // Await-friendly wrapper for select_recv_timeout_with.
-  pub async select_recv_timeout_with_async(Channel<T>* other, T* out, num* out_index, num timeout_ms) num {
-    ret self.select_recv_timeout_with(other, out, out_index, timeout_ms);
-  }
-
-  // Await-friendly wrapper for select_recv_timeout_with_token.
-  pub async select_recv_timeout_with_token_async(
-    Channel<T>* other,
-    T* out,
-    num* out_index,
-    num timeout_ms,
+    num backoff_steps,
     ChannelCancelToken* cancel_token
   ) num {
-    ret self.select_recv_timeout_with_token(other, out, out_index, timeout_ms, cancel_token);
+    ret self.select_recv_timeout_with_tuning_token(
+      other,
+      out,
+      out_index,
+      timeout_ms,
+      wait_slice_ms,
+      backoff_steps,
+      cancel_token
+    );
   }
 
   // Try receiving from self + two other channels without blocking, using
@@ -1984,126 +1759,6 @@ impl Channel<T> {
   }
 
   // Receive from self + two other channels, polling until timeout, with
-  // fairness rotation driven by next_index.
-  // 
-  // Notes:
-  // - This uses polling with `try_recv` plus short condvar-assisted waits.
-  // 
-  // Params:
-  // - other_a: second channel pointer
-  // - other_b: third channel pointer
-  // - next_index: in/out probe start index (0=self, 1=other_a, 2=other_b)
-  // - out: destination pointer
-  // - out_index: destination pointer for selected channel index
-  // - timeout_ms: max wait in ms (negative means wait forever)
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when all three channels are closed and empty
-  // - 2 on timeout
-  // - -1 when any pointer argument is null
-  // - other nonzero codes on synchronization failures
-  pub select_recv_timeout3_rr_with(
-    Channel<T>* other_a,
-    Channel<T>* other_b,
-    num* next_index,
-    T* out,
-    num* out_index,
-    num timeout_ms
-  ) num {
-    ret self.select_recv_timeout3_rr_with_slice(
-      other_a,
-      other_b,
-      next_index,
-      out,
-      out_index,
-      timeout_ms,
-      self.select_wait_slice_ms
-    );
-  }
-
-  // Receive from self + two other channels, polling until timeout, with
-  // fairness rotation and an explicit wait-slice override.
-  // 
-  // Params:
-  // - other_a: second channel pointer
-  // - other_b: third channel pointer
-  // - next_index: in/out probe start index (0=self, 1=other_a, 2=other_b)
-  // - out: destination pointer
-  // - out_index: destination pointer for selected channel index
-  // - timeout_ms: max wait in ms (negative means wait forever)
-  // - wait_slice_ms: wait duration per polling round (clamped to >= 1)
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when all three channels are closed and empty
-  // - 2 on timeout
-  // - -1 when any pointer argument is null
-  // - other nonzero codes on synchronization failures
-  pub select_recv_timeout3_rr_with_slice(
-    Channel<T>* other_a,
-    Channel<T>* other_b,
-    num* next_index,
-    T* out,
-    num* out_index,
-    num timeout_ms,
-    num wait_slice_ms
-  ) num {
-    ret self.select_recv_timeout3_rr_with_tuning(
-      other_a,
-      other_b,
-      next_index,
-      out,
-      out_index,
-      timeout_ms,
-      wait_slice_ms,
-      self.select_wait_backoff_steps
-    );
-  }
-
-  // Receive from self + two other channels, polling until timeout, with
-  // fairness rotation and explicit wait-slice/backoff-step overrides.
-  // 
-  // Params:
-  // - other_a: second channel pointer
-  // - other_b: third channel pointer
-  // - next_index: in/out probe start index (0=self, 1=other_a, 2=other_b)
-  // - out: destination pointer
-  // - out_index: destination pointer for selected channel index
-  // - timeout_ms: max wait in ms (negative means wait forever)
-  // - wait_slice_ms: wait duration per polling round (clamped to >= 1)
-  // - backoff_steps: max adaptive backoff steps (clamped to 0..8)
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when all three channels are closed and empty
-  // - 2 on timeout
-  // - -1 when any pointer argument is null
-  // - other nonzero codes on synchronization failures
-  pub select_recv_timeout3_rr_with_tuning(
-    Channel<T>* other_a,
-    Channel<T>* other_b,
-    num* next_index,
-    T* out,
-    num* out_index,
-    num timeout_ms,
-    num wait_slice_ms,
-    num backoff_steps
-  ) num {
-    ret self.select_recv_timeout3_rr_with_tuning_cancel(
-      other_a,
-      other_b,
-      next_index,
-      out,
-      out_index,
-      timeout_ms,
-      wait_slice_ms,
-      backoff_steps,
-      nil
-    );
-  }
-
-  // Receive from self + two other channels, polling until timeout, with
   // fairness rotation, explicit wait tuning, and optional cancellation.
   // 
   // Returns:
@@ -2119,17 +1774,28 @@ impl Channel<T> {
     num* next_index,
     T* out,
     num* out_index,
-    num timeout_ms,
-    num wait_slice_ms,
-    num backoff_steps,
-    num* cancel_flag
+    num timeout_ms = -1,
+    num wait_slice_ms = -1,
+    num backoff_steps = -1,
+    num* cancel_flag = nil
   ) num {
     if other_a == nil || other_b == nil || next_index == nil || out == nil || out_index == nil {
       ret channel_rc_null_arg();
     }
 
-    let base_wait_slice_ms = channel_sanitize_wait_slice_ms(wait_slice_ms);
-    let max_backoff_steps = channel_sanitize_backoff_steps(backoff_steps);
+    // `-1` sentinels mean "use this channel's configured tuning" (default params
+    // can't reference `self`, so the substitution happens here in the body).
+    num eff_slice_ms = wait_slice_ms;
+    if eff_slice_ms < 0 {
+      eff_slice_ms = self.select_wait_slice_ms;
+    }
+    num eff_backoff_steps = backoff_steps;
+    if eff_backoff_steps < 0 {
+      eff_backoff_steps = self.select_wait_backoff_steps;
+    }
+
+    let base_wait_slice_ms = channel_sanitize_wait_slice_ms(eff_slice_ms);
+    let max_backoff_steps = channel_sanitize_backoff_steps(eff_backoff_steps);
 
     let wait_forever = timeout_ms < 0;
     ChannelAbsTime abs_time;
@@ -2237,24 +1903,18 @@ impl Channel<T> {
     );
   }
 
-  // Receive from self + two other channels, polling until timeout, with
-  // optional cancellation and default wait tuning.
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when all three channels are closed and empty
-  // - 2 on timeout
-  // - 3 when cancelled
-  // - -1 when any pointer argument is null
-  // - other nonzero codes on synchronization failures
-  pub select_recv_timeout3_rr_with_cancel(
+  // Await-friendly select-recv (3-channel round-robin). Tuning knobs default to
+  // this channel's configuration via -1 sentinels.
+  pub async select_recv_timeout3_rr_with_tuning_cancel_async(
     Channel<T>* other_a,
     Channel<T>* other_b,
     num* next_index,
     T* out,
     num* out_index,
-    num timeout_ms,
-    num* cancel_flag
+    num timeout_ms = -1,
+    num wait_slice_ms = -1,
+    num backoff_steps = -1,
+    num* cancel_flag = nil
   ) num {
     ret self.select_recv_timeout3_rr_with_tuning_cancel(
       other_a,
@@ -2263,238 +1923,9 @@ impl Channel<T> {
       out,
       out_index,
       timeout_ms,
-      self.select_wait_slice_ms,
-      self.select_wait_backoff_steps,
-      cancel_flag
-    );
-  }
-
-  // Receive from self + two other channels, polling until timeout,
-  // with optional token cancellation and default wait tuning.
-  // 
-  // Returns:
-  // - same return codes as select_recv_timeout3_rr_with_cancel
-  pub select_recv_timeout3_rr_with_token(
-    Channel<T>* other_a,
-    Channel<T>* other_b,
-    num* next_index,
-    T* out,
-    num* out_index,
-    num timeout_ms,
-    ChannelCancelToken* cancel_token
-  ) num {
-    ret self.select_recv_timeout3_rr_with_cancel(
-      other_a,
-      other_b,
-      next_index,
-      out,
-      out_index,
-      timeout_ms,
-      channel_cancel_token_flag_ptr(cancel_token)
-    );
-  }
-
-  // Receive from self + two other channels, polling until one is ready,
-  // with fairness rotation and optional cancellation.
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when all three channels are closed and empty
-  // - 3 when cancelled
-  // - -1 when any pointer argument is null
-  // - other nonzero codes on synchronization failures
-  pub select_recv3_rr_with_cancel(
-    Channel<T>* other_a,
-    Channel<T>* other_b,
-    num* next_index,
-    T* out,
-    num* out_index,
-    num* cancel_flag
-  ) num {
-    ret self.select_recv_timeout3_rr_with_tuning_cancel(
-      other_a,
-      other_b,
-      next_index,
-      out,
-      out_index,
-      -1,
-      self.select_wait_slice_ms,
-      self.select_wait_backoff_steps,
-      cancel_flag
-    );
-  }
-
-  // Receive from self + two other channels, polling until one is ready,
-  // with fairness rotation and optional token cancellation.
-  // 
-  // Returns:
-  // - same return codes as select_recv3_rr_with_cancel
-  pub select_recv3_rr_with_token(
-    Channel<T>* other_a,
-    Channel<T>* other_b,
-    num* next_index,
-    T* out,
-    num* out_index,
-    ChannelCancelToken* cancel_token
-  ) num {
-    ret self.select_recv3_rr_with_cancel(
-      other_a,
-      other_b,
-      next_index,
-      out,
-      out_index,
-      channel_cancel_token_flag_ptr(cancel_token)
-    );
-  }
-
-  // Receive from self + two other channels, polling until one is ready,
-  // with fairness rotation and an explicit wait-slice override.
-  // 
-  // Params:
-  // - other_a: second channel pointer
-  // - other_b: third channel pointer
-  // - next_index: in/out probe start index (0=self, 1=other_a, 2=other_b)
-  // - out: destination pointer
-  // - out_index: destination pointer for selected channel index
-  // - wait_slice_ms: wait duration per polling round (clamped to >= 1)
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when all three channels are closed and empty
-  // - -1 when any pointer argument is null
-  // - other nonzero codes on synchronization failures
-  pub select_recv3_rr_with_slice(
-    Channel<T>* other_a,
-    Channel<T>* other_b,
-    num* next_index,
-    T* out,
-    num* out_index,
-    num wait_slice_ms
-  ) num {
-    ret self.select_recv_timeout3_rr_with_tuning(
-      other_a,
-      other_b,
-      next_index,
-      out,
-      out_index,
-      -1,
       wait_slice_ms,
-      self.select_wait_backoff_steps
-    );
-  }
-
-  // Receive from self + two other channels, polling until one is ready,
-  // with fairness rotation and explicit wait-slice/backoff-step overrides.
-  // 
-  // Params:
-  // - other_a: second channel pointer
-  // - other_b: third channel pointer
-  // - next_index: in/out probe start index (0=self, 1=other_a, 2=other_b)
-  // - out: destination pointer
-  // - out_index: destination pointer for selected channel index
-  // - wait_slice_ms: wait duration per polling round (clamped to >= 1)
-  // - backoff_steps: max adaptive backoff steps (clamped to 0..8)
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when all three channels are closed and empty
-  // - -1 when any pointer argument is null
-  // - other nonzero codes on synchronization failures
-  pub select_recv3_rr_with_tuning(
-    Channel<T>* other_a,
-    Channel<T>* other_b,
-    num* next_index,
-    T* out,
-    num* out_index,
-    num wait_slice_ms,
-    num backoff_steps
-  ) num {
-    ret self.select_recv_timeout3_rr_with_tuning(
-      other_a,
-      other_b,
-      next_index,
-      out,
-      out_index,
-      -1,
-      wait_slice_ms,
-      backoff_steps
-    );
-  }
-
-  // Receive from self + two other channels, polling until one is ready,
-  // with fairness rotation driven by next_index.
-  // 
-  // Params:
-  // - other_a: second channel pointer
-  // - other_b: third channel pointer
-  // - next_index: in/out probe start index (0=self, 1=other_a, 2=other_b)
-  // - out: destination pointer
-  // - out_index: destination pointer for selected channel index
-  // 
-  // Returns:
-  // - 0 on success
-  // - 1 when all three channels are closed and empty
-  // - -1 when any pointer argument is null
-  // - other nonzero codes on synchronization failures
-  pub select_recv3_rr_with(
-    Channel<T>* other_a,
-    Channel<T>* other_b,
-    num* next_index,
-    T* out,
-    num* out_index
-  ) num {
-    ret self.select_recv3_rr_with_tuning(
-      other_a,
-      other_b,
-      next_index,
-      out,
-      out_index,
-      self.select_wait_slice_ms,
-      self.select_wait_backoff_steps
-    );
-  }
-
-  // Await-friendly wrapper for select_recv3_rr_with.
-  pub async select_recv3_rr_with_async(
-    Channel<T>* other_a,
-    Channel<T>* other_b,
-    num* next_index,
-    T* out,
-    num* out_index
-  ) num {
-    ret self.select_recv3_rr_with(other_a, other_b, next_index, out, out_index);
-  }
-
-  // Await-friendly wrapper for select_recv_timeout3_rr_with.
-  pub async select_recv_timeout3_rr_with_async(
-    Channel<T>* other_a,
-    Channel<T>* other_b,
-    num* next_index,
-    T* out,
-    num* out_index,
-    num timeout_ms
-  ) num {
-    ret self.select_recv_timeout3_rr_with(other_a, other_b, next_index, out, out_index, timeout_ms);
-  }
-
-  // Await-friendly wrapper for select_recv_timeout3_rr_with_token.
-  pub async select_recv_timeout3_rr_with_token_async(
-    Channel<T>* other_a,
-    Channel<T>* other_b,
-    num* next_index,
-    T* out,
-    num* out_index,
-    num timeout_ms,
-    ChannelCancelToken* cancel_token
-  ) num {
-    ret self.select_recv_timeout3_rr_with_token(
-      other_a,
-      other_b,
-      next_index,
-      out,
-      out_index,
-      timeout_ms,
-      cancel_token
+      backoff_steps,
+      cancel_flag
     );
   }
 
@@ -2562,7 +1993,15 @@ impl Channel<T> {
     }
 
     let value = self.zero_value();
-    let rc = await self.select_recv_timeout_with_async(other, &value, out_index, timeout_ms);
+    let rc = self.select_recv_timeout_with_tuning_cancel(
+      other,
+      &value,
+      out_index,
+      timeout_ms,
+      -1,
+      -1,
+      nil
+    );
     if rc != channel_rc_ok() {
       ret rc;
     }
@@ -2587,11 +2026,13 @@ impl Channel<T> {
     }
 
     let value = self.zero_value();
-    let rc = await self.select_recv_timeout_with_token_async(
+    let rc = self.select_recv_timeout_with_tuning_token(
       other,
       &value,
       out_index,
       timeout_ms,
+      -1,
+      -1,
       cancel_token
     );
     if rc != channel_rc_ok() {

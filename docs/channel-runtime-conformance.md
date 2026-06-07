@@ -46,8 +46,8 @@ The following operations are treated as compatibility anchors:
 | `send_timeout` after `close()` | `channel_rc_closed()` (`1`) |
 | `recv_timeout_into` after close+drain | `channel_rc_closed()` (`1`) |
 | `select_recv_default_with` on two open+empty channels | `channel_rc_default()` (`3`), index `channel_select_index_default()` (`-1`) |
-| `select_recv_timeout_with` on two open+empty channels | `channel_rc_timeout()` (`2`) |
-| `select_recv_timeout_with_cancel` with raised cancel flag | `channel_rc_cancelled()` (`3`) |
+| `select_recv_timeout_with_tuning_cancel` on two open+empty channels | `channel_rc_timeout()` (`2`) |
+| `select_recv_timeout_with_tuning_cancel` with raised cancel flag | `channel_rc_cancelled()` (`3`) |
 
 Alias constraints are also part of compatibility:
 
@@ -59,7 +59,7 @@ Alias constraints are also part of compatibility:
 A micro-benchmark validates select round-robin fairness and timeout stability:
 
 - Workload:
-	- `select_recv_timeout3_rr_with_tuning` over three prefilled channels (360 receives total)
+	- `select_recv_timeout3_rr_with_tuning_cancel` over three prefilled channels (360 receives total)
 	- 20 timeout rounds over empty 3-way select with 15ms timeout each
 - Fairness threshold: `fairness_skew <= 1`
 - Completion threshold: `count_total == 360`

@@ -483,12 +483,14 @@ pub async fun copy_file_progress_async(
     total = total + n;
 
     if progress_updates != nil {
-      let rc = await progress_updates.send_timeout_with_token_async(total, 0, cancel_token);
-      if rc == channel_rc_cancelled() {
-        ret -3;
-      }
-      if rc != channel_rc_ok() && rc != channel_rc_full() && rc != channel_rc_timeout() {
-        ret -1;
+      // Progress is best-effort: a Full channel (no reader keeping up) is fine to skip;
+      // only a cancellation or a real failure aborts the copy.
+      fit await progress_updates.send_result_timeout_with_token_async(total, 0, cancel_token) {
+        .Ok -> { }
+        .Full -> { }
+        .Cancelled -> { ret -3; }
+        .Closed -> { ret -1; }
+        .Error(e) -> { ret -1; }
       }
     }
   }
@@ -539,16 +541,24 @@ pub async fun read_lines_into_channel_async(
       break;
     }
 
-    let rc = await out_lines.send_with_token_async(line, cancel_token);
-    if rc != channel_rc_ok() {
-      free(line);
-      if rc == channel_rc_cancelled() {
+    fit await out_lines.send_result_with_token_async(line, cancel_token) {
+      .Ok -> { }
+      .Cancelled -> {
+        free(line);
         ret -3;
       }
-      if rc == channel_rc_closed() {
+      .Closed -> {
+        free(line);
         ret sent;
       }
-      ret -1;
+      .Full -> {
+        free(line);
+        ret -1;
+      }
+      .Error(e) -> {
+        free(line);
+        ret -1;
+      }
     }
 
     sent = sent + 1;

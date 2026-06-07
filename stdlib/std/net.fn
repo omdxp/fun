@@ -429,17 +429,24 @@ pub async fun build_http_get_to_channel_async(
     ret -2;
   }
 
-  let rc = await out_requests.send_with_token_async(req, cancel_token);
-  if rc == channel_rc_ok() {
-    ret 0;
-  }
-
-  free(req);
-  if rc == channel_rc_cancelled() {
-    ret -3;
-  }
-  if rc == channel_rc_closed() {
-    ret 1;
+  fit await out_requests.send_result_with_token_async(req, cancel_token) {
+    .Ok -> { ret 0; }
+    .Cancelled -> {
+      free(req);
+      ret -3;
+    }
+    .Closed -> {
+      free(req);
+      ret 1;
+    }
+    .Full -> {
+      free(req);
+      ret -1;
+    }
+    .Error(e) -> {
+      free(req);
+      ret -1;
+    }
   }
   ret -1;
 }

@@ -2618,9 +2618,9 @@ test "std.channel runtime conformance matrix is stable across backend selectors"
         "  num out_sel = 0;\n" ++
         "  num rc_default = a.select_recv_default_with(&b, &out_sel, &idx);\n" ++
         "  num idx_default = idx;\n" ++
-        "  num rc_select_timeout = a.select_recv_timeout_with(&b, &out_sel, &idx, 20);\n" ++
+        "  num rc_select_timeout = a.select_recv_timeout_with_tuning_cancel(&b, &out_sel, &idx, 20);\n" ++
         "  num cancel_select = 1;\n" ++
-        "  num rc_select_cancelled = a.select_recv_timeout_with_cancel(&b, &out_sel, &idx, 20, &cancel_select);\n" ++
+        "  num rc_select_cancelled = a.select_recv_timeout_with_tuning_cancel(&b, &out_sel, &idx, 20, -1, -1, &cancel_select);\n" ++
         "\n" ++
         "  printf(\"backend=%s\\n\", runtime_backend_name());\n" ++
         "  printf(\"sync_backend=%s\\n\", sync_runtime_backend_name());\n" ++
@@ -2744,7 +2744,7 @@ test "std.channel fairness and timeout benchmark stays within backend thresholds
         "  for i < total_rounds {\n" ++
         "    num out = 0;\n" ++
         "    num which = -1;\n" ++
-        "    num rc = a.select_recv_timeout3_rr_with_tuning(&b, &c, &next, &out, &which, 50, 5, 0);\n" ++
+        "    num rc = a.select_recv_timeout3_rr_with_tuning_cancel(&b, &c, &next, &out, &which, 50, 5, 0);\n" ++
         "    if rc != channel_rc_ok() {\n" ++
         "      fairness_rc = rc;\n" ++
         "      i = total_rounds;\n" ++
@@ -2786,7 +2786,7 @@ test "std.channel fairness and timeout benchmark stays within backend thresholds
         "  num timeout_failures = 0;\n" ++
         "  i = 0;\n" ++
         "  for i < timeout_rounds {\n" ++
-        "    num timeout_rc = x.select_recv_timeout3_rr_with_tuning(&y, &z, &next_timeout, &out_timeout, &idx_timeout, 15, 5, 0);\n" ++
+        "    num timeout_rc = x.select_recv_timeout3_rr_with_tuning_cancel(&y, &z, &next_timeout, &out_timeout, &idx_timeout, 15, 5, 0);\n" ++
         "    if timeout_rc != channel_rc_timeout() {\n" ++
         "      timeout_failures = timeout_failures + 1;\n" ++
         "    }\n" ++
@@ -3029,7 +3029,7 @@ test "std.channel async wrapper APIs await and run" {
         "  _ = await b.send_async(99);\n" ++
         "  num idx = -1;\n" ++
         "  num sel = 0;\n" ++
-        "  num rc_sel = await a.select_recv_with_async(&b, &sel, &idx);\n" ++
+        "  num rc_sel = await a.select_recv_timeout_with_tuning_cancel_async(&b, &sel, &idx);\n" ++
         "\n" ++
         "  Channel<num> x = channel_new(0);\n" ++
         "  Channel<num> y = channel_new(0);\n" ++
@@ -3038,7 +3038,7 @@ test "std.channel async wrapper APIs await and run" {
         "  num next = 0;\n" ++
         "  num out3 = 0;\n" ++
         "  num idx3 = -1;\n" ++
-        "  num rc_sel3 = await x.select_recv3_rr_with_async(&y, &z, &next, &out3, &idx3);\n" ++
+        "  num rc_sel3 = await x.select_recv_timeout3_rr_with_tuning_cancel_async(&y, &z, &next, &out3, &idx3);\n" ++
         "\n" ++
         "  printf(\"%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld\", rc_send, first, rc_send_timed, rc_recv_into, out, rc_sel, idx, sel, rc_sel3, idx3, out3);\n" ++
         "\n" ++
@@ -3316,10 +3316,6 @@ test "std.channel cancel token APIs transpile" {
         "  _ = ch.recv_into_with_token(&out, &token);\n" ++
         "  num v1 = ch.recv_timeout_with_token(10, &token);\n" ++
         "  num v2 = ch.recv_with_token(&token);\n" ++
-        "  _ = a.select_recv_timeout_with_token(&b, &out, &idx, 10, &token);\n" ++
-        "  _ = a.select_recv_with_token(&b, &out, &idx, &token);\n" ++
-        "  _ = a.select_recv_timeout3_rr_with_token(&b, &c, &next, &out, &idx, 10, &token);\n" ++
-        "  _ = a.select_recv3_rr_with_token(&b, &c, &next, &out, &idx, &token);\n" ++
         "  _ = a.select_recv_timeout_with_tuning_token(&b, &out, &idx, 10, 2, 1, &token);\n" ++
         "  _ = a.select_recv_timeout3_rr_with_tuning_token(&b, &c, &next, &out, &idx, 10, 2, 1, &token);\n" ++
         "  _ = out + idx + next + v1 + v2;\n" ++
@@ -3338,10 +3334,6 @@ test "std.channel cancel token APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__recv_into_with_token(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__recv_timeout_with_token(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__recv_with_token(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with_token(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_with_token(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_token(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv3_rr_with_token(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with_tuning_token(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_tuning_token(") != null);
 
@@ -3360,14 +3352,14 @@ test "std.channel select recv2 timeout transpile" {
         "  _ = b.send(42);\n" ++
         "  num out = 0;\n" ++
         "  num idx = -1;\n" ++
-        "  _ = a.select_recv_timeout_with(&b, &out, &idx, 10);\n" ++
+        "  _ = a.select_recv_timeout_with_tuning_cancel(&b, &out, &idx, 10);\n" ++
         "  _ = out + idx;\n" ++
         "}\n";
 
     const out_owned = try runTranspile(allocator, ifilepath, input);
     defer allocator.free(out_owned);
 
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with_tuning_cancel(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_try_recv_with(") != null);
 
     try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
@@ -3387,14 +3379,14 @@ test "std.channel select recv3 fair timeout transpile" {
         "  num out = 0;\n" ++
         "  num idx = -1;\n" ++
         "  num next = 0;\n" ++
-        "  _ = a.select_recv_timeout3_rr_with(&b, &c, &next, &out, &idx, 10);\n" ++
+        "  _ = a.select_recv_timeout3_rr_with_tuning_cancel(&b, &c, &next, &out, &idx, 10);\n" ++
         "  _ = out + idx + next;\n" ++
         "}\n";
 
     const out_owned = try runTranspile(allocator, ifilepath, input);
     defer allocator.free(out_owned);
 
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_tuning_cancel(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_try_recv3_rr_with(") != null);
 
     try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
@@ -3440,19 +3432,19 @@ test "std.channel select cancel-aware APIs transpile" {
         "  num idx = -1;\n" ++
         "  num next = 0;\n" ++
         "  num cancel = 1;\n" ++
-        "  _ = a.select_recv_timeout_with_cancel(&b, &out, &idx, 10, &cancel);\n" ++
-        "  _ = a.select_recv_with_cancel(&b, &out, &idx, &cancel);\n" ++
-        "  _ = a.select_recv_timeout3_rr_with_cancel(&b, &c, &next, &out, &idx, 10, &cancel);\n" ++
-        "  _ = a.select_recv3_rr_with_cancel(&b, &c, &next, &out, &idx, &cancel);\n" ++
+        "  _ = a.select_recv_timeout_with_tuning_cancel(&b, &out, &idx, 10, -1, -1, &cancel);\n" ++
+        "  _ = a.select_recv_timeout_with_tuning_cancel(&b, &out, &idx, -1, -1, -1, &cancel);\n" ++
+        "  _ = a.select_recv_timeout3_rr_with_tuning_cancel(&b, &c, &next, &out, &idx, 10, -1, -1, &cancel);\n" ++
+        "  _ = a.select_recv_timeout3_rr_with_tuning_cancel(&b, &c, &next, &out, &idx, -1, -1, -1, &cancel);\n" ++
         "}\n";
 
     const out_owned = try runTranspile(allocator, ifilepath, input);
     defer allocator.free(out_owned);
 
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with_cancel(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_with_cancel(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_cancel(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv3_rr_with_cancel(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with_tuning_cancel(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with_tuning_cancel(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_tuning_cancel(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_tuning_cancel(") != null);
 
     try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
@@ -3492,15 +3484,15 @@ test "std.channel select explicit wait-slice override transpile" {
         "  num out = 0;\n" ++
         "  num idx = -1;\n" ++
         "  num next = 0;\n" ++
-        "  _ = a.select_recv_timeout_with_slice(&b, &out, &idx, 10, 2);\n" ++
-        "  _ = a.select_recv_timeout3_rr_with_slice(&b, &c, &next, &out, &idx, 10, 2);\n" ++
+        "  _ = a.select_recv_timeout_with_tuning_cancel(&b, &out, &idx, 10, 2);\n" ++
+        "  _ = a.select_recv_timeout3_rr_with_tuning_cancel(&b, &c, &next, &out, &idx, 10, 2);\n" ++
         "}\n";
 
     const out_owned = try runTranspile(allocator, ifilepath, input);
     defer allocator.free(out_owned);
 
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with_slice(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_slice(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with_tuning_cancel(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_tuning_cancel(") != null);
 
     try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
@@ -3518,15 +3510,15 @@ test "std.channel select explicit wait-slice and backoff override transpile" {
         "  num out = 0;\n" ++
         "  num idx = -1;\n" ++
         "  num next = 0;\n" ++
-        "  _ = a.select_recv_timeout_with_tuning(&b, &out, &idx, 10, 2, 1);\n" ++
-        "  _ = a.select_recv_timeout3_rr_with_tuning(&b, &c, &next, &out, &idx, 10, 2, 1);\n" ++
+        "  _ = a.select_recv_timeout_with_tuning_cancel(&b, &out, &idx, 10, 2, 1);\n" ++
+        "  _ = a.select_recv_timeout3_rr_with_tuning_cancel(&b, &c, &next, &out, &idx, 10, 2, 1);\n" ++
         "}\n";
 
     const out_owned = try runTranspile(allocator, ifilepath, input);
     defer allocator.free(out_owned);
 
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with_tuning(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_tuning(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with_tuning_cancel(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_tuning_cancel(") != null);
 
     try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
@@ -3544,19 +3536,15 @@ test "std.channel select blocking tuning overrides transpile" {
         "  num out = 0;\n" ++
         "  num idx = -1;\n" ++
         "  num next = 0;\n" ++
-        "  _ = a.select_recv_with_slice(&b, &out, &idx, 2);\n" ++
-        "  _ = a.select_recv_with_tuning(&b, &out, &idx, 2, 1);\n" ++
-        "  _ = a.select_recv3_rr_with_slice(&b, &c, &next, &out, &idx, 2);\n" ++
-        "  _ = a.select_recv3_rr_with_tuning(&b, &c, &next, &out, &idx, 2, 1);\n" ++
+        "  _ = a.select_recv_timeout_with_tuning_cancel(&b, &out, &idx, -1, 2, 1);\n" ++
+        "  _ = a.select_recv_timeout3_rr_with_tuning_cancel(&b, &c, &next, &out, &idx, -1, 2, 1);\n" ++
         "}\n";
 
     const out_owned = try runTranspile(allocator, ifilepath, input);
     defer allocator.free(out_owned);
 
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_with_slice(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_with_tuning(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv3_rr_with_slice(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv3_rr_with_tuning(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout_with_tuning_cancel(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Channel__num__select_recv_timeout3_rr_with_tuning_cancel(") != null);
 
     try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
@@ -3572,7 +3560,7 @@ test "std.channel select adaptive wait backoff transpile" {
         "  Channel<num> b = channel_new(0);\n" ++
         "  num out = 0;\n" ++
         "  num idx = -1;\n" ++
-        "  _ = a.select_recv_timeout_with(&b, &out, &idx, 10);\n" ++
+        "  _ = a.select_recv_timeout_with_tuning_cancel(&b, &out, &idx, 10);\n" ++
         "}\n";
 
     const out_owned = try runTranspile(allocator, ifilepath, input);
@@ -3687,9 +3675,9 @@ test "channel select cancel returns cancelled status" {
         "  num idx = -1;\n" ++
         "  num next = 0;\n" ++
         "  num cancel = 1;\n" ++
-        "  num rc2 = a.select_recv_timeout_with_cancel(&b, &out, &idx, 10, &cancel);\n" ++
+        "  num rc2 = a.select_recv_timeout_with_tuning_cancel(&b, &out, &idx, 10, -1, -1, &cancel);\n" ++
         "  num idx2 = idx;\n" ++
-        "  num rc3 = a.select_recv_timeout3_rr_with_cancel(&b, &c, &next, &out, &idx, 10, &cancel);\n" ++
+        "  num rc3 = a.select_recv_timeout3_rr_with_tuning_cancel(&b, &c, &next, &out, &idx, 10, -1, -1, &cancel);\n" ++
         "  num idx3 = idx;\n" ++
         "  num ok_rc2 = 0;\n" ++
         "  if rc2 == channel_rc_cancelled() { ok_rc2 = 1; }\n" ++
@@ -3920,7 +3908,7 @@ test "channel select3 rr stress drains all values with expected statuses" {
         "  num sum = 0;\n" ++
         "  i = 0;\n" ++
         "  for i < 600 {\n" ++
-        "    num rc = a.select_recv3_rr_with(&b, &c, &next, &out, &idx);\n" ++
+        "    num rc = a.select_recv_timeout3_rr_with_tuning_cancel(&b, &c, &next, &out, &idx, -1);\n" ++
         "    if rc != channel_rc_ok() {\n" ++
         "      printf(\"0|0|0|0|0\");\n" ++
         "      _ = a.destroy();\n" ++
@@ -4012,7 +4000,7 @@ test "channel default and cancel select stress stays stable" {
         "  i = 0;\n" ++
         "  num ok_cancel = 1;\n" ++
         "  for i < 300 {\n" ++
-        "    num rc = a.select_recv_timeout_with_cancel(&b, &out, &idx, 5, &cancel);\n" ++
+        "    num rc = a.select_recv_timeout_with_tuning_cancel(&b, &out, &idx, 5, -1, -1, &cancel);\n" ++
         "    if rc != channel_rc_cancelled() {\n" ++
         "      ok_cancel = 0;\n" ++
         "    } elif idx != channel_select_index_default() {\n" ++
@@ -7573,4 +7561,47 @@ test "for k, v :: map iterates key/value pairs" {
     const stdout = try runExeWithEnv(allocator, exe_path, &.{});
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("3 60\n", stdout);
+}
+
+test "default parameter values: free fn + method, omitting trailing args fills defaults" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_default_params.fn";
+    const c_path = "codegen_default_params.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_default_params.exe" else "codegen_default_params";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // A trailing default param may be omitted at the call site; the callee's default
+    // expression is materialized there. Covers: free fn with two defaults (omit 2 / omit
+    // 1 / pass all), and a method default. A default may call a global fn (`base()`).
+    const input =
+        "imp std.c.io;\n" ++
+        "fun base() num { ret 100; }\n" ++
+        "fun three(num a, num b = 2, num c = base()) num { ret a * 1000 + b * 10 + c; }\n" ++
+        "compound Box { num v; }\n" ++
+        "impl Box {\n" ++
+        "  pub add(num x, num y = 50) num { ret self.v + x + y; }\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"%lld %lld %lld\\n\", three(1), three(1, 5), three(1, 5, 9));\n" ++
+        "  Box b;\n" ++
+        "  b.v = 1000;\n" ++
+        "  printf(\"%lld %lld\\n\", b.add(1), b.add(1, 1));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    // three(1)=1000+20+100=1120; three(1,5)=1000+50+100=1150; three(1,5,9)=1000+50+9=1059
+    // b.add(1)=1000+1+50=1051; b.add(1,1)=1000+1+1=1002
+    try std.testing.expectEqualStrings("1120 1150 1059\n1051 1002\n", stdout);
 }

@@ -1787,6 +1787,64 @@ test "fls e2e: dot-shorthand in a fit whose subject is a method call returning a
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: dot-shorthand in a fit whose subject is `await <method-call>`" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    // The fit SUBJECT is `await b.peek()` — an awaited method call returning a generic
+    // enum. The leading `await` keyword must be skipped so the shorthand `.Ok` arm
+    // resolves via the awaited call's return type. (Regression: `fit await <call>` gave
+    // empty hover/def because subject resolution bailed on the `await` keyword.)
+    const doc_text =
+        "imp std.c.io;\n\n" ++
+        "enum RR<T> {\n" ++
+        "  Ok(T),\n" ++
+        "  Empty,\n" ++
+        "}\n\n" ++
+        "compound Box<T> {\n" ++
+        "  T v;\n" ++
+        "}\n\n" ++
+        "impl Box<T> {\n" ++
+        "  pub async peek() RR<T> {\n" ++
+        "    ret RR.Ok(self.v);\n" ++
+        "  }\n" ++
+        "}\n\n" ++
+        "async fun run() {\n" ++
+        "  Box<num> b;\n" ++
+        "  b.v = 5;\n" ++
+        "  fit await b.peek() {\n" ++
+        "    .Ok(v) -> { printf(\"%lld\\n\", v); }\n" ++
+        "    .Empty -> { printf(\"empty\\n\"); }\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-fit-await-shorthand.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const ok_pos = try findPosition(doc_text, ".Ok(v) ->", 0);
+    const ok_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, ok_pos.line, ok_pos.col + 1 },
+    );
+    defer allocator.free(ok_params);
+    try waitForHoverContains(allocator, &lsp, ok_params, "RR.Ok", 15000);
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: cross-file generic fit-binding hover resolves the imported enum's payload" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();

@@ -9,7 +9,7 @@ fun main() {
 
   num out = 0;
   num which = -1;
-  num rc = a.select_recv_with_tuning(&b, &out, &which, 2, 1);
+  num rc = a.select_recv_timeout_with_tuning_cancel(&b, &out, &which, -1, 2, 1);
 
   printf("select rc=%lld which=%lld value=%lld slice=%lld backoff=%lld\n", rc, which, out, 2, 1);
 

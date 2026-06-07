@@ -4393,7 +4393,13 @@ pub const LspServer = struct {
             const t = idx.tokens[@intCast(f)];
             if ((t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, ";")) break;
             if (t.kind == .keyword and std.mem.eql(u8, t.text, "fit")) {
-                const after_i = nextNonTrivialTokenLite(idx.tokens, @as(usize, @intCast(f + 1))) orelse return null;
+                var after_i = nextNonTrivialTokenLite(idx.tokens, @as(usize, @intCast(f + 1))) orelse return null;
+                // Skip a leading `await` so `fit await ch.recv_result() { .Ok -> }`
+                // resolves the same as `fit ch.recv_result()` — the awaited expression's
+                // type is the awaited call's return type.
+                if (idx.tokens[after_i].kind == .keyword and std.mem.eql(u8, idx.tokens[after_i].text, "await")) {
+                    after_i = nextNonTrivialTokenLite(idx.tokens, after_i + 1) orelse return null;
+                }
                 if (idx.tokens[after_i].kind != .identifier) return null;
                 const name = idx.tokens[after_i].text;
                 if (self.isEnumTypeName(uri, name)) return name;

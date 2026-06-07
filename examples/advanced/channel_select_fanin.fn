@@ -6,11 +6,12 @@
 // 
 // fork f(args)                         spawn a virtual thread (M:N scheduler)
 // ch <- v                              send (sugar for ch.send(v))
-// a.select_recv_with_tuning(&b, ...)   block until `a` OR `b` has a value
+// a.select_recv_timeout_with_tuning_cancel(&b, ...)  block until a OR b ready
 // 
-// `select_recv_with_tuning(other, out, out_index, slice_ms, backoff)` writes the
-// received value into `out`, sets `out_index` to which channel fired (0 = self,
-// 1 = other), and returns a status code (0 = ok, 1 = both closed).
+// `select_recv_timeout_with_tuning_cancel(other, out, out_index, timeout_ms,
+// slice_ms, backoff)` writes the received value into `out`, sets `out_index` to
+// which channel fired (0 = self, 1 = other), and returns a status code (0 = ok,
+// 1 = both closed). A negative `timeout_ms` means wait forever.
 
 imp std.c.io;
 imp std.channel;
@@ -40,7 +41,7 @@ fun main() num {
   num value = 0;
   num which = -1;
   for got < 6 {
-    num rc = evens.select_recv_with_tuning(&odds, &value, &which, 2, 1);
+    num rc = evens.select_recv_timeout_with_tuning_cancel(&odds, &value, &which, -1, 2, 1);
     if rc == 0 {
       total = total + value;
       if which == 0 {

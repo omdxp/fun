@@ -188,7 +188,7 @@ test "typecheck std.channel async wrappers with await are ok" {
         "  _ = await b.send_async(9);\n" ++
         "  num sel = 0;\n" ++
         "  num idx = -1;\n" ++
-        "  num rc_sel = await a.select_recv_with_async(&b, &sel, &idx);\n" ++
+        "  num rc_sel = await a.select_recv_timeout_with_tuning_cancel_async(&b, &sel, &idx);\n" ++
         "\n" ++
         "  _ = rc_send + out + rc_sel + sel + idx;\n" ++
         "}\n";
