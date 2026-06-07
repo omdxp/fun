@@ -64,7 +64,7 @@ impl Array<T> {
 
   // Swap two elements.
   pub swap(num i, num j) {
-    T tmp = self.data[i];
+    let tmp = self.data[i];
     self.data[i] = self.data[j];
     self.data[j] = tmp;
   }
@@ -114,7 +114,7 @@ pub fun min_num(num[] arr, num len) num {
   if len == 0 {
     ret 0;
   }
-  num min = arr[0];
+  let min = arr[0];
   num i = 1;
   for i < len {
     if arr[i] < min {
@@ -137,7 +137,7 @@ pub fun max_num(num[] arr, num len) num {
   if len == 0 {
     ret 0;
   }
-  num max = arr[0];
+  let max = arr[0];
   num i = 1;
   for i < len {
     if arr[i] > max {

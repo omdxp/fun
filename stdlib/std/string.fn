@@ -68,7 +68,7 @@ impl StringBuilder {
 
   // Append a num as decimal digits.
   pub append_num(num n) {
-    str s = format_num(n);
+    let s = format_num(n);
     if s == nil {
       ret;
     }
@@ -78,7 +78,7 @@ impl StringBuilder {
 
   // Append a dec with the given number of decimal places.
   pub append_dec(dec d, num places) {
-    str s = format_dec(d, places);
+    let s = format_dec(d, places);
     if s == nil {
       ret;
     }
@@ -164,8 +164,8 @@ pub fun is_empty(str s) bin {
 pub fun equals(str a, str b) bin {
   num i = 0;
   for true {
-    chr ca = a[i];
-    chr cb = b[i];
+    let ca = a[i];
+    let cb = b[i];
     if ca != cb {
       ret false;
     }
@@ -185,8 +185,8 @@ pub fun equals(str a, str b) bin {
 // Returns:
 // - true if prefix matches
 pub fun starts_with(str s, str prefix) bin {
-  num sl = _string_len(s);
-  num pl = _string_len(prefix);
+  let sl = _string_len(s);
+  let pl = _string_len(prefix);
   if pl > sl {
     ret false;
   }
@@ -209,13 +209,13 @@ pub fun starts_with(str s, str prefix) bin {
 // Returns:
 // - true if suffix matches
 pub fun ends_with(str s, str suffix) bin {
-  num sl = _string_len(s);
-  num su = _string_len(suffix);
+  let sl = _string_len(s);
+  let su = _string_len(suffix);
   if su > sl {
     ret false;
   }
   num i = 0;
-  num start = sl - su;
+  let start = sl - su;
   for i < su {
     if s[start + i] != suffix[i] {
       ret false;
@@ -269,7 +269,7 @@ pub fun try_substr(str s, num start, num length) Result<str> {
   if start + length > _string_len(s) {
     ret err(1, "substr: range exceeds string length", "");
   }
-  str out = substr(s, start, length);
+  let out = substr(s, start, length);
   if out == nil {
     ret err(1, "substr: allocation failed", "");
   }
@@ -284,14 +284,14 @@ pub fun try_substr(str s, num start, num length) Result<str> {
 // Returns:
 // - trimmed string
 pub fun trim(str s) str {
-  num n = _string_len(s);
+  let n = _string_len(s);
   if n == 0 {
     ret substr(s, 0, 0);
   }
 
   num start = 0;
   for start < n {
-    chr c = s[start];
+    let c = s[start];
     if _is_space(c) == false {
       break;
     }
@@ -304,14 +304,14 @@ pub fun trim(str s) str {
 
   num end = n;
   for end > 0 {
-    chr c = s[end - 1];
+    let c = s[end - 1];
     if _is_space(c) == false {
       break;
     }
     end = end - 1;
   }
 
-  num out_len = end - start;
+  let out_len = end - start;
   ret substr(s, start, out_len);
 }
 
@@ -323,14 +323,14 @@ pub fun trim(str s) str {
 // Returns:
 // - trimmed string
 pub fun trim_left(str s) str {
-  num n = _string_len(s);
+  let n = _string_len(s);
   if n == 0 {
     ret substr(s, 0, 0);
   }
 
   num start = 0;
   for start < n {
-    chr c = s[start];
+    let c = s[start];
     if _is_space(c) == false {
       break;
     }
@@ -347,14 +347,14 @@ pub fun trim_left(str s) str {
 // Returns:
 // - trimmed string
 pub fun trim_right(str s) str {
-  num n = _string_len(s);
+  let n = _string_len(s);
   if n == 0 {
     ret substr(s, 0, 0);
   }
 
   num end = n;
   for end > 0 {
-    chr c = s[end - 1];
+    let c = s[end - 1];
     if _is_space(c) == false {
       break;
     }
@@ -374,18 +374,18 @@ pub fun trim_right(str s) str {
 pub fun split(str s, chr delim) Vec<str> {
   Vec<str> parts;
   parts.init(4);
-  num n = _string_len(s);
+  let n = _string_len(s);
   num start = 0;
   num i = 0;
   for i <= n {
     if s[i] == delim {
-      num seg_len = i - start;
-      str seg = substr(s, start, seg_len);
+      let seg_len = i - start;
+      let seg = substr(s, start, seg_len);
       parts.push(seg);
       start = i + 1;
     } elif s[i] == 0 {
-      num seg_len = i - start;
-      str seg = substr(s, start, seg_len);
+      let seg_len = i - start;
+      let seg = substr(s, start, seg_len);
       parts.push(seg);
       start = i + 1;
     }
@@ -405,7 +405,7 @@ pub fun split_whitespace(str s) Vec<str> {
   Vec<str> parts;
   parts.init(4);
 
-  num n = _string_len(s);
+  let n = _string_len(s);
   num i = 0;
   for i < n {
     for i < n {
@@ -417,14 +417,14 @@ pub fun split_whitespace(str s) Vec<str> {
     if i >= n {
       break;
     }
-    num start = i;
+    let start = i;
     for i < n {
       if _is_space(s[i]) != false {
         break;
       }
       i = i + 1;
     }
-    num seg_len = i - start;
+    let seg_len = i - start;
     parts.push(substr(s, start, seg_len));
   }
   ret parts;
@@ -470,7 +470,7 @@ pub fun index_of_char(str s, chr ch) num {
 // Returns:
 // - index or -1
 pub fun last_index_of_char(str s, chr ch) num {
-  num i = _string_len(s);
+  let i = _string_len(s);
   for i > 0 {
     if s[i - 1] == ch {
       ret i - 1;
@@ -489,8 +489,8 @@ pub fun last_index_of_char(str s, chr ch) num {
 // Returns:
 // - index or -1
 pub fun index_of_str(str s, str needle) num {
-  num sl = _string_len(s);
-  num nl = _string_len(needle);
+  let sl = _string_len(s);
+  let nl = _string_len(needle);
   if nl == 0 {
     ret 0;
   }
@@ -525,11 +525,11 @@ pub fun index_of_str(str s, str needle) num {
 // Returns:
 // - number of occurrences
 pub fun count(str s, str needle) num {
-  num nl = _string_len(needle);
+  let nl = _string_len(needle);
   if nl == 0 {
     ret 0;
   }
-  num sl = _string_len(s);
+  let sl = _string_len(s);
   num i = 0;
   num total = 0;
   for i <= sl - nl {
@@ -579,8 +579,8 @@ pub fun strip_suffix(str s, str suffix) str {
   if ends_with(s, suffix) == false {
     ret substr(s, 0, _string_len(s));
   }
-  num sl = _string_len(s);
-  num su = _string_len(suffix);
+  let sl = _string_len(s);
+  let su = _string_len(suffix);
   ret substr(s, 0, sl - su);
 }
 
@@ -592,14 +592,14 @@ pub fun strip_suffix(str s, str suffix) str {
 // Returns:
 // - Vec<str> of lines
 pub fun split_lines(str s) Vec<str> {
-  Vec<str> parts = split(s, '\n');
+  let parts = split(s, '\n');
   num i = 0;
   for i < parts.len {
-    str line = parts.get(i);
-    num l = _string_len(line);
+    let line = parts.get(i);
+    let l = _string_len(line);
     if l > 0 {
       if line[l - 1] == '\0' {
-        str trimmed = substr(line, 0, l - 1);
+        let trimmed = substr(line, 0, l - 1);
         parts.set(i, trimmed);
       }
     }
@@ -616,7 +616,7 @@ pub fun split_lines(str s) Vec<str> {
 // Returns:
 // - new lowercase string
 pub fun to_lower(str s) str {
-  num n = _string_len(s);
+  let n = _string_len(s);
   str out = malloc(n + 1);
   if out == nil {
     ret nil;
@@ -625,7 +625,7 @@ pub fun to_lower(str s) str {
   str lower = "abcdefghijklmnopqrstuvwxyz";
   num i = 0;
   for i < n {
-    chr c = s[i];
+    let c = s[i];
     num j = 0;
     bin changed = false;
     for j < 26 {
@@ -653,7 +653,7 @@ pub fun to_lower(str s) str {
 // Returns:
 // - new uppercase string
 pub fun to_upper(str s) str {
-  num n = _string_len(s);
+  let n = _string_len(s);
   str out = malloc(n + 1);
   if out == nil {
     ret nil;
@@ -662,7 +662,7 @@ pub fun to_upper(str s) str {
   str lower = "abcdefghijklmnopqrstuvwxyz";
   num i = 0;
   for i < n {
-    chr c = s[i];
+    let c = s[i];
     num j = 0;
     bin changed = false;
     for j < 26 {
@@ -694,8 +694,8 @@ pub fun repeat(str s, num times) str {
   if times <= 0 {
     ret substr(s, 0, 0);
   }
-  num sl = _string_len(s);
-  num total = sl * times;
+  let sl = _string_len(s);
+  let total = sl * times;
   str out = malloc(total + 1);
   if out == nil {
     ret nil;
@@ -723,14 +723,14 @@ pub fun repeat(str s, num times) str {
 // Returns:
 // - new string
 pub fun replace_char(str s, chr from, chr to) str {
-  num n = _string_len(s);
+  let n = _string_len(s);
   str out = malloc(n + 1);
   if out == nil {
     ret nil;
   }
   num i = 0;
   for i < n {
-    chr c = s[i];
+    let c = s[i];
     if c == from {
       c = to;
     }
@@ -751,13 +751,13 @@ pub fun replace_char(str s, chr from, chr to) str {
 // Returns:
 // - new string
 pub fun replace_str(str s, str needle, str repl) str {
-  num nl = _string_len(needle);
+  let nl = _string_len(needle);
   if nl == 0 {
     ret substr(s, 0, _string_len(s));
   }
 
-  StringBuilder b = string_builder_init(8);
-  num sl = _string_len(s);
+  let b = string_builder_init(8);
+  let sl = _string_len(s);
   num i = 0;
   for i < sl {
     bin match = true;
@@ -782,7 +782,7 @@ pub fun replace_str(str s, str needle, str repl) str {
       i = i + 1;
     }
   }
-  str out = b.build();
+  let out = b.build();
   b.free();
   ret out;
 }
@@ -859,7 +859,7 @@ pub fun format_num(num n) str {
     buf[1] = '\0';
     ret buf;
   }
-  bin neg = n < 0;
+  let neg = n < 0;
   if neg {
     n = 0 - n;
   }
@@ -881,7 +881,7 @@ pub fun format_num(num n) str {
   num lo = 0;
   num hi = pos - 1;
   for lo < hi {
-    chr tmp = buf[lo];
+    let tmp = buf[lo];
     buf[lo] = buf[hi];
     buf[hi] = tmp;
     lo = lo + 1;
@@ -1001,7 +1001,7 @@ pub fun try_parse_dec(str s) Result<dec> {
   num digits = 0;
   num dots = 0;
   for i < n {
-    chr c = s[i];
+    let c = s[i];
     if c == '.' {
       dots = dots + 1;
       if dots > 1 {

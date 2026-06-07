@@ -62,7 +62,7 @@ impl Fs {
   // Returns:
   // - Result<str> with contents or error
   pub try_read_to_string(str path) Result<str> {
-    str out = read_all(path);
+    let out = read_all(path);
     if out == nil {
       ret err(1, "read_to_string failed", "");
     }
@@ -90,7 +90,7 @@ impl Fs {
     if buf == nil {
       ret nil;
     }
-    num read = fread(buf, 1, max_len, h);
+    let read = fread(buf, 1, max_len, h);
     buf[read] = '\0';
     ret buf;
   }
@@ -104,7 +104,7 @@ impl Fs {
   // Returns:
   // - Result<str> with bytes or error
   pub try_read_bytes(str path, num max_len) Result<str> {
-    str out = self.read_bytes(path, max_len);
+    let out = self.read_bytes(path, max_len);
     if out == nil {
       ret err(1, "read_bytes failed", "");
     }
@@ -132,7 +132,7 @@ impl Fs {
   // Returns:
   // - Result<bin> with success flag or error
   pub try_write_string(str path, str data) Result<bin> {
-    bin ok_write = write_all(path, data);
+    let ok_write = write_all(path, data);
     if ok_write == false {
       ret err(1, "write_string failed", false);
     }
@@ -153,8 +153,8 @@ impl Fs {
       ret false;
     }
     defer fclose(h);
-    num n = len(data);
-    num wrote = fwrite(data, 1, n, h);
+    let n = len(data);
+    let wrote = fwrite(data, 1, n, h);
     ret wrote == n;
   }
 
@@ -167,7 +167,7 @@ impl Fs {
   // Returns:
   // - Result<bin> with success flag or error
   pub try_append_string(str path, str data) Result<bin> {
-    bin ok_append = self.append_string(path, data);
+    let ok_append = self.append_string(path, data);
     if ok_append == false {
       ret err(1, "append_string failed", false);
     }
@@ -183,7 +183,7 @@ impl Fs {
   // Returns:
   // - true on success
   pub copy_file(str src, str dst) bin {
-    str data = read_all(src);
+    let data = read_all(src);
     if data == nil {
       ret false;
     }
@@ -199,7 +199,7 @@ impl Fs {
   // Returns:
   // - Result<bin> with success flag or error
   pub try_copy_file(str src, str dst) Result<bin> {
-    str data = read_all(src);
+    let data = read_all(src);
     if data == nil {
       ret err(1, "copy_file read failed", false);
     }
@@ -225,7 +225,7 @@ impl Fs {
     if fseek(h, 0, 2) != 0 {
       ret -1;
     }
-    num end = ftell(h);
+    let end = ftell(h);
     if end < 0 {
       ret -1;
     }
@@ -240,7 +240,7 @@ impl Fs {
   // Returns:
   // - Result<num> with size or error
   pub try_size(str path) Result<num> {
-    num out = self.size(path);
+    let out = self.size(path);
     if out < 0 {
       ret err(1, "size failed", -1);
     }
@@ -290,7 +290,7 @@ impl Fs {
   // Returns:
   // - Result<Vec<str>> with lines or error
   pub try_read_lines(str path, num max_len) Result<Vec<str>> {
-    Vec<str> out = self.read_lines(path, max_len);
+    let out = self.read_lines(path, max_len);
     if out.len == 0 {
       // Best-effort: treat empty as ok unless file can't be opened.
       if self.exists(path) == false {
@@ -309,7 +309,7 @@ impl Fs {
 // Returns:
 // - true if file can be opened
 pub fun exists(str path) bin {
-  Fs f = fs();
+  let f = fs();
   ret f.exists(path);
 }
 
@@ -321,7 +321,7 @@ pub fun exists(str path) bin {
 // Returns:
 // - file contents or null
 pub fun read_to_string(str path) str {
-  Fs f = fs();
+  let f = fs();
   ret f.read_to_string(path);
 }
 
@@ -334,7 +334,7 @@ pub fun read_to_string(str path) str {
 // Returns:
 // - bytes string or null
 pub fun read_bytes(str path, num max_len) str {
-  Fs f = fs();
+  let f = fs();
   ret f.read_bytes(path, max_len);
 }
 
@@ -347,7 +347,7 @@ pub fun read_bytes(str path, num max_len) str {
 // Returns:
 // - true on success
 pub fun write_string(str path, str data) bin {
-  Fs f = fs();
+  let f = fs();
   ret f.write_string(path, data);
 }
 
@@ -360,7 +360,7 @@ pub fun write_string(str path, str data) bin {
 // Returns:
 // - true on success
 pub fun append_string(str path, str data) bin {
-  Fs f = fs();
+  let f = fs();
   ret f.append_string(path, data);
 }
 
@@ -373,7 +373,7 @@ pub fun append_string(str path, str data) bin {
 // Returns:
 // - true on success
 pub fun copy_file(str src, str dst) bin {
-  Fs f = fs();
+  let f = fs();
   ret f.copy_file(src, dst);
 }
 
@@ -385,14 +385,14 @@ pub fun copy_file(str src, str dst) bin {
 // Returns:
 // - size in bytes
 pub fun size(str path) num {
-  Fs f = fs();
+  let f = fs();
   ret f.size(path);
 }
 
 // File size with Result. `Ok(bytes)` on success, `Err` when the file can't be
 // sized — clearer than checking `size(path) < 0` for the -1 sentinel.
 pub fun try_size(str path) Result<num> {
-  num n = size(path);
+  let n = size(path);
   if n < 0 {
     ret err(1, "size failed", -1);
   }
@@ -408,7 +408,7 @@ pub fun try_size(str path) Result<num> {
 // Returns:
 // - Vec<str> of lines (may be empty)
 pub fun read_lines(str path, num max_len) Vec<str> {
-  Fs f = fs();
+  let f = fs();
   ret f.read_lines(path, max_len);
 }
 
@@ -445,13 +445,13 @@ pub async fun copy_file_progress_async(
     ret -3;
   }
 
-  File in_file = open_read(src);
+  let in_file = open_read(src);
   if in_file.handle == nil {
     ret -1;
   }
   defer in_file.close();
 
-  File out_file = open_write(dst);
+  let out_file = open_write(dst);
   if out_file.handle == nil {
     ret -1;
   }
@@ -469,7 +469,7 @@ pub async fun copy_file_progress_async(
       ret -3;
     }
 
-    num n = in_file.read_into(buf, chunk_size);
+    let n = in_file.read_into(buf, chunk_size);
     if n < 0 {
       ret -1;
     }
@@ -483,7 +483,7 @@ pub async fun copy_file_progress_async(
     total = total + n;
 
     if progress_updates != nil {
-      num rc = await progress_updates.send_timeout_with_token_async(total, 0, cancel_token);
+      let rc = await progress_updates.send_timeout_with_token_async(total, 0, cancel_token);
       if rc == channel_rc_cancelled() {
         ret -3;
       }
@@ -534,12 +534,12 @@ pub async fun read_lines_into_channel_async(
       ret -3;
     }
 
-    str line = f.read_line_max(max_len);
+    let line = f.read_line_max(max_len);
     if line == nil {
       break;
     }
 
-    num rc = await out_lines.send_with_token_async(line, cancel_token);
+    let rc = await out_lines.send_with_token_async(line, cancel_token);
     if rc != channel_rc_ok() {
       free(line);
       if rc == channel_rc_cancelled() {

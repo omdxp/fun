@@ -36,7 +36,7 @@ impl Url {
     parts.push(" HTTP/1.1\r\nHost: ");
     parts.push(self.host);
     parts.push("\r\nConnection: close\r\n\r\n");
-    str out = parts.join("");
+    let out = parts.join("");
     parts.free();
     ret out;
   }
@@ -56,14 +56,14 @@ pub fun parse_url(str s) Url {
   u.port = 80;
   u.path = "/";
 
-  num scheme_idx = index_of_str(s, "://");
+  let scheme_idx = index_of_str(s, "://");
   if scheme_idx != -1 {
     u.scheme = substr(s, 0, scheme_idx);
-    num rest_start = scheme_idx + 3;
+    let rest_start = scheme_idx + 3;
     s = substr(s, rest_start, len(s) - rest_start);
   }
 
-  num slash_idx = index_of_char(s, '/');
+  let slash_idx = index_of_char(s, '/');
   if slash_idx == -1 {
     u.host = s;
     u.path = "/";
@@ -72,10 +72,10 @@ pub fun parse_url(str s) Url {
     u.path = substr(s, slash_idx, len(s) - slash_idx);
   }
 
-  num colon_idx = index_of_char(u.host, ':');
+  let colon_idx = index_of_char(u.host, ':');
   if colon_idx != -1 {
-    str host_only = substr(u.host, 0, colon_idx);
-    str port_str = substr(u.host, colon_idx + 1, len(u.host) - (colon_idx + 1));
+    let host_only = substr(u.host, 0, colon_idx);
+    let port_str = substr(u.host, colon_idx + 1, len(u.host) - (colon_idx + 1));
     u.host = host_only;
     u.port = parse_int(port_str);
   } else {
@@ -91,7 +91,7 @@ pub fun parse_url(str s) Url {
 // otherwise `Err` — unlike `parse_url`, which returns a Url with an empty host
 // on malformed input (a silent footgun).
 pub fun try_parse_url(str s) Result<Url> {
-  Url u = parse_url(s);
+  let u = parse_url(s);
   if is_empty(u.host) {
     ret err(1, "parse_url: missing host", u);
   }
@@ -137,9 +137,9 @@ pub compound SockAddrInPacked {
 
 fun _pack_sockaddr_in_linux(num port) SockAddrInPacked {
   SockAddrInPacked a;
-  num fam = af_inet();
-  num prt = htons(port);
-  num addr = htonl(0);
+  let fam = af_inet();
+  let prt = htons(port);
+  let addr = htonl(0);
   a.word0 = fam + (prt * 65536) + (addr * 4294967296);
   a.word1 = 0;
   ret a;
@@ -148,9 +148,9 @@ fun _pack_sockaddr_in_linux(num port) SockAddrInPacked {
 fun _pack_sockaddr_in_bsd(num port) SockAddrInPacked {
   SockAddrInPacked a;
   num len = 16;
-  num fam = af_inet();
-  num prt = htons(port);
-  num addr = htonl(0);
+  let fam = af_inet();
+  let prt = htons(port);
+  let addr = htonl(0);
   a.word0 = len + (fam * 256) + (prt * 65536) + (addr * 4294967296);
   a.word1 = 0;
   ret a;
@@ -161,12 +161,12 @@ fun _pack_sockaddr_in_bsd(num port) SockAddrInPacked {
 // Returns:
 // - server fd on success, or -1
 pub fun tcp_listen(num port) num {
-  num fd = socket(af_inet(), sock_stream(), 0);
+  let fd = socket(af_inet(), sock_stream(), 0);
   if fd < 0 {
     ret -1;
   }
 
-  SockAddrInPacked addr = _pack_sockaddr_in_linux(port);
+  let addr = _pack_sockaddr_in_linux(port);
   raw* addr_ptr = &addr;
   if bind(fd, addr_ptr, 16) != 0 {
     addr = _pack_sockaddr_in_bsd(port);
@@ -187,7 +187,7 @@ pub fun tcp_listen(num port) num {
 
 // Create a TCP listening socket with Result.
 pub fun try_tcp_listen(num port) Result<num> {
-  num fd = tcp_listen(port);
+  let fd = tcp_listen(port);
   if fd < 0 {
     ret err(1, "tcp_listen failed", -1);
   }
@@ -204,7 +204,7 @@ pub fun tcp_accept(num server_fd) num {
 
 // Accept a client connection with Result.
 pub fun try_tcp_accept(num server_fd) Result<num> {
-  num fd = tcp_accept(server_fd);
+  let fd = tcp_accept(server_fd);
   if fd < 0 {
     ret err(1, "tcp_accept failed", -1);
   }
@@ -226,7 +226,7 @@ pub fun tcp_read(num fd, str buf, num len) num {
 
 // Read from a socket with Result.
 pub fun try_tcp_read(num fd, str buf, num len) Result<num> {
-  num n = tcp_read(fd, buf, len);
+  let n = tcp_read(fd, buf, len);
   if n < 0 {
     ret err(1, "tcp_read failed", -1);
   }
@@ -248,7 +248,7 @@ pub fun tcp_write(num fd, str buf, num len) num {
 
 // Write to a socket with Result.
 pub fun try_tcp_write(num fd, str buf, num len) Result<num> {
-  num n = tcp_write(fd, buf, len);
+  let n = tcp_write(fd, buf, len);
   if n < 0 {
     ret err(1, "tcp_write failed", -1);
   }
@@ -288,9 +288,9 @@ fun _tcp_roundtrip_core(
   }
 
   if send_buf != nil {
-    num send_len = len(send_buf);
+    let send_len = len(send_buf);
     if send_len > 0 {
-      num wrote = tcp_write(fd, send_buf, send_len);
+      let wrote = tcp_write(fd, send_buf, send_len);
       if wrote < 0 {
         ret -1;
       }
@@ -301,7 +301,7 @@ fun _tcp_roundtrip_core(
     ret -3;
   }
 
-  num n = tcp_read(fd, recv_buf, recv_len);
+  let n = tcp_read(fd, recv_buf, recv_len);
   if n < 0 {
     ret -1;
   }
@@ -379,12 +379,12 @@ pub async fun tcp_roundtrip_offload_async(
   job.cancel_token = cancel_token;
   job.result_rc = -1;
 
-  RuntimeAsyncTask task = runtime_async_spawn(_tcp_roundtrip_offload_worker, &job);
+  let task = runtime_async_spawn(_tcp_roundtrip_offload_worker, &job);
   if task.last_start_rc() != 0 {
     ret task.last_start_rc();
   }
 
-  num join_rc = await task.join_async(nil);
+  let join_rc = await task.join_async(nil);
   if join_rc != 0 {
     ret join_rc;
   }
@@ -419,17 +419,17 @@ pub async fun build_http_get_to_channel_async(
     ret -3;
   }
 
-  Url u = parse_url(raw_url);
+  let u = parse_url(raw_url);
   if u.host == nil || len(u.host) == 0 {
     ret -1;
   }
 
-  str req = u.build_http_get();
+  let req = u.build_http_get();
   if req == nil {
     ret -2;
   }
 
-  num rc = await out_requests.send_with_token_async(req, cancel_token);
+  let rc = await out_requests.send_with_token_async(req, cancel_token);
   if rc == channel_rc_ok() {
     ret 0;
   }
@@ -446,13 +446,13 @@ pub async fun build_http_get_to_channel_async(
 
 // Serve a single HTTP request with a fixed response.
 pub fun http_serve_once(num port, str body) num {
-  num server = tcp_listen(port);
+  let server = tcp_listen(port);
   if server < 0 {
     ret -1;
   }
   defer tcp_close(server);
 
-  num client = tcp_accept(server);
+  let client = tcp_accept(server);
   if client < 0 {
     ret -1;
   }
@@ -472,7 +472,7 @@ pub fun http_serve_once(num port, str body) num {
 
 // Serve a single HTTP request with Result.
 pub fun try_http_serve_once(num port, str body) Result<num> {
-  num rc = http_serve_once(port, body);
+  let rc = http_serve_once(port, body);
   if rc != 0 {
     ret err(1, "http_serve_once failed", rc);
   }
@@ -481,14 +481,14 @@ pub fun try_http_serve_once(num port, str body) Result<num> {
 
 // Serve HTTP requests forever (blocking loop).
 pub fun http_serve_forever(num port, str body) num {
-  num server = tcp_listen(port);
+  let server = tcp_listen(port);
   if server < 0 {
     ret -1;
   }
   defer tcp_close(server);
 
   for true {
-    num client = tcp_accept(server);
+    let client = tcp_accept(server);
     if client < 0 {
       ret -1;
     }
@@ -509,7 +509,7 @@ pub fun http_serve_forever(num port, str body) num {
 
 // Serve HTTP requests forever with Result.
 pub fun try_http_serve_forever(num port, str body) Result<num> {
-  num rc = http_serve_forever(port, body);
+  let rc = http_serve_forever(port, body);
   if rc != 0 {
     ret err(1, "http_serve_forever failed", rc);
   }

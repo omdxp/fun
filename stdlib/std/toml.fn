@@ -77,25 +77,25 @@ impl TomlValue as Display {
   pub to_string() str {
     fit *self {
       .Str(s) -> {
-        StringBuilder b = string_builder_init(_tv_strlen(s) + 2);
+        let b = string_builder_init(_tv_strlen(s) + 2);
         b.append_char('"');
         b.append(s);
         b.append_char('"');
-        str out = b.build();
+        let out = b.build();
         b.free();
         ret out;
       }
       .Int(n) -> {
-        StringBuilder b = string_builder_init(16);
+        let b = string_builder_init(16);
         b.append_num(n);
-        str out = b.build();
+        let out = b.build();
         b.free();
         ret out;
       }
       .Float(d) -> {
-        StringBuilder b = string_builder_init(24);
+        let b = string_builder_init(24);
         b.append_dec(d, 6);
-        str out = b.build();
+        let out = b.build();
         b.free();
         ret out;
       }
@@ -119,9 +119,9 @@ fun _tv_strlen(str s) num {
 }
 
 fun _tv_dup(str s) str {
-  StringBuilder b = string_builder_init(_tv_strlen(s) + 1);
+  let b = string_builder_init(_tv_strlen(s) + 1);
   b.append(s);
-  str out = b.build();
+  let out = b.build();
   b.free();
   ret out;
 }
@@ -161,7 +161,7 @@ impl TomlDoc {
 
   // Render the document back to `key = value` lines.
   pub stringify() str {
-    StringBuilder b = string_builder_init(self.values.len() * 16 + 8);
+    let b = string_builder_init(self.values.len() * 16 + 8);
     defer b.free();
     let keys = self.values.keys();
     defer keys.free();
@@ -171,7 +171,7 @@ impl TomlDoc {
       let val = self.values.get(key);
       b.append(key);
       b.append(" = ");
-      str vs = val.to_string();
+      let vs = val.to_string();
       b.append(vs);
       b.append_char('\n');
       i = i + 1;
@@ -181,7 +181,7 @@ impl TomlDoc {
 
   // Render with Result (for the fallible serde surface).
   pub try_stringify() Result<str> {
-    str out = self.stringify();
+    let out = self.stringify();
     if out == nil {
       ret err(1, "toml stringify failed", "");
     }
@@ -197,7 +197,7 @@ fun _toml_is_digit(chr c) bin {
 
 // Classify a raw (trimmed) TOML value string into a typed TomlValue.
 fun _classify(str text) TomlValue {
-  num n = _tv_strlen(text);
+  let n = _tv_strlen(text);
   if n == 0 {
     ret TomlValue.Str(text);
   }
@@ -219,7 +219,7 @@ fun _classify(str text) TomlValue {
   }
 
   // Numbers: a leading digit or sign, with a '.' meaning float.
-  chr c0 = text[0];
+  let c0 = text[0];
   if _toml_is_digit(c0) || c0 == '-' || c0 == '+' {
     num has_dot = 0;
     num i = 0;
@@ -257,7 +257,7 @@ fun _parse_line_into(TomlDoc* out, str line) {
 
 // Parse a flat TOML document (`key = value` per line).
 pub fun parse_document(str s) TomlDoc {
-  TomlDoc out = toml_doc_init();
+  let out = toml_doc_init();
   num i = 0;
   num start = 0;
   for s[i] != 0 {
@@ -279,7 +279,7 @@ pub fun parse_document(str s) TomlDoc {
 
 // Parse a flat TOML document with Result.
 pub fun try_parse_document(str s) Result<TomlDoc> {
-  TomlDoc out = parse_document(s);
+  let out = parse_document(s);
   ret ok(out);
 }
 

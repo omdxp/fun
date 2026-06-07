@@ -89,8 +89,8 @@ impl ThreadPool {
         arg = args[i];
       }
 
-      Thread worker = self.workers[i];
-      num rc = runtime_thread_start(&worker, entry, arg);
+      let worker = self.workers[i];
+      let rc = runtime_thread_start(&worker, entry, arg);
       self.workers[i] = worker;
       if rc != 0 {
         ret rc;
@@ -123,8 +123,8 @@ impl ThreadPool {
         out_ret = out_rets[i];
       }
 
-      Thread worker = self.workers[i];
-      num rc = runtime_thread_join(&worker, out_ret);
+      let worker = self.workers[i];
+      let rc = runtime_thread_join(&worker, out_ret);
       self.workers[i] = worker;
       if rc != 0 {
         ret rc;
@@ -149,8 +149,8 @@ impl ThreadPool {
 
     num i = 0;
     for i < self.size {
-      Thread worker = self.workers[i];
-      num rc = runtime_thread_detach(&worker);
+      let worker = self.workers[i];
+      let rc = runtime_thread_detach(&worker);
       self.workers[i] = worker;
       if rc != 0 {
         ret rc;

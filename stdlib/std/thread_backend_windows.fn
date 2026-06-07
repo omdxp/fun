@@ -36,12 +36,12 @@ pub fun thread_backend_windows_start(Thread* thread, raw* entry, raw* arg) num {
     ret -2;
   }
 
-  Thread t = thread[0];
+  let t = thread[0];
   if t.started == true {
     ret 0;
   }
 
-  num rc = pthread_create(&t.handle, nil, entry, arg);
+  let rc = pthread_create(&t.handle, nil, entry, arg);
   if rc == 0 {
     t.started = true;
   }
@@ -61,12 +61,12 @@ pub fun thread_backend_windows_join(Thread* thread, raw* out_ret) num {
     ret -1;
   }
 
-  Thread t = thread[0];
+  let t = thread[0];
   if t.started == false {
     ret 0;
   }
 
-  num rc = pthread_join(t.handle, out_ret);
+  let rc = pthread_join(t.handle, out_ret);
   if rc == 0 {
     t.started = false;
   }
@@ -86,12 +86,12 @@ pub fun thread_backend_windows_detach(Thread* thread) num {
     ret -1;
   }
 
-  Thread t = thread[0];
+  let t = thread[0];
   if t.started == false {
     ret 0;
   }
 
-  num rc = pthread_detach(t.handle);
+  let rc = pthread_detach(t.handle);
   if rc == 0 {
     t.started = false;
   }

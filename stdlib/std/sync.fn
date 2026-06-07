@@ -53,7 +53,7 @@ impl Mutex {
     if self.initialized == true {
       ret 0;
     }
-    num rc = pthread_mutex_init(&self.inner, nil);
+    let rc = pthread_mutex_init(&self.inner, nil);
     if rc == 0 {
       self.initialized = true;
     }
@@ -74,7 +74,7 @@ impl Mutex {
   // - pthread return code (0 on success)
   pub lock() num {
     if self.initialized == false {
-      num init_rc = self.init();
+      let init_rc = self.init();
       if init_rc != 0 {
         ret init_rc;
       }
@@ -91,7 +91,7 @@ impl Mutex {
   // - pthread return code (0 on success)
   pub try_lock() num {
     if self.initialized == false {
-      num init_rc = self.init();
+      let init_rc = self.init();
       if init_rc != 0 {
         ret init_rc;
       }
@@ -124,7 +124,7 @@ impl Mutex {
     if self.initialized == false {
       ret 0;
     }
-    num rc = pthread_mutex_destroy(&self.inner);
+    let rc = pthread_mutex_destroy(&self.inner);
     if rc == 0 {
       self.initialized = false;
     }
@@ -141,7 +141,7 @@ impl CondVar {
     if self.initialized == true {
       ret 0;
     }
-    num rc = pthread_cond_init(&self.inner, nil);
+    let rc = pthread_cond_init(&self.inner, nil);
     if rc == 0 {
       self.initialized = true;
     }
@@ -164,7 +164,7 @@ impl CondVar {
   // - nonzero pthread error code on failure
   pub wait(Mutex* mutex) num {
     if self.initialized == false {
-      num init_rc = self.init();
+      let init_rc = self.init();
       if init_rc != 0 {
         ret init_rc;
       }
@@ -173,7 +173,7 @@ impl CondVar {
       ret -1;
     }
     if mutex.initialized == false {
-      num m_rc = mutex.init();
+      let m_rc = mutex.init();
       if m_rc != 0 {
         ret m_rc;
       }
@@ -194,7 +194,7 @@ impl CondVar {
   // - nonzero pthread error code on timeout/failure
   pub timed_wait(Mutex* mutex, raw* abs_time) num {
     if self.initialized == false {
-      num init_rc = self.init();
+      let init_rc = self.init();
       if init_rc != 0 {
         ret init_rc;
       }
@@ -206,7 +206,7 @@ impl CondVar {
       ret -2;
     }
     if mutex.initialized == false {
-      num m_rc = mutex.init();
+      let m_rc = mutex.init();
       if m_rc != 0 {
         ret m_rc;
       }
@@ -253,7 +253,7 @@ impl CondVar {
     if self.initialized == false {
       ret 0;
     }
-    num rc = pthread_cond_destroy(&self.inner);
+    let rc = pthread_cond_destroy(&self.inner);
     if rc == 0 {
       self.initialized = false;
     }
@@ -276,7 +276,7 @@ pub fun mutex_init(Mutex* mutex) num {
     ret 0;
   }
 
-  num rc = pthread_mutex_init(&mutex.inner, nil);
+  let rc = pthread_mutex_init(&mutex.inner, nil);
   if rc == 0 {
     mutex.initialized = true;
   }
@@ -295,13 +295,13 @@ pub fun mutex_lock(Mutex* mutex) num {
   }
 
   if mutex.initialized == false {
-    num init_rc = mutex_init(mutex);
+    let init_rc = mutex_init(mutex);
     if init_rc != 0 {
       ret init_rc;
     }
   }
 
-  num rc = pthread_mutex_lock(&mutex.inner);
+  let rc = pthread_mutex_lock(&mutex.inner);
   ret rc;
 }
 
@@ -317,13 +317,13 @@ pub fun mutex_try_lock(Mutex* mutex) num {
   }
 
   if mutex.initialized == false {
-    num init_rc = mutex_init(mutex);
+    let init_rc = mutex_init(mutex);
     if init_rc != 0 {
       ret init_rc;
     }
   }
 
-  num rc = pthread_mutex_trylock(&mutex.inner);
+  let rc = pthread_mutex_trylock(&mutex.inner);
   ret rc;
 }
 
@@ -342,7 +342,7 @@ pub fun mutex_unlock(Mutex* mutex) num {
     ret 0;
   }
 
-  num rc = pthread_mutex_unlock(&mutex.inner);
+  let rc = pthread_mutex_unlock(&mutex.inner);
   ret rc;
 }
 
@@ -361,7 +361,7 @@ pub fun mutex_destroy(Mutex* mutex) num {
     ret 0;
   }
 
-  num rc = pthread_mutex_destroy(&mutex.inner);
+  let rc = pthread_mutex_destroy(&mutex.inner);
   if rc == 0 {
     mutex.initialized = false;
   }
@@ -383,7 +383,7 @@ pub fun condvar_init(CondVar* cond) num {
     ret 0;
   }
 
-  num rc = pthread_cond_init(&cond.inner, nil);
+  let rc = pthread_cond_init(&cond.inner, nil);
   if rc == 0 {
     cond.initialized = true;
   }
@@ -402,20 +402,20 @@ pub fun condvar_wait(CondVar* cond, Mutex* mutex) num {
   }
 
   if cond.initialized == false {
-    num init_rc = condvar_init(cond);
+    let init_rc = condvar_init(cond);
     if init_rc != 0 {
       ret init_rc;
     }
   }
 
   if mutex.initialized == false {
-    num m_rc = mutex_init(mutex);
+    let m_rc = mutex_init(mutex);
     if m_rc != 0 {
       ret m_rc;
     }
   }
 
-  num rc = pthread_cond_wait(&cond.inner, &mutex.inner);
+  let rc = pthread_cond_wait(&cond.inner, &mutex.inner);
   ret rc;
 }
 
@@ -436,20 +436,20 @@ pub fun condvar_timed_wait(CondVar* cond, Mutex* mutex, raw* abs_time) num {
   }
 
   if cond.initialized == false {
-    num init_rc = condvar_init(cond);
+    let init_rc = condvar_init(cond);
     if init_rc != 0 {
       ret init_rc;
     }
   }
 
   if mutex.initialized == false {
-    num m_rc = mutex_init(mutex);
+    let m_rc = mutex_init(mutex);
     if m_rc != 0 {
       ret m_rc;
     }
   }
 
-  num rc = pthread_cond_timedwait(&cond.inner, &mutex.inner, abs_time);
+  let rc = pthread_cond_timedwait(&cond.inner, &mutex.inner, abs_time);
   ret rc;
 }
 
@@ -468,7 +468,7 @@ pub fun condvar_signal(CondVar* cond) num {
     ret 0;
   }
 
-  num rc = pthread_cond_signal(&cond.inner);
+  let rc = pthread_cond_signal(&cond.inner);
   ret rc;
 }
 
@@ -487,7 +487,7 @@ pub fun condvar_broadcast(CondVar* cond) num {
     ret 0;
   }
 
-  num rc = pthread_cond_broadcast(&cond.inner);
+  let rc = pthread_cond_broadcast(&cond.inner);
   ret rc;
 }
 
@@ -506,7 +506,7 @@ pub fun condvar_destroy(CondVar* cond) num {
     ret 0;
   }
 
-  num rc = pthread_cond_destroy(&cond.inner);
+  let rc = pthread_cond_destroy(&cond.inner);
   if rc == 0 {
     cond.initialized = false;
   }

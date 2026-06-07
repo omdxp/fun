@@ -142,7 +142,7 @@ impl Logger {
 // - level: severity
 // - msg: message
 pub fun log(LogLevel level, str msg) {
-  Logger l = logger_init(.Debug);
+  let l = logger_init(.Debug);
   l.log(level, msg);
 }
 
@@ -151,7 +151,7 @@ pub fun log(LogLevel level, str msg) {
 // Params:
 // - msg: message
 pub fun log_debug(str msg) {
-  Logger l = logger_init(.Debug);
+  let l = logger_init(.Debug);
   l.debug(msg);
 }
 
@@ -160,7 +160,7 @@ pub fun log_debug(str msg) {
 // Params:
 // - msg: message
 pub fun log_info(str msg) {
-  Logger l = logger_init(.Debug);
+  let l = logger_init(.Debug);
   l.info(msg);
 }
 
@@ -169,7 +169,7 @@ pub fun log_info(str msg) {
 // Params:
 // - msg: message
 pub fun log_warn(str msg) {
-  Logger l = logger_init(.Debug);
+  let l = logger_init(.Debug);
   l.warn(msg);
 }
 
@@ -178,6 +178,6 @@ pub fun log_warn(str msg) {
 // Params:
 // - msg: message
 pub fun log_error(str msg) {
-  Logger l = logger_init(.Debug);
+  let l = logger_init(.Debug);
   l.error(msg);
 }

@@ -21,8 +21,8 @@ pub compound Vec2 {
 impl Vec2 {
   // Euclidean distance to another vector.
   pub distance(Vec2 other) dec {
-    dec dx = self.x - other.x;
-    dec dy = self.y - other.y;
+    let dx = self.x - other.x;
+    let dy = self.y - other.y;
     ret cmath.sqrt(dx * dx + dy * dy);
   }
 
@@ -39,7 +39,7 @@ impl Vec2 {
   // Normalized vector (zero stays zero).
   pub normalize() Vec2 {
     Vec2 out;
-    dec len = self.length();
+    let len = self.length();
     if len == 0 {
       out.x = 0;
       out.y = 0;

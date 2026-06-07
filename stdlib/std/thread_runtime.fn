@@ -127,7 +127,7 @@ pub fun runtime_async_task_new() RuntimeAsyncTask {
 // Returns:
 // - RuntimeAsyncTask with start_rc set to the thread start result
 pub fun runtime_async_spawn(raw* entry, raw* arg) RuntimeAsyncTask {
-  RuntimeAsyncTask task = runtime_async_task_new();
+  let task = runtime_async_task_new();
   task.start_rc = runtime_thread_start(&task.thread, entry, arg);
   task.active = task.start_rc == 0;
   ret task;
@@ -161,7 +161,7 @@ impl RuntimeAsyncTask {
       ret 0;
     }
 
-    num rc = runtime_thread_join(&self.thread, out_ret);
+    let rc = runtime_thread_join(&self.thread, out_ret);
     if rc == 0 {
       self.active = false;
     }
@@ -187,7 +187,7 @@ impl RuntimeAsyncTask {
       ret 0;
     }
 
-    num rc = runtime_thread_detach(&self.thread);
+    let rc = runtime_thread_detach(&self.thread);
     if rc == 0 {
       self.active = false;
     }

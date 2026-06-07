@@ -43,7 +43,7 @@ impl Thread {
     if self.started == true {
       ret 0;
     }
-    num rc = pthread_create(&self.handle, nil, entry, arg);
+    let rc = pthread_create(&self.handle, nil, entry, arg);
     if rc == 0 {
       self.started = true;
     }
@@ -63,7 +63,7 @@ impl Thread {
     if self.started == false {
       ret 0;
     }
-    num rc = pthread_join(self.handle, out_ret);
+    let rc = pthread_join(self.handle, out_ret);
     if rc == 0 {
       self.started = false;
     }
@@ -80,7 +80,7 @@ impl Thread {
     if self.started == false {
       ret 0;
     }
-    num rc = pthread_detach(self.handle);
+    let rc = pthread_detach(self.handle);
     if rc == 0 {
       self.started = false;
     }
@@ -105,8 +105,8 @@ pub fun thread_start(Thread* thread, raw* entry, raw* arg) num {
     ret -1;
   }
 
-  Thread t = thread[0];
-  num rc = t.start(entry, arg);
+  let t = thread[0];
+  let rc = t.start(entry, arg);
   thread[0] = t;
   ret rc;
 }
@@ -127,8 +127,8 @@ pub fun thread_join(Thread* thread, raw* out_ret) num {
     ret -1;
   }
 
-  Thread t = thread[0];
-  num rc = t.join(out_ret);
+  let t = thread[0];
+  let rc = t.join(out_ret);
   thread[0] = t;
   ret rc;
 }
@@ -148,8 +148,8 @@ pub fun thread_detach(Thread* thread) num {
     ret -1;
   }
 
-  Thread t = thread[0];
-  num rc = t.detach();
+  let t = thread[0];
+  let rc = t.detach();
   thread[0] = t;
   ret rc;
 }

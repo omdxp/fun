@@ -245,7 +245,7 @@ pub fun json_array() Vec<JsonValue> {
 fun _append_escaped(StringBuilder* b, str s) {
   num i = 0;
   for s[i] != 0 {
-    chr c = s[i];
+    let c = s[i];
     if c == '"' {
       b.append_char('\\');
       b.append_char('"');
@@ -326,9 +326,9 @@ fun _append_value(StringBuilder* b, JsonValue* v) {
 impl JsonValue as Display {
   // Render this value as compact JSON text.
   pub to_string() str {
-    StringBuilder b = string_builder_init(32);
+    let b = string_builder_init(32);
     _append_value(&b, self);
-    str out = b.build();
+    let out = b.build();
     b.free();
     ret out;
   }
@@ -364,7 +364,7 @@ pub compound JsonParser {
 impl JsonParser {
   skip_ws() {
     for true {
-      chr c = self.src[self.pos];
+      let c = self.src[self.pos];
       if c == ' ' || c == '\n' || c == '\t' {
         self.pos = self.pos + 1;
       } else {
@@ -383,22 +383,22 @@ impl JsonParser {
       ret err(1, "expected '\"'", "");
     }
     self.pos = self.pos + 1;
-    StringBuilder b = string_builder_init(16);
+    let b = string_builder_init(16);
     for true {
-      chr c = self.src[self.pos];
+      let c = self.src[self.pos];
       if c == 0 {
         b.free();
         ret err(1, "unterminated string", "");
       }
       if c == '"' {
         self.pos = self.pos + 1;
-        str out = b.build();
+        let out = b.build();
         b.free();
         ret ok(out);
       }
       if c == '\\' {
         self.pos = self.pos + 1;
-        chr e = self.src[self.pos];
+        let e = self.src[self.pos];
         if e == 'n' {
           b.append_char('\n');
         } elif e == 't' {
@@ -422,7 +422,7 @@ impl JsonParser {
 
   // Collect the raw text of a number literal (caller converts with parse_dec).
   parse_number_text() str {
-    num start = self.pos;
+    let start = self.pos;
     for _json_is_number_char(self.src[self.pos]) {
       self.pos = self.pos + 1;
     }
@@ -443,7 +443,7 @@ impl JsonParser {
 
   parse_value() Result<JsonValue> {
     self.skip_ws();
-    chr c = self.peek();
+    let c = self.peek();
 
     if c == '{' {
       ret self.parse_object();
@@ -470,7 +470,7 @@ impl JsonParser {
       ret ok(JsonValue.Null);
     }
     if _json_is_digit(c) || c == '-' {
-      str numtext = self.parse_number_text();
+      let numtext = self.parse_number_text();
       ret ok(JsonValue.Num(parse_dec(numtext)));
     }
     ret err(1, "unexpected character in JSON", JsonValue.Null);
@@ -494,7 +494,7 @@ impl JsonParser {
         }
       }
       self.skip_ws();
-      chr c = self.peek();
+      let c = self.peek();
       if c == ',' {
         self.pos = self.pos + 1;
       } elif c == ']' {
@@ -541,7 +541,7 @@ impl JsonParser {
         }
       }
       self.skip_ws();
-      chr c = self.peek();
+      let c = self.peek();
       if c == ',' {
         self.pos = self.pos + 1;
       } elif c == '}' {
@@ -558,7 +558,7 @@ impl JsonParser {
 
 // Parse JSON text into a typed `JsonValue`. Returns `Err` on malformed input.
 pub fun parse(str src) Result<JsonValue> {
-  JsonParser p = JsonParser{src = src, pos = 0};
+  let p = JsonParser{src = src, pos = 0};
   ret p.parse_value();
 }
 

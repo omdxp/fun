@@ -75,7 +75,7 @@ impl Vec<T> {
 
   // Grow backing storage to at least min_cap.
   grow(num min_cap) {
-    num new_cap = self.cap;
+    let new_cap = self.cap;
     if new_cap < 4 {
       new_cap = 4;
     }
@@ -83,7 +83,7 @@ impl Vec<T> {
       new_cap = new_cap * 2;
     }
 
-    num new_size = new_cap * sizeof(T);
+    let new_size = new_cap * sizeof(T);
     if self.cap == 0 {
       self.data = malloc(new_size);
     } else {
@@ -361,8 +361,8 @@ impl Vec<T> as Clearable {
 impl Vec<str> {
   // Join elements with a separator.
   pub join(str sep) str {
-    num sep_len = _str_len(sep);
-    num count = self.len;
+    let sep_len = _str_len(sep);
+    let count = self.len;
     if count == 0 {
       str out_empty = malloc(1);
       if out_empty == nil {
@@ -552,7 +552,7 @@ impl Vec<num> as Display {
   pub to_string() str {
     // Each 64-bit integer needs at most 20 digits plus a sign; allow 24 per
     // element, two bytes per separator, and the surrounding brackets.
-    num budget = self.len * 24 + self.len * 2 + 3;
+    let budget = self.len * 24 + self.len * 2 + 3;
     str out = malloc(budget);
     if out == nil {
       ret nil;
@@ -563,7 +563,7 @@ impl Vec<num> as Display {
     pos = pos + 1;
     num i = 0;
     for i < self.len {
-      num written = snprintf(cell, 24, "%lld", self.data[i]);
+      let written = snprintf(cell, 24, "%lld", self.data[i]);
       num k = 0;
       for k < written {
         out[pos + k] = cell[k];

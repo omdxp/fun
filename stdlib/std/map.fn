@@ -121,7 +121,7 @@ impl Map<K, V> {
       ret -1;
     }
 
-    num idx = self.hash_key(key) % self.cap;
+    let idx = self.hash_key(key) % self.cap;
     num steps = 0;
     for steps < self.cap {
       if self.used[idx] == false {
@@ -165,7 +165,7 @@ impl Map<K, V> {
       ret -1;
     }
 
-    num idx = self.hash_key(key) % self.cap;
+    let idx = self.hash_key(key) % self.cap;
     num steps = 0;
     num first_tomb = -1;
 
@@ -211,7 +211,7 @@ impl Map<K, V> {
     V* old_values = self.value_slots;
     bin* old_used = self.used;
     bin* old_tomb = self.tomb;
-    num old_cap = self.cap;
+    let old_cap = self.cap;
 
     self.key_slots = nil;
     self.value_slots = nil;
@@ -330,7 +330,7 @@ impl Map<K, V> {
       ret;
     }
 
-    num idx = self.find_insert_index_for(key);
+    let idx = self.find_insert_index_for(key);
     if idx == -1 {
       self.rehash(self.cap * 2);
       idx = self.find_insert_index_for(key);
@@ -455,7 +455,7 @@ impl MapIter<K, V> as Iterator<K> {
   // Advance to the next live key, skipping empty and tombstoned slots.
   pub next() Option<K> {
     for self.idx < self.src.cap {
-      num at = self.idx;
+      let at = self.idx;
       self.idx = self.idx + 1;
       if self.src.used[at] != false && self.src.tomb[at] == false {
         ret Option.Some(self.src.key_slots[at]);
@@ -487,7 +487,7 @@ fun _map_str_len(str s) num {
 }
 
 fun _map_append(str dst, num pos, str part) num {
-  num n = _map_str_len(part);
+  let n = _map_str_len(part);
   num j = 0;
   for j < n {
     dst[pos + j] = part[j];
@@ -526,7 +526,7 @@ impl Map<str, num> as Display {
         pos = _map_append(out, pos, self.key_slots[i]);
         pos = _map_append(out, pos, "\": ");
         chr[24] cell;
-        num c = snprintf(cell, 24, "%lld", self.value_slots[i]);
+        let c = snprintf(cell, 24, "%lld", self.value_slots[i]);
         num k = 0;
         for k < c {
           out[pos + k] = cell[k];

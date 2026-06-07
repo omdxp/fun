@@ -31,7 +31,7 @@ pub fun rand_init(num seed) Rand {
 impl Rand {
   // Next pseudo-random integer.
   pub next() num {
-    num s = self.state % 32768;
+    let s = self.state % 32768;
     s = (s * 1103 + 12345) % 32768;
     self.state = s;
     ret s;
@@ -39,8 +39,8 @@ impl Rand {
 
   // Random integer in [min, max].
   pub range(num min, num max) num {
-    num v = self.next();
-    num span = max - min + 1;
+    let v = self.next();
+    let span = max - min + 1;
     if span <= 0 {
       ret min;
     }
@@ -64,7 +64,7 @@ impl Rand {
 
   // Random decimal in [min, max).
   pub range_dec(dec min, dec max) dec {
-    dec v = self.next_dec();
+    let v = self.next_dec();
     ret min + (max - min) * v;
   }
 
@@ -160,8 +160,8 @@ pub fun rand_shuffle_nums(Rand* r, Vec<num>* v) {
   }
   num i = v.len() - 1;
   for i > 0 {
-    num j = r.range(0, i);
-    num tmp = v.data[i];
+    let j = r.range(0, i);
+    let tmp = v.data[i];
     v.data[i] = v.data[j];
     v.data[j] = tmp;
     i = i - 1;
@@ -179,8 +179,8 @@ pub fun rand_shuffle_strs(Rand* r, Vec<str>* v) {
   }
   num i = v.len() - 1;
   for i > 0 {
-    num j = r.range(0, i);
-    str tmp = v.data[i];
+    let j = r.range(0, i);
+    let tmp = v.data[i];
     v.data[i] = v.data[j];
     v.data[j] = tmp;
     i = i - 1;

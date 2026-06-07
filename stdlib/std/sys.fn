@@ -22,7 +22,7 @@ pub fun env(str name) str {
 
 // Read an environment variable with Result.
 pub fun try_env(str name) Result<str> {
-  str out = env(name);
+  let out = env(name);
   if out == nil {
     ret err(1, "env missing", "");
   }

@@ -58,7 +58,7 @@ pub fun print_bin(bin b) {
 
 // Duplicate a string into a new buffer.
 fun _dup_str(str s) str {
-  num n = len(s);
+  let n = len(s);
   str out = malloc(n + 1);
   if out == nil {
     ret nil;
@@ -135,7 +135,7 @@ pub fun fmt_raw(raw* p) str {
 // Returns:
 // - formatted string
 pub fun format_impl(str fmt, Vec<str>* args) str {
-  StringBuilder b = string_builder_init(8);
+  let b = string_builder_init(8);
   num i = 0;
   let n = len(fmt);
   num arg_i = 0;
@@ -192,7 +192,7 @@ pub fun format_impl(str fmt, Vec<str>* args) str {
     i = i + 1;
   }
 
-  str out = b.build();
+  let out = b.build();
   b.free();
   ret out;
 }
@@ -214,7 +214,7 @@ pub fun format(str fmt, ...) str {
 // Print a formatted string to stdout (no newline).
 // See format() for placeholder types.
 pub fun print_fmt(str fmt, ...) {
-  str out = format_impl(fmt, &vargs);
+  let out = format_impl(fmt, &vargs);
   if out != nil {
     print(out);
     free(out);
@@ -224,7 +224,7 @@ pub fun print_fmt(str fmt, ...) {
 // Print a formatted string to stdout with newline.
 // See format() for placeholder types.
 pub fun println_fmt(str fmt, ...) {
-  str out = format_impl(fmt, &vargs);
+  let out = format_impl(fmt, &vargs);
   if out != nil {
     println(out);
     free(out);
@@ -252,7 +252,7 @@ pub fun open_read(str path) File {
 
 // Open file for reading (binary) with Result.
 pub fun try_open_read(str path) Result<File> {
-  File f = open_read(path);
+  let f = open_read(path);
   if f.handle == nil {
     ret err(1, "open_read failed", f);
   }
@@ -274,7 +274,7 @@ pub fun open_write(str path) File {
 
 // Open file for writing (binary) with Result.
 pub fun try_open_write(str path) Result<File> {
-  File f = open_write(path);
+  let f = open_write(path);
   if f.handle == nil {
     ret err(1, "open_write failed", f);
   }
@@ -296,7 +296,7 @@ pub fun open_append(str path) File {
 
 // Open file for appending (binary) with Result.
 pub fun try_open_append(str path) Result<File> {
-  File f = open_append(path);
+  let f = open_append(path);
   if f.handle == nil {
     ret err(1, "open_append failed", f);
   }
@@ -319,7 +319,7 @@ impl File {
     }
 
     fseek(self.handle, 0, 2);
-    num size = ftell(self.handle);
+    let size = ftell(self.handle);
     fseek(self.handle, 0, 0);
 
     if size < 0 {
@@ -331,7 +331,7 @@ impl File {
       ret nil;
     }
 
-    num read = fread(buf, 1, size, self.handle);
+    let read = fread(buf, 1, size, self.handle);
     buf[read] = '\0';
     ret buf;
   }
@@ -341,7 +341,7 @@ impl File {
     if self.handle == nil {
       ret err(1, "read_all on closed file", "");
     }
-    str out = self.read_all();
+    let out = self.read_all();
     if out == nil {
       ret err(1, "read_all failed", "");
     }
@@ -357,7 +357,7 @@ impl File {
     if buf == nil {
       ret nil;
     }
-    num read = fread(buf, 1, max_len, self.handle);
+    let read = fread(buf, 1, max_len, self.handle);
     buf[read] = '\0';
     ret buf;
   }
@@ -367,7 +367,7 @@ impl File {
     if self.handle == nil || max_len <= 0 {
       ret err(1, "read_bytes invalid", "");
     }
-    str out = self.read_bytes(max_len);
+    let out = self.read_bytes(max_len);
     if out == nil {
       ret err(1, "read_bytes failed", "");
     }
@@ -396,7 +396,7 @@ impl File {
     if self.handle == nil || max_len <= 1 {
       ret err(1, "read_line_max invalid", "");
     }
-    str out = self.read_line_max(max_len);
+    let out = self.read_line_max(max_len);
     if out == nil {
       ret err(1, "read_line_max failed", "");
     }
@@ -412,7 +412,7 @@ impl File {
       ret out;
     }
     for true {
-      str line = self.read_line_max(max_len);
+      let line = self.read_line_max(max_len);
       if line == nil {
         break;
       }
@@ -429,7 +429,7 @@ impl File {
       empty.cap = 0;
       ret err(1, "read_lines on closed file", empty);
     }
-    Vec<str> out = self.read_lines(max_len);
+    let out = self.read_lines(max_len);
     ret ok(out);
   }
 
@@ -438,7 +438,7 @@ impl File {
     if self.handle == nil || data == nil {
       ret false;
     }
-    num wrote = fwrite(data, 1, len, self.handle);
+    let wrote = fwrite(data, 1, len, self.handle);
     ret wrote == len;
   }
 
@@ -447,7 +447,7 @@ impl File {
     if self.handle == nil || data == nil {
       ret err(1, "write_bytes invalid", false);
     }
-    bin ok_write = self.write_bytes(data, len);
+    let ok_write = self.write_bytes(data, len);
     if ok_write == false {
       ret err(1, "write_bytes failed", false);
     }
@@ -467,7 +467,7 @@ impl File {
     if self.handle == nil || dst == nil {
       ret err(1, "read_into invalid", 0);
     }
-    num n = self.read_into(dst, len);
+    let n = self.read_into(dst, len);
     ret ok(n);
   }
 
@@ -484,7 +484,7 @@ impl File {
     if self.handle == nil {
       ret err(1, "seek on closed file", false);
     }
-    bin ok_seek = self.seek(offset, whence);
+    let ok_seek = self.seek(offset, whence);
     if ok_seek == false {
       ret err(1, "seek failed", false);
     }
@@ -504,7 +504,7 @@ impl File {
     if self.handle == nil {
       ret err(1, "tell on closed file", -1);
     }
-    num pos = self.tell();
+    let pos = self.tell();
     if pos < 0 {
       ret err(1, "tell failed", -1);
     }
@@ -532,7 +532,7 @@ impl File {
     if self.handle == nil {
       ret err(1, "flush on closed file", false);
     }
-    bin ok_flush = self.flush();
+    let ok_flush = self.flush();
     if ok_flush == false {
       ret err(1, "flush failed", false);
     }
@@ -551,7 +551,7 @@ impl File {
     if fseek(self.handle, 0, 2) != 0 {
       ret -1;
     }
-    num end = ftell(self.handle);
+    let end = ftell(self.handle);
     fseek(self.handle, cur, 0);
     ret end;
   }
@@ -561,8 +561,8 @@ impl File {
     if self.handle == nil {
       ret false;
     }
-    num n = len(data);
-    num wrote = fwrite(data, 1, n, self.handle);
+    let n = len(data);
+    let wrote = fwrite(data, 1, n, self.handle);
     ret wrote == n;
   }
 
@@ -571,7 +571,7 @@ impl File {
     if self.handle == nil {
       ret err(1, "write on closed file", false);
     }
-    bin ok_write = self.write(data);
+    let ok_write = self.write(data);
     if ok_write == false {
       ret err(1, "write failed", false);
     }
@@ -587,12 +587,12 @@ impl File {
 // Returns:
 // - file contents or null
 pub fun read_all(str path) str {
-  File f = open_read(path);
+  let f = open_read(path);
   if f.handle == nil {
     ret nil;
   }
   defer f.close();
-  str out = f.read_all();
+  let out = f.read_all();
   ret out;
 }
 
@@ -605,11 +605,11 @@ pub fun read_all(str path) str {
 // Returns:
 // - true on success
 pub fun write_all(str path, str data) bin {
-  File f = open_write(path);
+  let f = open_write(path);
   if f.handle == nil {
     ret false;
   }
   defer f.close();
-  bin ok = f.write(data);
+  let ok = f.write(data);
   ret ok;
 }
