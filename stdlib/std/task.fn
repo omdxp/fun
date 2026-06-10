@@ -74,6 +74,11 @@ pub fun wait_group_new(num n) WaitGroup {
 }
 
 impl WaitGroup {
+  // Add `n` to the expected count. Call before `wait()` to add more tasks to wait for.
+  pub add(num n) {
+    self.expected = self.expected + n;
+  }
+
   // Signal that one task has finished. Called from inside a forked task body.
   pub done() {
     self.signals <- 1;
