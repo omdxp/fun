@@ -1,4 +1,4 @@
-<!-- Hi, thank you for your contribution! 🔥
+<!-- Thank you for your contribution.
 
 Please provide a high-level description of the changes made by your pull request. If possible, reference related GitHub issues or other pull requests. For example:
 

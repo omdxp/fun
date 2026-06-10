@@ -13,7 +13,7 @@ imp std.result;
 
 // Path wrapper.
 pub compound Path {
-  // path string
+  // Path string.
   str value;
 }
 
@@ -23,7 +23,7 @@ pub compound Path {
 // - value: path string
 // 
 // Returns:
-// - Path wrapper
+// - initialized path wrapper
 pub fun path(str value) Path {
   Path p;
   p.value = value;
@@ -31,27 +31,46 @@ pub fun path(str value) Path {
 }
 
 impl Path {
-  // Join with another path segment.
+  // Join this path with another path segment.
+  // 
+  // Params:
+  // - other: child path segment
+  // 
+  // Returns:
+  // - joined path string
   pub join(str other) str {
     ret path_join(self.value, other);
   }
 
-  // Base name of the path.
+  // Return the base name of the path.
+  // 
+  // Returns:
+  // - final path segment
   pub basename() str {
     ret basename(self.value);
   }
 
-  // Directory name of the path.
+  // Return the directory portion of the path.
+  // 
+  // Returns:
+  // - directory component of the path
   pub dirname() str {
     ret dirname(self.value);
   }
 
-  // File extension of the path.
+  // Return the file extension of the path.
+  // 
+  // Returns:
+  // - file extension including the leading dot
+  // - empty string when no extension is present
   pub extname() str {
     ret extname(self.value);
   }
 
-  // True if path is absolute (posix).
+  // Return true when the path is absolute.
+  // 
+  // Returns:
+  // - true when the path is absolute under POSIX rules
   pub is_abs() bin {
     ret is_abs(self.value);
   }
@@ -116,7 +135,15 @@ pub fun path_join(str a, str b) str {
   ret out;
 }
 
-// Join two path segments with Result.
+// Join two path segments and report allocation failure as a Result.
+// 
+// Params:
+// - a: base path
+// - b: child path
+// 
+// Returns:
+// - `Ok(joined_path)` on success
+// - `Err` when allocation fails
 pub fun try_path_join(str a, str b) Result<str> {
   let out = path_join(a, b);
   if out == nil {
@@ -150,7 +177,14 @@ pub fun path_join_many(Vec<str>* parts) str {
   ret out;
 }
 
-// Join multiple segments with Result.
+// Join multiple path segments and report allocation failure as a Result.
+// 
+// Params:
+// - parts: vector of path parts
+// 
+// Returns:
+// - `Ok(joined_path)` on success
+// - `Err` when allocation fails
 pub fun try_path_join_many(Vec<str>* parts) Result<str> {
   let out = path_join_many(parts);
   if out == nil {
@@ -326,7 +360,15 @@ pub fun change_ext(str path, str new_ext) str {
   ret out;
 }
 
-// Change or add an extension with Result.
+// Change or add an extension and report allocation failure as a Result.
+// 
+// Params:
+// - path: path string
+// - new_ext: new extension with or without a leading dot
+// 
+// Returns:
+// - `Ok(path_with_new_extension)` on success
+// - `Err` when allocation fails
 pub fun try_change_ext(str path, str new_ext) Result<str> {
   let out = change_ext(path, new_ext);
   if out == nil {

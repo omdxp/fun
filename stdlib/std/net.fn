@@ -16,18 +16,21 @@ imp std.result;
 
 // Parsed URL components.
 pub compound Url {
-  // protocol (http/https)
+  // Protocol (`http` or `https`).
   str scheme;
-  // hostname
+  // Host name.
   str host;
-  // port number
+  // Port number.
   num port;
-  // request path
+  // Request path.
   str path;
 }
 
 impl Url {
   // Build a simple HTTP/1.1 GET request string.
+  // 
+  // Returns:
+  // - heap-allocated request string
   pub build_http_get() str {
     Vec<str> parts;
     parts.init(4);
@@ -89,7 +92,7 @@ pub fun parse_url(str s) Url {
 
 // Parse a URL with validation. `Ok(url)` when a non-empty host is present,
 // otherwise `Err` — unlike `parse_url`, which returns a Url with an empty host
-// on malformed input (a silent footgun).
+// on malformed input.
 pub fun try_parse_url(str s) Result<Url> {
   let u = parse_url(s);
   if is_empty(u.host) {
@@ -185,7 +188,14 @@ pub fun tcp_listen(num port) num {
   ret fd;
 }
 
-// Create a TCP listening socket with Result.
+// Create a TCP listening socket and report failures as a Result.
+// 
+// Params:
+// - port: TCP port to bind
+// 
+// Returns:
+// - `Ok(fd)` on success
+// - `Err` when socket setup fails
 pub fun try_tcp_listen(num port) Result<num> {
   let fd = tcp_listen(port);
   if fd < 0 {
@@ -202,7 +212,14 @@ pub fun tcp_accept(num server_fd) num {
   ret accept(server_fd, nil, nil);
 }
 
-// Accept a client connection with Result.
+// Accept a client connection and report failures as a Result.
+// 
+// Params:
+// - server_fd: listening socket descriptor
+// 
+// Returns:
+// - `Ok(fd)` on success
+// - `Err` when accept fails
 pub fun try_tcp_accept(num server_fd) Result<num> {
   let fd = tcp_accept(server_fd);
   if fd < 0 {
@@ -224,7 +241,16 @@ pub fun tcp_read(num fd, str buf, num len) num {
   ret recv(fd, buf, len, 0);
 }
 
-// Read from a socket with Result.
+// Read from a socket and report failures as a Result.
+// 
+// Params:
+// - fd: socket fd
+// - buf: destination buffer
+// - len: bytes to read
+// 
+// Returns:
+// - `Ok(bytes_read)` on success
+// - `Err` when the read fails
 pub fun try_tcp_read(num fd, str buf, num len) Result<num> {
   let n = tcp_read(fd, buf, len);
   if n < 0 {
@@ -246,7 +272,16 @@ pub fun tcp_write(num fd, str buf, num len) num {
   ret send(fd, buf, len, 0);
 }
 
-// Write to a socket with Result.
+// Write to a socket and report failures as a Result.
+// 
+// Params:
+// - fd: socket fd
+// - buf: source buffer
+// - len: bytes to write
+// 
+// Returns:
+// - `Ok(bytes_written)` on success
+// - `Err` when the write fails
 pub fun try_tcp_write(num fd, str buf, num len) Result<num> {
   let n = tcp_write(fd, buf, len);
   if n < 0 {
@@ -452,6 +487,14 @@ pub async fun build_http_get_to_channel_async(
 }
 
 // Serve a single HTTP request with a fixed response.
+// 
+// Params:
+// - port: TCP port to bind
+// - body: response body to send
+// 
+// Returns:
+// - `0` on success
+// - `-1` on socket setup or request handling failure
 pub fun http_serve_once(num port, str body) num {
   let server = tcp_listen(port);
   if server < 0 {
@@ -477,7 +520,15 @@ pub fun http_serve_once(num port, str body) num {
   ret 0;
 }
 
-// Serve a single HTTP request with Result.
+// Serve a single HTTP request and report failures as a Result.
+// 
+// Params:
+// - port: TCP port to bind
+// - body: response body to send
+// 
+// Returns:
+// - `Ok(0)` on success
+// - `Err` when serving fails
 pub fun try_http_serve_once(num port, str body) Result<num> {
   let rc = http_serve_once(port, body);
   if rc != 0 {
@@ -486,7 +537,15 @@ pub fun try_http_serve_once(num port, str body) Result<num> {
   ret ok(rc);
 }
 
-// Serve HTTP requests forever (blocking loop).
+// Serve HTTP requests forever in a blocking loop.
+// 
+// Params:
+// - port: TCP port to bind
+// - body: response body to send
+// 
+// Returns:
+// - `0` if the loop exits normally
+// - `-1` on socket setup or request handling failure
 pub fun http_serve_forever(num port, str body) num {
   let server = tcp_listen(port);
   if server < 0 {
@@ -514,7 +573,15 @@ pub fun http_serve_forever(num port, str body) num {
   ret 0;
 }
 
-// Serve HTTP requests forever with Result.
+// Serve HTTP requests forever and report failures as a Result.
+// 
+// Params:
+// - port: TCP port to bind
+// - body: response body to send
+// 
+// Returns:
+// - `Ok(0)` if the loop exits normally
+// - `Err` when serving fails
 pub fun try_http_serve_forever(num port, str body) Result<num> {
   let rc = http_serve_forever(port, body);
   if rc != 0 {

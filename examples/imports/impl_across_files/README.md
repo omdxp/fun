@@ -1,5 +1,15 @@
-Minimal repro for LSP method completion across files.
+# Impl Across Files Example
 
-- `user.fn` declares `compound User`.
-- `user_impl.fn` declares `impl User { greet() }`.
-- `main.fn` imports both and should complete `u.greet()` after typing `u.` (where `u` is a `User*`).
+This example validates method resolution and editor completion when a compound and its implementation are declared in separate files.
+
+## Structure
+
+- `user.fn` declares `compound User`
+- `user_impl.fn` declares `impl User { greet() }`
+- `main.fn` imports both files and exercises method completion
+
+## What This Example Verifies
+
+- the implementation is associated with `User` across file boundaries
+- editor completion on `u.` includes `greet()` for a `User*`
+- language tooling resolves methods consistently when declarations and implementations are split across modules

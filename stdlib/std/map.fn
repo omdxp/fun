@@ -31,24 +31,39 @@ pub compound Map<K, V> {
 }
 
 impl Map<K, V> as Sized {
-  // Number of entries.
+  // Return the number of live entries.
+  // 
+  // Returns:
+  // - live entry count
   pub len() num {
     ret self.len;
   }
 
-  // True when empty.
+  // Return true when the map holds no entries.
+  // 
+  // Returns:
+  // - true when the map is empty
   pub is_empty() bin {
     ret self.len == 0;
   }
 
-  // Current capacity.
+  // Return the current slot capacity.
+  // 
+  // Returns:
+  // - allocated slot count
   pub capacity() num {
     ret self.cap;
   }
 }
 
 impl Map<K, V> {
-  // Initialize the map with a capacity.
+  // Initialize the map with at least the requested capacity.
+  // 
+  // Params:
+  // - cap: requested initial slot capacity
+  // 
+  // Notes:
+  // - Capacities smaller than 8 are rounded up to 8.
   pub init(num cap) {
     self.key_slots = nil;
     self.value_slots = nil;
@@ -63,7 +78,13 @@ impl Map<K, V> {
     self.alloc(cap);
   }
 
-  // Ensure capacity is at least min_cap.
+  // Ensure capacity is at least the requested size.
+  // 
+  // Params:
+  // - min_cap: minimum desired slot capacity
+  // 
+  // Notes:
+  // - Capacities smaller than 8 are rounded up to 8.
   pub reserve(num min_cap) {
     if min_cap < 8 {
       min_cap = 8;
@@ -247,7 +268,7 @@ impl Map<K, V> {
     free(old_tomb);
   }
 
-  // Free internal storage.
+  // Free internal storage and reset the map to an empty state.
   pub free() {
     self.clear();
     if self.key_slots != nil {
@@ -271,12 +292,25 @@ impl Map<K, V> {
     self.cap = 0;
   }
 
-  // Check if a key exists.
+  // Return true when a key exists in the map.
+  // 
+  // Params:
+  // - key: key to look up
+  // 
+  // Returns:
+  // - true when the key is present
   pub has(K key) bin {
     ret self.find_live_index(key) != -1;
   }
 
-  // Get a value by key (zero value if missing).
+  // Return the value for a key.
+  // 
+  // Params:
+  // - key: key to look up
+  // 
+  // Returns:
+  // - stored value when the key exists
+  // - zero value of `V` when the key is missing
   pub get(K key) V {
     let idx = self.find_live_index(key);
     if idx == -1 {
@@ -285,7 +319,15 @@ impl Map<K, V> {
     ret self.load_value_idx(idx);
   }
 
-  // Get a value by key or fallback if missing.
+  // Return the value for a key or a fallback when it is missing.
+  // 
+  // Params:
+  // - key: key to look up
+  // - fallback: value returned when the key is absent
+  // 
+  // Returns:
+  // - stored value when the key exists
+  // - `fallback` when the key is missing
   pub get_or(K key, V fallback) V {
     let idx = self.find_live_index(key);
     if idx == -1 {
@@ -294,7 +336,15 @@ impl Map<K, V> {
     ret self.load_value_idx(idx);
   }
 
-  // Try to read a value into out; returns true on success.
+  // Try to read a value into an output pointer.
+  // 
+  // Params:
+  // - key: key to look up
+  // - out: destination for the value when present
+  // 
+  // Returns:
+  // - true when the key exists and `out` is written
+  // - false when the key is missing
   pub try_get(K key, V* out) bin {
     let idx = self.find_live_index(key);
     if idx == -1 {
@@ -304,8 +354,14 @@ impl Map<K, V> {
     ret true;
   }
 
-  // Look up a key as an Option: Some(value) when present, None when absent.
-  // (The safe counterpart to `get`/`get_or`; mirrors `Vec.at`.)
+  // Look up a key as an Option.
+  // 
+  // Params:
+  // - key: key to look up
+  // 
+  // Returns:
+  // - `Some(value)` when the key exists
+  // - `None` when the key is absent
   pub at(K key) Option<V> {
     let idx = self.find_live_index(key);
     if idx == -1 {
@@ -314,7 +370,11 @@ impl Map<K, V> {
     ret Option.Some(self.load_value_idx(idx));
   }
 
-  // Insert or update a value.
+  // Insert a value or replace the existing value for a key.
+  // 
+  // Params:
+  // - key: key to insert or update
+  // - value: value to store
   pub put(K key, V value) {
     if self.cap == 0 {
       self.alloc(8);
@@ -346,7 +406,15 @@ impl Map<K, V> {
     self.len = self.len + 1;
   }
 
-  // Insert only if absent; returns true when inserted.
+  // Insert a value only when the key is not already present.
+  // 
+  // Params:
+  // - key: key to insert
+  // - value: value to store
+  // 
+  // Returns:
+  // - true when a new entry is inserted
+  // - false when the key already exists
   pub put_if_absent(K key, V value) bin {
     // Only insert when the key is absent; do NOT overwrite an existing value.
     // (Previously this always called put(), overwriting the existing value, then
@@ -358,7 +426,14 @@ impl Map<K, V> {
     ret true;
   }
 
-  // Remove a key; returns true when removed.
+  // Remove a key from the map.
+  // 
+  // Params:
+  // - key: key to remove
+  // 
+  // Returns:
+  // - true when an entry is removed
+  // - false when the key is missing
   pub remove(K key) bin {
     let idx = self.find_live_index(key);
     if idx == -1 {
@@ -371,7 +446,7 @@ impl Map<K, V> {
     ret true;
   }
 
-  // Clear all entries (keeps capacity).
+  // Remove all entries while keeping the current capacity.
   pub clear() {
     if self.value_slots != nil {
       memset(self.key_slots, 0, self.cap * sizeof(K));
@@ -382,7 +457,10 @@ impl Map<K, V> {
     self.len = 0;
   }
 
-  // Return keys as a vector.
+  // Return the live keys as a vector.
+  // 
+  // Returns:
+  // - vector containing every live key in iteration order
   pub keys() Vec<K> {
     Vec<K> out;
     out.init(self.len);
@@ -400,7 +478,10 @@ impl Map<K, V> {
     ret out;
   }
 
-  // Return values as a vector.
+  // Return the live values as a vector.
+  // 
+  // Returns:
+  // - vector containing every live value in iteration order
   pub values() Vec<V> {
     Vec<V> out;
     out.init(self.len);
@@ -418,8 +499,13 @@ impl Map<K, V> {
     ret out;
   }
 
-  // A forward iterator over the live keys (unordered). Pair with `get`/`at`
-  // to visit values:
+  // Return a forward iterator over the live keys.
+  // 
+  // Notes:
+  // - Iteration order is unspecified.
+  // - Pair the yielded keys with `get()` or `at()` to visit values.
+  // 
+  // Usage:
   // 
   // ```
   // let it = m.iter_keys();
@@ -437,7 +523,10 @@ impl Map<K, V> {
     ret it;
   }
 
-  // Alias for `iter_keys()` so `for key : map { ... }` iterates the keys.
+  // Return the default key iterator.
+  // 
+  // Returns:
+  // - same iterator as `iter_keys()`
   pub iter() MapIter<K, V> {
     ret self.iter_keys();
   }
@@ -445,14 +534,18 @@ impl Map<K, V> {
 
 // Forward iterator over a Map's live keys, produced by `Map.iter_keys()`.
 pub compound MapIter<K, V> {
-  // the map being iterated (borrowed, not owned)
+  // Map being iterated (borrowed, not owned).
   Map<K, V>* src;
-  // index of the next slot to examine
+  // Index of the next slot to examine.
   num idx;
 }
 
 impl MapIter<K, V> as Iterator<K> {
-  // Advance to the next live key, skipping empty and tombstoned slots.
+  // Return the next live key from the iterator.
+  // 
+  // Returns:
+  // - `Some(key)` for the next live slot
+  // - `None` after all slots have been examined
   pub next() Option<K> {
     for self.idx < self.src.cap {
       let at = self.idx;
@@ -466,7 +559,7 @@ impl MapIter<K, V> as Iterator<K> {
 }
 
 impl Map<K, V> as Clearable {
-  // Clear all entries (keeps capacity).
+  // Remove all entries while keeping the current capacity.
   pub clear() {
     if self.value_slots != nil {
       memset(self.key_slots, 0, self.cap * sizeof(K));

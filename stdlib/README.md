@@ -1,7 +1,9 @@
 
 # Fun Standard Library
 
-This directory contains standard library modules for the Fun language.
+This directory contains the Fun standard library source and the documentation conventions used for standard-library modules.
+
+`stdlib/std/` contains Fun-native modules and signature modules used for C interop. In particular, `stdlib/std/c/` defines signature-only bindings that describe external C APIs for the compiler and tooling layer.
 
 ## Documentation Comments
 

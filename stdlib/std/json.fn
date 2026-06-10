@@ -36,7 +36,7 @@ pub enum JsonValue {
 }
 
 impl JsonValue {
-  // True when this value is JSON null.
+  // Return true when this value is JSON null.
   pub is_null() bin {
     fit *self {
       .Null -> { ret true; }
@@ -49,7 +49,7 @@ impl JsonValue {
     ret false;
   }
 
-  // True when this value is a JSON boolean.
+  // Return true when this value is a JSON boolean.
   pub is_bool() bin {
     fit *self {
       .Bool(b) -> { ret true; }
@@ -62,7 +62,7 @@ impl JsonValue {
     ret false;
   }
 
-  // True when this value is a JSON number.
+  // Return true when this value is a JSON number.
   pub is_num() bin {
     fit *self {
       .Num(n) -> { ret true; }
@@ -75,7 +75,7 @@ impl JsonValue {
     ret false;
   }
 
-  // True when this value is a JSON string.
+  // Return true when this value is a JSON string.
   pub is_str() bin {
     fit *self {
       .Str(s) -> { ret true; }
@@ -88,7 +88,7 @@ impl JsonValue {
     ret false;
   }
 
-  // True when this value is a JSON array.
+  // Return true when this value is a JSON array.
   pub is_array() bin {
     fit *self {
       .Array(a) -> { ret true; }
@@ -101,7 +101,7 @@ impl JsonValue {
     ret false;
   }
 
-  // True when this value is a JSON object.
+  // Return true when this value is a JSON object.
   pub is_object() bin {
     fit *self {
       .Object(o) -> { ret true; }
@@ -114,7 +114,7 @@ impl JsonValue {
     ret false;
   }
 
-  // The boolean, or None when this is not a Bool.
+  // Return the boolean contents, or None when this is not a Bool.
   pub as_bool() Option<bin> {
     fit *self {
       .Bool(b) -> { ret Option.Some(b); }
@@ -127,7 +127,7 @@ impl JsonValue {
     ret Option.None;
   }
 
-  // The number (as a dec), or None when this is not a Num.
+  // Return the numeric contents, or None when this is not a Num.
   pub as_num() Option<dec> {
     fit *self {
       .Num(n) -> { ret Option.Some(n); }
@@ -140,7 +140,7 @@ impl JsonValue {
     ret Option.None;
   }
 
-  // The string, or None when this is not a Str.
+  // Return the string contents, or None when this is not a Str.
   pub as_str() Option<str> {
     fit *self {
       .Str(s) -> { ret Option.Some(s); }
@@ -153,8 +153,11 @@ impl JsonValue {
     ret Option.None;
   }
 
-  // The array elements, or None when this is not an Array. The Vec is a copy of the
-  // header (its elements are shared); treat it as read-only.
+  // Return the array elements, or None when this is not an Array.
+  // 
+  // Notes:
+  // - The returned Vec copies only the header; the elements are still shared.
+  // - Treat the returned Vec as read-only.
   pub as_array() Option<Vec<JsonValue>> {
     fit *self {
       .Array(a) -> { ret Option.Some(a); }
@@ -167,8 +170,14 @@ impl JsonValue {
     ret Option.None;
   }
 
-  // Look up a key on an Object: Some(value) when present, None otherwise (also None
-  // when this value is not an Object).
+  // Look up a key on an object value.
+  // 
+  // Params:
+  // - key: object key to read
+  // 
+  // Returns:
+  // - `Some(value)` when this is an object and the key exists
+  // - `None` when the key is missing or this value is not an object
   pub get(str key) Option<JsonValue> {
     fit *self {
       .Object(o) -> { ret o.at(key); }
@@ -181,8 +190,14 @@ impl JsonValue {
     ret Option.None;
   }
 
-  // The element at array index `i`: Some(value) in range, None otherwise (also None
-  // when this value is not an Array).
+  // Return the element at an array index.
+  // 
+  // Params:
+  // - i: array index
+  // 
+  // Returns:
+  // - `Some(value)` when this is an array and `i` is in range
+  // - `None` when `i` is out of range or this value is not an array
   pub index(num i) Option<JsonValue> {
     fit *self {
       .Array(a) -> { ret a.at(i); }
@@ -195,7 +210,12 @@ impl JsonValue {
     ret Option.None;
   }
 
-  // Number of entries (Object) or elements (Array); 0 for scalars.
+  // Return the logical length of the value.
+  // 
+  // Returns:
+  // - object entry count for `Object`
+  // - element count for `Array`
+  // - `0` for scalar values
   pub len() num {
     fit *self {
       .Array(a) -> { ret a.len(); }
@@ -211,29 +231,35 @@ impl JsonValue {
 
 // --- Convenience constructors --------------------------------------------------------
 
-// A JSON number from a decimal.
+// Create a JSON number from a decimal.
 pub fun json_num(dec n) JsonValue {
   ret JsonValue.Num(n);
 }
 
-// A JSON string.
+// Create a JSON string.
 pub fun json_str(str s) JsonValue {
   ret JsonValue.Str(s);
 }
 
-// A JSON boolean.
+// Create a JSON boolean.
 pub fun json_bool(bin b) JsonValue {
   ret JsonValue.Bool(b);
 }
 
-// An empty JSON object map you can fill with `put`, then wrap as `JsonValue.Object`.
+// Create an empty JSON object map.
+// 
+// Returns:
+// - empty map ready to wrap as `JsonValue.Object`
 pub fun json_object() Map<str, JsonValue> {
   Map<str, JsonValue> m;
   m.init(8);
   ret m;
 }
 
-// An empty JSON array vector you can fill with `push`, then wrap as `JsonValue.Array`.
+// Create an empty JSON array vector.
+// 
+// Returns:
+// - empty vector ready to wrap as `JsonValue.Array`
 pub fun json_array() Vec<JsonValue> {
   Vec<JsonValue> v;
   v.init(8);

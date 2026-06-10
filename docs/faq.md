@@ -1,19 +1,39 @@
-# fun FAQ
+# Fun FAQ
 
-**Q: Why another programming language?**
-A: To explore language design, static typing, and transpilation to C for performance and portability.
+## What is Fun designed for?
 
-**Q: How do I run a fun program?**
-A: See the Quickstart in the main [README](../README.md).
+Fun is a statically typed language that transpiles to C. The project emphasizes readable generated output, predictable deployment across common C toolchains, and a practical development workflow built around formatting, diagnostics, and editor tooling.
 
-**Q: What are the numeric sizes?**
-A: `num`/`dec` stay 64-bit by default (`int64_t`/`double`), and Fun also supports low-level numeric types like `i32`, `u64`, `f32`, `f64`, plus arbitrary-width integers via `iN`/`uN`.
+## How do I run a Fun program?
 
-**Q: Where can I find examples?**
-A: In the [examples/](../examples/) directory.
+See the Quickstart section in the repository [README](../README.md). The standard local workflow is:
 
-**Q: How do I contribute?**
-A: See [CONTRIBUTING.md](../CONTRIBUTING.md).
+```sh
+zig build
+./zig-out/bin/fun -in path/to/file.fn
+```
 
-**Q: Why does FLS restart in a loop with EPIPE/SIGABRT errors?**
-A: That usually means the language server process crashed while indexing workspace files. FLS uses panic-safe token-only indexing by default. If you manually enabled parser-heavy indexing for debugging, disable it by unsetting `FLS_ENABLE_INPROC_PARSE` (or setting it to `0`) and keep `FLS_PARSE_SCOPE=none`.
+## What numeric types does Fun provide?
+
+`num` and `dec` are 64-bit by default (`int64_t` and `double`). Fun also provides fixed-width scalar types such as `i32`, `u64`, `f32`, and `f64`, plus arbitrary-width integers through `iN` and `uN`.
+
+## Where can I find language and library examples?
+
+The [examples/](../examples/) directory contains language, standard-library, import-structure, and negative-behavior examples. It is the best starting point for concrete usage patterns.
+
+## Where is the authoritative documentation?
+
+Use these documents depending on what you need:
+
+- [language.md](language.md) for the language overview
+- [reference.md](reference.md) for the reference material
+- [architecture.md](architecture.md) for implementation structure
+- [channel-runtime-conformance.md](channel-runtime-conformance.md) for backend/runtime behavior details
+
+## How do I contribute?
+
+Contribution workflow, validation expectations, and review guidance are documented in [CONTRIBUTING.md](../CONTRIBUTING.md).
+
+## Why does FLS restart repeatedly with `EPIPE` or `SIGABRT` errors?
+
+That usually indicates that the language server crashed while indexing workspace files. FLS defaults to panic-safe token-only indexing. If parser-heavy indexing was enabled for debugging, disable it by unsetting `FLS_ENABLE_INPROC_PARSE` (or setting it to `0`) and keep `FLS_PARSE_SCOPE=none`.

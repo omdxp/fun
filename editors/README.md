@@ -1,10 +1,16 @@
-# Editor support
+# Editor Support
 
-Each editor integration includes a website-matching "Fun Web" color theme/scheme alongside syntax support.
+This directory contains editor integrations, syntax support, themes, and language-server setup notes for Fun.
 
-- VS Code: see [editors/vscode](vscode/)
-- Vim: see [editors/vim](vim/)
-- Neovim: see [editors/neovim](neovim/)
-- Emacs: see [editors/emacs](emacs/)
-- Sublime Text: see [editors/sublime](sublime/)
-- JetBrains: see [editors/jetbrains](jetbrains/)
+Most editor packages are designed to work alongside `fls`, the Fun language server, which provides diagnostics, hover, completion, formatting-aware workflows, and related editor features where supported.
+
+## Available Integrations
+
+- VS Code: [editors/vscode](vscode/)
+- Vim: [editors/vim](vim/)
+- Neovim: [editors/neovim](neovim/)
+- Emacs: [editors/emacs](emacs/)
+- Sublime Text: [editors/sublime](sublime/)
+- JetBrains: [editors/jetbrains](jetbrains/)
+
+Several integrations also include the "Fun Web" color theme or a matching editor theme derived from the project website palette.

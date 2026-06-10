@@ -1,25 +1,63 @@
-# Contributing to fun
+# Contributing to Fun
 
-Thank you for your interest in contributing! Please read these guidelines to make the process smooth for everyone.
+Thank you for contributing to Fun. This document outlines the expected workflow for code changes, issue reports, and pull requests so contributions can be reviewed and merged efficiently.
 
-## How to Contribute
-- Fork the repository and create your branch from `main`.
-- Write clear, concise commit messages.
-- Add tests for new features or bug fixes.
-- Ensure all tests pass (`zig build test`).
-- Open a pull request and describe your changes.
+## Before You Start
 
-## Code Style
-- Follow the style of existing Zig code.
-- Use descriptive names and add comments where helpful.
+- Review the current [README.md](README.md) and the relevant documentation under [docs/](docs/).
+- Search existing issues and pull requests before opening a new report or proposal.
+- Prefer focused changes. Small, well-scoped pull requests are easier to validate and review.
+
+## Development Workflow
+
+1. Fork the repository and create a branch from `main`.
+2. Make the smallest change that fully addresses the issue or feature.
+3. Add or update tests whenever behavior changes.
+4. Run the relevant validation commands before opening a pull request.
+5. Open a pull request with a clear description of the problem, approach, and validation performed.
+
+## Validation Expectations
+
+At minimum, contributors should run the repository validation relevant to the changed area.
+
+- Full repository validation: `zig build test --summary all`
+- Build validation: `zig build`
+- Editor extension changes: run the local build steps documented in [editors/vscode/README.md](editors/vscode/README.md)
+
+If a change intentionally affects diagnostics, formatting, runtime backends, or editor tooling, include the commands used to verify that behavior in the pull request description.
+
+## Code And Documentation Standards
+
+- Follow the style already established in the surrounding code.
+- Prefer explicit, descriptive names over abbreviated identifiers.
+- Keep changes targeted; avoid unrelated refactors in the same pull request.
+- Update documentation when user-facing behavior, tooling, or configuration changes.
+- Keep examples and README content aligned with the current implementation.
 
 ## Reporting Issues
-- Search existing issues before opening a new one.
-- Include steps to reproduce, expected and actual behavior, and relevant logs/code.
 
-## Community
-- Be respectful and constructive in all interactions.
+When filing a bug, include enough detail for maintainers to reproduce the problem quickly:
 
----
+- operating system and toolchain details
+- the Fun input or project layout involved
+- the exact command executed
+- expected behavior
+- actual behavior
+- relevant logs, diagnostics, or generated output
 
-We appreciate your help in making fun better!
+Feature requests should explain the use case, the limitation in the current behavior, and any constraints that matter for the design.
+
+## Pull Request Guidance
+
+Pull requests should include:
+
+- a concise summary of the change
+- the motivation or problem statement
+- validation performed
+- links to any related issues or prior discussion
+
+If the change affects syntax, diagnostics, standard-library APIs, or editor behavior, call that out explicitly in the PR description so reviewers can route it appropriately.
+
+## Community Expectations
+
+All contributors are expected to follow [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Reviews and discussion should stay technical, respectful, and evidence-based.

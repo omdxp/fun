@@ -28,7 +28,7 @@ pub enum Result<T> {
 }
 
 impl Result<T> {
-  // True when the result is Ok.
+  // Return true when the result is Ok.
   pub is_ok() bin {
     fit *self {
       .Ok(v) -> { ret true; }
@@ -37,7 +37,7 @@ impl Result<T> {
     ret false;
   }
 
-  // True when the result is an Err.
+  // Return true when the result is Err.
   pub is_err() bin {
     fit *self {
       .Ok(v) -> { ret false; }
@@ -46,7 +46,7 @@ impl Result<T> {
     ret true;
   }
 
-  // The Ok value, or `fallback` when Err.
+  // Return the Ok value, or `fallback` when Err.
   pub unwrap_or(T fallback) T {
     fit *self {
       .Ok(v) -> { ret v; }
@@ -55,8 +55,12 @@ impl Result<T> {
     ret fallback;
   }
 
-  // The Ok value. Prefer `unwrap_or`: on Err this returns a zero value (there is no
-  // panic), so use it only after checking `is_ok()` or matching the variant.
+  // Return the Ok value.
+  // 
+  // Notes:
+  // - Prefer `unwrap_or()` when you need a fallback.
+  // - On Err this returns a zero value; there is no panic mechanism.
+  // - Use it only after checking `is_ok()` or matching the variant.
   pub unwrap() T {
     fit *self {
       .Ok(v) -> { ret v; }
@@ -65,7 +69,7 @@ impl Result<T> {
     ret self.zero();
   }
 
-  // The Err value, or a no-error `Error` when Ok.
+  // Return the Err value, or `error_none()` when the result is Ok.
   pub unwrap_err() Error {
     fit *self {
       .Ok(v) -> { ret error_none(); }
@@ -80,7 +84,7 @@ impl Result<T> {
     ret out;
   }
 
-  // `other` if this is Ok, otherwise keep this Err (logical AND of success).
+  // Return `other` when this result is Ok; otherwise keep this Err.
   pub and(Result<T> other) Result<T> {
     fit *self {
       .Ok(v) -> { ret other; }
@@ -89,7 +93,7 @@ impl Result<T> {
     ret other;
   }
 
-  // This result if it is Ok, otherwise `other`.
+  // Return this result when it is Ok; otherwise return `other`.
   pub or(Result<T> other) Result<T> {
     fit *self {
       .Ok(v) -> { ret .Ok(v); }

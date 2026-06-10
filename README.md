@@ -1,98 +1,208 @@
+<div align="center">
+  <img src="editors/vscode/fun.png" alt="Fun Programming Language" width="220" />
+  <h1>Fun Programming Language</h1>
+  <p>A statically typed programming language that transpiles to C, built for predictable performance, straightforward tooling, and portable deployment.</p>
+  <p>
+    <a href="https://omdxp.github.io/fun/#language"><strong>Language Guide</strong></a>
+    ·
+    <a href="https://omdxp.github.io/fun/#reference"><strong>Reference</strong></a>
+    ·
+    <a href="examples/"><strong>Examples</strong></a>
+    ·
+    <a href="https://marketplace.visualstudio.com/items?itemName=omdxp.fun-language"><strong>VS Code</strong></a>
+  </p>
+  <p>
+    <a href="https://github.com/omdxp/fun/actions"><img src="https://img.shields.io/github/actions/workflow/status/omdxp/fun/ci-dev.yml?branch=main" alt="CI status" /></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="MIT License" /></a>
+  </p>
+</div>
 
-# Fun Programming Language
+## Overview
 
-[![CI](https://img.shields.io/github/actions/workflow/status/omdxp/fun/ci-dev.yml?branch=main)](https://github.com/omdxp/fun/actions)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+Fun is a compiled language implemented in Zig that lowers Fun source code to readable C. The project focuses on a compact language surface, strong static typing, practical concurrency, and an editor-friendly toolchain built around formatting, diagnostics, and language-server support.
 
-**Fun** is a statically-typed programming language that transpiles to C, designed for safety, performance, and simplicity. Written in Zig. Fun includes high-level defaults (`num`, `dec`) and low-level fixed/arbitrary-width numeric types (`i32`, `u64`, `f32`, `f64`, `iN`, `uN`).
+The language provides high-level default numerics (`num`, `dec`), fixed-width scalar types (`i32`, `u64`, `f32`, `f64`), and arbitrary-width integers (`iN`, `uN`) so the same codebase can target ergonomic application code and lower-level systems work.
 
----
+## Why Fun
 
-## Table of Contents
-- [Fun Programming Language](#fun-programming-language)
-  - [Table of Contents](#table-of-contents)
-  - [Features](#features)
-  - [Installation](#installation)
-  - [Release installers (bundles)](#release-installers-bundles)
-  - [GitHub Actions](#github-actions)
-  - [CLI Usage](#cli-usage)
-    - [C Compiler Selection](#c-compiler-selection)
-      - [Windows notes](#windows-notes)
-  - [Quickstart](#quickstart)
-  - [Examples](#examples)
-  - [Documentation](#documentation)
-  - [Project Structure](#project-structure)
-  - [Contributing](#contributing)
-  - [Changelog](#changelog)
-  - [License](#license)
-  - [IDE / Language Server (fls)](#ide--language-server-fls)
-    - [VS Code](#vs-code)
-    - [Other Editors](#other-editors)
-    - [GitHub Syntax Highlighting](#github-syntax-highlighting)
-  - [Installation](#installation-1)
-    - [Prerequisites](#prerequisites)
-    - [Build from Source](#build-from-source)
-    - [Install from Release](#install-from-release)
+- Predictable compilation model: Fun compiles through C, making generated output inspectable and portable across common platform toolchains.
+- Practical type system: the language combines simple defaults with low-level numeric control when exact layout or width matters.
+- Built-in concurrency primitives: virtual threads, channels, async/await, and task coordination are first-class parts of the language and standard library.
+- Tooling-first workflow: formatting, diagnostics, a language server, and editor integrations are part of the day-to-day development experience.
+- Compact standard library: the core library covers collections, filesystem, networking, serialization, synchronization, and C interop signatures.
 
----
+## Core Capabilities
 
-## Features
-
-- Statically-typed, C-like performance
-- Rich numeric model (`num`/`dec`, fixed-width `i32`/`u64`, and arbitrary-width `iN`/`uN`)
-- Transpiles to readable C code
-- Simple, expressive syntax
-- Modular imports
-- Pattern matching (`fit` statement)
-- Type-safe variables and functions
-- Default parameter values (`fun f(num x, num y = 1)`)
-- Data-carrying enums (sum types) with payload binding
-- Concurrency: virtual threads (`fork`, M:N scheduler), channels, and a `std.task` WaitGroup
-- CLI with multiple output and debug options
-- AST printing and analysis
-- Comprehensive error handling
-- Example and test suite
+- Static typing with explicit, readable syntax
+- Transpilation to C with debug-friendly source mapping
+- Pattern matching via `fit`
+- Data-carrying enums and generic compounds
+- Default parameter values
+- Virtual-thread concurrency with `fork`
+- Standard-library support for channels, tasks, threads, filesystem access, JSON, TOML, networking, and more
+- CLI tooling for formatting, diagnostics, AST inspection, and code generation
 
 ## Installation
 
-Requires [Zig](https://ziglang.org/).
+### Prerequisites
 
-```bash
+- [Zig](https://ziglang.org/download/) matching the version declared in [build.zig.zon](build.zig.zon)
+- macOS, Linux, or Windows
+
+### Build From Source
+
+```sh
+git clone https://github.com/omdxp/fun.git
+cd fun
 zig build
 ```
 
-This will build the `fun` compiler in `zig-out/bin/fun`.
+This produces the compiler and language server in `zig-out/bin/`.
 
-To install the compiler plus the Fun standard library files:
+To install the compiler together with the standard library layout used by the runtime and editor tooling:
 
-```bash
+```sh
 zig build install
 ```
 
-This installs:
-- `zig-out/bin/fun`
-- `zig-out/share/fun/stdlib/std/c/*.fn` (signature-only C-interop modules used for tooling)
+### Release Bundles
 
-Notes:
-- `std.c.*` is the C-interop layer (signatures only). These modules describe external C APIs (e.g. `printf`) so the compiler and language server can typecheck and provide tooling.
-- `std.*` (without `.c`) is intended for Fun-native standard library modules written in Fun.
+Release assets are published as install bundles containing the compiler, the standard library under `share/fun/`, and platform-specific install assets.
 
-## Release installers (bundles)
+- Windows releases are available as `.msi` installers and portable `.zip` archives.
+- Portable archives preserve the same `bin/` and `share/fun/` layout as an installed release.
+- Windows portable packages include `README-portable.txt` with platform-specific startup notes.
 
-Release assets are packaged as install bundles (binary + `share/fun/` + an installer script).
+At runtime, the compiler discovers the standard library in this order:
 
-On Windows, release assets are provided as both `.msi` installers and portable `.zip` archives.
-The portable archive contains the same `fun-<target>/` layout (`bin/` + `share/fun/`) so you can unzip and run without installation.
-Each portable archive also includes `README-portable.txt` with Windows-specific quickstart notes.
+1. `FUN_STDLIB_DIR`
+2. `<exe>/../share/fun`
+3. Common system install locations for the active platform
 
-The compiler discovers the standard library at runtime using, in order:
-- `FUN_STDLIB_DIR` (explicit override)
-- `<exe>/../share/fun` (installed layout)
-- common system locations (platform-dependent)
+`std.c.*` modules are signature-only C interop definitions used for typechecking and tooling. `std.*` modules without the `.c` namespace are Fun-native standard library modules.
 
-## GitHub Actions
+## Quickstart
 
-Use the published setup action to install `fun` in CI:
+Create `hello.fn`:
+
+```fun
+imp std.c.io;
+
+fun main(str[] args) {
+  printf("Hello, World!\n");
+}
+```
+
+Build the toolchain and run the program:
+
+```sh
+zig build
+./zig-out/bin/fun -in hello.fn
+```
+
+## CLI
+
+```text
+Usage:
+  fun -in <input_file> [-fmt | -fmt-all | -fmt-diag | -fmt-check | -fmt-check-all] [-out <output_file>] [-no-exec] [-outf] [-ast] [-g] [-help] [-- <program args...>]
+  fun -fmt-check-all [-in <file_or_dir>]
+  fun -version
+```
+
+Key workflows:
+
+- `fun -in file.fn` compiles and runs a Fun program.
+- `fun -fmt`, `fun -fmt-all`, and `fun -fmt-check-all` enforce formatting across a file or tree.
+- `fun -fmt-diag -no-exec` formats and collects diagnostics in a single pass.
+- `fun -g` emits debug-friendly Fun-to-C source mapping for native debugger workflows.
+
+### C Compiler Selection
+
+By default, `fun` selects a platform compiler unless `FUN_CC` is set.
+
+- macOS and Linux: `zig cc`, `clang`, `gcc`, `cc`
+- Windows: `zig cc`, `clang`, `gcc`, `cl`
+
+You can override the compiler with:
+
+- `FUN_CC`: base compiler command, or a full template when it includes `{src}` and `{out}`
+- `FUN_CC_ARGS`: additional arguments appended to the base command
+
+Examples:
+
+- `FUN_CC=clang`
+- `FUN_CC=zig` with `FUN_CC_ARGS="cc"`
+- `FUN_CC="clang -O2 {src} -o {out}"`
+
+#### Windows Notes
+
+When using `cl`, run Fun from **Developer PowerShell for Visual Studio** (or after `VsDevCmd.bat`) so MSVC environment variables are initialized.
+
+Recommended stable Windows setup:
+
+```powershell
+$env:FUN_CC = "zig"
+$env:FUN_CC_ARGS = "cc"
+```
+
+Use `cl` only when the Visual Studio toolchain environment is already active:
+
+```powershell
+$env:FUN_CC = "cl /nologo /Fe{out} {src}"
+$env:FUN_CC_ARGS = ""
+```
+
+## Tooling And Editor Support
+
+The repository includes `fls`, the Fun language server. It communicates over LSP and supports diagnostics, formatting-aware workflows, hover, completion, go-to-definition, and related editor features.
+
+### VS Code
+
+The official VS Code extension is published on the Visual Studio Marketplace: [Fun (FLS) for VS Code](https://marketplace.visualstudio.com/items?itemName=omdxp.fun-language).
+
+1. Build `fun` and `fls` with `zig build`.
+2. Install the published extension from the marketplace.
+3. For local development, packaging, or extension source, see [editors/vscode](editors/vscode).
+
+### Other Editors
+
+Vim, Neovim, Emacs, JetBrains, and Sublime setup notes are available in [editors/README.md](editors/README.md).
+
+### GitHub Syntax Highlighting
+
+This repository maps `.fn` files to Zig highlighting on GitHub via [/.gitattributes](.gitattributes). Native Fun highlighting can be added upstream by contributing a Fun definition and TextMate grammar to GitHub Linguist.
+
+## Documentation
+
+- [Public documentation site](https://omdxp.github.io/fun/): primary documentation entry point
+- [Language guide](https://omdxp.github.io/fun/#language): public language overview and feature guide
+- [Reference](https://omdxp.github.io/fun/#reference): public language and library reference
+- [Interactive playground](https://omdxp.github.io/fun/#playground): runnable browser-based examples
+- [docs/architecture.md](docs/architecture.md): implementation structure and compiler pipeline
+- [docs/channel-runtime-conformance.md](docs/channel-runtime-conformance.md): backend conformance matrix and runtime thresholds
+- [docs/faq.md](docs/faq.md): common questions about the language and tooling
+- [docs/](docs/): source Markdown that feeds the published documentation
+
+## Examples
+
+The [examples/](examples/) directory is organized for incremental exploration:
+
+- foundational language examples
+- advanced language features and concurrency patterns
+- import and module-organization scenarios
+- standard-library usage examples
+- negative and edge-case programs used for diagnostics and behavior validation
+
+Representative entry points:
+
+- [examples/test.fn](examples/test.fn)
+- [examples/advanced/custom_functions.fn](examples/advanced/custom_functions.fn)
+- [examples/imports/main.fn](examples/imports/main.fn)
+- [examples/stdlib/json_basic.fn](examples/stdlib/json_basic.fn)
+
+## CI And Automation
+
+Use the published setup action to install Fun in GitHub Actions:
 
 ```yaml
 jobs:
@@ -106,171 +216,27 @@ jobs:
       - run: fun -version
 ```
 
-## CLI Usage
+## Repository Layout
 
-```
-Usage:
-  fun -in <input_file> [-fmt | -fmt-all | -fmt-diag | -fmt-check | -fmt-check-all] [-out <output_file>] [-no-exec] [-outf] [-ast] [-g] [-help] [-- <program args...>]
-  fun -fmt-check-all [-in <file_or_dir>]
-  fun -version
-
-Arguments:
-  -help             Show this help message
-  -version          Print version and exit
-  -in      <file>   Input file to compile (required except for -fmt-check-all)
-  -fmt              Format the input file in-place (optional)
-  -fmt-all          Format the input file and all locally imported modules (optional)
-  -fmt-diag         Format the input file in-place, then run diagnostics (optional)
-  -fmt-check        Check if the input file is formatted; exit 1 if not (optional)
-  -fmt-check-all    Check every .fn file under the current directory or -in root; exit 1 if any are unformatted (optional)
-  -g                Enable debug info: source-level Fun→C mapping + DWARF symbols (optional)
-  -out     <file>   Output file (optional, defaults to input filename with .c extension)
-  -no-exec          Disable automatic compilation and execution (optional, execution enabled by default)
-  -outf             Generate .c output file (optional, disabled by default)
-  -ast              Print AST nodes (optional, disabled by default)
-  --                All following args are passed to the compiled program
-```
-
-### C Compiler Selection
-
-By default, `fun` tries platform compiler defaults unless `FUN_CC` is set:
-
-- Windows: `zig cc`, `clang`, `gcc`, `cl`
-- macOS/Linux: `zig cc`, `clang`, `gcc`, `cc`
-
-Release installers on macOS/Linux set `FUN_CC=gcc` by default. The Windows MSI sets `FUN_CC` to use `cl` with a template command. The Windows portable `.zip` does not modify your environment. You can override the C compiler with environment variables:
-
-- `FUN_CC`: compiler command. If it includes `{src}` and `{out}`, it is treated as a full template.
-- `FUN_CC_ARGS`: extra arguments appended after the base command.
-
-Examples:
-
-- Use clang:
-  - `FUN_CC=clang`
-- Use zig cc explicitly:
-  - `FUN_CC=zig` and `FUN_CC_ARGS="cc"`
-- Use a template with explicit placeholders:
-  - `FUN_CC="clang -O2 {src} -o {out}"`
-
-#### Windows notes
-
-If you use `cl`, run `fun` from **Developer PowerShell for Visual Studio** (or after `VsDevCmd.bat`) so MSVC environment variables are initialized.
-
-Recommended stable setup on Windows:
-
-```powershell
-$env:FUN_CC = "zig"
-$env:FUN_CC_ARGS = "cc"
-```
-
-Use `cl` explicitly only when your VS toolchain shell is active:
-
-```powershell
-$env:FUN_CC = "cl /nologo /Fe{out} {src}"
-$env:FUN_CC_ARGS = ""
-```
-
-If `cl` compiles but runtime output looks wrong on your system/toolset, switch back to `zig cc`.
-
-## Quickstart
-
-Write your first program in `hello.fn`:
-
-```fun
-imp std.c.io;
-
-fun main(str[] args) {
-  printf("Hello, World!\n");
-}
-```
-
-Compile and run:
-
-```bash
-zig build
-./zig-out/bin/fun -in hello.fn
-```
-
-## Examples
-
-Explore the [`examples/`](examples/) directory for more:
-- Basic: [`test.fn`](examples/test.fn)
-- Advanced: [`advanced/custom_functions.fn`](examples/advanced/custom_functions.fn)
-- Imports: [`imports/main.fn`](examples/imports/main.fn)
-- Imports (parent traversal `....`): [`imports/parent_traversal_2up/nested/level1/main.fn`](examples/imports/parent_traversal_2up/nested/level1/main.fn)
-- Error cases: [`error_cases/`](examples/error_cases/)
-
-## Documentation
-
-- Language overview: [docs/language.md](docs/language.md)
-- Full reference: [docs/reference.md](docs/reference.md)
-- Channel/runtime conformance matrix and backend thresholds: [docs/channel-runtime-conformance.md](docs/channel-runtime-conformance.md)
-
-## Project Structure
-
-- `cmd/` — CLI entrypoint
-- `modules/` — Core compiler modules (lexer, parser, codegen, semantics, utils, etc.)
-- `examples/` — Example programs
-- `tests/` — Test suite
-- `build.zig` — Zig build script
+- `cmd/`: command-line entrypoints
+- `modules/`: compiler and tooling modules
+- `stdlib/`: standard library source and documentation
+- `examples/`: sample Fun programs
+- `tests/`: repository test suites
+- `editors/`: editor integrations and language tooling packages
+- `build.zig`: Zig build definition
 
 ## Contributing
 
-Contributions are welcome! Please open issues or pull requests. See [CONTRIBUTING.md](CONTRIBUTING.md) if available.
+Contribution guidelines, development expectations, and pull-request workflow are documented in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for release notes and development history.
+Release history and notable changes are tracked in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
-
-## IDE / Language Server (fls)
-
-This repo includes a work-in-progress language server called `fls`.
-
-- Build: `zig build` (installs `fls` alongside `fun`)
-- The server speaks LSP over stdio and currently supports:
-  - Diagnostics (via `fun -no-exec`)
-  - Formatting + diagnostics combined (via `fun -fmt-diag -no-exec`) — when format-on-save is enabled, fls uses a single subprocess to format and collect diagnostics simultaneously, rather than two sequential compiler calls
-
-### VS Code
-
-There is a minimal VS Code extension scaffold in [editors/vscode](editors/vscode).
-
-- Build `fun` + `fls` first (`zig build`)
-- Then open `editors/vscode` in VS Code and follow its README.
-
-### Other Editors
-
-See [editors/README.md](editors/README.md) for Vim/Neovim, Emacs, JetBrains, and Sublime setup.
-
-### GitHub Syntax Highlighting
-
-This repo maps `.fn` files to Zig highlighting on GitHub via [/.gitattributes](.gitattributes).
-For native Fun highlighting, submit a Fun definition + TextMate grammar to GitHub Linguist.
-
-## Installation
-
-### Prerequisites
-
-- [Zig](https://ziglang.org/download/) (the one defined in [build.zig.zon](build.zig.zon))
-- Windows, Linux, or macOS
-
-### Build from Source
-
-Clone the repository and build using Zig:
-
-```sh
-git clone https://github.com/omdxp/fun.git
-cd fun
-zig build
-```
-
-### Install from Release
-
-Pre-built installers and binaries are available for each release. See [Release installers (bundles)](#release-installers-bundles).
+Fun is released under the MIT License. See [LICENSE](LICENSE) for the full text.
 
 
 

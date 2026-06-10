@@ -3,8 +3,8 @@
 // Usage:
 // ```
 // StringBuilder b = string_builder_init(4);
-// b.push("hello");
-// b.push("world");
+// b.append("hello");
+// b.append("world");
 // ```
 
 imp std.c.mem;
@@ -15,9 +15,9 @@ imp std.result;
 
 // String builder for efficient concatenation.
 pub compound StringBuilder {
-  // vector of string fragments
+  // Vector of string fragments.
   Vec<str> parts;
-  // total length of fragments
+  // Total length of all fragments.
   num total_len;
 }
 
@@ -27,7 +27,7 @@ pub compound StringBuilder {
 // - cap: initial capacity for internal parts
 // 
 // Returns:
-// - StringBuilder
+// - initialized string builder
 pub fun string_builder_init(num cap) StringBuilder {
   StringBuilder b;
   b.parts.init(cap);
@@ -36,12 +36,18 @@ pub fun string_builder_init(num cap) StringBuilder {
 }
 
 impl StringBuilder as Sized {
-  // Total length of appended content.
+  // Return the total length of appended content.
+  // 
+  // Returns:
+  // - total character count across all fragments
   pub len() num {
     ret self.total_len;
   }
 
-  // True when empty.
+  // Return true when no content has been appended.
+  // 
+  // Returns:
+  // - true when the builder is empty
   pub is_empty() bin {
     ret self.total_len == 0;
   }
@@ -49,12 +55,18 @@ impl StringBuilder as Sized {
 
 impl StringBuilder {
   // Append a string fragment.
+  // 
+  // Params:
+  // - s: fragment to append
   pub append(str s) {
     self.parts.push(s);
     self.total_len = self.total_len + _string_len(s);
   }
 
   // Append a single character.
+  // 
+  // Params:
+  // - c: character to append
   pub append_char(chr c) {
     str tmp = malloc(2);
     if tmp == nil {
@@ -66,7 +78,10 @@ impl StringBuilder {
     self.total_len = self.total_len + 1;
   }
 
-  // Append a num as decimal digits.
+  // Append a number as decimal digits.
+  // 
+  // Params:
+  // - n: integer to append
   pub append_num(num n) {
     let s = format_num(n);
     if s == nil {
@@ -76,7 +91,11 @@ impl StringBuilder {
     self.parts.push(s);
   }
 
-  // Append a dec with the given number of decimal places.
+  // Append a decimal value with the requested precision.
+  // 
+  // Params:
+  // - d: decimal value to append
+  // - places: number of decimal places to render
   pub append_dec(dec d, num places) {
     let s = format_dec(d, places);
     if s == nil {
@@ -86,19 +105,22 @@ impl StringBuilder {
     self.parts.push(s);
   }
 
-  // Clear fragments (keeps capacity).
+  // Remove all fragments while keeping capacity.
   pub clear() {
     self.parts.clear();
     self.total_len = 0;
   }
 
-  // Free internal storage.
+  // Free internal storage and reset the builder.
   pub free() {
     self.parts.free();
     self.total_len = 0;
   }
 
-  // Build the final string.
+  // Build the final joined string.
+  // 
+  // Returns:
+  // - concatenated string containing every fragment
   pub build() str {
     ret self.parts.join("");
   }
@@ -584,7 +606,7 @@ pub fun strip_suffix(str s, str suffix) str {
   ret substr(s, 0, sl - su);
 }
 
-// Split into lines (handles \n and trims trailing \r).
+// Split a string into lines.
 // 
 // Params:
 // - s: input string

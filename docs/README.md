@@ -1,14 +1,13 @@
+# Fun Documentation
 
-# Fun Language Documentation
+This directory contains the primary project documentation for the language, compiler architecture, runtime behavior, and reference material.
 
-This directory contains documentation for the Fun language.
+## Documents
 
-## Files
+- **architecture.md**: high-level implementation structure, compiler pipeline, and repository layout
+- **channel-runtime-conformance.md**: runtime backend compatibility, operational thresholds, and channel-related behavior notes
+- **faq.md**: common questions about the language, tooling, and development workflow
+- **language.md**: language overview and syntax-oriented documentation
+- **reference.md**: detailed reference for language constructs and standard-library usage
 
-- **architecture.md**: Language architecture overview
-- **channel-runtime-conformance.md**: Channel/runtime compatibility matrix and backend benchmark thresholds
-- **faq.md**: Frequently asked questions
-- **language.md**: Language specification
-- **reference.md**: Comprehensive language reference
-
-See individual files for details.
+For installation, quickstart, and repository-level navigation, start with the root [README.md](../README.md).

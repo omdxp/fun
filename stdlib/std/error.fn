@@ -28,41 +28,61 @@ pub enum ErrorKind {
 
 // Error representation used across stdlib.
 pub compound Error {
-  // error category
+  // Error category.
   ErrorKind kind;
-  // numeric error code
+  // Numeric error code.
   num code;
-  // human-readable message
+  // Human-readable message.
   str message;
-  // optional context string
+  // Optional context string.
   str context;
-  // optional cause detail
+  // Optional cause detail.
   str cause;
 }
 
 impl Error {
-  // Attach context (overwrites any previous context).
+  // Attach context, replacing any previous context string.
+  // 
+  // Params:
+  // - context: context message to store
   pub with_context(str context) {
     self.context = context;
   }
 
-  // Attach cause (overwrites any previous cause).
+  // Attach cause detail, replacing any previous cause string.
+  // 
+  // Params:
+  // - cause: cause detail to store
   pub with_cause(str cause) {
     self.cause = cause;
   }
 
-  // True when no error is present.
+  // Return true when no error is present.
+  // 
+  // Returns:
+  // - true when `kind` is `None`
   pub is_ok() bin {
     ret self.kind == .None;
   }
 
-  // True when an error is present.
+  // Return true when an error is present.
+  // 
+  // Returns:
+  // - true when `kind` is not `None`
   pub is_err() bin {
     ret self.kind != .None;
   }
 }
 
-// Create a new error value with kind + code.
+// Create a new error value with an explicit kind and code.
+// 
+// Params:
+// - kind: broad error category
+// - code: numeric error code
+// - message: human-readable error message
+// 
+// Returns:
+// - initialized error value
 pub fun error_new_kind(ErrorKind kind, num code, str message) Error {
   Error e;
   e.kind = kind;
@@ -73,12 +93,26 @@ pub fun error_new_kind(ErrorKind kind, num code, str message) Error {
   ret e;
 }
 
-// Create a new error value with kind (code defaults to 0).
+// Create a new error value with an explicit kind.
+// 
+// Params:
+// - kind: broad error category
+// - message: human-readable error message
+// 
+// Returns:
+// - initialized error value with code `0`
 pub fun error_new_simple(ErrorKind kind, str message) Error {
   ret error_new_kind(kind, 0, message);
 }
 
-// Backwards-compatible constructor (kind = System).
+// Create a system error using the legacy constructor shape.
+// 
+// Params:
+// - code: numeric error code
+// - message: human-readable error message
+// 
+// Returns:
+// - initialized error value with kind `System`
 pub fun error_new(num code, str message) Error {
   ret error_new_kind(.System, code, message);
 }
@@ -95,22 +129,42 @@ pub fun error_none() Error {
   ret e;
 }
 
-// Attach context to an error (best-effort).
+// Attach context to an error value.
+// 
+// Params:
+// - e: error to update
+// - context: context string to store
 pub fun error_with_context(Error* e, str context) {
   e.with_context(context);
 }
 
-// Attach cause to an error (best-effort).
+// Attach cause detail to an error value.
+// 
+// Params:
+// - e: error to update
+// - cause: cause string to store
 pub fun error_with_cause(Error* e, str cause) {
   e.with_cause(cause);
 }
 
-// True when no error is present.
+// Return true when no error is present.
+// 
+// Params:
+// - e: error to inspect
+// 
+// Returns:
+// - true when `e.kind` is `None`
 pub fun error_is_ok(Error* e) bin {
   ret e.kind == .None;
 }
 
-// True when an error is present.
+// Return true when an error is present.
+// 
+// Params:
+// - e: error to inspect
+// 
+// Returns:
+// - true when `e.kind` is not `None`
 pub fun error_is_err(Error* e) bin {
   ret e.kind != .None;
 }

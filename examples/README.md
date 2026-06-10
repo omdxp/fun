@@ -1,11 +1,22 @@
-# fun Examples
+# Fun Examples
 
-This directory contains example programs for the Fun language.
+This directory contains runnable examples covering the language core, standard library, import system, diagnostics, and edge-case behavior. The examples are organized so you can move from foundational syntax to advanced concurrency, generics, and tooling-oriented scenarios.
 
-Run any example:
+## Running Examples
+
+After building the compiler, run any example directly:
+
 ```sh
 zig-out/bin/fun -in examples/<example>.fn
 ```
+
+## Suggested Reading Order
+
+- Start with the basic examples to understand declarations, control flow, enums, and type behavior.
+- Move to `advanced/` for async, channels, generics, warnings, and lower-level features.
+- Use `imports/` to understand multi-file organization and module resolution.
+- Use `stdlib/` for practical standard-library usage patterns.
+- Use `error_cases/` when working on diagnostics, parser behavior, or negative tests.
 
 ## Basics
 - c_file_io.fn

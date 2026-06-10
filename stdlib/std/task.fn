@@ -10,7 +10,7 @@
 // 
 // `fork` is fire-and-forget and has no native join handle, so to wait for a batch
 // of tasks to finish you use a `WaitGroup`: a completion barrier built on a
-// channel, in the style of Go's `sync.WaitGroup`.
+// buffered channel that tracks a known number of task completions.
 // 
 // Usage:
 // ```

@@ -13,21 +13,36 @@ imp std.quirks;
 
 // View over a generic array.
 pub compound Array<T> {
-  // backing storage
+  // Backing storage.
   T[] data;
-  // number of elements
+  // Number of visible elements.
   num len;
 }
 
 impl Array<T> {
-  // Element at index, unchecked. The caller must guarantee `0 <= i < len`;
-  // an out-of-range index reads past the backing storage. For safe,
-  // bounds-checked access, use `at()`.
+  // Return the element at index without bounds checking.
+  // 
+  // Params:
+  // - i: element index
+  // 
+  // Notes:
+  // - The caller must ensure `0 <= i < len`.
+  // - Use `at()` for bounds-checked access.
+  // 
+  // Returns:
+  // - element at index `i`
   pub get(num i) T {
     ret self.data[i];
   }
 
-  // Bounds-checked element access: `Some(value)` when in range, `None` otherwise.
+  // Return the element at index when it is in range.
+  // 
+  // Params:
+  // - i: element index
+  // 
+  // Returns:
+  // - `Some(value)` when `i` is in range
+  // - `None` otherwise
   pub at(num i) Option<T> {
     if i < 0 || i >= self.len {
       ret Option.None;
@@ -35,12 +50,22 @@ impl Array<T> {
     ret Option.Some(self.data[i]);
   }
 
-  // Set element at index, unchecked. The caller must guarantee `0 <= i < len`.
+  // Set the element at index without bounds checking.
+  // 
+  // Params:
+  // - i: element index
+  // - value: value to write
+  // 
+  // Notes:
+  // - The caller must ensure `0 <= i < len`.
   pub set(num i, T value) {
     self.data[i] = value;
   }
 
-  // Fill array with a value.
+  // Fill every element with the same value.
+  // 
+  // Params:
+  // - value: value assigned to each element
   pub fill(T value) {
     num i = 0;
     for i < self.len {
@@ -49,7 +74,14 @@ impl Array<T> {
     }
   }
 
-  // Copy values from another array.
+  // Copy values from a source slice into the array.
+  // 
+  // Params:
+  // - src: source slice
+  // - len: number of elements to copy
+  // 
+  // Notes:
+  // - The caller must ensure `len <= self.len`.
   pub copy_from(T[] src, num len) {
     num i = 0;
     for i < len {
@@ -58,14 +90,18 @@ impl Array<T> {
     }
   }
 
-  // Swap two elements.
+  // Swap two elements in place.
+  // 
+  // Params:
+  // - i: first element index
+  // - j: second element index
   pub swap(num i, num j) {
     let tmp = self.data[i];
     self.data[i] = self.data[j];
     self.data[j] = tmp;
   }
 
-  // Reverse the array in-place.
+  // Reverse the elements in place.
   pub reverse() {
     if self.len <= 1 {
       ret;
@@ -79,7 +115,10 @@ impl Array<T> {
     }
   }
 
-  // A forward iterator over the elements (yields each value once, in order).
+  // Return a forward iterator over the elements.
+  // 
+  // Returns:
+  // - iterator yielding each value once, in order
   pub iter() ArrayIter<T> {
     ArrayIter<T> it;
     it.src = self;
@@ -89,20 +128,28 @@ impl Array<T> {
 }
 
 impl Array<T> as Sized {
-  // Number of elements.
+  // Return the number of elements.
+  // 
+  // Returns:
+  // - element count
   pub len() num {
     ret self.len;
   }
 
-  // True when the array holds no elements.
+  // Return true when the array holds no elements.
+  // 
+  // Returns:
+  // - true when the array is empty
   pub is_empty() bin {
     ret self.len == 0;
   }
 }
 
 impl Array<T> as Clearable {
-  // Reset the element count to zero (the backing storage is the caller's; this only
-  // marks the view as empty, it does not free `data`).
+  // Mark the view as empty without freeing the backing storage.
+  // 
+  // Notes:
+  // - The backing storage remains owned by the caller.
   pub clear() {
     self.len = 0;
   }
@@ -110,14 +157,18 @@ impl Array<T> as Clearable {
 
 // Forward iterator over an Array produced by `Array.iter()`.
 pub compound ArrayIter<T> {
-  // the array being iterated (borrowed, not owned)
+  // Array being iterated (borrowed, not owned).
   Array<T>* src;
-  // index of the next element to yield
+  // Index of the next element to yield.
   num idx;
 }
 
 impl ArrayIter<T> as Iterator<T> {
-  // Yield the next element, or None once the end is reached.
+  // Return the next element from the iterator.
+  // 
+  // Returns:
+  // - `Some(value)` while elements remain
+  // - `None` once the iterator reaches the end
   pub next() Option<T> {
     if self.idx >= self.src.len {
       ret Option.None;

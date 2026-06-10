@@ -1,23 +1,16 @@
-# fun Modules
+# Fun Modules
 
-This directory contains the core compiler modules for the fun language.
-
-
-Each subdirectory contains a README for more details.
-
-# Fun Language Modules
-
-This directory contains the core modules that implement the Fun language.
+This directory contains the core implementation modules for the Fun compiler, tooling, and language server.
 
 ## Module Overview
 
-- **ast**: Abstract Syntax Tree structures and logic
-- **cli**: Command-line interface logic
-- **codegen**: Code generation and transpiler
-- **fls**: Language Server implementation
-- **lexer**: Lexical analysis
-- **parser**: Parsing logic
-- **semantics**: Type checking and symbol resolution
-- **utils**: Utility functions
+- **ast**: abstract syntax tree structures and traversal support
+- **cli**: command-line parsing, command dispatch, and user-facing workflow logic
+- **codegen**: C generation and transpilation logic
+- **fls**: language-server implementation and editor-facing tooling support
+- **lexer**: lexical analysis and token production
+- **parser**: syntax parsing and AST construction
+- **semantics**: symbol resolution, type checking, and semantic validation
+- **utils**: shared helpers used across compiler and tooling layers
 
-Each module is self-contained and documented in its subdirectory.
+Where a submodule includes its own README or additional documentation, that file should be treated as the module-local source of truth for implementation details.

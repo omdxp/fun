@@ -22,7 +22,7 @@ pub enum LogLevel {
 
 // Logger with a minimum severity threshold.
 pub compound Logger {
-  // minimum severity to emit
+  // Minimum severity to emit.
   LogLevel level;
 }
 
@@ -32,7 +32,7 @@ pub compound Logger {
 // - level: minimum severity to emit
 // 
 // Returns:
-// - Logger
+// - initialized logger
 pub fun logger_init(LogLevel level) Logger {
   Logger l;
   l.level = level;
@@ -68,64 +68,109 @@ fun level_value(LogLevel level) num {
 
 impl Logger {
   // Set the minimum severity level.
+  // 
+  // Params:
+  // - level: new minimum severity threshold
   pub set_level(LogLevel level) {
     self.level = level;
   }
 
-  // True if a level would be emitted.
+  // Return true when a level would be emitted.
+  // 
+  // Params:
+  // - level: severity to test
+  // 
+  // Returns:
+  // - true when the logger would emit messages at this level
   pub enabled(LogLevel level) bin {
     ret level_value(level) >= level_value(self.level);
   }
 
-  // Log if level is >= logger threshold.
+  // Log a message when the level passes the current threshold.
+  // 
+  // Params:
+  // - level: message severity
+  // - msg: message text
   pub log(LogLevel level, str msg) {
     if level_value(level) >= level_value(self.level) {
       printf("[%s] %s\n", level_name(level), msg);
     }
   }
 
-  // Convenience: debug-level logging.
+  // Log a debug-level message.
+  // 
+  // Params:
+  // - msg: message text
   pub debug(str msg) {
     self.log(.Debug, msg);
   }
 
-  // Convenience: info-level logging.
+  // Log an info-level message.
+  // 
+  // Params:
+  // - msg: message text
   pub info(str msg) {
     self.log(.Info, msg);
   }
 
-  // Convenience: warn-level logging.
+  // Log a warning-level message.
+  // 
+  // Params:
+  // - msg: message text
   pub warn(str msg) {
     self.log(.Warn, msg);
   }
 
-  // Convenience: error-level logging.
+  // Log an error-level message.
+  // 
+  // Params:
+  // - msg: message text
   pub error(str msg) {
     self.log(.Error, msg);
   }
 
-  // Log a tagged message.
+  // Log a tagged message when the level passes the current threshold.
+  // 
+  // Params:
+  // - level: message severity
+  // - tag: short tag prefix
+  // - msg: message text
   pub log_tag(LogLevel level, str tag, str msg) {
     if level_value(level) >= level_value(self.level) {
       printf("[%s] [%s] %s\n", level_name(level), tag, msg);
     }
   }
 
-  // Log a number value.
+  // Log a numeric value when the level passes the current threshold.
+  // 
+  // Params:
+  // - level: message severity
+  // - label: field label
+  // - value: numeric value to print
   pub log_num(LogLevel level, str label, num value) {
     if level_value(level) >= level_value(self.level) {
       printf("[%s] %s=%lld\n", level_name(level), label, value);
     }
   }
 
-  // Log a decimal value.
+  // Log a decimal value when the level passes the current threshold.
+  // 
+  // Params:
+  // - level: message severity
+  // - label: field label
+  // - value: decimal value to print
   pub log_dec(LogLevel level, str label, dec value) {
     if level_value(level) >= level_value(self.level) {
       printf("[%s] %s=%f\n", level_name(level), label, value);
     }
   }
 
-  // Log a boolean value.
+  // Log a boolean value when the level passes the current threshold.
+  // 
+  // Params:
+  // - level: message severity
+  // - label: field label
+  // - value: boolean value to print
   pub log_bin(LogLevel level, str label, bin value) {
     let enabled = level_value(level) >= level_value(self.level);
     if enabled && value {

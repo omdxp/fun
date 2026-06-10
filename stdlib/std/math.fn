@@ -28,31 +28,50 @@ pub enum Sign {
 
 // 2D vector for simple math utilities.
 pub compound Vec2 {
-  // x component
+  // X component.
   dec x;
-  // y component
+  // Y component.
   dec y;
 }
 
 impl Vec2 {
-  // Euclidean distance to another vector.
+  // Return the Euclidean distance to another vector.
+  // 
+  // Params:
+  // - other: vector to measure against
+  // 
+  // Returns:
+  // - Euclidean distance between the two vectors
   pub distance(Vec2 other) dec {
     let dx = self.x - other.x;
     let dy = self.y - other.y;
     ret cmath.sqrt(dx * dx + dy * dy);
   }
 
-  // Vector length.
+  // Return the vector length.
+  // 
+  // Returns:
+  // - Euclidean length of the vector
   pub length() dec {
     ret cmath.sqrt(self.x * self.x + self.y * self.y);
   }
 
-  // Dot product with another vector.
+  // Return the dot product with another vector.
+  // 
+  // Params:
+  // - other: vector to multiply against
+  // 
+  // Returns:
+  // - dot product of the two vectors
   pub dot(Vec2 other) dec {
     ret self.x * other.x + self.y * other.y;
   }
 
-  // Normalized vector (zero stays zero).
+  // Return a normalized copy of the vector.
+  // 
+  // Returns:
+  // - unit-length vector in the same direction
+  // - zero vector when the input length is zero
   pub normalize() Vec2 {
     Vec2 out;
     let len = self.length();
@@ -68,6 +87,7 @@ impl Vec2 {
 }
 
 // Trigonometry and core math helpers (decimal).
+// 
 // Compute sine of an angle.
 // 
 // Params:
@@ -168,7 +188,7 @@ pub fun cbrt_dec(dec x) dec {
   ret cmath.cbrt(x);
 }
 
-// Raise x to the power y.
+// Raise `x` to the power `y`.
 // 
 // Params:
 // - x: base
@@ -180,7 +200,7 @@ pub fun pow_dec(dec x, dec y) dec {
   ret cmath.pow(x, y);
 }
 
-// Compute e raised to x.
+// Compute `e` raised to `x`.
 // 
 // Params:
 // - x: value
@@ -191,7 +211,7 @@ pub fun exp_dec(dec x) dec {
   ret cmath.exp(x);
 }
 
-// Compute natural log.
+// Compute the natural logarithm.
 // 
 // Params:
 // - x: value
@@ -202,7 +222,7 @@ pub fun log_dec(dec x) dec {
   ret cmath.log(x);
 }
 
-// Compute log base 10.
+// Compute the base-10 logarithm.
 // 
 // Params:
 // - x: value
@@ -213,7 +233,7 @@ pub fun log10_dec(dec x) dec {
   ret cmath.log10(x);
 }
 
-// Compute log base 2.
+// Compute the base-2 logarithm.
 // 
 // Params:
 // - x: value
@@ -224,7 +244,7 @@ pub fun log2_dec(dec x) dec {
   ret cmath.log2(x);
 }
 
-// Floor a decimal value.
+// Round down to the nearest integer value.
 // 
 // Params:
 // - x: value
@@ -235,7 +255,7 @@ pub fun floor_dec(dec x) dec {
   ret cmath.floor(x);
 }
 
-// Ceil a decimal value.
+// Round up to the nearest integer value.
 // 
 // Params:
 // - x: value
@@ -246,7 +266,7 @@ pub fun ceil_dec(dec x) dec {
   ret cmath.ceil(x);
 }
 
-// Round to nearest integer value.
+// Round to the nearest integer value.
 // 
 // Params:
 // - x: value
@@ -268,7 +288,7 @@ pub fun trunc_dec(dec x) dec {
   ret cmath.trunc(x);
 }
 
-// Remainder of x divided by y.
+// Compute the floating-point remainder of `x / y`.
 // 
 // Params:
 // - x: value
@@ -292,7 +312,7 @@ pub fun hypot_dec(dec x, dec y) dec {
   ret cmath.hypot(x, y);
 }
 
-// Copy sign from y to x.
+// Copy the sign from `y` to `x`.
 // 
 // Params:
 // - x: magnitude source
@@ -304,7 +324,7 @@ pub fun copysign_dec(dec x, dec y) dec {
   ret cmath.copysign(x, y);
 }
 
-// Absolute value (num).
+// Compute the absolute value of a number.
 // 
 // Params:
 // - x: value
@@ -318,7 +338,7 @@ pub fun abs_num(num x) num {
   ret x;
 }
 
-// Absolute value (dec).
+// Compute the absolute value of a decimal.
 // 
 // Params:
 // - x: value
@@ -332,7 +352,7 @@ pub fun abs_dec(dec x) dec {
   ret x;
 }
 
-// Sign of a number (-1, 0, 1).
+// Compute the sign of a number as `-1`, `0`, or `1`.
 // 
 // Params:
 // - x: value
@@ -349,7 +369,7 @@ pub fun sign_num(num x) num {
   ret 0;
 }
 
-// Sign of a decimal (-1, 0, 1).
+// Compute the sign of a decimal as `-1`, `0`, or `1`.
 // 
 // Params:
 // - x: value
@@ -366,8 +386,10 @@ pub fun sign_dec(dec x) dec {
   ret 0;
 }
 
-// Sign of a number as a type-safe `Sign`. Prefer this over `sign_num` when you want
-// to `fit`-match the cases rather than compare against -1/0/1.
+// Compute the sign of a number as a type-safe `Sign`.
+// 
+// Notes:
+// - Prefer this over `sign_num()` when you want to `fit`-match the cases.
 pub fun sign_of(num x) Sign {
   if x < 0 {
     ret Sign.Negative;
@@ -378,7 +400,10 @@ pub fun sign_of(num x) Sign {
   ret Sign.Zero;
 }
 
-// Sign of a decimal as a type-safe `Sign` (see `sign_of`).
+// Compute the sign of a decimal as a type-safe `Sign`.
+// 
+// Notes:
+// - See `sign_of()` for the integer variant.
 pub fun sign_of_dec(dec x) Sign {
   if x < 0 {
     ret Sign.Negative;
@@ -389,7 +414,7 @@ pub fun sign_of_dec(dec x) Sign {
   ret Sign.Zero;
 }
 
-// Minimum of two numbers.
+// Return the minimum of two numbers.
 // 
 // Params:
 // - a: first value
@@ -404,7 +429,7 @@ pub fun min_num(num a, num b) num {
   ret b;
 }
 
-// Maximum of two numbers.
+// Return the maximum of two numbers.
 // 
 // Params:
 // - a: first value
@@ -419,7 +444,7 @@ pub fun max_num(num a, num b) num {
   ret b;
 }
 
-// Minimum of two decimals.
+// Return the minimum of two decimals.
 // 
 // Params:
 // - a: first value
@@ -434,7 +459,7 @@ pub fun min_dec(dec a, dec b) dec {
   ret b;
 }
 
-// Maximum of two decimals.
+// Return the maximum of two decimals.
 // 
 // Params:
 // - a: first value
@@ -449,7 +474,7 @@ pub fun max_dec(dec a, dec b) dec {
   ret b;
 }
 
-// Clamp a number to [lo, hi].
+// Clamp a number to `[lo, hi]`.
 // 
 // Params:
 // - x: value
@@ -468,7 +493,7 @@ pub fun clamp_num(num x, num lo, num hi) num {
   ret x;
 }
 
-// Clamp a decimal to [lo, hi].
+// Clamp a decimal to `[lo, hi]`.
 // 
 // Params:
 // - x: value
@@ -487,7 +512,7 @@ pub fun clamp_dec(dec x, dec lo, dec hi) dec {
   ret x;
 }
 
-// Linear interpolation between a and b.
+// Linearly interpolate between `a` and `b`.
 // 
 // Params:
 // - a: start
@@ -522,7 +547,7 @@ pub fun rad_to_deg(dec radians) dec {
   ret radians * (180 / 3.141592653589793);
 }
 
-// Integer power (non-negative exp).
+// Raise an integer base to a non-negative integer exponent.
 // 
 // Params:
 // - base: base value
@@ -541,8 +566,11 @@ pub fun pow_int(num base, num exp) num {
   ret result;
 }
 
-// Integer power with validation. `Ok(base^exp)` for `exp >= 0`, `Err` for a negative
-// exponent (which `pow_int` silently treats as 0, returning 1).
+// Raise an integer base to an exponent with validation.
+// 
+// Returns:
+// - `Ok(base^exp)` when `exp >= 0`
+// - `Err` when `exp` is negative
 pub fun try_pow_int(num base, num exp) Result<num> {
   if exp < 0 {
     ret err(1, "pow_int: negative exponent", 1);
@@ -550,7 +578,7 @@ pub fun try_pow_int(num base, num exp) Result<num> {
   ret ok(pow_int(base, exp));
 }
 
-// Convenience function for Vec2 distance.
+// Return the distance between two vectors.
 // 
 // Params:
 // - a: vector
@@ -562,7 +590,7 @@ pub fun distance(Vec2 a, Vec2 b) dec {
   ret a.distance(b);
 }
 
-// Convenience function for Vec2 length.
+// Return the length of a vector.
 // 
 // Params:
 // - v: vector
@@ -573,7 +601,7 @@ pub fun length(Vec2 v) dec {
   ret v.length();
 }
 
-// Convenience function for Vec2 dot product.
+// Return the dot product of two vectors.
 // 
 // Params:
 // - a: first vector

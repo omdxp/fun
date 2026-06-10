@@ -1,15 +1,23 @@
 // Collection quirks and helpers.
+// 
+// Usage:
+// ```
+// fun takes(Collection c) { if c.is_empty() { ... } }
+// ```
 
 imp std.quirks;
 
-// Collection quirk for len/is_empty.
-// 
-// Example:
-// fun takes(Collection c) { if c.is_empty() { ... } }
+// Collection quirk for basic size introspection.
 pub quirk Collection {
-  // Return element count.
+  // Return the number of elements.
+  // 
+  // Returns:
+  // - element count
   len() num;
-  // Return true when empty.
+  // Return true when the collection is empty.
+  // 
+  // Returns:
+  // - true when the collection holds no elements
   is_empty() bin;
 }
 
