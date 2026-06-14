@@ -1,3 +1,153 @@
+## [0.40.0] - 2026-06-14
+
+### Chore
+
+- Refactor Result and Option handling in stdlib
+- Refactor stdlib synchronization and threading code to use 'nil' instead of 'NULL'
+- Refactor std library for improved error handling and functionality
+- Refactor variable declarations to use 'let' instead of type declarations in stdlib
+- Refactor channel and file handling APIs for improved error handling and consistency
+- *(docs)* Enhance documentation across standard library modules
+- *(deps)* Bump esbuild
+- *(deps)* Bump esbuild from 0.25.12 to 0.28.1 in /website/reference in the npm_and_yarn group across 1 directory (#89)
+
+### Feat
+
+- Enhance documentation handling and type definitions in FLS
+- Add tests for AST flushing, generic method specialization, and import aliasing
+- Add data-carrying enums, private fields, and FLS support
+- Add nil literal and fork keyword support for concurrency with M:N scheduler
+- Add support for generic data enums with type parameters and enhance code generation
+- Refactor stdlib documentation and improve iterator functionality
+- Enhance generic handling and improve documentation
+- Add Result handling for thread operations and enhance ThreadPool functionality
+- Add WaitGroup implementation for managing completion of virtual tasks
+- Enhance error handling and ergonomics for channel operations
+- Add method to dynamically adjust expected task count in WaitGroup
+
+## [0.30.2] - 2026-06-03
+
+### Feat
+
+- *(parser)* Implement O(1) significant-token lookahead for improved performance
+
+## [0.30.1] - 2026-06-02
+
+### Fix
+
+- Unused_import on non-aliased imported function calls
+
+### Test
+
+- Increase warm save threshold from 150ms to 200ms
+
+## [0.30.0] - 2026-05-28
+
+### Chore
+
+- *(deps-dev)* Bump fast-uri
+- *(deps-dev)* Bump fast-uri from 3.1.0 to 3.1.2 in /editors/vscode in the npm_and_yarn group across 1 directory (#86)
+- *(deps)* Bump the npm_and_yarn group across 2 directories with 1 update
+- *(deps)* Bump the npm_and_yarn group across 2 directories with 1 update (#87)
+- *(deps-dev)* Bump tmp
+- *(deps-dev)* Bump tmp from 0.2.5 to 0.2.7 in /editors/vscode in the npm_and_yarn group across 1 directory (#88)
+
+### Feat
+
+- Add zig.testArgs configuration to settings
+- Add new warning controls and refactor existing tests
+- Add unused variable expect example to expected fail cases
+
+## [0.29.1] - 2026-05-05
+
+### Feat
+
+- *(formatting)* Implement format-on-save cache hit for improved performance
+
+### Fix
+
+- *(tests)* Update format-on-save cache hit threshold to 200 ms
+
+## [0.29.0] - 2026-05-05
+
+### Chore
+
+- *(deps)* Bump uuid
+- *(deps)* Bump uuid from 8.3.2 to removed in /editors/vscode in the npm_and_yarn group across 1 directory (#84)
+- *(deps)* Bump postcss
+- *(deps)* Bump postcss from 8.5.6 to 8.5.13 in /website/reference in the npm_and_yarn group across 1 directory (#85)
+- Bump Zig version to 0.16.0 in CI/release workflows
+
+### Feat
+
+- *(array)* Add support for multi-dimensional arrays and enhance transpilation for array types
+- *(fls)* Implement diagnostic caching to improve performance and reduce compile time
+- *(cli)* Add -fmt-check flag to verify formatting without modifying files
+- Add run and debug commands for Fun language in VSCode extension
+- *(generics)* Add constrained impl params (T: num | dec) and update vec/string stdlib
+
+### Fix
+
+- *(fls)* Use `fun` language id in hover code fences and improve semantic token classification
+- *(editors)* Fix vim E867 syntax error, set 2-space indent across editors, update neovim docs to 0.11+ LSP API
+- *(build)* Add link_libc option to all modules in build process
+- *(transpiler)* Improve handling of generic instantiations and memory allocation
+- Replace std.debug.print with proper IO in production code
+- *(examples)* Fix asm_arch_specific expected-fail handling in run scripts
+- *(fls,fmt)* Support constrained impl generics and restore field go-to-definition
+- *(codegen)* Correct defer #line mapping for function-scope defers
+- *(codegen)* Emit semicolon for declaration-only function prototypes
+
+### Perf
+
+- *(fls)* Combine format+diagnostics into single subprocess on save
+
+### Refactor
+
+- *(fls)* Split monolithic main.zig into modular structure
+
+## [0.28.8] - 2026-04-13
+
+### Feat
+
+- Add withBasePath function to handle base URL and improve version content fetching
+- Enhance Fun Web color theme with additional syntax highlighting for regex, keywords, and various types
+- Add operator and punctuation highlighting across various editors and themes
+
+## [0.28.7] - 2026-04-13
+
+### Chore
+
+- *(deps-dev)* Bump vite
+- *(deps-dev)* Bump vite from 6.4.1 to 6.4.2 in /website/reference in the npm_and_yarn group across 1 directory (#83)
+
+### Feat
+
+- Add Fun Web color scheme and enhance syntax highlighting
+
+## [0.28.6] - 2026-04-06
+
+### Feat
+
+- Enhance defer semantics and add comprehensive tests for defer behavior in various contexts
+
+## [0.28.5] - 2026-04-06
+
+### Feat
+
+- *(tests)* Enhance e2e tests for async function completion and definition resolution
+
+## [0.28.4] - 2026-04-06
+
+### Chore
+
+- Update CHANGELOG for version 0.28.3 with new features and improvements
+
+### Feat
+
+- Add support for variadic function signatures and corresponding tests
+- Enhance documentation and return codes across synchronization and threading modules
+
 ## [0.28.3] - 2026-04-06
 
 ### Feat
