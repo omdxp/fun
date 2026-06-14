@@ -66,7 +66,7 @@
 
 #### Data-carrying enums (sum types / tagged unions)
 A variant may carry a positional payload, turning the enum into a tagged union (a
-Rust-style sum type). An enum becomes a tagged union as soon as *any* variant has a
+payload-carrying sum type). An enum becomes a tagged union as soon as *any* variant has a
 payload; payload-free variants still coexist.
 
 - **Declaration**: `enum Shape { Circle(num), Rect(num, num), Empty }`
@@ -151,7 +151,9 @@ payload; payload-free variants still coexist.
 - **Default parameter values**: A parameter may declare a default with `= expr`; a
   call that omits it uses the default.
     ```fun
-    fun greet(str name, num times = 1, str sep = ", ") { /* ... */ }
+    fun greet(str name, num times = 1, str sep = ", ") {
+      // implementation
+    }
     greet("a");           // times = 1, sep = ", "
     greet("a", 3);        // times = 3, sep = ", "
     greet("a", 3, "; ");  // all explicit
@@ -217,11 +219,20 @@ async fun main() {
     `Cancelled`, `Error(num)` (also `send_result_timeout`, `try_send_result`, async).
     ```fun
     fit ch.recv_result() {
-        RecvResult.Ok(v)   -> { /* use v */ }
-        RecvResult.Closed  -> { /* drained */ }
-        RecvResult.Timeout -> { /* retry */ }
-        RecvResult.Cancelled -> { }
-        RecvResult.Error(e)  -> { }
+      RecvResult.Ok(v) -> {
+        // use v
+        _ = v;
+      }
+      RecvResult.Closed -> {
+        // drained
+      }
+      RecvResult.Timeout -> {
+        // retry
+      }
+      RecvResult.Cancelled -> { }
+      RecvResult.Error(e) -> {
+        _ = e;
+      }
     }
     ```
 - **`std.task` WaitGroup**: wait for a batch of `fork`ed tasks. `wait_group_new(n)`,

@@ -8,21 +8,21 @@
 
 // Broad error categories.
 pub enum ErrorKind {
-  // None: no error
+  // No error
   None,
-  // Io: input/output failures
+  // Input/output failures
   Io,
-  // Parse: parsing/format errors
+  // Parsing/format errors
   Parse,
-  // NotFound: missing resource
+  // Missing resource
   NotFound,
-  // Invalid: invalid input or state
+  // Invalid input or state
   Invalid,
-  // OutOfMemory: allocation failure
+  // Allocation failure
   OutOfMemory,
-  // System: OS/system error
+  // OS/system error
   System,
-  // Unexpected: unexpected failure
+  // Unexpected failure
   Unexpected
 }
 

@@ -21,6 +21,7 @@ const FUN_KEYWORDS = [
   "for",
   "async",
   "await",
+  "fork",
   "break",
   "continue",
   "defer",

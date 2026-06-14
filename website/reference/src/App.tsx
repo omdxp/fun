@@ -40,6 +40,7 @@ type StdSymbol = {
   owner?: string;
   fields?: StdField[];
   members?: StdField[];
+  variants?: StdField[];
   docs: DocsMeta;
   docsMarkdown: string;
 };
@@ -1844,6 +1845,74 @@ export default function App() {
                                         ) : (
                                           <p className="muted">
                                             No member-level docs found.
+                                          </p>
+                                        )}
+                                      </article>
+                                    ),
+                                  )}
+                                </div>
+                              </section>
+                            )}
+
+                          {activeSymbol.kind === "enum" &&
+                            (activeSymbol.variants?.length ?? 0) > 0 && (
+                              <section className="compound-fields">
+                                <h4>Variants</h4>
+                                <div className="compound-fields-list">
+                                  {(activeSymbol.variants ?? []).map(
+                                    (variant) => (
+                                      <article
+                                        key={`${activeSymbol.name}:${variant.name}:${variant.line}`}
+                                        id={`detail-variant:${variant.name}:${variant.line}`}
+                                        className={`compound-field-item ${
+                                          selectedDetailKey ===
+                                          `variant:${variant.name}:${variant.line}`
+                                            ? "active"
+                                            : ""
+                                        }`}
+                                        onClick={() => {
+                                          setSelectedDetailKey(
+                                            `variant:${variant.name}:${variant.line}`,
+                                          );
+                                        }}
+                                      >
+                                        <div className="compound-field-head">
+                                          <strong>{variant.name}</strong>
+                                          <div className="compound-field-meta">
+                                            <span className="muted small">
+                                              line {variant.line}
+                                            </span>
+                                            <button
+                                              type="button"
+                                              className="detail-link-btn"
+                                              onClick={(event) => {
+                                                event.stopPropagation();
+                                                void copyStdlibDetailLink(
+                                                  `variant:${variant.name}:${variant.line}`,
+                                                );
+                                              }}
+                                            >
+                                              {detailCopyKey ===
+                                              `variant:${variant.name}:${variant.line}`
+                                                ? "Copied"
+                                                : "Permalink"}
+                                            </button>
+                                          </div>
+                                        </div>
+
+                                        {variant.docsMarkdown ? (
+                                          <MarkdownWithPlayground
+                                            markdown={variant.docsMarkdown}
+                                            sourcePath={`stdlib/std/${activeModule.module}`}
+                                            enableRunnableFunBlocks={false}
+                                          />
+                                        ) : variant.inlineDoc ? (
+                                          <p className="muted">
+                                            {variant.inlineDoc}
+                                          </p>
+                                        ) : (
+                                          <p className="muted">
+                                            No variant-level docs found.
                                           </p>
                                         )}
                                       </article>

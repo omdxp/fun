@@ -266,7 +266,9 @@ fun main() {
 - **Default parameter values**: parameters may have defaults (`= expr`); a call may omit
   trailing defaulted arguments.
 ```fun
-fun connect(str host, num port = 8080, bin tls = false) { /* ... */ }
+fun connect(str host, num port = 8080, bin tls = false) {
+  // implementation
+}
 
 fun main() {
   connect("a");            // port 8080, tls false

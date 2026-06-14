@@ -107,6 +107,7 @@ function parseStdFile(filePath, source) {
       const symbolMarkdown = buildDocsMarkdown(symbolDocs);
       const fields = m[1] === "compound" ? extractCompoundFields(lines, i) : [];
       const members = m[1] === "quirk" ? extractQuirkMembers(lines, i) : [];
+      const variants = m[1] === "enum" ? extractEnumVariants(lines, i) : [];
       symbols.push({
         kind: m[1],
         name: m[2],
@@ -116,6 +117,7 @@ function parseStdFile(filePath, source) {
         docsMarkdown: symbolMarkdown,
         fields,
         members,
+        variants,
       });
     }
   }
@@ -262,6 +264,73 @@ function extractQuirkMembers(lines, declLineIdx) {
   }
 
   return members;
+}
+
+function extractEnumVariants(lines, declLineIdx) {
+  const variants = [];
+
+  let depth = 0;
+  let enteredBody = false;
+
+  for (let i = declLineIdx; i < lines.length; i += 1) {
+    const rawLine = lines[i];
+    const trimmed = rawLine.trim();
+
+    if (!enteredBody) {
+      if (rawLine.includes("{")) {
+        enteredBody = true;
+      }
+      depth += countChar(rawLine, "{") - countChar(rawLine, "}");
+      continue;
+    }
+
+    if (depth === 1 && trimmed && !trimmed.startsWith("//")) {
+      const withoutTrailingComma = trimmed.replace(/,$/, "").trim();
+      const variantMatch = withoutTrailingComma.match(
+        /^([A-Za-z_][A-Za-z0-9_]*)(?:\s*\((.+)\))?$/,
+      );
+
+      if (variantMatch) {
+        const variantCommentLines = collectCommentAbove(lines, i);
+        const nameText = variantMatch[1].trim();
+        const payloadText = (variantMatch[2] ?? "").trim();
+        const cleanCommentLines = stripNamedPrefix(
+          variantCommentLines,
+          nameText,
+        );
+        const parsedDocs = parseCommentBlock(cleanCommentLines);
+        const signature = payloadText
+          ? `${nameText}(${payloadText})`
+          : nameText;
+        const variantDocs = ensureDocs(
+          parsedDocs,
+          signature,
+          "variant",
+          nameText,
+        );
+        const inlineDoc = parseFieldInlineDoc(variantCommentLines, nameText);
+
+        variants.push({
+          name: nameText,
+          type: payloadText,
+          signature,
+          line: i + 1,
+          docs: variantDocs,
+          docsMarkdown: variantDocs.raw
+            ? buildDocsMarkdown(variantDocs)
+            : inlineDoc,
+          inlineDoc,
+        });
+      }
+    }
+
+    depth += countChar(rawLine, "{") - countChar(rawLine, "}");
+    if (enteredBody && depth <= 0) {
+      break;
+    }
+  }
+
+  return variants;
 }
 
 function parseFieldInlineDoc(commentLines, expectedName = "") {
