@@ -170,6 +170,24 @@ impl JsonValue {
     ret Option.None;
   }
 
+  // Return the object as a Map, or None when this is not an Object.
+  //
+  // Notes:
+  // - The returned Map copies only the header; the entries are still shared.
+  // - Treat the returned Map as read-only.
+  // - Use `m.values().data` to iterate every value, or `m.keys()` for the keys.
+  pub as_object() Option<Map<str, JsonValue>> {
+    fit *self {
+      .Object(o) -> { ret Option.Some(o); }
+      .Null -> { ret Option.None; }
+      .Bool(b) -> { ret Option.None; }
+      .Num(n) -> { ret Option.None; }
+      .Str(s) -> { ret Option.None; }
+      .Array(a) -> { ret Option.None; }
+    }
+    ret Option.None;
+  }
+
   // Look up a key on an object value.
   // 
   // Params:

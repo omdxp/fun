@@ -166,6 +166,7 @@ fn run_pipeline(ctx: anytype) void {
             .diag_only = !options.exec and !options.outf and !options.print_ast,
             .debug_info = options.debug_info,
             .emit_unused_warnings = options.warn_unused,
+            .warn_unused_lenient = options.warn_unused_lenient,
         },
     ) catch |err| print_error_and_exit(io, err);
 

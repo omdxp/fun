@@ -1,0 +1,71 @@
+{
+  "name": "Fun Web Light",
+  "author": "Fun language contributors",
+  "variables": {
+    "bg": "#F6F8FF",
+    "fg": "#1B2340",
+    "comment": "#6A78A0",
+    "string": "#9A5B12",
+    "number": "#1F6F9E",
+    "keyword": "#2F5BD0",
+    "operator": "#3F63C0",
+    "type_builtin": "#2E7D32",
+    "type_custom": "#6A4FD0",
+    "support_type": "#0E8A6E",
+    "boolean": "#C0325A",
+    "func": "#1E7FA8",
+    "accent": "#4A78D6",
+  },
+  "globals": {
+    "background": "var(bg)",
+    "foreground": "var(fg)",
+    "selection": "color(var(accent) alpha(0.35))",
+    "caret": "#1B2340",
+    "line_highlight": "#EEF2FF",
+    "inactive_selection": "color(var(accent) alpha(0.2))",
+    "gutter_foreground": "#9AA6D0",
+  },
+  "rules": [
+    {
+      "scope": "comment",
+      "foreground": "var(comment)",
+    },
+    {
+      "scope": "string, constant.character.escape",
+      "foreground": "var(string)",
+    },
+    {
+      "scope": "constant.numeric",
+      "foreground": "var(number)",
+    },
+    {
+      "scope": "keyword",
+      "foreground": "var(keyword)",
+      "font_style": "bold",
+    },
+    {
+      "scope": "keyword.operator, punctuation.separator",
+      "foreground": "var(operator)",
+    },
+    {
+      "scope": "storage.type",
+      "foreground": "var(type_builtin)",
+    },
+    {
+      "scope": "entity.name.type",
+      "foreground": "var(type_custom)",
+    },
+    {
+      "scope": "support.type",
+      "foreground": "var(support_type)",
+    },
+    {
+      "scope": "constant.language.boolean",
+      "foreground": "var(boolean)",
+    },
+    {
+      "scope": "entity.name.function, support.function",
+      "foreground": "var(func)",
+    },
+  ],
+}

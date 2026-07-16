@@ -55,10 +55,19 @@ pub compound WaitGroup {
 }
 
 // Create a WaitGroup expecting `n` tasks to complete.
-// 
+//
+// IMPORTANT: pass the FULL number of tasks up front. The signalling channel is
+// buffered to `n` so `done()` never blocks before `wait()` starts draining. If
+// you instead create it with `wait_group_new(0)` and grow the count later with
+// `add()`, the buffer stays clamped to 1 — so once more than one task calls
+// `done()` before `wait()` runs (the usual fork-in-a-loop-then-wait shape), the
+// extra `done()` calls block and the program can DEADLOCK when many tasks are in
+// flight. The compiler warns about this pattern (blocking_fork_deadlock). Prefer
+// `wait_group_new(count)`.
+//
 // Params:
 // - n: number of virtual tasks that will each call `done()` once
-// 
+//
 // Returns:
 // - a WaitGroup whose `wait()` blocks until `n` completions arrive
 pub fun wait_group_new(num n) WaitGroup {
@@ -75,6 +84,12 @@ pub fun wait_group_new(num n) WaitGroup {
 
 impl WaitGroup {
   // Add `n` to the expected count. Call before `wait()` to add more tasks to wait for.
+  //
+  // NOTE: this only grows the number `wait()` expects; it does NOT grow the
+  // signalling buffer. If the group was created with `wait_group_new(0)`, that
+  // buffer is capacity 1 and `done()` will block once a second task signals
+  // before `wait()` drains — size the group up front with `wait_group_new(count)`
+  // instead of `wait_group_new(0)` + `add()` in a loop.
   pub add(num n) {
     self.expected = self.expected + n;
   }

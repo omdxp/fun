@@ -35,6 +35,11 @@ pub const WarningId = enum {
     unused_function,
     unused_compound,
     missing_return,
+    // Static concurrency lints (the `fork` keyword). See the concurrency-lint
+    // pass in the transpiler. Conservative: only fire on the high-confidence
+    // structural shape so they don't false-positive on correct programs.
+    blocking_fork_deadlock,
+    shared_mutable_capture_race,
 };
 
 /// Intent controls for warning diagnostics.
@@ -54,6 +59,8 @@ pub fn warning_id_from_string(name: []const u8) ?WarningId {
     if (mem.eql(u8, name, "unused_function")) return .unused_function;
     if (mem.eql(u8, name, "unused_compound")) return .unused_compound;
     if (mem.eql(u8, name, "missing_return")) return .missing_return;
+    if (mem.eql(u8, name, "blocking_fork_deadlock")) return .blocking_fork_deadlock;
+    if (mem.eql(u8, name, "shared_mutable_capture_race")) return .shared_mutable_capture_race;
     return null;
 }
 
@@ -69,6 +76,8 @@ pub fn warning_id_to_string(id: WarningId) []const u8 {
         .unused_function => "unused_function",
         .unused_compound => "unused_compound",
         .missing_return => "missing_return",
+        .blocking_fork_deadlock => "blocking_fork_deadlock",
+        .shared_mutable_capture_race => "shared_mutable_capture_race",
     };
 }
 

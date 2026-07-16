@@ -18,6 +18,13 @@ Load the bundled website-matching theme:
 (load-theme 'fun-web t)
 ```
 
+Or the light variant:
+
+```elisp
+(add-to-list 'custom-theme-load-path "/path/to/fun/editors/emacs")
+(load-theme 'fun-web-light t)
+```
+
 ## LSP (lsp-mode)
 
 ```elisp

@@ -1973,11 +1973,494 @@ pub const LspServer = struct {
 
         // Free function: resolve via its signature (current doc + imports).
         if (self.calleeSignatureDetail(uri, idx, name_i)) |detail| {
+            // If the callee is generic (`some<T>(T value) Option<T>`), bind its type
+            // params against the concrete argument types and substitute them into the
+            // return type so hover shows `Option<str>` rather than the declared `Option<T>`.
+            // Falls back to the verbatim return type when nothing can be bound so a
+            // non-generic (or unresolvable) call keeps its current behavior.
+            if (self.specializeGenericFreeFnReturn(uri, idx, at, lparen_i, rparen_i, detail)) |spec| {
+                defer self.allocator.free(spec);
+                const arena = @constCast(&idx.arena).allocator();
+                return arena.dupe(u8, spec) catch null;
+            }
             const rt = returnTypeFullFromSignatureLabel(detail) orelse return null;
             const arena = @constCast(&idx.arena).allocator();
             return arena.dupe(u8, rt) catch null;
         }
         return null;
+    }
+
+    /// For a generic FREE function call `name(args)` whose closing `)` is at
+    /// `rparen_i` and opening `(` at `lparen_i`, bind the callee's generic type
+    /// params against the resolved types of the actual call arguments and
+    /// substitute the bindings into the declared return-type spelling.
+    ///
+    /// Example: `some("hi")` where the signature is `fun some<T>(T value) Option<T>`
+    /// binds `T = str` and returns `Option<str>`. Returns an allocator-owned string
+    /// (caller frees) or null when the callee is not generic, has no bindable args,
+    /// or the return type can't be substituted — in which case the caller falls back
+    /// to the verbatim declared return type (preserving prior behavior).
+    ///
+    /// This is a self-contained re-implementation of the arg->param binding loop used
+    /// by `specializeGenericSignatureHelpLabel`; signatureHelp is intentionally left
+    /// untouched (this only adds hover-side return specialization).
+    fn specializeGenericFreeFnReturn(
+        self: *LspServer,
+        uri: []const u8,
+        idx: *const Index,
+        at: Position,
+        lparen_i: usize,
+        rparen_i: usize,
+        detail: []const u8,
+    ) ?[]u8 {
+        const TypeBinding = struct { param: []const u8, arg: []const u8 };
+
+        const findSignatureParenBounds = struct {
+            const Bounds = struct { open: usize, close: usize };
+            fn call(label: []const u8) ?Bounds {
+                const open_i = std.mem.indexOfScalar(u8, label, '(') orelse return null;
+                var depth: i64 = 0;
+                var i = open_i;
+                while (i < label.len) : (i += 1) {
+                    const ch = label[i];
+                    if (ch == '(') {
+                        depth += 1;
+                        continue;
+                    }
+                    if (ch == ')') {
+                        depth -= 1;
+                        if (depth == 0) return .{ .open = open_i, .close = i };
+                    }
+                }
+                return null;
+            }
+        }.call;
+
+        const splitTopLevelCsv = struct {
+            fn call(text: []const u8, out: *ArrayList([]const u8)) !void {
+                var angle_depth: i64 = 0;
+                var paren_depth: i64 = 0;
+                var brack_depth: i64 = 0;
+                var brace_depth: i64 = 0;
+                var start: usize = 0;
+                var i: usize = 0;
+                while (i <= text.len) : (i += 1) {
+                    const at_end = i == text.len;
+                    const ch: u8 = if (!at_end) text[i] else 0;
+                    if (!at_end) {
+                        switch (ch) {
+                            '<' => angle_depth += 1,
+                            '>' => {
+                                if (angle_depth > 0) angle_depth -= 1;
+                            },
+                            '(' => paren_depth += 1,
+                            ')' => {
+                                if (paren_depth > 0) paren_depth -= 1;
+                            },
+                            '[' => brack_depth += 1,
+                            ']' => {
+                                if (brack_depth > 0) brack_depth -= 1;
+                            },
+                            '{' => brace_depth += 1,
+                            '}' => {
+                                if (brace_depth > 0) brace_depth -= 1;
+                            },
+                            else => {},
+                        }
+                    }
+                    if (at_end or (ch == ',' and angle_depth == 0 and paren_depth == 0 and brack_depth == 0 and brace_depth == 0)) {
+                        var seg = text[start..i];
+                        seg = std.mem.trim(u8, seg, " \t\r\n");
+                        if (seg.len != 0) try out.append(seg);
+                        start = i + 1;
+                    }
+                }
+            }
+        }.call;
+
+        const normalizeGenericParamName = struct {
+            fn call(param_raw: []const u8) []const u8 {
+                var p = std.mem.trim(u8, param_raw, " \t\r\n");
+                if (p.len == 0) return p;
+                var cut = p.len;
+                var j: usize = 0;
+                while (j < p.len) : (j += 1) {
+                    const ch = p[j];
+                    if (ch == ':' or ch == '=' or ch == ' ' or ch == '\t') {
+                        cut = j;
+                        break;
+                    }
+                }
+                return std.mem.trim(u8, p[0..cut], " \t\r\n");
+            }
+        }.call;
+
+        const parseGenericParamNamesFromLabel = struct {
+            fn call(splitCsv: anytype, normParam: anytype, bounds_fn: anytype, label: []const u8, out: *ArrayList([]const u8)) !void {
+                const bounds = bounds_fn(label) orelse return;
+                const head = label[0..bounds.open];
+                var depth: i64 = 0;
+                var lt_i: ?usize = null;
+                var gt_i: ?usize = null;
+                var i: usize = 0;
+                while (i < head.len) : (i += 1) {
+                    const ch = head[i];
+                    if (ch == '<') {
+                        if (depth == 0) lt_i = i;
+                        depth += 1;
+                        continue;
+                    }
+                    if (ch == '>') {
+                        if (depth > 0) {
+                            depth -= 1;
+                            if (depth == 0) gt_i = i;
+                        }
+                        continue;
+                    }
+                }
+                if (lt_i == null or gt_i == null or gt_i.? <= lt_i.?) return;
+
+                var raw = ArrayList([]const u8).init(std.heap.page_allocator);
+                defer raw.deinit();
+                splitCsv(head[lt_i.? + 1 .. gt_i.?], &raw) catch return;
+                for (raw.items) |it| {
+                    const p = normParam(it);
+                    if (p.len == 0) continue;
+                    try out.append(p);
+                }
+            }
+        }.call;
+
+        const parseParamTypesFromLabel = struct {
+            fn call(splitCsv: anytype, bounds_fn: anytype, label: []const u8, out: *ArrayList([]const u8)) !void {
+                const bounds = bounds_fn(label) orelse return;
+                if (bounds.close <= bounds.open + 1) return;
+                const inner = std.mem.trim(u8, label[bounds.open + 1 .. bounds.close], " \t\r\n");
+                if (inner.len == 0) return;
+
+                var raw = ArrayList([]const u8).init(std.heap.page_allocator);
+                defer raw.deinit();
+                splitCsv(inner, &raw) catch return;
+                for (raw.items) |seg0| {
+                    const seg = std.mem.trim(u8, seg0, " \t\r\n");
+                    if (seg.len == 0) continue;
+                    if (std.mem.eql(u8, seg, "...")) continue;
+
+                    var split_at: ?usize = null;
+                    var j = seg.len;
+                    while (j > 0) : (j -= 1) {
+                        const ch = seg[j - 1];
+                        if (ch == ' ' or ch == '\t') {
+                            split_at = j - 1;
+                            break;
+                        }
+                    }
+                    var tname = seg;
+                    if (split_at) |s| {
+                        const maybe_t = std.mem.trim(u8, seg[0..s], " \t\r\n");
+                        if (maybe_t.len != 0) tname = maybe_t;
+                    }
+                    try out.append(tname);
+                }
+            }
+        }.call;
+
+        const parseGenericCore = struct {
+            const Core = struct { base: []const u8, inner: []const u8 };
+            fn call(type_name_raw: []const u8) ?Core {
+                const tname = std.mem.trim(u8, type_name_raw, " \t\r\n");
+                const lt = std.mem.indexOfScalar(u8, tname, '<') orelse return null;
+                var depth: i64 = 0;
+                var gt: ?usize = null;
+                var i = lt;
+                while (i < tname.len) : (i += 1) {
+                    const ch = tname[i];
+                    if (ch == '<') {
+                        depth += 1;
+                        continue;
+                    }
+                    if (ch == '>') {
+                        depth -= 1;
+                        if (depth == 0) {
+                            gt = i;
+                            break;
+                        }
+                    }
+                }
+                if (gt == null or gt.? <= lt) return null;
+                if (std.mem.trim(u8, tname[gt.? + 1 ..], " \t\r\n").len != 0) return null;
+                return .{ .base = std.mem.trim(u8, tname[0..lt], " \t\r\n"), .inner = tname[lt + 1 .. gt.?] };
+            }
+        }.call;
+
+        const isGenericParam = struct {
+            fn call(gparams: []const []const u8, name: []const u8) bool {
+                for (gparams) |gp| {
+                    if (std.mem.eql(u8, gp, name)) return true;
+                }
+                return false;
+            }
+        }.call;
+
+        const lookupBinding = struct {
+            fn call(bindings: []const TypeBinding, name: []const u8) ?[]const u8 {
+                for (bindings) |b| {
+                    if (std.mem.eql(u8, b.param, name)) return b.arg;
+                }
+                return null;
+            }
+        }.call;
+
+        const bindIfMissing = struct {
+            fn call(bindings: *ArrayList(TypeBinding), param: []const u8, arg: []const u8) !void {
+                for (bindings.items) |b| {
+                    if (std.mem.eql(u8, b.param, param)) return;
+                }
+                try bindings.append(.{ .param = param, .arg = arg });
+            }
+        }.call;
+
+        const bindFromParamType = struct {
+            fn call(
+                splitCsv: anytype,
+                coreFn: anytype,
+                isGP: anytype,
+                bindMissing: anytype,
+                gparams: []const []const u8,
+                bindings: *ArrayList(TypeBinding),
+                ptype_raw: []const u8,
+                atype_raw: []const u8,
+            ) !void {
+                const ptype = std.mem.trim(u8, ptype_raw, " \t\r\n");
+                const atype = std.mem.trim(u8, atype_raw, " \t\r\n");
+                if (ptype.len == 0 or atype.len == 0) return;
+
+                if (isGP(gparams, ptype)) {
+                    try bindMissing(bindings, ptype, atype);
+                    return;
+                }
+                if (std.mem.endsWith(u8, ptype, "[]") and std.mem.endsWith(u8, atype, "[]")) {
+                    try call(splitCsv, coreFn, isGP, bindMissing, gparams, bindings, ptype[0 .. ptype.len - 2], atype[0 .. atype.len - 2]);
+                    return;
+                }
+                if (coreFn(ptype)) |pc| {
+                    if (coreFn(atype)) |ac| {
+                        if (!std.mem.eql(u8, pc.base, ac.base)) return;
+                        var pinner = ArrayList([]const u8).init(std.heap.page_allocator);
+                        defer pinner.deinit();
+                        var ainner = ArrayList([]const u8).init(std.heap.page_allocator);
+                        defer ainner.deinit();
+                        splitCsv(pc.inner, &pinner) catch return;
+                        splitCsv(ac.inner, &ainner) catch return;
+                        const n = @min(pinner.items.len, ainner.items.len);
+                        var i: usize = 0;
+                        while (i < n) : (i += 1) {
+                            try call(splitCsv, coreFn, isGP, bindMissing, gparams, bindings, pinner.items[i], ainner.items[i]);
+                        }
+                    }
+                }
+            }
+        }.call;
+
+        const substituteLabelTypeParams = struct {
+            fn isIdentStart(ch: u8) bool {
+                return std.ascii.isAlphabetic(ch) or ch == '_';
+            }
+            fn isIdentChar(ch: u8) bool {
+                return std.ascii.isAlphanumeric(ch) or ch == '_';
+            }
+            fn call(lookup: anytype, allocator_: Allocator, label: []const u8, bindings: []const TypeBinding) ?[]u8 {
+                if (bindings.len == 0) return null;
+                var out = ArrayList(u8).init(allocator_);
+                defer out.deinit();
+                var changed = false;
+                var i: usize = 0;
+                while (i < label.len) {
+                    const ch = label[i];
+                    if (!isIdentStart(ch)) {
+                        out.append(ch) catch return null;
+                        i += 1;
+                        continue;
+                    }
+                    const start = i;
+                    i += 1;
+                    while (i < label.len and isIdentChar(label[i])) : (i += 1) {}
+                    const ident = label[start..i];
+                    if (lookup(bindings, ident)) |mapped| {
+                        out.appendSlice(mapped) catch return null;
+                        changed = true;
+                    } else {
+                        out.appendSlice(ident) catch return null;
+                    }
+                }
+                if (!changed) return null;
+                return out.toOwnedSlice() catch null;
+            }
+        }.call;
+
+        // 1. Parse generic param names. No params -> not generic -> fall back.
+        var generic_params = ArrayList([]const u8).init(self.allocator);
+        defer generic_params.deinit();
+        parseGenericParamNamesFromLabel(splitTopLevelCsv, normalizeGenericParamName, findSignatureParenBounds, detail, &generic_params) catch return null;
+        if (generic_params.items.len == 0) return null;
+
+        // 2. Parse declared param-type spellings from the signature label.
+        var param_types = ArrayList([]const u8).init(self.allocator);
+        defer param_types.deinit();
+        parseParamTypesFromLabel(splitTopLevelCsv, findSignatureParenBounds, detail, &param_types) catch return null;
+        if (param_types.items.len == 0) return null;
+
+        // 3. Walk the call's argument token ranges between `(` and `)`.
+        const ArgRange = struct { start: usize, end: usize };
+        var arg_ranges = ArrayList(ArgRange).init(self.allocator);
+        defer arg_ranges.deinit();
+        collectFreeCallArgRanges(idx.tokens, lparen_i, rparen_i, ArgRange, &arg_ranges) catch return null;
+        if (arg_ranges.items.len == 0) return null;
+
+        // 4. Bind each param spelling against the resolved type of its argument.
+        //    Guard the recursion depth: resolving an argument type can re-enter the
+        //    call-return engine (`resolveTypeOfExprEndingAtToken` -> ... -> here).
+        if (self.type_infer_depth >= 16) return null;
+        self.type_infer_depth += 1;
+        defer self.type_infer_depth -= 1;
+
+        var bindings = ArrayList(TypeBinding).init(self.allocator);
+        defer bindings.deinit();
+
+        const pair_n = @min(param_types.items.len, arg_ranges.items.len);
+        var pi: usize = 0;
+        while (pi < pair_n) : (pi += 1) {
+            const rg = arg_ranges.items[pi];
+            const arg_t = self.inferFreeCallArgType(idx, uri, at, rg.start, rg.end) orelse continue;
+            bindFromParamType(splitTopLevelCsv, parseGenericCore, isGenericParam, bindIfMissing, generic_params.items, &bindings, param_types.items[pi], arg_t) catch continue;
+        }
+
+        if (bindings.items.len == 0) return null;
+
+        // 5. Substitute bindings into the WHOLE label, then read the (now concrete)
+        //    return type so we can hand back a plain, owned return-type spelling.
+        const spec_label = substituteLabelTypeParams(lookupBinding, self.allocator, detail, bindings.items) orelse return null;
+        defer self.allocator.free(spec_label);
+        const rt = returnTypeFullFromSignatureLabel(spec_label) orelse return null;
+        return self.allocator.dupe(u8, rt) catch null;
+    }
+
+    /// Collect top-level argument token ranges of a call whose `(` is at
+    /// `lparen_i` and matching `)` at `rparen_i`. Splits on top-level commas
+    /// (ignoring commas nested in `()[]{}<>`). `RangeT` must be a struct
+    /// `{ start: usize, end: usize }`.
+    fn collectFreeCallArgRanges(
+        tokens: []const TokenLite,
+        lparen_i: usize,
+        rparen_i: usize,
+        comptime RangeT: type,
+        out: *ArrayList(RangeT),
+    ) !void {
+        if (rparen_i <= lparen_i + 1) return;
+
+        const nextNonComment = struct {
+            fn call(toks: []const TokenLite, start_i: usize, end_excl: usize) ?usize {
+                var i = start_i;
+                while (i < end_excl) : (i += 1) {
+                    if (toks[i].kind == .comment) continue;
+                    return i;
+                }
+                return null;
+            }
+        }.call;
+
+        const trimRange = struct {
+            fn call(toks: []const TokenLite, s0: usize, e0: usize) ?RangeT {
+                var s = s0;
+                var e = e0;
+                while (s < e and toks[s].kind == .comment) : (s += 1) {}
+                while (e > s and toks[e - 1].kind == .comment) : (e -= 1) {}
+                if (s >= e) return null;
+                return .{ .start = s, .end = e };
+            }
+        }.call;
+
+        var seg_start = nextNonComment(tokens, lparen_i + 1, rparen_i) orelse return;
+
+        var p_depth: i64 = 0;
+        var b_depth: i64 = 0;
+        var c_depth: i64 = 0;
+        var g_depth: i64 = 0;
+
+        var i = lparen_i + 1;
+        while (i < rparen_i) : (i += 1) {
+            const t = tokens[i];
+            if (t.kind == .comment) continue;
+            // Literal tokens are atomic: their text can contain `,` `(` `<` etc.
+            // (e.g. `"Hello, world!"`, `'>'`) which are NOT structural delimiters.
+            if (t.kind == .string or t.kind == .number or t.kind == .boolean) continue;
+
+            var saw_top_comma = false;
+            for (t.text) |ch| {
+                switch (ch) {
+                    '(' => p_depth += 1,
+                    ')' => {
+                        if (p_depth > 0) p_depth -= 1;
+                    },
+                    '[' => b_depth += 1,
+                    ']' => {
+                        if (b_depth > 0) b_depth -= 1;
+                    },
+                    '{' => c_depth += 1,
+                    '}' => {
+                        if (c_depth > 0) c_depth -= 1;
+                    },
+                    '<' => g_depth += 1,
+                    '>' => {
+                        if (g_depth > 0) g_depth -= 1;
+                    },
+                    ',' => {
+                        if (p_depth == 0 and b_depth == 0 and c_depth == 0 and g_depth == 0) saw_top_comma = true;
+                    },
+                    else => {},
+                }
+            }
+
+            if (saw_top_comma) {
+                if (trimRange(tokens, seg_start, i)) |rg| try out.append(rg);
+                seg_start = nextNonComment(tokens, i + 1, rparen_i) orelse rparen_i;
+            }
+        }
+
+        if (seg_start < rparen_i) {
+            if (trimRange(tokens, seg_start, rparen_i)) |rg| try out.append(rg);
+        }
+    }
+
+    /// Resolve the type of a single call argument occupying tokens `[start_i, end_i)`.
+    /// String/number/bool/char literals map to their builtin type; a single
+    /// identifier or a dot-chain is resolved through the existing type engine.
+    fn inferFreeCallArgType(self: *LspServer, idx: *const Index, uri: []const u8, at: Position, start_i: usize, end_i: usize) ?[]const u8 {
+        var s = start_i;
+        var e = end_i;
+        while (s < e and idx.tokens[s].kind == .comment) : (s += 1) {}
+        while (e > s and idx.tokens[e - 1].kind == .comment) : (e -= 1) {}
+        if (s >= e) return null;
+
+        if (e == s + 1) {
+            const t = idx.tokens[s];
+            return switch (t.kind) {
+                .string => "str",
+                .boolean => "bin",
+                .number => blk: {
+                    if (t.text.len >= 2 and t.text[0] == '\'' and t.text[t.text.len - 1] == '\'') break :blk "chr";
+                    if (std.mem.indexOfScalar(u8, t.text, '.') != null) break :blk "dec";
+                    break :blk "num";
+                },
+                .identifier => self.guessVariableType(idx, uri, t.text, at) orelse
+                    if (self.isKnownTypeName(uri, t.text)) t.text else null,
+                else => null,
+            };
+        }
+
+        // Any other expression (dot-chains, nested calls, indexing, ...): resolve
+        // via the general expression engine ending at the last token of the range.
+        return self.resolveTypeOfExprEndingAtToken(idx, uri, at, e - 1);
     }
 
     fn findMatchingLBracketLite(tokens: []const TokenLite, rbrack_i: usize) ?usize {
@@ -6338,7 +6821,10 @@ pub const LspServer = struct {
                     const semi_idx = std.mem.indexOfScalar(u8, line, ';') orelse line.len;
                     const decl = std.mem.trim(u8, line[0..semi_idx], " \t\r");
 
-                    const sp = std.mem.lastIndexOfScalar(u8, decl, ' ') orelse continue;
+                    const sp = std.mem.lastIndexOfScalar(u8, decl, ' ') orelse {
+                        line_start = if (line_end < text.len) line_end + 1 else line_end;
+                        continue;
+                    };
                     const field_name = std.mem.trim(u8, decl[sp + 1 ..], " \t\r");
                     if (field_name.len == 0) {
                         line_start = if (line_end < text.len) line_end + 1 else line_end;
@@ -6484,6 +6970,31 @@ pub const LspServer = struct {
             start_ident -= 1;
         }
         if (start_ident == end_ident) return null;
+
+        // Hardening: don't treat a `compound`/`enum`/`quirk` DEFINITION body as an
+        // init literal. If the identifier before `{` is itself immediately preceded
+        // (modulo whitespace) by one of those keywords, the cursor is inside a type
+        // definition, not a `Type{...}` initializer — returning the type name here
+        // sends completion down the field-init path, which previously could hang on
+        // a partial field line. (Primary hang fix is the line_start advance above;
+        // this closes the whole class.)
+        {
+            var kw_end: usize = start_ident;
+            while (kw_end > 0 and (text[kw_end - 1] == ' ' or text[kw_end - 1] == '\t' or text[kw_end - 1] == '\r' or text[kw_end - 1] == '\n')) : (kw_end -= 1) {}
+            var kw_start: usize = kw_end;
+            while (kw_start > 0) {
+                const ch = text[kw_start - 1];
+                const ok = (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z');
+                if (!ok) break;
+                kw_start -= 1;
+            }
+            if (kw_start < kw_end) {
+                const kw = text[kw_start..kw_end];
+                if (std.mem.eql(u8, kw, "compound") or std.mem.eql(u8, kw, "enum") or std.mem.eql(u8, kw, "quirk")) {
+                    return null;
+                }
+            }
+        }
 
         const type_name = text[start_ident..end_ident];
         return type_name;
@@ -9144,6 +9655,40 @@ pub const LspServer = struct {
         self.refineLetVariableTypesFromDirectImports(uri);
     }
 
+    /// Heuristic: does a type spelling still carry an UNBOUND generic type parameter?
+    /// (e.g. `Option<T>`, `Result<T>`, `Map<K, V>`.) These are index-time best-effort
+    /// let-inference results where the compiler couldn't substitute the concrete arg;
+    /// they should be re-refined by the query-time call-return engine so hover shows
+    /// the concrete instantiation (`Option<str>`). Fun's generic type params follow the
+    /// single-uppercase-letter convention (T, U, K, V, E, ...), so a generic ARGUMENT
+    /// that is a lone uppercase letter and not a builtin is treated as unbound.
+    fn typeSpellingHasUnboundParam(type_str: []const u8) bool {
+        const lt = std.mem.indexOfScalar(u8, type_str, '<') orelse return false;
+        const gt = std.mem.lastIndexOfScalar(u8, type_str, '>') orelse return false;
+        if (gt <= lt + 1) return false;
+        const inner = type_str[lt + 1 .. gt];
+
+        var i: usize = 0;
+        while (i < inner.len) {
+            const c = inner[i];
+            const is_ident = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_';
+            if (!is_ident) {
+                i += 1;
+                continue;
+            }
+            const start = i;
+            while (i < inner.len) : (i += 1) {
+                const ch = inner[i];
+                const ok = (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or
+                    (ch >= '0' and ch <= '9') or ch == '_' or ch == '.';
+                if (!ok) break;
+            }
+            const name = inner[start..i];
+            if (name.len == 1 and name[0] >= 'A' and name[0] <= 'Z' and !isBuiltinTypeName(name)) return true;
+        }
+        return false;
+    }
+
     fn refineLetVariableTypesFromDirectImports(self: *LspServer, uri: []const u8) void {
         const doc_ptr = self.docs.getPtr(uri) orelse return;
         const idx = doc_ptr.index orelse return;
@@ -9165,7 +9710,7 @@ pub const LspServer = struct {
 
                 const existing_vt_opt = s.value_type;
                 if (existing_vt_opt) |existing_vt| {
-                    if (!isLetInferTypeName(existing_vt) and !isBuiltinTypeName(existing_vt)) continue;
+                    if (!isLetInferTypeName(existing_vt) and !isBuiltinTypeName(existing_vt) and !typeSpellingHasUnboundParam(existing_vt)) continue;
                 }
 
                 const inferred = self.tryInferLetInitializerCallReturnType(idx, uri, s, arena_alloc) orelse continue;
@@ -9360,6 +9905,17 @@ pub const LspServer = struct {
                     idx_.tokens[lparen_i].range.start
                 else
                     idx_.tokens[before_rparen_i].range.start;
+
+                // Prefer the query-time call-return engine: it specializes generic FREE
+                // functions against their concrete argument types (e.g. `some("hi")` ->
+                // `Option<str>`), which the signatureHelp label path does not do for a bare
+                // free call. Only accept it when it produced a fully-bound type (no leftover
+                // `<T>`); otherwise fall through to the signatureHelp-derived return type.
+                if (self_.resolveCallReturnType(idx_, uri_, sig_pos, last_i)) |crt| {
+                    if (crt.len != 0 and !typeSpellingHasUnboundParam(crt)) {
+                        return arena_alloc_.dupe(u8, crt) catch null;
+                    }
+                }
 
                 const sig = self_.guessCallSignatureAt(uri_, idx_, sig_pos) orelse return null;
 
@@ -9829,7 +10385,7 @@ pub const LspServer = struct {
         // The subprocess cost is identical (~40 ms); by storing the formatted result
         // now, any subsequent formatting request on the same content is a cache hit
         // with no subprocess needed.
-        const argv = [_][]const u8{ self.fun_exe_path, "-in", tmp_path_for_fun, "-fmt-diag", "-no-exec", "-warn-unused" };
+        const argv = [_][]const u8{ self.fun_exe_path, "-in", tmp_path_for_fun, "-fmt-diag", "-no-exec", "-warn-unused-lenient" };
         _ = try runCaptureStderr(self.allocator, &argv, &stderr_buf);
 
         // Read back the (possibly reformatted) temp file so we can cache it.
@@ -9907,7 +10463,7 @@ pub const LspServer = struct {
         defer stderr_buf.deinit();
 
         // Single subprocess: format in-place AND get diagnostics from stderr.
-        const argv = [_][]const u8{ self.fun_exe_path, "-in", tmp_abs_path, "-fmt-diag", "-no-exec", "-warn-unused" };
+        const argv = [_][]const u8{ self.fun_exe_path, "-in", tmp_abs_path, "-fmt-diag", "-no-exec", "-warn-unused-lenient" };
         _ = try runCaptureStderr(self.allocator, &argv, &stderr_buf);
 
         // Read the (possibly-formatted) result.

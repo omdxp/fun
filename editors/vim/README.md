@@ -10,3 +10,9 @@ Use the bundled website-matching colorscheme:
 ```vim
 colorscheme funweb
 ```
+
+Or the light variant:
+
+```vim
+colorscheme funweblight
+```

@@ -1040,3 +1040,90 @@ test "diagnostic: allow missing_return suppresses warning" {
     }
     std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
+
+test "diagnostic: shared mutable capture across forked tasks warns (data race)" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "conc_race_warn.fn";
+
+    // `&counter` (a compound with no Mutex field) is forked into a mutating
+    // async fn inside a loop -> unsynchronized shared mutable state race.
+    const input =
+        "compound Counter { num n; }\n" ++
+        "async fun bump(Counter* c) { c.n = c.n + 1; }\n" ++
+        "fun main() {\n" ++
+        "  Counter counter;\n" ++
+        "  counter.n = 0;\n" ++
+        "  for i : 0..4 {\n" ++
+        "    fork bump(&counter);\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, true);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(res.warnings != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "shared_mutable_capture_race") != null);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "diagnostic: forking a Mutex-guarded compound does not warn" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "conc_race_mutex_ok.fn";
+
+    // A compound that carries a `Mutex` field is treated as self-synchronizing,
+    // so sharing it across forked tasks must NOT warn.
+    const input =
+        "compound Mutex { num locked; }\n" ++
+        "compound Safe { Mutex mu; num n; }\n" ++
+        "async fun bump(Safe* s) { s.n = s.n + 1; }\n" ++
+        "fun main() {\n" ++
+        "  Safe s;\n" ++
+        "  s.n = 0;\n" ++
+        "  for i : 0..4 {\n" ++
+        "    fork bump(&s);\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, true);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    if (res.warnings) |w| {
+        try std.testing.expect(std.mem.indexOf(u8, w, "shared_mutable_capture_race") == null);
+    }
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "diagnostic: read-only shared capture across forks does not warn" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "conc_race_readonly_ok.fn";
+
+    // The forked fn only READS through the pointer (no field write), so sharing
+    // it is safe and must not warn.
+    const input =
+        "compound Counter { num n; }\n" ++
+        "async fun peek(Counter* c) { let v = c.n; _ = v; }\n" ++
+        "fun main() {\n" ++
+        "  Counter counter;\n" ++
+        "  counter.n = 0;\n" ++
+        "  for i : 0..4 {\n" ++
+        "    fork peek(&counter);\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, true);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    if (res.warnings) |w| {
+        try std.testing.expect(std.mem.indexOf(u8, w, "shared_mutable_capture_race") == null);
+    }
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}

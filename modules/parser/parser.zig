@@ -4172,7 +4172,14 @@ pub const ParseProcess = struct {
         };
         function_node.node_variant.?.function.name = fname;
         self.parser_current_function = function_node;
-        function_node.node_variant.?.function.type_params = try self.parse_generic_type_params();
+        {
+            const parsed_tp = try self.parse_impl_type_params_with_constraints();
+            function_node.node_variant.?.function.type_params = parsed_tp.params;
+            // Constraints (forced_insts) are only relevant for eager impl-method
+            // instantiation; generic free functions are monomorphized lazily from
+            // call sites, so the constraint set is used solely for validation and
+            // can be discarded here.
+        }
         try self.expect_op("(");
         var hist_args = utils.History.init(self.transpile_proc.allocator, .{});
         defer hist_args.deinit();

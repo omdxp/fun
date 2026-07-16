@@ -82,7 +82,12 @@ function collectCustomTypeNames(code: string) {
   return [...out];
 }
 
-const FUN_NON_FUNCTION_IDENTIFIERS = [...FUN_KEYWORDS, "true", "false"];
+// Language constant literals. `nil` is a lexer keyword (see modules/utils/misc.zig
+// `is_keyword`) but reads as a constant like true/false, so it shares the boolean
+// token color rather than the control-keyword color.
+const FUN_CONSTANTS = ["true", "false", "nil"];
+
+const FUN_NON_FUNCTION_IDENTIFIERS = [...FUN_KEYWORDS, ...FUN_CONSTANTS];
 
 function buildTokenRegex(code: string) {
   const customTypeNames = collectCustomTypeNames(code);
@@ -107,7 +112,7 @@ function buildTokenRegex(code: string) {
       `(?<support>\\b(?:${FUN_SUPPORT_TYPES.join("|")})\\b)`,
       customTypePattern,
       `(?<function>\\b(?!${nonFunctionIdentifiers.map((keyword) => `${escapeRegExp(keyword)}\\b`).join("|")})(?:[A-Za-z_][A-Za-z0-9_]*)\\b(?=\\s*\\())`,
-      "(?<boolean>\\b(?:true|false)\\b)",
+      `(?<boolean>\\b(?:${FUN_CONSTANTS.join("|")})\\b)`,
     ].join("|"),
     "gm",
   );

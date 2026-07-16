@@ -78,6 +78,11 @@
         "label": "Fun Web",
         "uiTheme": "vs-dark",
         "path": "./themes/fun-web-color-theme.json"
+      },
+      {
+        "label": "Fun Web Light",
+        "uiTheme": "vs",
+        "path": "./themes/fun-web-light-color-theme.json"
       }
     ],
     "breakpoints": [

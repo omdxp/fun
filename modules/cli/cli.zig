@@ -74,6 +74,11 @@ pub const CliOptions = struct {
     /// Flag to emit unused import/variable/function/compound warnings.
     warn_unused: bool,
 
+    /// Like `warn_unused` but lenient: a hard type error elsewhere in the file
+    /// does not suppress the unused-* diagnostics (used by fls so squiggles still
+    /// appear on files with an unrelated error). Implies `warn_unused`.
+    warn_unused_lenient: bool,
+
     /// Arguments passed to the compiled program (everything after `--`).
     program_args: [][]const u8,
 };
@@ -113,6 +118,7 @@ fn print_usage(io: std.Io) void {
         \\  -fmt-check-all    Check every .fn file under the current directory or -in root; exit 1 if any are unformatted (optional)
         \\  -g                Enable debug info: source-level Fun→C mapping + DWARF symbols (optional)
         \\  -warn-unused      Emit unused import/variable/function/compound warnings (optional)
+        \\  -warn-unused-lenient  Like -warn-unused but still emits unused warnings when the file has an unrelated type error (used by fls) (optional)
         \\  -out     <file>   Output file (optional, defaults to input filename with .c extension)
         \\  -no-exec          Disable automatic compilation and execution (optional, execution enabled by default)
         \\  -outf             Generate .c output file (optional, disabled by default)
@@ -156,6 +162,7 @@ pub fn parse_args(allocator: mem.Allocator, io: std.Io, argv: []const []const u8
     var fmt_check_all = false;
     var debug_info = false;
     var warn_unused = false;
+    var warn_unused_lenient = false;
     var program_args = ArrayList([]const u8).init(allocator);
     errdefer {
         for (program_args.items) |p| allocator.free(p);
@@ -211,6 +218,9 @@ pub fn parse_args(allocator: mem.Allocator, io: std.Io, argv: []const []const u8
             debug_info = true;
         } else if (std.mem.eql(u8, arg, "-warn-unused")) {
             warn_unused = true;
+        } else if (std.mem.eql(u8, arg, "-warn-unused-lenient")) {
+            warn_unused = true;
+            warn_unused_lenient = true;
         }
     }
 
@@ -248,6 +258,7 @@ pub fn parse_args(allocator: mem.Allocator, io: std.Io, argv: []const []const u8
         .fmt_check_all = fmt_check_all,
         .debug_info = debug_info,
         .warn_unused = warn_unused,
+        .warn_unused_lenient = warn_unused_lenient,
         .program_args = try program_args.toOwnedSlice(),
     };
 }

@@ -131,6 +131,13 @@ pub const TranspileProcessFlags = packed struct {
     /// dependency-noise diagnostics while users are editing incomplete files.
     emit_unused_warnings: bool = false,
 
+    /// When true, a single hard type error does not abort unused-* reporting for
+    /// the whole module: typechecking continues per-module (best-effort) and the
+    /// unused warnings are still emitted, then the first hard error is re-raised.
+    /// Used by fls so a file with an unrelated error still shows unused squiggles.
+    /// Implies the same detection as `emit_unused_warnings`.
+    warn_unused_lenient: bool = false,
+
     /// When true, skip C code emission entirely after type-checking.
     ///
     /// Used by the diagnostics-only path (`fun -no-exec` without `-outf`) to avoid the
@@ -750,6 +757,18 @@ pub const TranspileProcess = struct {
         return try self.make_alias_qualified_symbol_name(alias, name);
     }
 
+    /// True when `alias` (in the scope of `ref_node`) resolves to a `std.c.*`
+    /// C-binding module. Such calls emit the RAW libc symbol name (e.g. `log`,
+    /// `pow`) rather than an `alias__fn` mangling, which is why their bare name
+    /// can collide in the typecheck `fns` map with an unrelated stdlib function
+    /// of the same name (e.g. `std.log`'s `log(LogLevel, str)`). Inference must
+    /// therefore look these up under an alias-qualified key, not the bare name.
+    fn alias_is_c_binding(self: *Self, ref_node: ?*const ast.Node, alias: []const u8) bool {
+        const alias_map = self.alias_map_for_node(ref_node);
+        const import_path = alias_map.get(alias) orelse return false;
+        return std.mem.startsWith(u8, import_path, "std.c.");
+    }
+
     /// Build a C name for a helper function that lives in the same module as the current call.
     /// When the call was `alias.fn(...)`, `module_alias` is `"alias"` and the result is
     /// `"alias__fn_name"`.  When there is no module alias (bare `fn(...)`), returns `fn_name`.
@@ -870,6 +889,24 @@ pub const TranspileProcess = struct {
                     const name = n.node_variant.?.enum_decl.name.items;
                     if (reg.enums_by_name.get(name)) |existing| {
                         if (!self.same_node_file(n, existing)) return TranspileError.DuplicateSymbol;
+                        // See the Compound branch: still owe the alias-qualified key
+                        // when this proc is an aliased re-import of an already-seen
+                        // type, so `alias.EnumType` annotations resolve.
+                        if (proc.import_alias) |alias| {
+                            const alias_name = try self.make_alias_qualified_symbol_name(alias, name);
+                            if (reg.enums_by_name.contains(alias_name)) {
+                                self.allocator.free(alias_name);
+                            } else {
+                                reg.enums_by_name.put(alias_name, existing) catch {
+                                    self.allocator.free(alias_name);
+                                    return TranspileError.MemoryAllocationFailed;
+                                };
+                                reg.owned_keys.append(alias_name) catch {
+                                    self.allocator.free(alias_name);
+                                    return TranspileError.MemoryAllocationFailed;
+                                };
+                            }
+                        }
                         continue;
                     }
                     if (reg.compounds_by_name.contains(name) or reg.quirk_sig_by_name.contains(name)) {
@@ -904,6 +941,27 @@ pub const TranspileProcess = struct {
                     const name = n.node_variant.?.compound.name.items;
                     if (reg.compounds_by_name.get(name)) |existing| {
                         if (!self.same_node_file(n, existing)) return TranspileError.DuplicateSymbol;
+                        // The bare name is already registered (same stdlib type
+                        // imported both unaliased — transitively — and aliased). If
+                        // THIS proc carries an import alias we still owe the
+                        // alias-qualified type key (`s__StringBuilder`) so an
+                        // `s.StringBuilder` annotation resolves. Mirrors the FnSig
+                        // fix in collect_fn_sigs.
+                        if (proc.import_alias) |alias| {
+                            const alias_name = try self.make_alias_qualified_symbol_name(alias, name);
+                            if (reg.compounds_by_name.contains(alias_name)) {
+                                self.allocator.free(alias_name);
+                            } else {
+                                reg.compounds_by_name.put(alias_name, existing) catch {
+                                    self.allocator.free(alias_name);
+                                    return TranspileError.MemoryAllocationFailed;
+                                };
+                                reg.owned_keys.append(alias_name) catch {
+                                    self.allocator.free(alias_name);
+                                    return TranspileError.MemoryAllocationFailed;
+                                };
+                            }
+                        }
                         continue;
                     }
                     reg.compounds_by_name.put(name, n) catch {
@@ -1013,6 +1071,72 @@ pub const TranspileProcess = struct {
         try self.collect_type_registry_module(proc, reg);
         for (proc.children.items) |child| {
             try self.collect_type_registry_recursive(child, reg);
+        }
+    }
+
+    /// Post-pass mirroring `register_alias_stub_sigs` but for the TYPE registry:
+    /// an aliased re-import of an already-parsed module is a node-less stub, so
+    /// `collect_type_registry_module` registers no `alias__Type` keys for it. Here
+    /// we find the real parsed proc for the stub's module and mirror each of its
+    /// compound/enum names under the stub's alias, so an `s.StringBuilder`
+    /// annotation (mangled `s__StringBuilder`) resolves. Runs AFTER the recursive
+    /// collection so all bare type names are present.
+    fn register_alias_stub_types(self: *Self, proc: *Self, reg: *TypeRegistry) TranspileError!void {
+        const is_node_less = proc.nodes.items().len == 0 and proc.owned_nodes.items.len == 0;
+        if (is_node_less) {
+            if (proc.import_alias) |alias| {
+                if (self.find_parsed_proc_by_path(proc.input_file_path)) |real| {
+                    try self.mirror_alias_types_from_proc(real, alias, reg);
+                }
+            }
+        }
+        for (proc.children.items) |child| {
+            try self.register_alias_stub_types(child, reg);
+        }
+    }
+
+    fn mirror_alias_types_from_proc(self: *Self, src: *Self, alias: []const u8, reg: *TypeRegistry) TranspileError!void {
+        for (src.owned_nodes.items) |n| {
+            if (n.node_variant == null) continue;
+            const bare: []const u8 = switch (n.type) {
+                .Compound => n.node_variant.?.compound.name.items,
+                .Enum => n.node_variant.?.enum_decl.name.items,
+                else => continue,
+            };
+            const alias_name = try self.make_alias_qualified_symbol_name(alias, bare);
+            switch (n.type) {
+                .Compound => {
+                    if (reg.compounds_by_name.contains(alias_name)) {
+                        self.allocator.free(alias_name);
+                        continue;
+                    }
+                    const existing = reg.compounds_by_name.get(bare) orelse n;
+                    reg.compounds_by_name.put(alias_name, existing) catch {
+                        self.allocator.free(alias_name);
+                        return TranspileError.MemoryAllocationFailed;
+                    };
+                    reg.owned_keys.append(alias_name) catch {
+                        self.allocator.free(alias_name);
+                        return TranspileError.MemoryAllocationFailed;
+                    };
+                },
+                .Enum => {
+                    if (reg.enums_by_name.contains(alias_name)) {
+                        self.allocator.free(alias_name);
+                        continue;
+                    }
+                    const existing = reg.enums_by_name.get(bare) orelse n;
+                    reg.enums_by_name.put(alias_name, existing) catch {
+                        self.allocator.free(alias_name);
+                        return TranspileError.MemoryAllocationFailed;
+                    };
+                    reg.owned_keys.append(alias_name) catch {
+                        self.allocator.free(alias_name);
+                        return TranspileError.MemoryAllocationFailed;
+                    };
+                },
+                else => self.allocator.free(alias_name),
+            }
         }
     }
 
@@ -2763,6 +2887,10 @@ pub const TranspileProcess = struct {
 
         try self.collect_type_registry_recursive(self, new_reg);
 
+        // Register alias-qualified type keys for aliased re-imports that were
+        // deduped to node-less stubs (so `alias.Type` annotations resolve).
+        try self.register_alias_stub_types(self, new_reg);
+
         // Second pass: impls need quirk name->signature resolution.
         try self.collect_impls_recursive(self, new_reg);
     }
@@ -3717,14 +3845,19 @@ pub const TranspileProcess = struct {
     }
 
     fn consume_warning_control(self: *Self, id: ast.WarningId) bool {
+        // `expect` is one-shot: it asserts exactly one matching warning occurs, so
+        // it is marked and won't match a second time.
         for (self.pending_warning_expects.items) |*pending| {
             if (pending.id == id and !pending.matched) {
                 pending.matched = true;
                 return true;
             }
         }
+        // `allow` suppresses EVERY matching warning in its scope, not just the
+        // first one — so it is NOT consumed/marked here. (We still flag it matched
+        // for the "unused allow" bookkeeping, but keep suppressing subsequent hits.)
         for (self.pending_warning_allows.items) |*pending| {
-            if (pending.id == id and !pending.matched) {
+            if (pending.id == id) {
                 pending.matched = true;
                 return true;
             }
@@ -6908,7 +7041,25 @@ pub const TranspileProcess = struct {
                                     return TranspileError.SymbolNotDefined;
                                 }
 
-                                if (fns.get(qualified)) |sig| {
+                                // For a std.c.* binding, `qualified` is the bare libc
+                                // name (e.g. `log`), which can collide in `fns` with an
+                                // unrelated stdlib function of the same name. Prefer the
+                                // alias-qualified sig (`cmath__log`) registered by
+                                // collect_fn_sigs so we read the C binding's real return
+                                // type, not the collider's.
+                                var c_binding_sig: ?FnSig = null;
+                                if (self.alias_is_c_binding(&node, alias_name)) {
+                                    const c_key = try self.make_alias_qualified_symbol_name(alias_name, member_name);
+                                    defer self.allocator.free(c_key);
+                                    if (fns.get(c_key)) |csig| c_binding_sig = csig;
+                                }
+
+                                if (c_binding_sig) |sig| {
+                                    maybe_sig = sig;
+                                    call_rtype = sig.rtype;
+                                    callee_is_async = sig.is_async;
+                                    callee_async_known = true;
+                                } else if (fns.get(qualified)) |sig| {
                                     maybe_sig = sig;
                                     call_rtype = sig.rtype;
                                     callee_is_async = sig.is_async;
@@ -8132,6 +8283,97 @@ pub const TranspileProcess = struct {
         }
     }
 
+    /// True when `proc` is a `std.c.*` C-binding module (its source lives under
+    /// `stdlib/std/c/`). Such modules declare bodyless bindings whose bare names
+    /// (`log`, `pow`, `sin`, ...) can collide in the typecheck `fns` map with an
+    /// unrelated stdlib function of the same name (e.g. `std.log`'s
+    /// `log(LogLevel, str)`). Stdlib module paths are always built with `/`
+    /// separators (see build_stdlib_module_path), so a substring check suffices.
+    fn proc_is_c_binding_module(proc: *Self) bool {
+        return std.mem.indexOf(u8, proc.input_file_path, "/std/c/") != null or
+            std.mem.indexOf(u8, proc.input_file_path, "\\std\\c\\") != null;
+    }
+
+    /// Build a `FnSig` from a function node, allocating a fresh `args` slice and
+    /// tracking it in `owned_args` for later free. Mirrors the per-node sig
+    /// construction used in the main `collect_fn_sigs` loops.
+    fn build_fn_sig_from_node(self: *Self, proc: *Self, fnv: anytype, owned_args: *ArrayList([]CheckedType)) TranspileError!FnSig {
+        const args_vec = fnv.args orelse utils.Vector(*ast.Node).init(proc.allocator);
+        const args_items = args_vec.items();
+        var args_slice = proc.allocator.alloc(CheckedType, args_items.len) catch {
+            return TranspileError.MemoryAllocationFailed;
+        };
+        errdefer proc.allocator.free(args_slice);
+
+        var i: usize = 0;
+        for (args_items) |arg_ptr| {
+            const arg = arg_ptr.*;
+            if (arg.type == .Variable and arg.node_variant != null) {
+                try self.register_generic_instantiations_from_dtype(arg.node_variant.?.variable.type);
+                args_slice[i] = try self.type_from_dtype_with_mangled(arg.node_variant.?.variable.type);
+            } else {
+                args_slice[i] = .{ .base = .Unknown };
+            }
+            try self.register_generic_instantiation_from_checked_type(args_slice[i]);
+            i += 1;
+        }
+
+        owned_args.append(args_slice) catch {
+            return TranspileError.MemoryAllocationFailed;
+        };
+        const fn_rtype: CheckedType = if (fnv.rtype) |rt| blk: {
+            const rt_heap = try self.clone_dtype(&rt);
+            try self.register_generic_instantiations_from_dtype(rt_heap);
+            break :blk try self.type_from_dtype_with_mangled(rt_heap);
+        } else .{ .base = .Void };
+        try self.register_generic_instantiation_from_checked_type(fn_rtype);
+        return .{
+            .rtype = fn_rtype,
+            .args = args_slice,
+            .is_variadic = fnv.is_variadic,
+            .is_async = fnv.is_async,
+            .type_params = if (fnv.type_params) |*params| params else null,
+            .min_args = count_required_args_from_node(args_vec),
+        };
+    }
+
+    /// Register the alias-qualified key (`alias__name`) for a function whose bare
+    /// name is already present in `fns`. This handles the case where the same
+    /// stdlib module is imported both unaliased (often transitively, e.g. std.json
+    /// does `imp std.math;`) and aliased (`imp std.math as m`): the bare-name dedup
+    /// would otherwise skip the alias-registration block, leaving `m.sqrt_dec(...)`
+    /// unable to infer its return type.
+    ///
+    /// For a normal module we clone the already-registered bare `FnSig` (const-shared
+    /// for typecheck only; sharing its `args`/`type_params`) under the alias key — no
+    /// new `owned_args` entry, so there is no double-free.
+    ///
+    /// For a `std.c.*` C-binding module the bare `fns.get(name)` entry may be an
+    /// UNRELATED collider (e.g. `std.log`'s void `log`), so cloning it would poison
+    /// the alias key with the wrong return type. Instead we build the alias-qualified
+    /// sig from the C binding's OWN function node (`fnv`), giving `cmath.log(...)` its
+    /// real `dec` return type for typecheck while codegen still emits the raw libc name.
+    fn register_alias_qualified_from_existing(self: *Self, proc: *Self, fns: *std.StringHashMap(FnSig), fnv: anytype, owned_args: *ArrayList([]CheckedType)) TranspileError!void {
+        const alias = proc.import_alias orelse return;
+        const name = (fnv.name orelse return).items;
+        const alias_name = try self.make_alias_qualified_symbol_name(alias, name);
+        if (fns.contains(alias_name)) {
+            self.allocator.free(alias_name);
+            return;
+        }
+        const sig: FnSig = if (proc_is_c_binding_module(proc))
+            try self.build_fn_sig_from_node(proc, fnv, owned_args)
+        else
+            (fns.get(name) orelse {
+                self.allocator.free(alias_name);
+                return;
+            });
+        fns.put(alias_name, sig) catch {
+            self.allocator.free(alias_name);
+            return TranspileError.MemoryAllocationFailed;
+        };
+    }
+
     fn collect_fn_sigs(self: *Self, proc: *Self, fns: *std.StringHashMap(FnSig), owned_args: *ArrayList([]CheckedType)) TranspileError!void {
         for (proc.nodes.items()) |node| {
             if (node.type != .Function or node.node_variant == null) continue;
@@ -8139,7 +8381,16 @@ pub const TranspileProcess = struct {
             if (fnv.name == null) continue;
             const name = fnv.name.?.items;
 
-            if (fns.contains(name)) continue;
+            if (fns.contains(name)) {
+                // The bare name is already registered (e.g. the same stdlib module
+                // was imported both unaliased — transitively — and aliased). Even so,
+                // if THIS proc carries an import alias, we still owe the
+                // alias-qualified key (`m__fn`) so `m.fn(...)` calls can infer their
+                // return type. Reuse the already-registered bare signature (it is
+                // const-shared for typecheck only; do NOT add another owned_args entry).
+                try self.register_alias_qualified_from_existing(proc, fns, fnv, owned_args);
+                continue;
+            }
 
             const args_vec = fnv.args orelse utils.Vector(*ast.Node).init(proc.allocator);
             const args_items = args_vec.items();
@@ -8209,7 +8460,12 @@ pub const TranspileProcess = struct {
             if (fnv.name == null) continue;
             const name = fnv.name.?.items;
 
-            if (fns.contains(name)) continue;
+            if (fns.contains(name)) {
+                // See the note in the `proc.nodes` loop above: still owe the
+                // alias-qualified key when this proc carries an import alias.
+                try self.register_alias_qualified_from_existing(proc, fns, fnv, owned_args);
+                continue;
+            }
 
             const args_vec = fnv.args orelse utils.Vector(*ast.Node).init(proc.allocator);
             const args_items = args_vec.items();
@@ -8418,6 +8674,74 @@ pub const TranspileProcess = struct {
         }
     }
 
+    /// Post-pass over the whole process tree that registers alias-qualified
+    /// function signatures for aliased re-imports that were deduped to a
+    /// node-less STUB (see process_local_import: when a module is already
+    /// globally parsed and then re-imported `as x`, only an empty stub child is
+    /// created). Because the stub has no function nodes, `collect_fn_sigs`
+    /// registers nothing for it, so `x.fn(...)` cannot infer its return type.
+    /// Here we locate the real, parsed proc that owns the module (matched by
+    /// canonical `input_file_path`) and mirror each of its bare `fns` entries
+    /// under the stub's `alias__fn` key. Must run AFTER the full `collect_fn_sigs`
+    /// walk so every bare signature is already present.
+    fn register_alias_stub_sigs(self: *Self, proc: *Self, fns: *std.StringHashMap(FnSig)) TranspileError!void {
+        const is_node_less = proc.nodes.items().len == 0 and proc.owned_nodes.items.len == 0;
+        if (is_node_less) {
+            if (proc.import_alias) |alias| {
+                if (self.find_parsed_proc_by_path(proc.input_file_path)) |real| {
+                    try self.mirror_alias_sigs_from_proc(real, alias, fns);
+                }
+            }
+        }
+        for (proc.children.items) |child| {
+            try self.register_alias_stub_sigs(child, fns);
+        }
+    }
+
+    /// Find the parsed process in the tree (rooted at `self`) whose
+    /// `input_file_path` equals `path` and that actually carries function nodes.
+    fn find_parsed_proc_by_path(self: *Self, path: []const u8) ?*Self {
+        if ((self.nodes.items().len != 0 or self.owned_nodes.items.len != 0) and
+            std.mem.eql(u8, self.input_file_path, path))
+        {
+            return self;
+        }
+        for (self.children.items) |child| {
+            if (child.find_parsed_proc_by_path(path)) |found| return found;
+        }
+        return null;
+    }
+
+    /// Register `alias__fnname` for every top-level function of `src` proc,
+    /// reusing the bare `fnname` signature already present in `fns`.
+    fn mirror_alias_sigs_from_proc(self: *Self, src: *Self, alias: []const u8, fns: *std.StringHashMap(FnSig)) TranspileError!void {
+        try self.mirror_alias_sigs_from_nodes(src.nodes.items(), alias, fns);
+        try self.mirror_alias_sigs_from_nodes(src.owned_nodes.items, alias, fns);
+    }
+
+    fn mirror_alias_sigs_from_nodes(self: *Self, nodes: anytype, alias: []const u8, fns: *std.StringHashMap(FnSig)) TranspileError!void {
+        for (nodes) |node_entry| {
+            const node = switch (@typeInfo(@TypeOf(node_entry))) {
+                .pointer => node_entry.*,
+                else => node_entry,
+            };
+            if (node.type != .Function or node.node_variant == null) continue;
+            const fnv = node.node_variant.?.function;
+            if (fnv.name == null) continue;
+            const name = fnv.name.?.items;
+            const existing = fns.get(name) orelse continue;
+            const alias_name = try self.make_alias_qualified_symbol_name(alias, name);
+            if (fns.contains(alias_name)) {
+                self.allocator.free(alias_name);
+                continue;
+            }
+            fns.put(alias_name, existing) catch {
+                self.allocator.free(alias_name);
+                return TranspileError.MemoryAllocationFailed;
+            };
+        }
+    }
+
     fn typecheck_all(self: *Self) TranspileError!void {
         var fns = std.StringHashMap(FnSig).init(self.allocator);
         defer fns.deinit();
@@ -8428,6 +8752,33 @@ pub const TranspileProcess = struct {
         }
 
         try self.collect_fn_sigs(self, &fns, &owned_args);
+        try self.register_alias_stub_sigs(self, &fns);
+
+        // Lenient mode (used by fls diagnostics): a single hard type error must NOT
+        // suppress every unused-* diagnostic for the whole module. Typecheck each
+        // module catching the first error, then still emit the unused warnings
+        // (which only read `used`/`public` markers, populated as far as checking
+        // reached), and re-raise the first recorded error at the end so the file
+        // still shows its real type error too. Strict mode keeps aborting on the
+        // first error as before.
+        if (self.flags.warn_unused_lenient) {
+            const LenientWalker = struct {
+                fn walk(proc: *Self, fns_ref: *const std.StringHashMap(FnSig), first_err: *?TranspileError) void {
+                    typecheck_module(proc, fns_ref) catch |e| {
+                        if (first_err.* == null) first_err.* = e;
+                        // Body checking aborted; still emit unused warnings best-effort.
+                        proc.emit_unused_top_level_warnings() catch {};
+                    };
+                    for (proc.children.items) |child| {
+                        walk(child, fns_ref, first_err);
+                    }
+                }
+            };
+            var first_err: ?TranspileError = null;
+            LenientWalker.walk(self, &fns, &first_err);
+            if (first_err) |e| return e;
+            return;
+        }
 
         // Check this module and all imported modules recursively.
         const Walker = struct {
@@ -8454,6 +8805,7 @@ pub const TranspileProcess = struct {
         }
 
         self.collect_fn_sigs(self, &fns, &owned_args) catch return;
+        self.register_alias_stub_sigs(self, &fns) catch return;
 
         // Ensure the type registry is populated so local type checks can resolve named types.
         self.collect_type_registry_all() catch return;
@@ -8866,19 +9218,464 @@ pub const TranspileProcess = struct {
             }
         }
 
+        try proc.run_concurrency_lints();
         try proc.emit_unused_top_level_warnings();
+    }
+
+    /// Static concurrency lints for the `fork` keyword. Conservative by design:
+    /// only fires on the high-confidence structural shape so correct programs are
+    /// never flagged. Currently detects `shared_mutable_capture_race`: a forked
+    /// `async fun` receives a pointer to a compound that has NO internal `Mutex`
+    /// field (i.e. is not self-synchronizing, unlike `Channel`/`WaitGroup`) and
+    /// mutates one of that pointee's fields, while the SAME pointer is handed to
+    /// multiple concurrently-live forked tasks — the classic unsynchronized shared
+    /// mutable state race (e.g. sharing `&rand` across forked workers). Gated on
+    /// the same flag as the other advisory lints and honors `allow`/`expect`.
+    fn run_concurrency_lints(proc: *Self) TranspileError!void {
+        if (proc.is_importing or !proc.flags.emit_unused_warnings) return;
+
+        for (proc.nodes.items()) |*node| {
+            if (node.type != .Function or node.node_variant == null) continue;
+            const fnv = node.node_variant.?.function;
+            if (fnv.body) |body| {
+                try proc.lint_forks_in_body(body);
+            }
+        }
+        for (proc.owned_nodes.items) |n| {
+            if (n.type != .Impl or n.node_variant == null) continue;
+            for (n.node_variant.?.impl.methods.items()) |m_ptr| {
+                const m = m_ptr.*;
+                if (m.type != .Function or m.node_variant == null) continue;
+                if (m.node_variant.?.function.body) |body| {
+                    try proc.lint_forks_in_body(body);
+                }
+            }
+        }
+    }
+
+    /// Walk a function body collecting `fork` statements and, for each, count how
+    /// many times the SAME `&var` pointer argument is forked (across the whole
+    /// body, including inside loops — a fork inside a `for` is treated as spawning
+    /// many concurrent copies). A shared pointer forked 2+ times (or once inside a
+    /// loop) into a mutating, unsynchronized-compound async fn is flagged.
+    const ForkOccurrence = struct { node: *ast.Node, in_loop: bool };
+
+    fn lint_forks_in_body(proc: *Self, body: *ast.Node) TranspileError!void {
+        // Collect (fork node, in_loop) pairs.
+        var forks = ArrayList(ForkOccurrence).init(proc.allocator);
+        defer forks.deinit();
+        collect_fork_stmts(body, false, &forks);
+        if (forks.items.len == 0) return;
+
+        // Count occurrences of each shared `&var` name across all forks.
+        var shared_counts = std.StringHashMap(u32).init(proc.allocator);
+        defer shared_counts.deinit();
+        for (forks.items) |f| {
+            const call = f.node.node_variant.?.statement.fork_stmt.expr;
+            var call_args = ArrayList(*ast.Node).init(proc.allocator);
+            defer call_args.deinit();
+            proc.fork_call_args(call, &call_args);
+            for (call_args.items) |arg_ptr| {
+                if (addr_of_operand_name(arg_ptr.*)) |vname| {
+                    const bump: u32 = if (f.in_loop) 2 else 1;
+                    const gop = shared_counts.getOrPut(vname) catch continue;
+                    if (!gop.found_existing) gop.value_ptr.* = 0;
+                    gop.value_ptr.* += bump;
+                }
+            }
+        }
+
+        // Now warn on each fork whose `&var` arg is shared concurrently and lands
+        // on a mutated, unsynchronized compound parameter.
+        for (forks.items) |f| {
+            const call = f.node.node_variant.?.statement.fork_stmt.expr;
+            const callee = fork_call_callee_name(call) orelse continue;
+            var call_args = ArrayList(*ast.Node).init(proc.allocator);
+            defer call_args.deinit();
+            proc.fork_call_args(call, &call_args);
+            const target = proc.find_async_fn_node(callee) orelse continue;
+            const tfnv = target.node_variant.?.function;
+            const tparams = tfnv.args orelse continue;
+            const tbody = tfnv.body orelse continue;
+
+            const params = tparams.items();
+            var i: usize = 0;
+            while (i < call_args.items.len and i < params.len) : (i += 1) {
+                const vname = addr_of_operand_name(call_args.items[i].*) orelse continue;
+                const shared = (shared_counts.get(vname) orelse 0) >= 2;
+                if (!shared) continue;
+
+                const param = params[i].*;
+                if (param.type != .Variable or param.node_variant == null) continue;
+                const pv = param.node_variant.?.variable;
+                if (pv.type.pointer_depth == 0) continue; // not a pointer param
+                const pname = pv.name.items;
+                const compound_name = base_compound_type_name(pv.type.type_str.items);
+                if (proc.compound_is_self_synchronizing(compound_name)) continue; // safe to share
+                if (!body_writes_param_field(tbody, pname)) continue; // no mutation -> read-only share is fine
+
+                proc.report_warning(
+                    .shared_mutable_capture_race,
+                    f.node.*,
+                    "data race: '&{s}' ({s}) is shared across concurrently forked '{s}' tasks and mutated without synchronization; guard it with a Mutex or give each task its own copy",
+                    .{ vname, compound_name, callee },
+                );
+                // Continue scanning the remaining args: several distinct shared
+                // objects can each race, and reporting only the first would hide the
+                // others (e.g. flagging `wg` must not mask the real `r` race).
+            }
+        }
+
+        // Deadlock lint: a WaitGroup created with a literal `wait_group_new(0)` has
+        // a signalling channel clamped to capacity 1, so once more than a bufferful
+        // of tasks call `done()` before `wait()` starts draining (the typical
+        // fork-in-a-loop-then-wait shape), the extra `done()` calls BLOCK and the
+        // program can deadlock when the number of in-flight forks is large. Flag it
+        // so the size is fixed at compile time rather than hanging at runtime.
+        var zerocap_wgs = std.StringHashMap(void).init(proc.allocator);
+        defer zerocap_wgs.deinit();
+        collect_zero_cap_wait_groups(body, &zerocap_wgs);
+        if (zerocap_wgs.count() != 0) {
+            for (forks.items) |f| {
+                if (!f.in_loop) continue; // only a loop can overflow the buffer
+                const call = f.node.node_variant.?.statement.fork_stmt.expr;
+                var call_args = ArrayList(*ast.Node).init(proc.allocator);
+                defer call_args.deinit();
+                proc.fork_call_args(call, &call_args);
+                for (call_args.items) |arg_ptr| {
+                    const vname = addr_of_operand_name(arg_ptr.*) orelse continue;
+                    if (!zerocap_wgs.contains(vname)) continue;
+                    proc.report_warning(
+                        .blocking_fork_deadlock,
+                        f.node.*,
+                        "possible deadlock: WaitGroup '{s}' was created with wait_group_new(0) (signal buffer capacity 1) but is done()'d from tasks forked in a loop; size it to the number of tasks (wait_group_new(count)) so done() never blocks before wait() drains",
+                        .{vname},
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Collect names of WaitGroup locals in `body` initialized with a literal
+    /// `wait_group_new(0)` — the pattern whose signal buffer is clamped to 1 and
+    /// therefore blocks `done()` once a loopful of tasks signal before `wait()`.
+    fn collect_zero_cap_wait_groups(node: *ast.Node, out: *std.StringHashMap(void)) void {
+        const nv = node.node_variant orelse return;
+        switch (node.type) {
+            .Body => {
+                for (nv.body.statements.items()) |s| collect_zero_cap_wait_groups(s, out);
+            },
+            .Variable => {
+                const v = nv.variable;
+                if (v.val) |val| {
+                    if (call_is_wait_group_new_zero(val)) {
+                        out.put(v.name.items, {}) catch {};
+                    }
+                }
+            },
+            .Expression => {
+                // `WaitGroup wg = wait_group_new(0)` may also appear as an
+                // assignment expression `wg = wait_group_new(0)`.
+                const e = nv.exp;
+                if (mem.eql(u8, e.op, "=")) {
+                    if (e.left) |l| {
+                        if (l.type == .Identifier and l.data != null) {
+                            if (e.right) |r| {
+                                if (call_is_wait_group_new_zero(r)) out.put(l.data.?.sval.items, {}) catch {};
+                            }
+                        }
+                    }
+                }
+            },
+            else => {},
+        }
+    }
+
+    /// True when `expr` is a call `wait_group_new(0)` with a literal `0` argument.
+    fn call_is_wait_group_new_zero(expr: *ast.Node) bool {
+        if (expr.type != .Expression or expr.node_variant == null) return false;
+        const e = expr.node_variant.?.exp;
+        if (!mem.eql(u8, e.op, "()")) return false;
+        const callee = e.left orelse return false;
+        if (callee.type != .Identifier or callee.data == null) return false;
+        if (!mem.eql(u8, callee.data.?.sval.items, "wait_group_new")) return false;
+        // Argument must be the literal 0.
+        const args = e.right orelse return false;
+        var inner = args;
+        if (inner.type == .ExpressionParenthesis and inner.node_variant != null) {
+            inner = inner.node_variant.?.paren.exp;
+        }
+        if (inner.type == .Number and inner.data != null) {
+            return switch (inner.data.?) {
+                .llnum => |v| v == 0,
+                .lnum => |v| v == 0,
+                .inum => |v| v == 0,
+                .dnum => |v| v == 0,
+                else => false,
+            };
+        }
+        return false;
+    }
+
+    /// Recursively collect `fork` statements from a body, tracking whether each is
+    /// lexically inside a loop (a fork in a loop spawns many concurrent instances).
+    fn collect_fork_stmts(node: *ast.Node, in_loop: bool, out: *ArrayList(ForkOccurrence)) void {
+        const nv = node.node_variant orelse return;
+        switch (node.type) {
+            .StatementFork => {
+                out.append(.{ .node = node, .in_loop = in_loop }) catch {};
+            },
+            .Body => {
+                for (nv.body.statements.items()) |s| collect_fork_stmts(s, in_loop, out);
+            },
+            .StatementFor => {
+                const body = switch (nv.statement.for_stmt) {
+                    .cond => |c| c.body,
+                    .range => |r| r.body,
+                    .iter => |it| it.body,
+                };
+                collect_fork_stmts(body, true, out);
+            },
+            .StatementIf => collect_fork_stmts(nv.statement.if_stmt.body, in_loop, out),
+            .StatementElseIf => collect_fork_stmts(nv.statement.elif_stmt.body, in_loop, out),
+            .StatementElse => collect_fork_stmts(nv.statement.else_stmt.body, in_loop, out),
+            else => {},
+        }
+    }
+
+    /// Extract the callee function name from a `fork <call>` expression.
+    /// Extract the callee function name from a `fork <call>` expression. The call
+    /// is an `.Expression` with op `"()"`, `left` = the callee identifier and
+    /// `right` = the parenthesized argument list (see how calls are parsed).
+    fn fork_call_callee_name(call: *ast.Node) ?[]const u8 {
+        if (call.type == .Function and call.node_variant != null) {
+            if (call.node_variant.?.function.name) |nm| return nm.items;
+        }
+        if (call.type == .Expression and call.node_variant != null) {
+            const e = call.node_variant.?.exp;
+            if (mem.eql(u8, e.op, "()")) {
+                if (e.left) |l| {
+                    if (l.type == .Identifier and l.data != null) return l.data.?.sval.items;
+                }
+            }
+        }
+        return null;
+    }
+
+    /// Collect the flattened argument nodes from a `fork <call>` expression into
+    /// `out` (top-level comma-separated args of the `()` call).
+    fn fork_call_args(proc: *Self, call: *ast.Node, out: *ArrayList(*ast.Node)) void {
+        if (call.type == .Function and call.node_variant != null) {
+            const f = call.node_variant.?.function;
+            if (f.args) |args| {
+                for (args.items()) |a| out.append(a) catch {};
+            }
+            return;
+        }
+        if (call.type == .Expression and call.node_variant != null) {
+            const e = call.node_variant.?.exp;
+            if (mem.eql(u8, e.op, "()")) {
+                if (e.right) |r| proc.flatten_call_args_ptr(r, out) catch {};
+            }
+        }
+    }
+
+    /// If `node` is an `&x` (address-of) unary on a plain identifier, return `x`.
+    fn addr_of_operand_name(node: ast.Node) ?[]const u8 {
+        if (node.type != .Unary or node.node_variant == null) return null;
+        const u = node.node_variant.?.unary;
+        if (!mem.eql(u8, u.op, "&")) return null;
+        const op = u.operand;
+        if (op.*.type == .Identifier and op.*.data != null) return op.*.data.?.sval.items;
+        return null;
+    }
+
+    /// Find a top-level `async fun` node by name in this module.
+    fn find_async_fn_node(proc: *Self, name: []const u8) ?*ast.Node {
+        for (proc.nodes.items()) |*n| {
+            if (n.type != .Function or n.node_variant == null) continue;
+            const f = n.node_variant.?.function;
+            if (!f.is_async) continue;
+            if (f.name) |nm| {
+                if (mem.eql(u8, nm.items, name)) return n;
+            }
+        }
+        return null;
+    }
+
+    /// Strip pointer/array/generic decoration to the base compound type name.
+    fn base_compound_type_name(type_str: []const u8) []const u8 {
+        var s = std.mem.trim(u8, type_str, " \t\r\n");
+        if (std.mem.indexOfScalar(u8, s, '<')) |lt| s = s[0..lt];
+        // Trim trailing `*` and whitespace.
+        while (s.len > 0 and (s[s.len - 1] == '*' or s[s.len - 1] == ' ' or s[s.len - 1] == '\t')) s = s[0 .. s.len - 1];
+        return std.mem.trim(u8, s, " \t\r\n");
+    }
+
+    /// True when the named compound is SELF-SYNCHRONIZING — safe to share across
+    /// concurrent tasks — so it should not be flagged as a data race. This holds
+    /// when the type is itself a known synchronization primitive (`Mutex`,
+    /// `Channel`, `WaitGroup`) or transitively contains a `Mutex`/`Channel` field
+    /// (e.g. a `Channel` carries a `Mutex mu`; a `WaitGroup` carries a signalling
+    /// `Channel`). Only plain data compounds with no internal synchronization
+    /// (like `Rand`, which is just `num state`) fall through to the race check.
+    fn compound_is_self_synchronizing(proc: *Self, compound_name: []const u8) bool {
+        if (mem.eql(u8, compound_name, "Mutex") or
+            mem.eql(u8, compound_name, "Channel") or
+            mem.eql(u8, compound_name, "WaitGroup"))
+        {
+            return true;
+        }
+        const reg = proc.root_registry() orelse return false;
+        const cnode = reg.compounds_by_name.get(compound_name) orelse return false;
+        if (cnode.node_variant == null) return false;
+        for (cnode.node_variant.?.compound.fields.items()) |field| {
+            const ft = base_compound_type_name(field.dtype.type_str.items);
+            if (mem.eql(u8, ft, "Mutex") or mem.eql(u8, ft, "Channel")) return true;
+        }
+        return false;
+    }
+
+    /// True when `body` may MUTATE the pointee reached through pointer parameter
+    /// `param` — either a direct field assignment `param.field = ...` OR a method
+    /// call `param.method(...)`. A method on a non-Mutex compound can mutate `self`
+    /// (e.g. `r.next()` advancing a PRNG's state), and the caller (`run_concurrency_lints`)
+    /// already restricts this to shared, unsynchronized compounds, so treating any
+    /// method call on the shared receiver as a potential unsynchronized write is the
+    /// right conservative signal for a data-race lint.
+    fn body_writes_param_field(body: *ast.Node, param: []const u8) bool {
+        return node_writes_param_field(body, param);
+    }
+
+    fn node_writes_param_field(node: *ast.Node, param: []const u8) bool {
+        if (node.node_variant == null) return false;
+        switch (node.type) {
+            .Body => {
+                for (node.node_variant.?.body.statements.items()) |s| {
+                    if (node_writes_param_field(s, param)) return true;
+                }
+                return false;
+            },
+            .Expression => {
+                const exp = node.node_variant.?.exp;
+                // Assignment `param.field = ...` (or compound-assign): LHS is a `.`
+                // access whose base identifier is `param`.
+                if (is_assignment_op(exp.op)) {
+                    if (exp.left) |lhs| {
+                        if (expr_base_is_ident(lhs, param)) return true;
+                    }
+                }
+                // Method call `param.method(...)`: an `()`-call expression whose
+                // callee (left) is a `.`-access chain rooted at `param`. A method
+                // on a non-Mutex compound can mutate `self` (e.g. `r.next()`), so
+                // treat it as a potential unsynchronized write. (The receiver may
+                // also be reached through the `.`-expr's own right operand being an
+                // invocation, so check both shapes.)
+                if (mem.eql(u8, exp.op, "()")) {
+                    if (exp.left) |callee| {
+                        if (callee.type == .Expression and callee.node_variant != null) {
+                            const ce = callee.node_variant.?.exp;
+                            if (mem.eql(u8, ce.op, ".")) {
+                                if (ce.left) |recv| {
+                                    if (expr_base_is_ident(recv, param)) return true;
+                                }
+                            }
+                        }
+                    }
+                }
+                if (mem.eql(u8, exp.op, ".")) {
+                    if (exp.left) |l| {
+                        if (expr_base_is_ident(l, param)) {
+                            if (exp.right) |r| {
+                                if (expr_is_invocation(r)) return true;
+                            }
+                        }
+                    }
+                }
+                if (exp.left) |l| {
+                    if (node_writes_param_field(l, param)) return true;
+                }
+                if (exp.right) |r| {
+                    if (node_writes_param_field(r, param)) return true;
+                }
+                return false;
+            },
+            .StatementIf => return node_writes_param_field(node.node_variant.?.statement.if_stmt.body, param),
+            .StatementElseIf => return node_writes_param_field(node.node_variant.?.statement.elif_stmt.body, param),
+            .StatementElse => return node_writes_param_field(node.node_variant.?.statement.else_stmt.body, param),
+            .StatementFor => {
+                const body = switch (node.node_variant.?.statement.for_stmt) {
+                    .cond => |c| c.body,
+                    .range => |r| r.body,
+                    .iter => |it| it.body,
+                };
+                return node_writes_param_field(body, param);
+            },
+            .StatementDefer => return node_writes_param_field(node.node_variant.?.statement.defer_stmt.body, param),
+            else => return false,
+        }
+    }
+
+    fn is_assignment_op(op: []const u8) bool {
+        return mem.eql(u8, op, "=") or mem.eql(u8, op, "+=") or mem.eql(u8, op, "-=") or
+            mem.eql(u8, op, "*=") or mem.eql(u8, op, "/=") or mem.eql(u8, op, "%=");
+    }
+
+    /// True when `expr` represents a call/invocation — a `.Function` call node, or
+    /// an expression whose right operand is an `ExpressionParenthesis` argument
+    /// list (the shape a method call `recv.method(args)` desugars to in the AST).
+    fn expr_is_invocation(expr: *ast.Node) bool {
+        if (expr.type == .Function) return true;
+        if (expr.type == .ExpressionParenthesis) return true;
+        if (expr.type == .Expression and expr.node_variant != null) {
+            const e = expr.node_variant.?.exp;
+            if (e.right) |r| {
+                if (r.type == .ExpressionParenthesis or r.type == .Function) return true;
+            }
+        }
+        return false;
+    }
+
+    /// True when `expr` is a `.`-access chain whose leftmost identifier is `name`
+    /// (e.g. `r.state` or `r.a.b` with base `r`).
+    fn expr_base_is_ident(expr: *ast.Node, name: []const u8) bool {
+        var cur = expr;
+        while (true) {
+            if (cur.type == .Identifier and cur.data != null) {
+                return mem.eql(u8, cur.data.?.sval.items, name);
+            }
+            if (cur.type == .Expression and cur.node_variant != null) {
+                const e = cur.node_variant.?.exp;
+                if (mem.eql(u8, e.op, ".")) {
+                    cur = e.left orelse return false;
+                    continue;
+                }
+            }
+            return false;
+        }
     }
 
     fn emit_unused_top_level_warnings(proc: *Self) TranspileError!void {
         if (proc.is_importing or !proc.flags.emit_unused_warnings) return;
 
+        // Pre-scan ALL top-level warning-control pragmas first so `allow`/`expect`
+        // are FILE-scoped for unused_* diagnostics, not order-sensitive. Previously
+        // the pragma was queued inline as the loop reached it, so `allow unused_import`
+        // only suppressed imports that appeared textually AFTER it — e.g. a pragma on
+        // line 4 could not silence imports on lines 1-3. Queue every control up front.
+        for (proc.nodes.items()) |*node| {
+            if (node.type != .StatementWarningControl) continue;
+            if (node.node_variant) |nv| {
+                const ctrl = nv.statement.warning_ctrl;
+                try proc.queue_warning_control(ctrl.action, ctrl.id, ctrl.reason, node.pos);
+            }
+        }
+
         for (proc.nodes.items()) |*node| {
             switch (node.type) {
                 .StatementWarningControl => {
-                    if (node.node_variant) |nv| {
-                        const ctrl = nv.statement.warning_ctrl;
-                        try proc.queue_warning_control(ctrl.action, ctrl.id, ctrl.reason, node.pos);
-                    }
+                    // Already queued in the pre-scan above.
                 },
                 .Import => {
                     if (node_is_used(node)) continue;
@@ -14964,6 +15761,54 @@ pub const TranspileProcess = struct {
         }
     }
 
+    /// True when some imported `std.c.*` module declares a BODYLESS binding named
+    /// `name` (e.g. `pub fun log(dec x) dec;` in std.c.math, which maps to libc
+    /// `log`). Used to detect that a Fun-defined free function of the same name
+    /// would collide with the raw libc symbol in generated C.
+    fn c_binding_symbol_exists_in(self: *Self, proc: *Self, name: []const u8) bool {
+        if (proc_is_c_binding_module(proc)) {
+            for (proc.nodes.items()) |n| {
+                if (n.type != .Function or n.node_variant == null) continue;
+                const fnv = n.node_variant.?.function;
+                if (fnv.body != null) continue; // only bodyless bindings map to raw libc
+                if (fnv.name != null and mem.eql(u8, fnv.name.?.items, name)) return true;
+            }
+            for (proc.owned_nodes.items) |n| {
+                if (n.type != .Function or n.node_variant == null) continue;
+                const fnv = n.node_variant.?.function;
+                if (fnv.body != null) continue;
+                if (fnv.name != null and mem.eql(u8, fnv.name.?.items, name)) return true;
+            }
+        }
+        for (proc.children.items) |child| {
+            if (self.c_binding_symbol_exists_in(child, name)) return true;
+        }
+        return false;
+    }
+
+    /// A Fun-defined free function whose name collides with a libc symbol pulled in
+    /// by an imported `std.c.*` binding (e.g. `std.log`'s `pub fun log(LogLevel, str)`
+    /// vs libc `log` from `<math.h>` via std.math) must be emitted under a
+    /// collision-safe C symbol. Its Fun surface name is UNCHANGED; only the C name is
+    /// rewritten, consistently at its declaration and its bare-identifier call sites.
+    /// The `std.c.*` binding calls themselves resolve to the RAW libc name and are not
+    /// affected (they never route through this — they carry a module alias and go
+    /// through `resolve_alias_qualified_symbol_name`).
+    fn fun_fn_name_needs_c_shadow_rename(self: *Self, name: []const u8) bool {
+        if (mem.eql(u8, name, "main")) return false;
+        const fn_node = self.find_function_node(name) orelse return false;
+        if (fn_node.node_variant == null) return false;
+        const fnv = fn_node.node_variant.?.function;
+        if (fnv.body == null) return false; // the Fun function must be a real definition
+        // If the resolved definition itself lives in a std.c.* module it IS the binding;
+        // don't rename it.
+        if (fn_node.pos) |pos| {
+            if (std.mem.indexOf(u8, pos.filename, "/std/c/") != null) return false;
+            if (std.mem.indexOf(u8, pos.filename, "\\std\\c\\") != null) return false;
+        }
+        return self.c_binding_symbol_exists_in(self.get_root(), name);
+    }
+
     fn write_effective_function_name(self: *Self, node: ast.Node, name: []const u8) TranspileError!void {
         _ = node;
         if (self.override_fn_name) |ov| {
@@ -14978,6 +15823,12 @@ pub const TranspileProcess = struct {
                 try self.write(name);
                 return;
             }
+        }
+
+        if (self.fun_fn_name_needs_c_shadow_rename(name)) {
+            try self.write("__fun_shadow__");
+            try self.write(name);
+            return;
         }
 
         try self.write(name);
@@ -14996,6 +15847,12 @@ pub const TranspileProcess = struct {
                     return TranspileError.MemoryAllocationFailed;
                 };
             }
+        }
+
+        if (self.fun_fn_name_needs_c_shadow_rename(name)) {
+            return std.fmt.allocPrint(self.allocator, "__fun_shadow__{s}", .{name}) catch {
+                return TranspileError.MemoryAllocationFailed;
+            };
         }
 
         return self.allocator.dupe(u8, name) catch {
@@ -15466,41 +16323,62 @@ pub const TranspileProcess = struct {
         // re-imported under a different alias).  Find the canonical process to enumerate
         // the module's public functions.
         const source_proc: *TranspileProcess = blk: {
-            if (child.nodes.items().len > 0) break :blk child;
-            if (self.get_root().find_process_for_file(child.input_file_path)) |p| break :blk p;
+            if (child.nodes.items().len > 0 or child.owned_nodes.items.len > 0) break :blk child;
+            // Prefer a proc that actually carries the module's nodes. `find_process_for_file`
+            // matches by basename and can return ANOTHER node-less stub for the same file
+            // (there may be several aliased re-imports), so use the path-exact,
+            // nodes-carrying lookup first and only fall back to the basename match.
+            if (self.get_root().find_parsed_proc_by_path(child.input_file_path)) |p| break :blk p;
+            if (self.get_root().find_process_for_file(child.input_file_path)) |p| {
+                if (p.nodes.items().len > 0 or p.owned_nodes.items.len > 0) break :blk p;
+            }
             return; // Can't find node list — skip.
         };
 
         var wrote_header = false;
-        for (source_proc.nodes.items()) |node| {
-            if (node.type != .Function or node.node_variant == null) continue;
-            const f = node.node_variant.?.function;
-            if (f.body == null or f.name == null) continue;
-            if (f.type_params != null) continue;
-            const fname = f.name.?.items;
-            if (mem.eql(u8, fname, "main")) continue;
+        var emitted = std.StringHashMap(void).init(self.allocator);
+        defer emitted.deinit();
+        // Stdlib module functions live in `owned_nodes`; user-module functions in
+        // `nodes`. Scan BOTH so a diamond-imported stdlib module (imported once
+        // unaliased, once `as x`) still gets its `x__fn -> fn` #define stubs —
+        // without them an `x.fn(...)` call emits an undeclared `x__fn` (implicit
+        // int in C), which fails to compile.
+        inline for (.{ true, false }) |use_nodes| {
+            const count = if (use_nodes) source_proc.nodes.items().len else source_proc.owned_nodes.items.len;
+            var idx: usize = 0;
+            while (idx < count) : (idx += 1) {
+                const node = if (use_nodes) source_proc.nodes.items()[idx] else source_proc.owned_nodes.items[idx].*;
+                if (node.type != .Function or node.node_variant == null) continue;
+                const f = node.node_variant.?.function;
+                if (f.body == null or f.name == null) continue;
+                if (f.type_params != null) continue;
+                const fname = f.name.?.items;
+                if (mem.eql(u8, fname, "main")) continue;
+                if (emitted.contains(fname)) continue;
+                emitted.put(fname, {}) catch {};
 
-            if (!wrote_header) {
-                try self.write("\n// Alias stubs: ");
-                try self.write(if (new_alias) |a| a else "(unaliased)");
-                try self.write(" -> ");
-                try self.write(if (canonical_alias) |a| a else "(unaliased)");
+                if (!wrote_header) {
+                    try self.write("\n// Alias stubs: ");
+                    try self.write(if (new_alias) |a| a else "(unaliased)");
+                    try self.write(" -> ");
+                    try self.write(if (canonical_alias) |a| a else "(unaliased)");
+                    try self.write("\n");
+                    wrote_header = true;
+                }
+                try self.write("#define ");
+                if (new_alias) |na| {
+                    try self.write(na);
+                    try self.write("__");
+                }
+                try self.write(fname);
+                try self.write(" ");
+                if (canonical_alias) |ca| {
+                    try self.write(ca);
+                    try self.write("__");
+                }
+                try self.write(fname);
                 try self.write("\n");
-                wrote_header = true;
             }
-            try self.write("#define ");
-            if (new_alias) |na| {
-                try self.write(na);
-                try self.write("__");
-            }
-            try self.write(fname);
-            try self.write(" ");
-            if (canonical_alias) |ca| {
-                try self.write(ca);
-                try self.write("__");
-            }
-            try self.write(fname);
-            try self.write("\n");
         }
     }
 
@@ -15721,7 +16599,7 @@ pub const TranspileProcess = struct {
             \\#endif
             \\#define __FUN_SCHED_QCAP 4096
             \\typedef struct __fun_sched {
-            \\  __fun_sched_mtx mu; __fun_sched_cv not_empty; __fun_sched_cv idle;
+            \\  __fun_sched_mtx mu; __fun_sched_cv not_empty; __fun_sched_cv not_full; __fun_sched_cv idle;
             \\  __fun_task q[__FUN_SCHED_QCAP]; int head, tail, count;
             \\  long long pending; /* queued + running tasks */
             \\  int started, shutting_down, nworkers;
@@ -15736,6 +16614,8 @@ pub const TranspileProcess = struct {
             \\    __fun_task t = __fun_g_sched.q[__fun_g_sched.head];
             \\    __fun_g_sched.head = (__fun_g_sched.head+1) % __FUN_SCHED_QCAP;
             \\    __fun_g_sched.count--;
+            \\    /* A slot just freed: wake any producer blocked in __fun_go on a full queue. */
+            \\    __fun_sched_cv_signal(&__fun_g_sched.not_full);
             \\    __fun_sched_mtx_unlock(&__fun_g_sched.mu);
             \\    if(t.fn) t.fn(t.arg);
             \\    __fun_sched_mtx_lock(&__fun_g_sched.mu);
@@ -15748,6 +16628,7 @@ pub const TranspileProcess = struct {
             \\  static int once=0; if(once) return; once=1;
             \\  __fun_sched_mtx_init(&__fun_g_sched.mu);
             \\  __fun_sched_cv_init(&__fun_g_sched.not_empty);
+            \\  __fun_sched_cv_init(&__fun_g_sched.not_full);
             \\  __fun_sched_cv_init(&__fun_g_sched.idle);
             \\}
             \\static void __fun_sched_ensure_started(void){
@@ -15763,8 +16644,17 @@ pub const TranspileProcess = struct {
             \\static void __fun_go(__fun_task_fn fn, void* arg){
             \\  __fun_sched_init_once(); __fun_sched_ensure_started();
             \\  __fun_sched_mtx_lock(&__fun_g_sched.mu);
-            \\  if(__fun_g_sched.count==__FUN_SCHED_QCAP){ /* queue full: run inline to avoid deadlock */
-            \\    __fun_sched_mtx_unlock(&__fun_g_sched.mu); if(fn) fn(arg); return; }
+            \\  /* Bounded queue: apply BACKPRESSURE instead of running the task inline on a
+            \\     full queue. Running inline meant a forked task that blocks (e.g. a channel
+            \\     send / WaitGroup.done() with no concurrent receiver yet) could deadlock the
+            \\     producer thread — the source of the intermittent hang once the number of
+            \\     forks-in-flight crossed __FUN_SCHED_QCAP. Worker threads keep draining while
+            \\     we wait, so a slot is guaranteed to free as long as no task is *itself*
+            \\     blocked on this producer (a genuine user-level deadlock, which the static
+            \\     concurrency lint flags at compile time). */
+            \\  while(__fun_g_sched.count==__FUN_SCHED_QCAP && !__fun_g_sched.shutting_down)
+            \\    __fun_sched_cv_wait(&__fun_g_sched.not_full, &__fun_g_sched.mu);
+            \\  if(__fun_g_sched.shutting_down){ __fun_sched_mtx_unlock(&__fun_g_sched.mu); if(fn) fn(arg); return; }
             \\  __fun_g_sched.q[__fun_g_sched.tail].fn=fn; __fun_g_sched.q[__fun_g_sched.tail].arg=arg;
             \\  __fun_g_sched.tail=(__fun_g_sched.tail+1)%__FUN_SCHED_QCAP; __fun_g_sched.count++; __fun_g_sched.pending++;
             \\  __fun_sched_cv_signal(&__fun_g_sched.not_empty);
@@ -17019,6 +17909,20 @@ pub const TranspileProcess = struct {
                                 return;
                             }
                         }
+                    }
+                }
+                // A reference to a Fun free function whose C name is shadow-renamed to
+                // dodge a libc collision (see fun_fn_name_needs_c_shadow_rename) must emit
+                // that renamed symbol here too, unless a local variable shadows the name.
+                {
+                    const shadowed_by_variable = if (self.get_scope_entity(str)) |ent|
+                        if (ent.node) |ent_node| ent_node.type == .Variable else false
+                    else
+                        false;
+                    if (!shadowed_by_variable and self.fun_fn_name_needs_c_shadow_rename(str)) {
+                        try self.write("__fun_shadow__");
+                        try self.write(str);
+                        return;
                     }
                 }
                 try self.write(str);

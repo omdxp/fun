@@ -12,7 +12,7 @@
 
 (defconst fun-keywords
   '("imp" "as" "pub" "fun" "compound" "quirk" "impl" "enum" "asm" "volatile" "arch"
-    "defer" "ret" "if" "elif" "else" "for" "fit" "async" "await" "break" "continue" "assert" "allow" "expect" "let"))
+    "defer" "ret" "if" "elif" "else" "for" "fit" "async" "await" "fork" "break" "continue" "assert" "allow" "expect" "let"))
 
 (defconst fun-types
   '("void" "raw" "num" "dec" "f32" "f64" "str" "bin" "chr"))
@@ -24,7 +24,7 @@
     "time_t" "clock_t"))
 
 (defconst fun-constants
-  '("true" "false"))
+  '("true" "false" "nil"))
 
 (defface fun-boolean-face
   '((t :inherit font-lock-constant-face))

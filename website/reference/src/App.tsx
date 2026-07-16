@@ -176,6 +176,52 @@ function buildStdlibHash(
   return query ? `#stdlib?${query}` : "#stdlib";
 }
 
+/**
+ * Copy `text` to the clipboard, throwing on failure so callers can show an
+ * accurate "copied" vs "copy failed" state.
+ *
+ * The async Clipboard API only exists in a secure context (HTTPS or localhost);
+ * over plain HTTP `navigator.clipboard` is undefined, so we fall back to the
+ * legacy `execCommand('copy')`. That fallback returns a boolean and can silently
+ * no-op — the previous code ignored the return and always reported success, so
+ * the button said "Copied" while nothing was on the clipboard (the reported prod
+ * bug). We now honor the boolean and reject when the copy did not happen.
+ */
+async function copyTextToClipboard(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textArea = document.createElement("textarea");
+  textArea.value = text;
+  textArea.setAttribute("readonly", "true");
+  textArea.style.position = "fixed";
+  textArea.style.top = "0";
+  textArea.style.left = "-9999px";
+  document.body.appendChild(textArea);
+  const selection = document.getSelection();
+  const previousRange =
+    selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
+  textArea.focus();
+  textArea.select();
+  // iOS Safari needs an explicit selection range.
+  textArea.setSelectionRange(0, textArea.value.length);
+  let ok = false;
+  try {
+    ok = document.execCommand("copy");
+  } finally {
+    document.body.removeChild(textArea);
+    if (previousRange && selection) {
+      selection.removeAllRanges();
+      selection.addRange(previousRange);
+    }
+  }
+  if (!ok) {
+    throw new Error("Clipboard copy command was rejected by the browser");
+  }
+}
+
 function parseTabHash(hash: string): TabKey | null {
   const value = hash.startsWith("#") ? hash.slice(1) : hash;
   const [route] = value.split("?");
@@ -232,6 +278,34 @@ function getInitialHashState() {
     detailKey: "",
     docAnchorKey: params.get("anchor") ?? "",
   };
+}
+
+const THEME_STORAGE_KEY = "fun-theme";
+
+function getInitialTheme(): "light" | "dark" {
+  if (typeof document !== "undefined") {
+    const seeded = document.documentElement.dataset.theme;
+    if (seeded === "light" || seeded === "dark") {
+      return seeded;
+    }
+  }
+
+  if (typeof window !== "undefined") {
+    try {
+      const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+      if (stored === "light" || stored === "dark") {
+        return stored;
+      }
+    } catch {
+      // Ignore storage access failures (e.g. privacy mode) and fall through.
+    }
+
+    if (window.matchMedia?.("(prefers-color-scheme: light)").matches) {
+      return "light";
+    }
+  }
+
+  return "dark";
 }
 
 function getInitialVersion() {
@@ -403,7 +477,28 @@ export default function App() {
   const [copyStatus, setCopyStatus] = useState<"idle" | "ok" | "err">("idle");
   const [detailCopyKey, setDetailCopyKey] = useState("");
   const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState(false);
+  const [theme, setTheme] = useState<"light" | "dark">(getInitialTheme);
   const releaseUrl = `https://github.com/omdxp/fun/releases/tag/v${content.funVersion}`;
+
+  const toggleTheme = () => {
+    setTheme((prev) => (prev === "dark" ? "light" : "dark"));
+  };
+
+  const goHome = () => {
+    setTab("language");
+    setSearch("");
+    setGlobalSearch("");
+    setActiveGlobalResultIndex(-1);
+    setSelectedModulePath("");
+    setSelectedSymbolKey("");
+    setSelectedDetailKey("");
+    setSelectedDocAnchorKey("");
+    setIsStdlibModalOpen(false);
+    setIsMobileDrawerOpen(false);
+    if (typeof window !== "undefined") {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  };
 
   const scrollToDocAnchor = (
     anchor: string,
@@ -772,6 +867,22 @@ export default function App() {
   useEffect(() => {
     setActiveGlobalResultIndex(globalResults.length > 0 ? 0 : -1);
   }, [globalSearch, globalResults.length]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    document.documentElement.dataset.theme = theme;
+    const themeColorMeta = document.querySelector<HTMLMetaElement>(
+      'meta[name="theme-color"]',
+    );
+    if (themeColorMeta) {
+      themeColorMeta.content = theme === "light" ? "#f4f1e9" : "#0b1020";
+    }
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+    } catch {
+      // Ignore storage write failures (e.g. privacy mode).
+    }
+  }, [theme]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1151,19 +1262,7 @@ export default function App() {
     const url = `${window.location.origin}${window.location.pathname}${window.location.search}${hash}`;
 
     try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(url);
-      } else {
-        const textArea = document.createElement("textarea");
-        textArea.value = url;
-        textArea.setAttribute("readonly", "true");
-        textArea.style.position = "absolute";
-        textArea.style.left = "-9999px";
-        document.body.appendChild(textArea);
-        textArea.select();
-        document.execCommand("copy");
-        document.body.removeChild(textArea);
-      }
+      await copyTextToClipboard(url);
       setCopyStatus("ok");
     } catch {
       setCopyStatus("err");
@@ -1184,19 +1283,7 @@ export default function App() {
     const url = `${window.location.origin}${window.location.pathname}${window.location.search}${hash}`;
 
     try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(url);
-      } else {
-        const textArea = document.createElement("textarea");
-        textArea.value = url;
-        textArea.setAttribute("readonly", "true");
-        textArea.style.position = "absolute";
-        textArea.style.left = "-9999px";
-        document.body.appendChild(textArea);
-        textArea.select();
-        document.execCommand("copy");
-        document.body.removeChild(textArea);
-      }
+      await copyTextToClipboard(url);
       setDetailCopyKey(detailKey);
       window.setTimeout(() => {
         setDetailCopyKey((prev) => (prev === detailKey ? "" : prev));
@@ -1210,18 +1297,47 @@ export default function App() {
     <div className="app-shell">
       <aside>
         <div className="drawer-mobile-bar">
-          <div className="brand">Fun Language Reference</div>
-          <button
-            type="button"
-            className="drawer-toggle"
-            aria-expanded={isMobileDrawerOpen}
-            aria-controls="sidebar-drawer-content"
-            onClick={() => {
-              setIsMobileDrawerOpen((prev) => !prev);
-            }}
-          >
-            {isMobileDrawerOpen ? "Hide menu" : "Show menu"}
+          <button type="button" className="brand" onClick={goHome}>
+            <img
+              className="brand-logo"
+              src={`${import.meta.env.BASE_URL}fun.png`}
+              alt="Fun language logo"
+              width={36}
+              height={36}
+            />
+            <span className="brand-text">Fun Language Reference</span>
           </button>
+          <div className="header-actions">
+            <button
+              type="button"
+              className="theme-toggle"
+              aria-label={
+                theme === "dark"
+                  ? "Switch to light theme"
+                  : "Switch to dark theme"
+              }
+              aria-pressed={theme === "light"}
+              title={
+                theme === "dark"
+                  ? "Switch to light theme"
+                  : "Switch to dark theme"
+              }
+              onClick={toggleTheme}
+            >
+              <span aria-hidden="true">{theme === "dark" ? "☀" : "☾"}</span>
+            </button>
+            <button
+              type="button"
+              className="drawer-toggle"
+              aria-expanded={isMobileDrawerOpen}
+              aria-controls="sidebar-drawer-content"
+              onClick={() => {
+                setIsMobileDrawerOpen((prev) => !prev);
+              }}
+            >
+              {isMobileDrawerOpen ? "Hide menu" : "Show menu"}
+            </button>
+          </div>
         </div>
 
         <div
@@ -1235,6 +1351,8 @@ export default function App() {
             <input
               id="global-search-input"
               className="search global-search"
+              type="search"
+              aria-label="Search everything"
               placeholder="Search everything (/ to focus)"
               value={globalSearch}
               onChange={(e) => setGlobalSearch(e.target.value)}
@@ -1519,6 +1637,8 @@ export default function App() {
             <div className="stdlib-toolbar">
               <input
                 className="search"
+                type="search"
+                aria-label="Search standard library"
                 placeholder="Search module, symbol, signature, docs..."
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
@@ -1619,6 +1739,7 @@ export default function App() {
                     </div>
                     <div className="modal-actions">
                       <button
+                        type="button"
                         className="copy-link-btn"
                         onClick={copyStdlibLink}
                       >
