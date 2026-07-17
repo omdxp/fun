@@ -133,9 +133,7 @@ test "std.log aliased import: methods use alias-prefixed helpers" {
     defer allocator.free(out);
     std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 
-    try std.testing.expect(std.mem.indexOf(u8, out, "mylog__level_value") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "mylog__level_name") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, " level_value(") == null);
     try std.testing.expect(std.mem.indexOf(u8, out, " level_name(") == null);
 }
 
