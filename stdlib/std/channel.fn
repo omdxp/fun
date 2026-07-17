@@ -494,39 +494,39 @@ impl Channel<T> {
   // Codes 2/3 mean timeout/cancelled in a recv context.
   result_from_rc(num rc, T value) RecvResult<T> {
     if rc == channel_rc_ok() {
-      ret RecvResult.Ok(value);
+      ret .Ok(value);
     }
     if rc == channel_rc_closed() {
-      ret RecvResult.Closed;
+      ret .Closed;
     }
     if rc == channel_rc_timeout() {
-      ret RecvResult.Timeout;
+      ret .Timeout;
     }
     if rc == channel_rc_cancelled() {
-      ret RecvResult.Cancelled;
+      ret .Cancelled;
     }
-    ret RecvResult.Error(rc);
+    ret .Error(rc);
   }
 
   // Map a send status code into a SendResult. Codes 2/3 mean full/cancelled in a send
   // context (full and timeout share code 2; in a send the meaning is "couldn't enqueue").
   send_result_from_rc(num rc) SendResult {
     if rc == channel_rc_ok() {
-      ret SendResult.Ok;
+      ret .Ok;
     }
     if rc == channel_rc_closed() {
-      ret SendResult.Closed;
+      ret .Closed;
     }
     if rc == channel_rc_send_closed_blocking() {
-      ret SendResult.Closed;
+      ret .Closed;
     }
     if rc == channel_rc_full() {
-      ret SendResult.Full;
+      ret .Full;
     }
     if rc == channel_rc_cancelled() {
-      ret SendResult.Cancelled;
+      ret .Cancelled;
     }
-    ret SendResult.Error(rc);
+    ret .Error(rc);
   }
 
   // Initialize internal synchronization primitives.

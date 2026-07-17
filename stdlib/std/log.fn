@@ -10,13 +10,13 @@ imp std.c.io;
 
 // Log severity levels.
 pub enum LogLevel {
-  // Debug: verbose diagnostic logging
+  // Verbose diagnostic logging
   Debug,
-  // Info: general informational messages
+  // General informational messages
   Info,
-  // Warn: warning conditions
+  // Warning conditions
   Warn,
-  // Error: error conditions
+  // Error conditions
   Error
 }
 
@@ -56,16 +56,6 @@ pub fun level_name(LogLevel level) str {
   ret "INFO";
 }
 
-fun level_value(LogLevel level) num {
-  fit level {
-    .Debug -> { ret 0; }
-    .Info -> { ret 1; }
-    .Warn -> { ret 2; }
-    .Error -> { ret 3; }
-  }
-  ret 1;
-}
-
 impl Logger {
   // Set the minimum severity level.
   // 
@@ -83,7 +73,7 @@ impl Logger {
   // Returns:
   // - true when the logger would emit messages at this level
   pub enabled(LogLevel level) bin {
-    ret level_value(level) >= level_value(self.level);
+    ret level >= self.level;
   }
 
   // Log a message when the level passes the current threshold.
@@ -92,7 +82,7 @@ impl Logger {
   // - level: message severity
   // - msg: message text
   pub log(LogLevel level, str msg) {
-    if level_value(level) >= level_value(self.level) {
+    if level >= self.level {
       printf("[%s] %s\n", level_name(level), msg);
     }
   }
@@ -136,7 +126,7 @@ impl Logger {
   // - tag: short tag prefix
   // - msg: message text
   pub log_tag(LogLevel level, str tag, str msg) {
-    if level_value(level) >= level_value(self.level) {
+    if level >= self.level {
       printf("[%s] [%s] %s\n", level_name(level), tag, msg);
     }
   }
@@ -148,7 +138,7 @@ impl Logger {
   // - label: field label
   // - value: numeric value to print
   pub log_num(LogLevel level, str label, num value) {
-    if level_value(level) >= level_value(self.level) {
+    if level >= self.level {
       printf("[%s] %s=%lld\n", level_name(level), label, value);
     }
   }
@@ -160,7 +150,7 @@ impl Logger {
   // - label: field label
   // - value: decimal value to print
   pub log_dec(LogLevel level, str label, dec value) {
-    if level_value(level) >= level_value(self.level) {
+    if level >= self.level {
       printf("[%s] %s=%f\n", level_name(level), label, value);
     }
   }
@@ -172,7 +162,7 @@ impl Logger {
   // - label: field label
   // - value: boolean value to print
   pub log_bin(LogLevel level, str label, bin value) {
-    let enabled = level_value(level) >= level_value(self.level);
+    let enabled = level >= self.level;
     if enabled && value {
       printf("[%s] %s=true\n", level_name(level), label);
     } elif enabled {

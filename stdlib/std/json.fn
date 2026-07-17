@@ -40,11 +40,7 @@ impl JsonValue {
   pub is_null() bin {
     fit *self {
       .Null -> { ret true; }
-      .Bool(b) -> { ret false; }
-      .Num(n) -> { ret false; }
-      .Str(s) -> { ret false; }
-      .Array(a) -> { ret false; }
-      .Object(o) -> { ret false; }
+      _ -> { ret false; }
     }
     ret false;
   }
@@ -53,11 +49,7 @@ impl JsonValue {
   pub is_bool() bin {
     fit *self {
       .Bool(b) -> { ret true; }
-      .Null -> { ret false; }
-      .Num(n) -> { ret false; }
-      .Str(s) -> { ret false; }
-      .Array(a) -> { ret false; }
-      .Object(o) -> { ret false; }
+      _ -> { ret false; }
     }
     ret false;
   }
@@ -66,11 +58,7 @@ impl JsonValue {
   pub is_num() bin {
     fit *self {
       .Num(n) -> { ret true; }
-      .Null -> { ret false; }
-      .Bool(b) -> { ret false; }
-      .Str(s) -> { ret false; }
-      .Array(a) -> { ret false; }
-      .Object(o) -> { ret false; }
+      _ -> { ret false; }
     }
     ret false;
   }
@@ -79,11 +67,7 @@ impl JsonValue {
   pub is_str() bin {
     fit *self {
       .Str(s) -> { ret true; }
-      .Null -> { ret false; }
-      .Bool(b) -> { ret false; }
-      .Num(n) -> { ret false; }
-      .Array(a) -> { ret false; }
-      .Object(o) -> { ret false; }
+      _ -> { ret false; }
     }
     ret false;
   }
@@ -92,11 +76,7 @@ impl JsonValue {
   pub is_array() bin {
     fit *self {
       .Array(a) -> { ret true; }
-      .Null -> { ret false; }
-      .Bool(b) -> { ret false; }
-      .Num(n) -> { ret false; }
-      .Str(s) -> { ret false; }
-      .Object(o) -> { ret false; }
+      _ -> { ret false; }
     }
     ret false;
   }
@@ -105,11 +85,7 @@ impl JsonValue {
   pub is_object() bin {
     fit *self {
       .Object(o) -> { ret true; }
-      .Null -> { ret false; }
-      .Bool(b) -> { ret false; }
-      .Num(n) -> { ret false; }
-      .Str(s) -> { ret false; }
-      .Array(a) -> { ret false; }
+      _ -> { ret false; }
     }
     ret false;
   }
@@ -117,40 +93,28 @@ impl JsonValue {
   // Return the boolean contents, or None when this is not a Bool.
   pub as_bool() Option<bin> {
     fit *self {
-      .Bool(b) -> { ret Option.Some(b); }
-      .Null -> { ret Option.None; }
-      .Num(n) -> { ret Option.None; }
-      .Str(s) -> { ret Option.None; }
-      .Array(a) -> { ret Option.None; }
-      .Object(o) -> { ret Option.None; }
+      .Bool(b) -> { ret .Some(b); }
+      _ -> { ret .None; }
     }
-    ret Option.None;
+    ret .None;
   }
 
   // Return the numeric contents, or None when this is not a Num.
   pub as_num() Option<dec> {
     fit *self {
-      .Num(n) -> { ret Option.Some(n); }
-      .Null -> { ret Option.None; }
-      .Bool(b) -> { ret Option.None; }
-      .Str(s) -> { ret Option.None; }
-      .Array(a) -> { ret Option.None; }
-      .Object(o) -> { ret Option.None; }
+      .Num(n) -> { ret .Some(n); }
+      _ -> { ret .None; }
     }
-    ret Option.None;
+    ret .None;
   }
 
   // Return the string contents, or None when this is not a Str.
   pub as_str() Option<str> {
     fit *self {
-      .Str(s) -> { ret Option.Some(s); }
-      .Null -> { ret Option.None; }
-      .Bool(b) -> { ret Option.None; }
-      .Num(n) -> { ret Option.None; }
-      .Array(a) -> { ret Option.None; }
-      .Object(o) -> { ret Option.None; }
+      .Str(s) -> { ret .Some(s); }
+      _ -> { ret .None; }
     }
-    ret Option.None;
+    ret .None;
   }
 
   // Return the array elements, or None when this is not an Array.
@@ -160,32 +124,24 @@ impl JsonValue {
   // - Treat the returned Vec as read-only.
   pub as_array() Option<Vec<JsonValue>> {
     fit *self {
-      .Array(a) -> { ret Option.Some(a); }
-      .Null -> { ret Option.None; }
-      .Bool(b) -> { ret Option.None; }
-      .Num(n) -> { ret Option.None; }
-      .Str(s) -> { ret Option.None; }
-      .Object(o) -> { ret Option.None; }
+      .Array(a) -> { ret .Some(a); }
+      _ -> { ret .None; }
     }
-    ret Option.None;
+    ret .None;
   }
 
   // Return the object as a Map, or None when this is not an Object.
-  //
+  // 
   // Notes:
   // - The returned Map copies only the header; the entries are still shared.
   // - Treat the returned Map as read-only.
   // - Use `m.values().data` to iterate every value, or `m.keys()` for the keys.
   pub as_object() Option<Map<str, JsonValue>> {
     fit *self {
-      .Object(o) -> { ret Option.Some(o); }
-      .Null -> { ret Option.None; }
-      .Bool(b) -> { ret Option.None; }
-      .Num(n) -> { ret Option.None; }
-      .Str(s) -> { ret Option.None; }
-      .Array(a) -> { ret Option.None; }
+      .Object(o) -> { ret .Some(o); }
+      _ -> { ret .None; }
     }
-    ret Option.None;
+    ret .None;
   }
 
   // Look up a key on an object value.
@@ -199,13 +155,9 @@ impl JsonValue {
   pub get(str key) Option<JsonValue> {
     fit *self {
       .Object(o) -> { ret o.at(key); }
-      .Null -> { ret Option.None; }
-      .Bool(b) -> { ret Option.None; }
-      .Num(n) -> { ret Option.None; }
-      .Str(s) -> { ret Option.None; }
-      .Array(a) -> { ret Option.None; }
+      _ -> { ret .None; }
     }
-    ret Option.None;
+    ret .None;
   }
 
   // Return the element at an array index.
@@ -219,13 +171,9 @@ impl JsonValue {
   pub index(num i) Option<JsonValue> {
     fit *self {
       .Array(a) -> { ret a.at(i); }
-      .Null -> { ret Option.None; }
-      .Bool(b) -> { ret Option.None; }
-      .Num(n) -> { ret Option.None; }
-      .Str(s) -> { ret Option.None; }
-      .Object(o) -> { ret Option.None; }
+      _ -> { ret .None; }
     }
-    ret Option.None;
+    ret .None;
   }
 
   // Return the logical length of the value.
@@ -238,10 +186,7 @@ impl JsonValue {
     fit *self {
       .Array(a) -> { ret a.len(); }
       .Object(o) -> { ret o.len(); }
-      .Null -> { ret 0; }
-      .Bool(b) -> { ret 0; }
-      .Num(n) -> { ret 0; }
-      .Str(s) -> { ret 0; }
+      _ -> { ret 0; }
     }
     ret 0;
   }
@@ -497,8 +442,8 @@ impl JsonParser {
     }
     if c == '"' {
       fit self.parse_string() {
-        Result.Ok(s) -> { ret ok(JsonValue.Str(s)); }
-        Result.Err(e) -> { ret err_error(e, JsonValue.Null); }
+        .Ok(s) -> { ret ok(JsonValue.Str(s)); }
+        .Err(e) -> { ret err_error(e, JsonValue.Null); }
       }
     }
     if self.starts_with("true") {
@@ -531,8 +476,8 @@ impl JsonParser {
     }
     for true {
       fit self.parse_value() {
-        Result.Ok(v) -> { items.push(v); }
-        Result.Err(e) -> {
+        .Ok(v) -> { items.push(v); }
+        .Err(e) -> {
           items.free();
           ret err_error(e, JsonValue.Null);
         }
@@ -565,8 +510,8 @@ impl JsonParser {
       self.skip_ws();
       str key = "";
       fit self.parse_string() {
-        Result.Ok(k) -> { key = k; }
-        Result.Err(e) -> {
+        .Ok(k) -> { key = k; }
+        .Err(e) -> {
           entries.free();
           ret err_error(e, JsonValue.Null);
         }
@@ -578,8 +523,8 @@ impl JsonParser {
       }
       self.pos = self.pos + 1;
       fit self.parse_value() {
-        Result.Ok(v) -> { entries.put(key, v); }
-        Result.Err(e) -> {
+        .Ok(v) -> { entries.put(key, v); }
+        .Err(e) -> {
           entries.free();
           ret err_error(e, JsonValue.Null);
         }

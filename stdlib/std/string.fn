@@ -135,19 +135,7 @@ fun _string_len(str s) num {
 }
 
 fun _is_space(chr c) bin {
-  if c == ' ' {
-    ret true;
-  }
-  if c == '\0' {
-    ret true;
-  }
-  if c == '\n' {
-    ret true;
-  }
-  if c == '\t' {
-    ret true;
-  }
-  if c == '\0' {
+  if c == ' ' || c == '\0' || c == '\n' || c == '\t' || c == '\0' {
     ret true;
   }
   ret false;

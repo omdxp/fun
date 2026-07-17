@@ -365,9 +365,9 @@ impl Map<K, V> {
   pub at(K key) Option<V> {
     let idx = self.find_live_index(key);
     if idx == -1 {
-      ret Option.None;
+      ret .None;
     }
-    ret Option.Some(self.load_value_idx(idx));
+    ret .Some(self.load_value_idx(idx));
   }
 
   // Insert a value or replace the existing value for a key.
@@ -551,10 +551,10 @@ impl MapIter<K, V> as Iterator<K> {
       let at = self.idx;
       self.idx = self.idx + 1;
       if self.src.used[at] != false && self.src.tomb[at] == false {
-        ret Option.Some(self.src.key_slots[at]);
+        ret .Some(self.src.key_slots[at]);
       }
     }
-    ret Option.None;
+    ret .None;
   }
 }
 

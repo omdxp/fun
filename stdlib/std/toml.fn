@@ -31,9 +31,7 @@ impl TomlValue {
   pub as_str() Option<str> {
     fit *self {
       .Str(s) -> { ret Option.Some(s); }
-      .Int(n) -> { ret Option.None; }
-      .Float(d) -> { ret Option.None; }
-      .Bool(b) -> { ret Option.None; }
+      _ -> { ret Option.None; }
     }
     ret Option.None;
   }
@@ -42,9 +40,7 @@ impl TomlValue {
   pub as_int() Option<num> {
     fit *self {
       .Int(n) -> { ret Option.Some(n); }
-      .Str(s) -> { ret Option.None; }
-      .Float(d) -> { ret Option.None; }
-      .Bool(b) -> { ret Option.None; }
+      _ -> { ret Option.None; }
     }
     ret Option.None;
   }
@@ -53,9 +49,7 @@ impl TomlValue {
   pub as_float() Option<dec> {
     fit *self {
       .Float(d) -> { ret Option.Some(d); }
-      .Str(s) -> { ret Option.None; }
-      .Int(n) -> { ret Option.None; }
-      .Bool(b) -> { ret Option.None; }
+      _ -> { ret Option.None; }
     }
     ret Option.None;
   }
@@ -64,9 +58,7 @@ impl TomlValue {
   pub as_bool() Option<bin> {
     fit *self {
       .Bool(b) -> { ret Option.Some(b); }
-      .Str(s) -> { ret Option.None; }
-      .Int(n) -> { ret Option.None; }
-      .Float(d) -> { ret Option.None; }
+      _ -> { ret Option.None; }
     }
     ret Option.None;
   }
@@ -199,23 +191,23 @@ fun _toml_is_digit(chr c) bin {
 fun _classify(str text) TomlValue {
   let n = _tv_strlen(text);
   if n == 0 {
-    ret TomlValue.Str(text);
+    ret .Str(text);
   }
 
   // Quoted string: strip the surrounding quotes.
   if text[0] == '"' {
     if n >= 2 && text[n - 1] == '"' {
-      ret TomlValue.Str(substr(text, 1, n - 2));
+      ret .Str(substr(text, 1, n - 2));
     }
-    ret TomlValue.Str(text);
+    ret .Str(text);
   }
 
   // Booleans.
   if equals(text, "true") {
-    ret TomlValue.Bool(true);
+    ret .Bool(true);
   }
   if equals(text, "false") {
-    ret TomlValue.Bool(false);
+    ret .Bool(false);
   }
 
   // Numbers: a leading digit or sign, with a '.' meaning float.
@@ -230,9 +222,9 @@ fun _classify(str text) TomlValue {
       i = i + 1;
     }
     if has_dot == 1 {
-      ret TomlValue.Float(parse_dec(text));
+      ret .Float(parse_dec(text));
     }
-    ret TomlValue.Int(parse_int(text));
+    ret .Int(parse_int(text));
   }
 
   // Anything else is a bare string.

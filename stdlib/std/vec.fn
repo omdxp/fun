@@ -211,12 +211,12 @@ impl Vec<T> {
   // - `None` otherwise
   pub at(num i) Option<T> {
     if i < 0 {
-      ret Option.None;
+      ret .None;
     }
     if i >= self.len {
-      ret Option.None;
+      ret .None;
     }
-    ret Option.Some(self.data[i]);
+    ret .Some(self.data[i]);
   }
 
   // Return the first element when present.
@@ -226,9 +226,9 @@ impl Vec<T> {
   // - `None` when the vector is empty
   pub first() Option<T> {
     if self.len == 0 {
-      ret Option.None;
+      ret .None;
     }
-    ret Option.Some(self.data[0]);
+    ret .Some(self.data[0]);
   }
 
   // Return the last element when present.
@@ -238,9 +238,9 @@ impl Vec<T> {
   // - `None` when the vector is empty
   pub last() Option<T> {
     if self.len == 0 {
-      ret Option.None;
+      ret .None;
     }
-    ret Option.Some(self.data[self.len - 1]);
+    ret .Some(self.data[self.len - 1]);
   }
 
   // Insert a value at an index.
@@ -455,11 +455,11 @@ impl VecIter<T> as Iterator<T> {
   // - `None` once the iterator reaches the end
   pub next() Option<T> {
     if self.idx >= self.src.len {
-      ret Option.None;
+      ret .None;
     }
     T value = self.src.data[self.idx];
     self.idx = self.idx + 1;
-    ret Option.Some(value);
+    ret .Some(value);
   }
 }
 

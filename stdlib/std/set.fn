@@ -118,15 +118,15 @@ impl Set<T> {
     let ia = self.map.iter_keys();
     for true {
       fit ia.next() {
-        Option.Some(k) -> { out.add(k); }
-        Option.None -> { break; }
+        .Some(k) -> { out.add(k); }
+        .None -> { break; }
       }
     }
     let ib = other.map.iter_keys();
     for true {
       fit ib.next() {
-        Option.Some(k) -> { out.add(k); }
-        Option.None -> { break; }
+        .Some(k) -> { out.add(k); }
+        .None -> { break; }
       }
     }
     ret out;
@@ -145,12 +145,12 @@ impl Set<T> {
     let it = self.map.iter_keys();
     for true {
       fit it.next() {
-        Option.Some(k) -> {
+        .Some(k) -> {
           if other.has(k) {
             out.add(k);
           }
         }
-        Option.None -> { break; }
+        .None -> { break; }
       }
     }
     ret out;
@@ -169,12 +169,12 @@ impl Set<T> {
     let it = self.map.iter_keys();
     for true {
       fit it.next() {
-        Option.Some(k) -> {
+        .Some(k) -> {
           if other.has(k) == false {
             out.add(k);
           }
         }
-        Option.None -> { break; }
+        .None -> { break; }
       }
     }
     ret out;
@@ -191,12 +191,12 @@ impl Set<T> {
     let it = self.map.iter_keys();
     for true {
       fit it.next() {
-        Option.Some(k) -> {
+        .Some(k) -> {
           if other.has(k) == false {
             ret false;
           }
         }
-        Option.None -> { break; }
+        .None -> { break; }
       }
     }
     ret true;
@@ -299,14 +299,14 @@ impl Set<str> as Display {
     SetIter<str> measure = self.iter();
     for true {
       fit measure.next() {
-        Option.Some(x) -> {
+        .Some(x) -> {
           num m = 0;
           for x[m] != 0 {
             m = m + 1;
           }
           budget = budget + m + 4;
         }
-        Option.None -> { break; }
+        .None -> { break; }
       }
     }
     str out = malloc(budget);
@@ -320,7 +320,7 @@ impl Set<str> as Display {
     SetIter<str> it = self.iter();
     for true {
       fit it.next() {
-        Option.Some(x) -> {
+        .Some(x) -> {
           if written > 0 {
             out[pos] = ',';
             out[pos + 1] = ' ';
@@ -338,7 +338,7 @@ impl Set<str> as Display {
           pos = pos + 1;
           written = written + 1;
         }
-        Option.None -> { break; }
+        .None -> { break; }
       }
     }
     out[pos] = '}';
