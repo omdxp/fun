@@ -1031,6 +1031,7 @@ export default function App() {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
+    if (!versionsReady) return;
 
     if (tab !== "stdlib") {
       const params = new URLSearchParams();
@@ -1058,6 +1059,7 @@ export default function App() {
     }
   }, [
     tab,
+    versionsReady,
     activeModule,
     activeSymbol,
     selectedDetailKey,
@@ -1148,8 +1150,12 @@ export default function App() {
   }, [selectedVersion]);
 
   useEffect(() => {
-    if (!activeModule) {
+    if (!selectedModulePath) {
       setIsStdlibModalOpen(false);
+      return;
+    }
+
+    if (!activeModule) {
       return;
     }
 
@@ -1162,9 +1168,13 @@ export default function App() {
         setSelectedDetailKey("");
       }
     }
-  }, [activeModule, selectedSymbolKey]);
+  }, [activeModule, selectedModulePath, selectedSymbolKey]);
 
   useEffect(() => {
+    if (!activeModule) {
+      return;
+    }
+
     if (!activeSymbol) {
       setSelectedDetailKey("");
       return;
@@ -1195,8 +1205,16 @@ export default function App() {
       return;
     }
 
+    if (kind === "variant") {
+      const exists = (activeSymbol.variants ?? []).some(
+        (v) => v.name === name && v.line === line,
+      );
+      if (!exists) setSelectedDetailKey("");
+      return;
+    }
+
     setSelectedDetailKey("");
-  }, [activeSymbol, selectedDetailKey]);
+  }, [activeModule, activeSymbol, selectedDetailKey]);
 
   useEffect(() => {
     if (!selectedDetailKey) return;
