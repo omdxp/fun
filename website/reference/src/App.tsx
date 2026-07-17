@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import MarkdownWithPlayground from "./components/MarkdownWithPlayground";
 import RunCodeBlock from "./components/RunCodeBlock";
@@ -317,13 +317,34 @@ function getInitialVersion() {
   return params.get("v") || DEFAULT_FUN_VERSION;
 }
 
+function stripMarkdownForSearch(text: string) {
+  return text
+    .replace(/```[\s\S]*?```/g, (block) =>
+      block.replace(/```[a-zA-Z0-9_-]*\n?|```/g, " "),
+    )
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^>\s?/gm, "")
+    .replace(/^[-*+]\s+/gm, "")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/__([^_]+)__/g, "$1")
+    .replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, "$1")
+    .replace(/(?<!_)_([^_]+)_(?!_)/g, "$1")
+    .replace(/~~([^~]+)~~/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function formatSnippet(text: string, q: string) {
-  const lower = text.toLowerCase();
+  const cleaned = stripMarkdownForSearch(text);
+  const lower = cleaned.toLowerCase();
   const idx = lower.indexOf(q.toLowerCase());
-  if (idx < 0) return text.slice(0, 120);
+  if (idx < 0) return cleaned.slice(0, 120);
   const start = Math.max(0, idx - 36);
-  const end = Math.min(text.length, idx + q.length + 56);
-  return text.slice(start, end).replace(/\s+/g, " ").trim();
+  const end = Math.min(cleaned.length, idx + q.length + 56);
+  return cleaned.slice(start, end).replace(/\s+/g, " ").trim();
 }
 
 function slugifyHeading(text: string) {
@@ -477,11 +498,23 @@ export default function App() {
   const [copyStatus, setCopyStatus] = useState<"idle" | "ok" | "err">("idle");
   const [detailCopyKey, setDetailCopyKey] = useState("");
   const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState(false);
+  const [isSearchModalOpen, setIsSearchModalOpen] = useState(false);
   const [theme, setTheme] = useState<"light" | "dark">(getInitialTheme);
+  const globalSearchInputRef = useRef<HTMLInputElement | null>(null);
   const releaseUrl = `https://github.com/omdxp/fun/releases/tag/v${content.funVersion}`;
 
   const toggleTheme = () => {
     setTheme((prev) => (prev === "dark" ? "light" : "dark"));
+  };
+
+  const openSearchModal = () => {
+    setIsSearchModalOpen(true);
+    setIsMobileDrawerOpen(false);
+  };
+
+  const closeSearchModal = () => {
+    setIsSearchModalOpen(false);
+    setActiveGlobalResultIndex(-1);
   };
 
   const goHome = () => {
@@ -495,6 +528,7 @@ export default function App() {
     setSelectedDocAnchorKey("");
     setIsStdlibModalOpen(false);
     setIsMobileDrawerOpen(false);
+    setIsSearchModalOpen(false);
     if (typeof window !== "undefined") {
       window.scrollTo({ top: 0, behavior: "smooth" });
     }
@@ -686,6 +720,28 @@ export default function App() {
     };
   }, [globalResults]);
 
+  const globalResultSections = useMemo(
+    () =>
+      [
+        {
+          key: "docs",
+          label: "Docs",
+          items: groupedGlobalResults.docs,
+        },
+        {
+          key: "stdlib",
+          label: "Standard Library",
+          items: groupedGlobalResults.stdlib,
+        },
+        {
+          key: "samples",
+          label: "Playground Samples",
+          items: groupedGlobalResults.samples,
+        },
+      ] as const,
+    [groupedGlobalResults],
+  );
+
   const filteredModules = useMemo(() => {
     const q = search.toLowerCase().trim();
     if (!q) return content.stdlib;
@@ -817,6 +873,7 @@ export default function App() {
   const activateGlobalResult = (result: GlobalSearchResult) => {
     setTab(result.tab);
     setIsMobileDrawerOpen(false);
+    setIsSearchModalOpen(false);
     if (
       (result.tab === "language" || result.tab === "reference") &&
       result.docAnchorKey
@@ -855,14 +912,24 @@ export default function App() {
 
       if (event.key === "/" && !inEditable) {
         event.preventDefault();
-        const el = document.getElementById("global-search-input");
-        el?.focus();
+        openSearchModal();
       }
     };
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
+
+  useEffect(() => {
+    if (!isSearchModalOpen) return;
+
+    const id = window.setTimeout(() => {
+      globalSearchInputRef.current?.focus();
+      globalSearchInputRef.current?.select();
+    }, 0);
+
+    return () => window.clearTimeout(id);
+  }, [isSearchModalOpen]);
 
   useEffect(() => {
     setActiveGlobalResultIndex(globalResults.length > 0 ? 0 : -1);
@@ -1246,7 +1313,7 @@ export default function App() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     if (typeof document === "undefined") return;
-    if (!isStdlibModalOpen) return;
+    if (!isStdlibModalOpen && !isSearchModalOpen) return;
 
     const body = document.body;
     const previousOverflow = body.style.overflow;
@@ -1263,7 +1330,7 @@ export default function App() {
       body.style.overflow = previousOverflow;
       body.style.paddingRight = previousPaddingRight;
     };
-  }, [isStdlibModalOpen]);
+  }, [isStdlibModalOpen, isSearchModalOpen]);
 
   const copyStdlibLink = async () => {
     if (typeof window === "undefined") return;
@@ -1366,126 +1433,21 @@ export default function App() {
             Interactive docs + local runner
           </p>
           <div className="global-search-wrap">
-            <input
-              id="global-search-input"
-              className="search global-search"
-              type="search"
-              aria-label="Search everything"
-              placeholder="Search everything (/ to focus)"
-              value={globalSearch}
-              onChange={(e) => setGlobalSearch(e.target.value)}
-              onKeyDown={(event) => {
-                if (!globalSearch.trim()) return;
-
-                if (event.key === "ArrowDown") {
-                  event.preventDefault();
-                  setActiveGlobalResultIndex((prev) => {
-                    if (globalResults.length === 0) return -1;
-                    return (
-                      (prev + 1 + globalResults.length) % globalResults.length
-                    );
-                  });
-                  return;
-                }
-
-                if (event.key === "ArrowUp") {
-                  event.preventDefault();
-                  setActiveGlobalResultIndex((prev) => {
-                    if (globalResults.length === 0) return -1;
-                    return (
-                      (prev - 1 + globalResults.length) % globalResults.length
-                    );
-                  });
-                  return;
-                }
-
-                if (event.key === "Enter") {
-                  if (activeGlobalResultIndex < 0) return;
-                  event.preventDefault();
-                  const selected = globalResults[activeGlobalResultIndex];
-                  if (selected) {
-                    activateGlobalResult(selected);
-                  }
-                  return;
-                }
-
-                if (event.key === "Escape") {
-                  event.preventDefault();
-                  setGlobalSearch("");
-                  setActiveGlobalResultIndex(-1);
-                }
-              }}
-            />
-            {globalSearch.trim() && (
-              <div className="global-results">
-                {globalResults.length === 0 ? (
-                  <div className="muted small">No results</div>
-                ) : (
-                  (
-                    [
-                      {
-                        key: "docs",
-                        label: "Docs",
-                        items: groupedGlobalResults.docs,
-                      },
-                      {
-                        key: "stdlib",
-                        label: "Standard Library",
-                        items: groupedGlobalResults.stdlib,
-                      },
-                      {
-                        key: "samples",
-                        label: "Playground Samples",
-                        items: groupedGlobalResults.samples,
-                      },
-                    ] as const
-                  ).map((section) => {
-                    if (section.items.length === 0) return null;
-
-                    return (
-                      <section
-                        key={section.key}
-                        className="global-result-group"
-                      >
-                        <div className="global-result-group-title muted small">
-                          {section.label}
-                        </div>
-                        {section.items.map((result) => {
-                          const absoluteIndex = globalResults.findIndex(
-                            (item) => item.id === result.id,
-                          );
-
-                          return (
-                            <button
-                              key={result.id}
-                              type="button"
-                              className={`global-result-item ${
-                                absoluteIndex === activeGlobalResultIndex
-                                  ? "active"
-                                  : ""
-                              }`}
-                              onMouseEnter={() => {
-                                setActiveGlobalResultIndex(absoluteIndex);
-                              }}
-                              onClick={() => {
-                                activateGlobalResult(result);
-                              }}
-                            >
-                              <div className="global-result-title">
-                                {result.title}
-                              </div>
-                              <div className="global-result-subtitle muted small">
-                                {result.subtitle}
-                              </div>
-                            </button>
-                          );
-                        })}
-                      </section>
-                    );
-                  })
-                )}
-              </div>
-            )}
+            <button
+              type="button"
+              className="search global-search search-trigger"
+              aria-label="Open global search"
+              aria-haspopup="dialog"
+              aria-expanded={isSearchModalOpen}
+              onClick={openSearchModal}
+            >
+              <span className="search-trigger-label">
+                {globalSearch.trim() || "Search everything"}
+              </span>
+              <span className="search-trigger-shortcut" aria-hidden="true">
+                /
+              </span>
+            </button>
           </div>
 
           <div className="version-controls">
@@ -1652,7 +1614,7 @@ export default function App() {
               Browse modules, then open one for an immersive, focused deep dive.
             </p>
 
-            <div className="stdlib-toolbar">
+            <div className="stdlib-toolbar search-sticky">
               <input
                 className="search"
                 type="search"
@@ -2111,6 +2073,178 @@ export default function App() {
           </section>
         )}
       </main>
+
+      {isSearchModalOpen && (
+        <div
+          className="modal-backdrop"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeSearchModal();
+            }
+          }}
+        >
+          <div
+            className="modal-card search-modal-card"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="global-search-title"
+          >
+            <div className="modal-head search-modal-head">
+              <div>
+                <div className="modal-eyebrow">Global Search</div>
+                <h2 id="global-search-title">Search everything</h2>
+                <p className="muted">
+                  Docs, standard library, and playground samples. Press / to
+                  open and Enter to jump.
+                </p>
+              </div>
+              <div className="modal-actions">
+                <button
+                  className="modal-close"
+                  type="button"
+                  onClick={closeSearchModal}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+
+            <div className="search-modal-body">
+              <div className="search-modal-input-row">
+                <input
+                  ref={globalSearchInputRef}
+                  id="global-search-input"
+                  className="search"
+                  type="search"
+                  aria-label="Search everything"
+                  placeholder="Search everything"
+                  value={globalSearch}
+                  onChange={(e) => setGlobalSearch(e.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "ArrowDown") {
+                      event.preventDefault();
+                      setActiveGlobalResultIndex((prev) => {
+                        if (globalResults.length === 0) return -1;
+                        return (
+                          (prev + 1 + globalResults.length) %
+                          globalResults.length
+                        );
+                      });
+                      return;
+                    }
+
+                    if (event.key === "ArrowUp") {
+                      event.preventDefault();
+                      setActiveGlobalResultIndex((prev) => {
+                        if (globalResults.length === 0) return -1;
+                        return (
+                          (prev - 1 + globalResults.length) %
+                          globalResults.length
+                        );
+                      });
+                      return;
+                    }
+
+                    if (event.key === "Enter") {
+                      if (activeGlobalResultIndex < 0) return;
+                      event.preventDefault();
+                      const selected = globalResults[activeGlobalResultIndex];
+                      if (selected) {
+                        activateGlobalResult(selected);
+                      }
+                      return;
+                    }
+
+                    if (event.key === "Escape") {
+                      event.preventDefault();
+                      if (globalSearch.trim()) {
+                        setGlobalSearch("");
+                        setActiveGlobalResultIndex(-1);
+                      } else {
+                        closeSearchModal();
+                      }
+                    }
+                  }}
+                />
+                {globalSearch.trim() && (
+                  <button
+                    type="button"
+                    className="modal-close search-clear-btn"
+                    onClick={() => {
+                      setGlobalSearch("");
+                      setActiveGlobalResultIndex(-1);
+                      globalSearchInputRef.current?.focus();
+                    }}
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+
+              <div className="search-modal-hint muted small">
+                Use ↑ and ↓ to move through results.
+              </div>
+
+              {globalSearch.trim() ? (
+                <div className="global-results search-modal-results">
+                  {globalResults.length === 0 ? (
+                    <div className="muted small">No results</div>
+                  ) : (
+                    globalResultSections.map((section) => {
+                      if (section.items.length === 0) return null;
+
+                      return (
+                        <section
+                          key={section.key}
+                          className="global-result-group"
+                        >
+                          <div className="global-result-group-title muted small">
+                            {section.label}
+                          </div>
+                          {section.items.map((result) => {
+                            const absoluteIndex = globalResults.findIndex(
+                              (item) => item.id === result.id,
+                            );
+
+                            return (
+                              <button
+                                key={result.id}
+                                type="button"
+                                className={`global-result-item ${
+                                  absoluteIndex === activeGlobalResultIndex
+                                    ? "active"
+                                    : ""
+                                }`}
+                                onMouseEnter={() => {
+                                  setActiveGlobalResultIndex(absoluteIndex);
+                                }}
+                                onClick={() => {
+                                  activateGlobalResult(result);
+                                }}
+                              >
+                                <div className="global-result-title">
+                                  {result.title}
+                                </div>
+                                <div className="global-result-subtitle muted small">
+                                  {result.subtitle}
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </section>
+                      );
+                    })
+                  )}
+                </div>
+              ) : (
+                <div className="search-empty-state muted">
+                  Search docs, modules, symbols, and playground samples.
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
