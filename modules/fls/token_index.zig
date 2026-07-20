@@ -243,6 +243,78 @@ fn trailingCommentTextOnLine(allocator: Allocator, tokens: []const token.Token, 
     return null;
 }
 
+/// Build a data-carrying enum variant's payload signature, e.g.
+/// `Shape.Circle(num)` or `Shape.Rect(num, num)`, from the payload tokens between
+/// the `(` at `open_i` and the matching `)` at `close_i`. Reconstructs the type
+/// spellings token-by-token (identifiers/keywords contribute their text; the
+/// bracket/pointer/angle symbols contribute their char), inserting a `, ` at each
+/// top-level comma. Returns an allocator-owned slice, or null on any allocation
+/// failure (caller then leaves `detail` as null).
+fn buildEnumVariantSig(
+    allocator: Allocator,
+    owner_name: []const u8,
+    variant_name: []const u8,
+    tokens: []const token.Token,
+    open_i: usize,
+    close_i: usize,
+) ?[]const u8 {
+    var out = ArrayList(u8).init(allocator);
+    errdefer out.deinit();
+    out.appendSlice(owner_name) catch return null;
+    out.append('.') catch return null;
+    out.appendSlice(variant_name) catch return null;
+    out.append('(') catch return null;
+
+    var depth: i64 = 0; // nesting of `<`/`(`/`[` inside the payload
+    var wrote_any = false;
+    var need_space_before_ident = false;
+    var i: usize = open_i + 1;
+    while (i < close_i) : (i += 1) {
+        const t = tokens[i];
+        if (t.type == .NewLine or t.type == .Comment) continue;
+
+        // Top-level comma separates payload types.
+        if (depth == 0 and (isPunctChar(t, ',') or isSymbolChar(t, ','))) {
+            out.appendSlice(", ") catch return null;
+            need_space_before_ident = false;
+            continue;
+        }
+
+        if (isPunctChar(t, '<') or isSymbolChar(t, '<') or isPunctChar(t, '[') or isSymbolChar(t, '[')) depth += 1;
+        if (isPunctChar(t, '>') or isSymbolChar(t, '>') or isPunctChar(t, ']') or isSymbolChar(t, ']')) {
+            if (depth > 0) depth -= 1;
+        }
+
+        const s = tokenString(t);
+        if (s.len != 0) {
+            // Identifier/keyword (a type name or generic arg).
+            if (need_space_before_ident) out.append(' ') catch return null;
+            out.appendSlice(s) catch return null;
+            need_space_before_ident = true;
+            wrote_any = true;
+        } else if (t.type == .Symbol and t.data == .cval) {
+            // Punctuation glyph: `<`, `>`, `[`, `]`, `*`, `&`.
+            out.append(t.data.cval) catch return null;
+            // No space needed after most punctuation; identifiers following `>`/`]`
+            // (e.g. another type) are separated by the comma path above.
+            need_space_before_ident = false;
+            wrote_any = true;
+        } else if (t.type == .Operator) {
+            // Operators such as `*` (pointer) or `<`/`>` when lexed as operators.
+            out.appendSlice(s) catch {};
+            if (s.len != 0) wrote_any = true;
+            need_space_before_ident = false;
+        }
+    }
+    out.append(')') catch return null;
+    if (!wrote_any) {
+        // Empty payload `()` — treat as no meaningful sig.
+        out.deinit();
+        return null;
+    }
+    return out.toOwnedSlice() catch null;
+}
+
 /// Read the full spelling of a type that starts at `start_i` — the base identifier
 /// plus any balanced generic argument run `<...>` and trailing `*`/`[]` suffixes —
 /// joined with no spaces (`Box < num >` -> "Box<num>"). Returns an allocator-owned
@@ -363,11 +435,14 @@ pub fn buildSignatureFromTokens(
     errdefer name_buf.deinit();
     try name_buf.appendSlice(tokenString(tokens[name_i]));
 
-    // Optional generic params between name and '(' (e.g., `fun id<T>(...)`).
+    // Optional generic params between name and '(' (e.g., `fun id<T>(...)`,
+    // `fun pick<T: Meters | Feet>(...)`). Copy tokens verbatim (like a
+    // compound's concrete-generic hover does) rather than only collecting
+    // identifiers, so a constraint's `:`/`|` survive instead of being
+    // dropped/misread as extra bare type params.
     if (isPunctChar(tokens[after_name_i], '<')) {
         var depth: i64 = 0;
         var i: usize = after_name_i;
-        var first_param = true;
         var params_buf = ArrayList(u8).init(allocator);
         defer params_buf.deinit();
 
@@ -376,16 +451,20 @@ pub fn buildSignatureFromTokens(
             if (t.type == .NewLine or t.type == .Comment) continue;
             if (isPunctChar(t, '<')) {
                 depth += 1;
+                if (depth > 1) try params_buf.append('<');
                 continue;
             }
             if (isPunctChar(t, '>')) {
                 depth -= 1;
                 if (depth == 0) break;
+                try params_buf.append('>');
                 continue;
             }
-            if (depth == 1 and isIdent(t)) {
-                if (!first_param) try params_buf.appendSlice(", ");
-                first_param = false;
+            if (depth == 1 and isPunctChar(t, ',')) {
+                try params_buf.appendSlice(", ");
+                continue;
+            }
+            if (depth >= 1) {
                 try params_buf.appendSlice(tokenString(t));
             }
         }
@@ -2126,6 +2205,36 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                         return inferExpr(allocator_a, tokens_a, after_await, b.end, lt, gt, syms);
                     }
 
+                    // Channel receive: `<- ch` yields the channel's element type.
+                    // `<-` may lex as a single `<-` operator or as `<` then `-`.
+                    {
+                        var operand_i: ?usize = null;
+                        if (tokens_a[first_i].type == .Operator and std.mem.eql(u8, tokenString(tokens_a[first_i]), "<-")) {
+                            operand_i = nextNonTrivialToken(tokens_a, first_i + 1);
+                        } else if (isPunctChar(tokens_a[first_i], '<')) {
+                            const dash_i = nextNonTrivialToken(tokens_a, first_i + 1) orelse b.end;
+                            if (dash_i < b.end and isPunctChar(tokens_a[dash_i], '-')) {
+                                operand_i = nextNonTrivialToken(tokens_a, dash_i + 1);
+                            }
+                        }
+                        if (operand_i) |oi| {
+                            if (oi < b.end) {
+                                const chan_type = inferExpr(allocator_a, tokens_a, oi, b.end, lt, gt, syms) orelse return null;
+                                // `Channel<T>` / `Channel<T>*` -> T (first generic arg).
+                                // Strip any trailing pointer/reference markers so the
+                                // closing `>` is the last char for the generic-arg unwrap.
+                                var base = chan_type;
+                                while (base.len != 0 and (base[base.len - 1] == '*' or base[base.len - 1] == '&' or base[base.len - 1] == ' ')) {
+                                    base = base[0 .. base.len - 1];
+                                }
+                                if (iterableElementTypeName(base)) |elem| {
+                                    return allocator_a.dupe(u8, elem) catch return null;
+                                }
+                                return null;
+                            }
+                        }
+                    }
+
                     var deref_count: usize = 0;
                     var addr_count: usize = 0;
                     var cur_i = first_i;
@@ -3036,6 +3145,16 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                                     if (pd == 0) break;
                                 }
                             }
+                            // Build the payload signature `Owner.Variant(t1, t2)` from the
+                            // tokens between the `(` at `after_name_i` and the `)` at `m`.
+                            // Prefer the trailing comment when present (rare) so that
+                            // documented variants keep their doc; otherwise store the sig
+                            // so hover/completion can show the payload types.
+                            const trailing_doc = trailingCommentTextOnLine(allocator, tokens, m);
+                            const detail_val: ?[]const u8 = if (trailing_doc) |td|
+                                td
+                            else
+                                buildEnumVariantSig(allocator, owner_name, vname, tokens, after_name_i, m);
                             // The trailing comment sits on the same line as the `)`
                             // (after the optional `,`), so scan from `m`.
                             try out.append(.{
@@ -3046,7 +3165,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                                 .is_public = is_public,
                                 .container_type = try allocator.dupe(u8, owner_name),
                                 .value_type = try allocator.dupe(u8, owner_name),
-                                .detail = trailingCommentTextOnLine(allocator, tokens, m),
+                                .detail = detail_val,
                             });
                             k = m;
                             continue;

@@ -24,6 +24,7 @@
 // ```
 
 imp std.result;
+imp std.error;
 
 // An optional value: `Some(v)` holds a `T`; `None` holds nothing.
 pub enum Option<T> {
@@ -116,17 +117,17 @@ pub fun some<T>(T value) Option<T> {
   ret .Some(value);
 }
 
-// Convert an Option to a Result: Some(v) -> Ok(v); None -> Err(error_new(code, msg)).
+// Convert an Option to a Result: Some(v) -> Ok(v); None -> Err tagged with `kind`.
 // Provided as a free function (rather than a method) so the Result type parameter
 // resolves from the call site.
-pub fun ok_or<T>(Option<T> o, num code, str message) Result<T> {
+pub fun ok_or<T>(Option<T> o, ErrorKind kind, str message) Result<T> {
   fit o {
     .Some(v) -> { ret ok(v); }
     .None -> {
       T zero;
-      ret err(code, message, zero);
+      ret err_kind(kind, message, zero);
     }
   }
   T zero;
-  ret err(code, message, zero);
+  ret err_kind(kind, message, zero);
 }

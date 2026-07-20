@@ -56,5 +56,20 @@ fun main() num {
   }
   printf("scores=%s best=%lld\n", scores.to_string(), best);
 
+  // --- for-each over an EXPRESSION iterable (not just a bare identifier) ---
+  // The iterable can be any expression that yields an iterable value, e.g. the
+  // Vec returned by `map.keys()`. The compiler materializes the temporary and
+  // drives it through the same iterator protocol.
+  num keysum = 0;
+  Map<num, num> squares;
+  squares.init(8);
+  squares.put(2, 4);
+  squares.put(3, 9);
+  for k : squares.keys() {
+    keysum = keysum + k;
+  }
+  printf("keysum=%lld\n", keysum);
+  squares.free();
+
   ret 0;
 }

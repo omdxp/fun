@@ -169,7 +169,7 @@ pub fun format_local(num epoch, str buf, num buf_len, str format) num {
 pub fun try_format_local(num epoch, str buf, num buf_len, str format) Result<num> {
   let n = format_local(epoch, buf, buf_len, format);
   if n <= 0 {
-    ret err(1, "format_local failed", 0);
+    ret err_kind(.Unexpected, "format_local failed", 0);
   }
   ret ok(n);
 }
@@ -194,7 +194,7 @@ pub fun format_utc(num epoch, str buf, num buf_len, str format) num {
 pub fun try_format_utc(num epoch, str buf, num buf_len, str format) Result<num> {
   let n = format_utc(epoch, buf, buf_len, format);
   if n <= 0 {
-    ret err(1, "format_utc failed", 0);
+    ret err_kind(.Unexpected, "format_utc failed", 0);
   }
   ret ok(n);
 }
@@ -263,7 +263,7 @@ pub fun now_string(str buf, num buf_len) num {
 pub fun try_now_string(str buf, num buf_len) Result<num> {
   let n = now_string(buf, buf_len);
   if n <= 0 {
-    ret err(1, "now_string failed", 0);
+    ret err_kind(.Unexpected, "now_string failed", 0);
   }
   ret ok(n);
 }
@@ -289,7 +289,7 @@ pub fun now_string_utc(str buf, num buf_len) num {
 pub fun try_now_string_utc(str buf, num buf_len) Result<num> {
   let n = now_string_utc(buf, buf_len);
   if n <= 0 {
-    ret err(1, "now_string_utc failed", 0);
+    ret err_kind(.Unexpected, "now_string_utc failed", 0);
   }
   ret ok(n);
 }

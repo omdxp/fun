@@ -3008,7 +3008,9 @@ pub const ParseProcess = struct {
             return ParseError.MemoryAllocationFailed;
         };
 
-        const type_params = try self.parse_generic_type_params();
+        const parsed_ctp = try self.parse_impl_type_params_with_constraints();
+        const type_params = parsed_ctp.params;
+        const type_param_forced_insts = parsed_ctp.forced_insts;
 
         try self.expect_sym('{');
 
@@ -3119,7 +3121,7 @@ pub const ParseProcess = struct {
             .type = .Compound,
             .pos = name_tok.?.pos,
             .flags = .{ .is_public = is_public },
-            .node_variant = .{ .compound = .{ .name = name, .fields = fields, .type_params = type_params } },
+            .node_variant = .{ .compound = .{ .name = name, .fields = fields, .type_params = type_params, .type_param_forced_insts = type_param_forced_insts } },
         };
 
         // Register as a symbol so it can be used as a datatype identifier.
@@ -4175,10 +4177,10 @@ pub const ParseProcess = struct {
         {
             const parsed_tp = try self.parse_impl_type_params_with_constraints();
             function_node.node_variant.?.function.type_params = parsed_tp.params;
-            // Constraints (forced_insts) are only relevant for eager impl-method
-            // instantiation; generic free functions are monomorphized lazily from
-            // call sites, so the constraint set is used solely for validation and
-            // can be discarded here.
+            // Keep the constraint set (forced_insts): generic free functions are
+            // monomorphized lazily from call sites, but the constraints are used to
+            // type-check that each call's inferred type args satisfy `T: a | b`.
+            function_node.node_variant.?.function.type_param_forced_insts = parsed_tp.forced_insts;
         }
         try self.expect_op("(");
         var hist_args = utils.History.init(self.transpile_proc.allocator, .{});
@@ -6055,11 +6057,11 @@ pub const ParseProcess = struct {
             item_entity = .{ .flags = .{ .on_stack = true }, .node = null, .name = item_name };
             try self.push_loop_scope_entity(&item_entity.?);
         } else {
-            // For now, iterable for-loops require an identifier (array variable).
-            if (iterable_node.type != .Identifier) {
-                self.transpile_proc.err("for-each loops currently require an array identifier", .{});
-                return ParseError.InvalidExpression;
-            }
+            // The iterable may be any expression (a bare identifier, or a call like
+            // `map.keys()` / `vec.iter()`). Codegen's `emit_iter_protocol_for`
+            // resolves the receiver type of an arbitrary expression and lowers it
+            // through the Iterator next()/Option protocol; the identifier-only
+            // fast path is a codegen optimization, not a language restriction.
             if (index_name) |iname| {
                 index_entity = .{ .flags = .{ .on_stack = true }, .node = null, .name = iname };
                 try self.push_loop_scope_entity(&index_entity.?);

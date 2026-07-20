@@ -6292,6 +6292,22 @@ test "P0: block comment is lexed; unterminated /* and stray top-level token erro
     try runTranspileExpectFailure(allocator, "p0_stray_op.fn", "* 5\nfun main() {}\n");
 }
 
+/// Payload + entry point for running the deep-expression transpile on a
+/// dedicated large-stack thread, mirroring how the real CLI runs the compile
+/// pipeline (cmd/fun/main.zig spawns it with `pipeline_stack_size`). The
+/// recursive-descent parser/typechecker needs the big stack to reach its
+/// depth guard and report ExpressionTooDeep instead of overflowing the test
+/// runner's small default thread stack.
+const DeepExprCtx = struct {
+    allocator: std.mem.Allocator,
+    input: []const u8,
+    result: anyerror!void = {},
+};
+
+fn runDeepExprOnThread(ctx: *DeepExprCtx) void {
+    ctx.result = runTranspileExpectFailure(ctx.allocator, "p0_deep_expr.fn", ctx.input);
+}
+
 test "P0: pathologically deep expression errors cleanly instead of crashing" {
     const allocator = std.testing.allocator;
     // A nesting depth past the parser guard must yield ExpressionTooDeep, not a
@@ -6306,7 +6322,13 @@ test "P0: pathologically deep expression errors cleanly instead of crashing" {
     i = 0;
     while (i < depth) : (i += 1) try src.append(')');
     try src.appendSlice("; ret x; }\n");
-    try runTranspileExpectFailure(allocator, "p0_deep_expr.fn", src.items);
+
+    // Run on a large dedicated stack, exactly as the CLI does — the test runner's
+    // default thread stack is too small to hold the guard-depth recursion.
+    var ctx = DeepExprCtx{ .allocator = allocator, .input = src.items };
+    const thread = try std.Thread.spawn(.{ .stack_size = 256 * 1024 * 1024 }, runDeepExprOnThread, .{&ctx});
+    thread.join();
+    try ctx.result;
 }
 
 test "P0: typed format decodes escapes and treats unknown {foo} as literal" {
@@ -7466,6 +7488,126 @@ test "default parameter rejected: default references self" {
         allocator.free(out);
         return error.TestExpectedError;
     } else |_| {}
+}
+
+test "default parameter longhand enum values work for generic enums" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_default_params_longhand_enum.fn";
+    const c_path = "codegen_default_params_longhand_enum.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_default_params_longhand_enum.exe" else "codegen_default_params_longhand_enum";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    const input =
+        "imp std.c.io;\n" ++
+        "enum Option<T> { Some(T), None }\n" ++
+        "fun pick(Option<num> v = Option.None) num {\n" ++
+        "  fit v {\n" ++
+        "    Option.Some(n) -> { ret n; }\n" ++
+        "    Option.None -> { ret 7; }\n" ++
+        "  }\n" ++
+        "  ret -1;\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"%lld %lld\\n\", pick(), pick(Option.Some(9)));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Option__num_None") != null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("7 9\n", stdout);
+}
+
+test "quirk-impl method call chains onto a call-expression receiver" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_chained_quirk_method_call.fn";
+    const c_path = "codegen_chained_quirk_method_call.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_chained_quirk_method_call.exe" else "codegen_chained_quirk_method_call";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // `len()`/`is_empty()` come from `impl Vec<T> as Sized`, not a plain `impl
+    // Vec<T>` block. Chaining `.len()` onto a CALL-expression receiver (no
+    // named variable to take the address of) used to fall through to plain
+    // field access — `Vec` also has a `len` FIELD of the same name — emitting
+    // invalid C that tried to call an int64_t. Regresses that codegen path.
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.vec;\n" ++
+        "fun make_vec() Vec<num> {\n" ++
+        "  Vec<num> v;\n" ++
+        "  v.init(4);\n" ++
+        "  v.push(1);\n" ++
+        "  v.push(2);\n" ++
+        "  ret v;\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"%lld %d\\n\", make_vec().len(), make_vec().is_empty());\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("2 0\n", stdout);
+}
+
+test "std.log supports rotating sink destinations" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_log_rotating_sink.fn";
+    const c_path = "codegen_log_rotating_sink.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_log_rotating_sink.exe" else "codegen_log_rotating_sink";
+    const out_path = "codegen_log_rotating_sink.out";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, out_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, "codegen_log_rotating_sink.out.1") catch {};
+
+    const input =
+        "imp std.log;\n" ++
+        "imp std.io;\n" ++
+        "fun main() num {\n" ++
+        "  RotatingSink rot = rotating_sink_new(\"codegen_log_rotating_sink.out\", 1024, 2);\n" ++
+        "  Sink s = Sink.Rotating(&rot);\n" ++
+        "  Logger l = logger_init(.Info).with_timestamps(false).to_sink(s);\n" ++
+        "  l.info(\"hello rotating sink\");\n" ++
+        "  _ = s.flush();\n" ++
+        "  rot.close();\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "Sink_Rotating") != null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    _ = try runExeWithEnv(allocator, exe_path, &.{});
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, out_path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+    try std.testing.expect(std.mem.indexOf(u8, got, "hello rotating sink") != null);
 }
 
 test "for item : iterable drives a user Iterator via next()/Option; break exits the loop" {

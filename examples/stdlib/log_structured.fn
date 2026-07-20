@@ -1,0 +1,42 @@
+// Structured logging: levels, typed key/value fields, Text vs JSON formats, and
+// routing to a std.io Sink (stdout / stderr / file / rotating file).
+
+imp std.c.io;
+imp std.log;
+imp std.io;
+
+fun main() num {
+  // A Text logger at Info level (timestamps off here for reproducible output).
+  Logger l = logger_init(.Info).with_timestamps(false).named("app");
+
+  // Below-threshold records are dropped.
+  l.debug("verbose detail (filtered out at Info)");
+
+  // Plain messages (back-compatible API).
+  l.info("service started");
+
+  // Structured fields via the fluent, by-value builder.
+  l.info_r("request served").str_field("method", "GET").str_field("path", "/health").num_field(
+    "status",
+    200
+  ).dec_field("ms", 1.5).emit();
+
+  // A JSON logger emits one object per line — ideal for log aggregators.
+  Logger j = logger_json(.Debug).with_timestamps(false);
+  j.warn_r("cache miss").str_field("key", "user:42").bin_field("cold", true).emit();
+
+  // Route errors to stderr while everything else goes to stdout.
+  Logger r = logger_init(.Info).with_timestamps(false).route_errors(true);
+  r.error("payment declined");
+
+  // Log to a rotating file (each generation capped; oldest dropped).
+  let rot = rotating_sink_new("/tmp/fun_example_app.log", 4096, 3);
+  Sink fs = Sink.File(rot.current);
+  Logger fl = logger_init(.Info).with_timestamps(false).to_sink(fs);
+  fl.info("written to a file sink");
+  _ = fs.flush();
+  rot.close();
+
+  printf("done\n");
+  ret 0;
+}

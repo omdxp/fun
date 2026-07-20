@@ -787,6 +787,24 @@ pub fn guessTypeFromTextFallback(text: []const u8, name: []const u8, at: Positio
     return null;
 }
 
+/// A Fun language keyword that can never be the receiver of a `.member`
+/// access. Used by the text-based receiver scanners so that a dot-shorthand
+/// like `ret .Variant` or `= .Ok` is not misinterpreted as `ret.` / `=.`.
+pub fn isReceiverStopKeyword(word: []const u8) bool {
+    const kws = [_][]const u8{
+        "imp",      "as",   "pub",   "async",    "fun",  "compound", "quirk",
+        "impl",     "enum", "asm",   "volatile", "arch", "defer",    "await",
+        "ret",      "if",   "elif",  "else",     "for",  "fit",      "break",
+        "continue", "void", "raw",   "num",      "dec",  "str",      "bin",
+        "chr",      "true", "false", "nil",      "fork", "allow",    "expect",
+        "sizeof",
+    };
+    for (kws) |kw| {
+        if (std.mem.eql(u8, kw, word)) return true;
+    }
+    return false;
+}
+
 pub fn guessReceiverNameBeforeCursor(text: []const u8, p: Position) ?[]const u8 {
     const idx = byteIndexForPosition(text, p);
     if (idx == 0) return null;
@@ -804,11 +822,14 @@ pub fn guessReceiverNameBeforeCursor(text: []const u8, p: Position) ?[]const u8 
     }
     const dot_i = dot_i_opt orelse return null;
 
-    // Scan left to find receiver identifier.
+    // Scan left to find receiver identifier. The receiver must be adjacent to
+    // the dot on the SAME line: only skip spaces/tabs, never newlines. This
+    // prevents an identifier on a previous line (or a bare-dot shorthand) from
+    // being mis-bound as the receiver.
     var j: usize = dot_i;
     while (j > 0) {
         const ch = text[j - 1];
-        if (ch == ' ' or ch == '\t' or ch == '\r' or ch == '\n') {
+        if (ch == ' ' or ch == '\t') {
             j -= 1;
             continue;
         }
@@ -822,7 +843,9 @@ pub fn guessReceiverNameBeforeCursor(text: []const u8, p: Position) ?[]const u8 
         start -= 1;
     }
     if (start >= j) return null;
-    return text[start..j];
+    const name = text[start..j];
+    if (isReceiverStopKeyword(name)) return null;
+    return name;
 }
 
 pub fn guessReceiverNameAtCursor(text: []const u8, p: Position) ?[]const u8 {
@@ -830,10 +853,12 @@ pub fn guessReceiverNameAtCursor(text: []const u8, p: Position) ?[]const u8 {
     if (idx == 0) return null;
     if (text[idx - 1] != '.') return null;
 
+    // Receiver must be adjacent to the dot on the SAME line: skip only
+    // spaces/tabs, never newlines.
     var j: usize = idx - 1;
     while (j > 0) {
         const ch = text[j - 1];
-        if (ch == ' ' or ch == '\t' or ch == '\r' or ch == '\n') {
+        if (ch == ' ' or ch == '\t') {
             j -= 1;
             continue;
         }
@@ -847,7 +872,9 @@ pub fn guessReceiverNameAtCursor(text: []const u8, p: Position) ?[]const u8 {
         start -= 1;
     }
     if (start >= j) return null;
-    return text[start..j];
+    const name = text[start..j];
+    if (isReceiverStopKeyword(name)) return null;
+    return name;
 }
 
 pub const ReceiverGuess = struct {
@@ -878,10 +905,12 @@ pub fn guessReceiverAtCursorWithIndex(text: []const u8, p: Position) ?ReceiverGu
         }
     }.call;
 
+    // Receiver must be adjacent to the dot on the SAME line: skip only
+    // spaces/tabs, never newlines.
     var j: usize = dot_i;
     while (j > 0) {
         const ch = text[j - 1];
-        if (ch == ' ' or ch == '\t' or ch == '\r' or ch == '\n') {
+        if (ch == ' ' or ch == '\t') {
             j -= 1;
             continue;
         }
@@ -911,7 +940,7 @@ pub fn guessReceiverAtCursorWithIndex(text: []const u8, p: Position) ?ReceiverGu
 
         while (j > 0) {
             const ch = text[j - 1];
-            if (ch == ' ' or ch == '\t' or ch == '\r' or ch == '\n') {
+            if (ch == ' ' or ch == '\t') {
                 j -= 1;
                 continue;
             }
@@ -924,7 +953,9 @@ pub fn guessReceiverAtCursorWithIndex(text: []const u8, p: Position) ?ReceiverGu
         start -= 1;
     }
     if (start >= j) return null;
-    return .{ .name = text[start..j], .indexed = indexed };
+    const name = text[start..j];
+    if (isReceiverStopKeyword(name)) return null;
+    return .{ .name = name, .indexed = indexed };
 }
 
 test "fls: byteIndexForPosition handles CRLF" {

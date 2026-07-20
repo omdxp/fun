@@ -270,12 +270,74 @@ pub fn enrichSymbolsFromAst(allocator: Allocator, symbols: *ArrayList(SymbolLite
                     }
                 }
             }
+
+            // Data-carrying enum variant payload signature (e.g. `Shape.Circle(num)`).
+            // Only attach it when the variant actually has a payload (the sig then
+            // differs from the bare `Enum.Variant`) AND there's no trailing doc
+            // comment already occupying `.detail`. The render sites distinguish a
+            // sig from a comment by testing for the `Enum.` prefix.
+            if (s.detail == null and s.kind == .enumMember) {
+                var buf: [256]u8 = undefined;
+                const key = std.fmt.bufPrint(&buf, "{s}.{s}", .{ ct, s.name }) catch null;
+                if (key) |k| {
+                    if (enrich.member_sig_by_key.get(k)) |ms| {
+                        // Skip payload-free variants: their sig is just `Enum.Variant`,
+                        // which the plain render already produces.
+                        var prefix_buf: [256]u8 = undefined;
+                        const plain = std.fmt.bufPrint(&prefix_buf, "{s}.{s}", .{ ct, s.name }) catch "";
+                        if (!std.mem.eql(u8, ms, plain)) s.detail = ms;
+                    }
+                }
+            }
         }
 
         if (s.container_fn_range) |fr| {
             _ = fr;
         }
     }
+}
+
+// Render a function's `<T, U, ...>` generic clause, including each param's
+// declared constraint bound (`<T: A | B>`) so the signature matches how a
+// constrained generic COMPOUND's hover already renders (`Boxed<T: num | str>`).
+// A constrained param's forced instantiations are recorded as the Cartesian
+// product of every param's bound set; the bounds for param `i` are the
+// distinct values at index `i` across every combo, in first-seen order.
+fn appendTypeParamsWithConstraints(buf: *ArrayList(u8), allocator: Allocator, fnv: anytype) !void {
+    if (!@hasField(@TypeOf(fnv), "type_params")) return;
+    const params = fnv.type_params orelse return;
+    try buf.append('<');
+    for (params.items(), 0..) |p, i| {
+        if (i != 0) try buf.appendSlice(", ");
+        try buf.appendSlice(p.items);
+        if (@hasField(@TypeOf(fnv), "type_param_forced_insts")) {
+            if (fnv.type_param_forced_insts) |insts| {
+                var seen = ArrayList([]const u8).init(allocator);
+                defer seen.deinit();
+                for (insts.items()) |combo| {
+                    const combo_items = combo.items();
+                    if (i >= combo_items.len) continue;
+                    const bound_name = combo_items[i].items;
+                    var already: bool = false;
+                    for (seen.items) |s| {
+                        if (std.mem.eql(u8, s, bound_name)) {
+                            already = true;
+                            break;
+                        }
+                    }
+                    if (!already) seen.append(bound_name) catch {};
+                }
+                if (seen.items.len != 0) {
+                    try buf.appendSlice(": ");
+                    for (seen.items, 0..) |bound_name, bi| {
+                        if (bi != 0) try buf.appendSlice(" | ");
+                        try buf.appendSlice(bound_name);
+                    }
+                }
+            }
+        }
+    }
+    try buf.append('>');
 }
 
 pub fn buildSignatureFromAst(
@@ -297,16 +359,7 @@ pub fn buildSignatureFromAst(
     } else {
         try buf.print("{s}", .{name});
     }
-    if (@hasField(@TypeOf(fnv), "type_params")) {
-        if (fnv.type_params) |params| {
-            try buf.append('<');
-            for (params.items(), 0..) |p, i| {
-                if (i != 0) try buf.appendSlice(", ");
-                try buf.appendSlice(p.items);
-            }
-            try buf.append('>');
-        }
-    }
+    try appendTypeParamsWithConstraints(&buf, allocator, fnv);
 
     try buf.append('(');
 
@@ -487,16 +540,7 @@ pub fn formatFunctionSignature(allocator: Allocator, name: []const u8, fnv: anyt
     }
     try buf.print("fun {s}", .{name});
 
-    if (@hasField(@TypeOf(fnv), "type_params")) {
-        if (fnv.type_params) |params| {
-            try buf.append('<');
-            for (params.items(), 0..) |p, i| {
-                if (i != 0) try buf.appendSlice(", ");
-                try buf.appendSlice(p.items);
-            }
-            try buf.append('>');
-        }
-    }
+    try appendTypeParamsWithConstraints(&buf, allocator, fnv);
 
     try buf.append('(');
 

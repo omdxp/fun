@@ -17,6 +17,12 @@ fun main() num {
       let version = doc.get("version").unwrap_or(JsonValue.Null);
       printf("version=%g\n", version.as_num().unwrap_or(0.0));
 
+      // A full inline method chain also works: get() -> Option<JsonValue>,
+      // unwrap_or(.Null) -> JsonValue, as_str() -> Option<str>, unwrap_or -> str.
+      // (Chaining a method that returns the type param T of a generic ENUM like
+      // Option/Result was previously a codegen error.)
+      printf("chained_name=%s\n", doc.get("name").unwrap_or(.Null).as_str().unwrap_or("?"));
+
       // Round-trips back to JSON text.
       printf("json=%s\n", doc.to_string());
     }

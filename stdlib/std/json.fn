@@ -369,7 +369,7 @@ impl JsonParser {
   // Parse a JSON string literal (assumes the opening quote is current).
   parse_string() Result<str> {
     if self.peek() != '"' {
-      ret err(1, "expected '\"'", "");
+      ret err_kind(.Parse, "expected '\"'", "");
     }
     self.pos = self.pos + 1;
     let b = string_builder_init(16);
@@ -377,7 +377,7 @@ impl JsonParser {
       let c = self.src[self.pos];
       if c == 0 {
         b.free();
-        ret err(1, "unterminated string", "");
+        ret err_kind(.Parse, "unterminated string", "");
       }
       if c == '"' {
         self.pos = self.pos + 1;
@@ -406,7 +406,7 @@ impl JsonParser {
       }
     }
     b.free();
-    ret err(1, "unterminated string", "");
+    ret err_kind(.Parse, "unterminated string", "");
   }
 
   // Collect the raw text of a number literal (caller converts with parse_dec).
@@ -462,7 +462,7 @@ impl JsonParser {
       let numtext = self.parse_number_text();
       ret ok(JsonValue.Num(parse_dec(numtext)));
     }
-    ret err(1, "unexpected character in JSON", JsonValue.Null);
+    ret err_kind(.Parse, "unexpected character in JSON", JsonValue.Null);
   }
 
   parse_array() Result<JsonValue> {
@@ -491,7 +491,7 @@ impl JsonParser {
         ret ok(JsonValue.Array(items));
       } else {
         items.free();
-        ret err(1, "expected ',' or ']' in array", JsonValue.Null);
+        ret err_kind(.Parse, "expected ',' or ']' in array", JsonValue.Null);
       }
     }
     ret ok(JsonValue.Array(items));
@@ -519,7 +519,7 @@ impl JsonParser {
       self.skip_ws();
       if self.peek() != ':' {
         entries.free();
-        ret err(1, "expected ':' in object", JsonValue.Null);
+        ret err_kind(.Parse, "expected ':' in object", JsonValue.Null);
       }
       self.pos = self.pos + 1;
       fit self.parse_value() {
@@ -538,7 +538,7 @@ impl JsonParser {
         ret ok(JsonValue.Object(entries));
       } else {
         entries.free();
-        ret err(1, "expected ',' or '}' in object", JsonValue.Null);
+        ret err_kind(.Parse, "expected ',' or '}' in object", JsonValue.Null);
       }
     }
     ret ok(JsonValue.Object(entries));
@@ -574,6 +574,15 @@ impl JsonValue as Serialize {
 //   }
 // }
 // ```
+// 
+// NOTE: prefer the generic `std.quirks.To<JsonValue>` for new code
+// (`impl Point as To<JsonValue> { pub to() JsonValue {...} }`, called as `p.to()`).
+// `ToJson` is kept as a concrete convenience layer because the free-function
+// wrappers below (`to_json_value`/`to_json_string`) take a NON-generic quirk as a
+// parameter and rely on quirk-object dispatch; a generic-quirk-typed parameter
+// (`fun f(To<JsonValue> v)`) does not dispatch yet, so those wrappers cannot be
+// expressed over `To<T>` today. Direct `value.to()` calls on a `To<JsonValue>`
+// impl work fine.
 pub quirk ToJson {
   // Build a `JsonValue` representing this value.
   to_json() JsonValue;

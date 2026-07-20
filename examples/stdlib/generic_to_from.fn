@@ -1,0 +1,62 @@
+// Generic conversion quirks: `To<T>` / `From<T>` (std.quirks).
+// 
+// These are the generic, target-agnostic replacements for the type-specific
+// ToJson/FromJson quirks: a type implements `To<JsonValue>` to convert itself
+// into a JsonValue and `From<JsonValue>` to rebuild itself from one. Fun has no
+// reflection/derive, so each conversion is hand-written — the explicit
+// equivalent of a derived Into/From.
+// 
+// A single impl per type dispatches through a direct method call (`c.to()` /
+// `back.from(doc)`).
+
+imp std.c.io;
+imp std.json;
+imp std.quirks;
+imp std.result;
+
+pub compound Config {
+  str name;
+  dec version;
+  bin stable;
+}
+
+impl Config as To<JsonValue> {
+  pub to() JsonValue {
+    let o = json_object();
+    o.put("name", json_str(self.name));
+    o.put("version", json_num(self.version));
+    o.put("stable", json_bool(self.stable));
+    ret JsonValue.Object(o);
+  }
+}
+
+impl Config as From<JsonValue> {
+  pub from(JsonValue value) {
+    let n = value.get("name").unwrap_or(JsonValue.Null);
+    self.name = n.as_str().unwrap_or("");
+    let v = value.get("version").unwrap_or(JsonValue.Null);
+    self.version = v.as_num().unwrap_or(0.0);
+    let s = value.get("stable").unwrap_or(JsonValue.Null);
+    self.stable = s.as_bool().unwrap_or(false);
+  }
+}
+
+fun main() num {
+  Config c = Config{name = "fun", version = 1.0, stable = true};
+
+  // Compound -> typed JSON via To<JsonValue>, then render to text.
+  let doc = c.to();
+  printf("json=%s\n", doc.to_string());
+
+  // text -> typed JSON -> compound via From<JsonValue>.
+  fit parse(doc.to_string()) {
+    Result.Ok(parsed) -> {
+      Config back;
+      back.from(parsed);
+      printf("back: name=%s version=%g stable=%d\n", back.name, back.version, back.stable);
+    }
+    Result.Err(e) -> { printf("parse failed\n"); }
+  }
+
+  ret 0;
+}

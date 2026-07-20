@@ -24,6 +24,7 @@ const codegen = @import("codegen");
 const parser = @import("parser");
 const lexer = @import("lexer");
 const utils = @import("utils");
+const cli = @import("cli");
 const token = lexer.token;
 
 const globals = @import("globals.zig");
@@ -137,6 +138,7 @@ const guessReceiverNameBeforeCursor = positions_mod.guessReceiverNameBeforeCurso
 const guessReceiverNameAtCursor = positions_mod.guessReceiverNameAtCursor;
 const ReceiverGuess = positions_mod.ReceiverGuess;
 const guessReceiverAtCursorWithIndex = positions_mod.guessReceiverAtCursorWithIndex;
+const isReceiverStopKeyword = positions_mod.isReceiverStopKeyword;
 
 // --- Token analysis ---
 const appendDocCommentAboveLine = token_idx.appendDocCommentAboveLine;
@@ -155,6 +157,30 @@ const GuessedCallSignature = index_mod.GuessedCallSignature;
 
 fn isLitePunct(t: TokenLite, ch: u8) bool {
     return (t.kind == .symbol or t.kind == .operator) and t.text.len == 1 and t.text[0] == ch;
+}
+
+/// A token that closes a chainable receiver expression — `)` (call result) or
+/// `]` (index result). A `.` following one of these is a member access on that
+/// result, never a bare `.Variant` enum dot-shorthand.
+fn isChainCloserLite(t: TokenLite) bool {
+    return isLitePunct(t, ')') or isLitePunct(t, ']');
+}
+
+/// If `sym` is a data-carrying enum variant whose `detail` holds the payload
+/// signature (`Enum.Variant(types)`), return that signature. Returns null when
+/// `sym` is not an enum member, has no detail, or its detail is a trailing doc
+/// comment rather than a sig (a sig always begins with `enum_name.`).
+fn enumVariantSigFromDetail(sym: SymbolLite, enum_name: []const u8) ?[]const u8 {
+    if (sym.kind != .enumMember) return null;
+    const det = sym.detail orelse return null;
+    // Match against the container's base name and the fully-qualified enum name
+    // (a shorthand hover may pass either the declared or a specialized name).
+    const base = LspServer.baseTypeNameForLookup(enum_name);
+    const container = if (sym.container_type) |ct| ct else enum_name;
+    const container_base = LspServer.baseTypeNameForLookup(container);
+    if (std.mem.startsWith(u8, det, base) and det.len > base.len and det[base.len] == '.') return det;
+    if (std.mem.startsWith(u8, det, container_base) and det.len > container_base.len and det[container_base.len] == '.') return det;
+    return null;
 }
 
 fn fieldNameIndexAfterTypeLite(tokens: []const TokenLite, type_i: usize) ?usize {
@@ -1249,17 +1275,19 @@ pub const LspServer = struct {
             return;
         };
 
-        const result = self.formatAndComputeDiagnostics(uri, doc.text) catch |err| {
+        // Formatting is pure token work — it needs no imports/typecheck. Run the
+        // in-process token formatter (byte-identical to `fun -fmt`) instead of
+        // spawning the full `fun -fmt-diag` diagnostics subprocess. Diagnostics
+        // remain on their own trigger (didOpen/didChange/didSave).
+        const formatted_opt = self.formatInProcess(uri, doc.text) catch |err| {
             self.log("[fls] formatting failed: {s}\n", .{@errorName(err)});
             try self.sendResponseJson(id_val, empty);
             return;
         };
-        // `result.formatted` is owned here; `result.diags` are transferred to
-        // `publishDiagsFromOwned` below, which takes ownership and frees them.
-        defer if (result.formatted) |f| self.allocator.free(f);
+        defer if (formatted_opt) |f| self.allocator.free(f);
 
         // Send format edits only if we got a non-empty formatted result.
-        if (result.formatted) |formatted| {
+        if (formatted_opt) |formatted| {
             const edits = [_]TextEdit{.{
                 .range = .{
                     .start = .{ .line = 0, .character = 0 },
@@ -1273,11 +1301,54 @@ pub const LspServer = struct {
         } else {
             try self.sendResponseJson(id_val, empty);
         }
+    }
 
-        // Publish diagnostics collected during the same subprocess run and mark
-        // the timestamp so handleDidSave can skip the redundant re-run.
-        try self.publishDiagsFromOwned(result.diags);
-        if (self.docs.getPtr(uri)) |dp| dp.last_diag_ms = nowMs();
+    /// Format `text` using the in-process token formatter (`cli.format_source`).
+    /// This is lexing-only: no transpile/typecheck, no imports, no stdlib walk,
+    /// so it is an order of magnitude faster than the diagnostics subprocess.
+    ///
+    /// The formatter lexes from a real file, so we materialise `text` into a
+    /// stable temp file next to the document (same convention as the diagnostics
+    /// path) and remove it afterwards. Returns an allocator-owned formatted
+    /// string, or null when the formatter produced nothing usable.
+    fn formatInProcess(self: *LspServer, current_uri: []const u8, text: []const u8) !?[]u8 {
+        var tmp_name_buf: [80]u8 = undefined;
+        const tmp_name = try std.fmt.bufPrint(&tmp_name_buf, ".__fls_fmt_{x:0>6}.fn", .{std.hash.Wyhash.hash(0, current_uri) & 0xFFFFFF});
+
+        const current_path_opt = uriToPath(self.allocator, current_uri) catch null;
+        defer if (current_path_opt) |p| self.allocator.free(p);
+        const current_dir_opt = if (current_path_opt) |p| std.fs.path.dirname(p) else null;
+
+        var base_dir = if (current_dir_opt) |d|
+            try std.Io.Dir.openDirAbsolute(globalIo(), d, .{})
+        else
+            std.Io.Dir.cwd();
+        defer if (current_dir_opt != null) base_dir.close(globalIo());
+
+        {
+            const f = try base_dir.createFile(globalIo(), tmp_name, .{ .read = true, .truncate = true });
+            defer f.close(globalIo());
+            try f.writeStreamingAll(globalIo(), text);
+        }
+        defer base_dir.deleteFile(globalIo(), tmp_name) catch {};
+
+        const tmp_abs_path = blk: {
+            if (current_dir_opt) |d|
+                break :blk try std.fs.path.join(self.allocator, &[_][]const u8{ d, tmp_name });
+            break :blk try self.allocator.dupe(u8, tmp_name);
+        };
+        defer self.allocator.free(tmp_abs_path);
+
+        const formatted = cli.format_source(self.allocator, tmp_abs_path, text) catch |err| {
+            self.log("[fls] in-process format error: {s}\n", .{@errorName(err)});
+            return null;
+        };
+        // Defensive: never send an edit that wipes a non-empty doc.
+        if (formatted.len == 0 and text.len != 0) {
+            self.allocator.free(formatted);
+            return null;
+        }
+        return formatted;
     }
 
     fn handleHover(self: *LspServer, id_val: ?std.json.Value, params_val: ?std.json.Value) !void {
@@ -1399,14 +1470,24 @@ pub const LspServer = struct {
                     if (self.findMemberByContainer(uri, enum_name, variant_name, .enumMember)) |h| {
                         var buf = ArrayList(u8).init(self.allocator);
                         defer buf.deinit();
-                        try buf.print("```fun\n{s}.{s}\n```\n", .{ enum_name, variant_name });
+                        // A data-carrying variant stores its payload signature
+                        // (`Enum.Variant(types)`) in `detail`; render that so the
+                        // payload types are visible. A trailing doc comment does NOT
+                        // start with the `Enum.` prefix, so it is distinguishable.
+                        const variant_sig = enumVariantSigFromDetail(h.sym, enum_name);
+                        if (variant_sig) |vs| {
+                            try buf.print("```fun\n{s}\n```\n", .{vs});
+                        } else {
+                            try buf.print("```fun\n{s}.{s}\n```\n", .{ enum_name, variant_name });
+                        }
                         var had_leading_doc = false;
                         if (self.docs.get(h.uri)) |hdoc| {
                             had_leading_doc = try appendDocCommentAboveLine(self.allocator, &buf, hdoc.text, h.sym.decl_range.start.line);
                         }
                         // Fall back to the variant's trailing doc comment (stored in
                         // `detail`) when there's no leading doc: `Number(num), // ...`.
-                        if (!had_leading_doc) {
+                        // Skip when `detail` is actually the payload sig.
+                        if (!had_leading_doc and variant_sig == null) {
                             if (h.sym.detail) |variant_doc| {
                                 if (variant_doc.len != 0) try buf.print("\n{s}\n", .{variant_doc});
                             }
@@ -1459,7 +1540,11 @@ pub const LspServer = struct {
                                     }
                                 },
                                 .enumMember => {
-                                    try buf.print("```fun\n{s}.{s}\n```\n", .{ recv_type, name });
+                                    if (enumVariantSigFromDetail(h.sym, recv_type)) |vs| {
+                                        try buf.print("```fun\n{s}\n```\n", .{vs});
+                                    } else {
+                                        try buf.print("```fun\n{s}.{s}\n```\n", .{ recv_type, name });
+                                    }
                                 },
                                 .method => {
                                     if (h.sym.detail) |det| {
@@ -1495,8 +1580,11 @@ pub const LspServer = struct {
                             }
                             // An enum variant carries its trailing doc comment in
                             // `detail` (`Number(num), // ...`); surface it when there
-                            // is no leading doc above the variant.
-                            if (!member_had_leading_doc and h.sym.kind == .enumMember) {
+                            // is no leading doc above the variant. Skip when `detail`
+                            // is actually the payload signature (already rendered).
+                            if (!member_had_leading_doc and h.sym.kind == .enumMember and
+                                enumVariantSigFromDetail(h.sym, recv_type) == null)
+                            {
                                 if (h.sym.detail) |variant_doc| {
                                     if (variant_doc.len != 0) try buf.print("\n{s}\n", .{variant_doc});
                                 }
@@ -1624,6 +1712,9 @@ pub const LspServer = struct {
                     if (d.kind == .struct_ or d.kind == .interface or d.kind == .enum_) {
                         // Render type symbols in the kind-specific branch below so we can
                         // include concrete generic arguments from the hover site.
+                    } else if (d.kind == .enumMember) {
+                        // Rendered in the enumMember branch below (which knows how to
+                        // pick between the payload sig and the plain `Enum.Variant`).
                     } else if (d.kind == .function and d.value_type != null) {
                         const det_trim = std.mem.trimEnd(u8, det, " \t\r\n");
                         if (det_trim.len != 0 and det_trim[det_trim.len - 1] == ')') {
@@ -1649,11 +1740,16 @@ pub const LspServer = struct {
                 }
             } else if (d.kind == .enumMember) {
                 const recv_type = d.container_type orelse d.value_type orelse "";
-                if (recv_type.len != 0) {
+                if (enumVariantSigFromDetail(d, recv_type)) |vs| {
+                    try buf.print("```fun\n{s}\n```\n", .{vs});
+                } else if (recv_type.len != 0) {
                     try buf.print("```fun\n{s}.{s}\n```\n", .{ recv_type, tok.text });
                 } else {
                     try buf.print("_{s}_\n", .{@tagName(d.kind)});
                 }
+            } else if ((d.kind == .field or d.kind == .property) and d.value_type != null) {
+                // Field/property inside a compound: render `type name`.
+                try buf.print("```fun\n{s} {s}\n```\n", .{ d.value_type.?, tok.text });
             } else if ((d.kind == .struct_ or d.kind == .interface or d.kind == .enum_)) {
                 const kw = if (d.kind == .struct_) "compound" else if (d.kind == .interface) "quirk" else "enum";
                 if (concrete_hover_type) |concrete| {
@@ -1674,7 +1770,7 @@ pub const LspServer = struct {
 
             var printed_detail = false;
             if (d.detail) |det| {
-                if (!(d.kind == .struct_ or d.kind == .interface or d.kind == .enum_)) {
+                if (!(d.kind == .struct_ or d.kind == .interface or d.kind == .enum_ or d.kind == .enumMember)) {
                     if (d.kind == .function and d.value_type != null) {
                         const det_trim = std.mem.trimEnd(u8, det, " \t\r\n");
                         if (det_trim.len != 0 and det_trim[det_trim.len - 1] == ')') {
@@ -1698,11 +1794,16 @@ pub const LspServer = struct {
                     }
                 } else if (d.kind == .enumMember) {
                     const recv_type = d.container_type orelse d.value_type orelse "";
-                    if (recv_type.len != 0) {
+                    if (enumVariantSigFromDetail(d, recv_type)) |vs| {
+                        try buf.print("```fun\n{s}\n```\n", .{vs});
+                    } else if (recv_type.len != 0) {
                         try buf.print("```fun\n{s}.{s}\n```\n", .{ recv_type, tok.text });
                     } else {
                         try buf.print("_{s}_\n", .{@tagName(d.kind)});
                     }
+                } else if ((d.kind == .field or d.kind == .property) and d.value_type != null) {
+                    // Field/property inside a compound: render `type name`.
+                    try buf.print("```fun\n{s} {s}\n```\n", .{ d.value_type.?, tok.text });
                 } else if ((d.kind == .struct_ or d.kind == .interface or d.kind == .enum_)) {
                     const kw = if (d.kind == .struct_) "compound" else if (d.kind == .interface) "quirk" else "enum";
                     if (concrete_hover_type) |concrete| {
@@ -3495,13 +3596,35 @@ pub const LspServer = struct {
                     if (depth != 1) continue;
                     if (tk.kind != .identifier and tk.kind != .keyword) continue;
 
+                    // Inline method shape at the top level of the compound body:
+                    // `name(...)` — recognise it so inline methods aren't filtered
+                    // out of member completion for this compound. (An `async` modifier
+                    // may precede the name.)
+                    if (isIdentLite(tk)) {
+                        const after_ident_i = nextNonTrivialTokenLite(idx.tokens, k + 1) orelse idx.tokens.len;
+                        if (after_ident_i < idx.tokens.len and isSymbolLite(idx.tokens[after_ident_i], '(')) {
+                            const mkey = try self.allocator.dupe(u8, tk.text);
+                            if (allowed.contains(mkey)) {
+                                self.allocator.free(mkey);
+                            } else {
+                                try allowed.put(mkey, {});
+                            }
+                            // Fall through: also try the field shape below (harmless;
+                            // it will fail the `;` check for a method).
+                        }
+                    }
+
                     const field_name_i = fieldNameIndexAfterTypeLite(idx.tokens, k) orelse continue;
                     if (!isIdentLite(idx.tokens[field_name_i])) continue;
                     const after_name_i = nextNonTrivialTokenLite(idx.tokens, field_name_i + 1) orelse continue;
                     if (!isSymbolLite(idx.tokens[after_name_i], ';')) continue;
 
                     const key = try self.allocator.dupe(u8, idx.tokens[field_name_i].text);
-                    try allowed.put(key, {});
+                    if (allowed.contains(key)) {
+                        self.allocator.free(key);
+                    } else {
+                        try allowed.put(key, {});
+                    }
                     k = after_name_i;
                 }
                 break;
@@ -3538,7 +3661,11 @@ pub const LspServer = struct {
                     if (depth != 1 or !isIdentLite(tk)) continue;
 
                     const key = try self.allocator.dupe(u8, tk.text);
-                    try allowed.put(key, {});
+                    if (allowed.contains(key)) {
+                        self.allocator.free(key);
+                    } else {
+                        try allowed.put(key, {});
+                    }
                 }
                 break;
             }
@@ -3577,7 +3704,11 @@ pub const LspServer = struct {
                     if (!isSymbolLite(idx.tokens[after_name_i], '(')) continue;
 
                     const key = try self.allocator.dupe(u8, tk.text);
-                    try allowed.put(key, {});
+                    if (allowed.contains(key)) {
+                        self.allocator.free(key);
+                    } else {
+                        try allowed.put(key, {});
+                    }
                 }
                 break;
             }
@@ -5110,6 +5241,45 @@ pub const LspServer = struct {
                 if (t.kind != .identifier) break;
             }
             const eqi = eq_i orelse return null;
+
+            // Channel receive: `let n = <- ch;` — the RHS is `<- <operand>` where the
+            // operand's type is a `Channel<T>` (or `Channel<T>*`). The binding's type
+            // is the channel's element type `T`. `<-` may lex as a single `<-`
+            // operator or as `<` followed by `-`; handle both.
+            {
+                const first_rhs = nextNonTrivialTokenLite(toks, eqi + 1);
+                if (first_rhs) |fr| {
+                    const t0 = toks[fr];
+                    const is_arrow_single = (t0.kind == .operator or t0.kind == .symbol) and std.mem.eql(u8, t0.text, "<-");
+                    const is_arrow_split = (t0.kind == .operator or t0.kind == .symbol) and std.mem.eql(u8, t0.text, "<") and blk_arrow: {
+                        const nxt = nextNonTrivialTokenLite(toks, fr + 1) orelse break :blk_arrow false;
+                        break :blk_arrow (toks[nxt].kind == .operator or toks[nxt].kind == .symbol) and std.mem.eql(u8, toks[nxt].text, "-");
+                    };
+                    if (is_arrow_single or is_arrow_split) {
+                        // Resolve the operand's type, then unwrap its first generic arg.
+                        const operand_start = if (is_arrow_split) (nextNonTrivialTokenLite(toks, fr + 1) orelse return null) + 1 else fr + 1;
+                        // Find the last significant RHS token before `;`.
+                        var oe: ?usize = null;
+                        var oq = operand_start;
+                        var od: i64 = 0;
+                        while (oq < toks.len) : (oq += 1) {
+                            const t = toks[oq];
+                            if (isOpenParen(t) or (t.kind == .symbol and std.mem.eql(u8, t.text, "["))) od += 1;
+                            if (isCloseParen(t) or (t.kind == .symbol and std.mem.eql(u8, t.text, "]"))) od -= 1;
+                            if (od <= 0 and (t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, ";")) break;
+                            if (t.kind != .comment) oe = oq;
+                        }
+                        const oei = oe orelse return null;
+                        const chan_type = self.resolveTypeOfExprEndingAtToken(idx, uri, at, oei) orelse return null;
+                        // `Channel<T>` / `Channel<T>*` -> T (first generic arg).
+                        if (genericArgSpellingsArena(idx, chan_type)) |args| {
+                            if (args.len != 0) return args[0];
+                        }
+                        return null;
+                    }
+                }
+            }
+
             // Find the last significant token of the RHS (just before the terminating `;`).
             var end_i: ?usize = null;
             var q = eqi + 1;
@@ -6141,6 +6311,35 @@ pub const LspServer = struct {
                                 }
                             }
                         }
+                    } else if (dot_i >= 1 and idx.tokens[dot_i - 1].text.len == 1 and idx.tokens[dot_i - 1].text[0] == ')') {
+                        // Method-chain result: the receiver expression ends in `)`
+                        // (e.g. `a.get(x).unwrap_or(y).`). Resolve the chain-result
+                        // type and offer ITS members. A data-enum chain result must
+                        // route here (member methods), NOT into the `.Variant`
+                        // dot-shorthand path — that path is only for a bare `.Variant`
+                        // with no receiver expression.
+                        const expr_last_i = prevNonTrivialTokenLite(idx.tokens, dot_i) orelse idx.tokens.len;
+                        if (expr_last_i < idx.tokens.len) {
+                            if (self.resolveTypeOfExprEndingAtToken(idx, uri, pos, expr_last_i)) |recv_type| {
+                                var seen = std.StringHashMap(void).init(self.allocator);
+                                defer {
+                                    var it = seen.iterator();
+                                    while (it.next()) |e| self.allocator.free(e.key_ptr.*);
+                                    seen.deinit();
+                                }
+                                try self.appendMemberCompletionsFromIndexForType(&items, &seen, idx, recv_type, prefix);
+                                try self.appendMemberCompletionsForType(&items, &seen, uri, recv_type, prefix);
+                                try self.appendMemberFieldCompletionsFromTokens(&items, &seen, idx, recv_type, prefix);
+                                try self.filterMemberCompletionItemsToLocalType(&items, idx, doc.text, recv_type);
+                                if (items.items.len != 0) {
+                                    const list: CompletionList = .{ .items = items.items };
+                                    const json = try jsonStringifyAlloc(self.allocator, list);
+                                    defer self.allocator.free(json);
+                                    try self.sendResponseJson(id_val, json);
+                                    return;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -6285,13 +6484,17 @@ pub const LspServer = struct {
                     break :blk true;
                 }
                 if (t.kind == .identifier and ti > 0 and isDotToken(idx.tokens[ti - 1])) {
-                    // Not shorthand when receiver exists: `Type.Member`
+                    // Not shorthand when a receiver expression precedes the dot:
+                    // `Type.Member`, or a call/index result `foo().Member` / `a[i].Member`.
                     if (ti >= 2 and idx.tokens[ti - 2].kind == .identifier) break :blk false;
+                    if (ti >= 2 and isChainCloserLite(idx.tokens[ti - 2])) break :blk false;
                     break :blk true;
                 }
                 if (isDotToken(t)) {
-                    // Not shorthand when receiver exists: `Type.`
+                    // Not shorthand when a receiver expression precedes the dot:
+                    // `Type.`, or a call/index result `foo().` / `a[i].`.
                     if (ti >= 1 and idx.tokens[ti - 1].kind == .identifier) break :blk false;
+                    if (ti >= 1 and isChainCloserLite(idx.tokens[ti - 1])) break :blk false;
                     break :blk true;
                 }
             }
@@ -6309,15 +6512,21 @@ pub const LspServer = struct {
             if (dot_i_opt == null) break :blk false;
 
             // Ensure there's no receiver identifier before the dot (shorthand only).
+            // The receiver would have to be adjacent to the dot on the SAME line,
+            // so skip only spaces/tabs (never newlines). A Fun keyword before the
+            // dot (e.g. `ret .`) is NOT a receiver — treat it as bare-dot shorthand.
             var j: usize = dot_i_opt.?;
             while (j > 0) {
                 const ch = doc.text[j - 1];
-                if (ch == ' ' or ch == '\t' or ch == '\r' or ch == '\n') {
+                if (ch == ' ' or ch == '\t') {
                     j -= 1;
                     continue;
                 }
                 break;
             }
+            // A call/index result (`)` / `]`) before the dot is a member access on
+            // that result, never a bare `.Variant` shorthand.
+            if (j > 0 and (doc.text[j - 1] == ')' or doc.text[j - 1] == ']')) break :blk false;
             var start: usize = j;
             while (start > 0) {
                 const ch = doc.text[start - 1];
@@ -6326,10 +6535,25 @@ pub const LspServer = struct {
                 start -= 1;
             }
             const recv_name = if (start < j) doc.text[start..j] else "";
-            break :blk recv_name.len == 0;
+            break :blk recv_name.len == 0 or isReceiverStopKeyword(recv_name);
         };
 
         if ((prefix.len == 1 and prefix[0] == '.') or dot_shorthand_active) {
+            // A dot shorthand (`.Variant`) or a bare `.` never completes to keywords
+            // or arbitrary symbols. Drop anything appended above (the unconditional
+            // keyword/symbol dump) so we return an enum-only (or empty) list.
+            for (items.items) |it| {
+                self.allocator.free(it.label);
+                if (it.detail) |d| self.allocator.free(d);
+                if (it.insertText) |ins| self.allocator.free(ins);
+                if (it.labelDetails) |ld| {
+                    if (ld.detail) |d| self.allocator.free(d);
+                    if (ld.description) |d| self.allocator.free(d);
+                }
+                if (it.filterText) |ft| self.allocator.free(ft);
+            }
+            items.clearRetainingCapacity();
+
             const dot_tok_i_opt = findTokenIndexAt(idx.tokens, pos) orelse findLastTokenIndexBeforeOrAt(idx.tokens, pos);
             if (dot_tok_i_opt) |dot_tok_i| {
                 if (self.guessEnumTypeForDotShorthand(uri, idx, dot_tok_i)) |enum_name| {
@@ -6340,10 +6564,11 @@ pub const LspServer = struct {
                         if (s.kind != .enumMember) continue;
                         if (s.container_type == null or !std.mem.eql(u8, baseTypeNameForLookup(s.container_type.?), enum_base)) continue;
                         const ft = try std.fmt.allocPrint(self.allocator, ".{s}", .{s.name});
+                        const det: []const u8 = enumVariantSigFromDetail(s, enum_name) orelse enum_name;
                         try items.append(.{
                             .label = try self.allocator.dupe(u8, s.name),
                             .kind = 20,
-                            .detail = try self.allocator.dupe(u8, enum_name),
+                            .detail = try self.allocator.dupe(u8, det),
                             .insertText = try self.allocator.dupe(u8, s.name),
                             .filterText = ft,
                         });
@@ -6365,10 +6590,11 @@ pub const LspServer = struct {
                             if (s.container_type == null or !std.mem.eql(u8, baseTypeNameForLookup(s.container_type.?), enum_base)) continue;
                             if (!self.isSymbolVisibleFromUri(uri, iu, s)) continue;
                             const ft = try std.fmt.allocPrint(self.allocator, ".{s}", .{s.name});
+                            const det: []const u8 = enumVariantSigFromDetail(s, enum_name) orelse enum_name;
                             try items.append(.{
                                 .label = try self.allocator.dupe(u8, s.name),
                                 .kind = 20,
-                                .detail = try self.allocator.dupe(u8, enum_name),
+                                .detail = try self.allocator.dupe(u8, det),
                                 .insertText = try self.allocator.dupe(u8, s.name),
                                 .filterText = ft,
                             });
@@ -6417,10 +6643,11 @@ pub const LspServer = struct {
                     if (s.container_type == null or !std.mem.eql(u8, s.container_type.?, e.name)) continue;
                     if (!self.isSymbolVisibleFromUri(uri, e.uri, s)) continue;
                     const ft = try std.fmt.allocPrint(self.allocator, ".{s}", .{s.name});
+                    const det: []const u8 = enumVariantSigFromDetail(s, e.name) orelse e.name;
                     try items.append(.{
                         .label = try self.allocator.dupe(u8, s.name),
                         .kind = 20,
-                        .detail = try self.allocator.dupe(u8, e.name),
+                        .detail = try self.allocator.dupe(u8, det),
                         .insertText = try self.allocator.dupe(u8, s.name),
                         .filterText = ft,
                     });

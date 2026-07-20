@@ -71,7 +71,7 @@ impl Rand {
   // - `Err` when the bounds are invalid
   pub try_range(num min, num max) Result<num> {
     if min > max {
-      ret err(1, "range: min > max", min);
+      ret err_kind(.Invalid, "range: min > max", min);
     }
     ret ok(self.range(min, max));
   }
@@ -109,7 +109,7 @@ impl Rand {
   // - `Err` when the bounds are invalid
   pub try_range_dec(dec min, dec max) Result<dec> {
     if min > max {
-      ret err(1, "range_dec: min > max", min);
+      ret err_kind(.Invalid, "range_dec: min > max", min);
     }
     ret ok(self.range_dec(min, max));
   }
@@ -192,31 +192,12 @@ pub fun rand_chance(Rand* r, dec p) bin {
   ret r.chance(p);
 }
 
-// Shuffle a Vec<num> in-place.
-// 
+// Shuffle a Vec<T> in-place (Fisher-Yates).
+//
 // Params:
 // - r: generator
 // - v: vector
-pub fun rand_shuffle_nums(Rand* r, Vec<num>* v) {
-  if v.len() <= 1 {
-    ret;
-  }
-  num i = v.len() - 1;
-  for i > 0 {
-    let j = r.range(0, i);
-    let tmp = v.data[i];
-    v.data[i] = v.data[j];
-    v.data[j] = tmp;
-    i = i - 1;
-  }
-}
-
-// Shuffle a Vec<str> in-place.
-// 
-// Params:
-// - r: generator
-// - v: vector
-pub fun rand_shuffle_strs(Rand* r, Vec<str>* v) {
+pub fun rand_shuffle<T>(Rand* r, Vec<T>* v) {
   if v.len() <= 1 {
     ret;
   }

@@ -122,7 +122,7 @@ impl ThreadPool {
   pub try_start_all(raw* entry, raw** args) Result<num> {
     let rc = self.start_all(entry, args);
     if rc != 0 {
-      ret err(rc, "thread pool start_all failed", rc);
+      ret err_kind_code(.System, rc, "thread pool start_all failed", rc);
     }
     ret ok(self.size);
   }
@@ -165,7 +165,7 @@ impl ThreadPool {
   pub try_join_all(raw** out_rets) Result<num> {
     let rc = self.join_all(out_rets);
     if rc != 0 {
-      ret err(rc, "thread pool join_all failed", rc);
+      ret err_kind_code(.System, rc, "thread pool join_all failed", rc);
     }
     ret ok(self.size);
   }
@@ -200,7 +200,7 @@ impl ThreadPool {
   pub try_detach_all() Result<num> {
     let rc = self.detach_all();
     if rc != 0 {
-      ret err(rc, "thread pool detach_all failed", rc);
+      ret err_kind_code(.System, rc, "thread pool detach_all failed", rc);
     }
     ret ok(self.size);
   }

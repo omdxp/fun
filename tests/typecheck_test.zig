@@ -1276,3 +1276,73 @@ test "typecheck map supports compound key operations" {
 
     try runTranspileExpectOk(std.testing.allocator, "typecheck_map_compound_key_ok.fn", input);
 }
+
+test "generic constraint: free fn accepts an in-bound type arg" {
+    const input =
+        "fun f<T: num | str>(T x) T { ret x; }\n" ++
+        "fun main() {\n" ++
+        "  let a = f(5);\n" ++
+        "  let b = f(\"hi\");\n" ++
+        "  _ = a;\n" ++
+        "  _ = b;\n" ++
+        "}\n";
+    try runTranspileExpectOk(std.testing.allocator, "gc_freefn_ok.fn", input);
+}
+
+test "generic constraint: free fn rejects an out-of-bound type arg" {
+    const input =
+        "fun f<T: num | str>(T x) T { ret x; }\n" ++
+        "fun main() {\n" ++
+        "  dec d = 3.5;\n" ++
+        "  let a = f(d);\n" ++
+        "  _ = a;\n" ++
+        "}\n";
+    try runTranspileExpectError(std.testing.allocator, "gc_freefn_bad.fn", input);
+}
+
+test "generic constraint: free fn with custom-type bound accepts a listed type" {
+    const input =
+        "compound A { num x; }\n" ++
+        "compound B { num y; }\n" ++
+        "fun f<T: A | B>(T v) T { ret v; }\n" ++
+        "fun main() {\n" ++
+        "  A a = A{ x = 1 };\n" ++
+        "  let r = f(a);\n" ++
+        "  _ = r;\n" ++
+        "}\n";
+    try runTranspileExpectOk(std.testing.allocator, "gc_freefn_custom_ok.fn", input);
+}
+
+test "generic constraint: free fn with custom-type bound rejects an unlisted type" {
+    const input =
+        "compound A { num x; }\n" ++
+        "compound B { num y; }\n" ++
+        "compound C { num z; }\n" ++
+        "fun f<T: A | B>(T v) T { ret v; }\n" ++
+        "fun main() {\n" ++
+        "  C c = C{ z = 1 };\n" ++
+        "  let r = f(c);\n" ++
+        "  _ = r;\n" ++
+        "}\n";
+    try runTranspileExpectError(std.testing.allocator, "gc_freefn_custom_bad.fn", input);
+}
+
+test "generic constraint: constrained compound accepts an in-bound instantiation" {
+    const input =
+        "compound Box<T: num | str> { T val; }\n" ++
+        "fun main() {\n" ++
+        "  Box<num> b = Box<num>{ val = 5 };\n" ++
+        "  _ = b.val;\n" ++
+        "}\n";
+    try runTranspileExpectOk(std.testing.allocator, "gc_compound_ok.fn", input);
+}
+
+test "generic constraint: constrained compound rejects an out-of-bound instantiation" {
+    const input =
+        "compound Box<T: num | str> { T val; }\n" ++
+        "fun main() {\n" ++
+        "  Box<bin> b = Box<bin>{ val = true };\n" ++
+        "  _ = b.val;\n" ++
+        "}\n";
+    try runTranspileExpectError(std.testing.allocator, "gc_compound_bad.fn", input);
+}

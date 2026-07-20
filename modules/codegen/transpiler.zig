@@ -1529,27 +1529,41 @@ pub const TranspileProcess = struct {
         };
         out.type_str.appendSlice(name) catch return TranspileError.MemoryAllocationFailed;
 
-        if (reg.compounds_by_name.get(name)) |cnode| {
-            if (cnode.node_variant != null) {
-                const c = cnode.node_variant.?.compound;
-                if (c.type_params) |params| {
-                    if (params.count > 0) {
-                        var args = utils.Vector(*dtype.DataType).init(self.allocator);
-                        errdefer {
-                            for (args.items()) |ga| {
-                                ga.type_str.deinit();
-                                self.allocator.destroy(ga);
-                            }
-                            args.deinit();
-                        }
-                        var i: usize = 0;
-                        while (i < params.count) : (i += 1) {
-                            const arg_dt = try self.dtype_from_mangled_segments(reg, segments, idx) orelse return null;
-                            args.push(arg_dt) catch return TranspileError.MemoryAllocationFailed;
-                        }
-                        out.generic_args = args;
-                    }
+        // Recover generic args by consuming the following segments, once per
+        // declared type param. Works for both generic COMPOUNDS and generic ENUMS
+        // (Option<T>/Result<T> are enums) — without the enum branch, a mangled
+        // name like `Option__JsonValue` yields generic_args=null, so a chained
+        // method returning the type param T (e.g. `opt.unwrap_or(..)` -> T) can't
+        // substitute T and the chain falls back to invalid raw C member access.
+        const type_params: ?*const utils.Vector(ArrayList(u8)) = blk: {
+            if (reg.compounds_by_name.get(name)) |cnode| {
+                if (cnode.node_variant != null) {
+                    if (cnode.node_variant.?.compound.type_params) |*p| break :blk p;
                 }
+            }
+            if (reg.enums_by_name.get(name)) |enode| {
+                if (enode.node_variant != null) {
+                    if (enode.node_variant.?.enum_decl.type_params) |*p| break :blk p;
+                }
+            }
+            break :blk null;
+        };
+        if (type_params) |params| {
+            if (params.count > 0) {
+                var args = utils.Vector(*dtype.DataType).init(self.allocator);
+                errdefer {
+                    for (args.items()) |ga| {
+                        ga.type_str.deinit();
+                        self.allocator.destroy(ga);
+                    }
+                    args.deinit();
+                }
+                var i: usize = 0;
+                while (i < params.count) : (i += 1) {
+                    const arg_dt = try self.dtype_from_mangled_segments(reg, segments, idx) orelse return null;
+                    args.push(arg_dt) catch return TranspileError.MemoryAllocationFailed;
+                }
+                out.generic_args = args;
             }
         }
 
@@ -4054,6 +4068,37 @@ pub const TranspileProcess = struct {
         }
     }
 
+    fn normalize_expr_to_expected_type(self: *Self, expr: *ast.Node, expected: CheckedType, env: *TypeEnv, fns: *const std.StringHashMap(FnSig)) TranspileError!void {
+        if (expr.type == .CompoundInit) {
+            try self.bind_compound_init_expected(expr, expected, env, fns);
+        }
+        if (self.expected_enum_name(expected)) |enum_name| {
+            if (dot_shorthand_variant_name(expr)) |_| {
+                _ = try self.resolve_dot_shorthand_enum_variant(expr, enum_name);
+            }
+            try self.resolve_shorthand_enum_call(expr, enum_name);
+            try self.bind_enum_ctor_expected(expr, expected);
+        }
+    }
+
+    fn validate_parameter_defaults(self: *Self, fnv_args: ?utils.Vector(*ast.Node), owner: ast.Node, env: *TypeEnv, fns: *const std.StringHashMap(FnSig)) TranspileError!void {
+        const args = (fnv_args orelse return).items();
+        for (args) |arg_ptr| {
+            const arg = arg_ptr.*;
+            if (arg.type != .Variable or arg.node_variant == null) continue;
+            const v = arg.node_variant.?.variable;
+            const dflt = v.val orelse continue;
+            const expected = try self.type_from_dtype_with_mangled(v.type);
+            try self.normalize_expr_to_expected_type(dflt, expected, env, fns);
+            const actual = try self.infer_expr_type(dflt.*, env, fns);
+            if (is_known_type(expected) and is_known_type(actual) and !(try self.can_implicit_coerce(expected, actual))) {
+                self.report_type_error(owner, "type mismatch in default value for parameter '{s}'", .{v.name.items});
+                return TranspileError.TypeMismatch;
+            }
+            self.check_int_literal_range(v.type, dflt, owner);
+        }
+    }
+
     fn count_required_args_from_node(args_vec: utils.Vector(*ast.Node)) usize {
         const items = args_vec.items();
         var n: usize = 0;
@@ -4527,7 +4572,45 @@ pub const TranspileProcess = struct {
             for (gargs.items()) |ga| {
                 try self.ensure_dtype_visible(ref_node, ga, allow);
             }
+            // Enforce constrained generic COMPOUNDS (`compound Box<T: num | str>`):
+            // a concrete instantiation like `Box<bin>` must satisfy the declared
+            // bound. Only check when every generic arg is a concrete/known type
+            // (not a still-symbolic type param inside the compound's own impl),
+            // to avoid false positives during generic-body typechecking.
+            const base = if (mem.indexOf(u8, dt.type_str.items, "__")) |i| dt.type_str.items[0..i] else dt.type_str.items;
+            if (self.root_registry()) |reg| {
+                if (reg.compounds_by_name.get(base)) |cnode| {
+                    if (cnode.node_variant != null) {
+                        if (cnode.node_variant.?.compound.type_param_forced_insts) |forced| {
+                            const arg_items = gargs.items();
+                            var all_concrete = true;
+                            for (arg_items) |ga| {
+                                const gt = type_from_dtype(ga);
+                                if (!is_known_type(gt) or (allow != null and self.dtype_names_type_param(ga, allow.?))) {
+                                    all_concrete = false;
+                                    break;
+                                }
+                            }
+                            if (all_concrete and !impl_allows_generic_args(forced, arg_items)) {
+                                self.report_type_error(ref_node, "'{s}' does not satisfy its generic constraint: type argument is not in the declared bound", .{dt.type_str.items});
+                                return TranspileError.TypeMismatch;
+                            }
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    /// True when `dt`'s type name is one of the allowed (still-symbolic) type
+    /// parameter names in `allow` (e.g. `T` inside `impl Box<T>`), so constraint
+    /// enforcement should be skipped for it.
+    fn dtype_names_type_param(self: *Self, dt: *const dtype.DataType, allow: []const []const u8) bool {
+        _ = self;
+        for (allow) |p| {
+            if (mem.eql(u8, p, dt.type_str.items)) return true;
+        }
+        return false;
     }
 
     fn is_known_type(t: CheckedType) bool {
@@ -5249,7 +5332,17 @@ pub const TranspileProcess = struct {
         return null;
     }
 
-    fn infer_compound_field_access_type(self: *Self, node: ast.Node, base: CheckedType, field_name: []const u8) TranspileError!CheckedType {
+    fn infer_compound_field_access_type(self: *Self, node: ast.Node, base: CheckedType, field_name: []const u8, env: *TypeEnv) TranspileError!CheckedType {
+        // Field access on a value whose type is a still-symbolic generic type
+        // parameter (e.g. `x.v` inside `fun f<T>(T x) num { ret x.v; }`) cannot be
+        // resolved at the generic definition — the concrete type (and thus its
+        // fields) is only known per monomorphization. Defer: return Unknown rather
+        // than reporting `unknown type 'T'`. The real field-type check happens when
+        // the specialized body is emitted for each concrete T.
+        if (base.name) |bn| {
+            if (env.has_type_param(bn)) return CheckedType{ .base = .Unknown };
+        }
+
         if (!is_user_named_type(base)) {
             self.report_type_error(node, "field access requires a compound-typed value", .{});
             return TranspileError.InvalidFieldAccess;
@@ -5487,6 +5580,67 @@ pub const TranspileProcess = struct {
         return self.find_any_impl_method_node_proc(root, type_base, method_name);
     }
 
+    /// When a method call resolves to an impl block that constrains its type
+    /// parameters (`impl Box<T: num | dec> { ... }`), verify the concrete receiver
+    /// type args satisfy the constraint. Emits a Fun TypeError on violation
+    /// instead of leaving the constrained-out specialization un-emitted (which the
+    /// old behavior turned into an opaque C linker error `undefined Box__str__get`).
+    /// Returns error.TypeMismatch on violation; no-op when unconstrained or the
+    /// receiver args aren't statically concrete.
+    fn check_impl_generic_constraint(self: *Self, node: ast.Node, recv_dt: ?*const dtype.DataType, recv_base: []const u8, method_name: []const u8) TranspileError!void {
+        const dt = recv_dt orelse return;
+        const gargs_vec = dt.generic_args orelse return;
+        const gargs = gargs_vec.items();
+        if (gargs.len == 0) return;
+        const base = if (mem.indexOf(u8, recv_base, "__")) |idx| recv_base[0..idx] else recv_base;
+        const hit = self.find_any_impl_method_node(base, method_name) orelse return;
+        const im = hit.impl_node.node_variant.?.impl;
+        const forced = im.type_param_forced_insts orelse return;
+        // Only check when every generic arg is CONCRETE — not a still-symbolic type
+        // parameter. A call made inside a generic body (e.g. stdlib `impl Vec<T>`
+        // calling a constrained sibling with receiver `Vec__T`) has `T` as the arg;
+        // that is not a real instantiation and must not be constraint-checked here
+        // (it is checked at the concrete call site). Skip if any arg is unknown, is
+        // one of the impl's own type-param names, or is a bare single-uppercase
+        // placeholder / still contains `__`-free uppercase-only spelling.
+        const impl_params = self.impl_type_params(hit.impl_node);
+        for (gargs) |ga| {
+            const gt = type_from_dtype(ga);
+            if (!is_known_type(gt)) return;
+            const spelling = ga.type_str.items;
+            if (impl_params) |params| {
+                for (params.items()) |p| {
+                    if (mem.eql(u8, p.items, spelling)) return;
+                }
+            }
+            // A conventional bare type-param placeholder (single uppercase letter,
+            // or all-uppercase with no `__` mangling) — not a concrete type.
+            if (spelling.len >= 1 and spelling[0] >= 'A' and spelling[0] <= 'Z' and
+                mem.indexOf(u8, spelling, "__") == null)
+            {
+                var all_upper_ident = true;
+                for (spelling) |ch| {
+                    if (!((ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_')) {
+                        all_upper_ident = false;
+                        break;
+                    }
+                }
+                // Only treat as a type-param if it is NOT a known concrete type name.
+                if (all_upper_ident) {
+                    const reg = self.root_registry();
+                    const is_concrete_type = reg != null and
+                        (reg.?.compounds_by_name.contains(spelling) or reg.?.enums_by_name.contains(spelling));
+                    if (!is_concrete_type) return;
+                }
+            }
+        }
+        if (!impl_allows_generic_args(forced, gargs)) {
+            const mangled = self.type_name_mangled(dt) catch dt.type_str.items;
+            self.report_type_error(node, "'{s}' does not satisfy the constraint on 'impl {s}' for method '{s}'", .{ mangled, base, method_name });
+            return TranspileError.TypeMismatch;
+        }
+    }
+
     fn synthesize_generic_plain_method_sig(self: *Self, recv_dt: *const dtype.DataType, recv_name: []const u8, method_name: []const u8) ?FnSig {
         if (recv_dt.generic_args == null) return null;
         const base = if (mem.indexOf(u8, recv_name, "__")) |idx| recv_name[0..idx] else recv_name;
@@ -5670,6 +5824,104 @@ pub const TranspileProcess = struct {
         return self.find_function_node_proc(root, name);
     }
 
+    fn find_generic_fn_instantiation(self: *Self, name: []const u8) ?*const GenericFnInstantiation {
+        const root = self.get_root();
+        for (root.generic_fn_instantiations.items) |*inst| {
+            if (mem.eql(u8, inst.name, name)) return inst;
+        }
+        return null;
+    }
+
+    fn find_imported_proc_by_alias(self: *Self, ref_node: ?*const ast.Node, alias: []const u8) ?*Self {
+        const root = self.get_root();
+        const owner = blk: {
+            if (ref_node) |n| {
+                if (n.pos) |p| {
+                    if (root.find_process_for_file(p.filename)) |proc| break :blk proc;
+                }
+            }
+            break :blk self;
+        };
+        for (owner.children.items) |child| {
+            if (child.import_alias) |child_alias| {
+                if (mem.eql(u8, child_alias, alias)) return child;
+            }
+        }
+        return null;
+    }
+
+    const FreeCallDefaultInfo = struct {
+        fn_node: *ast.Node,
+        subst_params: ?*const utils.Vector(ArrayList(u8)) = null,
+        subst_args: ?[]*dtype.DataType = null,
+    };
+
+    fn resolve_free_call_default_info(self: *Self, call_node: ast.Node, callee: *ast.Node) ?FreeCallDefaultInfo {
+        if (self.lookup_generic_call_override(call_node)) |spec_name| {
+            const inst = self.find_generic_fn_instantiation(spec_name) orelse return null;
+            return .{ .fn_node = inst.fn_node, .subst_params = inst.params, .subst_args = inst.args };
+        }
+
+        if (callee.type == .Identifier and callee.data != null) {
+            const fname = callee.data.?.sval.items;
+            const fname_base = if (std.mem.lastIndexOf(u8, fname, "__")) |sep| fname[sep + 2 ..] else fname;
+            const fn_node = self.find_function_node(fname) orelse self.find_function_node(fname_base) orelse return null;
+            return .{ .fn_node = fn_node };
+        }
+
+        if (callee.type == .Expression and callee.node_variant != null and mem.eql(u8, callee.node_variant.?.exp.op, ".")) {
+            const dot = callee.node_variant.?.exp;
+            const left = dot.left orelse return null;
+            const right = dot.right orelse return null;
+            if (left.*.type == .Identifier and left.*.data != null and right.*.type == .Identifier and right.*.data != null) {
+                const alias_name = left.*.data.?.sval.items;
+                const member_name = right.*.data.?.sval.items;
+                if (self.alias_map_for_node(&call_node).contains(alias_name)) {
+                    if (self.alias_is_c_binding(&call_node, alias_name)) return null;
+                    if (self.find_imported_proc_by_alias(&call_node, alias_name)) |proc| {
+                        if (self.find_function_node_proc(proc, member_name)) |fn_node| {
+                            return .{ .fn_node = fn_node };
+                        }
+                    }
+                    if (self.find_function_node(member_name)) |fn_node| {
+                        return .{ .fn_node = fn_node };
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    fn emit_expr_with_subst(self: *Self, expr: ast.Node, subst_params: ?*const utils.Vector(ArrayList(u8)), subst_args: ?[]*dtype.DataType) TranspileError!void {
+        const prev_params = self.type_subst_params;
+        const prev_args = self.type_subst_args;
+        if (subst_params != null and subst_args != null) {
+            self.type_subst_params = subst_params;
+            self.type_subst_args = subst_args;
+        }
+        defer {
+            self.type_subst_params = prev_params;
+            self.type_subst_args = prev_args;
+        }
+        try self.transpile_node(expr);
+    }
+
+    fn emit_omitted_default_args_from_params(self: *Self, params: []const *ast.Node, passed: usize, initially_wrote_any: bool, subst_params: ?*const utils.Vector(ArrayList(u8)), subst_args: ?[]*dtype.DataType) TranspileError!void {
+        if (passed >= params.len) return;
+
+        var wrote_any = initially_wrote_any;
+        var idx: usize = passed;
+        while (idx < params.len) : (idx += 1) {
+            const p = params[idx].*;
+            if (p.type != .Variable or p.node_variant == null) return;
+            const dflt = p.node_variant.?.variable.val orelse return;
+            if (wrote_any) try self.write(", ");
+            try self.emit_expr_with_subst(dflt.*, subst_params, subst_args);
+            wrote_any = true;
+        }
+    }
+
     /// Append the callee's default-value expressions for any TRAILING params the call
     /// omitted. `right` is the call's (flattened) argument expression; `passed` is how
     /// many args the caller actually wrote. For each param index in [passed, param_count)
@@ -5677,13 +5929,9 @@ pub const TranspileProcess = struct {
     /// the general (non-variadic) call path so a single chokepoint covers free-function
     /// calls; methods/generics route through their own paths and are handled separately.
     /// No-op when the callee isn't found, has no defaults, or the call is already full.
-    fn emit_trailing_default_args(self: *Self, left: *ast.Node, right: ?*ast.Node) TranspileError!void {
-        // Derive the callee name from `left` (a bare identifier; member-call `a.f` and
-        // other forms route through their own emission paths and are skipped here).
-        if (left.type != .Identifier or left.data == null) return;
-        const fname = left.data.?.sval.items;
-        const fname_base = if (std.mem.lastIndexOf(u8, fname, "__")) |sep| fname[sep + 2 ..] else fname;
-        const fn_node = self.find_function_node(fname) orelse self.find_function_node(fname_base) orelse return;
+    fn emit_trailing_default_args(self: *Self, call_node: ast.Node, callee: *ast.Node, right: ?*ast.Node) TranspileError!void {
+        const info = self.resolve_free_call_default_info(call_node, callee) orelse return;
+        const fn_node = info.fn_node;
         if (fn_node.node_variant == null) return;
         const fnv = fn_node.node_variant.?.function;
         if (fnv.is_variadic) return; // variadic path handles its own arg list
@@ -5699,21 +5947,7 @@ pub const TranspileProcess = struct {
             self.flatten_call_args_ptr(r, &tmp) catch return;
             passed = tmp.items.len;
         }
-        if (passed >= params.len) return;
-
-        // `wrote_any` tracks whether anything precedes the next arg inside the parens,
-        // so we emit a separating comma iff the caller passed >=1 arg OR we've already
-        // emitted a prior default this loop.
-        var wrote_any = passed > 0;
-        var idx: usize = passed;
-        while (idx < params.len) : (idx += 1) {
-            const p = params[idx].*;
-            if (p.type != .Variable or p.node_variant == null) return;
-            const dflt = p.node_variant.?.variable.val orelse return; // trailing-only guarantees the rest also have defaults
-            if (wrote_any) try self.write(", ");
-            try self.transpile_node(dflt.*);
-            wrote_any = true;
-        }
+        try self.emit_omitted_default_args_from_params(params, passed, passed > 0, info.subst_params, info.subst_args);
     }
 
     /// Method variant: fill omitted trailing default args for a resolved method whose
@@ -6550,6 +6784,43 @@ pub const TranspileProcess = struct {
         }
     }
 
+    /// Advisory static check: when a variable is declared with an arbitrary-width
+    /// integer type (`uN`/`iN`) and initialized from a compile-time integer
+    /// constant, warn if the value cannot be represented in that width — a value
+    /// too large for the width, or a negative value assigned to an unsigned type.
+    /// Only fires for constants the const-folder can resolve; anything dynamic is
+    /// left alone (zero false positives). Emitted as a warning (like unused_*),
+    /// gated on `flags.emit_unused_warnings`, and honors `allow`/`expect`.
+    fn check_int_literal_range(self: *Self, decl_type: *const dtype.DataType, val: *const ast.Node, node: ast.Node) void {
+        if (!self.flags.emit_unused_warnings) return;
+        const dyn = utils.parse_dynamic_int_datatype(decl_type.type_str.items) orelse return;
+        // A pointer/array of the int type is not a scalar literal target.
+        if (decl_type.pointer_depth != 0) return;
+        if (decl_type.flags != null and decl_type.flags.?.is_array) return;
+        const value = self.const_fold_int(val.*) orelse return;
+
+        // Compute the representable range in i128 to avoid overflow at the edges
+        // (u64/i64 bounds don't fit in i64/u64 respectively).
+        if (dyn.bits == 0 or dyn.bits > 128) return;
+        if (!dyn.is_signed and value < 0) {
+            self.report_warning(.integer_literal_out_of_range, node, "negative literal {d} assigned to unsigned type 'u{d}'", .{ value, dyn.bits });
+            return;
+        }
+        const v128: i128 = value;
+        if (dyn.is_signed) {
+            const lo: i128 = -(@as(i128, 1) << @intCast(dyn.bits - 1));
+            const hi: i128 = (@as(i128, 1) << @intCast(dyn.bits - 1)) - 1;
+            if (v128 < lo or v128 > hi) {
+                self.report_warning(.integer_literal_out_of_range, node, "literal {d} out of range for 'i{d}' (valid {d}..{d})", .{ value, dyn.bits, lo, hi });
+            }
+        } else {
+            const hi: i128 = (@as(i128, 1) << @intCast(dyn.bits)) - 1;
+            if (v128 > hi) {
+                self.report_warning(.integer_literal_out_of_range, node, "literal {d} out of range for 'u{d}' (valid 0..{d})", .{ value, dyn.bits, hi });
+            }
+        }
+    }
+
     fn infer_expr_type(self: *Self, node: ast.Node, env: *TypeEnv, fns: *const std.StringHashMap(FnSig)) TranspileError!CheckedType {
         if (self.recursion_depth >= max_expr_recursion_depth) {
             self.report_type_error(node, "expression nests too deeply for the compiler to analyze (limit {d})", .{max_expr_recursion_depth});
@@ -6707,19 +6978,25 @@ pub const TranspileProcess = struct {
                     }
                     return .{ .base = .Bin };
                 }
+                // A type param (e.g. T) is unknown but may be constrained to numeric
+                // types; allow it here too so a constrained generic body (e.g.
+                // `fun abs<T: num | dec>(T x) T { ret -x; }`) typechecks at the
+                // template pass, mirroring the binary-operator allowance below.
+                const operand_is_num_or_param = operand_t.base == .Num or operand_t.base == .Dec or
+                    (operand_t.base == .Unknown and operand_t.name != null and env.has_type_param(operand_t.name.?));
                 if (mem.eql(u8, u.op, "-") or mem.eql(u8, u.op, "+")) {
-                    if (operand_t.base != .Num and operand_t.base != .Dec) {
+                    if (!operand_is_num_or_param) {
                         self.report_type_error(node, "unary '{s}' expects num/dec operand", .{u.op});
                         return TranspileError.TypeMismatch;
                     }
-                    return .{ .base = operand_t.base };
+                    return operand_t;
                 }
                 if (mem.eql(u8, u.op, "++") or mem.eql(u8, u.op, "--")) {
-                    if (operand_t.base != .Num and operand_t.base != .Dec) {
+                    if (!operand_is_num_or_param) {
                         self.report_type_error(node, "unary '{s}' expects num/dec operand", .{u.op});
                         return TranspileError.TypeMismatch;
                     }
-                    return .{ .base = operand_t.base };
+                    return operand_t;
                 }
                 return operand_t;
             },
@@ -7191,7 +7468,13 @@ pub const TranspileProcess = struct {
                                 }
 
                                 if (plain_method_sig != null) {
-                                    // Resolved via plain impl.
+                                    // Resolved via plain impl. If the owning impl is
+                                    // constrained (`impl Box<T: num | dec>`), verify the
+                                    // concrete receiver satisfies it — else this call
+                                    // would reference an un-emitted specialization and
+                                    // fail at C link time.
+                                    const check_dt: ?*const dtype.DataType = if (recv_t.dtype_ref) |dt| dt else self.lookup_receiver_dtype(recv.*);
+                                    try self.check_impl_generic_constraint(node, check_dt, recv_name_canon, mname);
                                 } else {
                                     // fallback to alt generic name or quirk impl
                                     // Retry with a mangled generic receiver name if available.
@@ -7341,6 +7624,17 @@ pub const TranspileProcess = struct {
                                 if (expected_node.type != .Variable or expected_node.node_variant == null) continue;
                                 const expected_dt = expected_node.node_variant.?.variable.type;
 
+                                // Resolve enum/compound shorthand (`.Io`, `.Some(v)`) against
+                                // the DECLARED (unsubstituted) param type before inferring the
+                                // arg's type below. For a concrete (non-type-param) param this
+                                // is already the real expected type, so the rewrite is safe to
+                                // do here in the same pass that binds T from other arguments —
+                                // otherwise a concretely-typed param preceding the type-param
+                                // one (e.g. `err_kind<T>(ErrorKind kind, ..., T default)`) would
+                                // have its shorthand arg inferred with no expected type yet and
+                                // fail as a bare field access on a blank receiver.
+                                try self.normalize_expr_to_expected_type(arg_node, try self.type_from_dtype_with_mangled(expected_dt), env, fns);
+
                                 const actual_ct = try self.infer_expr_type(arg_node.*, env, fns);
                                 const actual_dt = (try self.checked_type_to_dtype(actual_ct)) orelse {
                                     self.report_type_error(node, "cannot infer generic argument from value", .{});
@@ -7369,6 +7663,16 @@ pub const TranspileProcess = struct {
                                 pi += 1;
                             }
 
+                            // Enforce the declared constraint set (`fun f<T: a | b>`):
+                            // the inferred concrete type args must satisfy one of the
+                            // forced instantiations. Unlike the impl path (which
+                            // silently omits emission), a free-fn violation is a real
+                            // Fun-level TypeError rather than an opaque C link error.
+                            if (!impl_allows_generic_args(fnv.type_param_forced_insts, gargs)) {
+                                self.report_type_error(node, "call to '{s}' violates generic constraint: type argument does not satisfy the declared bound", .{callee_name.?});
+                                return TranspileError.TypeMismatch;
+                            }
+
                             // Typecheck args against substituted signature.
                             idx = 0;
                             while (idx < args_nodes.items.len and idx < fixed_len) : (idx += 1) {
@@ -7376,6 +7680,7 @@ pub const TranspileProcess = struct {
                                 if (expected_node.type != .Variable or expected_node.node_variant == null) continue;
                                 const expected_dt = expected_node.node_variant.?.variable.type;
                                 const expected_t = try self.type_from_dtype_with_subst(expected_dt, params_ptr.*, gargs);
+                                try self.normalize_expr_to_expected_type(args_nodes.items[idx], expected_t, env, fns);
                                 const actual_t = try self.infer_expr_type(args_nodes.items[idx].*, env, fns);
                                 if (is_known_type(expected_t) and is_known_type(actual_t) and !(try self.can_implicit_coerce(expected_t, actual_t))) {
                                     self.report_type_error(node, "type mismatch in call to '{s}' argument {d}", .{ callee_name.?, idx + 1 });
@@ -7441,14 +7746,7 @@ pub const TranspileProcess = struct {
                             // Enum shorthand args: `foo(.Blue)` where param type is `Color`.
                             if (idx < sig.args.len) {
                                 const expected = sig.args[idx];
-                                if (arg_node.type == .CompoundInit) {
-                                    try self.bind_compound_init_expected(arg_node, expected, env, fns);
-                                }
-                                if (self.expected_enum_name(expected)) |enum_name| {
-                                    if (dot_shorthand_variant_name(arg_node)) |_| {
-                                        _ = try self.resolve_dot_shorthand_enum_variant(arg_node, enum_name);
-                                    }
-                                }
+                                try self.normalize_expr_to_expected_type(arg_node, expected, env, fns);
                             }
 
                             const actual = try self.infer_expr_type(arg_node.*, env, fns);
@@ -7470,14 +7768,7 @@ pub const TranspileProcess = struct {
                         }
                         for (args_nodes.items, 0..) |arg_node, idx| {
                             const expected = type_from_dtype(expected_args[idx].dtype);
-                            if (arg_node.type == .CompoundInit) {
-                                try self.bind_compound_init_expected(arg_node, expected, env, fns);
-                            }
-                            if (self.expected_enum_name(expected)) |enum_name| {
-                                if (dot_shorthand_variant_name(arg_node)) |_| {
-                                    _ = try self.resolve_dot_shorthand_enum_variant(arg_node, enum_name);
-                                }
-                            }
+                            try self.normalize_expr_to_expected_type(arg_node, expected, env, fns);
 
                             const actual = try self.infer_expr_type(arg_node.*, env, fns);
                             if (is_known_type(expected) and is_known_type(actual) and !(try self.can_implicit_coerce(expected, actual))) {
@@ -7516,14 +7807,7 @@ pub const TranspileProcess = struct {
                             const sig_idx = idx + 1; // skip implicit self
                             if (sig_idx < psig.args.len) {
                                 const expected = psig.args[sig_idx];
-                                if (arg_node.type == .CompoundInit) {
-                                    try self.bind_compound_init_expected(arg_node, expected, env, fns);
-                                }
-                                if (self.expected_enum_name(expected)) |enum_name| {
-                                    if (dot_shorthand_variant_name(arg_node)) |_| {
-                                        _ = try self.resolve_dot_shorthand_enum_variant(arg_node, enum_name);
-                                    }
-                                }
+                                try self.normalize_expr_to_expected_type(arg_node, expected, env, fns);
                             }
 
                             const actual = try self.infer_expr_type(arg_node.*, env, fns);
@@ -7603,7 +7887,7 @@ pub const TranspileProcess = struct {
                     // `rect.a.x` -> `rect . (a . x)`.
                     // Support both `left . Identifier` and `left . (a . b . c)` forms.
                     if (right.type == .Identifier and right.data != null) {
-                        return try self.infer_compound_field_access_type(node, lt, right.data.?.sval.items);
+                        return try self.infer_compound_field_access_type(node, lt, right.data.?.sval.items, env);
                     }
 
                     if (right.type == .Expression and right.node_variant != null and mem.eql(u8, right.node_variant.?.exp.op, "[]")) {
@@ -7620,7 +7904,7 @@ pub const TranspileProcess = struct {
                             self.report_type_error(node, "field access requires an identifier", .{});
                             return TranspileError.InvalidFieldAccess;
                         }
-                        const field_dt = try self.infer_compound_field_access_type(node, lt, rleft.*.data.?.sval.items);
+                        const field_dt = try self.infer_compound_field_access_type(node, lt, rleft.*.data.?.sval.items, env);
                         const idx_t = try self.infer_expr_type(rright.*, env, fns);
                         if (idx_t.base != .Num) {
                             self.report_type_error(node, "array index must be num", .{});
@@ -7646,7 +7930,7 @@ pub const TranspileProcess = struct {
                                     return TranspileError.InvalidFieldAccess;
                                 };
                                 if (seg.type == .Identifier and seg.data != null) {
-                                    lt = try self.infer_compound_field_access_type(node, lt, seg.data.?.sval.items);
+                                    lt = try self.infer_compound_field_access_type(node, lt, seg.data.?.sval.items, env);
                                 } else if (seg.type == .Expression and seg.node_variant != null and mem.eql(u8, seg.node_variant.?.exp.op, "[]")) {
                                     const segexp = seg.node_variant.?.exp;
                                     const segleft = segexp.left orelse {
@@ -7661,7 +7945,7 @@ pub const TranspileProcess = struct {
                                         self.report_type_error(node, "field access requires an identifier", .{});
                                         return TranspileError.InvalidFieldAccess;
                                     }
-                                    const field_dt = try self.infer_compound_field_access_type(node, lt, segleft.*.data.?.sval.items);
+                                    const field_dt = try self.infer_compound_field_access_type(node, lt, segleft.*.data.?.sval.items, env);
                                     const idx_t = try self.infer_expr_type(segright.*, env, fns);
                                     if (idx_t.base != .Num) {
                                         self.report_type_error(node, "array index must be num", .{});
@@ -7689,7 +7973,7 @@ pub const TranspileProcess = struct {
                             }
 
                             if (cursor.type == .Identifier and cursor.data != null) {
-                                lt = try self.infer_compound_field_access_type(node, lt, cursor.data.?.sval.items);
+                                lt = try self.infer_compound_field_access_type(node, lt, cursor.data.?.sval.items, env);
                                 return lt;
                             }
 
@@ -7989,6 +8273,8 @@ pub const TranspileProcess = struct {
                             self.report_type_error(stmt, "type mismatch in initialization of '{s}'", .{name});
                             return TranspileError.TypeMismatch;
                         }
+                        // uN/iN literal range/signedness check (advisory).
+                        self.check_int_literal_range(v.type, val, stmt);
                     }
                 },
                 .StatementReturn => {
@@ -8020,7 +8306,20 @@ pub const TranspileProcess = struct {
                             try self.bind_enum_ctor_expected(rv, fn_rtype);
                         }
                         const rt = try self.infer_expr_type(rv.*, env, fns);
-                        if (is_known_type(fn_rtype) and is_known_type(rt) and !(try self.can_implicit_coerce(fn_rtype, rt))) {
+                        // A declared return type that's still a symbolic, numerically
+                        // constrained type param (e.g. `fun sign<T: num | dec>(T x) T`)
+                        // can legitimately return a concrete numeric LITERAL (`ret -1;`,
+                        // whose inferred type is plain `Num`, not `T`). The real
+                        // constraint (does the concrete `T` actually accept `Num`?) is
+                        // enforced at each call site via `impl_allows_generic_args`, so
+                        // the template body itself only needs this numeric/param
+                        // allowance — mirroring the same relaxation already applied to
+                        // unary/binary operators on a constrained type param above.
+                        const rtype_is_numeric_param = fn_rtype.base == .Unknown and fn_rtype.name != null and env.has_type_param(fn_rtype.name.?);
+                        const rt_is_num_or_param = rt.base == .Num or rt.base == .Dec or
+                            (rt.base == .Unknown and rt.name != null and env.has_type_param(rt.name.?));
+                        const skip_return_check = rtype_is_numeric_param and rt_is_num_or_param;
+                        if (!skip_return_check and is_known_type(fn_rtype) and is_known_type(rt) and !(try self.can_implicit_coerce(fn_rtype, rt))) {
                             self.report_type_error(stmt, "return type mismatch", .{});
                             return TranspileError.ReturnTypeMismatch;
                         }
@@ -8983,6 +9282,8 @@ pub const TranspileProcess = struct {
                     proc.report_type_error(gn.*, "type mismatch in initialization of '{s}'", .{v.name.items});
                     return TranspileError.TypeMismatch;
                 }
+                // uN/iN literal range/signedness check (advisory).
+                proc.check_int_literal_range(v.type, val, gn.*);
             }
         }
 
@@ -9044,6 +9345,8 @@ pub const TranspileProcess = struct {
                 const vdt = try proc.make_vec_str_dtype();
                 try fn_env.put_current("vargs", try proc.type_from_dtype_with_mangled(vdt));
             }
+
+            try proc.validate_parameter_defaults(fnv.args, node, &fn_env, fns);
 
             if (fnv.body) |body| {
                 const prev_async = proc.current_fn_is_async;
@@ -9175,6 +9478,8 @@ pub const TranspileProcess = struct {
                 }
 
                 if (fnv.body) |body| {
+                    try proc.validate_parameter_defaults(fnv.args, m, &fn_env, fns);
+
                     const prev_async = proc.current_fn_is_async;
                     proc.current_fn_is_async = fnv.is_async;
                     defer proc.current_fn_is_async = prev_async;
@@ -9239,6 +9544,7 @@ pub const TranspileProcess = struct {
             const fnv = node.node_variant.?.function;
             if (fnv.body) |body| {
                 try proc.lint_forks_in_body(body);
+                proc.lint_channel_capacity_in_body(body);
             }
         }
         for (proc.owned_nodes.items) |n| {
@@ -9248,7 +9554,96 @@ pub const TranspileProcess = struct {
                 if (m.type != .Function or m.node_variant == null) continue;
                 if (m.node_variant.?.function.body) |body| {
                     try proc.lint_forks_in_body(body);
+                    proc.lint_channel_capacity_in_body(body);
                 }
+            }
+        }
+    }
+
+    /// Channel-capacity static lint (MVP): flag a bounded channel that receives
+    /// more BLOCKING sends than its capacity with no concurrent receiver, so the
+    /// producer blocks forever. Conservative to the point of zero false positives:
+    /// only fires for the straight-line shape where a channel local is created
+    /// with a literal `channel_new_cap(_, C)` and then gets > C top-level
+    /// `ch <- v` sends BEFORE any `fork` is spawned and before any `ch.recv()` /
+    /// `ch.close()` — i.e. a single-threaded producer that provably overflows its
+    /// own buffer (e.g. `let c = channel_new_cap(0, 1); c <- 1; c <- 2; c <- 3;`).
+    /// Anything with a prior fork, a receive, a loop, or a non-literal capacity is
+    /// left alone (those may have a concurrent drainer the lint can't see).
+    fn lint_channel_capacity_in_body(self: *Self, body: *ast.Node) void {
+        if (body.type != .Body or body.node_variant == null) return;
+        const stmts = body.node_variant.?.body.statements.items();
+
+        // channel name -> literal capacity (only channels created in THIS body).
+        var caps = std.StringHashMap(i64).init(self.allocator);
+        defer caps.deinit();
+        // channel name -> top-level blocking-send count seen so far.
+        var sends = std.StringHashMap(i64).init(self.allocator);
+        defer sends.deinit();
+        // Once any fork appears, a concurrent receiver may exist — stop analyzing.
+        var forked = false;
+        // Channels that have been received-from / closed at top level are exempt.
+        var drained = std.StringHashMap(void).init(self.allocator);
+        defer drained.deinit();
+
+        for (stmts) |s| {
+            if (forked) break;
+            switch (s.type) {
+                .StatementFork => {
+                    forked = true;
+                },
+                .Variable => {
+                    const v = s.node_variant.?.variable;
+                    if (v.val) |val| {
+                        if (self.channel_new_cap_literal(val)) |c| {
+                            caps.put(v.name.items, c) catch {};
+                            sends.put(v.name.items, 0) catch {};
+                        }
+                    }
+                },
+                .Expression => {
+                    // Assignment form `c = channel_new_cap(...)`, or a channel op.
+                    const e = s.node_variant.?.exp;
+                    if (mem.eql(u8, e.op, "=")) {
+                        if (e.left) |l| {
+                            if (l.type == .Identifier and l.data != null) {
+                                if (e.right) |r| {
+                                    if (self.channel_new_cap_literal(r)) |c| {
+                                        caps.put(l.data.?.sval.items, c) catch {};
+                                        sends.put(l.data.?.sval.items, 0) catch {};
+                                    }
+                                }
+                            }
+                        }
+                    } else if (channel_op_of(s)) |op| {
+                        if (mem.eql(u8, op.method, "send")) {
+                            if (sends.getPtr(op.name)) |sp| sp.* += 1;
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+
+        // A receive or close ANYWHERE in the body (including on a `let x = <- c`
+        // RHS, in a nested block, or after the sends) means the buffer is drained,
+        // so exempt that channel — we only flag a provably one-way over-send.
+        collect_channel_drainers(body, &drained);
+
+        if (forked) return; // a concurrent receiver may exist; don't guess.
+        var it = caps.iterator();
+        while (it.next()) |entry| {
+            const name = entry.key_ptr.*;
+            const cap = entry.value_ptr.*;
+            if (drained.contains(name)) continue;
+            const n_sends = sends.get(name) orelse 0;
+            if (cap >= 0 and n_sends > cap) {
+                self.report_warning(
+                    .channel_capacity_overflow,
+                    body.*,
+                    "possible deadlock: {d} blocking send(s) into channel '{s}' of capacity {d} with no concurrent receiver; the producer will block once the buffer is full. Increase the capacity or receive concurrently (e.g. via fork).",
+                    .{ n_sends, name, cap },
+                );
             }
         }
     }
@@ -9416,6 +9811,79 @@ pub const TranspileProcess = struct {
             };
         }
         return false;
+    }
+
+    /// If `expr` is a `channel_new_cap(<buffering>, <cap>)` call whose CAPACITY
+    /// (2nd) argument is a compile-time integer literal, return that capacity.
+    fn channel_new_cap_literal(self: *Self, expr: *ast.Node) ?i64 {
+        if (expr.type != .Expression or expr.node_variant == null) return null;
+        const e = expr.node_variant.?.exp;
+        if (!mem.eql(u8, e.op, "()")) return null;
+        const callee = e.left orelse return null;
+        if (callee.type != .Identifier or callee.data == null) return null;
+        if (!mem.eql(u8, callee.data.?.sval.items, "channel_new_cap")) return null;
+        const args_node = e.right orelse return null;
+        var flat = ArrayList(*ast.Node).init(self.allocator);
+        defer flat.deinit();
+        self.flatten_call_args_ptr(args_node, &flat) catch return null;
+        if (flat.items.len != 2) return null;
+        return self.const_fold_int(flat.items[1].*);
+    }
+
+    /// If `node` is a channel operation `ch.<method>(...)` (the desugared form of
+    /// `ch <- v` -> `ch.send(v)` and `<- ch` -> `ch.recv()`), return
+    /// `.{ name, method }` for the base channel identifier and method name.
+    const ChannelOp = struct { name: []const u8, method: []const u8 };
+    fn channel_op_of(node: *const ast.Node) ?ChannelOp {
+        if (node.type != .Expression or node.node_variant == null) return null;
+        const e = node.node_variant.?.exp;
+        if (!mem.eql(u8, e.op, "()")) return null;
+        const callee = e.left orelse return null;
+        if (callee.type != .Expression or callee.node_variant == null) return null;
+        const ce = callee.node_variant.?.exp;
+        if (!mem.eql(u8, ce.op, ".")) return null;
+        const recv = ce.left orelse return null;
+        const meth = ce.right orelse return null;
+        if (recv.type != .Identifier or recv.data == null) return null;
+        if (meth.type != .Identifier or meth.data == null) return null;
+        return .{ .name = recv.data.?.sval.items, .method = meth.data.?.sval.items };
+    }
+
+    /// Recursively record every channel that is received-from (`recv`) or closed
+    /// anywhere under `node`, so the capacity lint can exempt drained channels
+    /// regardless of where the receive appears (top-level stmt, `let x = <- c`
+    /// RHS, a nested block, etc.). Conservative on purpose — any receive at all
+    /// suppresses the one-way-over-send warning.
+    fn collect_channel_drainers(node: *const ast.Node, out: *std.StringHashMap(void)) void {
+        if (channel_op_of(node)) |op| {
+            if (mem.eql(u8, op.method, "recv") or mem.eql(u8, op.method, "close")) {
+                out.put(op.name, {}) catch {};
+            }
+        }
+        const nv = node.node_variant orelse return;
+        switch (node.type) {
+            .Body => for (nv.body.statements.items()) |s| collect_channel_drainers(s, out),
+            .Variable => if (nv.variable.val) |val| collect_channel_drainers(val, out),
+            .Expression => {
+                if (nv.exp.left) |l| collect_channel_drainers(l, out);
+                if (nv.exp.right) |r| collect_channel_drainers(r, out);
+            },
+            .ExpressionParenthesis => collect_channel_drainers(nv.paren.exp, out),
+            .Unary => collect_channel_drainers(nv.unary.operand, out),
+            .StatementIf => collect_channel_drainers(nv.statement.if_stmt.body, out),
+            .StatementElseIf => collect_channel_drainers(nv.statement.elif_stmt.body, out),
+            .StatementElse => collect_channel_drainers(nv.statement.else_stmt.body, out),
+            .StatementFor => {
+                const b = switch (nv.statement.for_stmt) {
+                    .cond => |c| c.body,
+                    .range => |r| r.body,
+                    .iter => |it| it.body,
+                };
+                collect_channel_drainers(b, out);
+            },
+            .StatementDefer => collect_channel_drainers(nv.statement.defer_stmt.body, out),
+            else => {},
+        }
     }
 
     /// Recursively collect `fork` statements from a body, tracking whether each is
@@ -12021,6 +12489,31 @@ pub const TranspileProcess = struct {
         try self.write("{");
         self.indent();
 
+        // When the iterable is an rvalue (e.g. a call like `map.keys()`), we cannot
+        // take its address directly (`&(rvalue)` is invalid C, and iter()/get()
+        // receive `self` by pointer). Materialize it into a named source temp first
+        // and reference the temp wherever `&<iterable>` is needed. A plain
+        // identifier is already an lvalue, so we address it in place (and avoid
+        // copying a potentially non-copyable collection header unnecessarily).
+        const iterable_is_lvalue = fi.iterable.type == .Identifier;
+        var src_tmp: ?[]const u8 = null;
+        defer if (src_tmp) |s| self.allocator.free(s);
+        if (!iterable_is_lvalue) {
+            // Declare the temp with the MANGLED collection type (e.g. `Vec__num`,
+            // not the bare base `Vec`). `coll_canon` is the instantiated/canonical
+            // name already used for the iter()/get() lookups below.
+            const src_type = if (coll_canon.len != 0) coll_canon else ty;
+            const s = try self.next_tmp_name("iter_src");
+            src_tmp = s;
+            try self.write_indent();
+            try self.write(src_type);
+            try self.write(" ");
+            try self.write(s);
+            try self.write(" = ");
+            try self.transpile_node(fi.iterable.*);
+            try self.write(";");
+        }
+
         // Materialize the iterator into a temp (call iter() when the source is a
         // collection; otherwise the value already IS the iterator). The iterator is
         // taken by address since iter()/next() receive `self` by pointer.
@@ -12032,8 +12525,14 @@ pub const TranspileProcess = struct {
         if (iter_fn) |ifn| {
             try self.write(ifn);
             try self.write("(&(");
-            try self.transpile_node(fi.iterable.*);
+            if (src_tmp) |s| {
+                try self.write(s);
+            } else {
+                try self.transpile_node(fi.iterable.*);
+            }
             try self.write("))");
+        } else if (src_tmp) |s| {
+            try self.write(s);
         } else {
             try self.transpile_node(fi.iterable.*);
         }
@@ -12073,7 +12572,11 @@ pub const TranspileProcess = struct {
             try self.write("__auto_type ");
             try self.write(fi.item_name);
             try self.print(" = {s}(&(", .{get_fn});
-            try self.transpile_node(fi.iterable.*);
+            if (src_tmp) |s| {
+                try self.write(s);
+            } else {
+                try self.transpile_node(fi.iterable.*);
+            }
             try self.print("), {s});\n", .{fi.index_name.?});
 
             try self.bind_loop_var(fi.index_name.?, kv.key);
@@ -12903,7 +13406,7 @@ pub const TranspileProcess = struct {
     /// coercion; returns `false` (writing nothing) so the caller's normal emission
     /// path runs unchanged otherwise — this keeps codegen byte-identical for every
     /// call that doesn't actually cross a concrete→quirk boundary.
-    fn try_emit_call_with_quirk_coercion(self: *Self, fname: []const u8, fname_base: []const u8, left: *ast.Node, exp_right: ?*ast.Node) TranspileError!bool {
+    fn try_emit_call_with_quirk_coercion(self: *Self, call_node: ast.Node, fname: []const u8, fname_base: []const u8, left: *ast.Node, exp_right: ?*ast.Node) TranspileError!bool {
         const reg = self.root_registry() orelse return false;
 
         // Resolve the callee function node (try the mangled name, then the base).
@@ -12916,7 +13419,8 @@ pub const TranspileProcess = struct {
         const fnv = fnode.node_variant.?.function;
         // Variadic callees are handled by the dedicated path above; skip here.
         if (fnv.is_variadic) return false;
-        const params = if (fnv.args) |a| a.items() else return false;
+        const args_vec = fnv.args orelse return false;
+        const params = args_vec.items();
         if (params.len == 0) return false;
 
         // Does ANY parameter have a quirk type? If not, nothing to coerce.
@@ -12937,25 +13441,24 @@ pub const TranspileProcess = struct {
         if (exp_right) |right| {
             try self.flatten_call_args_ptr(right, &args_nodes);
         }
-        // Arg/param count must line up for positional coercion; bail otherwise
-        // (a separate diagnostic already reports arity mismatches).
-        if (args_nodes.items.len != params.len) return false;
+        const min_args = count_required_args_from_node(args_vec);
+        if (args_nodes.items.len < min_args or args_nodes.items.len > params.len) return false;
 
         // Determine, per argument, whether it actually crosses a concrete->quirk
         // boundary that we can coerce. Only commit to per-arg emission if at least
         // one does — otherwise fall back so unrelated calls stay byte-identical.
         // `coerce_ident[i]` holds the impl-key type name (mangled for generics,
         // e.g. `Box__num`), reused as the `__fun_coerce_<ident>_<hash>` name.
-        var coerce_ident = self.allocator.alloc(?[]const u8, params.len) catch return TranspileError.MemoryAllocationFailed;
+        var coerce_ident = self.allocator.alloc(?[]const u8, args_nodes.items.len) catch return TranspileError.MemoryAllocationFailed;
         defer {
             for (coerce_ident) |ci| if (ci) |s| self.allocator.free(@constCast(s));
             self.allocator.free(coerce_ident);
         }
-        var coerce_sig = self.allocator.alloc(?[]const u8, params.len) catch return TranspileError.MemoryAllocationFailed;
+        var coerce_sig = self.allocator.alloc(?[]const u8, args_nodes.items.len) catch return TranspileError.MemoryAllocationFailed;
         defer self.allocator.free(coerce_sig);
         var any = false;
         var i: usize = 0;
-        while (i < params.len) : (i += 1) {
+        while (i < args_nodes.items.len) : (i += 1) {
             coerce_ident[i] = null;
             coerce_sig[i] = null;
             const p = params[i];
@@ -12969,6 +13472,8 @@ pub const TranspileProcess = struct {
             any = true;
         }
         if (!any) return false;
+
+        const default_info = self.resolve_free_call_default_info(call_node, left);
 
         // Emit `callee(arg0, arg1, ...)`, wrapping the coercible args.
         try self.transpile_node(left.*);
@@ -12988,6 +13493,13 @@ pub const TranspileProcess = struct {
                 try self.transpile_node(arg);
             }
         }
+        try self.emit_omitted_default_args_from_params(
+            params,
+            args_nodes.items.len,
+            args_nodes.items.len > 0,
+            if (default_info) |info| info.subst_params else null,
+            if (default_info) |info| info.subst_args else null,
+        );
         try self.write(")");
         return true;
     }
@@ -13805,7 +14317,21 @@ pub const TranspileProcess = struct {
                         }
                     } else {
                         const dep = f.dtype.type_str.items;
-                        if (!registry.compounds_by_name.contains(dep)) continue;
+                        // A by-value field may be a compound OR a tagged-union data
+                        // enum (e.g. `Logger { Sink sink; }` where `Sink` is a data
+                        // enum). Both are emitted as full structs and recorded in
+                        // `emitted_compounds`; either must precede this compound.
+                        // Plain (non-payload) enums lower to a C enum (complete on
+                        // forward decl), so only tagged-union enums create an
+                        // ordering dependency.
+                        const is_compound_dep = registry.compounds_by_name.contains(dep);
+                        const is_data_enum_dep = blk: {
+                            if (registry.enums_by_name.get(dep)) |enode| {
+                                if (enode.node_variant) |nv| break :blk enum_is_tagged_union(nv.enum_decl);
+                            }
+                            break :blk false;
+                        };
+                        if (!is_compound_dep and !is_data_enum_dep) continue;
                         if (!emitted_compounds.contains(dep)) {
                             deps_satisfied = false;
                             break;
@@ -16519,6 +17045,16 @@ pub const TranspileProcess = struct {
 
         if (!self.is_importing) {
             try self.write("#include <stdlib.h>\n");
+            try self.write("#include <stdio.h>\n");
+            // Standard-stream accessors. `stdout`/`stderr`/`stdin` are macros/globals
+            // (not callable), and differ per libc (glibc/musl/macOS/MSVCRT resolve
+            // them differently — MSVCRT via a function call). Wrapping them in tiny
+            // `static` functions lets Fun name them as `FILE*`-returning bindings
+            // (std.c.io.stdout_stream()/...) portably; a bare `extern FILE* stdout;`
+            // would fail to link on Windows.
+            try self.write("static FILE* stdout_stream(void){ return stdout; }\n");
+            try self.write("static FILE* stderr_stream(void){ return stderr; }\n");
+            try self.write("static FILE* stdin_stream(void){ return stdin; }\n");
             try self.write("#ifdef _WIN32\n");
             try self.write("#include <windows.h>\n");
             try self.write("typedef HANDLE __fun_thread_t;\n");
@@ -16542,6 +17078,15 @@ pub const TranspileProcess = struct {
             // at every `main` exit) blocks until all queued tasks complete.
             if (self.uses_fork) {
                 try self.emit_scheduler_runtime();
+            } else {
+                // No fork scheduler in this program, but channel.fn still names the
+                // watchdog hooks. Emit no-op stubs so pure-channel (non-fork)
+                // programs link, and a shared stderr warn helper for the channel-side
+                // timed-wait fallback. All are dead unless FUN_DEADLOCK_WATCHDOG_MS
+                // arms the channel path, so the default hot path is unchanged.
+                try self.write("void __fun_wd_enter_wait(void){}\n");
+                try self.write("void __fun_wd_leave_wait(void){}\n");
+                try self.write("void __fun_wd_warn(long long a, long long b, long long ms){ fprintf(stderr, \"fun: possible deadlock: %lld blocked, %lld pending/cap, no progress for %lldms\\n\", a, b, ms); }\n\n");
             }
 
             try self.write("#define __fun_tag(x) _Generic((x), ");
@@ -16595,6 +17140,7 @@ pub const TranspileProcess = struct {
             \\static void __fun_sched_cv_signal(__fun_sched_cv* c){pthread_cond_signal(c);}
             \\static void __fun_sched_cv_broadcast(__fun_sched_cv* c){pthread_cond_broadcast(c);}
             \\#include <unistd.h>
+            \\#include <time.h>
             \\static int __fun_cpu_count(void){long n=sysconf(_SC_NPROCESSORS_ONLN); return n>0?(int)n:1;}
             \\#endif
             \\#define __FUN_SCHED_QCAP 4096
@@ -16603,8 +17149,51 @@ pub const TranspileProcess = struct {
             \\  __fun_task q[__FUN_SCHED_QCAP]; int head, tail, count;
             \\  long long pending; /* queued + running tasks */
             \\  int started, shutting_down, nworkers;
+            \\  /* Opt-in deadlock watchdog (FUN_DEADLOCK_WATCHDOG_MS). When wd_armed==0
+            \\     (the default) none of these are touched and no watchdog thread runs,
+            \\     so the scheduler is byte-identical to the non-watchdog build. */
+            \\  int wd_armed; long long wd_threshold_ms; int wd_abort;
+            \\  int blocked; long long progress_seq;
             \\} __fun_sched;
             \\static __fun_sched __fun_g_sched;
+            \\/* Shared stderr formatter for deadlock warnings (also used by channel.fn). */
+            \\void __fun_wd_warn(long long blocked_or_count, long long pending_or_cap, long long stall_ms){
+            \\  fprintf(stderr, "fun: possible deadlock: %lld blocked, %lld pending/cap, no progress for %lldms\n", blocked_or_count, pending_or_cap, stall_ms);
+            \\}
+            \\/* Channel-wait bracketing hooks: bump the scheduler's blocked counter so the
+            \\   watchdog can see \"all workers parked\". No-ops unless armed. */
+            \\void __fun_wd_enter_wait(void){ if(!__fun_g_sched.wd_armed) return; __fun_sched_mtx_lock(&__fun_g_sched.mu); __fun_g_sched.blocked++; __fun_sched_mtx_unlock(&__fun_g_sched.mu); }
+            \\void __fun_wd_leave_wait(void){ if(!__fun_g_sched.wd_armed) return; __fun_sched_mtx_lock(&__fun_g_sched.mu); if(__fun_g_sched.blocked>0)__fun_g_sched.blocked--; __fun_g_sched.progress_seq++; __fun_sched_mtx_unlock(&__fun_g_sched.mu); }
+            \\static void* __fun_sched_watchdog(void* unused){ (void)unused;
+            \\  long long last_seq = -1; long long stall_ms = 0;
+            \\  long long step = __fun_g_sched.wd_threshold_ms/4; if(step<1) step=1; if(step>1000) step=1000;
+            \\  for(;;){
+            \\#ifdef _WIN32
+            \\    Sleep((DWORD)step);
+            \\#else
+            \\    struct timespec __ts; __ts.tv_sec=step/1000; __ts.tv_nsec=(step%1000)*1000000L; nanosleep(&__ts,NULL);
+            \\#endif
+            \\    __fun_sched_mtx_lock(&__fun_g_sched.mu);
+            \\    long long pend=__fun_g_sched.pending; int blk=__fun_g_sched.blocked; int nw=__fun_g_sched.nworkers;
+            \\    long long seq=__fun_g_sched.progress_seq; int down=__fun_g_sched.shutting_down;
+            \\    __fun_sched_mtx_unlock(&__fun_g_sched.mu);
+            \\    if(down) return NULL;
+            \\    /* Stall = outstanding work (pending>0), at least one task parked in a
+            \\       blocking channel wait (blk>0), and no scheduler progress for the
+            \\       whole window. Requiring blk>0 (not blk>=nworkers) catches a deadlock
+            \\       where only a subset of tasks are blocked while excess workers sit
+            \\       idle on an empty queue, yet avoids firing on pure CPU-bound work
+            \\       (which parks nothing). (void)nw. */
+            \\    (void)nw;
+            \\    if(pend>0 && blk>0 && seq==last_seq){ stall_ms+=step; } else { stall_ms=0; }
+            \\    last_seq=seq;
+            \\    if(stall_ms>=__fun_g_sched.wd_threshold_ms){
+            \\      __fun_wd_warn((long long)blk, pend, stall_ms);
+            \\      if(__fun_g_sched.wd_abort) abort();
+            \\      stall_ms=0; /* warn once per window, keep watching */
+            \\    }
+            \\  }
+            \\}
             \\static void* __fun_sched_worker(void* unused){ (void)unused;
             \\  for(;;){
             \\    __fun_sched_mtx_lock(&__fun_g_sched.mu);
@@ -16614,12 +17203,14 @@ pub const TranspileProcess = struct {
             \\    __fun_task t = __fun_g_sched.q[__fun_g_sched.head];
             \\    __fun_g_sched.head = (__fun_g_sched.head+1) % __FUN_SCHED_QCAP;
             \\    __fun_g_sched.count--;
+            \\    if(__fun_g_sched.wd_armed) __fun_g_sched.progress_seq++;
             \\    /* A slot just freed: wake any producer blocked in __fun_go on a full queue. */
             \\    __fun_sched_cv_signal(&__fun_g_sched.not_full);
             \\    __fun_sched_mtx_unlock(&__fun_g_sched.mu);
             \\    if(t.fn) t.fn(t.arg);
             \\    __fun_sched_mtx_lock(&__fun_g_sched.mu);
             \\    __fun_g_sched.pending--;
+            \\    if(__fun_g_sched.wd_armed) __fun_g_sched.progress_seq++;
             \\    if(__fun_g_sched.pending==0) __fun_sched_cv_broadcast(&__fun_g_sched.idle);
             \\    __fun_sched_mtx_unlock(&__fun_g_sched.mu);
             \\  }
@@ -16630,6 +17221,13 @@ pub const TranspileProcess = struct {
             \\  __fun_sched_cv_init(&__fun_g_sched.not_empty);
             \\  __fun_sched_cv_init(&__fun_g_sched.not_full);
             \\  __fun_sched_cv_init(&__fun_g_sched.idle);
+            \\  { const char* w = getenv("FUN_DEADLOCK_WATCHDOG_MS");
+            \\    long long wm = (w && w[0]) ? atoll(w) : 0;
+            \\    __fun_g_sched.wd_armed = (wm > 0) ? 1 : 0;
+            \\    __fun_g_sched.wd_threshold_ms = (wm > 0) ? wm : 0;
+            \\    const char* a = getenv("FUN_DEADLOCK_ABORT");
+            \\    __fun_g_sched.wd_abort = (a && a[0]=='1') ? 1 : 0;
+            \\    __fun_g_sched.blocked = 0; __fun_g_sched.progress_seq = 0; }
             \\}
             \\static void __fun_sched_ensure_started(void){
             \\  __fun_sched_mtx_lock(&__fun_g_sched.mu);
@@ -16638,6 +17236,7 @@ pub const TranspileProcess = struct {
             \\    __fun_g_sched.pending=0; __fun_g_sched.shutting_down=0;
             \\    int n=__fun_cpu_count(); if(n<1)n=1; if(n>64)n=64; __fun_g_sched.nworkers=n;
             \\    for(int i=0;i<n;i++){ __fun_thread_t th; __fun_thread_start(&th, __fun_sched_worker, NULL); }
+            \\    if(__fun_g_sched.wd_armed){ __fun_thread_t wt; __fun_thread_start(&wt, __fun_sched_watchdog, NULL); }
             \\  }
             \\  __fun_sched_mtx_unlock(&__fun_g_sched.mu);
             \\}
@@ -16657,6 +17256,7 @@ pub const TranspileProcess = struct {
             \\  if(__fun_g_sched.shutting_down){ __fun_sched_mtx_unlock(&__fun_g_sched.mu); if(fn) fn(arg); return; }
             \\  __fun_g_sched.q[__fun_g_sched.tail].fn=fn; __fun_g_sched.q[__fun_g_sched.tail].arg=arg;
             \\  __fun_g_sched.tail=(__fun_g_sched.tail+1)%__FUN_SCHED_QCAP; __fun_g_sched.count++; __fun_g_sched.pending++;
+            \\  if(__fun_g_sched.wd_armed) __fun_g_sched.progress_seq++;
             \\  __fun_sched_cv_signal(&__fun_g_sched.not_empty);
             \\  __fun_sched_mtx_unlock(&__fun_g_sched.mu);
             \\}
@@ -17122,16 +17722,21 @@ pub const TranspileProcess = struct {
                                     }
                                 }
 
-                                // Plain-impl method on a CALL RESULT (chaining), e.g.
-                                // `b.add(2).get()` or `makeBox(7).get()`. The receiver is
-                                // an rvalue with no name in scope, so materialize it once
-                                // into a temp (emitting it twice would re-run the call) and
+                                // Plain-impl (or quirk-impl) method on a CALL RESULT
+                                // (chaining), e.g. `b.add(2).get()`, `makeBox(7).get()`,
+                                // or `make_vec().len()` where `len()` comes from `impl
+                                // Vec<T> as Sized`. The receiver is an rvalue with no
+                                // name in scope, so materialize it once into a temp
+                                // (emitting it twice would re-run the call) and
                                 // dispatch: `({ T __t = recv; (T__method(&__t, args)); })`.
                                 if (recv.?.type != .Identifier) {
                                     if (self.expr_compound_return_type_name(recv.?.*)) |rtype| {
                                         const recv_canon = self.canonical_compound_name(rtype);
                                         const mname = member.?.data.?.sval.items;
-                                        if (self.lookup_plain_impl_method_fn(&node, recv_canon, mname)) |fn_name| {
+                                        const plain_fn_name = self.lookup_plain_impl_method_fn(&node, recv_canon, mname);
+                                        const quirk_res = if (plain_fn_name == null) self.resolve_quirk_impl_method_for_concrete(node, recv_canon, mname) else QuirkImplMethodResolution{};
+                                        const fn_name = plain_fn_name orelse (if (!quirk_res.ambiguous) quirk_res.fn_name else null);
+                                        if (fn_name) |resolved_fn_name| {
                                             const tmp = try self.next_tmp_name("mrecv");
                                             defer self.allocator.free(tmp);
                                             try self.write("({ ");
@@ -17141,7 +17746,7 @@ pub const TranspileProcess = struct {
                                             try self.write(" = ");
                                             try self.transpile_node(recv.?.*);
                                             try self.write("; (");
-                                            try self.write_module_impl_method_ref(fn_name);
+                                            try self.write_module_impl_method_ref(resolved_fn_name);
                                             try self.write("(&");
                                             try self.write(tmp);
                                             if (exp.right) |right| {
@@ -17573,6 +18178,7 @@ pub const TranspileProcess = struct {
                                 if (exp.right) |right| {
                                     try self.transpile_node(right.*);
                                 }
+                                try self.emit_trailing_default_args(node, left, exp.right);
                                 try self.write(")");
                                 return;
                             }
@@ -17581,7 +18187,7 @@ pub const TranspileProcess = struct {
                             // args passed to quirk-typed params. Returns false (and
                             // emits nothing) for calls that don't cross that
                             // boundary, so unrelated calls fall through unchanged.
-                            if (try self.try_emit_call_with_quirk_coercion(fname, fname_base, left, exp.right)) {
+                            if (try self.try_emit_call_with_quirk_coercion(node, fname, fname_base, left, exp.right)) {
                                 return;
                             }
                         }
@@ -17591,7 +18197,7 @@ pub const TranspileProcess = struct {
                             try self.transpile_node(right.*);
                         }
                         // Fill omitted trailing params with their default expressions.
-                        try self.emit_trailing_default_args(left, exp.right);
+                        try self.emit_trailing_default_args(node, left, exp.right);
                         try self.write(")");
                     }
                 } else if (mem.eql(u8, exp.op, ",")) {
@@ -19401,6 +20007,11 @@ pub const TranspileProcess = struct {
             header_name = self.allocator.dupe(u8, "errno.h") catch {
                 return TranspileError.MemoryAllocationFailed;
             };
+        } else if (mem.eql(u8, import_path, "std.c.wd")) {
+            // Deadlock-watchdog hooks: no libc header — the symbols
+            // (`__fun_wd_enter_wait`/`__fun_wd_leave_wait`/`__fun_wd_warn`) are
+            // emitted directly into the prelude by the compiler. Nothing to include.
+            return;
         } else {
             self.report_error(import_node, "Unsupported standard library import: {s}", .{import_path});
             return TranspileError.UnsupportedImport;

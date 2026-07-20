@@ -1,0 +1,52 @@
+// Generic constraints on free functions and compounds.
+// 
+// A type parameter can be bounded to a union of allowed types with `<T: a | b>`.
+// The compiler monomorphizes each concrete instantiation (zero runtime cost) AND
+// type-checks, at every call/instantiation site, that the concrete type argument
+// is one of the listed bounds — a violation is a compile-time error, not a
+// mysterious C link failure.
+
+imp std.io;
+
+// A constrained generic FREE function: T must be num or str.
+fun identity<T: num | str>(T x) T {
+  ret x;
+}
+
+// Constraints also work with custom types in the bound set. `pick` accepts a
+// Meters or a Feet and returns it unchanged (T -> T).
+compound Meters {
+  num v;
+}
+
+allow unused_compound, "Feet is only used in a generic constraint, not instantiated";
+compound Feet {
+  num v;
+}
+
+fun pick<T: Meters | Feet>(T len) T {
+  ret len;
+}
+
+// A constrained generic COMPOUND: the type argument is checked at instantiation.
+compound Boxed<T: num | str> {
+  T value;
+}
+
+fun main() {
+  // Both instantiations satisfy `num | str`.
+  let a = identity(42);
+  let b = identity("hello");
+  println_fmt("identity: {} {}", a, b);
+
+  Meters m = Meters{v = 100};
+  let picked = pick(m);
+  println_fmt("meters: {}", picked.v);
+
+  Boxed<num> bn = Boxed<num>{value = 7};
+  Boxed<str> bs = Boxed<str>{value = "seven"};
+  println_fmt("boxed: {} {}", bn.value, bs.value);
+
+  // Calling `identity(3.5)` (a dec) or declaring `Boxed<bin>` would now be a
+  // compile-time error: the type argument is not in the declared bound.
+}

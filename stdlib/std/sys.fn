@@ -24,7 +24,7 @@ pub fun env(str name) str {
 pub fun try_env(str name) Result<str> {
   let out = env(name);
   if out == nil {
-    ret err(1, "env missing", "");
+    ret err_kind(.NotFound, "env missing", "");
   }
   ret ok(out);
 }

@@ -59,11 +59,11 @@ fun main() {
   let dec_expr = (d * d) + (d / 2);
   let nested = make_point(n + 1, n - 1);
   let nested_sum = (nested.x + nested.y) / 2;
-  let dec_mix = m.lerp_dec(n, n + 2, d) + m.abs_dec(d / 2);
+  let dec_mix = m.lerp_dec(n, n + 2, d) + m.abs(d / 2);
   let dec_mix2 = m.lerp_dec(n2, n2 + n, (d + 1)) / 2;
   let mix_point = make_point(m.min_num(n, n2), m.max_num(n, n2));
   let mix_points = [make_point(n, n + 1), make_point(n2, n2 + 1)];
-  let mix_sum = m.lerp_dec(n, n + 10, d) + (m.abs_dec(d) / 3);
+  let mix_sum = m.lerp_dec(n, n + 10, d) + (m.abs(d) / 3);
   let mix_idx = (m.min_num(n, n2) - 40) / 2;
   let mix_pick = arr2[mix_idx];
   let mixed = m.lerp_dec(n, n + 10, d);

@@ -27,6 +27,6 @@ fun main() {
   Vec2 n = a.normalize();
   printf("len=%f norm=(%f,%f)\n", a.length(), n.x, n.y);
 
-  printf("clamp_dec(1.5,0,1)=%f\n", clamp_dec(1.5, 0, 1));
+  printf("clamp(1.5,0,1)=%f\n", clamp(1.5, 0.0, 1.0));
   printf("pow_int(2,8)=%d pow_dec(2,8)=%f\n", pow_int(2, 8), pow_dec(2, 8));
 }

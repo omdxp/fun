@@ -123,6 +123,16 @@
           "default": false,
           "description": "Enable go-to-definition debug logging from fls (sets FLS_DEBUG_DEFINITIONS=1)."
         },
+        "fun.debug.watchdogMs": {
+          "type": "number",
+          "default": 1000,
+          "description": "When debugging (⚙ Debug above main), arm the runtime deadlock watchdog with this stall threshold in milliseconds (sets FUN_DEADLOCK_WATCHDOG_MS). Set to 0 to disable. Plain ▶ Run never enables the watchdog."
+        },
+        "fun.debug.watchdogAbort": {
+          "type": "boolean",
+          "default": false,
+          "description": "When debugging, abort the program on a detected deadlock instead of just warning (sets FUN_DEADLOCK_ABORT=1). Requires fun.debug.watchdogMs > 0."
+        },
         "fun.inlayHints.parameterNames.enabled": {
           "type": "boolean",
           "default": true,

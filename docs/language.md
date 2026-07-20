@@ -330,6 +330,26 @@ fun main() num {
       `if/elif/else` where every branch returns, a `fit` with a default branch whose
       arms all return, and infinite loops (`for {}` / `for true {}` with no `break`)
       all count as returning. Always checked (not gated behind `-warn-unused`).
+    - `blocking_fork_deadlock` (with `-warn-unused`) — a `WaitGroup` created with a
+      literal `wait_group_new(0)` (whose internal signal buffer holds only one
+      completion) is `done()`'d from tasks spawned by `fork` inside a loop; the
+      producer can block before any receiver drains it. Size the WaitGroup to the
+      task count. A conservative structural lint on the `fork` concurrency pass.
+    - `shared_mutable_capture_race` (with `-warn-unused`) — a mutable compound with
+      no internal `Mutex`/`Channel` field is passed by `&` into a mutating `async fun`
+      that is `fork`ed multiple times (e.g. in a loop), so several tasks mutate the
+      same value without synchronization. Guard it with a `Mutex` or give each task
+      its own copy. `Channel`/`WaitGroup` (self-synchronizing) are exempt.
+    - `integer_literal_out_of_range` (with `-warn-unused`) — a compile-time integer
+      literal cannot be represented in the declared arbitrary-width integer type:
+      a value larger than the type's width (`u2 x = 5;`, `i6 y = 100;`) or a
+      negative value assigned to an unsigned `uN` (`u8 z = -3;`).
+    - `channel_capacity_overflow` (with `-warn-unused`) — more blocking sends are
+      issued into a bounded channel than its capacity with no concurrent receiver,
+      so the producer blocks forever (e.g. `let c = channel_new_cap(0, 1); c <- 1;
+      c <- 2; c <- 3;`). Conservative: only fires when the capacity and the send
+      count are statically known literals and the channel is never received-from
+      and no `fork` runs first.
 - **Suppress next warning intentionally**:
         - `allow <warning_id>, "reason";`
 - **Require next warning to appear**:

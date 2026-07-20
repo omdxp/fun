@@ -64,7 +64,7 @@ impl Fs {
   pub try_read_to_string(str path) Result<str> {
     let out = read_all(path);
     if out == nil {
-      ret err(1, "read_to_string failed", "");
+      ret err_kind(.Io, "read_to_string failed", "");
     }
     ret ok(out);
   }
@@ -106,7 +106,7 @@ impl Fs {
   pub try_read_bytes(str path, num max_len) Result<str> {
     let out = self.read_bytes(path, max_len);
     if out == nil {
-      ret err(1, "read_bytes failed", "");
+      ret err_kind(.Io, "read_bytes failed", "");
     }
     ret ok(out);
   }
@@ -134,7 +134,7 @@ impl Fs {
   pub try_write_string(str path, str data) Result<bin> {
     let ok_write = write_all(path, data);
     if ok_write == false {
-      ret err(1, "write_string failed", false);
+      ret err_kind(.Io, "write_string failed", false);
     }
     ret ok(true);
   }
@@ -169,7 +169,7 @@ impl Fs {
   pub try_append_string(str path, str data) Result<bin> {
     let ok_append = self.append_string(path, data);
     if ok_append == false {
-      ret err(1, "append_string failed", false);
+      ret err_kind(.Io, "append_string failed", false);
     }
     ret ok(true);
   }
@@ -201,10 +201,10 @@ impl Fs {
   pub try_copy_file(str src, str dst) Result<bin> {
     let data = read_all(src);
     if data == nil {
-      ret err(1, "copy_file read failed", false);
+      ret err_kind(.Io, "copy_file read failed", false);
     }
     if write_all(dst, data) == false {
-      ret err(1, "copy_file write failed", false);
+      ret err_kind(.Io, "copy_file write failed", false);
     }
     ret ok(true);
   }
@@ -242,7 +242,7 @@ impl Fs {
   pub try_size(str path) Result<num> {
     let out = self.size(path);
     if out < 0 {
-      ret err(1, "size failed", -1);
+      ret err_kind(.Io, "size failed", -1);
     }
     ret ok(out);
   }
@@ -294,7 +294,7 @@ impl Fs {
     if out.len == 0 {
       // Best-effort: treat empty as ok unless file can't be opened.
       if self.exists(path) == false {
-        ret err(1, "read_lines failed", out);
+        ret err_kind(.NotFound, "read_lines failed", out);
       }
     }
     ret ok(out);
@@ -394,7 +394,7 @@ pub fun size(str path) num {
 pub fun try_size(str path) Result<num> {
   let n = size(path);
   if n < 0 {
-    ret err(1, "size failed", -1);
+    ret err_kind(.Io, "size failed", -1);
   }
   ret ok(n);
 }
@@ -486,11 +486,10 @@ pub async fun copy_file_progress_async(
       // Progress is best-effort: a Full channel (no reader keeping up) is fine to skip;
       // only a cancellation or a real failure aborts the copy.
       fit await progress_updates.send_result_timeout_with_token_async(total, 0, cancel_token) {
-        .Ok -> { }
-        .Full -> { }
         .Cancelled -> { ret -3; }
         .Closed -> { ret -1; }
         .Error(e) -> { ret -1; }
+        _ -> { }
       }
     }
   }
@@ -551,11 +550,7 @@ pub async fun read_lines_into_channel_async(
         free(line);
         ret sent;
       }
-      .Full -> {
-        free(line);
-        ret -1;
-      }
-      .Error(e) -> {
+      _ -> {
         free(line);
         ret -1;
       }

@@ -1,0 +1,21 @@
+// Deadlock-watchdog runtime hooks (bindings to compiler-emitted C).
+// 
+// The compiler always emits these three symbols in the C prelude: real
+// implementations when the program uses `fork` (they feed the M:N scheduler's
+// blocked-task counter so the watchdog thread can detect a global stall), and
+// no-op stubs otherwise. They are only exercised when FUN_DEADLOCK_WATCHDOG_MS
+// arms the watchdog; with it unset, the channel layer never calls them.
+
+// Mark the current thread as entering a blocking channel wait.
+pub fun __fun_wd_enter_wait();
+
+// Mark the current thread as leaving a blocking channel wait (records progress).
+pub fun __fun_wd_leave_wait();
+
+// Print a "possible deadlock" diagnostic to stderr.
+// 
+// Params:
+// - blocked_or_count: blocked task count (scheduler) or channel occupancy
+// - pending_or_cap: pending tasks (scheduler) or channel capacity
+// - stall_ms: how long no progress has been observed
+pub fun __fun_wd_warn(num blocked_or_count, num pending_or_cap, num stall_ms);

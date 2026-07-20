@@ -254,7 +254,7 @@ pub fun open_read(str path) File {
 pub fun try_open_read(str path) Result<File> {
   let f = open_read(path);
   if f.handle == nil {
-    ret err(1, "open_read failed", f);
+    ret err_kind(.Io, "open_read failed", f);
   }
   ret ok(f);
 }
@@ -276,7 +276,7 @@ pub fun open_write(str path) File {
 pub fun try_open_write(str path) Result<File> {
   let f = open_write(path);
   if f.handle == nil {
-    ret err(1, "open_write failed", f);
+    ret err_kind(.Io, "open_write failed", f);
   }
   ret ok(f);
 }
@@ -298,7 +298,7 @@ pub fun open_append(str path) File {
 pub fun try_open_append(str path) Result<File> {
   let f = open_append(path);
   if f.handle == nil {
-    ret err(1, "open_append failed", f);
+    ret err_kind(.Io, "open_append failed", f);
   }
   ret ok(f);
 }
@@ -339,11 +339,11 @@ impl File {
   // Read entire file into a new string with Result.
   pub try_read_all() Result<str> {
     if self.handle == nil {
-      ret err(1, "read_all on closed file", "");
+      ret err_kind(.Invalid, "read_all on closed file", "");
     }
     let out = self.read_all();
     if out == nil {
-      ret err(1, "read_all failed", "");
+      ret err_kind(.Io, "read_all failed", "");
     }
     ret ok(out);
   }
@@ -365,11 +365,11 @@ impl File {
   // Read up to max_len bytes with Result.
   pub try_read_bytes(num max_len) Result<str> {
     if self.handle == nil || max_len <= 0 {
-      ret err(1, "read_bytes invalid", "");
+      ret err_kind(.Invalid, "read_bytes invalid", "");
     }
     let out = self.read_bytes(max_len);
     if out == nil {
-      ret err(1, "read_bytes failed", "");
+      ret err_kind(.Io, "read_bytes failed", "");
     }
     ret ok(out);
   }
@@ -394,11 +394,11 @@ impl File {
   // Read a line up to max_len with Result.
   pub try_read_line_max(num max_len) Result<str> {
     if self.handle == nil || max_len <= 1 {
-      ret err(1, "read_line_max invalid", "");
+      ret err_kind(.Invalid, "read_line_max invalid", "");
     }
     let out = self.read_line_max(max_len);
     if out == nil {
-      ret err(1, "read_line_max failed", "");
+      ret err_kind(.Io, "read_line_max failed", "");
     }
     ret ok(out);
   }
@@ -427,7 +427,7 @@ impl File {
       Vec<str> empty;
       empty.len = 0;
       empty.cap = 0;
-      ret err(1, "read_lines on closed file", empty);
+      ret err_kind(.Invalid, "read_lines on closed file", empty);
     }
     let out = self.read_lines(max_len);
     ret ok(out);
@@ -445,11 +445,11 @@ impl File {
   // Write raw bytes to the file with Result.
   pub try_write_bytes(raw* data, num len) Result<bin> {
     if self.handle == nil || data == nil {
-      ret err(1, "write_bytes invalid", false);
+      ret err_kind(.Invalid, "write_bytes invalid", false);
     }
     let ok_write = self.write_bytes(data, len);
     if ok_write == false {
-      ret err(1, "write_bytes failed", false);
+      ret err_kind(.Io, "write_bytes failed", false);
     }
     ret ok(true);
   }
@@ -465,7 +465,7 @@ impl File {
   // Read raw bytes into a buffer with Result.
   pub try_read_into(raw* dst, num len) Result<num> {
     if self.handle == nil || dst == nil {
-      ret err(1, "read_into invalid", 0);
+      ret err_kind(.Invalid, "read_into invalid", 0);
     }
     let n = self.read_into(dst, len);
     ret ok(n);
@@ -482,11 +482,11 @@ impl File {
   // Seek within the file with Result.
   pub try_seek(num offset, num whence) Result<bin> {
     if self.handle == nil {
-      ret err(1, "seek on closed file", false);
+      ret err_kind(.Invalid, "seek on closed file", false);
     }
     let ok_seek = self.seek(offset, whence);
     if ok_seek == false {
-      ret err(1, "seek failed", false);
+      ret err_kind(.Io, "seek failed", false);
     }
     ret ok(true);
   }
@@ -502,11 +502,11 @@ impl File {
   // Tell current file position with Result.
   pub try_tell() Result<num> {
     if self.handle == nil {
-      ret err(1, "tell on closed file", -1);
+      ret err_kind(.Invalid, "tell on closed file", -1);
     }
     let pos = self.tell();
     if pos < 0 {
-      ret err(1, "tell failed", -1);
+      ret err_kind(.Io, "tell failed", -1);
     }
     ret ok(pos);
   }
@@ -530,11 +530,11 @@ impl File {
   // Flush buffered output with Result.
   pub try_flush() Result<bin> {
     if self.handle == nil {
-      ret err(1, "flush on closed file", false);
+      ret err_kind(.Invalid, "flush on closed file", false);
     }
     let ok_flush = self.flush();
     if ok_flush == false {
-      ret err(1, "flush failed", false);
+      ret err_kind(.Io, "flush failed", false);
     }
     ret ok(true);
   }
@@ -569,13 +569,190 @@ impl File {
   // Write a string to the file with Result.
   pub try_write(str data) Result<bin> {
     if self.handle == nil {
-      ret err(1, "write on closed file", false);
+      ret err_kind(.Invalid, "write on closed file", false);
     }
     let ok_write = self.write(data);
     if ok_write == false {
-      ret err(1, "write failed", false);
+      ret err_kind(.Io, "write failed", false);
     }
     ret ok(true);
+  }
+}
+
+// --- Sinks: a unified write destination -----------------------------------------------
+
+// A `Sink` names where bytes go: one of the three standard streams, or an open
+// `File`. It gives std.io (and std.log) a single `write` path that works for
+// stdout, stderr, and files alike. Dispatch is a `fit` over the enum (no vtable),
+// so it stays zero-cost.
+// 
+// The set is intentionally limited to byte-stream destinations that map to a
+// `FILE*` today. Pipe/Socket/Unix-socket/SharedMemory/Semaphore sinks are a
+// roadmap item that depends on std.net / std.sync handles and per-OS syscalls;
+// the enum can grow additively (one new variant + one `fit` arm) without
+// changing any caller.
+pub enum Sink {
+  Stdout,
+  Stderr,
+  Stdin,
+  File(File),
+  Rotating(RotatingSink*),
+}
+
+impl Sink {
+  // Resolve the underlying C stream handle for this sink.
+  handle() FILE* {
+    fit *self {
+      .Stdout -> { ret stdout_stream(); }
+      .Stderr -> { ret stderr_stream(); }
+      .Stdin -> { ret stdin_stream(); }
+      .File(f) -> { ret f.handle; }
+      .Rotating(r) -> { ret r.current.handle; }
+    }
+    ret nil;
+  }
+
+  // Write a string to the sink. Returns true on success.
+  pub write(str s) bin {
+    // Rotating sinks own their size-cap/rollover logic, so route through
+    // RotatingSink.write() instead of the plain handle()+fputs path below.
+    fit *self {
+      .Rotating(r) -> { ret r.write(s); }
+      _ -> {}
+    }
+    let h = self.handle();
+    if h == nil {
+      ret false;
+    }
+    let rc = fputs(s, h);
+    ret rc >= 0;
+  }
+
+  // Write a string to the sink with a Result.
+  pub try_write(str s) Result<bin> {
+    fit *self {
+      .Rotating(r) -> {
+        if r.write(s) {
+          ret ok(true);
+        }
+        ret err_kind(.Io, "sink write failed", false);
+      }
+      _ -> {}
+    }
+    let h = self.handle();
+    if h == nil {
+      ret err_kind(.Invalid, "write to unavailable sink", false);
+    }
+    let rc = fputs(s, h);
+    if rc < 0 {
+      ret err_kind(.Io, "sink write failed", false);
+    }
+    ret ok(true);
+  }
+
+  // Flush any buffered bytes to the underlying stream.
+  pub flush() bin {
+    fit *self {
+      .Rotating(r) -> { ret r.flush(); }
+      _ -> {}
+    }
+    let h = self.handle();
+    if h == nil {
+      ret false;
+    }
+    ret fflush(h) == 0;
+  }
+
+  // Flush any buffered bytes to the underlying stream, with a Result.
+  pub try_flush() Result<bin> {
+    if self.flush() {
+      ret ok(true);
+    }
+    ret err_kind(.Io, "sink flush failed", false);
+  }
+}
+
+// Write `msg` to a sink (no trailing newline).
+pub fun write_to(Sink s, str msg) {
+  _ = s.write(msg);
+}
+
+// Write `msg` followed by a newline to a sink.
+pub fun writeln_to(Sink s, str msg) {
+  _ = s.write(msg);
+  _ = s.write("\n");
+}
+
+// --- Rotating file sink ----------------------------------------------------------------
+
+// A file destination that caps each file at `max_bytes` and keeps up to
+// `max_files` rolled-over generations (`path`, `path.1`, ... `path.{max_files-1}`).
+// When a write would exceed the cap, the current file is closed, existing
+// generations are shifted up (dropping the oldest), and a fresh `path` is opened.
+// Intended for a single writer; guard with a Mutex for concurrent use.
+pub compound RotatingSink {
+  str path;
+  num max_bytes;
+  num max_files;
+  File current;
+  num written;
+}
+
+// Open a rotating sink at `path` (truncates/creates the active file).
+pub fun rotating_sink_new(str path, num max_bytes, num max_files) RotatingSink {
+  RotatingSink r;
+  r.path = path;
+  r.max_bytes = max_bytes;
+  r.max_files = max_files;
+  r.current = open_write(path);
+  r.written = 0;
+  ret r;
+}
+
+impl RotatingSink {
+  // Roll the current file over: close it, shift `path.N -> path.N+1` (dropping the
+  // oldest beyond max_files), then reopen a fresh active `path`.
+  rotate() {
+    self.current.close();
+    // Shift older generations up, oldest first, so nothing is overwritten.
+    num i = self.max_files - 1;
+    for i > 0 {
+      let src = self.numbered_path(i - 1);
+      let dst = self.numbered_path(i);
+      _ = rename(src, dst);
+      i = i - 1;
+    }
+    self.current = open_write(self.path);
+    self.written = 0;
+  }
+
+  // Build the on-disk name for generation `n` (0 = the active `path`).
+  numbered_path(num n) str {
+    if n == 0 {
+      ret self.path;
+    }
+    ret format("{}.{}", self.path, n);
+  }
+
+  // Write `s`, rotating first if it would exceed the size cap.
+  pub write(str s) bin {
+    let n = len(s);
+    if self.written + n > self.max_bytes && self.written > 0 {
+      self.rotate();
+    }
+    let ok_w = self.current.write(s);
+    if ok_w {
+      self.written = self.written + n;
+    }
+    ret ok_w;
+  }
+
+  pub flush() bin {
+    ret self.current.flush();
+  }
+
+  pub close() {
+    self.current.close();
   }
 }
 

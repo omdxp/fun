@@ -108,12 +108,43 @@ pub fun ok<T>(T value) Result<T> {
   ret .Ok(value);
 }
 
-// Construct an `Err` from a code + message. The trailing value is not stored (an Err
-// carries only the Error); it exists purely as a generic-type WITNESS so `T` is
-// inferred from the call site — `err(1, "msg", fallback)` resolves `Result<T>`. The
-// leading underscore marks it intentionally unused.
+// Construct an `Err` from a code + message, tagged `ErrorKind.System`. The trailing
+// value is not stored (an Err carries only the Error); it exists purely as a
+// generic-type WITNESS so `T` is inferred from the call site — `err(1, "msg",
+// fallback)` resolves `Result<T>`. The leading underscore marks it intentionally
+// unused.
+//
+// Prefer `err_kind()` when the failure has an unambiguous category (`Io`, `Parse`,
+// `NotFound`, `Invalid`, `OutOfMemory`, `Unexpected`) — callers inspecting
+// `result.unwrap_err().kind` see that category instead of the generic `System`.
 pub fun err<T>(num code, str message, T _default_value) Result<T> {
   ret .Err(error_new(code, message));
+}
+
+// Construct an `Err` tagged with a specific error category, code `0`. Use this in
+// place of `err()` whenever the failure obviously belongs to one of the
+// `ErrorKind` categories, so callers can branch on `kind` instead of parsing
+// `message`.
+//
+// Params:
+// - kind: broad error category
+// - message: human-readable error message
+// - _default_value: generic-type witness only, not stored (see `err()`)
+pub fun err_kind<T>(ErrorKind kind, str message, T _default_value) Result<T> {
+  ret .Err(error_new_simple(kind, message));
+}
+
+// Construct a category-tagged `Err` that also carries a real numeric code (e.g. an
+// OS/pthread return code). Use `err_kind()` instead when there is no meaningful
+// code to report.
+//
+// Params:
+// - kind: broad error category
+// - code: numeric error code
+// - message: human-readable error message
+// - _default_value: generic-type witness only, not stored (see `err()`)
+pub fun err_kind_code<T>(ErrorKind kind, num code, str message, T _default_value) Result<T> {
+  ret .Err(error_new_kind(kind, code, message));
 }
 
 // Construct an `Err` from a pre-built Error. The trailing value is the same

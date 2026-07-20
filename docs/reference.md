@@ -496,6 +496,25 @@ Examples:
 
 `std.thread_runtime` and `std.sync_runtime` follow the same selector.
 
+## Deadlock Watchdog (opt-in)
+
+Concurrent programs (`fork` and/or channels) can opt into a runtime deadlock
+watchdog via environment variables. It is OFF by default: with the variable
+unset the runtime is byte-identical — no watchdog thread, no timed waits, no
+overhead.
+
+- `FUN_DEADLOCK_WATCHDOG_MS=<ms>` — arm the watchdog with a stall threshold in
+  milliseconds. When outstanding work exists but no scheduler progress happens
+  and at least one task is parked in a blocking channel wait for the whole
+  window, the runtime prints `fun: possible deadlock: <n> blocked, <n> pending, no progress for <ms>ms`
+  to stderr and keeps running (warn-and-continue; semantics unchanged).
+- `FUN_DEADLOCK_ABORT=1` — in addition, `abort()` the process on detection
+  (nonzero exit + the diagnostic), for CI/fail-fast use.
+
+The watchdog is a diagnostic aid; it never changes the behavior of a correct
+program. Choose a threshold comfortably above your longest legitimate blocking
+wait to avoid warning on slow-but-live operations.
+
 ## Formatting
 - `fun -fmt -in file.fn` formats a file in place.
 - `fun -fmt-all -in file.fn` formats local imports (skips `std.*`).
@@ -521,7 +540,7 @@ Examples:
 
 ## Standard Library (high level)
 - `std.array`: array helpers
-- `std.io`: file helpers + print utilities
+- `std.io`: file helpers + print utilities, plus a `Sink` write destination (`Sink.Stdout`/`Stderr`/`Stdin`/`File(File)`) with `write`/`try_write`/`flush` and `write_to`/`writeln_to`, and a `RotatingSink` (size-capped, generation-rolling file logger). `stderr`/`stdin` are reachable via the `std.c.io` stream accessors (`stdout_stream`/`stderr_stream`/`stdin_stream`).
 - `std.vec`: dynamic vectors
 - `std.map`: generic maps (`Map<K, V>`) with typed keys/values and bytewise hashed lookups by default
 - `std.set`: sets built on maps
@@ -543,6 +562,8 @@ Examples:
 - `std.json`: typed JSON via the `JsonValue` data enum (`Null`/`Bool`/`Num`/`Str`/`Array`/`Object`); `parse(str) -> Result<JsonValue>`, Option-returning accessors (`as_num`/`as_str`/`as_bool`/`as_array`/`get(key)`/`index(i)`/`len`/`is_null`), and `to_string`/`stringify`. Structured (de)serialization of your own compounds via the `ToJson`/`FromJson` quirks (hand-implemented — Fun has no reflection).
 - `std.toml`: typed flat `key = value` TOML via the `TomlValue` enum (`Str`/`Int`/`Float`/`Bool`); `parse_document`, typed `get(key) -> Option<TomlValue>`, `as_int`/`as_float`/`as_str`/`as_bool`, and `stringify`.
 - `std.serde`: the text-layer `Serialize`/`Deserialize` quirks + `to_string`/`from_string`, shared by `JsonValue` and `TomlDoc`.
+- `std.log`: structured logging. `LogLevel` (`Trace`/`Debug`/`Info`/`Warn`/`Error`/`Fatal`, explicit ordered values), `LogFormat` (`Text`/`Json`), and a `Logger` that filters by level and routes to any `std.io.Sink`. Bare methods (`info`/`warn`/`error`/...) emit immediately; the fluent by-value builder (`l.info_r("msg").str_field(k,v).num_field(k,n).emit()`) attaches typed key/value fields. Text renders `[LEVEL] <ts> [name] msg k=v`; JSON renders one object per line (deterministic field order). Fluent config: `logger_init`/`logger_json`, `as_format`/`to_sink`/`named`/`route_errors`/`with_timestamps`. `route_errors(true)` sends `Warn`+ to stderr.
+- `std.quirks`: common quirks — `Sized`, `Display`, `Clearable`, `Iterator<T>`, and the generic conversion quirks `To<T>`/`From<T>` (e.g. `impl Config as To<JsonValue>`), the target-agnostic successors to `std.json`'s `ToJson`/`FromJson`.
 - `std.time`, `std.rand`, `std.math`, `std.path`, `std.net`, etc.
 - `std.sys`: environment and process helpers (`sys_exit`, `sys_abort`, `sys_system`)
 - `std.net`: URL parsing + pure Fun POSIX TCP/HTTP helpers (POSIX sockets)
@@ -567,6 +588,10 @@ fun -in <input_file> [-out <output_file>] [-no-exec] [-outf] [-ast] [-help]
 - `unused_function` (with `-warn-unused`)
 - `unused_compound` (with `-warn-unused`)
 - `missing_return` (non-`void` function may reach its end without returning; always checked)
+- `blocking_fork_deadlock` (with `-warn-unused`) — `wait_group_new(0)` + `fork` in a loop that `done()`s the group; size the WaitGroup to the task count
+- `shared_mutable_capture_race` (with `-warn-unused`) — a non-`Mutex`/`Channel` compound shared by `&` into a mutating `async fun` forked multiple times; guard or copy per task
+- `integer_literal_out_of_range` (with `-warn-unused`) — a compile-time integer literal does not fit the declared `uN`/`iN` width, or a negative value is assigned to an unsigned `uN`
+- `channel_capacity_overflow` (with `-warn-unused`) — more statically-known blocking sends than a bounded channel's literal capacity, with no concurrent receiver, so the producer blocks (e.g. `channel_new_cap(0, 1)` then three `<-` sends)
 
 ### Warning Control Statements
 - `allow <warning_id>, "reason";`

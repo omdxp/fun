@@ -40,6 +40,14 @@ pub const WarningId = enum {
     // structural shape so they don't false-positive on correct programs.
     blocking_fork_deadlock,
     shared_mutable_capture_race,
+    // A compile-time integer literal cannot be represented in the declared
+    // arbitrary-width integer type (e.g. `u2 x = 5;`, `u8 y = -3;`, `i6 z = 100;`).
+    integer_literal_out_of_range,
+    // A bounded channel receives more blocking sends than its capacity, with no
+    // concurrent receiver, so the producer can block forever (e.g.
+    // `let c = channel_new_cap(0, 1); c <- 1; c <- 2; c <- 3;`). Conservative:
+    // only fires when both the capacity and the send count are statically known.
+    channel_capacity_overflow,
 };
 
 /// Intent controls for warning diagnostics.
@@ -61,6 +69,8 @@ pub fn warning_id_from_string(name: []const u8) ?WarningId {
     if (mem.eql(u8, name, "missing_return")) return .missing_return;
     if (mem.eql(u8, name, "blocking_fork_deadlock")) return .blocking_fork_deadlock;
     if (mem.eql(u8, name, "shared_mutable_capture_race")) return .shared_mutable_capture_race;
+    if (mem.eql(u8, name, "integer_literal_out_of_range")) return .integer_literal_out_of_range;
+    if (mem.eql(u8, name, "channel_capacity_overflow")) return .channel_capacity_overflow;
     return null;
 }
 
@@ -78,6 +88,8 @@ pub fn warning_id_to_string(id: WarningId) []const u8 {
         .missing_return => "missing_return",
         .blocking_fork_deadlock => "blocking_fork_deadlock",
         .shared_mutable_capture_race => "shared_mutable_capture_race",
+        .integer_literal_out_of_range => "integer_literal_out_of_range",
+        .channel_capacity_overflow => "channel_capacity_overflow",
     };
 }
 
@@ -263,6 +275,11 @@ pub const Node = struct {
             name: ?ArrayList(u8) = null,
             /// Optional generic type parameters.
             type_params: ?utils.Vector(ArrayList(u8)) = null,
+            /// Forced concrete type combinations from constrained type params, e.g.
+            /// `fun f<T: num | str>` yields [["num"], ["str"]] (parallel to
+            /// type_params). Used to type-check generic-fn call sites against the
+            /// declared constraint set. Same shape as the impl node's field.
+            type_param_forced_insts: ?utils.Vector(utils.Vector(ArrayList(u8))) = null,
             /// The arguments of the function.
             args: ?utils.Vector(*Node) = null,
             /// Whether the function was declared with the `async` keyword.
@@ -278,6 +295,10 @@ pub const Node = struct {
             fields: utils.Vector(CompoundField),
             /// Optional generic type parameters (e.g. Vec<T> -> ["T"]).
             type_params: ?utils.Vector(ArrayList(u8)) = null,
+            /// Forced concrete type combinations from constrained type params, e.g.
+            /// `compound Box<T: num | str>` yields [["num"], ["str"]]. Enforced at
+            /// each instantiation/declaration site.
+            type_param_forced_insts: ?utils.Vector(utils.Vector(ArrayList(u8))) = null,
         },
 
         quirk: struct {

@@ -147,7 +147,7 @@ pub fun path_join(str a, str b) str {
 pub fun try_path_join(str a, str b) Result<str> {
   let out = path_join(a, b);
   if out == nil {
-    ret err(1, "path_join failed", "");
+    ret err_kind(.Invalid, "path_join failed", "");
   }
   ret ok(out);
 }
@@ -188,7 +188,7 @@ pub fun path_join_many(Vec<str>* parts) str {
 pub fun try_path_join_many(Vec<str>* parts) Result<str> {
   let out = path_join_many(parts);
   if out == nil {
-    ret err(1, "path_join_many failed", "");
+    ret err_kind(.Invalid, "path_join_many failed", "");
   }
   ret ok(out);
 }
@@ -372,7 +372,7 @@ pub fun change_ext(str path, str new_ext) str {
 pub fun try_change_ext(str path, str new_ext) Result<str> {
   let out = change_ext(path, new_ext);
   if out == nil {
-    ret err(1, "change_ext failed", "");
+    ret err_kind(.Invalid, "change_ext failed", "");
   }
   ret ok(out);
 }

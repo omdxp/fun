@@ -291,6 +291,25 @@ function buildDebugConfig(
   program: string,
   cwd: string,
 ): vscode.DebugConfiguration {
+  // Arm the runtime deadlock watchdog for debug sessions (warn-only, ~1s
+  // threshold). A hang while debugging then surfaces a "possible deadlock"
+  // diagnostic on stderr instead of stalling silently. Plain "Run" (fun.runFile)
+  // does NOT set this, so production runs stay byte-identical. Configurable via
+  // the `fun.debug.watchdogMs` / `fun.debug.watchdogAbort` settings.
+  const wdConfig = vscode.workspace.getConfiguration("fun");
+  const wdMs = wdConfig.get<number>("debug.watchdogMs", 1000);
+  const wdAbort = wdConfig.get<boolean>("debug.watchdogAbort", false);
+  // As a name/value map (CodeLLDB) and as a name/value list (cpptools).
+  const envMap: Record<string, string> = {};
+  if (wdMs > 0) {
+    envMap["FUN_DEADLOCK_WATCHDOG_MS"] = String(wdMs);
+    if (wdAbort) envMap["FUN_DEADLOCK_ABORT"] = "1";
+  }
+  const envList = Object.entries(envMap).map(([name, value]) => ({
+    name,
+    value,
+  }));
+
   const debugType = detectDebugType();
   if (debugType === "cppdbg") {
     if (process?.platform === "win32") {
@@ -302,6 +321,7 @@ function buildDebugConfig(
         program,
         args: [],
         cwd,
+        environment: envList,
         stopAtEntry: false,
         // No MIMode → cpptools auto-selects the MSVC engine on Windows.
       };
@@ -314,6 +334,7 @@ function buildDebugConfig(
       program,
       args: [],
       cwd,
+      environment: envList,
       stopAtEntry: false,
       MIMode: "lldb",
       setupCommands: [
@@ -333,6 +354,7 @@ function buildDebugConfig(
     program,
     args: [],
     cwd,
+    env: envMap,
     stopAtEntry: false,
   };
 }

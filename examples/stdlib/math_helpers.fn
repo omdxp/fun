@@ -4,8 +4,8 @@ imp std.c.io;
 imp std.math;
 
 fun main() {
-  printf("abs(-5)=%d\n", abs_num(-5));
-  printf("clamp(15,0,10)=%d\n", clamp_num(15, 0, 10));
+  printf("abs(-5)=%d\n", abs(-5));
+  printf("clamp(15,0,10)=%d\n", clamp(15, 0, 10));
 
   Vec2 a;
   a.x = 0;

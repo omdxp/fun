@@ -1127,3 +1127,188 @@ test "diagnostic: read-only shared capture across forks does not warn" {
     }
     std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
+
+test "diagnostic: integer literal out of range for uN warns" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "int_literal_range_warn.fn";
+
+    // u2 holds 0..3; 5 overflows. Negative into unsigned and signed overflow too.
+    const input =
+        "fun main() {\n" ++
+        "  u2 a = 5;\n" ++
+        "  u8 b = -3;\n" ++
+        "  i6 c = 100;\n" ++
+        "  _ = a; _ = b; _ = c;\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, true);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(res.warnings != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "integer_literal_out_of_range") != null);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "diagnostic: in-range integer literals for uN do not warn" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "int_literal_range_ok.fn";
+
+    // All within range: u8 0..255, i8 -128..127.
+    const input =
+        "fun main() {\n" ++
+        "  u8 a = 200;\n" ++
+        "  i8 b = -5;\n" ++
+        "  u4 c = 15;\n" ++
+        "  _ = a; _ = b; _ = c;\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, true);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    if (res.warnings) |w| {
+        try std.testing.expect(std.mem.indexOf(u8, w, "integer_literal_out_of_range") == null);
+    }
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "diagnostic: allow integer_literal_out_of_range suppresses the warning" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "int_literal_range_allow.fn";
+
+    const input =
+        "fun main() {\n" ++
+        "  allow integer_literal_out_of_range, \"intentional truncation\";\n" ++
+        "  u2 a = 5;\n" ++
+        "  _ = a;\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, true);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    if (res.warnings) |w| {
+        try std.testing.expect(std.mem.indexOf(u8, w, "integer_literal_out_of_range") == null);
+    }
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "diagnostic: blocking_fork_deadlock warns on wait_group_new(0) with fork-in-loop" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "blocking_fork_deadlock_warn.fn";
+
+    // A WaitGroup created with a literal 0 (signal buffer capacity 1) that is
+    // done()'d from tasks forked in a loop is the classic deadlock shape.
+    const input =
+        "imp std.task;\n" ++
+        "imp std.io;\n" ++
+        "async fun worker(WaitGroup* wg) {\n" ++
+        "  defer wg.done();\n" ++
+        "}\n" ++
+        "fun main() {\n" ++
+        "  WaitGroup wg = wait_group_new(0);\n" ++
+        "  defer wg.destroy();\n" ++
+        "  for i : 0..4 {\n" ++
+        "    wg.add(1);\n" ++
+        "    fork worker(&wg);\n" ++
+        "  }\n" ++
+        "  wg.wait();\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, true);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(res.warnings != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "blocking_fork_deadlock") != null);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "diagnostic: channel_capacity_overflow warns on over-send with no receiver" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "channel_capacity_overflow_warn.fn";
+
+    // 3 blocking sends into a capacity-1 channel with no receiver -> producer blocks.
+    const input =
+        "imp std.channel;\n" ++
+        "imp std.io;\n" ++
+        "fun main() {\n" ++
+        "  let c = channel_new_cap(0, 1);\n" ++
+        "  c <- 1;\n" ++
+        "  c <- 2;\n" ++
+        "  c <- 3;\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, true);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(res.warnings != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "channel_capacity_overflow") != null);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "diagnostic: channel within capacity does not warn" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "channel_capacity_ok.fn";
+
+    const input =
+        "imp std.channel;\n" ++
+        "imp std.io;\n" ++
+        "fun main() {\n" ++
+        "  let c = channel_new_cap(0, 4);\n" ++
+        "  c <- 1;\n" ++
+        "  c <- 2;\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, true);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    if (res.warnings) |w| {
+        try std.testing.expect(std.mem.indexOf(u8, w, "channel_capacity_overflow") == null);
+    }
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "diagnostic: over-send drained by a receive does not warn" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "channel_capacity_drained_ok.fn";
+
+    // Same channel is received-from, so the buffer drains -> no false positive.
+    const input =
+        "imp std.channel;\n" ++
+        "imp std.io;\n" ++
+        "fun main() {\n" ++
+        "  let c = channel_new_cap(0, 1);\n" ++
+        "  c <- 1;\n" ++
+        "  let x = <- c;\n" ++
+        "  c <- 2;\n" ++
+        "  let y = <- c;\n" ++
+        "  _ = x; _ = y;\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, true);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    if (res.warnings) |w| {
+        try std.testing.expect(std.mem.indexOf(u8, w, "channel_capacity_overflow") == null);
+    }
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}

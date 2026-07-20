@@ -64,7 +64,7 @@ impl Map<K, V> {
   // 
   // Notes:
   // - Capacities smaller than 8 are rounded up to 8.
-  pub init(num cap) {
+  pub init(num cap = 8) {
     self.key_slots = nil;
     self.value_slots = nil;
     self.used = nil;

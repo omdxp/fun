@@ -11,7 +11,7 @@ imp std.c.math as cmath;
 imp std.result;
 
 // The sign of a value, as a type-safe alternative to the -1/0/1 returned by
-// `sign_num`/`sign_dec`. Match it with `fit`:
+// `sign()`. Match it with `fit`:
 // 
 // ```
 // fit sign_of(x) {
@@ -324,42 +324,28 @@ pub fun copysign_dec(dec x, dec y) dec {
   ret cmath.copysign(x, y);
 }
 
-// Compute the absolute value of a number.
-// 
+// Compute the absolute value of a number or decimal.
+//
 // Params:
 // - x: value
-// 
+//
 // Returns:
 // - |x|
-pub fun abs_num(num x) num {
+pub fun abs<T: num | dec>(T x) T {
   if x < 0 {
     ret -x;
   }
   ret x;
 }
 
-// Compute the absolute value of a decimal.
-// 
+// Compute the sign of a number or decimal as `-1`, `0`, or `1`.
+//
 // Params:
 // - x: value
-// 
-// Returns:
-// - |x|
-pub fun abs_dec(dec x) dec {
-  if x < 0 {
-    ret -x;
-  }
-  ret x;
-}
-
-// Compute the sign of a number as `-1`, `0`, or `1`.
-// 
-// Params:
-// - x: value
-// 
+//
 // Returns:
 // - -1, 0, or 1
-pub fun sign_num(num x) num {
+pub fun sign<T: num | dec>(T x) T {
   if x < 0 {
     ret -1;
   }
@@ -369,42 +355,11 @@ pub fun sign_num(num x) num {
   ret 0;
 }
 
-// Compute the sign of a decimal as `-1`, `0`, or `1`.
-// 
-// Params:
-// - x: value
-// 
-// Returns:
-// - -1, 0, or 1
-pub fun sign_dec(dec x) dec {
-  if x < 0 {
-    ret -1;
-  }
-  if x > 0 {
-    ret 1;
-  }
-  ret 0;
-}
-
-// Compute the sign of a number as a type-safe `Sign`.
-// 
+// Compute the sign of a number or decimal as a type-safe `Sign`.
+//
 // Notes:
-// - Prefer this over `sign_num()` when you want to `fit`-match the cases.
-pub fun sign_of(num x) Sign {
-  if x < 0 {
-    ret Sign.Negative;
-  }
-  if x > 0 {
-    ret Sign.Positive;
-  }
-  ret Sign.Zero;
-}
-
-// Compute the sign of a decimal as a type-safe `Sign`.
-// 
-// Notes:
-// - See `sign_of()` for the integer variant.
-pub fun sign_of_dec(dec x) Sign {
+// - Prefer this over `sign()` when you want to `fit`-match the cases.
+pub fun sign_of<T: num | dec>(T x) Sign {
   if x < 0 {
     ret Sign.Negative;
   }
@@ -415,13 +370,20 @@ pub fun sign_of_dec(dec x) Sign {
 }
 
 // Return the minimum of two numbers.
-// 
+//
 // Params:
 // - a: first value
 // - b: second value
-// 
+//
 // Returns:
 // - smaller value
+//
+// Notes:
+// - Kept as separate `_num`/`_dec` overloads rather than a constrained
+//   generic `min<T>`: `Vec<T: num | dec>` already declares its own instance
+//   method named `min()` (a reduction over the vector), and a same-named
+//   free function collides with that method's resolution when both
+//   `std.vec` and `std.math` are imported together.
 pub fun min_num(num a, num b) num {
   if a < b {
     ret a;
@@ -430,11 +392,11 @@ pub fun min_num(num a, num b) num {
 }
 
 // Return the maximum of two numbers.
-// 
+//
 // Params:
 // - a: first value
 // - b: second value
-// 
+//
 // Returns:
 // - larger value
 pub fun max_num(num a, num b) num {
@@ -445,11 +407,11 @@ pub fun max_num(num a, num b) num {
 }
 
 // Return the minimum of two decimals.
-// 
+//
 // Params:
 // - a: first value
 // - b: second value
-// 
+//
 // Returns:
 // - smaller value
 pub fun min_dec(dec a, dec b) dec {
@@ -460,11 +422,11 @@ pub fun min_dec(dec a, dec b) dec {
 }
 
 // Return the maximum of two decimals.
-// 
+//
 // Params:
 // - a: first value
 // - b: second value
-// 
+//
 // Returns:
 // - larger value
 pub fun max_dec(dec a, dec b) dec {
@@ -474,35 +436,16 @@ pub fun max_dec(dec a, dec b) dec {
   ret b;
 }
 
-// Clamp a number to `[lo, hi]`.
-// 
+// Clamp a number or decimal to `[lo, hi]`.
+//
 // Params:
 // - x: value
 // - lo: lower bound
 // - hi: upper bound
-// 
+//
 // Returns:
 // - clamped value
-pub fun clamp_num(num x, num lo, num hi) num {
-  if x < lo {
-    ret lo;
-  }
-  if x > hi {
-    ret hi;
-  }
-  ret x;
-}
-
-// Clamp a decimal to `[lo, hi]`.
-// 
-// Params:
-// - x: value
-// - lo: lower bound
-// - hi: upper bound
-// 
-// Returns:
-// - clamped value
-pub fun clamp_dec(dec x, dec lo, dec hi) dec {
+pub fun clamp<T: num | dec>(T x, T lo, T hi) T {
   if x < lo {
     ret lo;
   }
@@ -573,7 +516,7 @@ pub fun pow_int(num base, num exp) num {
 // - `Err` when `exp` is negative
 pub fun try_pow_int(num base, num exp) Result<num> {
   if exp < 0 {
-    ret err(1, "pow_int: negative exponent", 1);
+    ret err_kind(.Invalid, "pow_int: negative exponent", 1);
   }
   ret ok(pow_int(base, exp));
 }

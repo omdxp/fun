@@ -26,13 +26,31 @@ pub fun printf(str fmt, ...) num;
 // Prints formatted output to a stream (e.g. stderr).
 // 
 // Params:
-// - stream: destination stream (modeled as num; typically a FILE*)
+// - stream: destination stream (a FILE*, e.g. from stderr_stream())
 // - fmt: printf-style format string
 // - ...: format arguments
 // 
 // Returns:
 // - number of characters written, or a negative value on error (C semantics)
-pub fun fprintf(num stream, str fmt, ...) num;
+pub fun fprintf(FILE* stream, str fmt, ...) num;
+
+// Standard-stream accessors. `stdout`/`stderr`/`stdin` are libc macros/globals,
+// not callable symbols and not portable as `extern FILE*` (MSVCRT resolves them
+// via a function call). The compiler emits tiny `static FILE* fun_*_stream()`
+// wrappers in the prelude that these bind to, so writing to stderr/stdin is
+// portable across glibc/musl/macOS/Windows.
+// 
+// Returns:
+// - the FILE* for the process's standard output stream
+pub fun stdout_stream() FILE*;
+
+// Returns:
+// - the FILE* for the process's standard error stream
+pub fun stderr_stream() FILE*;
+
+// Returns:
+// - the FILE* for the process's standard input stream
+pub fun stdin_stream() FILE*;
 
 // Formats output into a destination buffer.
 // 

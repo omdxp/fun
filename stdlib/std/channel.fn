@@ -12,6 +12,7 @@ imp std.sync_runtime;
 imp std.c.mem;
 imp std.c.string;
 imp std.c.time;
+imp std.c.wd;
 
 // Bounded blocking channel implemented as a ring buffer.
 pub compound Channel<T> {
@@ -600,7 +601,13 @@ impl Channel<T> {
     defer runtime_mutex_unlock(&self.mu);
 
     for self.count == self.cap && self.closed == false {
+      // Bracket the blocking wait so the fork scheduler's deadlock watchdog (if
+      // armed via FUN_DEADLOCK_WATCHDOG_MS) can see this worker as parked. The
+      // hooks are no-ops when the watchdog is disarmed (the default), so the hot
+      // path is unchanged.
+      __fun_wd_enter_wait();
       rc = runtime_condvar_wait(&self.can_send, &self.mu);
+      __fun_wd_leave_wait();
       if rc != 0 {
         ret rc;
       }
@@ -878,7 +885,11 @@ impl Channel<T> {
     defer runtime_mutex_unlock(&self.mu);
 
     for self.count == 0 && self.closed == false {
+      // See the send loop: bracket the blocking wait for the deadlock watchdog.
+      // No-ops unless FUN_DEADLOCK_WATCHDOG_MS armed the watchdog.
+      __fun_wd_enter_wait();
       rc = runtime_condvar_wait(&self.can_recv, &self.mu);
+      __fun_wd_leave_wait();
       if rc != 0 {
         ret rc;
       }
@@ -1591,10 +1602,10 @@ impl Channel<T> {
     Channel<T>* other,
     T* out,
     num* out_index,
-    num timeout_ms,
-    num wait_slice_ms,
-    num backoff_steps,
-    ChannelCancelToken* cancel_token
+    num timeout_ms = -1,
+    num wait_slice_ms = -1,
+    num backoff_steps = -1,
+    ChannelCancelToken* cancel_token = nil
   ) num {
     ret self.select_recv_timeout_with_tuning_cancel(
       other,
@@ -1885,10 +1896,10 @@ impl Channel<T> {
     num* next_index,
     T* out,
     num* out_index,
-    num timeout_ms,
-    num wait_slice_ms,
-    num backoff_steps,
-    ChannelCancelToken* cancel_token
+    num timeout_ms = -1,
+    num wait_slice_ms = -1,
+    num backoff_steps = -1,
+    ChannelCancelToken* cancel_token = nil
   ) num {
     ret self.select_recv_timeout3_rr_with_tuning_cancel(
       other_a,

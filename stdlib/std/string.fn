@@ -274,14 +274,14 @@ pub fun substr(str s, num start, num length) str {
 // otherwise `Err` — unlike `substr`, which reads past the string on a bad range.
 pub fun try_substr(str s, num start, num length) Result<str> {
   if start < 0 || length < 0 {
-    ret err(1, "substr: negative start or length", "");
+    ret err_kind(.Invalid, "substr: negative start or length", "");
   }
   if start + length > _string_len(s) {
-    ret err(1, "substr: range exceeds string length", "");
+    ret err_kind(.Invalid, "substr: range exceeds string length", "");
   }
   let out = substr(s, start, length);
   if out == nil {
-    ret err(1, "substr: allocation failed", "");
+    ret err_kind(.OutOfMemory, "substr: allocation failed", "");
   }
   ret ok(out);
 }
@@ -833,18 +833,18 @@ pub fun parse_int(str s) num {
 pub fun try_parse_int(str s) Result<num> {
   num n = _string_len(s);
   if n == 0 {
-    ret err(1, "parse_int: empty string", 0);
+    ret err_kind(.Parse, "parse_int: empty string", 0);
   }
   num i = 0;
   if s[0] == '-' {
     i = 1;
     if n == 1 {
-      ret err(1, "parse_int: lone '-'", 0);
+      ret err_kind(.Parse, "parse_int: lone '-'", 0);
     }
   }
   for i < n {
     if s[i] < '0' || s[i] > '9' {
-      ret err(1, "parse_int: invalid digit", 0);
+      ret err_kind(.Parse, "parse_int: invalid digit", 0);
     }
     i = i + 1;
   }
@@ -1002,7 +1002,7 @@ pub fun parse_dec(str s) dec {
 pub fun try_parse_dec(str s) Result<dec> {
   num n = _string_len(s);
   if n == 0 {
-    ret err(1, "parse_dec: empty string", 0.0);
+    ret err_kind(.Parse, "parse_dec: empty string", 0.0);
   }
   num i = 0;
   if s[0] == '-' {
@@ -1015,17 +1015,17 @@ pub fun try_parse_dec(str s) Result<dec> {
     if c == '.' {
       dots = dots + 1;
       if dots > 1 {
-        ret err(1, "parse_dec: multiple '.'", 0.0);
+        ret err_kind(.Parse, "parse_dec: multiple '.'", 0.0);
       }
     } elif c >= '0' && c <= '9' {
       digits = digits + 1;
     } else {
-      ret err(1, "parse_dec: invalid char", 0.0);
+      ret err_kind(.Parse, "parse_dec: invalid char", 0.0);
     }
     i = i + 1;
   }
   if digits == 0 {
-    ret err(1, "parse_dec: no digits", 0.0);
+    ret err_kind(.Parse, "parse_dec: no digits", 0.0);
   }
   ret ok(parse_dec(s));
 }

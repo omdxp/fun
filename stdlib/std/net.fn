@@ -96,7 +96,7 @@ pub fun parse_url(str s) Url {
 pub fun try_parse_url(str s) Result<Url> {
   let u = parse_url(s);
   if is_empty(u.host) {
-    ret err(1, "parse_url: missing host", u);
+    ret err_kind(.Parse, "parse_url: missing host", u);
   }
   ret ok(u);
 }
@@ -199,7 +199,7 @@ pub fun tcp_listen(num port) num {
 pub fun try_tcp_listen(num port) Result<num> {
   let fd = tcp_listen(port);
   if fd < 0 {
-    ret err(1, "tcp_listen failed", -1);
+    ret err_kind(.Io, "tcp_listen failed", -1);
   }
   ret ok(fd);
 }
@@ -223,7 +223,7 @@ pub fun tcp_accept(num server_fd) num {
 pub fun try_tcp_accept(num server_fd) Result<num> {
   let fd = tcp_accept(server_fd);
   if fd < 0 {
-    ret err(1, "tcp_accept failed", -1);
+    ret err_kind(.Io, "tcp_accept failed", -1);
   }
   ret ok(fd);
 }
@@ -254,7 +254,7 @@ pub fun tcp_read(num fd, str buf, num len) num {
 pub fun try_tcp_read(num fd, str buf, num len) Result<num> {
   let n = tcp_read(fd, buf, len);
   if n < 0 {
-    ret err(1, "tcp_read failed", -1);
+    ret err_kind(.Io, "tcp_read failed", -1);
   }
   ret ok(n);
 }
@@ -285,7 +285,7 @@ pub fun tcp_write(num fd, str buf, num len) num {
 pub fun try_tcp_write(num fd, str buf, num len) Result<num> {
   let n = tcp_write(fd, buf, len);
   if n < 0 {
-    ret err(1, "tcp_write failed", -1);
+    ret err_kind(.Io, "tcp_write failed", -1);
   }
   ret ok(n);
 }
@@ -474,11 +474,7 @@ pub async fun build_http_get_to_channel_async(
       free(req);
       ret 1;
     }
-    .Full -> {
-      free(req);
-      ret -1;
-    }
-    .Error(e) -> {
+    _ -> {
       free(req);
       ret -1;
     }
@@ -532,7 +528,7 @@ pub fun http_serve_once(num port, str body) num {
 pub fun try_http_serve_once(num port, str body) Result<num> {
   let rc = http_serve_once(port, body);
   if rc != 0 {
-    ret err(1, "http_serve_once failed", rc);
+    ret err_kind(.Io, "http_serve_once failed", rc);
   }
   ret ok(rc);
 }
@@ -585,7 +581,7 @@ pub fun http_serve_forever(num port, str body) num {
 pub fun try_http_serve_forever(num port, str body) Result<num> {
   let rc = http_serve_forever(port, body);
   if rc != 0 {
-    ret err(1, "http_serve_forever failed", rc);
+    ret err_kind(.Io, "http_serve_forever failed", rc);
   }
   ret ok(rc);
 }

@@ -175,7 +175,7 @@ impl TomlDoc {
   pub try_stringify() Result<str> {
     let out = self.stringify();
     if out == nil {
-      ret err(1, "toml stringify failed", "");
+      ret err_kind(.OutOfMemory, "toml stringify failed", "");
     }
     ret ok(out);
   }

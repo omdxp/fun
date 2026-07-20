@@ -60,10 +60,10 @@ impl Vec<T> as Sized {
 
 impl Vec<T> {
   // Initialize the vector with an optional starting capacity.
-  // 
+  //
   // Params:
   // - cap: requested initial capacity
-  pub init(num cap) {
+  pub init(num cap = 8) {
     self.len = 0;
     self.cap = 0;
     if cap > 0 {

@@ -133,6 +133,9 @@ pub fn build(b: *std.Build) void {
     fls_lib_module.addImport("parser", parser_module);
     fls_lib_module.addImport("semantics", semantics_module);
     fls_lib_module.addImport("codegen", codegen_module);
+    // The in-process token formatter (textDocument/formatting) lives in cli.zig;
+    // link it so formatting need not spawn a diagnostics subprocess.
+    fls_lib_module.addImport("cli", cli_module);
 
     // --- Define Language Server Executable (fls) ---
     const fls_module = b.createModule(.{
@@ -234,6 +237,7 @@ pub fn build(b: *std.Build) void {
     fls_test_module.addImport("parser", parser_module);
     fls_test_module.addImport("semantics", semantics_module);
     fls_test_module.addImport("codegen", codegen_module);
+    fls_test_module.addImport("cli", cli_module);
 
     const fls_tests = b.addTest(.{ .root_module = fls_test_module });
     const run_fls_tests = b.addRunArtifact(fls_tests);

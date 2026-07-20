@@ -2522,6 +2522,28 @@ pub fn format_file_in_place(allocator: mem.Allocator, io: std.Io, input_file: []
     const source = try std.Io.Dir.cwd().readFileAlloc(io, input_file, allocator, .limited(16 * 1024 * 1024));
     defer allocator.free(source);
 
+    const out = try format_source(allocator, input_file, source);
+    defer allocator.free(out);
+
+    // Overwrite input file in-place.
+    var tp = try codegen.TranspileProcess.init_rw(
+        allocator,
+        input_file,
+        "__fmt_unused__.c",
+        .{ .exec = false, .outf = false, .ast = false },
+    );
+    defer tp.deinit();
+    try tp.ifile.writePositionalAll(io, out, 0);
+    try tp.ifile.setLength(io, out.len);
+}
+
+/// Format `source` (the contents of `input_file`) using the pure token-based
+/// formatter and return the formatted text as an allocator-owned slice. This is
+/// lexing-only — it never transpiles or typechecks, so it is cheap and has no
+/// dependency on imports/stdlib. `input_file` is used only for lexing (the file
+/// must exist on disk with the given content). The output is byte-identical to
+/// what `format_file_in_place` writes.
+pub fn format_source(allocator: mem.Allocator, input_file: []const u8, source: []const u8) ![]u8 {
     var line_starts = ArrayList(usize).init(allocator);
     defer line_starts.deinit();
     try line_starts.append(0);
@@ -2747,9 +2769,7 @@ pub fn format_file_in_place(allocator: mem.Allocator, io: std.Io, input_file: []
         try out.append('\n');
     }
 
-    // Overwrite input file in-place.
-    try tp.ifile.writePositionalAll(io, out.items, 0);
-    try tp.ifile.setLength(io, out.items.len);
+    return out.toOwnedSlice();
 }
 
 /// Checks whether `input_file` is already correctly formatted, without modifying it.

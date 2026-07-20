@@ -117,7 +117,7 @@ pub fun thread_start(Thread* thread, raw* entry, raw* arg) num {
 pub fun try_thread_start(Thread* thread, raw* entry, raw* arg) Result<bin> {
   let rc = thread_start(thread, entry, arg);
   if rc != 0 {
-    ret err(rc, "thread_start failed", false);
+    ret err_kind_code(.System, rc, "thread_start failed", false);
   }
   ret ok(true);
 }
@@ -148,7 +148,7 @@ pub fun thread_join(Thread* thread, raw* out_ret) num {
 pub fun try_thread_join(Thread* thread, raw* out_ret) Result<bin> {
   let rc = thread_join(thread, out_ret);
   if rc != 0 {
-    ret err(rc, "thread_join failed", false);
+    ret err_kind_code(.System, rc, "thread_join failed", false);
   }
   ret ok(true);
 }
@@ -178,7 +178,7 @@ pub fun thread_detach(Thread* thread) num {
 pub fun try_thread_detach(Thread* thread) Result<bin> {
   let rc = thread_detach(thread);
   if rc != 0 {
-    ret err(rc, "thread_detach failed", false);
+    ret err_kind_code(.System, rc, "thread_detach failed", false);
   }
   ret ok(true);
 }
