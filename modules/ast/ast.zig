@@ -307,8 +307,15 @@ pub const Node = struct {
             /// True for a generic quirk (`quirk Iterator<T> { ... }`). Generic quirks
             /// support static dispatch only (direct method calls on a concrete impl);
             /// no monomorphic vtable/quirk-object struct is emitted, since an unbound
-            /// type parameter cannot be represented in a single C signature.
+            /// type parameter cannot be represented in a single C signature — UNLESS a
+            /// CONCRETE instantiation (`To<JsonValue>`) is used as a type annotation,
+            /// in which case the registry synthesizes a non-generic quirk node (see
+            /// `synthesize_quirk_instantiation`) with the params substituted out.
             is_generic: bool = false,
+            /// Ordered type parameter names (e.g. `To<T>` -> ["T"]). Needed to
+            /// positionally substitute a concrete instantiation's arguments into the
+            /// method signatures below. Null for a non-generic quirk.
+            type_params: ?utils.Vector(ArrayList(u8)) = null,
         },
 
         enum_decl: struct {
@@ -330,7 +337,22 @@ pub const Node = struct {
             /// Each inner vector maps one concrete type name per param (parallel to type_params).
             type_param_forced_insts: ?utils.Vector(utils.Vector(ArrayList(u8))) = null,
             /// Optional quirk name. When null, this is a plain impl block: `impl Type { ... }`.
+            /// Always the BARE quirk name (`Iterator`, `To`, ...), even when the `as`
+            /// clause names a concrete instantiation (`as Iterator<num>`, `as
+            /// To<num>`) — existing quirk mechanisms (structural dispatch, the
+            /// `for`-loop Iterator special-case) key off this bare name and must keep
+            /// doing so unchanged. See `quirk_concrete_instantiation` for the
+            /// mangled identity of a CONCRETE binding.
             quirk_name: ?ArrayList(u8) = null,
+            /// Set when the `as` clause names a CONCRETE instantiation of a generic
+            /// quirk whose argument is not the enclosing impl's own type param (`as
+            /// To<num>`, `as Iterator<num>` on a non-generic type) — the mangled
+            /// name (`To__num`) of that distinct quirk identity, registered
+            /// ADDITIONALLY alongside the bare `quirk_name` above so a quirk-typed
+            /// parameter/variable naming this same concrete instantiation
+            /// (`fun f(To<num> v)`) can ALSO dispatch to this impl. Null for a
+            /// SYMBOLIC binding (`impl VecIter<T> as Iterator<T>`) or a plain impl.
+            quirk_concrete_instantiation: ?ArrayList(u8) = null,
             methods: utils.Vector(*Node),
         },
         /// The statement node.

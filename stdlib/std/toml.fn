@@ -275,16 +275,16 @@ pub fun try_parse_document(str s) Result<TomlDoc> {
   ret ok(out);
 }
 
-impl TomlDoc as Serialize {
+impl TomlDoc as To<str> {
   // Encode this document as TOML text.
-  pub serialize() str {
+  pub to() str {
     ret self.stringify();
   }
 }
 
-impl TomlDoc as Deserialize {
+impl TomlDoc as From<str> {
   // Parse TOML text into this document (replacing any current contents).
-  pub deserialize(str input) {
+  pub from(str input) {
     if self.values.cap == 0 {
       self.values.init(8);
     } else {

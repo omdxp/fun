@@ -892,6 +892,7 @@ test "typecheck std serde quirks with json" {
     const input =
         "imp stdlib.std.serde;\n" ++
         "imp stdlib.std.json;\n" ++
+        "imp stdlib.std.quirks;\n" ++
         "imp stdlib.std.option;\n" ++
         "imp stdlib.std.result;\n" ++
         "imp stdlib.std.string;\n" ++
@@ -899,7 +900,7 @@ test "typecheck std serde quirks with json" {
         "  let o = json_object();\n" ++
         "  o.put(\"name\", json_str(\"fun\"));\n" ++
         "  JsonValue doc = JsonValue.Object(o);\n" ++
-        "  Serialize js = &doc;\n" ++
+        "  To<str> js = &doc;\n" ++
         "  str json_text = to_string(js);\n" ++
         "\n" ++
         "  fit parse(json_text) {\n" ++
@@ -918,16 +919,17 @@ test "typecheck std serde quirks with toml" {
     const input =
         "imp stdlib.std.serde;\n" ++
         "imp stdlib.std.toml;\n" ++
+        "imp stdlib.std.quirks;\n" ++
         "imp stdlib.std.option;\n" ++
         "imp stdlib.std.string;\n" ++
         "fun main() {\n" ++
         "  TomlDoc t = toml_doc_init();\n" ++
         "  t.set(\"channel\", TomlValue.Str(\"stable\"));\n" ++
-        "  Serialize ts = &t;\n" ++
+        "  To<str> ts = &t;\n" ++
         "  str toml_text = to_string(ts);\n" ++
         "\n" ++
         "  TomlDoc t2 = toml_doc_init();\n" ++
-        "  Deserialize td = &t2;\n" ++
+        "  From<str> td = &t2;\n" ++
         "  from_string(td, toml_text);\n" ++
         "\n" ++
         "  let v = t2.get(\"channel\").unwrap_or(TomlValue.Str(\"\"));\n" ++

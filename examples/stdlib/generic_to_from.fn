@@ -1,13 +1,14 @@
 // Generic conversion quirks: `To<T>` / `From<T>` (std.quirks).
 // 
-// These are the generic, target-agnostic replacements for the type-specific
-// ToJson/FromJson quirks: a type implements `To<JsonValue>` to convert itself
-// into a JsonValue and `From<JsonValue>` to rebuild itself from one. Fun has no
-// reflection/derive, so each conversion is hand-written — the explicit
-// equivalent of a derived Into/From.
+// A type implements `To<JsonValue>` to convert itself into a JsonValue and
+// `From<JsonValue>` to rebuild itself from one. Fun has no reflection/derive,
+// so each conversion is hand-written — the explicit equivalent of a derived
+// Into/From.
 // 
-// A single impl per type dispatches through a direct method call (`c.to()` /
-// `back.from(doc)`).
+// An impl dispatches both via a direct method call (`c.to()` / `back.from(doc)`)
+// and through a quirk-typed parameter/variable (`std.json`'s
+// `to_json_value`/`to_json_string` take a `To<JsonValue>` parameter, so any
+// implementer coerces at the call site: `to_json_value(&c)`).
 
 imp std.c.io;
 imp std.json;
@@ -57,6 +58,11 @@ fun main() num {
     }
     Result.Err(e) -> { printf("parse failed\n"); }
   }
+
+  // Same conversion through std.json's quirk-typed-parameter wrappers instead
+  // of a direct method call — `to_json_value`/`to_json_string` accept any
+  // `To<JsonValue>` implementer.
+  printf("via wrapper: %s\n", to_json_string(&c));
 
   ret 0;
 }

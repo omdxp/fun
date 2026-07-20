@@ -1,36 +1,30 @@
-// Serialization quirks (text layer).
-// 
-// `Serialize`/`Deserialize` turn a whole value to/from a string. The document types
-// (`JsonValue`, `TomlDoc`) implement them, so any of them can be handled uniformly:
+// Serialization (text layer), built directly on `std.quirks`' generic `To<T>`/
+// `From<T>`. A type that converts to/from `str` — `impl JsonValue as To<str>`,
+// `impl TomlDoc as From<str>` — is what "serializable"/"deserializable" MEANS
+// here; there's no separate `Serialize`/`Deserialize` quirk to maintain, and
+// no reason the target representation has to be `str` specifically — the same
+// `To<T>`/`From<T>` primitive generalizes to any target type (e.g. `std.json`'s
+// `to_json_value`/`to_json_string` do the identical thing with `T = JsonValue`).
 // 
 // ```
-// Serialize s = &doc;
+// To<str> s = &doc;
 // str text = to_string(s);
 // ```
 // 
-// For STRUCTURED, typed (de)serialization of your own compounds, see the `ToJson` /
-// `FromJson` quirks in `std.json`: Fun has no reflection or derive macros, so each
-// type hand-implements the conversion to/from a `JsonValue` — the explicit,
-// reflection-free equivalent of `#[derive(Serialize, Deserialize)]`.
+// For STRUCTURED, typed (de)serialization of your own compounds, see
+// `std.quirks`' `To<JsonValue>`/`From<JsonValue>` (and `std.json`'s
+// `to_json_value`/`to_json_string` wrappers): Fun has no reflection or derive
+// macros, so each type hand-implements the conversion to/from a `JsonValue` —
+// the explicit, reflection-free equivalent of `#[derive(Serialize, Deserialize)]`.
 
-// Types that can serialize themselves to text.
-pub quirk Serialize {
-  // Encode the value as a string.
-  serialize() str;
+imp std.quirks;
+
+// Convert any `To<str>` implementer to text.
+pub fun to_string(To<str> value) str {
+  ret value.to();
 }
 
-// Types that can deserialize themselves from text.
-pub quirk Deserialize {
-  // Decode and apply state from input text.
-  deserialize(str input);
-}
-
-// Serialize any `Serialize` implementer to text.
-pub fun to_string(Serialize value) str {
-  ret value.serialize();
-}
-
-// Deserialize text into any `Deserialize` implementer.
-pub fun from_string(Deserialize value, str input) {
-  value.deserialize(input);
+// Decode text into any `From<str>` implementer.
+pub fun from_string(From<str> value, str input) {
+  value.from(input);
 }

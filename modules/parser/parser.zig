@@ -3154,16 +3154,14 @@ pub const ParseProcess = struct {
 
         // Allow a generic quirk, e.g. `quirk Iterator<T> { next() Option<T>; }`.
         // The type parameters are abstract over the method signatures; an `impl`
-        // binds them. Method signatures treat `T` as an unresolved type name, so we
-        // only need to consume the params here (they are not stored on the node) and
-        // record that the quirk is generic so codegen skips its monomorphic vtable.
+        // binds them. Method signatures treat `T` as an unresolved type name.
+        // Kept on the node (ordered) so a CONCRETE instantiation used as a type
+        // annotation (`To<JsonValue>`) can be positionally substituted into a
+        // synthesized, non-generic quirk (see `synthesize_quirk_instantiation`).
         var quirk_is_generic = false;
         const quirk_type_params = try self.parse_generic_type_params();
-        if (quirk_type_params) |*tp| {
+        if (quirk_type_params != null) {
             quirk_is_generic = true;
-            for (tp.items()) |*p| p.deinit();
-            var mtp = tp.*;
-            mtp.deinit();
         }
 
         try self.expect_sym('{');
@@ -3279,7 +3277,7 @@ pub const ParseProcess = struct {
             .type = .Quirk,
             .pos = name_tok.?.pos,
             .flags = .{ .is_public = is_public },
-            .node_variant = .{ .quirk = .{ .name = name, .methods = methods, .is_generic = quirk_is_generic } },
+            .node_variant = .{ .quirk = .{ .name = name, .methods = methods, .is_generic = quirk_is_generic, .type_params = quirk_type_params } },
         };
 
         // Register as a symbol so it can be used as a datatype identifier.
@@ -3454,6 +3452,26 @@ pub const ParseProcess = struct {
         };
     }
 
+    // Does `dt` (or any of its nested generic args) reference one of `params` by
+    // bare name? Used to tell a SYMBOLIC quirk binding (`impl VecIter<T> as
+    // Iterator<T>`, where the quirk's arg is the enclosing impl's own type
+    // param — handled by the impl's existing generic-instantiation machinery)
+    // from a CONCRETE one (`impl Point as To<num>`, a distinct quirk identity
+    // that needs its own mangled name to dispatch correctly).
+    fn dtype_references_any_param(dt: *const dtype.DataType, params: *const utils.Vector(ArrayList(u8))) bool {
+        if ((dt.type == null or dt.type == .Unknown) and dt.type_str.items.len > 0) {
+            for (params.items()) |p| {
+                if (mem.eql(u8, p.items, dt.type_str.items)) return true;
+            }
+        }
+        if (dt.generic_args) |gargs| {
+            for (gargs.items()) |ga| {
+                if (dtype_references_any_param(ga, params)) return true;
+            }
+        }
+        return false;
+    }
+
     fn parse_impl(self: *Self, is_public: bool) ParseError!void {
         try self.expect_keyword("impl");
         const type_tok = self.token_next();
@@ -3507,6 +3525,8 @@ pub const ParseProcess = struct {
             type_params = try self.parse_generic_type_params();
             peek_after_type = self.token_peek_next();
         }
+        var quirk_name_mangled: ?ArrayList(u8) = null;
+        errdefer if (quirk_name_mangled) |*m| m.deinit();
         if (peek_after_type != null and peek_after_type.?.type == .Keyword and mem.eql(u8, peek_after_type.?.data.sval.items, "as")) {
             _ = self.token_next(); // consume `as`
             const maybe_quirk = self.token_next();
@@ -3516,9 +3536,16 @@ pub const ParseProcess = struct {
             }
             quirk_tok = maybe_quirk;
 
-            // Allow a generic quirk binding, e.g. `impl VecIter<T> as Iterator<T>`.
-            // The type arguments describe which T the quirk is satisfied for; method
-            // mangling keys off only the base quirk name, so parse and discard them.
+            // A generic quirk binding is either SYMBOLIC (`impl VecIter<T> as
+            // Iterator<T>` — the arg IS the enclosing impl's own type param,
+            // resolved later by the impl's own generic-instantiation machinery;
+            // method mangling keys off just the base quirk name, unchanged) or
+            // CONCRETE (`impl Point as To<num>` — a fixed instantiation that is
+            // effectively a DISTINCT quirk identity). Mangle the concrete case
+            // the same way a generic compound/enum instantiation is mangled
+            // (`To<num>` -> `To__num`) so it registers and dispatches
+            // separately per concrete argument instead of colliding with other
+            // instantiations of the same quirk on other types.
             if (self.next_token_is_angle_open()) {
                 var quirk_dt: dtype.DataType = .{
                     .array = null,
@@ -3531,6 +3558,14 @@ pub const ParseProcess = struct {
                 defer quirk_dt.type_str.deinit();
                 quirk_dt.type_str.appendSlice(maybe_quirk.?.data.sval.items) catch return ParseError.MemoryAllocationFailed;
                 try self.parse_generic_type_args(&quirk_dt);
+
+                const is_symbolic = if (type_params) |*params| dtype_references_any_param(&quirk_dt, params) else false;
+                if (!is_symbolic) {
+                    var mangled = ArrayList(u8).init(self.transpile_proc.allocator);
+                    errdefer mangled.deinit();
+                    try self.append_mangled_dtype_name(&mangled, &quirk_dt);
+                    quirk_name_mangled = mangled;
+                }
             }
         } else if (peek_after_type != null and peek_after_type.?.type == .Identifier) {
             self.transpile_proc.err("expected 'as' before quirk name in impl header", .{});
@@ -3556,6 +3591,11 @@ pub const ParseProcess = struct {
         var quirk_name: ?ArrayList(u8) = null;
         errdefer if (quirk_name) |*qn| qn.deinit();
         if (quirk_tok) |qt| {
+            // Always the BARE quirk name — existing quirk mechanisms (structural
+            // dispatch, the `for`-loop Iterator special-case) key off this and must
+            // keep doing so unchanged, even for a CONCRETE instantiation binding
+            // (`as To<num>`); that instantiation's distinct identity is tracked
+            // separately in `quirk_name_mangled` / `quirk_concrete_instantiation`.
             var qn = ArrayList(u8).initCapacity(self.transpile_proc.allocator, qt.data.sval.items.len) catch {
                 return ParseError.MemoryAllocationFailed;
             };
@@ -3793,7 +3833,7 @@ pub const ParseProcess = struct {
             .type = .Impl,
             .pos = type_tok.?.pos,
             .flags = .{ .is_public = is_public },
-            .node_variant = .{ .impl = .{ .type_name = type_name, .type_params = type_params, .type_param_forced_insts = type_param_forced_insts, .quirk_name = quirk_name, .methods = methods } },
+            .node_variant = .{ .impl = .{ .type_name = type_name, .type_params = type_params, .type_param_forced_insts = type_param_forced_insts, .quirk_name = quirk_name, .quirk_concrete_instantiation = quirk_name_mangled, .methods = methods } },
         };
 
         self.transpile_proc.nodes.push(node.*) catch {

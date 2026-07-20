@@ -163,11 +163,11 @@ fun main() {
 ```
 
 ### Generics
-- Compounds and impls can be generic: `compound Vec<T> { ... }`.
+- Compounds, impls, and free functions can be generic: `compound Vec<T> { ... }`, `fun identity<T>(T x) T { ret x; }`.
 - Use `Vec<num>` etc. where required.
-- Impl type parameters can be constrained with `:` and `|`.
-  - Example: `impl Vec<T: num | dec> { ... }`.
-  - This lets one impl body work for a fixed set of concrete numeric types.
+- Type parameters can be constrained with `:` and `|` — on impls, compounds, and free functions alike.
+  - Examples: `impl Vec<T: num | dec> { ... }`, `compound Box<T: num | str> { T value; }`, `fun identity<T: num | str>(T x) T { ret x; }`.
+  - This lets one body work for a fixed set of concrete types; the compiler monomorphizes each concrete instantiation and rejects a call/instantiation whose type argument isn't in the declared bound at compile time.
 
 ```fun
 compound Vec<T> {
@@ -186,7 +186,23 @@ impl Vec<T: num | dec> {
     ret out;
   }
 }
+
+compound Box<T: num | str> {
+  T value;
+}
+
+fun identity<T: num | str>(T x) T {
+  ret x;
+}
 ```
+
+### Generic Quirks
+- A quirk can be generic too: `quirk To<T> { to() T; }` — `impl Point as To<JsonValue> { pub to() JsonValue { ... } }` binds a concrete instantiation.
+- A concrete instantiation dispatches the same way a non-generic quirk does, in two forms:
+  - Direct method call on a value whose type implements it: `p.to()`.
+  - A quirk-typed parameter or variable naming the SAME concrete instantiation: `fun to_json_value(To<JsonValue> value) JsonValue { ret value.to(); }`, called as `to_json_value(&p)` for any `p` whose type implements `To<JsonValue>` — the concrete pointer coerces to the quirk-typed parameter at the call site, same as a non-generic quirk.
+- Each concrete instantiation (`To<JsonValue>`, `To<num>`, ...) is its own quirk identity: an `impl` binds one specific instantiation, and a quirk-typed parameter/variable must name that same instantiation to dispatch.
+- A quirk parameter still needs its argument's TYPE PARAMETER bound to a concrete type (`To<JsonValue>`, not bare `To<T>`) — a still-generic reference to a quirk's own type parameter (`impl VecIter<T> as Iterator<T>`) is a different, SYMBOLIC binding that resolves through the enclosing type's own generic instantiation instead.
 
 ## Variables
 - Variables can be explicitly typed or inferred with `let`.
@@ -559,11 +575,11 @@ wait to avoid warning on slow-but-live operations.
 - `std.sync_backend_windows`: Windows sync backend module (`sync_backend_windows_*`) with direct mutex/condvar operations over `std.c.thread_windows`
 - `std.sync_runtime`: backend-facing sync runtime shim (`runtime_mutex_*`, `runtime_condvar_*`) plus backend selector helpers (`sync_runtime_backend_*`), routed through `std.runtime_backend` and backend modules
 - `std.sync`: POSIX-backed mutex/condition variable helpers (method and helper forms)
-- `std.json`: typed JSON via the `JsonValue` data enum (`Null`/`Bool`/`Num`/`Str`/`Array`/`Object`); `parse(str) -> Result<JsonValue>`, Option-returning accessors (`as_num`/`as_str`/`as_bool`/`as_array`/`get(key)`/`index(i)`/`len`/`is_null`), and `to_string`/`stringify`. Structured (de)serialization of your own compounds via the `ToJson`/`FromJson` quirks (hand-implemented — Fun has no reflection).
+- `std.json`: typed JSON via the `JsonValue` data enum (`Null`/`Bool`/`Num`/`Str`/`Array`/`Object`); `parse(str) -> Result<JsonValue>`, Option-returning accessors (`as_num`/`as_str`/`as_bool`/`as_array`/`get(key)`/`index(i)`/`len`/`is_null`), and `to_string`/`stringify`. Structured (de)serialization of your own compounds via `std.quirks`' generic `To<JsonValue>`/`From<JsonValue>` (hand-implemented — Fun has no reflection), plus `to_json_value`/`to_json_string` convenience wrappers.
 - `std.toml`: typed flat `key = value` TOML via the `TomlValue` enum (`Str`/`Int`/`Float`/`Bool`); `parse_document`, typed `get(key) -> Option<TomlValue>`, `as_int`/`as_float`/`as_str`/`as_bool`, and `stringify`.
-- `std.serde`: the text-layer `Serialize`/`Deserialize` quirks + `to_string`/`from_string`, shared by `JsonValue` and `TomlDoc`.
+- `std.serde`: text-layer `to_string`/`from_string`, dispatching through `std.quirks`' generic `To<str>`/`From<str>` (implemented by `JsonValue` and `TomlDoc`).
 - `std.log`: structured logging. `LogLevel` (`Trace`/`Debug`/`Info`/`Warn`/`Error`/`Fatal`, explicit ordered values), `LogFormat` (`Text`/`Json`), and a `Logger` that filters by level and routes to any `std.io.Sink`. Bare methods (`info`/`warn`/`error`/...) emit immediately; the fluent by-value builder (`l.info_r("msg").str_field(k,v).num_field(k,n).emit()`) attaches typed key/value fields. Text renders `[LEVEL] <ts> [name] msg k=v`; JSON renders one object per line (deterministic field order). Fluent config: `logger_init`/`logger_json`, `as_format`/`to_sink`/`named`/`route_errors`/`with_timestamps`. `route_errors(true)` sends `Warn`+ to stderr.
-- `std.quirks`: common quirks — `Sized`, `Display`, `Clearable`, `Iterator<T>`, and the generic conversion quirks `To<T>`/`From<T>` (e.g. `impl Config as To<JsonValue>`), the target-agnostic successors to `std.json`'s `ToJson`/`FromJson`.
+- `std.quirks`: common quirks — `Sized`, `Display`, `Clearable`, `Iterator<T>`, and the generic conversion quirks `To<T>`/`From<T>` (e.g. `impl Config as To<JsonValue>`), which back `std.json`'s structured (de)serialization and `std.serde`'s text-layer `to_string`/`from_string` alike.
 - `std.time`, `std.rand`, `std.math`, `std.path`, `std.net`, etc.
 - `std.sys`: environment and process helpers (`sys_exit`, `sys_abort`, `sys_system`)
 - `std.net`: URL parsing + pure Fun POSIX TCP/HTTP helpers (POSIX sockets)

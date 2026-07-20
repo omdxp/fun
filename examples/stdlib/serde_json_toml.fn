@@ -1,12 +1,14 @@
 // Structured (de)serialization: a compound converts to/from a typed JsonValue via the
-// ToJson/FromJson quirks (the reflection-free equivalent of derive), plus the text-layer
-// Serialize quirk shared by JsonValue and TomlDoc.
+// generic To<JsonValue>/From<JsonValue> quirks (the reflection-free equivalent of
+// derive), plus the same To<str>/From<str> quirks (via std.serde) for the text
+// layer shared by JsonValue and TomlDoc.
 
 imp std.c.io;
 imp std.json;
 imp std.toml;
 imp std.serde;
 imp std.result;
+imp std.quirks;
 
 pub compound Config {
   str name;
@@ -14,8 +16,8 @@ pub compound Config {
   bin stable;
 }
 
-impl Config as ToJson {
-  pub to_json() JsonValue {
+impl Config as To<JsonValue> {
+  pub to() JsonValue {
     let o = json_object();
     o.put("name", json_str(self.name));
     o.put("version", json_num(self.version));
@@ -24,8 +26,8 @@ impl Config as ToJson {
   }
 }
 
-impl Config as FromJson {
-  pub from_json(JsonValue value) {
+impl Config as From<JsonValue> {
+  pub from(JsonValue value) {
     let n = value.get("name").unwrap_or(JsonValue.Null);
     self.name = n.as_str().unwrap_or("");
     let v = value.get("version").unwrap_or(JsonValue.Null);
@@ -38,7 +40,8 @@ impl Config as FromJson {
 fun main() num {
   Config c = Config{name = "fun", version = 1.0, stable = true};
 
-  // Compound -> typed JSON -> text.
+  // Compound -> typed JSON -> text (to_json_string takes a To<JsonValue>-typed
+  // parameter, so any implementer coerces at the call site: `&c`).
   str json_text = to_json_string(&c);
   printf("json=%s\n", json_text);
 
@@ -46,15 +49,15 @@ fun main() num {
   fit parse(json_text) {
     Result.Ok(doc) -> {
       Config back;
-      back.from_json(doc);
+      back.from(doc);
       printf("back: name=%s version=%g stable=%d\n", back.name, back.version, back.stable);
     }
     Result.Err(e) -> { printf("parse failed\n"); }
   }
 
-  // Text-layer Serialize quirk over a TomlDoc.
+  // Text-layer To<str> quirk over a TomlDoc.
   let t = parse_document("channel = \"stable\"\n");
-  Serialize ts = &t;
+  To<str> ts = &t;
   printf("toml=%s", to_string(ts));
 
   ret 0;

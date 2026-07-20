@@ -596,7 +596,7 @@ pub enum Sink {
   Stderr,
   Stdin,
   File(File),
-  Rotating(RotatingSink*),
+  Rotating(RotatingSink *),
 }
 
 impl Sink {
@@ -618,7 +618,7 @@ impl Sink {
     // RotatingSink.write() instead of the plain handle()+fputs path below.
     fit *self {
       .Rotating(r) -> { ret r.write(s); }
-      _ -> {}
+      _ -> { }
     }
     let h = self.handle();
     if h == nil {
@@ -637,7 +637,7 @@ impl Sink {
         }
         ret err_kind(.Io, "sink write failed", false);
       }
-      _ -> {}
+      _ -> { }
     }
     let h = self.handle();
     if h == nil {
@@ -654,7 +654,7 @@ impl Sink {
   pub flush() bin {
     fit *self {
       .Rotating(r) -> { ret r.flush(); }
-      _ -> {}
+      _ -> { }
     }
     let h = self.handle();
     if h == nil {

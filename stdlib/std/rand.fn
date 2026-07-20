@@ -193,7 +193,7 @@ pub fun rand_chance(Rand* r, dec p) bin {
 }
 
 // Shuffle a Vec<T> in-place (Fisher-Yates).
-//
+// 
 // Params:
 // - r: generator
 // - v: vector

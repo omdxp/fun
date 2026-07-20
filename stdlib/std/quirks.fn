@@ -56,10 +56,9 @@ pub quirk Iterator<T> {
   next() Option<T>;
 }
 
-// Convert this value INTO a `T`. The generic, target-agnostic replacement for
-// type-specific conversion quirks like `ToJson` (`impl Point as To<JsonValue>`).
-// Fun has no reflection/derive, so each type hand-implements the conversion —
-// the explicit equivalent of a derived `Into<T>`.
+// Convert this value INTO a `T`. Fun has no reflection/derive, so each type
+// hand-implements the conversion — the explicit equivalent of a derived
+// `Into<T>`.
 // 
 // ```
 // impl Point as To<JsonValue> {
@@ -70,21 +69,21 @@ pub quirk Iterator<T> {
 //     ret JsonValue.Object(o);
 //   }
 // }
-// let doc = p.to();   // JsonValue
+// let doc = p.to();               // direct method call
+// JsonValue doc2 = to_json_value(&p); // quirk-typed parameter (see std.json)
 // ```
 // 
-// Note: a single `To<T>` impl per type dispatches via a direct method call
-// (`value.to()`). A generic-quirk-typed *parameter* (`fun f(To<JsonValue> v)`)
-// or a generic bound (`fun f<V: To<JsonValue>>(V v)`) does not dispatch yet, so
-// the ergonomic free-function wrappers still live on the concrete `ToJson`
-// convenience layer in `std.json` — see the note there.
+// Dispatches both via a direct method call (`value.to()`) and through a
+// concrete instantiation used as a quirk-typed parameter or variable
+// (`fun f(To<JsonValue> v) { ret v.to(); }`, then `f(&point)` for any type
+// implementing `To<JsonValue>`).
 pub quirk To<T> {
   // Produce a `T` from this value.
   to() T;
 }
 
-// Rebuild this value FROM a `T`. The generic replacement for `FromJson`
-// (`impl Config as From<JsonValue>`). Reads state from the source value:
+// Rebuild this value FROM a `T` (e.g. `impl Config as From<JsonValue>`).
+// Reads state from the source value:
 // 
 // ```
 // impl Config as From<JsonValue> {

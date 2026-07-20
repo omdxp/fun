@@ -551,49 +551,32 @@ pub fun parse(str src) Result<JsonValue> {
   ret p.parse_value();
 }
 
-// A `JsonValue` serializes to its JSON text (the text-layer serde quirk).
-impl JsonValue as Serialize {
-  pub serialize() str {
+// A `JsonValue` serializes to its JSON text (the text-layer conversion, same
+// `To<T>` mechanism std.serde's `to_string()` dispatches through).
+impl JsonValue as To<str> {
+  pub to() str {
     ret self.to_string();
   }
 }
 
 // --- Structured (de)serialization for your own compounds -----------------------------
 
-// A compound that can convert itself into a structured `JsonValue`. Fun has no
-// reflection/derive, so implement this by hand — the explicit equivalent of a derived
-// serializer:
+// Convert your own compounds to/from a structured `JsonValue` with the generic
+// `std.quirks.To<T>`/`From<T>` quirks. Fun has no reflection/derive, so
+// implement these by hand — the explicit equivalent of a derived serializer:
 // 
 // ```
-// impl Point as ToJson {
-//   pub to_json() JsonValue {
+// impl Point as To<JsonValue> {
+//   pub to() JsonValue {
 //     let o = json_object();
 //     o.put("x", json_num(self.x));
 //     o.put("y", json_num(self.y));
 //     ret JsonValue.Object(o);
 //   }
 // }
-// ```
-// 
-// NOTE: prefer the generic `std.quirks.To<JsonValue>` for new code
-// (`impl Point as To<JsonValue> { pub to() JsonValue {...} }`, called as `p.to()`).
-// `ToJson` is kept as a concrete convenience layer because the free-function
-// wrappers below (`to_json_value`/`to_json_string`) take a NON-generic quirk as a
-// parameter and rely on quirk-object dispatch; a generic-quirk-typed parameter
-// (`fun f(To<JsonValue> v)`) does not dispatch yet, so those wrappers cannot be
-// expressed over `To<T>` today. Direct `value.to()` calls on a `To<JsonValue>`
-// impl work fine.
-pub quirk ToJson {
-  // Build a `JsonValue` representing this value.
-  to_json() JsonValue;
-}
-
-// A compound that can rebuild itself from a structured `JsonValue`. Read fields with
-// `value.get(key)` + the `as_*` accessors:
-// 
-// ```
-// impl Point as FromJson {
-//   pub from_json(JsonValue value) {
+//
+// impl Point as From<JsonValue> {
+//   pub from(JsonValue value) {
 //     let x = value.get("x").unwrap_or(JsonValue.Null);
 //     self.x = x.as_num().unwrap_or(0.0);
 //     let y = value.get("y").unwrap_or(JsonValue.Null);
@@ -601,18 +584,18 @@ pub quirk ToJson {
 //   }
 // }
 // ```
-pub quirk FromJson {
-  // Apply state from a `JsonValue` (best-effort: missing fields take defaults).
-  from_json(JsonValue value);
+// 
+// Dispatch directly (`p.to()`, `back.from(doc)`) or through the free-function
+// wrappers below, which accept any `To<JsonValue>` implementer via a quirk-typed
+// parameter.
+
+// Convert any `To<JsonValue>` implementer into a `JsonValue`.
+pub fun to_json_value(To<JsonValue> value) JsonValue {
+  ret value.to();
 }
 
-// Convert any `ToJson` implementer into a `JsonValue`.
-pub fun to_json_value(ToJson value) JsonValue {
-  ret value.to_json();
-}
-
-// Serialize any `ToJson` implementer straight to JSON text.
-pub fun to_json_string(ToJson value) str {
-  let v = value.to_json();
+// Serialize any `To<JsonValue>` implementer straight to JSON text.
+pub fun to_json_string(To<JsonValue> value) str {
+  let v = value.to();
   ret v.to_string();
 }

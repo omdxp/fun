@@ -325,10 +325,10 @@ pub fun copysign_dec(dec x, dec y) dec {
 }
 
 // Compute the absolute value of a number or decimal.
-//
+// 
 // Params:
 // - x: value
-//
+// 
 // Returns:
 // - |x|
 pub fun abs<T: num | dec>(T x) T {
@@ -339,10 +339,10 @@ pub fun abs<T: num | dec>(T x) T {
 }
 
 // Compute the sign of a number or decimal as `-1`, `0`, or `1`.
-//
+// 
 // Params:
 // - x: value
-//
+// 
 // Returns:
 // - -1, 0, or 1
 pub fun sign<T: num | dec>(T x) T {
@@ -356,7 +356,7 @@ pub fun sign<T: num | dec>(T x) T {
 }
 
 // Compute the sign of a number or decimal as a type-safe `Sign`.
-//
+// 
 // Notes:
 // - Prefer this over `sign()` when you want to `fit`-match the cases.
 pub fun sign_of<T: num | dec>(T x) Sign {
@@ -370,20 +370,20 @@ pub fun sign_of<T: num | dec>(T x) Sign {
 }
 
 // Return the minimum of two numbers.
-//
+// 
 // Params:
 // - a: first value
 // - b: second value
-//
+// 
 // Returns:
 // - smaller value
-//
+// 
 // Notes:
 // - Kept as separate `_num`/`_dec` overloads rather than a constrained
-//   generic `min<T>`: `Vec<T: num | dec>` already declares its own instance
-//   method named `min()` (a reduction over the vector), and a same-named
-//   free function collides with that method's resolution when both
-//   `std.vec` and `std.math` are imported together.
+// generic `min<T>`: `Vec<T: num | dec>` already declares its own instance
+// method named `min()` (a reduction over the vector), and a same-named
+// free function collides with that method's resolution when both
+// `std.vec` and `std.math` are imported together.
 pub fun min_num(num a, num b) num {
   if a < b {
     ret a;
@@ -392,11 +392,11 @@ pub fun min_num(num a, num b) num {
 }
 
 // Return the maximum of two numbers.
-//
+// 
 // Params:
 // - a: first value
 // - b: second value
-//
+// 
 // Returns:
 // - larger value
 pub fun max_num(num a, num b) num {
@@ -407,11 +407,11 @@ pub fun max_num(num a, num b) num {
 }
 
 // Return the minimum of two decimals.
-//
+// 
 // Params:
 // - a: first value
 // - b: second value
-//
+// 
 // Returns:
 // - smaller value
 pub fun min_dec(dec a, dec b) dec {
@@ -422,11 +422,11 @@ pub fun min_dec(dec a, dec b) dec {
 }
 
 // Return the maximum of two decimals.
-//
+// 
 // Params:
 // - a: first value
 // - b: second value
-//
+// 
 // Returns:
 // - larger value
 pub fun max_dec(dec a, dec b) dec {
@@ -437,12 +437,12 @@ pub fun max_dec(dec a, dec b) dec {
 }
 
 // Clamp a number or decimal to `[lo, hi]`.
-//
+// 
 // Params:
 // - x: value
 // - lo: lower bound
 // - hi: upper bound
-//
+// 
 // Returns:
 // - clamped value
 pub fun clamp<T: num | dec>(T x, T lo, T hi) T {

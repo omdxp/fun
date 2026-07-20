@@ -1158,12 +1158,32 @@ pub const TranspileProcess = struct {
             const key: ImplKey = .{ .type_name = type_name, .quirk_sig = sig };
             if (reg.impls_by_key.get(key)) |existing| {
                 if (!self.same_node_file(n, existing)) return TranspileError.DuplicateSymbol;
-                continue;
+            } else {
+                reg.impls_by_key.put(key, n) catch {
+                    return TranspileError.MemoryAllocationFailed;
+                };
             }
 
-            reg.impls_by_key.put(key, n) catch {
-                return TranspileError.MemoryAllocationFailed;
-            };
+            // A CONCRETE instantiation binding (`impl Point as To<num>`, or
+            // `impl Counter as Iterator<num>` where Counter isn't generic) is
+            // ALSO registered under its own distinct quirk identity
+            // (`synthesize_quirk_instantiations_module` already registered
+            // `To__num`'s substituted sig by this point), in ADDITION to the
+            // bare-name registration above — so a quirk-typed parameter or
+            // variable naming that same concrete instantiation can dispatch to
+            // this impl too, without disturbing any existing mechanism that
+            // keys off the bare quirk name.
+            if (imp.quirk_concrete_instantiation) |qci| {
+                const inst_name = qci.items;
+                if (reg.quirk_sig_by_name.get(inst_name)) |inst_sig| {
+                    const inst_key: ImplKey = .{ .type_name = type_name, .quirk_sig = inst_sig };
+                    if (!reg.impls_by_key.contains(inst_key)) {
+                        reg.impls_by_key.put(inst_key, n) catch {
+                            return TranspileError.MemoryAllocationFailed;
+                        };
+                    }
+                }
+            }
         }
     }
 
@@ -1171,6 +1191,149 @@ pub const TranspileProcess = struct {
         try self.collect_impls_module(proc, reg);
         for (proc.children.items) |child| {
             try self.collect_impls_recursive(child, reg);
+        }
+    }
+
+    /// Register a concrete (non-generic) synthesized quirk for `mangled_name`
+    /// (e.g. `To__num`, from `impl Point as To<num>` — see the parser's
+    /// concrete-vs-symbolic quirk-arg mangling) if not already registered.
+    /// Substitutes the base generic quirk's own type params into a cloned
+    /// method list, computes the substituted structural signature the same
+    /// way an ordinary concrete quirk declaration would, and registers it so
+    /// every existing quirk mechanism (dispatch, vtable/coercion codegen,
+    /// `impls_by_key` validation) treats it exactly like a hand-written
+    /// non-generic quirk — no changes needed anywhere else.
+    fn synthesize_quirk_instantiation(self: *Self, reg: *TypeRegistry, mangled_name: []const u8) TranspileError!void {
+        if (reg.quirk_sig_by_name.contains(mangled_name)) return;
+
+        const dt = (try self.dtype_from_mangled_type(mangled_name)) orelse return;
+        const base_name = dt.type_str.items;
+        const base_sig = reg.quirk_sig_by_name.get(base_name) orelse return;
+        const base_qnode = reg.quirks_by_sig.get(base_sig) orelse return;
+        if (base_qnode.node_variant == null) return;
+        const base_q = base_qnode.node_variant.?.quirk;
+        if (!base_q.is_generic) return; // already concrete; nothing to synthesize
+        const base_params = base_q.type_params orelse return;
+        const concrete_args = dt.generic_args orelse return;
+        if (concrete_args.items().len != base_params.count) return; // arity mismatch: let normal validation report it
+
+        var new_methods = utils.Vector(ast.QuirkMethodSig).init(reg.allocator);
+        for (base_q.methods.items()) |m| {
+            var new_args = utils.Vector(ast.QuirkArg).init(reg.allocator);
+            for (m.args.items()) |a| {
+                const substituted = try self.clone_dtype_with_subst_for_inst(a.dtype, &base_params, concrete_args.items());
+                var aname = ArrayList(u8).init(reg.allocator);
+                aname.appendSlice(a.name.items) catch return TranspileError.MemoryAllocationFailed;
+                new_args.push(.{ .name = aname, .dtype = substituted }) catch return TranspileError.MemoryAllocationFailed;
+            }
+            const new_rtype_ptr = try self.clone_dtype_with_subst_for_inst(&m.rtype, &base_params, concrete_args.items());
+            const new_rtype = new_rtype_ptr.*;
+            reg.allocator.destroy(new_rtype_ptr);
+            var mname = ArrayList(u8).init(reg.allocator);
+            mname.appendSlice(m.name.items) catch return TranspileError.MemoryAllocationFailed;
+            new_methods.push(.{ .name = mname, .rtype = new_rtype, .args = new_args, .is_async = m.is_async }) catch return TranspileError.MemoryAllocationFailed;
+        }
+
+        var qname_copy = ArrayList(u8).init(reg.allocator);
+        qname_copy.appendSlice(mangled_name) catch return TranspileError.MemoryAllocationFailed;
+
+        const new_node = reg.allocator.create(ast.Node) catch return TranspileError.MemoryAllocationFailed;
+        new_node.* = ast.Node{
+            .type = .Quirk,
+            .pos = base_qnode.pos,
+            // Inherit the base quirk's visibility — `can_access` checks
+            // `is_public or same_module`, and this synthesized node's `.pos`
+            // points at the base quirk's declaring file, which is almost
+            // always a different module than the call site using `To<num>`.
+            .flags = base_qnode.flags,
+            .node_variant = .{ .quirk = .{ .name = qname_copy, .methods = new_methods, .is_generic = false, .type_params = null } },
+        };
+
+        const sig_key = try self.quirk_signature_key(new_node);
+        const gop = reg.quirks_by_sig.getOrPut(sig_key) catch {
+            reg.allocator.free(sig_key);
+            return TranspileError.MemoryAllocationFailed;
+        };
+        if (gop.found_existing) {
+            reg.allocator.free(sig_key);
+        } else {
+            reg.owned_keys.append(sig_key) catch {
+                reg.allocator.free(sig_key);
+                return TranspileError.MemoryAllocationFailed;
+            };
+            gop.value_ptr.* = new_node;
+        }
+
+        // Own a durable copy of the name for the map key — callers may pass a
+        // temporary buffer (e.g. a freshly mangled name from a type annotation
+        // scan), not just an AST-owned string (e.g. an impl's `quirk_name`).
+        const name_key = reg.allocator.dupe(u8, mangled_name) catch return TranspileError.MemoryAllocationFailed;
+        reg.owned_keys.append(name_key) catch {
+            reg.allocator.free(name_key);
+            return TranspileError.MemoryAllocationFailed;
+        };
+        reg.quirk_sig_by_name.put(name_key, gop.key_ptr.*) catch return TranspileError.MemoryAllocationFailed;
+    }
+
+    fn synthesize_quirk_instantiations_module(self: *Self, proc: *Self, reg: *TypeRegistry) TranspileError!void {
+        for (proc.owned_nodes.items) |n| {
+            if (n.type != .Impl or n.node_variant == null) continue;
+            const imp = n.node_variant.?.impl;
+            const mangled_name = if (imp.quirk_concrete_instantiation) |qn| qn.items else continue;
+            try self.synthesize_quirk_instantiation(reg, mangled_name);
+        }
+    }
+
+    fn synthesize_quirk_instantiations_recursive(self: *Self, proc: *Self, reg: *TypeRegistry) TranspileError!void {
+        try self.synthesize_quirk_instantiations_module(proc, reg);
+        for (proc.children.items) |child| {
+            try self.synthesize_quirk_instantiations_recursive(child, reg);
+        }
+    }
+
+    /// A library function can declare a quirk-typed parameter (`fun
+    /// to_json_value(To<JsonValue> value) JsonValue { ret value.to(); }`) and
+    /// call the quirk's OWN method directly on it — this must typecheck
+    /// regardless of whether the CURRENT compilation unit contains any
+    /// concrete `impl X as To<JsonValue>` at all (the impl may live in
+    /// whatever program eventually calls this function). So, in addition to
+    /// discovering instantiations from impls (`synthesize_quirk_instantiations_module`),
+    /// also scan every type annotation in the program (function params/return
+    /// types, compound fields, variables — reusing the same scan generic
+    /// compound/enum monomorphization uses) for a concrete instantiation of
+    /// each known generic quirk, so the quirk itself becomes resolvable for
+    /// direct method calls even with zero concrete impls in scope.
+    fn synthesize_quirk_instantiations_from_type_annotations(self: *Self, reg: *TypeRegistry) TranspileError!void {
+        var generic_quirk_names = ArrayList([]const u8).init(self.allocator);
+        defer generic_quirk_names.deinit();
+        var qit = reg.quirks_by_sig.iterator();
+        while (qit.next()) |entry| {
+            const qnode = entry.value_ptr.*;
+            if (qnode.node_variant == null) continue;
+            const q = qnode.node_variant.?.quirk;
+            if (!q.is_generic) continue;
+            generic_quirk_names.append(q.name.items) catch return TranspileError.MemoryAllocationFailed;
+        }
+
+        for (generic_quirk_names.items) |base_name| {
+            var keys = std.StringHashMap(bool).init(self.allocator);
+            defer {
+                var kit = keys.iterator();
+                while (kit.next()) |e| self.allocator.free(e.key_ptr.*);
+                keys.deinit();
+            }
+            var out = ArrayList(*const dtype.DataType).init(self.allocator);
+            defer out.deinit();
+            try self.collect_generic_instantiations_recursive(self, base_name, &keys, &out);
+
+            for (out.items) |dt| {
+                if (dt.generic_args == null) continue;
+                if (self.dtype_has_unresolved_placeholder(dt)) continue;
+                const mangled = try self.type_name_mangled(dt);
+                defer self.allocator.free(mangled);
+                if (self.mangled_contains_unresolved_placeholder(mangled)) continue;
+                try self.synthesize_quirk_instantiation(reg, mangled);
+            }
         }
     }
 
@@ -1544,6 +1707,17 @@ pub const TranspileProcess = struct {
             if (reg.enums_by_name.get(name)) |enode| {
                 if (enode.node_variant != null) {
                     if (enode.node_variant.?.enum_decl.type_params) |*p| break :blk p;
+                }
+            }
+            // A generic quirk (`quirk To<T> { ... }`) used as a concrete
+            // instantiation (`To<num>`, e.g. an `impl X as To<num>` binding, or
+            // a `To<num>`-typed parameter) — same recovery as compounds/enums
+            // above, needed to reconstruct the concrete arg for substitution.
+            if (reg.quirk_sig_by_name.get(name)) |qsig| {
+                if (reg.quirks_by_sig.get(qsig)) |qnode| {
+                    if (qnode.node_variant != null) {
+                        if (qnode.node_variant.?.quirk.type_params) |*p| break :blk p;
+                    }
                 }
             }
             break :blk null;
@@ -2904,6 +3078,20 @@ pub const TranspileProcess = struct {
         // Register alias-qualified type keys for aliased re-imports that were
         // deduped to node-less stubs (so `alias.Type` annotations resolve).
         try self.register_alias_stub_types(self, new_reg);
+
+        // Third pass: register concrete instantiations of generic quirks used
+        // by `impl X as Quirk<Concrete>` bindings (e.g. `To__num`), so that
+        // BOTH the impl registration below and any later type resolution of
+        // the same instantiation (e.g. a `To<num>`-typed parameter) find a
+        // real, substituted quirk signature instead of an unmangled name.
+        try self.synthesize_quirk_instantiations_recursive(self, new_reg);
+
+        // Fourth pass: ALSO discover instantiations from bare type annotations
+        // (a quirk-typed parameter/field/variable, independent of any impl in
+        // this compilation unit — e.g. a library function that declares
+        // `To<JsonValue>` and calls its method directly must typecheck even
+        // when no concrete impl is in scope here).
+        try self.synthesize_quirk_instantiations_from_type_annotations(new_reg);
 
         // Second pass: impls need quirk name->signature resolution.
         try self.collect_impls_recursive(self, new_reg);
@@ -6400,7 +6588,13 @@ pub const TranspileProcess = struct {
             const root = self.get_root();
             if (root.type_registry == null) return false;
             const reg = &root.type_registry.?;
-            const sig = reg.quirk_sig_by_name.get(expected_n.name.?) orelse return false;
+            // A CONCRETE instantiation of a generic quirk (`To<num>`) registers
+            // its own substituted signature under the MANGLED name (`To__num`,
+            // synthesized in `synthesize_quirk_instantiation`), distinct from
+            // the bare generic template's own sig (`To`, still `to()->T;`).
+            // Prefer the mangled name so this resolves against the concrete
+            // instantiation's impls, not the unbound template's.
+            const sig = reg.quirk_sig_by_name.get(expected_n.mangled_name orelse expected_n.name.?) orelse return false;
             // A generic instantiation registers its impl under the MANGLED name
             // (`impl Box<num> as Sized` -> key `Box__num`), so try the mangled
             // name first and fall back to the plain base name for non-generics.
@@ -6424,7 +6618,7 @@ pub const TranspileProcess = struct {
             // only an array whose element type impls the quirk reaches this point.)
             const root = self.get_root();
             if (root.type_registry) |*reg| {
-                if (reg.quirk_sig_by_name.get(expected_n.name.?)) |sig| {
+                if (reg.quirk_sig_by_name.get(expected_n.mangled_name orelse expected_n.name.?)) |sig| {
                     if (actual_n.mangled_name) |mn| {
                         if (reg.impls_by_key.contains(.{ .type_name = mn, .quirk_sig = sig })) return true;
                     }
@@ -11013,6 +11207,11 @@ pub const TranspileProcess = struct {
                 },
                 .quirk => |q| {
                     q.name.deinit();
+                    if (q.type_params) |*tp| {
+                        for (tp.items()) |*p| p.deinit();
+                        var mtp = tp.*;
+                        mtp.deinit();
+                    }
                     for (q.methods.items()) |m| {
                         m.name.deinit();
                         m.rtype.type_str.deinit();
@@ -11089,6 +11288,9 @@ pub const TranspileProcess = struct {
                     }
                     if (im.quirk_name) |*qn| {
                         qn.deinit();
+                    }
+                    if (im.quirk_concrete_instantiation) |*qci| {
+                        qci.deinit();
                     }
                     for (im.methods.items()) |m| {
                         self.deinit_node(m.*);
@@ -13423,12 +13625,24 @@ pub const TranspileProcess = struct {
         const params = args_vec.items();
         if (params.len == 0) return false;
 
-        // Does ANY parameter have a quirk type? If not, nothing to coerce.
+        // Does ANY parameter have a quirk type? If not, nothing to coerce. A
+        // CONCRETE instantiation of a generic quirk (`To<num> v`) registers
+        // under its MANGLED name (`To__num`, see `synthesize_quirk_instantiation`),
+        // not the bare `type_str` ("To", the unbound template) — mangle first
+        // so this recognizes it too.
         var any_quirk_param = false;
         for (params) |p| {
             if (p.type != .Variable or p.node_variant == null) continue;
             const pdt = p.node_variant.?.variable.type;
-            if (pdt.pointer_depth == 0 and pdt.type == .Unknown and self.is_quirk_name(pdt.type_str.items)) {
+            if (pdt.pointer_depth != 0 or pdt.type != .Unknown) continue;
+            if (pdt.generic_args != null) {
+                const mangled = try self.type_name_mangled(pdt);
+                defer self.allocator.free(mangled);
+                if (self.is_quirk_name(mangled)) {
+                    any_quirk_param = true;
+                    break;
+                }
+            } else if (self.is_quirk_name(pdt.type_str.items)) {
                 any_quirk_param = true;
                 break;
             }
@@ -13464,8 +13678,19 @@ pub const TranspileProcess = struct {
             const p = params[i];
             if (p.type != .Variable or p.node_variant == null) continue;
             const pdt = p.node_variant.?.variable.type;
-            if (!(pdt.pointer_depth == 0 and pdt.type == .Unknown and self.is_quirk_name(pdt.type_str.items))) continue;
-            const sig = reg.quirk_sig_by_name.get(pdt.type_str.items) orelse continue;
+            if (pdt.pointer_depth != 0 or pdt.type != .Unknown) continue;
+            var mangled_owned: ?[]const u8 = null;
+            defer if (mangled_owned) |m| self.allocator.free(m);
+            const pname: []const u8 = blk: {
+                if (pdt.generic_args != null) {
+                    const m = try self.type_name_mangled(pdt);
+                    mangled_owned = m;
+                    break :blk m;
+                }
+                break :blk pdt.type_str.items;
+            };
+            if (!self.is_quirk_name(pname)) continue;
+            const sig = reg.quirk_sig_by_name.get(pname) orelse continue;
             const ident = (try self.pointee_quirk_impl_name(args_nodes.items[i].*, sig)) orelse continue;
             coerce_ident[i] = ident;
             coerce_sig[i] = sig;
@@ -14754,7 +14979,14 @@ pub const TranspileProcess = struct {
                 if (im.quirk_name == null) continue;
                 if (self.impl_type_params(impl_node) != null) continue; // generic templates: per-inst
                 if (self.mangled_contains_unresolved_placeholder(im.type_name.items)) continue;
-                const quirk_name = im.quirk_name.?.items;
+                // A CONCRETE quirk-instantiation binding (`impl Point as To<num>`)
+                // has its own synthesized, non-generic quirk identity — prefer that
+                // for the vtable/coercion machinery so it emits a real coercion
+                // (unlike a SYMBOLIC binding, e.g. `impl Counter as Iterator<num>`
+                // with no `quirk_concrete_instantiation`, which stays on the bare
+                // name and is correctly skipped below: generic quirks dispatch
+                // statically, with no quirk-object/coercion to emit).
+                const quirk_name = if (im.quirk_concrete_instantiation) |qci| qci.items else im.quirk_name.?.items;
                 const sig = reg.quirk_sig_by_name.get(quirk_name) orelse continue;
                 // Generic quirks have no canonical quirk-object/coercion (dispatch is
                 // static), so a concrete impl of one (`Counter as Iterator<num>`) must
@@ -14831,14 +15063,30 @@ pub const TranspileProcess = struct {
 
         // Impl wrappers/vtables/coercions
         try self.write("// --- Quirk impl vtables ---\n\n");
+        // A CONCRETE quirk-instantiation binding (`impl Counter as Iterator<num>`)
+        // is registered in `impls_by_key` under BOTH its bare quirk name AND its
+        // mangled concrete identity (see `collect_impls_module`), so the SAME
+        // impl node can appear twice in this iteration — dedupe by node pointer
+        // so its method bodies aren't emitted (and redefined in C) twice.
+        var body_emitted_nodes = std.AutoHashMap(*ast.Node, void).init(self.backing_allocator);
+        defer body_emitted_nodes.deinit();
         var impl_it = reg.impls_by_key.iterator();
         while (impl_it.next()) |entry| {
             const impl_node = entry.value_ptr.*;
             if (impl_node.node_variant == null) continue;
             const im = impl_node.node_variant.?.impl;
             if (self.mangled_contains_unresolved_placeholder(im.type_name.items)) continue;
-            const quirk_name = if (im.quirk_name) |qn| qn.items else continue;
+            // Prefer the CONCRETE instantiation's own synthesized (non-generic)
+            // quirk identity when this binding names one (`impl Point as
+            // To<num>`) — its vtable/coercion should be emitted like an
+            // ordinary concrete quirk's. A SYMBOLIC binding (`impl Counter as
+            // Iterator<num>`, no `quirk_concrete_instantiation`) stays on the
+            // bare name, where `emit_quirk_impl_instance` already knows to
+            // skip the vtable/coercion machinery for the still-generic quirk.
+            const quirk_name = if (im.quirk_concrete_instantiation) |qci| qci.items else if (im.quirk_name) |qn| qn.items else continue;
             const sig = reg.quirk_sig_by_name.get(quirk_name) orelse continue;
+            if (body_emitted_nodes.contains(impl_node)) continue;
+            body_emitted_nodes.put(impl_node, {}) catch return TranspileError.MemoryAllocationFailed;
             const sig_h = self.quirk_sig_hash_cached(sig);
             const qnode = reg.quirks_by_sig.get(sig) orelse continue;
             if (qnode.node_variant == null) continue;
@@ -18605,13 +18853,31 @@ pub const TranspileProcess = struct {
                     try self.write(" = ");
 
                     // Implicit quirk coercion in initializers: `Quirk q = &t;`.
-                    if (variable.type.type == .Unknown and self.is_quirk_name(variable.type.type_str.items)) {
+                    // A CONCRETE instantiation of a generic quirk (`To<str> q =
+                    // &t;`) registers under its MANGLED name (`To__str`, see
+                    // `synthesize_quirk_instantiation`), not the bare `type_str`
+                    // ("To", the unbound template) — mangle first so this finds it.
+                    const var_quirk_name: ?[]const u8 = blk: {
+                        if (variable.type.type != .Unknown) break :blk null;
+                        if (variable.type.generic_args != null) {
+                            const mangled = self.type_name_mangled(variable.type) catch break :blk null;
+                            if (self.is_quirk_name(mangled)) break :blk mangled;
+                            self.allocator.free(mangled);
+                            break :blk null;
+                        }
+                        if (self.is_quirk_name(variable.type.type_str.items)) break :blk variable.type.type_str.items;
+                        break :blk null;
+                    };
+                    defer if (var_quirk_name) |vqn| {
+                        if (variable.type.generic_args != null) self.allocator.free(@constCast(vqn));
+                    };
+                    if (var_quirk_name) |vqn| {
                         const reg = self.root_registry() orelse {
                             try self.transpile_node(val.*);
                             if (!self.in_function_params) try self.write(";");
                             return;
                         };
-                        const sig = reg.quirk_sig_by_name.get(variable.type.type_str.items) orelse null;
+                        const sig = reg.quirk_sig_by_name.get(vqn) orelse null;
                         if (sig != null) {
                             // `pointee_quirk_impl_name` uses the mangled instantiation
                             // name for generic pointees (e.g. `Box__num`) so the call
@@ -18642,9 +18908,13 @@ pub const TranspileProcess = struct {
                         self.is_quirk_name(variable.type.type_str.items))
                     {
                         // Quirk-typed array initializer `Q[] arr = [&p0, &p1]`: coerce
-                        // each concrete-pointer element to the quirk fat-pointer.
+                        // each concrete-pointer element to the quirk fat-pointer. A
+                        // CONCRETE instantiation of a generic quirk (`To<str>[]`)
+                        // registers under its mangled name, not the bare `type_str`.
                         const qname = variable.type.type_str.items;
-                        const sig = if (self.root_registry()) |reg| reg.quirk_sig_by_name.get(qname) else null;
+                        const arr_mangled: ?[]const u8 = if (variable.type.generic_args != null) (self.type_name_mangled(variable.type) catch null) else null;
+                        defer if (arr_mangled) |m| self.allocator.free(m);
+                        const sig = if (self.root_registry()) |reg| reg.quirk_sig_by_name.get(arr_mangled orelse qname) else null;
                         var els = ArrayList(*ast.Node).init(self.allocator);
                         defer els.deinit();
                         try self.flatten_call_args_ptr(val.node_variant.?.bracket.inner, &els);
