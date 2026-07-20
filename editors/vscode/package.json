@@ -193,13 +193,13 @@
     "package": "npm run compile && vsce package --allow-missing-repository --skip-license --allow-star-activation"
   },
   "dependencies": {
-    "vscode-languageclient": "^9.0.1"
+    "vscode-languageclient": "^10.1.0"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
     "@types/vscode": "^1.74.0",
     "typescript": "^5.3.3",
-    "@vscode/vsce": "^3.7.1"
+    "@vscode/vsce": "^3.9.2"
   },
   "overrides": {
     "cheerio": "1.0.0"
