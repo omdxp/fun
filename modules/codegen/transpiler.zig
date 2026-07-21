@@ -6402,7 +6402,20 @@ pub const TranspileProcess = struct {
             const dt = self.identifier_declared_dtype(nm) orelse return null;
             if (dt.type != .Unknown) return null;
 
-            const type_name = dt.type_str.items;
+            // A generic compound's `type_str` is just the bare template name
+            // (e.g. "Node" for `Node<num>`) — `generic_args` holds the concrete
+            // arg separately. Resolving against the bare name would dispatch to
+            // `Node__Display__to_string` (never emitted); mangle to `Node__num`
+            // first, matching how direct method calls (`lookup_plain_impl_method_fn`
+            // callers above) already do it.
+            var type_name: []const u8 = dt.type_str.items;
+            var owned_type_name = false;
+            if (dt.generic_args != null) {
+                type_name = self.type_name_mangled_for_emit(dt) catch return null;
+                owned_type_name = true;
+            }
+            defer if (owned_type_name) self.allocator.free(@constCast(type_name));
+
             const type_name_canon = self.canonical_compound_name(type_name);
             const res = self.resolve_quirk_impl_method_for_concrete(ref_node, type_name_canon, "to_string");
             if (res.fn_name == null or res.quirk_name == null or res.ambiguous) return null;
@@ -6423,7 +6436,14 @@ pub const TranspileProcess = struct {
                 const dt = self.identifier_declared_dtype(nm) orelse return null;
                 if (dt.type != .Unknown) return null;
 
-                const type_name = dt.type_str.items;
+                var type_name: []const u8 = dt.type_str.items;
+                var owned_type_name = false;
+                if (dt.generic_args != null) {
+                    type_name = self.type_name_mangled_for_emit(dt) catch return null;
+                    owned_type_name = true;
+                }
+                defer if (owned_type_name) self.allocator.free(@constCast(type_name));
+
                 const type_name_canon = self.canonical_compound_name(type_name);
                 const res = self.resolve_quirk_impl_method_for_concrete(ref_node, type_name_canon, "to_string");
                 if (res.fn_name == null or res.quirk_name == null or res.ambiguous) return null;
