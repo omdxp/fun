@@ -7801,13 +7801,18 @@ pub const TranspileProcess = struct {
 
                             const expected_items = if (fnv.args) |args| args.items() else &[_]*ast.Node{};
                             const fixed_len = expected_items.len;
+                            // Trailing params may carry a default (`fun f<T>(Node<T>* head, bin
+                            // with_addr = false)`); omitting them is valid, so the true floor is
+                            // the count of LEADING params without one, not the full param list —
+                            // mirrors the non-generic call path's use of the same helper.
+                            const required_len = if (fnv.args) |args| count_required_args_from_node(args) else 0;
 
-                            if (!fnv.is_variadic and args_nodes.items.len != fixed_len) {
+                            if (!fnv.is_variadic and (args_nodes.items.len < required_len or args_nodes.items.len > fixed_len)) {
                                 self.report_type_error(node, "function '{s}' expects {d} args, got {d}", .{ callee_name.?, fixed_len, args_nodes.items.len });
                                 return TranspileError.WrongArgCount;
                             }
-                            if (fnv.is_variadic and args_nodes.items.len < fixed_len) {
-                                self.report_type_error(node, "function '{s}' expects at least {d} args, got {d}", .{ callee_name.?, fixed_len, args_nodes.items.len });
+                            if (fnv.is_variadic and args_nodes.items.len < required_len) {
+                                self.report_type_error(node, "function '{s}' expects at least {d} args, got {d}", .{ callee_name.?, required_len, args_nodes.items.len });
                                 return TranspileError.WrongArgCount;
                             }
 
@@ -17327,14 +17332,57 @@ pub const TranspileProcess = struct {
             if (self.uses_fork) {
                 try self.emit_scheduler_runtime();
             } else {
-                // No fork scheduler in this program, but channel.fn still names the
-                // watchdog hooks. Emit no-op stubs so pure-channel (non-fork)
-                // programs link, and a shared stderr warn helper for the channel-side
-                // timed-wait fallback. All are dead unless FUN_DEADLOCK_WATCHDOG_MS
-                // arms the channel path, so the default hot path is unchanged.
-                try self.write("void __fun_wd_enter_wait(void){}\n");
-                try self.write("void __fun_wd_leave_wait(void){}\n");
-                try self.write("void __fun_wd_warn(long long a, long long b, long long ms){ fprintf(stderr, \"fun: possible deadlock: %lld blocked, %lld pending/cap, no progress for %lldms\\n\", a, b, ms); }\n\n");
+                // No fork scheduler in this program, but channel.fn still calls the
+                // watchdog hooks around every blocking channel wait — a plain
+                // (non-fork) program can deadlock too (e.g. a lone `ch.recv()` with
+                // no sender). Emit a minimal, self-contained watchdog: no task queue
+                // to track (nothing is scheduled), so the stall condition is simply
+                // "at least one blocking wait is open, with no enter/leave transition
+                // for the configured threshold". Dormant unless FUN_DEADLOCK_WATCHDOG_MS
+                // is set (the `armed` check below), so the default hot path is
+                // unchanged. Mirrors `emit_scheduler_runtime`'s fork-based watchdog.
+                try self.write(
+                    \\typedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;
+                    \\static __fun_wd_state __fun_g_wd;
+                    \\void __fun_wd_warn(long long blocked_or_count, long long pending_or_cap, long long stall_ms){
+                    \\  fprintf(stderr, "fun: possible deadlock: %lld blocked, %lld pending/cap, no progress for %lldms\n", blocked_or_count, pending_or_cap, stall_ms);
+                    \\}
+                    \\static void* __fun_wd_thread(void* unused){ (void)unused;
+                    \\  long long last_seq=-1; long long stall_ms=0;
+                    \\  long long step=__fun_g_wd.threshold_ms/4; if(step<1)step=1; if(step>1000)step=1000;
+                    \\  for(;;){
+                    \\#ifdef _WIN32
+                    \\    Sleep((DWORD)step);
+                    \\#else
+                    \\    struct timespec __ts; __ts.tv_sec=step/1000; __ts.tv_nsec=(step%1000)*1000000L; nanosleep(&__ts,NULL);
+                    \\#endif
+                    \\    int blk=__fun_g_wd.blocked; long long seq=__fun_g_wd.progress_seq;
+                    \\    if(blk>0 && seq==last_seq){ stall_ms+=step; } else { stall_ms=0; }
+                    \\    last_seq=seq;
+                    \\    if(stall_ms>=__fun_g_wd.threshold_ms){
+                    \\      __fun_wd_warn((long long)blk, 0, stall_ms);
+                    \\      if(__fun_g_wd.abort_on_fire) abort();
+                    \\      stall_ms=0;
+                    \\    }
+                    \\  }
+                    \\}
+                    \\void __fun_wd_enter_wait(void){
+                    \\  if(!__fun_g_wd.started){
+                    \\    __fun_g_wd.started=1;
+                    \\    const char* w=getenv("FUN_DEADLOCK_WATCHDOG_MS");
+                    \\    long long wm=(w && w[0])?atoll(w):0;
+                    \\    __fun_g_wd.armed=(wm>0)?1:0; __fun_g_wd.threshold_ms=(wm>0)?wm:0;
+                    \\    const char* a=getenv("FUN_DEADLOCK_ABORT");
+                    \\    __fun_g_wd.abort_on_fire=(a && a[0]=='1')?1:0;
+                    \\    if(__fun_g_wd.armed){ __fun_thread_t th; __fun_thread_start(&th, __fun_wd_thread, NULL); }
+                    \\  }
+                    \\  if(!__fun_g_wd.armed) return;
+                    \\  __fun_g_wd.blocked++;
+                    \\}
+                    \\void __fun_wd_leave_wait(void){ if(!__fun_g_wd.armed) return; if(__fun_g_wd.blocked>0)__fun_g_wd.blocked--; __fun_g_wd.progress_seq++; }
+                    \\
+                    \\
+                );
             }
 
             try self.write("#define __fun_tag(x) _Generic((x), ");
@@ -17778,7 +17826,53 @@ pub const TranspileProcess = struct {
                                 base_len -= 1;
                                 star_count += 1;
                             }
-                            const c_type = map_type_to_c(type_name[0..base_len]);
+                            const base_name = type_name[0..base_len];
+
+                            // A generic instance name mangled at parse time (`Node__T`) can
+                            // still carry a bare type param of the ENCLOSING constrained
+                            // generic function/impl (`T`) when this `sizeof` sits inside
+                            // that template body — `Node__T` is never emitted (only its
+                            // monomorphized instances are), so re-mangle every `__`-joined
+                            // segment that matches an active type param against the real
+                            // substitution: `sizeof(Node<T>)` inside `fun make<T>(...)`
+                            // then emits `Node__num`, not the undeclared `Node__T`.
+                            var substituted_owned: ?[]u8 = null;
+                            defer if (substituted_owned) |s| self.allocator.free(s);
+                            const c_type_base: []const u8 = blk: {
+                                if (self.type_subst_params == null or self.type_subst_args == null or mem.indexOf(u8, base_name, "__") == null) {
+                                    break :blk base_name;
+                                }
+                                const params = self.type_subst_params.?.*;
+                                const args = self.type_subst_args.?;
+                                var buf = ArrayList(u8).init(self.allocator);
+                                errdefer buf.deinit();
+                                var it = mem.splitSequence(u8, base_name, "__");
+                                var first = true;
+                                var changed = false;
+                                while (it.next()) |seg| {
+                                    if (!first) buf.appendSlice("__") catch return TranspileError.MemoryAllocationFailed;
+                                    first = false;
+                                    var replaced = false;
+                                    for (params.items(), 0..) |p, i| {
+                                        if (!mem.eql(u8, p.items, seg)) continue;
+                                        const m = self.type_name_mangled(args[i]) catch break;
+                                        defer self.allocator.free(m);
+                                        buf.appendSlice(m) catch return TranspileError.MemoryAllocationFailed;
+                                        replaced = true;
+                                        changed = true;
+                                        break;
+                                    }
+                                    if (!replaced) buf.appendSlice(seg) catch return TranspileError.MemoryAllocationFailed;
+                                }
+                                if (!changed) {
+                                    buf.deinit();
+                                    break :blk base_name;
+                                }
+                                const owned = buf.toOwnedSlice() catch return TranspileError.MemoryAllocationFailed;
+                                substituted_owned = owned;
+                                break :blk owned;
+                            };
+                            const c_type = map_type_to_c(c_type_base);
                             try self.write("(long long)(sizeof(");
                             try self.write(c_type);
                             var si: usize = 0;

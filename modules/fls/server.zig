@@ -107,6 +107,9 @@ const isCloseParen = positions_mod.isCloseParen;
 const isOpenBracket = positions_mod.isOpenBracket;
 const isCloseBracket = positions_mod.isCloseBracket;
 const isCommaToken = positions_mod.isCommaToken;
+const isOpenBrace = positions_mod.isOpenBrace;
+const isCloseBrace = positions_mod.isCloseBrace;
+const findBlockBraceRange = positions_mod.findBlockBraceRange;
 const paramNameFromLabel = positions_mod.paramNameFromLabel;
 const nextNonTrivialTokenLite = positions_mod.nextNonTrivialTokenLite;
 const prevNonTrivialTokenLite = positions_mod.prevNonTrivialTokenLite;
@@ -6053,6 +6056,15 @@ pub const LspServer = struct {
         var fixes = ArrayList(CodeActionFix).init(self.allocator);
         defer fixes.deinit();
 
+        // Backing storage for fixes whose `new_text` is built dynamically
+        // (unlike the static "async "/"await " literals below) — freed once
+        // the JSON response has been serialized.
+        var owned_texts = ArrayList([]u8).init(self.allocator);
+        defer {
+            for (owned_texts.items) |t| self.allocator.free(t);
+            owned_texts.deinit();
+        }
+
         for (parsed.?.diagnostics) |diag_val| {
             if (diag_val != .object) continue;
             const range_val = diag_val.object.get("range") orelse continue;
@@ -6110,6 +6122,59 @@ pub const LspServer = struct {
                 }
                 if (!exists) try fixes.append(fix);
             }
+
+            // `fit` over an enum missing variants (`fit_non_exhaustive` with a
+            // named "(missing: Enum.A, Enum.B)" list — the bin/num/unknown
+            // variants of this warning have no enumerable set and are left to
+            // the diagnostic's own "add catch-all '_'" suggestion).
+            if (msg_opt) |m| {
+                if (std.mem.indexOf(u8, m, "fit statement is not exhausted for enum '") != null and
+                    std.mem.indexOf(u8, m, "(missing: ") != null)
+                {
+                    if (try self.tryBuildFitMissingArmsFix(idx, uri, m, diag_range)) |built| {
+                        try owned_texts.append(built.new_text);
+                        const insert_range: Range = .{ .start = built.insert_pos, .end = built.insert_pos };
+                        const fix: CodeActionFix = .{
+                            .title = "Fill in missing fit arms",
+                            .range = insert_range,
+                            .new_text = built.new_text,
+                            .is_preferred = true,
+                        };
+                        var exists = false;
+                        for (fixes.items) |it| {
+                            if (std.mem.eql(u8, it.title, fix.title) and rangeEqual(it.range, fix.range)) {
+                                exists = true;
+                                break;
+                            }
+                        }
+                        if (!exists) try fixes.append(fix);
+                    }
+                }
+
+                // `impl Type as Quirk` missing one or more required methods.
+                if (std.mem.indexOf(u8, m, "' is missing ") != null and
+                    std.mem.indexOf(u8, m, "method(s):\n") != null)
+                {
+                    if (try self.tryBuildQuirkMissingMethodsFix(idx, m, diag_range)) |built| {
+                        try owned_texts.append(built.new_text);
+                        const insert_range: Range = .{ .start = built.insert_pos, .end = built.insert_pos };
+                        const fix: CodeActionFix = .{
+                            .title = "Implement missing quirk methods",
+                            .range = insert_range,
+                            .new_text = built.new_text,
+                            .is_preferred = true,
+                        };
+                        var exists = false;
+                        for (fixes.items) |it| {
+                            if (std.mem.eql(u8, it.title, fix.title) and rangeEqual(it.range, fix.range)) {
+                                exists = true;
+                                break;
+                            }
+                        }
+                        if (!exists) try fixes.append(fix);
+                    }
+                }
+            }
         }
 
         if (fixes.items.len == 0) {
@@ -6139,6 +6204,120 @@ pub const LspServer = struct {
         try json_buf.append(']');
 
         try self.sendResponseJson(id_val, json_buf.items);
+    }
+
+    /// Build a "Fill in missing fit arms" fix for a `fit_non_exhaustive`
+    /// diagnostic over an enum (message shape: "fit statement is not
+    /// exhausted for enum 'Name' condition (missing: Name.A, Name.B; add
+    /// catch-all '_' branch to silence)"). Inserts one arm per missing
+    /// variant, right before the fit block's closing `}`, working cross-file
+    /// like `resolveFitBindingType` to read each variant's payload arity.
+    /// Returns null when the message/tokens don't match the expected shape.
+    fn tryBuildFitMissingArmsFix(self: *LspServer, idx: *const Index, uri: []const u8, msg: []const u8, diag_range: Range) !?struct { insert_pos: Position, new_text: []u8 } {
+        const enum_marker = "for enum '";
+        const em_i = std.mem.indexOf(u8, msg, enum_marker) orelse return null;
+        const after_em = msg[em_i + enum_marker.len ..];
+        const enum_end = std.mem.indexOfScalar(u8, after_em, '\'') orelse return null;
+        const enum_name = after_em[0..enum_end];
+
+        const missing_marker = "(missing: ";
+        const mm_i = std.mem.indexOf(u8, msg, missing_marker) orelse return null;
+        const after_mm = msg[mm_i + missing_marker.len ..];
+        const missing_end = std.mem.indexOfScalar(u8, after_mm, ';') orelse return null;
+        const missing_list = after_mm[0..missing_end];
+
+        const fit_tok_i = findTokenIndexAt(idx.tokens, diag_range.start) orelse return null;
+        const braces = findBlockBraceRange(idx.tokens, fit_tok_i) orelse return null;
+        const insert_pos = idx.tokens[braces.close_i].range.start;
+
+        const enum_base = baseTypeNameForLookup(enum_name);
+        {
+            var import_uris = ArrayList([]u8).init(self.allocator);
+            defer {
+                for (import_uris.items) |u| self.allocator.free(u);
+                import_uris.deinit();
+            }
+            self.collectDirectImportUris(&import_uris, uri, idx) catch {};
+            for (import_uris.items) |iu| self.ensureDocIndexedFromDisk(iu) catch {};
+        }
+        const ehit = self.findEnumDefinitionAnyDoc(uri, enum_base) orelse return null;
+        const edoc = self.docs.get(ehit.uri) orelse return null;
+        const eidx = edoc.index orelse return null;
+
+        var new_text = ArrayList(u8).init(self.allocator);
+        errdefer new_text.deinit();
+
+        var it = std.mem.splitSequence(u8, missing_list, ", ");
+        while (it.next()) |entry| {
+            const trimmed = std.mem.trim(u8, entry, " ");
+            const dot_i = std.mem.lastIndexOfScalar(u8, trimmed, '.') orelse continue;
+            const variant_name = trimmed[dot_i + 1 ..];
+
+            var arity: usize = 0;
+            while (true) {
+                const p = enumVariantPayloadFromDoc(self.allocator, eidx, enum_base, variant_name, arity) orelse break;
+                self.allocator.free(p);
+                arity += 1;
+            }
+
+            try new_text.appendSlice("    ");
+            try new_text.appendSlice(enum_name);
+            try new_text.append('.');
+            try new_text.appendSlice(variant_name);
+            if (arity > 0) {
+                try new_text.append('(');
+                var vi: usize = 0;
+                while (vi < arity) : (vi += 1) {
+                    if (vi != 0) try new_text.appendSlice(", ");
+                    try new_text.print("v{d}", .{vi});
+                }
+                try new_text.append(')');
+            }
+            try new_text.appendSlice(" -> {}\n");
+        }
+
+        if (new_text.items.len == 0) {
+            new_text.deinit();
+            return null;
+        }
+
+        return .{ .insert_pos = insert_pos, .new_text = try new_text.toOwnedSlice() };
+    }
+
+    /// Build an "Implement missing quirk methods" fix for the impl-missing-
+    /// methods diagnostic (message shape: "impl 'Type' for quirk 'Quirk' is
+    /// missing N method(s):\n- name(args) rtype\n..."). Inserts an empty
+    /// `pub` stub per missing method, right before the impl block's closing
+    /// `}`. Returns null when the message/tokens don't match the expected
+    /// shape (e.g. no method lines actually parsed).
+    fn tryBuildQuirkMissingMethodsFix(self: *LspServer, idx: *const Index, msg: []const u8, diag_range: Range) !?struct { insert_pos: Position, new_text: []u8 } {
+        const header_end = std.mem.indexOfScalar(u8, msg, '\n') orelse return null;
+
+        const impl_tok_i = findTokenIndexAt(idx.tokens, diag_range.start) orelse return null;
+        const braces = findBlockBraceRange(idx.tokens, impl_tok_i) orelse return null;
+        const insert_pos = idx.tokens[braces.close_i].range.start;
+
+        var new_text = ArrayList(u8).init(self.allocator);
+        errdefer new_text.deinit();
+
+        var lines = std.mem.splitScalar(u8, msg[header_end + 1 ..], '\n');
+        var any = false;
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \r");
+            if (trimmed.len == 0) continue;
+            if (!std.mem.startsWith(u8, trimmed, "- ")) continue;
+            const sig = trimmed[2..];
+            try new_text.appendSlice("  pub ");
+            try new_text.appendSlice(sig);
+            try new_text.appendSlice(" {\n    // TODO: implement\n  }\n");
+            any = true;
+        }
+
+        if (!any) {
+            new_text.deinit();
+            return null;
+        }
+        return .{ .insert_pos = insert_pos, .new_text = try new_text.toOwnedSlice() };
     }
 
     fn handleCompletion(self: *LspServer, id_val: ?std.json.Value, params_val: ?std.json.Value) !void {
@@ -6542,12 +6721,42 @@ pub const LspServer = struct {
             }
         }
 
-        // Keywords.
-        const keywords = [_][]const u8{
-            "imp",    "as",   "pub", "async", "fun",   "compound", "quirk", "impl", "enum", "asm", "volatile", "arch", "defer", "await", "ret",   "if",
-            "elif",   "else", "for", "fit",   "break", "continue", "void",  "raw",  "num",  "dec", "str",      "bin",  "chr",   "true",  "false", "allow",
-            "expect",
+        // Keywords. Statement/declaration keywords (`imp`, `pub`, `fun`, `if`,
+        // `for`, ...) and bare type keywords (`num`, `str`, ...) can never
+        // start a value expression, so offering them right after `(` or `,`
+        // — i.e. at the start of a call argument — is pure noise; only the
+        // literal-value keywords stay relevant there.
+        const at_call_arg_start: bool = blk: {
+            const ti_opt = findTokenIndexAt(idx.tokens, pos) orelse findLastTokenIndexBeforeOrAt(idx.tokens, pos);
+            const ti = ti_opt orelse break :blk false;
+            const check_tok = idx.tokens[ti];
+            const paren_i: usize = if (isOpenParen(check_tok))
+                ti
+            else pi: {
+                // Cursor is inside/after a partial identifier (the completion
+                // `prefix`); check the token immediately before IT instead.
+                const prev_i = prevNonTrivialTokenLite(idx.tokens, ti) orelse break :blk false;
+                if (!isOpenParen(idx.tokens[prev_i])) break :blk false;
+                break :pi prev_i;
+            };
+            // A `(` right after `fun`/`pub`/`async <name>` is a PARAMETER LIST
+            // (or an `if`/`fit`/`for` subject call), where type names and other
+            // keywords are still valid completions — only suppress for a plain
+            // call/grouping paren. (A `,`-preceded position is left as-is too,
+            // to keep this check simple and safe.)
+            const name_i = prevNonTrivialTokenLite(idx.tokens, paren_i) orelse break :blk true;
+            if (idx.tokens[name_i].kind == .identifier and callParenIsDeclaration(idx.tokens, name_i, paren_i)) {
+                break :blk false;
+            }
+            break :blk true;
         };
+        const keywords_all = [_][]const u8{
+            "imp",  "as",    "pub",    "async", "fun",   "compound", "quirk", "impl", "enum", "asm", "volatile", "arch", "defer", "await", "ret",   "if",
+            "elif", "else",  "for",    "fit",   "break", "continue", "void",  "raw",  "num",  "dec", "str",      "bin",  "chr",   "true",  "false", "nil",
+            "fork", "allow", "expect",
+        };
+        const keywords_call_arg = [_][]const u8{ "true", "false", "nil" };
+        const keywords: []const []const u8 = if (at_call_arg_start) &keywords_call_arg else &keywords_all;
         for (keywords) |kw| {
             if (prefix.len == 0 or std.mem.startsWith(u8, kw, prefix)) {
                 const kw_detail: ?[]u8 = if (std.mem.eql(u8, kw, "async"))
@@ -7327,7 +7536,7 @@ pub const LspServer = struct {
             }
             if (kw_start < kw_end) {
                 const kw = text[kw_start..kw_end];
-                if (std.mem.eql(u8, kw, "compound") or std.mem.eql(u8, kw, "enum") or std.mem.eql(u8, kw, "quirk")) {
+                if (std.mem.eql(u8, kw, "compound") or std.mem.eql(u8, kw, "enum") or std.mem.eql(u8, kw, "quirk") or std.mem.eql(u8, kw, "impl")) {
                     return null;
                 }
             }

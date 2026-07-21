@@ -2012,30 +2012,21 @@ test "fls e2e: go-to-definition and hover on a method chained onto a real (non-f
     defer lsp.stop();
     try lspInitialize(allocator, &lsp, setup.root_uri);
 
-    // Mirrors examples/stdlib/serde_json_toml.fn's `From<JsonValue>` impl:
-    // `v.as_num().unwrap_or(0.0)` chains a REAL impl method (`unwrap_or`) onto
-    // another REAL impl method's result (`as_num()`), through an imported
-    // generic enum (`Option<dec>`). Regresses a reported "go-to-definition on
-    // the chained method does nothing" complaint.
-    const doc_text =
-        "imp std.c.io;\n" ++
-        "imp std.json;\n" ++
-        "imp std.result;\n" ++
-        "imp std.quirks;\n\n" ++
-        "pub compound Config {\n" ++
-        "  dec version;\n" ++
-        "}\n\n" ++
-        "impl Config as From<JsonValue> {\n" ++
-        "  pub from(JsonValue value) {\n" ++
-        "    let v = value.get(\"version\").unwrap_or(JsonValue.Null);\n" ++
-        "    self.version = v.as_num().unwrap_or(0.0);\n" ++
-        "  }\n" ++
-        "}\n\n" ++
-        "fun main() num {\n" ++
-        "  ret 0;\n" ++
-        "}\n";
+    // Open the REAL example file verbatim, at its REAL path, rather than a
+    // hand-typed excerpt — a reported "go-to-definition on the chained method
+    // does nothing" complaint pointed at this exact file/line
+    // (`v.as_num().unwrap_or(0.0)` in examples/stdlib/serde_json_toml.fn), and
+    // a trimmed synthetic repro of just that snippet did not reproduce it, so
+    // this test uses the unmodified file in case the surrounding context
+    // (the `to()` impl, `main()`'s other statements, the `To<str>` usage)
+    // matters.
+    const rel_path = "examples/stdlib/serde_json_toml.fn";
+    const doc_text = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, rel_path, allocator, .limited(1024 * 1024));
+    defer allocator.free(doc_text);
 
-    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-chained-method-def.fn");
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const doc_abs_len = try std.Io.Dir.cwd().realPathFile(std.testing.io, rel_path, &path_buf);
+    const doc_uri = try pathToFileUriAlloc(allocator, path_buf[0..doc_abs_len]);
     defer allocator.free(doc_uri);
     try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
 
@@ -2059,6 +2050,103 @@ test "fls e2e: go-to-definition and hover on a method chained onto a real (non-f
         try std.testing.expect(dval == .array and dval.array.items.len > 0);
         const def_uri = dval.array.items[0].object.get("uri").?.string;
         try std.testing.expect(std.mem.indexOf(u8, def_uri, "option.fn") != null);
+    }
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: server stays responsive across malformed/mid-edit snippets (no hang/crash)" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const snippets = [_][]const u8{
+        // Incomplete generic constraint clause.
+        "imp std.io;\nfun f<T: >(T x) T { ret x; }\n",
+        "imp std.io;\nfun f<T: num |>(T x) T { ret x; }\n",
+        "imp std.io;\nfun f<T: num | str\n",
+        "compound Boxed<T: >{ T value; }\n",
+        "compound Boxed<T: num |\n",
+        // Incomplete fit branch / pattern.
+        "imp std.option;\nfun main() num {\n  Option<num> o = some(1);\n  fit o {\n    Option.Some(\n",
+        "imp std.option;\nfun main() num {\n  Option<num> o = some(1);\n  fit o {\n    Option.\n",
+        "imp std.option;\nfun main() num {\n  Option<num> o = some(1);\n  fit o {\n    .Some(n) ->\n",
+        // Chained call cut off mid-dot.
+        "imp std.string;\nfun main() num {\n  let x = trim(\"a\").\n  ret 0;\n}\n",
+        "imp std.string;\nfun main() num {\n  let x = trim(\"a\").trim(\n",
+        // Incomplete quirk impl.
+        "imp std.quirks;\ncompound P{ num x; }\nimpl P as To<\n",
+        "imp std.quirks;\ncompound P{ num x; }\nimpl P as To<num> {\n  pub to() num {\n",
+        // Unterminated generic type annotation.
+        "imp std.vec;\nfun main() num {\n  Vec<num\n",
+        "imp std.vec;\nfun main() num {\n  Vec<Vec<num>\n",
+        // sizeof edge cases (the constrained-generic sizeof fix's neighborhood).
+        "compound Node<T>{ T v; }\nfun f<T>(T v) num { ret sizeof(Node<\n",
+        "compound Node<T>{ T v; }\nfun f<T>(T v) num { ret sizeof(\n",
+        // Empty / whitespace-only / just a dot.
+        "",
+        ".",
+        "   \n\t\n",
+    };
+
+    // The very first request in the session pays a one-time workspace-indexing
+    // cost (slower still in a Debug test build, which uses Zig's safety-checked
+    // allocator) — give it a generous timeout so that startup cost alone can't
+    // cause a false failure. Everything after should be fast; a genuinely hung
+    // server fails regardless of how long we wait, so later requests use a
+    // tighter bound.
+    var first_request = true;
+
+    for (snippets, 0..) |text, i| {
+        const doc_uri = try std.fmt.allocPrint(allocator, "{s}fuzz_{d}.fn", .{ setup.root_uri, i });
+        defer allocator.free(doc_uri);
+        try lspOpenDoc(allocator, &lsp, doc_uri, 1, text);
+
+        // Request hover at a handful of positions scattered across the (short)
+        // document; a dead/hung server shows up as a response timeout here.
+        var line: i64 = 0;
+        while (line < 6) : (line += 1) {
+            const params = try std.fmt.allocPrint(
+                allocator,
+                "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":3}}}}",
+                .{ doc_uri, line },
+            );
+            defer allocator.free(params);
+            const hid = try lsp.request("textDocument/hover", params);
+            const timeout_ms: i64 = if (first_request) 20000 else 4000;
+            first_request = false;
+            var res = lsp.waitResponse(hid, timeout_ms) catch {
+                std.debug.print("FAIL: snippet #{d} ({s}...) — server unresponsive on hover\n", .{ i, text[0..@min(text.len, 40)] });
+                return error.ServerUnresponsive;
+            };
+            res.deinit();
+        }
+
+        // Also fire a completion request right at the end of the document —
+        // exactly "typing `.` and nothing autocompletes" from the report, plus
+        // it's a different request path than hover.
+        const end_params = try std.fmt.allocPrint(
+            allocator,
+            "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":20,\"character\":0}}}}",
+            .{doc_uri},
+        );
+        defer allocator.free(end_params);
+        const cid = try lsp.request("textDocument/completion", end_params);
+        var cres = lsp.waitResponse(cid, 4000) catch {
+            std.debug.print("FAIL: snippet #{d} ({s}...) — server unresponsive on completion\n", .{ i, text[0..@min(text.len, 40)] });
+            return error.ServerUnresponsive;
+        };
+        cres.deinit();
     }
 
     const shutdown_id = try lsp.request("shutdown", "{}");
@@ -6359,6 +6447,345 @@ test "fls e2e: hover on a generic method specializes type params to the receiver
                 }
             }
         }
+    }
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: code action fills in missing fit arms for a non-exhaustive enum match" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "imp std.c.io;\n" ++
+        "enum Color { Red, Green, Blue }\n" ++
+        "fun main() num {\n" ++
+        "  Color c = Color.Red;\n" ++
+        "  fit c {\n" ++
+        "    Color.Red -> { ret 1; }\n" ++
+        "  }\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-codeaction-fit-arms.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const fit_pos = try findPosition(doc_text, "fit c {", 0);
+    const fit_end = fit_pos.col + @as(i64, @intCast("fit".len));
+
+    const code_action_params = try std.fmt.allocPrint(
+        allocator,
+        "{{" ++
+            "\"textDocument\":{{\"uri\":\"{s}\"}}," ++
+            "\"range\":{{\"start\":{{\"line\":{d},\"character\":{d}}},\"end\":{{\"line\":{d},\"character\":{d}}}}}," ++
+            "\"context\":{{\"diagnostics\":[" ++
+            "{{\"range\":{{\"start\":{{\"line\":{d},\"character\":{d}}},\"end\":{{\"line\":{d},\"character\":{d}}}}},\"severity\":2,\"code\":\"fit_non_exhaustive\"," ++
+            "\"message\":\"fit statement is not exhausted for enum 'Color' condition (missing: Color.Green, Color.Blue; add catch-all '_' branch to silence)\"}}" ++
+            "]}}" ++
+            "}}",
+        .{
+            doc_uri,
+            fit_pos.line,
+            fit_pos.col,
+            fit_pos.line,
+            fit_end,
+            fit_pos.line,
+            fit_pos.col,
+            fit_pos.line,
+            fit_end,
+        },
+    );
+    defer allocator.free(code_action_params);
+
+    const ca_id = try lsp.request("textDocument/codeAction", code_action_params);
+    var ca_res = try lsp.waitResponse(ca_id, 15000);
+    defer ca_res.deinit();
+    const ca_val = try jsonResultFromResponseObj(ca_res.parsed.value.object);
+
+    try expectCodeActionHasTitleWithNewText(
+        allocator,
+        ca_val,
+        "Fill in missing fit arms",
+        "    Color.Green -> {}\n    Color.Blue -> {}\n",
+    );
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: code action fills in missing fit arms for a generic data-carrying enum" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    // `Choice<T>`: `One` carries a single payload, `Two` carries two — checks
+    // that the fix reads each missing variant's REAL payload arity (not just
+    // "0 or 1"), and that a GENERIC enum's bare declared name (the message
+    // says "enum 'Choice'", not "Choice<num>") still resolves correctly.
+    const doc_text =
+        "imp std.c.io;\n" ++
+        "enum Choice<T> {\n" ++
+        "  One(T),\n" ++
+        "  Two(T, T),\n" ++
+        "  None\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  Choice<num> c = Choice.None;\n" ++
+        "  fit c {\n" ++
+        "    Choice.None -> { ret 0; }\n" ++
+        "  }\n" ++
+        "  ret -1;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-codeaction-fit-arms-generic.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const fit_pos = try findPosition(doc_text, "fit c {", 0);
+    const fit_end = fit_pos.col + @as(i64, @intCast("fit".len));
+
+    const code_action_params = try std.fmt.allocPrint(
+        allocator,
+        "{{" ++
+            "\"textDocument\":{{\"uri\":\"{s}\"}}," ++
+            "\"range\":{{\"start\":{{\"line\":{d},\"character\":{d}}},\"end\":{{\"line\":{d},\"character\":{d}}}}}," ++
+            "\"context\":{{\"diagnostics\":[" ++
+            "{{\"range\":{{\"start\":{{\"line\":{d},\"character\":{d}}},\"end\":{{\"line\":{d},\"character\":{d}}}}},\"severity\":2,\"code\":\"fit_non_exhaustive\"," ++
+            "\"message\":\"fit statement is not exhausted for enum 'Choice' condition (missing: Choice.One, Choice.Two; add catch-all '_' branch to silence)\"}}" ++
+            "]}}" ++
+            "}}",
+        .{
+            doc_uri,
+            fit_pos.line,
+            fit_pos.col,
+            fit_pos.line,
+            fit_end,
+            fit_pos.line,
+            fit_pos.col,
+            fit_pos.line,
+            fit_end,
+        },
+    );
+    defer allocator.free(code_action_params);
+
+    const ca_id = try lsp.request("textDocument/codeAction", code_action_params);
+    var ca_res = try lsp.waitResponse(ca_id, 15000);
+    defer ca_res.deinit();
+    const ca_val = try jsonResultFromResponseObj(ca_res.parsed.value.object);
+
+    try expectCodeActionHasTitleWithNewText(
+        allocator,
+        ca_val,
+        "Fill in missing fit arms",
+        "    Choice.One(v0) -> {}\n    Choice.Two(v0, v1) -> {}\n",
+    );
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: code action implements missing quirk methods on an impl block" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "imp std.quirks;\n" ++
+        "quirk Greet {\n" ++
+        "  hello() str;\n" ++
+        "  bye() str;\n" ++
+        "}\n" ++
+        "compound P { num x; }\n" ++
+        "impl P as Greet {\n" ++
+        "  pub hello() str { ret \"hi\"; }\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-codeaction-quirk-methods.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const impl_pos = try findPosition(doc_text, "impl P as Greet {", 0);
+    const impl_end = impl_pos.col + @as(i64, @intCast("impl".len));
+
+    const code_action_params = try std.fmt.allocPrint(
+        allocator,
+        "{{" ++
+            "\"textDocument\":{{\"uri\":\"{s}\"}}," ++
+            "\"range\":{{\"start\":{{\"line\":{d},\"character\":{d}}},\"end\":{{\"line\":{d},\"character\":{d}}}}}," ++
+            "\"context\":{{\"diagnostics\":[" ++
+            "{{\"range\":{{\"start\":{{\"line\":{d},\"character\":{d}}},\"end\":{{\"line\":{d},\"character\":{d}}}}},\"severity\":1," ++
+            "\"message\":\"impl 'P' for quirk 'Greet' is missing 1 method(s):\\n- bye() str\\n\"}}" ++
+            "]}}" ++
+            "}}",
+        .{
+            doc_uri,
+            impl_pos.line,
+            impl_pos.col,
+            impl_pos.line,
+            impl_end,
+            impl_pos.line,
+            impl_pos.col,
+            impl_pos.line,
+            impl_end,
+        },
+    );
+    defer allocator.free(code_action_params);
+
+    const ca_id = try lsp.request("textDocument/codeAction", code_action_params);
+    var ca_res = try lsp.waitResponse(ca_id, 15000);
+    defer ca_res.deinit();
+    const ca_val = try jsonResultFromResponseObj(ca_res.parsed.value.object);
+
+    try expectCodeActionHasTitleWithNewText(
+        allocator,
+        ca_val,
+        "Implement missing quirk methods",
+        "  pub bye() str {\n    // TODO: implement\n  }\n",
+    );
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+fn collectCompletionLabels(allocator: Allocator, result_val: std.json.Value) !ArrayList([]const u8) {
+    var labels = ArrayList([]const u8).init(allocator);
+    const items_val_opt: ?std.json.Value = switch (result_val) {
+        .object => |o| o.get("items"),
+        .array => result_val,
+        else => null,
+    };
+    if (items_val_opt) |items_val| {
+        if (items_val == .array) {
+            for (items_val.array.items) |it| {
+                if (it != .object) continue;
+                const lbl = it.object.get("label") orelse continue;
+                if (lbl != .string) continue;
+                try labels.append(lbl.string);
+            }
+        }
+    }
+    return labels;
+}
+
+fn labelsContain(labels: []const []const u8, name: []const u8) bool {
+    for (labels) |l| {
+        if (std.mem.eql(u8, l, name)) return true;
+    }
+    return false;
+}
+
+test "fls e2e: completion after a call-argument '(' skips statement/type keyword noise" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "imp std.c.io;\n" ++
+        "compound Box { num value; }\n" ++
+        "impl Box {\n" ++
+        "  pub add(num other) num {\n" ++
+        "    printf(\n" ++
+        "    ret self.value + other;\n" ++
+        "  }\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  Box b;\n" ++
+        "  b.value = 1;\n" ++
+        "  ret b.add(2);\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-paren-completion.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // Case 1: right after `printf(` — a CALL argument position. Statement
+    // keywords (`fun`, `if`, `for`, ...) and bare type keywords (`num`, `str`,
+    // ...) can never start a value expression there and are noise; locals
+    // (`self`, `other`) and literal-value keywords (`true`/`false`/`nil`)
+    // remain relevant.
+    {
+        const pos = try findPosition(doc_text, "printf(\n", 0);
+        const params = try std.fmt.allocPrint(
+            allocator,
+            "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+            .{ doc_uri, pos.line, pos.col + @as(i64, @intCast("printf(".len)) },
+        );
+        defer allocator.free(params);
+        const cid = try lsp.request("textDocument/completion", params);
+        var res = try lsp.waitResponse(cid, 10000);
+        defer res.deinit();
+        const result = try jsonResultFromResponseObj(res.parsed.value.object);
+        var labels = try collectCompletionLabels(allocator, result);
+        defer labels.deinit();
+
+        try std.testing.expect(!labelsContain(labels.items, "fun"));
+        try std.testing.expect(!labelsContain(labels.items, "pub"));
+        try std.testing.expect(!labelsContain(labels.items, "if"));
+        try std.testing.expect(!labelsContain(labels.items, "num"));
+        try std.testing.expect(!labelsContain(labels.items, "str"));
+        try std.testing.expect(labelsContain(labels.items, "true"));
+        try std.testing.expect(labelsContain(labels.items, "self"));
+        try std.testing.expect(labelsContain(labels.items, "other"));
+    }
+
+    // Case 2: right after `pub add(` — a PARAMETER LIST declaration, where
+    // type keywords are exactly what's needed and must NOT be suppressed.
+    {
+        const pos = try findPosition(doc_text, "pub add(", 0);
+        const params = try std.fmt.allocPrint(
+            allocator,
+            "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+            .{ doc_uri, pos.line, pos.col + @as(i64, @intCast("pub add(".len)) },
+        );
+        defer allocator.free(params);
+        const cid = try lsp.request("textDocument/completion", params);
+        var res = try lsp.waitResponse(cid, 10000);
+        defer res.deinit();
+        const result = try jsonResultFromResponseObj(res.parsed.value.object);
+        var labels = try collectCompletionLabels(allocator, result);
+        defer labels.deinit();
+
+        try std.testing.expect(labelsContain(labels.items, "num"));
+        try std.testing.expect(labelsContain(labels.items, "str"));
     }
 
     const shutdown_id = try lsp.request("shutdown", "{}");

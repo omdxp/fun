@@ -60,7 +60,7 @@ jobs:
           if [ -z "$tag" ]; then tag="0.0.0"; fi
           tag="${tag#v}"
 
-          zig build install -Dtarget=${{ matrix.target }} -Dversion="$tag" --prefix dist/fun-${{ matrix.target }}
+          zig build install --release=safe -Dtarget=${{ matrix.target }} -Dversion="$tag" --prefix dist/fun-${{ matrix.target }}
           cp scripts/installer/install.sh dist/fun-${{ matrix.target }}/install.sh
           cp scripts/installer/uninstall.sh dist/fun-${{ matrix.target }}/uninstall.sh
           chmod +x dist/fun-${{ matrix.target }}/install.sh dist/fun-${{ matrix.target }}/uninstall.sh || true
@@ -122,7 +122,7 @@ jobs:
 
           # IMPORTANT: always pass -Dversion as a single argument.
           # PowerShell can mis-tokenize version-like strings (e.g. 0.12.10) if they appear unquoted.
-          zig build install -Dtarget=${{ matrix.target }} "-Dversion=$tag" --prefix dist\fun-${{ matrix.target }}
+          zig build install --release=safe -Dtarget=${{ matrix.target }} "-Dversion=$tag" --prefix dist\fun-${{ matrix.target }}
 
           # Verify version embedding. We can execute x86_64 builds; for aarch64 just scan bytes.
           $exePath = "dist\fun-${{ matrix.target }}\bin\fun.exe"

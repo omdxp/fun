@@ -80,6 +80,50 @@ pub fn isCloseBracket(t: TokenLite) bool {
 pub fn isCommaToken(t: TokenLite) bool {
     return isPunct(t, ",");
 }
+pub fn isOpenBrace(t: TokenLite) bool {
+    return isPunct(t, "{");
+}
+pub fn isCloseBrace(t: TokenLite) bool {
+    return isPunct(t, "}");
+}
+
+/// From `start_i` (e.g. the `fit`/`impl` keyword token), find the FIRST `{`
+/// not nested inside parens (skipping over a `fit <expr>` subject or an
+/// `impl Type as Quirk` clause, either of which may itself contain parens),
+/// then its matching `}` via brace-depth tracking. Used by code actions that
+/// need to insert content just before a block's closing brace.
+pub fn findBlockBraceRange(tokens: []const TokenLite, start_i: usize) ?struct { open_i: usize, close_i: usize } {
+    var paren_depth: i64 = 0;
+    var i = start_i;
+    var open_i: ?usize = null;
+    while (i < tokens.len) : (i += 1) {
+        const t = tokens[i];
+        if (isOpenParen(t)) {
+            paren_depth += 1;
+            continue;
+        }
+        if (isCloseParen(t)) {
+            paren_depth -= 1;
+            continue;
+        }
+        if (paren_depth == 0 and isOpenBrace(t)) {
+            open_i = i;
+            break;
+        }
+    }
+    const ob = open_i orelse return null;
+    var depth: i64 = 0;
+    var j = ob;
+    while (j < tokens.len) : (j += 1) {
+        const t = tokens[j];
+        if (isOpenBrace(t)) depth += 1;
+        if (isCloseBrace(t)) {
+            depth -= 1;
+            if (depth == 0) return .{ .open_i = ob, .close_i = j };
+        }
+    }
+    return null;
+}
 
 /// Extracts the parameter *name* from a parameter label such as `num a`,
 /// `Point* p`, or `str[] names` → `a`, `p`, `names`. The name is the last

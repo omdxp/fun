@@ -7528,6 +7528,52 @@ test "default parameter longhand enum values work for generic enums" {
     try std.testing.expectEqualStrings("7 9\n", stdout);
 }
 
+test "default parameter after a generic-typed param: omitting the trailing default still typechecks" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_default_after_generic_param.fn";
+    const c_path = "codegen_default_after_generic_param.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_default_after_generic_param.exe" else "codegen_default_after_generic_param";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // A generic free function whose FIRST param's type mentions the function's own
+    // type param (`Node<T>*`) previously made the arg-count check for a defaulted
+    // TRAILING param (`with_addr = false`) require an exact match against every
+    // declared param instead of just the leading required ones — so omitting the
+    // default incorrectly errored "expects 2 args, got 1". The equivalent
+    // non-generic signature (a concrete `Node<num>*`) never hit this, since it
+    // goes through a different (already-correct) call-arg-count check.
+    const input =
+        "imp std.c.io;\n" ++
+        "compound Node<T> { T value; Node<T>* next; }\n" ++
+        "fun show<T>(Node<T>* head, bin with_addr = false) T {\n" ++
+        "  if with_addr { printf(\"with_addr=true\\n\"); } else { printf(\"with_addr=false\\n\"); }\n" ++
+        "  ret head.value;\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  Node<num> n;\n" ++
+        "  n.value = 5;\n" ++
+        "  n.next = nil;\n" ++
+        "  let a = show(&n);\n" ++
+        "  let b = show(&n, true);\n" ++
+        "  printf(\"%lld %lld\\n\", a, b);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("with_addr=false\nwith_addr=true\n5 5\n", stdout);
+}
+
 test "quirk-impl method call chains onto a call-expression receiver" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_chained_quirk_method_call.fn";
@@ -7746,4 +7792,67 @@ test "default parameter values: free fn + method, omitting trailing args fills d
     // three(1)=1000+20+100=1120; three(1,5)=1000+50+100=1150; three(1,5,9)=1000+50+9=1059
     // b.add(1)=1000+1+50=1051; b.add(1,1)=1000+1+1=1002
     try std.testing.expectEqualStrings("1120 1150 1059\n1051 1002\n", stdout);
+}
+
+test "deadlock watchdog fires on a plain (non-fork) blocking channel wait" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_sync_runtime_backend.fn";
+    const c_path = "codegen_wd_nofork.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_wd_nofork.exe" else "codegen_wd_nofork";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // No `fork` anywhere: the M:N scheduler (and its watchdog) never gets emitted,
+    // so this program must get the standalone non-fork watchdog runtime instead.
+    // `ch.recv()` blocks forever (nothing ever sends), which FUN_DEADLOCK_WATCHDOG_MS
+    // + FUN_DEADLOCK_ABORT should catch and abort on.
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.channel;\n" ++
+        "fun main() num {\n" ++
+        "  Channel<num> ch = channel_new(0);\n" ++
+        "  num v = ch.recv();\n" ++
+        "  printf(\"%lld\\n\", v);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+
+    const exe_abs = blk: {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const n = try std.Io.Dir.cwd().realPathFile(std.testing.io, exe_path, &buf);
+        break :blk try allocator.dupe(u8, buf[0..n]);
+    };
+    defer allocator.free(exe_abs);
+
+    var env_map = try std.testing.environ.createMap(allocator);
+    defer env_map.deinit();
+    try env_map.put("FUN_DEADLOCK_WATCHDOG_MS", "200");
+    try env_map.put("FUN_DEADLOCK_ABORT", "1");
+
+    const result = try std.process.run(allocator, std.testing.io, .{
+        .argv = &.{exe_abs},
+        .environ_map = &env_map,
+        .stdout_limit = .limited(1024 * 1024),
+        .stderr_limit = .limited(1024 * 1024),
+        .timeout = .{ .duration = .{ .raw = std.Io.Duration.fromMilliseconds(10_000), .clock = .real } },
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // Aborted (not a plain hang the timeout above had to kill, and not a clean exit).
+    switch (result.term) {
+        .signal => {},
+        .exited => |code| try std.testing.expect(code != 0),
+        else => return error.UnexpectedTermination,
+    }
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "possible deadlock") != null);
 }

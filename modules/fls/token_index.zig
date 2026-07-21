@@ -478,7 +478,10 @@ pub fn buildSignatureFromTokens(
         after_name_i = skipGenericArgsForward(tokens, after_name_i);
     }
 
-    if (!isPunctChar(tokens[after_name_i], '(')) return .{ .detail = null, .return_type = null };
+    // An unterminated generic clause (`fun f<T: num | str` with no closing `>`
+    // yet, e.g. mid-edit) makes `skipGenericArgsForward` consume every
+    // remaining token and return `tokens.len` — bounds-check before indexing.
+    if (after_name_i >= tokens.len or !isPunctChar(tokens[after_name_i], '(')) return .{ .detail = null, .return_type = null };
 
     // Find matching ')'
     var depth: i64 = 0;

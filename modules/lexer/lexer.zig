@@ -484,12 +484,22 @@ pub const LexProcess = struct {
     /// Errors:
     /// - Returns an error if reading characters or allocating the buffer fails.
     fn read_number_str(self: *Self) LexError!ArrayList(u8) {
-        var buffer = ArrayList(u8).init(self.transpile_proc.allocator);
-        try self.getc_if(&buffer, struct {
+        // Accept `_` as a visual digit separator (`1_000_000`); it's stripped
+        // below before the caller ever sees it, so every downstream consumer
+        // (int/float parsing, exponent digits) is unaffected.
+        var raw = ArrayList(u8).init(self.transpile_proc.allocator);
+        defer raw.deinit();
+        try self.getc_if(&raw, struct {
             fn call(_c: u8) bool {
-                return utils.is_number(_c);
+                return utils.is_number(_c) or _c == '_';
             }
         }.call);
+
+        var buffer = ArrayList(u8).init(self.transpile_proc.allocator);
+        for (raw.items) |c| {
+            if (c == '_') continue;
+            buffer.append(c) catch return LexError.MemoryAllocationFailed;
+        }
 
         return buffer;
     }
@@ -977,12 +987,20 @@ pub const LexProcess = struct {
     /// Errors:
     /// - Returns an error if reading characters or allocating the buffer fails.
     fn read_hex_number_str(self: *Self) LexError!ArrayList(u8) {
-        var buffer = ArrayList(u8).init(self.transpile_proc.allocator);
-        try self.getc_if(&buffer, struct {
+        // Same `_` digit-separator support as read_number_str (`0xFF_FF_FF`).
+        var raw = ArrayList(u8).init(self.transpile_proc.allocator);
+        defer raw.deinit();
+        try self.getc_if(&raw, struct {
             fn call(_c: u8) bool {
-                return utils.is_hex_number(_c);
+                return utils.is_hex_number(_c) or _c == '_';
             }
         }.call);
+
+        var buffer = ArrayList(u8).init(self.transpile_proc.allocator);
+        for (raw.items) |c| {
+            if (c == '_') continue;
+            buffer.append(c) catch return LexError.MemoryAllocationFailed;
+        }
 
         return buffer;
     }
