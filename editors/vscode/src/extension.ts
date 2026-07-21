@@ -513,7 +513,7 @@ class FunCodeLensProvider implements vscode.CodeLensProvider {
   }
 }
 
-function openOutput(output: vscode.OutputChannel): void {
+function openOutput(output: vscode.LogOutputChannel): void {
   // Keep this deterministic: just reveal our channel.
   try {
     output.show(true);
@@ -522,7 +522,7 @@ function openOutput(output: vscode.OutputChannel): void {
   }
 }
 
-function createClient(output: vscode.OutputChannel): LanguageClient {
+function createClient(output: vscode.LogOutputChannel): LanguageClient {
   const root = workspaceRootPath();
   const config = vscode.workspace.getConfiguration("fun");
   const flsCfg = config.get<string>("fls.path", "fls");
@@ -719,7 +719,9 @@ function createClient(output: vscode.OutputChannel): LanguageClient {
   );
 }
 export function activate(context: vscode.ExtensionContext) {
-  const output = vscode.window.createOutputChannel("Fun Language Server");
+  const output = vscode.window.createOutputChannel("Fun Language Server", {
+    log: true,
+  });
   context.subscriptions.push(output);
   openOutput(output);
   output.appendLine("Activating Fun Language extension...");
