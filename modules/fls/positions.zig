@@ -703,15 +703,24 @@ pub fn findAnyGlobalDefinition(symbols: []const SymbolLite, name: []const u8) ?S
     return null;
 }
 
-pub fn byteIndexForPosition(text: []const u8, p: Position) usize {
-    // LSP positions are UTF-16 by spec.
-    // Fun source is typically ASCII, but we still need to be robust to:
-    // - CRLF line endings on Windows
-    // - positions that point past end-of-line (formatters can do this)
-    // We treat `character` as a byte offset within the line and clamp safely.
-    const target_line: i64 = if (p.line < 0) 0 else p.line;
-    const target_char: i64 = if (p.character < 0) 0 else p.character;
+/// A UTF-8 lead byte's sequence length, i.e. how many bytes make up the
+/// codepoint it starts. Falls back to 1 for a stray/invalid lead byte (a
+/// continuation byte with no preceding lead, or a malformed encoding) so
+/// callers always make forward progress instead of looping or reading out
+/// of bounds on already-corrupt input.
+fn utf8LeadByteLen(b0: u8) usize {
+    return std.unicode.utf8ByteSequenceLength(b0) catch 1;
+}
 
+/// How many UTF-16 code units the codepoint starting at `text[i]` (a
+/// `seq_len`-byte UTF-8 sequence) contributes to an LSP `character` offset.
+/// Codepoints above the Basic Multilingual Plane (encoded as 4 UTF-8 bytes)
+/// need a UTF-16 surrogate PAIR — 2 units — everything else needs 1.
+fn utf16UnitsForSeqLen(seq_len: usize) i64 {
+    return if (seq_len == 4) 2 else 1;
+}
+
+fn byteIndexForLineStart(text: []const u8, target_line: i64) usize {
     var line: i64 = 0;
     var i: usize = 0;
     while (i < text.len and line < target_line) {
@@ -728,21 +737,65 @@ pub fn byteIndexForPosition(text: []const u8, p: Position) usize {
         }
         i += 1;
     }
+    return i;
+}
+
+pub fn byteIndexForPosition(text: []const u8, p: Position) usize {
+    // LSP positions are UTF-16 code-unit offsets by spec (absent a
+    // negotiated `positionEncoding: "utf-8"`, which this server does not
+    // assume every client supports — see `clientSupportsUtf8PositionEncoding`
+    // in server.zig). Fun source is mostly ASCII, but comments/strings can
+    // still contain non-ASCII text (curly quotes, em dashes, emoji, ...), so
+    // `character` must be walked as UTF-16 units over decoded codepoints, NOT
+    // as a raw byte count — treating it as bytes silently desyncs every
+    // position on a line once ANY multi-byte-UTF-8 character precedes the
+    // target column. Callers that compare a client position directly against
+    // an internal (byte-column) token/AST range instead of slicing `text`
+    // should go through `normalizePositionToByteColumns` first — see there
+    // for why a single conversion point matters.
+    // We still need to be robust to:
+    // - CRLF line endings on Windows
+    // - positions that point past end-of-line (formatters can do this)
+    const target_line: i64 = if (p.line < 0) 0 else p.line;
+    const target_char: i64 = if (p.character < 0) 0 else p.character;
+
+    var i: usize = byteIndexForLineStart(text, target_line);
 
     // Now `i` is at start of the target line (or end of text).
-    var col: i64 = 0;
-    while (i < text.len and col < target_char) {
+    var units: i64 = 0;
+    while (i < text.len and units < target_char) {
         const ch = text[i];
         if (ch == '\n') break;
         if (ch == '\r') {
             // Treat CRLF as newline.
             if (i + 1 < text.len and text[i + 1] == '\n') break;
         }
-        i += 1;
-        col += 1;
+        const seq_len = @min(utf8LeadByteLen(ch), text.len - i);
+        i += seq_len;
+        units += utf16UnitsForSeqLen(seq_len);
     }
 
     return i;
+}
+
+/// Convert a client-supplied (UTF-16 code-unit) `Position` into the
+/// equivalent Position using BYTE columns — the convention every internal
+/// token/AST `Range` already uses (they're built straight from the lexer's
+/// own byte-based column tracking; re-deriving UTF-16 columns for every
+/// token up front would mean re-scanning the whole file's text per token,
+/// which is O(tokens × file size) and not worth paying on every keystroke).
+/// Call this ONCE, right after resolving a request's `(uri, position)` and
+/// the document text, and use the result for every subsequent comparison
+/// against `TokenLite.range`/AST-node positions (`posInRange`,
+/// `findTokenIndexAt`, `findLastTokenIndexBeforeOrAt`, ...). Do NOT also
+/// route the result back through `byteIndexForPosition` — that function
+/// expects genuine UTF-16 input and would double-convert.
+pub fn normalizePositionToByteColumns(text: []const u8, p: Position) Position {
+    const target_line: i64 = if (p.line < 0) 0 else p.line;
+    const line_start = byteIndexForLineStart(text, target_line);
+    const byte_i = byteIndexForPosition(text, p);
+    const byte_col: i64 = @intCast(byte_i - line_start);
+    return .{ .line = target_line, .character = byte_col };
 }
 
 pub fn guessIdentifierPrefix(text: []const u8, p: Position) []const u8 {

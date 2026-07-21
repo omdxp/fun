@@ -2000,6 +2000,63 @@ test "fls e2e: query-time engine resolves a fit->let-chain->for-each binding cas
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: go-to-definition resolves the correct token when non-ASCII content precedes it on the same line" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    // LSP positions are UTF-16 code-unit offsets. An em dash ("\u{2014}")
+    // is 1 UTF-16 unit but 3 UTF-8 bytes, so a real client's `character` for
+    // the start of `helper` here is LESS than the byte offset would be — if
+    // fls mis-treats `character` as a raw byte count, it under-shoots and
+    // resolves to whatever token sits a couple of bytes to the left (here,
+    // the `=` sign) instead of `helper`, and go-to-definition comes back
+    // empty/wrong.
+    const prefix1 = "  str note = \"";
+    const em_dash = "\u{2014}";
+    const prefix2 = "\"; num x = ";
+    const doc_text =
+        "imp std.c.io;\n" ++
+        "fun helper() num { ret 7; }\n" ++
+        "fun main() num {\n" ++
+        prefix1 ++ em_dash ++ prefix2 ++ "helper();\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-utf16-position.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const line_pos = try findPosition(doc_text, prefix1, 0);
+    const target_char: i64 = @intCast(prefix1.len + 1 + prefix2.len); // +1 UTF-16 unit for the em dash
+
+    const def_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, line_pos.line, target_char },
+    );
+    defer allocator.free(def_params);
+
+    const did = try lsp.request("textDocument/definition", def_params);
+    var dres = try lsp.waitResponse(did, 15000);
+    defer dres.deinit();
+    const dval = try jsonResultFromResponseObj(dres.parsed.value.object);
+
+    const decl_pos = try findPosition(doc_text, "fun helper", 0);
+    try expectDefinitionPointsTo(allocator, dval, doc_uri, decl_pos.line, decl_pos.col + 4);
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: go-to-definition and hover on a method chained onto a real (non-free-function) method call" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
@@ -6677,6 +6734,53 @@ test "fls e2e: code action implements missing quirk methods on an impl block" {
     var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
     shutdown_res.deinit();
     try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: missing quirk method diagnostic substitutes the concrete generic arg, not the bare type param" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    // `impl Config as From<JsonValue>` with the `from` method omitted: the
+    // real compiler diagnostic (which both the raw CLI error output and the
+    // fls "Implement missing quirk methods" code action's stub text are
+    // built from) must report the SUBSTITUTED signature `from(JsonValue
+    // value)`, not the generic template's bare `from(T value)` — otherwise
+    // any fix built from it (manual or via the code action) inserts a stub
+    // that doesn't typecheck.
+    const doc_text =
+        "imp std.json;\n" ++
+        "imp std.quirks;\n" ++
+        "compound Config {\n" ++
+        "  num port;\n" ++
+        "}\n" ++
+        "impl Config as From<JsonValue> {\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const tmp_path = "fls-e2e-quirk-generic-diag.fn";
+    {
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, tmp_path, .{ .truncate = true });
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, doc_text);
+    }
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, tmp_path) catch {};
+
+    const result = try std.process.run(allocator, std.testing.io, .{
+        .argv = &.{ setup.fun_abs, "-in", tmp_path, "-no-exec" },
+        .stdout_limit = .limited(1024 * 1024),
+        .stderr_limit = .limited(1024 * 1024),
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "from(JsonValue value)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "from(T value)") == null);
 }
 
 fn collectCompletionLabels(allocator: Allocator, result_val: std.json.Value) !ArrayList([]const u8) {

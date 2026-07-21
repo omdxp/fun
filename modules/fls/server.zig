@@ -135,6 +135,7 @@ const numericBuiltinRank = positions_mod.numericBuiltinRank;
 const findBestDefinition = positions_mod.findBestDefinition;
 const findAnyGlobalDefinition = positions_mod.findAnyGlobalDefinition;
 const byteIndexForPosition = positions_mod.byteIndexForPosition;
+const normalizePositionToByteColumns = positions_mod.normalizePositionToByteColumns;
 const guessIdentifierPrefix = positions_mod.guessIdentifierPrefix;
 const guessTypeFromTextFallback = positions_mod.guessTypeFromTextFallback;
 const guessReceiverNameBeforeCursor = positions_mod.guessReceiverNameBeforeCursor;
@@ -965,6 +966,15 @@ pub const LspServer = struct {
     }
 
     fn handleInitialize(self: *LspServer, id_val: ?std.json.Value, params_val: ?std.json.Value) !void {
+        // Per the LSP spec, positions are UTF-16 code-unit offsets unless the
+        // server negotiates `positionEncoding: "utf-8"` — this server always
+        // treats `character` as UTF-16 (see `normalizePositionToByteColumns`
+        // in positions.zig for why: comments/strings can contain non-ASCII
+        // text, and misreading UTF-16 units as raw bytes desyncs every
+        // position on a line with non-ASCII content before the target
+        // column), so it never declares `positionEncoding` and always expects
+        // UTF-16 input, matching the default every LSP client assumes absent
+        // negotiation.
         const InitializeResult = struct {
             capabilities: struct {
                 textDocumentSync: struct {
@@ -3759,11 +3769,18 @@ pub const LspServer = struct {
             return;
         }
         const uri = parsed.?.uri;
-        const pos = parsed.?.pos;
         const doc = self.docs.get(uri) orelse {
             try self.sendResponseJson(id_val, "[]");
             return;
         };
+        // Convert the client's UTF-16-based position into the byte-column
+        // convention every token/symbol range in the index already uses —
+        // see `normalizePositionToByteColumns`. Every use of `pos` in this
+        // handler (directly and via `guessVariableType`/
+        // `tryHandleMemberChainDefinition`/`findBestDefinition`) is a
+        // token/symbol-range comparison, never raw text-slicing, so this
+        // conversion is safe for the whole function body.
+        const pos = normalizePositionToByteColumns(doc.text, parsed.?.pos);
         const idx = doc.index orelse {
             try self.sendResponseJson(id_val, "[]");
             return;
@@ -5932,11 +5949,11 @@ pub const LspServer = struct {
             return;
         }
         const uri = parsed.?.uri;
-        const pos = parsed.?.pos;
         const doc = self.docs.get(uri) orelse {
             try self.sendResponseJson(id_val, "[]");
             return;
         };
+        const pos = normalizePositionToByteColumns(doc.text, parsed.?.pos);
         const idx = doc.index orelse {
             try self.sendResponseJson(id_val, "[]");
             return;
@@ -5975,12 +5992,12 @@ pub const LspServer = struct {
             return;
         }
         const uri = parsed.?.uri;
-        const pos = parsed.?.pos;
         const new_name = parsed.?.new_name;
         const doc = self.docs.get(uri) orelse {
             try self.sendResponseJson(id_val, "null");
             return;
         };
+        const pos = normalizePositionToByteColumns(doc.text, parsed.?.pos);
         const idx = doc.index orelse {
             try self.sendResponseJson(id_val, "null");
             return;
@@ -9166,11 +9183,11 @@ pub const LspServer = struct {
             return;
         }
         const uri = parsed.?.uri;
-        const pos = parsed.?.pos;
         const doc = self.docs.get(uri) orelse {
             try self.sendResponseJson(id_val, "null");
             return;
         };
+        const pos = normalizePositionToByteColumns(doc.text, parsed.?.pos);
         const idx = doc.index orelse {
             try self.sendResponseJson(id_val, "null");
             return;

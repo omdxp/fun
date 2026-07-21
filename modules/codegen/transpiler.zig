@@ -1151,9 +1151,18 @@ pub const TranspileProcess = struct {
 
             const sig = reg.quirk_sig_by_name.get(quirk_name) orelse quirk_name;
 
-            // Validate: quirk impl must implement all quirk methods.
-            // This is a compiler-time error so users get a clear missing-method list.
-            try proc.validate_quirk_impl_complete(n, type_name, quirk_name, sig, reg);
+            // Validate: quirk impl must implement all quirk methods. For a
+            // concrete instantiation (`impl Config as From<JsonValue>`),
+            // validate against the SUBSTITUTED signature (`synthesize_quirk_instantiations_recursive`
+            // already registered it above, under `quirk_concrete_instantiation`'s
+            // mangled name) rather than the generic template — otherwise the
+            // missing-method list/stub reports the bare type param (`from(T value)`)
+            // instead of the concrete arg (`from(JsonValue value)`).
+            const validate_sig = if (imp.quirk_concrete_instantiation) |qci|
+                reg.quirk_sig_by_name.get(qci.items) orelse sig
+            else
+                sig;
+            try proc.validate_quirk_impl_complete(n, type_name, quirk_name, validate_sig, reg);
 
             const key: ImplKey = .{ .type_name = type_name, .quirk_sig = sig };
             if (reg.impls_by_key.get(key)) |existing| {
