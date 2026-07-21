@@ -7,6 +7,9 @@ pub fn build(b: *std.Build) void {
         .preferred_optimize_mode = .ReleaseSafe,
     });
 
+    const test_filter_opt = b.option([]const u8, "test-filter", "only run tests whose name contains this substring");
+    const test_filters: []const []const u8 = if (test_filter_opt) |f| &.{f} else &.{};
+
     const fun_version_opt = b.option([]const u8, "version", "version string for `fun --version` (set by release workflow)");
     const fun_version = blk: {
         const v = fun_version_opt orelse "0.0.0";
@@ -203,6 +206,7 @@ pub fn build(b: *std.Build) void {
 
     const main_tests = b.addTest(.{
         .root_module = test_module,
+        .filters = test_filters,
     });
 
     const run_main_tests = b.addRunArtifact(main_tests);
@@ -239,7 +243,7 @@ pub fn build(b: *std.Build) void {
     fls_test_module.addImport("codegen", codegen_module);
     fls_test_module.addImport("cli", cli_module);
 
-    const fls_tests = b.addTest(.{ .root_module = fls_test_module });
+    const fls_tests = b.addTest(.{ .root_module = fls_test_module, .filters = test_filters });
     const run_fls_tests = b.addRunArtifact(fls_tests);
     run_fls_tests.cwd = b.path(".");
     // Ensure fls unit tests use the repo stdlib and avoid any global installs.

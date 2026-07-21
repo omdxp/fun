@@ -2000,6 +2000,142 @@ test "fls e2e: query-time engine resolves a fit->let-chain->for-each binding cas
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: go-to-definition and hover on a method chained onto a real (non-free-function) method call" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    // Mirrors examples/stdlib/serde_json_toml.fn's `From<JsonValue>` impl:
+    // `v.as_num().unwrap_or(0.0)` chains a REAL impl method (`unwrap_or`) onto
+    // another REAL impl method's result (`as_num()`), through an imported
+    // generic enum (`Option<dec>`). Regresses a reported "go-to-definition on
+    // the chained method does nothing" complaint.
+    const doc_text =
+        "imp std.c.io;\n" ++
+        "imp std.json;\n" ++
+        "imp std.result;\n" ++
+        "imp std.quirks;\n\n" ++
+        "pub compound Config {\n" ++
+        "  dec version;\n" ++
+        "}\n\n" ++
+        "impl Config as From<JsonValue> {\n" ++
+        "  pub from(JsonValue value) {\n" ++
+        "    let v = value.get(\"version\").unwrap_or(JsonValue.Null);\n" ++
+        "    self.version = v.as_num().unwrap_or(0.0);\n" ++
+        "  }\n" ++
+        "}\n\n" ++
+        "fun main() num {\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-chained-method-def.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // Try every column across "unwrap_or" in `v.as_num().unwrap_or(0.0)` —
+    // any off-by-one in cursor->token mapping for a chained-call receiver
+    // would show up as an empty result at some (but not all) columns.
+    const pos = try findPosition(doc_text, "v.as_num().unwrap_or(0.0)", 0);
+    const base_off = "v.as_num().".len;
+    var col_off: i64 = 0;
+    while (col_off < @as(i64, @intCast("unwrap_or".len))) : (col_off += 1) {
+        const params = try std.fmt.allocPrint(
+            allocator,
+            "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+            .{ doc_uri, pos.line, pos.col + @as(i64, @intCast(base_off)) + col_off },
+        );
+        defer allocator.free(params);
+        const did = try lsp.request("textDocument/definition", params);
+        var dres = try lsp.waitResponse(did, 15000);
+        defer dres.deinit();
+        const dval = try jsonResultFromResponseObj(dres.parsed.value.object);
+        try std.testing.expect(dval == .array and dval.array.items.len > 0);
+        const def_uri = dval.array.items[0].object.get("uri").?.string;
+        try std.testing.expect(std.mem.indexOf(u8, def_uri, "option.fn") != null);
+    }
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: fit branch variant hover shows the concrete generic arg, not the bare type param" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    // `o` is `Option<dec>`. The payload binding `n` (inside the parens)
+    // already hovers as the concrete `dec` — this regresses the BRANCH
+    // VARIANT NAME itself (`Some`), which should also show `dec`, not the
+    // enum's bare declared type param `T`.
+    const doc_text =
+        "imp std.c.io;\n" ++
+        "imp std.option;\n\n" ++
+        "fun main() num {\n" ++
+        "  Option<dec> o = some(3.5);\n" ++
+        "  fit o {\n" ++
+        "    Option.Some(n) -> { printf(\"%f\\n\", n); }\n" ++
+        "    Option.None -> {}\n" ++
+        "  }\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-fit-branch-variant-hover.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // Hover on the payload binding `n` (already correct: concrete `dec`).
+    {
+        const pos = try findPosition(doc_text, "Option.Some(n)", 0);
+        const params = try std.fmt.allocPrint(
+            allocator,
+            "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+            .{ doc_uri, pos.line, pos.col + @as(i64, @intCast("Option.Some(".len)) },
+        );
+        defer allocator.free(params);
+        const hid = try lsp.request("textDocument/hover", params);
+        var res = try lsp.waitResponse(hid, 15000);
+        defer res.deinit();
+        try expectHoverContains(allocator, try jsonResultFromResponseObj(res.parsed.value.object), "dec");
+    }
+
+    // Hover on the branch's own variant name `Some` (the reported bug: this
+    // showed the bare type param, not `dec`).
+    {
+        const pos = try findPosition(doc_text, "Option.Some(n)", 0);
+        const params = try std.fmt.allocPrint(
+            allocator,
+            "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+            .{ doc_uri, pos.line, pos.col + @as(i64, @intCast("Option.".len)) },
+        );
+        defer allocator.free(params);
+        const hid = try lsp.request("textDocument/hover", params);
+        var res = try lsp.waitResponse(hid, 15000);
+        defer res.deinit();
+        try expectHoverContains(allocator, try jsonResultFromResponseObj(res.parsed.value.object), "dec");
+    }
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: data-carrying enum shorthand completion" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();

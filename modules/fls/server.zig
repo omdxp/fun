@@ -1474,7 +1474,10 @@ pub const LspServer = struct {
                         // (`Enum.Variant(types)`) in `detail`; render that so the
                         // payload types are visible. A trailing doc comment does NOT
                         // start with the `Enum.` prefix, so it is distinguishable.
-                        const variant_sig = enumVariantSigFromDetail(h.sym, enum_name);
+                        // Prefer the fit-arm-specific resolution, which substitutes
+                        // concrete generic args (`Option.Some(dec)`) over the plain
+                        // indexed detail (`Option.Some(T)`).
+                        const variant_sig = self.resolveFitVariantConcreteSig(idx, uri, pos) orelse enumVariantSigFromDetail(h.sym, enum_name);
                         if (variant_sig) |vs| {
                             try buf.print("```fun\n{s}\n```\n", .{vs});
                         } else {
@@ -1540,7 +1543,9 @@ pub const LspServer = struct {
                                     }
                                 },
                                 .enumMember => {
-                                    if (enumVariantSigFromDetail(h.sym, recv_type)) |vs| {
+                                    if (self.resolveFitVariantConcreteSig(idx, uri, pos)) |vs| {
+                                        try buf.print("```fun\n{s}\n```\n", .{vs});
+                                    } else if (enumVariantSigFromDetail(h.sym, recv_type)) |vs| {
                                         try buf.print("```fun\n{s}\n```\n", .{vs});
                                     } else {
                                         try buf.print("```fun\n{s}.{s}\n```\n", .{ recv_type, name });
@@ -1740,7 +1745,12 @@ pub const LspServer = struct {
                 }
             } else if (d.kind == .enumMember) {
                 const recv_type = d.container_type orelse d.value_type orelse "";
-                if (enumVariantSigFromDetail(d, recv_type)) |vs| {
+                // Prefer the fit-arm-pattern-specific resolution, which substitutes
+                // concrete generic args (`Option.Some(dec)`) over the plain indexed
+                // detail (`Option.Some(T)`) when hovering the variant name itself.
+                if (self.resolveFitVariantConcreteSig(idx, uri, pos)) |vs| {
+                    try buf.print("```fun\n{s}\n```\n", .{vs});
+                } else if (enumVariantSigFromDetail(d, recv_type)) |vs| {
                     try buf.print("```fun\n{s}\n```\n", .{vs});
                 } else if (recv_type.len != 0) {
                     try buf.print("```fun\n{s}.{s}\n```\n", .{ recv_type, tok.text });
@@ -1794,7 +1804,9 @@ pub const LspServer = struct {
                     }
                 } else if (d.kind == .enumMember) {
                     const recv_type = d.container_type orelse d.value_type orelse "";
-                    if (enumVariantSigFromDetail(d, recv_type)) |vs| {
+                    if (self.resolveFitVariantConcreteSig(idx, uri, pos)) |vs| {
+                        try buf.print("```fun\n{s}\n```\n", .{vs});
+                    } else if (enumVariantSigFromDetail(d, recv_type)) |vs| {
                         try buf.print("```fun\n{s}\n```\n", .{vs});
                     } else if (recv_type.len != 0) {
                         try buf.print("```fun\n{s}.{s}\n```\n", .{ recv_type, tok.text });
@@ -5496,6 +5508,104 @@ pub const LspServer = struct {
         const subj_args = self.fitSubjectConcreteArgs(idx, uri, var_i, at) orelse return null;
         if (pidx.? >= subj_args.len) return null;
         return arena.dupe(u8, subj_args[pidx.?]) catch null;
+    }
+
+    /// Resolve the CONCRETE signature of a `fit`-arm variant PATTERN itself at `at`
+    /// (hovering `Some`/`Ok` in `Result.Ok(doc) -> ...`, as opposed to the payload
+    /// binding `doc` — see `resolveFitBindingType` for that case). For a generic
+    /// enum this substitutes each bare type-param payload with the fit subject's
+    /// concrete arg (`Option.Some(T)` -> `Option.Some(dec)` when the subject is
+    /// `Option<dec>`), working cross-file like `resolveFitBindingType`. Returns null
+    /// (falling back to the plain indexed detail) when `at` isn't a payload-carrying
+    /// variant pattern, or the variant has no payload to substitute.
+    fn resolveFitVariantConcreteSig(self: *LspServer, idx: *const Index, uri: []const u8, at: Position) ?[]const u8 {
+        const arena = @constCast(&idx.arena).allocator();
+        const toks = idx.tokens;
+        const var_i = findTokenIndexAt(toks, at) orelse return null;
+        if (toks[var_i].kind != .identifier) return null;
+        const variant_name = toks[var_i].text;
+
+        const oi = nextNonTrivialTokenLite(toks, var_i + 1) orelse return null;
+        if (!isOpenParen(toks[oi])) return null;
+
+        // Confirm a `->` follows the matching `)` (this is a fit arm, not a call).
+        var d2: i64 = 0;
+        var m: usize = oi;
+        var close_i: usize = oi;
+        while (m < toks.len) : (m += 1) {
+            if (isOpenParen(toks[m])) d2 += 1;
+            if (isCloseParen(toks[m])) {
+                d2 -= 1;
+                if (d2 == 0) {
+                    close_i = m;
+                    break;
+                }
+            }
+        }
+        const after = nextNonTrivialTokenLite(toks, close_i + 1) orelse return null;
+        if (!((toks[after].kind == .operator or toks[after].kind == .symbol) and std.mem.eql(u8, toks[after].text, "->"))) return null;
+
+        // Resolve the enum the variant belongs to (same as resolveFitBindingType).
+        const enum_name = blk: {
+            const before_var = prevNonTrivialTokenLite(toks, var_i);
+            if (before_var) |bv| {
+                if ((toks[bv].kind == .operator or toks[bv].kind == .symbol) and std.mem.eql(u8, toks[bv].text, ".")) {
+                    const enum_tok = prevNonTrivialTokenLite(toks, bv);
+                    if (enum_tok) |et| {
+                        if (toks[et].kind == .identifier) break :blk toks[et].text;
+                    }
+                }
+            }
+            break :blk self.guessEnumTypeForDotShorthand(uri, idx, var_i) orelse return null;
+        };
+        const enum_base = baseTypeNameForLookup(enum_name);
+
+        {
+            var import_uris = ArrayList([]u8).init(self.allocator);
+            defer {
+                for (import_uris.items) |u| self.allocator.free(u);
+                import_uris.deinit();
+            }
+            self.collectDirectImportUris(&import_uris, uri, idx) catch {};
+            for (import_uris.items) |iu| self.ensureDocIndexedFromDisk(iu) catch {};
+        }
+
+        const ehit = self.findEnumDefinitionAnyDoc(uri, enum_base) orelse return null;
+        const edoc = self.docs.get(ehit.uri) orelse return null;
+        const eidx = edoc.index orelse return null;
+        const eparams = enumTypeParamsFromDoc(eidx, enum_base);
+
+        // Substitute every positional payload (not just one binding), building the
+        // full `Variant(arg0, arg1, ...)` argument list.
+        var args = ArrayList(u8).init(arena);
+        var arg_index: usize = 0;
+        var any_payload = false;
+        while (true) : (arg_index += 1) {
+            const payload_type = enumVariantPayloadFromDoc(self.allocator, eidx, enum_base, variant_name, arg_index) orelse break;
+            defer self.allocator.free(payload_type);
+            any_payload = true;
+
+            var pidx: ?usize = null;
+            for (eparams, 0..) |p, i| {
+                if (std.mem.eql(u8, p, payload_type)) {
+                    pidx = i;
+                    break;
+                }
+            }
+
+            const resolved: []const u8 = blk: {
+                if (pidx == null) break :blk payload_type;
+                const subj_args = self.fitSubjectConcreteArgs(idx, uri, var_i, at) orelse break :blk payload_type;
+                if (pidx.? >= subj_args.len) break :blk payload_type;
+                break :blk subj_args[pidx.?];
+            };
+
+            if (arg_index != 0) args.appendSlice(", ") catch return null;
+            args.appendSlice(resolved) catch return null;
+        }
+        if (!any_payload) return null;
+
+        return std.fmt.allocPrint(arena, "{s}.{s}({s})", .{ enum_name, variant_name, args.items }) catch null;
     }
 
     /// Locate the `enum <name>` declaration's `{` token index in a doc's TokenLite
