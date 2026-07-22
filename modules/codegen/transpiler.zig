@@ -3128,6 +3128,17 @@ pub const TranspileProcess = struct {
         return false;
     }
 
+    fn has_enum_named(proc: *Self, name: []const u8) bool {
+        for (proc.owned_nodes.items) |n| {
+            if (n.type != .Enum or n.node_variant == null) continue;
+            if (mem.eql(u8, n.node_variant.?.enum_decl.name.items, name)) return true;
+        }
+        for (proc.children.items) |child| {
+            if (has_enum_named(child, name)) return true;
+        }
+        return false;
+    }
+
     fn find_fn_defining_decl(self: *Self, kind_kw: []const u8, name: []const u8) !?[]u8 {
         // Best-effort: scan workspace files for a `compound <Name>` or `quirk <Name>` declaration.
         // Returns a backing-allocator owned relative path like `parent/child/some.fn`.
@@ -3480,7 +3491,16 @@ pub const TranspileProcess = struct {
             }
 
             // If the type already exists in the current import graph, nothing to do.
-            if (has_compound_named(self, name) or has_quirk_named(self, name)) continue;
+            // A name already declared as an ENUM locally must ALSO be skipped here
+            // (previously only compound/quirk were checked): a workspace-wide
+            // best-effort auto-import scan (`find_fn_defining_decl`) can find an
+            // UNRELATED file that happens to declare a `compound`/`quirk` with the
+            // same bare name and auto-import it, colliding with the local enum and
+            // misattributing the resulting "private/duplicate type" error to that
+            // unrelated file. Found via a compiler-shaped torture test: a program
+            // declaring `enum Shape` broke when run from within this repo's root,
+            // because `examples/advanced/quirks.fn` happens to declare `quirk Shape`.
+            if (has_compound_named(self, name) or has_quirk_named(self, name) or has_enum_named(self, name)) continue;
 
             // Prefer compounds; if not found, try quirks.
             if (self.find_fn_defining_decl("compound", name) catch null) |path| {
@@ -6452,6 +6472,39 @@ pub const TranspileProcess = struct {
                 return .{
                     .fn_name = res.fn_name.?,
                     .pass_by_ref = false,
+                };
+            }
+
+            // `*ptr` dereferencing a pointer down to a plain value — e.g.
+            // `println_fmt("{}", *program)` for an `Expr*` AST node, or the
+            // `fit *self { ... }`-derived recursive `format("{}", *e)` calls
+            // a Display impl's own to_string() makes on its pointer fields.
+            // Previously unhandled here, so it fell through to `return null`
+            // and format() printed the raw (garbage-looking) bytes instead
+            // of dispatching to Display.
+            if (mem.eql(u8, u.op, "*")) {
+                const op = u.operand.*;
+                if (op.type != .Identifier or op.data == null) return null;
+                const nm = op.data.?.sval.items;
+                const dt = self.identifier_declared_dtype(nm) orelse return null;
+                if (dt.type != .Unknown or dt.pointer_depth == 0) return null;
+
+                var type_name: []const u8 = dt.type_str.items;
+                var owned_type_name = false;
+                if (dt.generic_args != null) {
+                    type_name = self.type_name_mangled_for_emit(dt) catch return null;
+                    owned_type_name = true;
+                }
+                defer if (owned_type_name) self.allocator.free(@constCast(type_name));
+
+                const type_name_canon = self.canonical_compound_name(type_name);
+                const res = self.resolve_quirk_impl_method_for_concrete(ref_node, type_name_canon, "to_string");
+                if (res.fn_name == null or res.quirk_name == null or res.ambiguous) return null;
+                if (!mem.eql(u8, res.quirk_name.?, "Display")) return null;
+
+                return .{
+                    .fn_name = res.fn_name.?,
+                    .pass_by_ref = dt.pointer_depth == 1,
                 };
             }
         }
@@ -11730,6 +11783,60 @@ pub const TranspileProcess = struct {
     /// on all branches). Conservative: when it can't prove termination it returns false
     /// (so a genuine fall-through is flagged), but it never claims termination it can't
     /// justify (so it won't false-positive on code that does return everywhere).
+    /// True when every branch's condition names a distinct `Enum.Variant` (or
+    /// `.Variant` shorthand) path and, together, they cover every variant the
+    /// subject enum declares — mirroring the coverage check
+    /// `warn_if_fit_not_exhausted` already does structurally from the branch
+    /// list alone (no type inference needed: the enum name is read straight
+    /// off the first `Enum.Variant`-shaped branch condition).
+    fn fit_covers_all_enum_variants(self: *Self, branches: []const ast.FitBranch) bool {
+        var enum_name: ?[]const u8 = null;
+        for (branches) |branch| {
+            const cond = branch.condition orelse continue;
+            if (cond.type != .Expression or cond.node_variant == null) continue;
+            const exp = cond.node_variant.?.exp;
+            if (!mem.eql(u8, exp.op, ".")) continue;
+            const left = exp.left orelse continue;
+            const right = exp.right orelse continue;
+            if (left.*.type == .Identifier and left.*.data != null and right.*.type == .Identifier and right.*.data != null) {
+                enum_name = left.*.data.?.sval.items;
+                break;
+            }
+        }
+        const en = enum_name orelse return false;
+
+        const root = self.get_root();
+        if (root.type_registry == null) return false;
+        const reg = &root.type_registry.?;
+        const enode = reg.enums_by_name.get(en) orelse return false;
+        if (enode.node_variant == null) return false;
+        const variants = enode.node_variant.?.enum_decl.variants.items();
+        if (variants.len == 0) return false;
+
+        var covered = std.StringHashMap(bool).init(self.backing_allocator);
+        defer covered.deinit();
+        for (branches) |branch| {
+            const bcond = branch.condition orelse continue;
+            if (dot_shorthand_variant_name(bcond)) |short_name| {
+                covered.put(short_name, true) catch {};
+                continue;
+            }
+            if (bcond.*.type != .Expression or bcond.*.node_variant == null) continue;
+            const exp = bcond.*.node_variant.?.exp;
+            if (!mem.eql(u8, exp.op, ".")) continue;
+            const left = exp.left orelse continue;
+            const right = exp.right orelse continue;
+            if (left.*.type != .Identifier or left.*.data == null) continue;
+            if (right.*.type != .Identifier or right.*.data == null) continue;
+            covered.put(right.*.data.?.sval.items, true) catch {};
+        }
+
+        for (variants) |v| {
+            if (!covered.contains(v.name.items)) return false;
+        }
+        return true;
+    }
+
     fn body_always_returns(self: *Self, body: *ast.Node) bool {
         if (body.type != .Body or body.node_variant == null) return false;
         const stmts = body.node_variant.?.body.statements.items();
@@ -11774,11 +11881,13 @@ pub const TranspileProcess = struct {
                 .StatementFit => {
                     // A `fit` guarantees return only if it's exhaustive (no fall-through)
                     // AND every arm body always-returns. Exhaustiveness is signalled by a
-                    // default branch or by covering all variants; we conservatively treat
-                    // a fit WITHOUT a default branch as possibly-falling-through (the same
-                    // assumption the codegen's trailing `ret` after a fit relies on).
+                    // default branch OR by every arm naming a distinct variant of the
+                    // subject enum (the same coverage `warn_if_fit_not_exhausted` computes
+                    // to decide whether to warn) — a fit lacking a `_` catch-all but
+                    // covering `Enum.A`/`Enum.B`/... for every declared variant is just as
+                    // exhaustive and must not be treated as possibly-falling-through.
                     const fit_v = s.node_variant.?.statement.fit_stmt;
-                    if (!fit_v.has_default_branch) {
+                    if (!fit_v.has_default_branch and !self.fit_covers_all_enum_variants(fit_v.branches.items())) {
                         // Not provably exhaustive here — don't count it; keep scanning.
                         continue;
                     }

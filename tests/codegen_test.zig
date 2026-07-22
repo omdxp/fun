@@ -7856,3 +7856,163 @@ test "deadlock watchdog fires on a plain (non-fork) blocking channel wait" {
     }
     try std.testing.expect(std.mem.indexOf(u8, result.stderr, "possible deadlock") != null);
 }
+
+test "format()/println_fmt's {} auto-dispatches to Display through a pointer dereference" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_display_via_deref.fn";
+    const c_path = "codegen_display_via_deref.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_display_via_deref.exe" else "codegen_display_via_deref";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: `resolve_display_call_for_expr` only recognized a bare
+    // identifier (`{}`, val) or `&identifier` as a Display-dispatchable
+    // vararg — a dereference (`*ptr`) fell through to `return null` and
+    // format()/println_fmt printed the raw pointee bytes instead of calling
+    // Display's to_string(). This is exactly the shape a recursive,
+    // pointer-linked structure's own Display impl needs for its `next`
+    // field, so found via a compiler-shaped torture test (a toy AST
+    // interpreter with a Node<T>-style generic linked structure).
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.c.mem;\n" ++
+        "imp std.io;\n" ++
+        "imp std.quirks;\n" ++
+        "compound Point { num x; num y; }\n" ++
+        "impl Point as Display {\n" ++
+        "  pub to_string() str {\n" ++
+        "    ret format(\"({}, {})\", self.x, self.y);\n" ++
+        "  }\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  Point p = Point{x = 1, y = 2};\n" ++
+        "  println_fmt(\"direct = {}\", p);\n" ++
+        "  Point* pp = &p;\n" ++
+        "  println_fmt(\"deref  = {}\", *pp);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("direct = (1, 2)\nderef  = (1, 2)\n", stdout);
+}
+
+test "exhaustive fit over every enum variant (no catch-all) counts as always-returning" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_exhaustive_fit_no_catchall.fn";
+    const c_path = "codegen_exhaustive_fit_no_catchall.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_exhaustive_fit_no_catchall.exe" else "codegen_exhaustive_fit_no_catchall";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: `stmts_always_return`'s `.StatementFit` case only counted
+    // a fit as guaranteed-returning when it had an explicit `_` catch-all
+    // branch (`has_default_branch`), even when every arm named a distinct
+    // enum variant and the match was already provably exhaustive (no
+    // fit_non_exhaustive diagnostic). A method whose whole body was one
+    // such fit, with every arm returning, spuriously got the
+    // "may reach the end of its body without returning a value" warning.
+    // Found via the same torture test (an AST enum's recursive Display
+    // impl, matched exhaustively by naming all five variants).
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.io;\n" ++
+        "imp std.quirks;\n" ++
+        "enum Shape { Circle(num), Rect(num, num), Empty }\n" ++
+        "impl Shape as Display {\n" ++
+        "  pub to_string() str {\n" ++
+        "    fit *self {\n" ++
+        "      Shape.Circle(r) -> { ret format(\"circle {}\", r); }\n" ++
+        "      Shape.Rect(w, h) -> { ret format(\"rect {} {}\", w, h); }\n" ++
+        "      Shape.Empty -> { ret \"empty\"; }\n" ++
+        "    }\n" ++
+        "  }\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  Shape s = Shape.Rect(3, 4);\n" ++
+        "  println_fmt(\"{}\", s);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("rect 3 4\n", stdout);
+}
+
+test "a locally-declared enum is not shadowed by an unrelated workspace file's same-named type" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_enum_not_workspace_shadowed.fn";
+    const unrelated_path = "codegen_enum_not_workspace_shadowed_UNRELATED.fn";
+    const c_path = "codegen_enum_not_workspace_shadowed.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_enum_not_workspace_shadowed.exe" else "codegen_enum_not_workspace_shadowed";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, unrelated_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: `auto_import_missing_user_types` best-effort-scans every
+    // `.fn` file reachable from cwd for a `compound Name`/`quirk Name` this
+    // file references but never declares, so scripts can skip explicit
+    // imports. Its "already declared locally, nothing to do" guard checked
+    // ONLY compound/quirk (`has_compound_named`/`has_quirk_named`), never
+    // enum — so a file declaring `enum Wxqzy123` still got the scan run for
+    // "Wxqzy123", found this UNRELATED sibling file's `quirk Wxqzy123`
+    // (never imported, contents otherwise irrelevant to this program), and
+    // auto-imported it, colliding with the local enum and misattributing
+    // the resulting "type is private"/duplicate-symbol error to the
+    // unrelated file. Found via a compiler-shaped torture test run from
+    // this repo's root, where `examples/advanced/quirks.fn`'s `quirk Shape`
+    // collided with a torture-test program's own unrelated `enum Shape`.
+    {
+        const unrelated_file = try std.Io.Dir.cwd().createFile(std.testing.io, unrelated_path, .{ .truncate = true });
+        defer unrelated_file.close(std.testing.io);
+        try unrelated_file.writeStreamingAll(std.testing.io,
+            \\quirk Wxqzy123 {
+            \\  area() num;
+            \\}
+            \\
+        );
+    }
+
+    const input =
+        "imp std.c.io;\n" ++
+        "enum Wxqzy123 { A, B }\n" ++
+        "fun main() num {\n" ++
+        "  Wxqzy123 v = Wxqzy123.B;\n" ++
+        "  fit v {\n" ++
+        "    Wxqzy123.A -> { printf(\"a\\n\"); }\n" ++
+        "    Wxqzy123.B -> { printf(\"b\\n\"); }\n" ++
+        "  }\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("b\n", stdout);
+}
