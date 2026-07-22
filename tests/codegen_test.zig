@@ -8134,15 +8134,25 @@ test "multi-file compiler-shaped torture program: lexer+parser+ast+eval+trace ac
     // like a real self-hosted compiler's own source tree: a recursive
     // tagged-union AST built and walked across files, a Vec<Token>/
     // Map<str,dec> as generic collections, a constrained-generic recursive
-    // linked compound with a generic quirk impl, and private per-file
-    // helper functions reusing names across files (`mk_bin`/`mk_num` in
-    // both parser.fn and main.fn) the way independently-written modules
-    // naturally do. It found three real compiler bugs this way: Display
-    // not dispatching through a pointer dereference, an uninitialized
-    // `has_default_branch` field, and unmangled private-function C names
-    // colliding across unrelated files — all fixed and separately
-    // regression-tested above. This test locks in the whole thing still
-    // working together end-to-end.
+    // linked compound with a generic quirk impl, private per-file helper
+    // functions reusing names across files (`mk_bin`/`mk_num` in both
+    // parser.fn and main.fn), a real recursive-descent parser returning
+    // Result<Expr*> (Ok on success, Err on trailing garbage), and a 2-arg
+    // `Call` variant exercising `fit` on both `chr` (operators/lexing) and
+    // `str` (builtin dispatch) subjects with 4+ branches each. It found six
+    // real compiler bugs across two rounds this way: Display not
+    // dispatching through a pointer dereference, an uninitialized
+    // `has_default_branch` field, unmangled private-function C names
+    // colliding across unrelated files, `fit` on a `chr` subject silently
+    // matching only its FIRST branch (a real miscompile — see the dedicated
+    // regression test below), an enum-variant payload of a generic-compound
+    // type failing to type-match its own declared type, and a deep,
+    // NOT-fixed issue where a generic container instantiated with a POINTER
+    // type argument (`Vec<Expr*>`) loses/miscombines the pointer depth
+    // across several codegen paths (worked around here by capping `Call`
+    // at 2 fixed args instead of `Vec<Expr*>` — see ast.fn's comment). All
+    // fixed bugs are separately regression-tested above/below; this test
+    // locks in the whole program still working together end-to-end.
     var tp = try codegen.TranspileProcess.init(
         allocator,
         "examples/imports/torture_compiler/main.fn",
@@ -8171,9 +8181,118 @@ test "multi-file compiler-shaped torture program: lexer+parser+ast+eval+trace ac
     try std.testing.expectEqualStrings(
         "parsed result = 13.0\n" ++
             "parsed ast    = (- (+ 2 (* 3 4)) 1)\n" ++
+            "call result   = 10.0\n" ++
+            "call ast      = max((+ 2 3), min(10, 20))\n" ++
+            "rejected      = unexpected trailing tokens after expression\n" ++
             "built result  = 49.0\n" ++
             "built ast     = (let x = 7 in (* x x))\n" ++
             "trace         = 3 -> 2 -> 1\n",
         stdout,
     );
+}
+
+test "fit on a chr subject checks every branch, not just the first (regression)" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_fit_chr_multi_branch.fn";
+    const c_path = "codegen_fit_chr_multi_branch.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_fit_chr_multi_branch.exe" else "codegen_fit_chr_multi_branch";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: a REAL silent miscompile, not just a diagnostic
+    // false-positive. `fit` on a `chr` subject lowers to a C `switch`
+    // (an integral type), whose emitter dedupes `case` labels via
+    // `fit_label_key`. That function's switch never had a `.Character`
+    // arm (char literals are their own node type, not `.Number`), so every
+    // char-literal branch fell to the "unrecognized node" fallback, which
+    // keyed off `@intFromPtr(&label)` -- the address of a BY-VALUE
+    // function parameter, frequently identical across separate calls from
+    // the same call site. Every branch after the first got treated as a
+    // "duplicate" of the first and silently DROPPED from the emitted
+    // switch, so only the first branch's char ever matched; every other
+    // char fell through to the catch-all with no compiler warning at all.
+    // Found refactoring a lexer's char-dispatch if/elif chain into `fit`
+    // (per the torture-test program's real char lexing) and seeing the
+    // second-onward operators misclassify. Now `.Character` is handled
+    // like `.Number`'s `cval` case, keyed by its actual value.
+    const input =
+        "imp std.c.io;\n" ++
+        "fun classify(chr c) str {\n" ++
+        "  fit c {\n" ++
+        "    '+' -> { ret \"plus\"; }\n" ++
+        "    '-' -> { ret \"minus\"; }\n" ++
+        "    '*' -> { ret \"star\"; }\n" ++
+        "    '/' -> { ret \"slash\"; }\n" ++
+        "    _ -> { ret \"other\"; }\n" ++
+        "  }\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"%s %s %s %s %s\\n\", classify('+'), classify('-'), classify('*'), classify('/'), classify('x'));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("plus minus star slash other\n", stdout);
+}
+
+test "an enum variant payload of a generic-compound type matches its own declared type" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_fit_payload_generic_compound.fn";
+    const c_path = "codegen_fit_payload_generic_compound.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_fit_payload_generic_compound.exe" else "codegen_fit_payload_generic_compound";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: `fit_binding_type` resolved a destructured variant
+    // payload's type via the bare `type_from_dtype`, which never populates
+    // `mangled_name` -- so a payload of a generic-compound type (e.g.
+    // `Call(str, Vec<num>)`'s `Vec<num>` field) type-checked as a
+    // different, mangled_name-less CheckedType than the SAME `Vec<num>`
+    // resolved anywhere else (e.g. a function parameter's declared type),
+    // and passing the bound variable to such a function spuriously failed
+    // as a type mismatch. Now goes through `type_from_dtype_with_mangled`
+    // like every other resolved type.
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.vec;\n" ++
+        "enum E { A(str, Vec<num>) }\n" ++
+        "fun consume(str name, Vec<num> v) num {\n" ++
+        "  ret v.get(0);\n" ++
+        "}\n" ++
+        "fun handle(E e) num {\n" ++
+        "  fit e {\n" ++
+        "    E.A(name, items) -> { ret consume(name, items); }\n" ++
+        "  }\n" ++
+        "  ret -1;\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  Vec<num> v;\n" ++
+        "  v.init(4);\n" ++
+        "  v.push(42);\n" ++
+        "  printf(\"%lld\\n\", handle(E.A(\"x\", v)));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("42\n", stdout);
 }

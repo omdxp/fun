@@ -4,6 +4,7 @@
 
 imp std.c.mem;
 imp std.vec;
+imp std.result;
 imp token;
 imp ast;
 imp lexer;
@@ -41,6 +42,12 @@ fun parser_mk_neg(Expr* inner) Expr* {
 fun parser_mk_bin(chr op, Expr* l, Expr* r) Expr* {
   Expr* e = malloc(sizeof(Expr));
   *e = Expr.Bin(op, l, r);
+  ret e;
+}
+
+fun parser_mk_call(str name, Expr* a, Expr* b) Expr* {
+  Expr* e = malloc(sizeof(Expr));
+  *e = Expr.Call(name, a, b);
   ret e;
 }
 
@@ -97,7 +104,13 @@ impl Parser {
     let t = self.advance();
     fit t {
       Token.Num(n) -> { ret parser_mk_num(n); }
-      Token.Ident(name) -> { ret parser_mk_var(name); }
+      Token.Ident(name) -> {
+        let after = self.peek();
+        fit after {
+          Token.LParen -> { ret self.parse_call(name); }
+          _ -> { ret parser_mk_var(name); }
+        }
+      }
       Token.Minus -> { ret parser_mk_neg(self.parse_factor()); }
       Token.LParen -> {
         Expr* inner = self.parse_expr();
@@ -107,10 +120,27 @@ impl Parser {
       _ -> { ret parser_mk_num(0.0); }
     }
   }
+
+  // `name(` was already confirmed by the caller; consumes the '(' here.
+  // Fixed 2-arg calls only (`max(a, b)`, `min(a, b)`) -- see ast.fn's note
+  // on why this doesn't take a Vec<Expr*> of arbitrary arity.
+  parse_call(str name) Expr* {
+    self.advance();
+    Expr* a = self.parse_expr();
+    self.advance();
+    Expr* b = self.parse_expr();
+    self.advance();
+    ret parser_mk_call(name, a, b);
+  }
 }
 
-pub fun parse(str src) Expr* {
+pub fun parse(str src) Result<Expr *> {
   Vec<Token> toks = tokenize(src);
   Parser p = parser_new(toks);
-  ret p.parse_expr();
+  Expr* result = p.parse_expr();
+  let trailing = p.peek();
+  fit trailing {
+    Token.Eof -> { ret ok(result); }
+    _ -> { ret err(1, "unexpected trailing tokens after expression", result); }
+  }
 }

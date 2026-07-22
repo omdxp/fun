@@ -7,7 +7,7 @@ imp std.c.io;
 imp std.c.mem;
 imp std.io;
 imp std.map;
-imp token;
+imp std.result;
 imp ast;
 imp parser;
 imp eval;
@@ -42,9 +42,34 @@ fun main() num {
   env.init();
 
   // Parsed by the real lexer + recursive-descent parser: 2 + 3 * 4 - 1
-  Expr* parsed = parse("2 + 3 * 4 - 1");
-  printf("parsed result = %.1f\n", eval(parsed, &env));
-  println_fmt("parsed ast    = {}", *parsed);
+  Result<Expr *> parsed_r = parse("2 + 3 * 4 - 1");
+  fit parsed_r {
+    Result.Ok(parsed) -> {
+      Expr* p = parsed;
+      printf("parsed result = %.1f\n", eval(p, &env));
+      println_fmt("parsed ast    = {}", *p);
+    }
+    Result.Err(e) -> { printf("parse error (unexpected)\n"); }
+  }
+
+  // A function call, parsed for real: max(2 + 3, min(10, 20))
+  Result<Expr *> call_r = parse("max(2 + 3, min(10, 20))");
+  fit call_r {
+    Result.Ok(call_expr) -> {
+      Expr* c = call_expr;
+      printf("call result   = %.1f\n", eval(c, &env));
+      println_fmt("call ast      = {}", *c);
+    }
+    Result.Err(e) -> { printf("parse error (unexpected)\n"); }
+  }
+
+  // Trailing garbage after a complete expression: the parser must reject
+  // this instead of silently ignoring the leftover tokens.
+  Result<Expr *> bad_r = parse("2 + 3 4");
+  fit bad_r {
+    Result.Ok(v) -> { printf("bad parse (unexpected success)\n"); }
+    Result.Err(e) -> { println_fmt("rejected      = {}", e.message); }
+  }
 
   // Hand-built (parser has no let/in support): let x = 7 in x * x
   Expr* built = mk_let("x", mk_num(7.0), mk_bin('*', mk_var("x"), mk_var("x")));

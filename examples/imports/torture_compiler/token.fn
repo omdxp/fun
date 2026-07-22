@@ -13,6 +13,7 @@ pub enum Token {
   Slash,
   LParen,
   RParen,
+  Comma,
   Eof,
 }
 
@@ -27,6 +28,7 @@ impl Token as Display {
       Token.Slash -> { ret "Slash"; }
       Token.LParen -> { ret "LParen"; }
       Token.RParen -> { ret "RParen"; }
+      Token.Comma -> { ret "Comma"; }
       Token.Eof -> { ret "Eof"; }
     }
   }

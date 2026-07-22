@@ -4,6 +4,24 @@
 imp std.map;
 imp ast;
 
+fun eval_call(str name, dec a, dec b) dec {
+  fit name {
+    "max" -> {
+      if a > b {
+        ret a;
+      }
+      ret b;
+    }
+    "min" -> {
+      if a < b {
+        ret a;
+      }
+      ret b;
+    }
+    _ -> { ret 0.0; }
+  }
+}
+
 pub fun eval(Expr* e, Map<str, dec>* env) dec {
   fit *e {
     Expr.Num(n) -> { ret n; }
@@ -12,17 +30,20 @@ pub fun eval(Expr* e, Map<str, dec>* env) dec {
     Expr.Bin(op, l, r) -> {
       let lv = eval(l, env);
       let rv = eval(r, env);
-      if op == '+' { ret lv + rv; }
-      elif op == '-' { ret lv - rv; }
-      elif op == '*' { ret lv * rv; }
-      elif op == '/' { ret lv / rv; }
-      ret 0.0;
+      fit op {
+        '+' -> { ret lv + rv; }
+        '-' -> { ret lv - rv; }
+        '*' -> { ret lv * rv; }
+        '/' -> { ret lv / rv; }
+        _ -> { ret 0.0; }
+      }
     }
     Expr.Let(name, value_expr, body) -> {
       let v = eval(value_expr, env);
       env.put(name, v);
       ret eval(body, env);
     }
+    Expr.Call(name, a, b) -> { ret eval_call(name, eval(a, env), eval(b, env)); }
   }
   ret 0.0;
 }

@@ -5315,10 +5315,16 @@ pub const TranspileProcess = struct {
     /// payload (`Some(T)` of `Option<num>`), substitute the parameter with the
     /// concrete argument from the SUBJECT's generic args (`subject_t` is the
     /// `Option<num>` value being matched) so the binding is typed `num`, not `T`.
-    fn fit_binding_type(self: *Self, enum_name: []const u8, subject_t: CheckedType, payload_dt: *dtype.DataType) CheckedType {
-        // Concrete (non-type-param) payload: use it directly.
+    fn fit_binding_type(self: *Self, enum_name: []const u8, subject_t: CheckedType, payload_dt: *dtype.DataType) TranspileError!CheckedType {
+        // Concrete (non-type-param) payload: use it directly. Must go through
+        // `type_from_dtype_with_mangled` (not the bare `type_from_dtype`) so a
+        // generic-compound payload (e.g. `Call(str, Vec<Expr*>)`'s `Vec<Expr*>`)
+        // gets its `mangled_name` populated — without it, this binding's type
+        // and the SAME type resolved through any other path (e.g. a function
+        // parameter's declared type) disagreed on `mangled_name` and a call
+        // passing the bound variable spuriously failed as a type mismatch.
         if (!self.enum_payload_is_type_param(enum_name, payload_dt)) {
-            return type_from_dtype(payload_dt);
+            return self.type_from_dtype_with_mangled(payload_dt);
         }
         // Resolve the parameter index in the enum's declaration.
         const reg = self.root_registry() orelse return CheckedType{ .base = .Unknown };
@@ -5340,7 +5346,7 @@ pub const TranspileProcess = struct {
         const sdt = subject_t.dtype_ref orelse return CheckedType{ .base = .Unknown };
         const gargs = sdt.generic_args orelse return CheckedType{ .base = .Unknown };
         if (idx >= gargs.count) return CheckedType{ .base = .Unknown };
-        return type_from_dtype(gargs.items()[idx]);
+        return self.type_from_dtype_with_mangled(gargs.items()[idx]);
     }
 
     /// True when `name` is a declared enum that is a tagged union (sum type).
@@ -8758,7 +8764,7 @@ pub const TranspileProcess = struct {
                             const payload = if (variant) |v| v.payload else null;
                             for (branch.bindings.?.items(), 0..) |bname, i| {
                                 const bt = if (payload != null and i < payload.?.count)
-                                    self.fit_binding_type(target_enum.?, target_t, payload.?.items()[i])
+                                    try self.fit_binding_type(target_enum.?, target_t, payload.?.items()[i])
                                 else
                                     CheckedType{ .base = .Unknown };
                                 try env.put_current(bname.items, bt);
@@ -13156,6 +13162,24 @@ pub const TranspileProcess = struct {
                         .llnum => |v| return std.fmt.allocPrint(self.allocator, "n:{d}", .{v}) catch return TranspileError.MemoryAllocationFailed,
                         .lnum => |v| return std.fmt.allocPrint(self.allocator, "n:{d}", .{v}) catch return TranspileError.MemoryAllocationFailed,
                         .inum => |v| return std.fmt.allocPrint(self.allocator, "n:{d}", .{v}) catch return TranspileError.MemoryAllocationFailed,
+                        .cval => |v| return std.fmt.allocPrint(self.allocator, "c:{d}", .{v}) catch return TranspileError.MemoryAllocationFailed,
+                        else => {},
+                    }
+                }
+            },
+            // A char literal (`'+'`) is its OWN node type (.Character), not
+            // .Number — it was falling through to the unrecognized-node
+            // fallback below, which keys off `@intFromPtr(&label)` (the
+            // address of this function's BY-VALUE parameter). That address
+            // is frequently reused across separate calls to this function
+            // from the same call site (e.g. every branch label in a `fit`
+            // over `chr`), so every char-literal branch after the first
+            // collided as a "duplicate" and got silently dropped from the
+            // emitted C switch — matching the observed "only the first
+            // branch of `fit` on a chr subject ever matches" bug.
+            .Character => {
+                if (label.data) |d| {
+                    switch (d) {
                         .cval => |v| return std.fmt.allocPrint(self.allocator, "c:{d}", .{v}) catch return TranspileError.MemoryAllocationFailed,
                         else => {},
                     }

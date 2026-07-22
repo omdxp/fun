@@ -6,12 +6,22 @@
 imp std.io;
 imp std.quirks;
 
+// NOTE: `Call`'s args are two FIXED fields (not `Vec<Expr*>`) — a real
+// variable-arity design hit a genuine, previously-unknown compiler bug:
+// a generic container instantiated with a POINTER type argument
+// (`Vec<Expr*>`) is broken across several codegen paths (compound
+// fields, enum payloads, and method parameters each combine/lose the
+// pointer depth differently), producing `Vec<T>` monomorphized as if it
+// held `T` by value instead of `T*`. Deep, multi-path issue -- documented
+// as a known gap for the eventual self-hosting effort rather than fixed
+// here; worked around by capping calls at 2 args (enough for max/min).
 pub enum Expr {
   Num(dec),
   Var(str),
-  Neg(Expr*),
-  Bin(chr, Expr*, Expr*),
-  Let(str, Expr*, Expr*),
+  Neg(Expr *),
+  Bin(chr, Expr *, Expr *),
+  Let(str, Expr *, Expr *),
+  Call(str, Expr *, Expr *),
 }
 
 impl Expr as Display {
@@ -22,6 +32,7 @@ impl Expr as Display {
       Expr.Neg(e) -> { ret format("(neg {})", *e); }
       Expr.Bin(op, l, r) -> { ret format("({} {} {})", op, *l, *r); }
       Expr.Let(name, v, body) -> { ret format("(let {} = {} in {})", name, *v, *body); }
+      Expr.Call(name, a, b) -> { ret format("{}({}, {})", name, *a, *b); }
     }
   }
 }

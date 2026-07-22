@@ -21,7 +21,7 @@ fun _is_digit(chr c) bin {
 }
 
 fun _is_alpha(chr c) bin {
-  ret (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+  ret(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
 }
 
 impl Lexer {
@@ -65,13 +65,16 @@ impl Lexer {
       ret Token.Ident(substr(self.src, start, len));
     }
     self.advance();
-    if c == '+' { ret Token.Plus; }
-    if c == '-' { ret Token.Minus; }
-    if c == '*' { ret Token.Star; }
-    if c == '/' { ret Token.Slash; }
-    if c == '(' { ret Token.LParen; }
-    if c == ')' { ret Token.RParen; }
-    ret Token.Eof;
+    fit c {
+      '+' -> { ret Token.Plus; }
+      '-' -> { ret Token.Minus; }
+      '*' -> { ret Token.Star; }
+      '/' -> { ret Token.Slash; }
+      '(' -> { ret Token.LParen; }
+      ')' -> { ret Token.RParen; }
+      ',' -> { ret Token.Comma; }
+      _ -> { ret Token.Eof; }
+    }
   }
 }
 
@@ -84,7 +87,7 @@ pub fun tokenize(str src) Vec<Token> {
     out.push(t);
     fit t {
       Token.Eof -> { ret out; }
-      _ -> {}
+      _ -> { }
     }
   }
   ret out;
