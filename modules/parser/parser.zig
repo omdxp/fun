@@ -4702,6 +4702,12 @@ pub const ParseProcess = struct {
     fn parse_fit_body(self: *Self, fit_node: *ast.Node, hist: *utils.History) ParseError!void {
         try self.expect_sym('{');
         fit_node.*.node_variant.?.statement.fit_stmt.branches = utils.Vector(ast.FitBranch).init(self.transpile_proc.allocator);
+        // `fit_stmt` is constructed as `undefined` in `parse_fit_statement` and
+        // filled in field-by-field; `has_default_branch` was never assigned
+        // anywhere (only ever read, in transpiler.zig's `stmts_always_return`),
+        // leaving it uninitialized garbage. Initialize to false here and flip
+        // it true below when a `_` catch-all branch is actually parsed.
+        fit_node.*.node_variant.?.statement.fit_stmt.has_default_branch = false;
         while (!self.next_token_is_symbol('}')) {
             var hist_down = utils.History.down(self.transpile_proc.allocator, hist, hist.flags);
             defer hist_down.deinit();
@@ -4773,6 +4779,7 @@ pub const ParseProcess = struct {
                 fit_node.*.node_variant.?.statement.fit_stmt.branches.push(.{ .body = body, .condition = null }) catch {
                     return ParseError.MemoryAllocationFailed;
                 };
+                fit_node.*.node_variant.?.statement.fit_stmt.has_default_branch = true;
                 if (self.next_token_is_operator(",")) {
                     _ = self.token_next(); // skip ,
                 }

@@ -3106,6 +3106,50 @@ pub const TranspileProcess = struct {
         try self.collect_impls_recursive(self, new_reg);
     }
 
+    /// Whole-program check: two DIFFERENT files each declaring their own
+    /// private (non-`pub`) top-level function under the same bare name
+    /// (e.g. two small modules each with their own `mk_bin`/`peek`/`advance`
+    /// helper) currently both emit a plain, unmangled C function with that
+    /// name — a genuine C "redefinition" once both are reachable from the
+    /// same program, even though NEITHER file imports the other and Fun's
+    /// own visibility rules correctly keep them from calling each other's
+    /// private helper. Public collisions are already caught elsewhere
+    /// (global symbol registration); this catches the previously-uncaught
+    /// private/private case with a clear Fun-level diagnostic instead of a
+    /// confusing raw C compiler error surfacing after the fact. Found via a
+    /// multi-file compiler-shaped torture test (parser.fn and main.fn each
+    /// declaring their own private `mk_bin`/`mk_num`/`mk_var`).
+    fn check_no_duplicate_private_function_names(self: *Self) TranspileError!void {
+        var seen = std.StringHashMap(*ast.Node).init(self.backing_allocator);
+        defer seen.deinit();
+        try self.collect_private_functions_checking_dupes(&seen);
+    }
+
+    fn collect_private_functions_checking_dupes(self: *Self, seen: *std.StringHashMap(*ast.Node)) TranspileError!void {
+        for (self.nodes.items()) |*n| {
+            if (n.type != .Function or n.node_variant == null) continue;
+            if (n.flags != null and n.flags.?.is_public) continue;
+            const fnv = n.node_variant.?.function;
+            const nm = (fnv.name orelse continue).items;
+            if (nm.len == 0) continue;
+
+            if (seen.get(nm)) |existing| {
+                if (existing == n) continue;
+                const existing_file = if (existing.pos) |p| p.filename else "<unknown>";
+                self.report_type_error(
+                    n.*,
+                    "private function '{s}' is also declared (privately) in '{s}'; private top-level function names must be unique across the whole program — rename one or make it `pub`",
+                    .{ nm, existing_file },
+                );
+                return TranspileError.DuplicateSymbol;
+            }
+            seen.put(nm, n) catch return TranspileError.MemoryAllocationFailed;
+        }
+        for (self.children.items) |child| {
+            try child.collect_private_functions_checking_dupes(seen);
+        }
+    }
+
     fn has_compound_named(proc: *Self, name: []const u8) bool {
         for (proc.owned_nodes.items) |n| {
             if (n.type != .Compound or n.node_variant == null) continue;
@@ -6037,6 +6081,18 @@ pub const TranspileProcess = struct {
     }
 
     fn find_function_node(self: *Self, name: []const u8) ?*ast.Node {
+        // Try the CALLING module's own scope first (its own top-level
+        // functions/impl methods, then its own imports) before falling back
+        // to a whole-program search rooted at the entrypoint. Two different,
+        // unrelated files can each declare their own private (non-`pub`)
+        // helper under the same bare name (e.g. two small parser-ish
+        // modules each with their own `mk_bin`/`peek`/`advance`) — searching
+        // from the root ALWAYS finds whichever same-named node the root's
+        // fixed traversal order happens to reach first, regardless of which
+        // module is actually calling, so a module's call to its OWN local
+        // helper could resolve to a completely different file's PRIVATE
+        // same-named function and get spuriously rejected as "is private".
+        if (self.find_function_node_proc(self, name)) |found| return found;
         const root = self.get_root();
         return self.find_function_node_proc(root, name);
     }
@@ -16512,6 +16568,10 @@ pub const TranspileProcess = struct {
 
         // Collect user-defined type declarations across imports before typechecking.
         try self.collect_type_registry_all();
+
+        if (self.parent == null) {
+            try self.check_no_duplicate_private_function_names();
+        }
 
         // Type check after imports are parsed (so imported signatures are available).
         try self.typecheck_all();

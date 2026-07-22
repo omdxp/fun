@@ -1,0 +1,27 @@
+// AST module: the recursive expression tree the parser builds and the
+// evaluator walks. Lives in its own file/module, imported by both
+// parser.fn and eval.fn, to stress cross-file resolution of a recursive
+// pointer-based tagged-union type (and its Display quirk impl).
+
+imp std.io;
+imp std.quirks;
+
+pub enum Expr {
+  Num(dec),
+  Var(str),
+  Neg(Expr*),
+  Bin(chr, Expr*, Expr*),
+  Let(str, Expr*, Expr*),
+}
+
+impl Expr as Display {
+  pub to_string() str {
+    fit *self {
+      Expr.Num(n) -> { ret format("{}", n); }
+      Expr.Var(name) -> { ret name; }
+      Expr.Neg(e) -> { ret format("(neg {})", *e); }
+      Expr.Bin(op, l, r) -> { ret format("({} {} {})", op, *l, *r); }
+      Expr.Let(name, v, body) -> { ret format("(let {} = {} in {})", name, *v, *body); }
+    }
+  }
+}

@@ -1,0 +1,28 @@
+// Evaluator module: walks the Expr tree (ast.fn) using a Map<str, dec>
+// (std.map, a two-type-param generic) as the symbol table.
+
+imp std.map;
+imp ast;
+
+pub fun eval(Expr* e, Map<str, dec>* env) dec {
+  fit *e {
+    Expr.Num(n) -> { ret n; }
+    Expr.Var(name) -> { ret env.get_or(name, 0.0); }
+    Expr.Neg(inner) -> { ret 0.0 - eval(inner, env); }
+    Expr.Bin(op, l, r) -> {
+      let lv = eval(l, env);
+      let rv = eval(r, env);
+      if op == '+' { ret lv + rv; }
+      elif op == '-' { ret lv - rv; }
+      elif op == '*' { ret lv * rv; }
+      elif op == '/' { ret lv / rv; }
+      ret 0.0;
+    }
+    Expr.Let(name, value_expr, body) -> {
+      let v = eval(value_expr, env);
+      env.put(name, v);
+      ret eval(body, env);
+    }
+  }
+  ret 0.0;
+}

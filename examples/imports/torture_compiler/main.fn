@@ -1,0 +1,62 @@
+// Entry point: ties together a mini "compiler" spread across six files
+// (token/lexer/ast/parser/eval/trace) — a multi-module compilation graph
+// with cross-file recursive types, generics, and quirks, the way a real
+// self-hosted compiler's own source tree would be laid out.
+
+imp std.c.io;
+imp std.c.mem;
+imp std.io;
+imp std.map;
+imp token;
+imp ast;
+imp parser;
+imp eval;
+imp trace;
+
+fun mk_num(dec n) Expr* {
+  Expr* e = malloc(sizeof(Expr));
+  *e = Expr.Num(n);
+  ret e;
+}
+
+fun mk_bin(chr op, Expr* l, Expr* r) Expr* {
+  Expr* e = malloc(sizeof(Expr));
+  *e = Expr.Bin(op, l, r);
+  ret e;
+}
+
+fun mk_let(str name, Expr* value, Expr* body) Expr* {
+  Expr* e = malloc(sizeof(Expr));
+  *e = Expr.Let(name, value, body);
+  ret e;
+}
+
+fun mk_var(str name) Expr* {
+  Expr* e = malloc(sizeof(Expr));
+  *e = Expr.Var(name);
+  ret e;
+}
+
+fun main() num {
+  Map<str, dec> env;
+  env.init();
+
+  // Parsed by the real lexer + recursive-descent parser: 2 + 3 * 4 - 1
+  Expr* parsed = parse("2 + 3 * 4 - 1");
+  printf("parsed result = %.1f\n", eval(parsed, &env));
+  println_fmt("parsed ast    = {}", *parsed);
+
+  // Hand-built (parser has no let/in support): let x = 7 in x * x
+  Expr* built = mk_let("x", mk_num(7.0), mk_bin('*', mk_var("x"), mk_var("x")));
+  printf("built result  = %.1f\n", eval(built, &env));
+  println_fmt("built ast     = {}", *built);
+
+  Trace<dec>* trace = malloc(sizeof(Trace<dec>));
+  trace.from(1.0);
+  trace = trace_push(trace, 2.0);
+  trace = trace_push(trace, 3.0);
+  println_fmt("trace         = {}", *trace);
+
+  env.free();
+  ret 0;
+}

@@ -1,0 +1,116 @@
+// Parser module: recursive-descent, consuming a Vec<Token> (from lexer.fn)
+// and building an Expr* tree (from ast.fn) — the two most
+// "compiler-shaped" cross-file dependencies in this program.
+
+imp std.c.mem;
+imp std.vec;
+imp token;
+imp ast;
+imp lexer;
+
+pub compound Parser {
+  Vec<Token> toks;
+  num pos;
+}
+
+pub fun parser_new(Vec<Token> toks) Parser {
+  Parser p;
+  p.toks = toks;
+  p.pos = 0;
+  ret p;
+}
+
+fun parser_mk_num(dec n) Expr* {
+  Expr* e = malloc(sizeof(Expr));
+  *e = Expr.Num(n);
+  ret e;
+}
+
+fun parser_mk_var(str name) Expr* {
+  Expr* e = malloc(sizeof(Expr));
+  *e = Expr.Var(name);
+  ret e;
+}
+
+fun parser_mk_neg(Expr* inner) Expr* {
+  Expr* e = malloc(sizeof(Expr));
+  *e = Expr.Neg(inner);
+  ret e;
+}
+
+fun parser_mk_bin(chr op, Expr* l, Expr* r) Expr* {
+  Expr* e = malloc(sizeof(Expr));
+  *e = Expr.Bin(op, l, r);
+  ret e;
+}
+
+impl Parser {
+  peek() Token {
+    ret self.toks.get(self.pos);
+  }
+
+  advance() Token {
+    let t = self.toks.get(self.pos);
+    self.pos = self.pos + 1;
+    ret t;
+  }
+
+  pub parse_expr() Expr* {
+    Expr* left = self.parse_term();
+    for true {
+      let t = self.peek();
+      fit t {
+        Token.Plus -> {
+          self.advance();
+          left = parser_mk_bin('+', left, self.parse_term());
+        }
+        Token.Minus -> {
+          self.advance();
+          left = parser_mk_bin('-', left, self.parse_term());
+        }
+        _ -> { ret left; }
+      }
+    }
+    ret left;
+  }
+
+  parse_term() Expr* {
+    Expr* left = self.parse_factor();
+    for true {
+      let t = self.peek();
+      fit t {
+        Token.Star -> {
+          self.advance();
+          left = parser_mk_bin('*', left, self.parse_factor());
+        }
+        Token.Slash -> {
+          self.advance();
+          left = parser_mk_bin('/', left, self.parse_factor());
+        }
+        _ -> { ret left; }
+      }
+    }
+    ret left;
+  }
+
+  parse_factor() Expr* {
+    let t = self.advance();
+    fit t {
+      Token.Num(n) -> { ret parser_mk_num(n); }
+      Token.Ident(name) -> { ret parser_mk_var(name); }
+      Token.Minus -> { ret parser_mk_neg(self.parse_factor()); }
+      Token.LParen -> {
+        Expr* inner = self.parse_expr();
+        self.advance();
+        ret inner;
+      }
+      _ -> { ret parser_mk_num(0.0); }
+    }
+  }
+}
+
+pub fun parse(str src) Expr* {
+  Vec<Token> toks = tokenize(src);
+  Parser p = parser_new(toks);
+  ret p.parse_expr();
+}

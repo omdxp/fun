@@ -1,0 +1,33 @@
+// Token module: the lexical unit of the mini-language, shared by lexer.fn
+// and parser.fn.
+
+imp std.io;
+imp std.quirks;
+
+pub enum Token {
+  Num(dec),
+  Ident(str),
+  Plus,
+  Minus,
+  Star,
+  Slash,
+  LParen,
+  RParen,
+  Eof,
+}
+
+impl Token as Display {
+  pub to_string() str {
+    fit *self {
+      Token.Num(n) -> { ret format("Num({})", n); }
+      Token.Ident(name) -> { ret format("Ident({})", name); }
+      Token.Plus -> { ret "Plus"; }
+      Token.Minus -> { ret "Minus"; }
+      Token.Star -> { ret "Star"; }
+      Token.Slash -> { ret "Slash"; }
+      Token.LParen -> { ret "LParen"; }
+      Token.RParen -> { ret "RParen"; }
+      Token.Eof -> { ret "Eof"; }
+    }
+  }
+}

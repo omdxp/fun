@@ -1,0 +1,91 @@
+// Lexer module: turns source text into a Vec<Token>.
+
+imp std.string;
+imp std.vec;
+imp token;
+
+pub compound Lexer {
+  str src;
+  num pos;
+}
+
+pub fun lexer_new(str src) Lexer {
+  Lexer l;
+  l.src = src;
+  l.pos = 0;
+  ret l;
+}
+
+fun _is_digit(chr c) bin {
+  ret c >= '0' && c <= '9';
+}
+
+fun _is_alpha(chr c) bin {
+  ret (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+}
+
+impl Lexer {
+  peek() chr {
+    ret self.src[self.pos];
+  }
+
+  advance() chr {
+    let c = self.src[self.pos];
+    self.pos = self.pos + 1;
+    ret c;
+  }
+
+  skip_ws() {
+    for self.peek() == ' ' {
+      self.advance();
+    }
+  }
+
+  pub next() Token {
+    self.skip_ws();
+    let c = self.peek();
+    if c == 0 {
+      ret Token.Eof;
+    }
+    if _is_digit(c) {
+      num start = self.pos;
+      for _is_digit(self.peek()) {
+        self.advance();
+      }
+      num len = self.pos - start;
+      str numstr = substr(self.src, start, len);
+      ret Token.Num(parse_dec(numstr));
+    }
+    if _is_alpha(c) {
+      num start = self.pos;
+      for _is_alpha(self.peek()) {
+        self.advance();
+      }
+      num len = self.pos - start;
+      ret Token.Ident(substr(self.src, start, len));
+    }
+    self.advance();
+    if c == '+' { ret Token.Plus; }
+    if c == '-' { ret Token.Minus; }
+    if c == '*' { ret Token.Star; }
+    if c == '/' { ret Token.Slash; }
+    if c == '(' { ret Token.LParen; }
+    if c == ')' { ret Token.RParen; }
+    ret Token.Eof;
+  }
+}
+
+pub fun tokenize(str src) Vec<Token> {
+  Lexer lex = lexer_new(src);
+  Vec<Token> out;
+  out.init(8);
+  for true {
+    Token t = lex.next();
+    out.push(t);
+    fit t {
+      Token.Eof -> { ret out; }
+      _ -> {}
+    }
+  }
+  ret out;
+}

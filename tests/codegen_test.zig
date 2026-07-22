@@ -8016,3 +8016,164 @@ test "a locally-declared enum is not shadowed by an unrelated workspace file's s
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("b\n", stdout);
 }
+
+test "two unrelated files each declaring a private function of the same name is rejected clearly" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_private_fn_collision_main.fn";
+    const unrelated_path = "codegen_private_fn_collision_UNRELATED.fn";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, unrelated_path) catch {};
+
+    // Regression: two DIFFERENT files each declaring their own private
+    // (non-`pub`) top-level function under the same bare name both emitted
+    // a plain, unmangled C function with that name -- neither Fun's own
+    // visibility rules nor the C backend caught the collision until `cc`
+    // failed on a confusing "redefinition of 'helper'" error far removed
+    // from the actual cause. Worse, resolving a module's OWN call to its
+    // own private helper searched from the whole-program ROOT first, so it
+    // could find (and wrongly reject as "private") an unrelated file's
+    // same-named private helper instead of the caller's own. Found via a
+    // multi-file compiler-shaped torture test (a lexer/parser/ast/eval
+    // module split, each with private helpers like `mk_bin`/`peek`). Now
+    // caught with a clear Fun-level diagnostic before C emission.
+    // The unrelated module has its own PRIVATE `helper` (the colliding
+    // name) plus a `pub` function the main file genuinely needs -- so the
+    // two files are legitimately part of the SAME program (main imports
+    // the module for `other_thing`), exactly like `parser.fn` importing
+    // `token.fn`/`ast.fn` while both `parser.fn` and `main.fn` separately
+    // declared their own private `mk_bin` in the original torture test.
+    {
+        const unrelated_file = try std.Io.Dir.cwd().createFile(std.testing.io, unrelated_path, .{ .truncate = true });
+        defer unrelated_file.close(std.testing.io);
+        try unrelated_file.writeStreamingAll(std.testing.io,
+            \\fun helper(num x) num {
+            \\  ret x * 2;
+            \\}
+            \\pub fun other_thing() num {
+            \\  ret helper(10);
+            \\}
+            \\
+        );
+    }
+
+    const input =
+        "imp std.c.io;\n" ++
+        "imp codegen_private_fn_collision_UNRELATED;\n" ++
+        "fun helper(num x) num {\n" ++
+        "  ret x + 1;\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"%lld %lld\\n\", helper(5), other_thing());\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const result = runTranspile(allocator, ifilepath, input);
+    try std.testing.expectError(error.DuplicateSymbol, result);
+}
+
+test "fit statement with an explicit catch-all branch compiles and evaluates correctly" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_fit_default_branch.fn";
+    const c_path = "codegen_fit_default_branch.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_fit_default_branch.exe" else "codegen_fit_default_branch";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: `ast.FitStmt.has_default_branch` is constructed as
+    // `undefined` in `parse_fit_statement` and was never actually assigned
+    // anywhere the parser pushes a `_` catch-all branch -- its only reader
+    // (`stmts_always_return`'s missing_return check) was reading
+    // uninitialized memory, giving unpredictable true/false results run to
+    // run. Found via a multi-file compiler-shaped torture test (a
+    // recursive-descent parser's `parse_factor()`, whose whole body is one
+    // `fit` with a `_` catch-all) that spuriously warned
+    // "may reach the end of its body without returning a value" despite
+    // every arm returning. Now explicitly initialized false and flipped
+    // true when a `_` branch is actually parsed. This test's real value is
+    // the manually-verified absence of that warning (this harness doesn't
+    // capture compiler diagnostics); it also locks in correct compilation
+    // and runtime behavior for the pattern.
+    const input =
+        "imp std.c.io;\n" ++
+        "enum Token { Num(num), Ident, Plus, Minus, Star, Slash, LParen, RParen, Eof }\n" ++
+        "fun classify(Token t) num {\n" ++
+        "  fit t {\n" ++
+        "    Token.Num(n) -> { ret n; }\n" ++
+        "    Token.Ident -> { ret 1; }\n" ++
+        "    _ -> { ret 0; }\n" ++
+        "  }\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"%lld %lld %lld\\n\", classify(Token.Num(5)), classify(Token.Ident), classify(Token.Eof));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("5 1 0\n", stdout);
+}
+
+test "multi-file compiler-shaped torture program: lexer+parser+ast+eval+trace across 7 files" {
+    const allocator = std.testing.allocator;
+    const c_path = "torture_compiler.c";
+    const exe_path = if (builtin.os.tag == .windows) "torture_compiler.exe" else "torture_compiler";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // examples/imports/torture_compiler/ is a genuine multi-module program
+    // (token/lexer/ast/parser/eval/trace/main, split across 7 files) shaped
+    // like a real self-hosted compiler's own source tree: a recursive
+    // tagged-union AST built and walked across files, a Vec<Token>/
+    // Map<str,dec> as generic collections, a constrained-generic recursive
+    // linked compound with a generic quirk impl, and private per-file
+    // helper functions reusing names across files (`mk_bin`/`mk_num` in
+    // both parser.fn and main.fn) the way independently-written modules
+    // naturally do. It found three real compiler bugs this way: Display
+    // not dispatching through a pointer dereference, an uninitialized
+    // `has_default_branch` field, and unmangled private-function C names
+    // colliding across unrelated files — all fixed and separately
+    // regression-tested above. This test locks in the whole thing still
+    // working together end-to-end.
+    var tp = try codegen.TranspileProcess.init(
+        allocator,
+        "examples/imports/torture_compiler/main.fn",
+        "_ignored.c",
+        .{ .outf = false, .preload_imports = false, .preload_std_imports = false, .emit_stderr = false },
+    );
+    var lex_proc = lexer.LexProcess.init(&tp);
+    var parse_proc = ParseProcess.init(&tp);
+    defer {
+        lex_proc.deinit();
+        tp.deinit();
+    }
+    try lex_proc.lex();
+    try parse_proc.parse();
+    try tp.transpile();
+
+    const out = tp.get_output() orelse return error.NoOutput;
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings(
+        "parsed result = 13.0\n" ++
+            "parsed ast    = (- (+ 2 (* 3 4)) 1)\n" ++
+            "built result  = 49.0\n" ++
+            "built ast     = (let x = 7 in (* x x))\n" ++
+            "trace         = 3 -> 2 -> 1\n",
+        stdout,
+    );
+}

@@ -1,0 +1,37 @@
+// A constrained-generic recursive linked compound with a generic quirk
+// impl, in its own module — stresses cross-file resolution of generics
+// (sizeof(Trace<T>) inside a constrained generic function, monomorphized
+// Display) alongside the plain-enum AST machinery in ast.fn/eval.fn.
+
+imp std.c.mem;
+imp std.io;
+imp std.quirks;
+
+pub compound Trace<T: num | dec> {
+  T value;
+  Trace<T>* next;
+}
+
+impl Trace<T: num | dec> as From<T> {
+  pub from(T value) {
+    self.value = value;
+    self.next = nil;
+  }
+}
+
+impl Trace<T> as Display {
+  pub to_string() str {
+    if self.next == nil {
+      ret format("{}", self.value);
+    }
+    let nxt = self.next;
+    ret format("{} -> {}", self.value, *nxt);
+  }
+}
+
+pub fun trace_push(Trace<dec>* head, dec value) Trace<dec>* {
+  Trace<dec>* node = malloc(sizeof(Trace<dec>));
+  node.value = value;
+  node.next = head;
+  ret node;
+}
