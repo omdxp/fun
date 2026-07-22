@@ -1,3 +1,81 @@
+## [0.42.4] - 2026-07-21
+
+### Fix
+
+- *(codegen)* Mangle generic compound type before Display auto-dispatch resolution
+
+## [0.42.3] - 2026-07-21
+
+### Fix
+
+- *(fls)* Substitute concrete generic args in quirk missing-method diagnostics; fix UTF-16/byte position desync
+
+## [0.42.2] - 2026-07-21
+
+### Chore
+
+- *(deps)* Bump body-parser
+- *(deps)* Bump body-parser from 1.20.5 to 1.20.6 in /website/reference in the npm_and_yarn group across 1 directory (#95)
+
+### Fix
+
+- *(fls)* Correct completion misfires and codegen edge cases; add underscore numeric literals
+
+## [0.42.1] - 2026-07-21
+
+### Fix
+
+- *(vscode)* Restore compile after vscode-languageclient v10 bump
+- *(fls)* Substitute concrete generic args in fit-branch variant hover
+
+## [0.42.0] - 2026-07-20
+
+### Chore
+
+- Refactor serialization quirks to use generic To<T> and From<T> mechanisms
+- *(deps)* Bump the npm_and_yarn group across 2 directories with 2 updates
+- *(deps)* Bump the npm_and_yarn group across 2 directories with 2 updates (#94)
+
+### Feat
+
+- Wire ErrorKind through stdlib errors and merge constrained-generic duplicates
+
+## [0.41.1] - 2026-07-17
+
+### Feat
+
+- Implement global search modal and enhance search functionality
+
+### Fix
+
+- Improve handling of module and version readiness in App component
+
+### Refactor
+
+- Simplify result handling in channel and json implementations
+
+### Test
+
+- Refine expectations in std.log aliased import tests
+
+## [0.41.0] - 2026-07-16
+
+### Chore
+
+- Update CHANGELOG with new features and improvements for version 0.40.0
+- *(deps-dev)* Bump markdown-it
+- *(deps-dev)* Bump markdown-it from 14.1.1 to 14.2.0 in /editors/vscode in the npm_and_yarn group across 1 directory (#90)
+- *(deps-dev)* Bump the npm_and_yarn group across 1 directory with 2 updates
+- *(deps-dev)* Bump the npm_and_yarn group across 1 directory with 2 updates (#91)
+- *(deps)* Bump shell-quote
+- *(deps)* Bump shell-quote from 1.8.3 to 1.8.4 in /website/reference in the npm_and_yarn group across 1 directory (#92)
+- *(deps-dev)* Bump undici
+- *(deps-dev)* Bump undici from 6.24.1 to 6.27.0 in /editors/vscode in the npm_and_yarn group across 1 directory (#93)
+
+### Feat
+
+- Add concurrency lints and align Fun Web light themes
+
 ## [0.40.0] - 2026-06-14
 
 ### Chore
