@@ -16,7 +16,6 @@ imp std.option;
 imp std.result;
 imp std.string;
 imp std.quirks;
-imp std.serde;
 
 // A TOML scalar value.
 pub enum TomlValue {

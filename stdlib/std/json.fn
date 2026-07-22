@@ -22,7 +22,6 @@ imp std.result;
 imp std.string;
 imp std.math;
 imp std.quirks;
-imp std.serde;
 
 // Any JSON value. Arrays and objects nest recursively.
 pub enum JsonValue {
