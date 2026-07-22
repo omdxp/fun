@@ -2568,6 +2568,35 @@ pub const ParseProcess = struct {
             if (after != null and after.?.type == .Operator and mem.eql(u8, after.?.data.sval.items, "<")) {
                 return try self.parse_sizeof_generic_type_operand();
             }
+
+            // `sizeof(Node*)`: a plain (non-generic) user-defined type name
+            // followed by a trailing pointer suffix. The primitive-keyword
+            // branch above already folds `sizeof(num*)`/`sizeof(raw*)` this
+            // way; a user-defined type name reaches this point as a plain
+            // `.Identifier` token instead of a `.Keyword`, so it needs the
+            // same trailing-`*`-folding treatment here, or `Node*` gets
+            // mis-parsed as `Node * <missing operand>` (an incomplete
+            // multiplication) and `sizeof` rejects it as "not a type name".
+            if (after != null and after.?.type == .Operator and mem.eql(u8, after.?.data.sval.items, "*")) {
+                const consumed = self.token_next() orelse {
+                    self.transpile_proc.err("expected identifier, got eof", .{});
+                    return ParseError.InvalidIdentifier;
+                };
+                var sz_name = ArrayList(u8).init(self.transpile_proc.allocator);
+                errdefer sz_name.deinit();
+                sz_name.appendSlice(consumed.data.sval.items) catch return ParseError.MemoryAllocationFailed;
+                while (self.next_token_is_operator("*")) {
+                    _ = self.token_next();
+                    sz_name.append('*') catch return ParseError.MemoryAllocationFailed;
+                }
+                var ident_node = ast.Node{
+                    .type = .Identifier,
+                    .pos = consumed.pos,
+                    .data = .{ .sval = sz_name },
+                };
+                try self.create_node(&ident_node);
+                return true;
+            }
         }
 
         return try self.parse_single_token_to_node();

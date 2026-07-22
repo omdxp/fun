@@ -8415,3 +8415,43 @@ test "a concrete quirk instantiation with a pointer type argument validates agai
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("33\n", stdout);
 }
+
+test "sizeof accepts a user-defined type name with a trailing pointer suffix" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_sizeof_user_type_ptr.fn";
+    const c_path = "codegen_sizeof_user_type_ptr.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_sizeof_user_type_ptr.exe" else "codegen_sizeof_user_type_ptr";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: `sizeof(num*)`/`sizeof(raw*)` already worked (a dedicated
+    // parser branch folds a primitive type KEYWORD plus trailing `*`s into
+    // one operand identifier), but a PLAIN USER-DEFINED type name (a
+    // compound, reaching the parser as `.Identifier` rather than
+    // `.Keyword`) had no equivalent: `sizeof(Node*)` mis-parsed as
+    // `Node * <missing operand>` and was rejected as "sizeof argument must
+    // be a type name". Found stress-testing the pointer-arg mangling fix's
+    // edge cases (this is what a `malloc(sizeof(Node*))` array-of-pointers
+    // allocation needs). Added the same star-folding branch for a plain
+    // identifier operand in sizeof context.
+    const input =
+        "imp std.c.io;\n" ++
+        "compound Node { num value; }\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"%lld %lld %lld\\n\", sizeof(Node), sizeof(Node*), sizeof(Node**));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("8 8 8\n", stdout);
+}
