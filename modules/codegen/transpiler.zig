@@ -5274,6 +5274,29 @@ pub const TranspileProcess = struct {
         return false;
     }
 
+    /// Broader than `enum_payload_is_type_param`: true when the payload type
+    /// merely REFERENCES a type param somewhere in its structure, not just
+    /// when it bare-IS one. Needed for a self-referential recursive generic
+    /// enum (`enum List<T> { Cons(T, List<T>*), Nil }`) — the SECOND payload
+    /// field, `List<T>*`, isn't `T` itself but nests it as a generic arg of
+    /// the enum's OWN (unsubstituted) type. Outside any active generic
+    /// function/method context (e.g. constructing `List.Cons(v, tail)` inside
+    /// a plain, non-generic function whose param happens to be a concrete
+    /// `List<dec>*`), there's no substitution available to resolve that bare
+    /// `T` down to `dec` before comparing — so the strict check spuriously
+    /// rejected a well-typed `List<dec>*` argument as a "payload field type
+    /// mismatch" against the abstract, unresolved `List<T>*`.
+    fn enum_payload_references_type_param(self: *Self, enum_name: []const u8, dt: *const dtype.DataType) bool {
+        const reg = self.root_registry() orelse return false;
+        const enode = reg.enums_by_name.get(enum_name) orelse blk: {
+            const base = if (mem.indexOf(u8, enum_name, "__")) |idx| enum_name[0..idx] else break :blk null;
+            break :blk reg.enums_by_name.get(base);
+        } orelse return false;
+        if (enode.node_variant == null) return false;
+        const params = enode.node_variant.?.enum_decl.type_params orelse return false;
+        return self.dtype_contains_type_param(dt, &params);
+    }
+
     /// Resolve a fit-arm payload's concrete dtype for SCOPE REGISTRATION (codegen),
     /// given the (possibly mangled) subject enum name. A concrete payload (`Circle(num)`,
     /// `Array(Vec<JsonValue>)`) returns itself. A type-parameter payload (`Ok(T)` of a
@@ -5350,10 +5373,19 @@ pub const TranspileProcess = struct {
         // and the SAME type resolved through any other path (e.g. a function
         // parameter's declared type) disagreed on `mangled_name` and a call
         // passing the bound variable spuriously failed as a type mismatch.
-        if (!self.enum_payload_is_type_param(enum_name, payload_dt)) {
+        const is_bare_param = self.enum_payload_is_type_param(enum_name, payload_dt);
+        if (!is_bare_param and !self.enum_payload_references_type_param(enum_name, payload_dt)) {
             return self.type_from_dtype_with_mangled(payload_dt);
         }
-        // Resolve the parameter index in the enum's declaration.
+        // Resolve the enum's own declared type params so we can substitute
+        // through either shape below: a bare `T` payload, or a NESTED
+        // reference to `T` inside a self-referential recursive generic enum's
+        // own type (`List<T>*` in `enum List<T> { Cons(T, List<T>*), Nil }`).
+        // Without substituting the nested case, a fit-bound `tail` (payload
+        // field 1) kept the abstract, unresolved `List<T>*` as its type
+        // instead of the subject's actual concrete instantiation
+        // (`List<dec>*`), and passing it to anything declared to take
+        // `List<dec>*` spuriously failed as a type mismatch.
         const reg = self.root_registry() orelse return CheckedType{ .base = .Unknown };
         const enode = reg.enums_by_name.get(enum_name) orelse blk: {
             const base = if (mem.indexOf(u8, enum_name, "__")) |idx| enum_name[0..idx] else break :blk null;
@@ -5361,19 +5393,29 @@ pub const TranspileProcess = struct {
         } orelse return CheckedType{ .base = .Unknown };
         if (enode.node_variant == null) return CheckedType{ .base = .Unknown };
         const params = enode.node_variant.?.enum_decl.type_params orelse return CheckedType{ .base = .Unknown };
-        var pidx: ?usize = null;
-        for (params.items(), 0..) |p, i| {
-            if (mem.eql(u8, p.items, payload_dt.type_str.items)) {
-                pidx = i;
-                break;
-            }
-        }
-        const idx = pidx orelse return CheckedType{ .base = .Unknown };
-        // Map to the concrete arg from the subject's generic instantiation.
         const sdt = subject_t.dtype_ref orelse return CheckedType{ .base = .Unknown };
         const gargs = sdt.generic_args orelse return CheckedType{ .base = .Unknown };
-        if (idx >= gargs.count) return CheckedType{ .base = .Unknown };
-        return self.type_from_dtype_with_mangled(gargs.items()[idx]);
+        if (gargs.count != params.count) return CheckedType{ .base = .Unknown };
+
+        if (is_bare_param) {
+            var pidx: ?usize = null;
+            for (params.items(), 0..) |p, i| {
+                if (mem.eql(u8, p.items, payload_dt.type_str.items)) {
+                    pidx = i;
+                    break;
+                }
+            }
+            const idx = pidx orelse return CheckedType{ .base = .Unknown };
+            if (idx >= gargs.count) return CheckedType{ .base = .Unknown };
+            return self.type_from_dtype_with_mangled(gargs.items()[idx]);
+        }
+
+        // Nested reference: substitute every occurrence of the enum's own
+        // type params through `payload_dt`'s structure using the subject's
+        // concrete args (the same substitution machinery generic quirk
+        // instantiation already relies on), then mangle the result.
+        const substituted = try self.clone_dtype_with_subst_for_inst(payload_dt, &params, gargs.items());
+        return self.type_from_dtype_with_mangled(substituted);
     }
 
     /// True when `name` is a declared enum that is a tagged union (sum type).
@@ -5428,7 +5470,19 @@ pub const TranspileProcess = struct {
             // surrounding `Option<num>` annotation drives monomorphization. Still
             // infer the arg (to mark callees used / register instantiations), but
             // skip the strict match against the bare `T`.
-            if (self.enum_payload_is_type_param(path.enum_name, ptypes[i])) {
+            //
+            // A payload that merely REFERENCES a type param somewhere in its
+            // structure without bare-BEING one (`List<T>*` in a self-
+            // referential `enum List<T> { Cons(T, List<T>*), Nil }`) needs the
+            // same leniency: outside an active generic function/method's own
+            // substitution context, `T` here can't be resolved to the
+            // concrete instantiation actually being constructed (e.g.
+            // `List<dec>`), so the strict check would compare against the
+            // abstract, unresolved `List<T>*` and spuriously reject a
+            // perfectly well-typed `List<dec>*` argument.
+            if (self.enum_payload_is_type_param(path.enum_name, ptypes[i]) or
+                self.enum_payload_references_type_param(path.enum_name, ptypes[i]))
+            {
                 _ = try self.infer_expr_type(arg.*, env, fns);
                 continue;
             }

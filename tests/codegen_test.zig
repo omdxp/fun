@@ -8455,3 +8455,83 @@ test "sizeof accepts a user-defined type name with a trailing pointer suffix" {
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("8 8 8\n", stdout);
 }
+
+test "self-referential recursive generic enum (List<T>) via generic helper functions" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_recursive_generic_enum_list.fn";
+    const c_path = "codegen_recursive_generic_enum_list.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_recursive_generic_enum_list.exe" else "codegen_recursive_generic_enum_list";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: `enum List<T> { Cons(T, List<T>*), Nil }` -- the classic
+    // generic recursive linked-list/AST-node shape, where a payload field
+    // (`List<T>*`) is neither a concrete type nor bare `T`, but NESTS a
+    // reference to the enum's own type param inside its own (self-
+    // referential) type. `infer_enum_variant_construction` and
+    // `fit_binding_type` only special-cased a payload that bare-IS a type
+    // param (`Some(T)` of `Option<T>`) -- this payload shape fell through to
+    // the strict/concrete path, comparing the argument against the abstract,
+    // unresolved `List<T>*` and spuriously failing as a "payload field type
+    // mismatch" (construction) or leaving a fit-bound `tail`'s type wrong for
+    // later use (destructuring). Fixed by extending both to recognize a
+    // payload that merely REFERENCES a type param anywhere in its structure
+    // (`enum_payload_references_type_param`, via the existing
+    // `dtype_contains_type_param` walker), substituting through it with the
+    // same machinery generic quirk instantiation already uses.
+    //
+    // NOTE: this only works when EVERY construction/destructuring of the
+    // generic enum happens inside a function that is ITSELF generic over the
+    // same type param (`list_push<T>`/`list_head<T>` below) -- matching the
+    // codebase's own established convention for generic enums (see
+    // std.result.fn's `ok<T>`/`err<T>` helpers). Referencing a CONCRETE
+    // instantiation's bare type name directly from non-generic code (e.g. a
+    // plain `main()` writing `List.Nil` or `fit`-ing a `List<dec>*` itself)
+    // is a separate, deeper, NOT-yet-fixed gap -- the mangled instantiation
+    // name isn't resolved from the variable's own declared type outside an
+    // active generic-function substitution context. Worked around here by
+    // routing every touch point through a generic helper, including the
+    // base case (`list_nil<T>(T type_hint)`, taking a throwaway value
+    // purely so `T` is inferable -- this language has no explicit
+    // type-argument call syntax for a generic function with no argument to
+    // infer T from).
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.c.mem;\n" ++
+        "enum List<T> { Cons(T, List<T>*), Nil }\n" ++
+        "fun list_nil<T>(T type_hint) List<T>* {\n" ++
+        "  List<T>* n = malloc(sizeof(List<T>));\n" ++
+        "  *n = List.Nil;\n" ++
+        "  ret n;\n" ++
+        "}\n" ++
+        "fun list_push<T>(T v, List<T>* tail) List<T>* {\n" ++
+        "  List<T>* n = malloc(sizeof(List<T>));\n" ++
+        "  *n = List.Cons(v, tail);\n" ++
+        "  ret n;\n" ++
+        "}\n" ++
+        "fun list_head<T>(List<T>* l, T fallback) T {\n" ++
+        "  fit *l {\n" ++
+        "    List.Cons(v, tail) -> { ret v; }\n" ++
+        "    List.Nil -> { ret fallback; }\n" ++
+        "  }\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  List<dec>* nil_list = list_nil(0.0);\n" ++
+        "  List<dec>* l = list_push(2.0, list_push(1.0, nil_list));\n" ++
+        "  printf(\"head = %.1f\\n\", list_head(l, 0.0));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned2 = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned2);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned2);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout2 = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout2);
+    try std.testing.expectEqualStrings("head = 2.0\n", stdout2);
+}
