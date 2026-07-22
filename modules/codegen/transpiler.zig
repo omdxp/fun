@@ -12853,6 +12853,41 @@ pub const TranspileProcess = struct {
                 }
             }
         }
+        // `fit *l { ... }` dereferencing a pointer identifier: same idea as
+        // the bare-identifier case above, but resolved from the POINTEE's
+        // declared type. Without this, a fit over a generic tagged-union
+        // enum through a pointer (`fit *l` where `l: List<dec>*`) from a
+        // PLAIN, non-generic function fell all the way through to the
+        // arm-based fallback below, which -- with no active generic-function
+        // substitution to mangle through -- switched on the bare,
+        // never-emitted template name instead of the concrete instantiation.
+        if (fit_exp.type == .Unary and fit_exp.node_variant != null) {
+            const u = fit_exp.node_variant.?.unary;
+            if (mem.eql(u8, u.op, "*") and u.operand.type == .Identifier and u.operand.data != null) {
+                if (self.identifier_declared_dtype(u.operand.data.?.sval.items)) |dt| {
+                    if (dt.pointer_depth == 1 and dt.type_str.items.len > 0) {
+                        const nm = dt.type_str.items;
+                        if (self.enum_name_is_tagged_union(nm)) {
+                            if (dt.generic_args != null) {
+                                // Prefer the ACTIVE generic-function/method substitution
+                                // when one is in effect (e.g. `self`'s declared type inside
+                                // a generic enum's own template method body is still the
+                                // abstract `Option<T>` — mangling it bare would wrongly
+                                // give "Option__T" instead of the instantiation actually
+                                // being emitted). Only fall back to the dtype's own
+                                // (already-concrete, e.g. `List<dec>`) mangling when no
+                                // substitution is active.
+                                if (self.type_name_mangled_for_emit(dt) catch null) |mangled| {
+                                    defer self.allocator.free(mangled);
+                                    return self.arena.allocator().dupe(u8, mangled) catch nm;
+                                }
+                            }
+                            return nm;
+                        }
+                    }
+                }
+            }
+        }
         // A call/method-call subject (`it.next()`, `some(7)`, `box.at()`) returning a
         // data enum: resolve the call's MONOMORPHIZED return type so the switch uses
         // the mangled instance (`Option__num`/`Option__num_Some`) rather than the bare
@@ -13177,8 +13212,21 @@ pub const TranspileProcess = struct {
                                 // enum) has no concrete spelling here — let C infer
                                 // the binding type from the (already-monomorphized)
                                 // payload field via `__auto_type`. Concrete payloads
-                                // (`Circle(num)`) emit their explicit type.
-                                if (self.enum_payload_is_type_param(enum_name, pl.items()[i])) {
+                                // (`Circle(num)`) emit their explicit type. A payload
+                                // that merely REFERENCES a type param without bare-
+                                // BEING one (`List<T>*` in a self-referential
+                                // `enum List<T> { Cons(T, List<T>*), Nil }`) needs the
+                                // same `__auto_type` treatment: outside an active
+                                // generic-function substitution context, `write_type`
+                                // below has no way to resolve the abstract `T` down to
+                                // the concrete instantiation actually in play, and
+                                // emitted an undeclared `List__T*` instead of
+                                // `List__dec*`. The RHS (`tmp.payload.Variant._i`) is
+                                // already the correctly-monomorphized C field, so
+                                // `__auto_type` just infers from it directly.
+                                if (self.enum_payload_is_type_param(enum_name, pl.items()[i]) or
+                                    self.enum_payload_references_type_param(enum_name, pl.items()[i]))
+                                {
                                     try self.write("__auto_type ");
                                 } else {
                                     try self.write_type(pl.items()[i].*);

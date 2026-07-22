@@ -8535,3 +8535,83 @@ test "self-referential recursive generic enum (List<T>) via generic helper funct
     defer allocator.free(stdout2);
     try std.testing.expectEqualStrings("head = 2.0\n", stdout2);
 }
+
+test "a PLAIN (non-generic) function can fit-match and destructure a concrete generic-enum instantiation through a pointer" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_plain_fn_fit_generic_enum_ptr.fn";
+    const c_path = "codegen_plain_fn_fit_generic_enum_ptr.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_plain_fn_fit_generic_enum_ptr.exe" else "codegen_plain_fn_fit_generic_enum_ptr";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: `fit_subject_tagged_union_name` only recognized a BARE
+    // identifier subject (`fit l { ... }`) or an arm-based fallback that
+    // needs an ACTIVE generic-function substitution to resolve correctly.
+    // `fit *l { ... }` (dereferencing a POINTER identifier -- the natural
+    // way to match a self-referential `List<T>*` node) from a PLAIN,
+    // non-generic function fell through to the arm fallback with NO active
+    // substitution, so it switched on the bare, never-emitted template tag
+    // name (`List__T_Cons`) instead of the concrete instantiation actually
+    // in play (`List__dec_Cons`). A companion codegen spot (the fit-arm
+    // payload BINDING declaration) had the identical gap: it emitted the
+    // bound variable's C type via `write_type` on the raw, unsubstituted
+    // payload dtype, which only resolves correctly under an active
+    // substitution too.
+    //
+    // Fixed by (1) adding a `*identifier` case to
+    // `fit_subject_tagged_union_name` alongside the existing bare-identifier
+    // one, preferring `type_name_mangled_for_emit` (which checks for an
+    // active substitution first, so it still won't regress the OTHER real
+    // case that must keep resolving via ambient substitution: `fit *self`
+    // inside a generic enum's OWN template method body); and (2) using
+    // `__auto_type` for a fit-arm binding whenever the payload merely
+    // REFERENCES a type param (not just bare-IS one), so C infers the
+    // binding's type from the already-correctly-monomorphized RHS field
+    // instead of needing the (unavailable) substitution at all.
+    //
+    // Construction of a concrete generic-enum instantiation directly from
+    // non-generic code (e.g. a plain `main()` writing `List.Nil` itself)
+    // remains a separate, NOT-yet-fixed gap -- see the note in the previous
+    // test. This test's `list_nil`/`list_push` stay generic helpers; only
+    // `list_sum` (the part actually being regression-tested here) is a
+    // PLAIN, non-generic function fixed to `List<dec>`.
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.c.mem;\n" ++
+        "enum List<T> { Cons(T, List<T>*), Nil }\n" ++
+        "fun list_nil<T>(T type_hint) List<T>* {\n" ++
+        "  List<T>* n = malloc(sizeof(List<T>));\n" ++
+        "  *n = List.Nil;\n" ++
+        "  ret n;\n" ++
+        "}\n" ++
+        "fun list_push<T>(T v, List<T>* tail) List<T>* {\n" ++
+        "  List<T>* n = malloc(sizeof(List<T>));\n" ++
+        "  *n = List.Cons(v, tail);\n" ++
+        "  ret n;\n" ++
+        "}\n" ++
+        "fun list_sum(List<dec>* l) dec {\n" ++
+        "  fit *l {\n" ++
+        "    List.Cons(v, tail) -> { ret v + list_sum(tail); }\n" ++
+        "    List.Nil -> { ret 0.0; }\n" ++
+        "  }\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  List<dec>* nil_list = list_nil(0.0);\n" ++
+        "  List<dec>* l = list_push(3.0, list_push(2.0, list_push(1.0, nil_list)));\n" ++
+        "  printf(\"sum = %.1f\\n\", list_sum(l));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("sum = 6.0\n", stdout);
+}
