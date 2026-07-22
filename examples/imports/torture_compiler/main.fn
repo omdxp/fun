@@ -52,8 +52,8 @@ fun main() num {
     Result.Err(e) -> { printf("parse error (unexpected)\n"); }
   }
 
-  // A function call, parsed for real: max(2 + 3, min(10, 20))
-  Result<Expr *> call_r = parse("max(2 + 3, min(10, 20))");
+  // A variable-arity function call, parsed for real: max(2 + 3, min(10, 20), abs(0 - 9))
+  Result<Expr *> call_r = parse("max(2 + 3, min(10, 20), abs(0 - 9))");
   fit call_r {
     Result.Ok(call_expr) -> {
       Expr* c = call_expr;

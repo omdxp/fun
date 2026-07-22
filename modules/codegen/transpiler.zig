@@ -1683,19 +1683,46 @@ pub const TranspileProcess = struct {
         return self.dtype_from_mangled_segments(reg, segments.items, &idx);
     }
 
+    /// Splits a trailing `_ptrN` suffix (added by `append_mangled_type_depth`/
+    /// `append_mangled_type_with_subst_depth` to keep `Vec<Node>` and
+    /// `Vec<Node*>` from mangling to the same name) back off a reconstructed
+    /// segment name, recovering the base name and pointer depth.
+    fn splitMangledPointerSuffix(name: []const u8) struct { base: []const u8, depth: usize } {
+        if (mem.lastIndexOf(u8, name, "_ptr")) |i| {
+            const digits = name[i + 4 ..];
+            if (digits.len > 0) {
+                var all_digits = true;
+                for (digits) |c| {
+                    if (c < '0' or c > '9') {
+                        all_digits = false;
+                        break;
+                    }
+                }
+                if (all_digits) {
+                    if (std.fmt.parseInt(usize, digits, 10) catch null) |depth| {
+                        return .{ .base = name[0..i], .depth = depth };
+                    }
+                }
+            }
+        }
+        return .{ .base = name, .depth = 0 };
+    }
+
     fn dtype_from_mangled_segments(self: *Self, reg: *TypeRegistry, segments: [][]const u8, idx: *usize) TranspileError!?*dtype.DataType {
         if (idx.* >= segments.len) return null;
-        const name = segments[idx.*];
+        const raw_name = segments[idx.*];
+        const split = splitMangledPointerSuffix(raw_name);
+        const name = split.base;
         idx.* += 1;
 
         const out = self.allocator.create(dtype.DataType) catch {
             return TranspileError.MemoryAllocationFailed;
         };
         out.* = .{
-            .flags = null,
+            .flags = if (split.depth > 0) .{ .is_pointer = true } else null,
             .type = .Unknown,
             .type_str = ArrayList(u8).init(self.allocator),
-            .pointer_depth = 0,
+            .pointer_depth = split.depth,
             .array = null,
             .generic_args = null,
         };
@@ -12127,6 +12154,21 @@ pub const TranspileProcess = struct {
         }
 
         buf.appendSlice(dt.type_str.items) catch return TranspileError.MemoryAllocationFailed;
+        // A generic ARG's pointer depth must be part of its mangled identity:
+        // `Vec<Node>` and `Vec<Node*>` are genuinely different monomorphizations
+        // (a `T*` field/param substituting T=Node* needs an extra level of
+        // indirection than T=Node), but without this both mangled to the
+        // identical "Vec__Node" — colliding into ONE emitted struct/method set
+        // with whichever arg's pointer_depth happened to be seen last, a real
+        // miscompile (e.g. `push(T value)` monomorphized to take `Node` by
+        // value instead of `Node*`). Only applies at nested (arg) depth, not
+        // the OUTER/top-level type: `type_name_mangled` on a *pointer-typed
+        // variable* (`Vec<num>* p`) is called constantly to get just the bare
+        // struct name, with the caller's own C syntax adding the "*" — suffixing
+        // depth 0 too would wrongly rename every one of those existing uses.
+        if (depth > 0 and dt.pointer_depth > 0) {
+            buf.print("_ptr{d}", .{dt.pointer_depth}) catch return TranspileError.MemoryAllocationFailed;
+        }
         if (dt.generic_args) |gargs| {
             for (gargs.items()) |ga| {
                 if (buf.items.len + 2 > max_total_len) {
@@ -12140,6 +12182,21 @@ pub const TranspileProcess = struct {
 
     fn append_mangled_type(self: *Self, buf: *ArrayList(u8), dt: *const dtype.DataType) TranspileError!void {
         try self.append_mangled_type_depth(buf, dt, 0);
+    }
+
+    /// Like `type_name_mangled`, but for a dtype being manually concatenated
+    /// as a generic ARGUMENT segment into a larger `Outer__Arg` name (as
+    /// opposed to naming the dtype's own struct/variable, where a pointer is
+    /// a separate C token the caller adds itself). Starts the depth counter
+    /// at 1 so `append_mangled_type_depth`'s pointer-suffix logic (gated on
+    /// depth > 0) applies here too — without this, code that manually builds
+    /// a combined name by calling the depth-0 `type_name_mangled` on just the
+    /// argument piece silently lost the argument's own pointer depth again.
+    fn type_name_mangled_as_arg(self: *Self, dt: *const dtype.DataType) TranspileError![]const u8 {
+        var buf = ArrayList(u8).init(self.allocator);
+        errdefer buf.deinit();
+        try self.append_mangled_type_depth(&buf, dt, 1);
+        return buf.toOwnedSlice() catch return TranspileError.MemoryAllocationFailed;
     }
 
     fn type_name_mangled(self: *Self, dt: *const dtype.DataType) TranspileError![]const u8 {
@@ -12182,6 +12239,13 @@ pub const TranspileProcess = struct {
         }
 
         buf.appendSlice(dt.type_str.items) catch return TranspileError.MemoryAllocationFailed;
+        // See the matching comment in `append_mangled_type_depth`: a generic
+        // ARG's pointer depth must be part of its mangled identity, or
+        // `Vec<Node>`/`Vec<Node*>` collide into the same name. Only at nested
+        // (arg) depth, never the outer/top-level type.
+        if (depth > 0 and dt.pointer_depth > 0) {
+            buf.print("_ptr{d}", .{dt.pointer_depth}) catch return TranspileError.MemoryAllocationFailed;
+        }
         if (dt.generic_args) |gargs| {
             for (gargs.items()) |ga| {
                 if (buf.items.len + 2 > max_total_len) {
@@ -12813,7 +12877,7 @@ pub const TranspileProcess = struct {
                 return null; // unresolved param -> not concrete
             }
             const rt = resolved.?;
-            const arg_name = self.type_name_mangled(rt) catch return null;
+            const arg_name = self.type_name_mangled_as_arg(rt) catch return null;
             defer self.allocator.free(arg_name);
             buf.appendSlice("__") catch return null;
             buf.appendSlice(arg_name) catch return null;

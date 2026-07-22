@@ -4,24 +4,25 @@
 // pointer-based tagged-union type (and its Display quirk impl).
 
 imp std.io;
+imp std.string;
+imp std.vec;
 imp std.quirks;
 
-// NOTE: `Call`'s args are two FIXED fields (not `Vec<Expr*>`) — a real
-// variable-arity design hit a genuine, previously-unknown compiler bug:
-// a generic container instantiated with a POINTER type argument
-// (`Vec<Expr*>`) is broken across several codegen paths (compound
-// fields, enum payloads, and method parameters each combine/lose the
-// pointer depth differently), producing `Vec<T>` monomorphized as if it
-// held `T` by value instead of `T*`. Deep, multi-path issue -- documented
-// as a known gap for the eventual self-hosting effort rather than fixed
-// here; worked around by capping calls at 2 args (enough for max/min).
+// `Call`'s args are a real `Vec<Expr*>` (variable arity) -- this used to hit
+// a genuine compiler bug: a generic container instantiated with a POINTER
+// type argument (`Vec<Expr*>`) mangled to the SAME C name as `Vec<Expr>`
+// ("Vec__Expr" either way), so its struct fields, enum-payload unions, and
+// monomorphized method parameters all lost or miscombined the pointer depth
+// depending on which (colliding) instantiation happened to be processed
+// last. Now fixed: the mangled name encodes each generic arg's pointer
+// depth (`Vec__Expr_ptr1`), so distinct pointer-ness instantiate distinctly.
 pub enum Expr {
   Num(dec),
   Var(str),
   Neg(Expr *),
   Bin(chr, Expr *, Expr *),
   Let(str, Expr *, Expr *),
-  Call(str, Expr *, Expr *),
+  Call(str, Vec<Expr *>),
 }
 
 impl Expr as Display {
@@ -32,7 +33,23 @@ impl Expr as Display {
       Expr.Neg(e) -> { ret format("(neg {})", *e); }
       Expr.Bin(op, l, r) -> { ret format("({} {} {})", op, *l, *r); }
       Expr.Let(name, v, body) -> { ret format("(let {} = {} in {})", name, *v, *body); }
-      Expr.Call(name, a, b) -> { ret format("{}({}, {})", name, *a, *b); }
+      Expr.Call(name, args) -> {
+        Vec<str> parts;
+        parts.init(4);
+        num i = 0;
+        for i < args.len() {
+          // `format("{}", *args.get(i))` (dereferencing a METHOD CALL
+          // result directly) doesn't dispatch to Display -- a separate,
+          // already-documented limitation (auto-dispatch resolves a
+          // small set of syntactic shapes, not full type inference).
+          // Binding to a local first routes through the identifier-
+          // dereference path, which does dispatch correctly.
+          Expr* e = args.get(i);
+          parts.push(format("{}", *e));
+          i = i + 1;
+        }
+        ret format("{}({})", name, join(&parts, ", "));
+      }
     }
   }
 }

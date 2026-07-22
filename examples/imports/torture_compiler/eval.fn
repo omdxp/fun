@@ -2,21 +2,42 @@
 // (std.map, a two-type-param generic) as the symbol table.
 
 imp std.map;
+imp std.vec;
 imp ast;
 
-fun eval_call(str name, dec a, dec b) dec {
+// max/min reduce over a variable-arity Vec<Expr*> -- any argument count.
+fun eval_call(str name, Vec<Expr *> args, Map<str, dec>* env) dec {
   fit name {
     "max" -> {
-      if a > b {
-        ret a;
+      dec best = eval(args.get(0), env);
+      num i = 1;
+      for i < args.len() {
+        let v = eval(args.get(i), env);
+        if v > best {
+          best = v;
+        }
+        i = i + 1;
       }
-      ret b;
+      ret best;
     }
     "min" -> {
-      if a < b {
-        ret a;
+      dec best = eval(args.get(0), env);
+      num i = 1;
+      for i < args.len() {
+        let v = eval(args.get(i), env);
+        if v < best {
+          best = v;
+        }
+        i = i + 1;
       }
-      ret b;
+      ret best;
+    }
+    "abs" -> {
+      let a = eval(args.get(0), env);
+      if a < 0.0 {
+        ret 0.0 - a;
+      }
+      ret a;
     }
     _ -> { ret 0.0; }
   }
@@ -43,7 +64,7 @@ pub fun eval(Expr* e, Map<str, dec>* env) dec {
       env.put(name, v);
       ret eval(body, env);
     }
-    Expr.Call(name, a, b) -> { ret eval_call(name, eval(a, env), eval(b, env)); }
+    Expr.Call(name, args) -> { ret eval_call(name, args, env); }
   }
   ret 0.0;
 }

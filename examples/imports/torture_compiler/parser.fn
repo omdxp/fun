@@ -45,10 +45,24 @@ fun parser_mk_bin(chr op, Expr* l, Expr* r) Expr* {
   ret e;
 }
 
-fun parser_mk_call(str name, Expr* a, Expr* b) Expr* {
+fun parser_mk_call(str name, Vec<Expr *> args) Expr* {
   Expr* e = malloc(sizeof(Expr));
-  *e = Expr.Call(name, a, b);
+  *e = Expr.Call(name, args);
   ret e;
+}
+
+fun token_is_rparen(Token t) bin {
+  fit t {
+    Token.RParen -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
+fun token_is_comma(Token t) bin {
+  fit t {
+    Token.Comma -> { ret true; }
+    _ -> { ret false; }
+  }
 }
 
 impl Parser {
@@ -122,15 +136,20 @@ impl Parser {
   }
 
   // `name(` was already confirmed by the caller; consumes the '(' here.
-  // Fixed 2-arg calls only (`max(a, b)`, `min(a, b)`) -- see ast.fn's note
-  // on why this doesn't take a Vec<Expr*> of arbitrary arity.
+  // Real variable-arity call: `f()`, `f(a)`, `f(a, b, ...)`.
   parse_call(str name) Expr* {
     self.advance();
-    Expr* a = self.parse_expr();
+    Vec<Expr *> args;
+    args.init(4);
+    if ! token_is_rparen(self.peek()) {
+      args.push(self.parse_expr());
+      for token_is_comma(self.peek()) {
+        self.advance();
+        args.push(self.parse_expr());
+      }
+    }
     self.advance();
-    Expr* b = self.parse_expr();
-    self.advance();
-    ret parser_mk_call(name, a, b);
+    ret parser_mk_call(name, args);
   }
 }
 

@@ -8137,22 +8137,29 @@ test "multi-file compiler-shaped torture program: lexer+parser+ast+eval+trace ac
     // linked compound with a generic quirk impl, private per-file helper
     // functions reusing names across files (`mk_bin`/`mk_num` in both
     // parser.fn and main.fn), a real recursive-descent parser returning
-    // Result<Expr*> (Ok on success, Err on trailing garbage), and a 2-arg
-    // `Call` variant exercising `fit` on both `chr` (operators/lexing) and
-    // `str` (builtin dispatch) subjects with 4+ branches each. It found six
-    // real compiler bugs across two rounds this way: Display not
-    // dispatching through a pointer dereference, an uninitialized
-    // `has_default_branch` field, unmangled private-function C names
-    // colliding across unrelated files, `fit` on a `chr` subject silently
-    // matching only its FIRST branch (a real miscompile — see the dedicated
-    // regression test below), an enum-variant payload of a generic-compound
-    // type failing to type-match its own declared type, and a deep,
-    // NOT-fixed issue where a generic container instantiated with a POINTER
-    // type argument (`Vec<Expr*>`) loses/miscombines the pointer depth
-    // across several codegen paths (worked around here by capping `Call`
-    // at 2 fixed args instead of `Vec<Expr*>` — see ast.fn's comment). All
-    // fixed bugs are separately regression-tested above/below; this test
-    // locks in the whole program still working together end-to-end.
+    // Result<Expr*> (Ok on success, Err on trailing garbage), `fit` on both
+    // `chr` (operators/lexing) and `str` (builtin dispatch) subjects with
+    // 4+ branches each, and a variable-arity `Call(str, Vec<Expr*>)` --
+    // a generic container of POINTERS to the enum's own recursive type,
+    // parsed with a real comma-separated argument list and reduced over in
+    // the evaluator (`max`/`min`/`abs`, any arg count). It found seven real
+    // compiler bugs across three rounds this way: Display not dispatching
+    // through a pointer dereference, an uninitialized `has_default_branch`
+    // field, unmangled private-function C names colliding across unrelated
+    // files, `fit` on a `chr` subject silently matching only its FIRST
+    // branch (a real miscompile), an enum-variant payload of a generic-
+    // compound type failing to type-match its own declared type, and --
+    // the big one -- a generic container instantiated with a POINTER type
+    // argument (`Vec<Expr*>`) mangling to the SAME C name as `Vec<Expr>`
+    // ("Vec__Expr" either way), so whichever (colliding) instantiation was
+    // processed last silently won for every struct field, enum-payload
+    // union, and monomorphized method parameter -- e.g. `push(T value)`
+    // taking `Expr` by value instead of `Expr*`. Fixed by encoding each
+    // generic argument's pointer depth into its mangled name
+    // (`Vec__Expr_ptr1`), so distinct pointer-ness instantiates distinctly.
+    // All fixed bugs are separately regression-tested above/below; this
+    // test locks in the whole program (now using the REAL Vec<Expr*>
+    // design that originally exposed the bug) still working end-to-end.
     var tp = try codegen.TranspileProcess.init(
         allocator,
         "examples/imports/torture_compiler/main.fn",
@@ -8182,7 +8189,7 @@ test "multi-file compiler-shaped torture program: lexer+parser+ast+eval+trace ac
         "parsed result = 13.0\n" ++
             "parsed ast    = (- (+ 2 (* 3 4)) 1)\n" ++
             "call result   = 10.0\n" ++
-            "call ast      = max((+ 2 3), min(10, 20))\n" ++
+            "call ast      = max((+ 2 3), min(10, 20), abs((- 0 9)))\n" ++
             "rejected      = unexpected trailing tokens after expression\n" ++
             "built result  = 49.0\n" ++
             "built ast     = (let x = 7 in (* x x))\n" ++
@@ -8295,4 +8302,64 @@ test "an enum variant payload of a generic-compound type matches its own declare
     const stdout = try runExeWithEnv(allocator, exe_path, &.{});
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("42\n", stdout);
+}
+
+test "a generic container instantiated with a pointer type argument mangles distinctly (Vec<T*>)" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_generic_pointer_arg_mangling.fn";
+    const c_path = "codegen_generic_pointer_arg_mangling.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_generic_pointer_arg_mangling.exe" else "codegen_generic_pointer_arg_mangling";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: the big one. `append_mangled_type_depth`/
+    // `append_mangled_type_with_subst_depth` never encoded a generic
+    // argument's POINTER DEPTH in the mangled name -- `Vec<Node>` and
+    // `Vec<Node*>` both mangled to the identical "Vec__Node", so both
+    // instantiations collided into ONE emitted struct/method set, with
+    // whichever instantiation was processed last silently winning. In
+    // practice this meant a monomorphized method like `push(T value)`
+    // could take `Node` BY VALUE instead of `Node*`, a real miscompile
+    // (C errors like "passing 'Node *' to parameter of incompatible type
+    // 'Node'"). Found via the torture-test program's original design (a
+    // recursive AST's `Call` variant holding `Vec<Expr*>`). Fixed by
+    // suffixing a nested (generic-arg-depth) pointer type with `_ptrN`
+    // in its mangled name (`Vec__Node_ptr1`), so distinct pointer-ness
+    // instantiates distinctly. Also exercises `Vec<T>` used with BOTH a
+    // plain and a pointer argument in the SAME program, which is exactly
+    // the scenario that used to collide.
+    const input2 =
+        "imp std.c.io;\n" ++
+        "imp std.c.mem;\n" ++
+        "imp std.vec;\n" ++
+        "compound Node { num value; }\n" ++
+        "fun main() num {\n" ++
+        "  Vec<Node> plain;\n" ++
+        "  plain.init(4);\n" ++
+        "  Node a;\n" ++
+        "  a.value = 7;\n" ++
+        "  plain.push(a);\n" ++
+        "  Vec<Node*> ptrs;\n" ++
+        "  ptrs.init(4);\n" ++
+        "  Node* n = malloc(sizeof(Node));\n" ++
+        "  n.value = 42;\n" ++
+        "  ptrs.push(n);\n" ++
+        "  Node got_plain = plain.get(0);\n" ++
+        "  Node* got_ptr = ptrs.get(0);\n" ++
+        "  printf(\"%lld %lld\\n\", got_plain.value, got_ptr.value);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned2 = try runTranspile(allocator, ifilepath, input2);
+    defer allocator.free(out_owned2);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned2);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout2 = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout2);
+    try std.testing.expectEqualStrings("7 42\n", stdout2);
 }
