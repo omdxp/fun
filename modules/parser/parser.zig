@@ -1280,11 +1280,26 @@ pub const ParseProcess = struct {
     }
 
     fn append_mangled_dtype_name(self: *Self, buf: *ArrayList(u8), dt: *const dtype.DataType) ParseError!void {
+        try self.append_mangled_dtype_name_depth(buf, dt, 0);
+    }
+
+    fn append_mangled_dtype_name_depth(self: *Self, buf: *ArrayList(u8), dt: *const dtype.DataType, depth: usize) ParseError!void {
         buf.appendSlice(dt.type_str.items) catch return ParseError.MemoryAllocationFailed;
+        // A generic ARG's pointer depth must be part of its mangled identity
+        // (mirrors `append_mangled_type_depth` in transpiler.zig — see its
+        // comment): `Box<Node>` and `Box<Node*>` are genuinely different
+        // concrete quirk instantiations, but without this both mangled to
+        // the identical "Box__Node", so an `impl X as Box<Node*>`'s method
+        // validated against the WRONG (unsubstituted-for-pointer) quirk
+        // signature and spuriously failed as a return-type mismatch. Only
+        // at nested (arg) depth, never the outer/top-level quirk name.
+        if (depth > 0 and dt.pointer_depth > 0) {
+            buf.print("_ptr{d}", .{dt.pointer_depth}) catch return ParseError.MemoryAllocationFailed;
+        }
         if (dt.generic_args) |gargs| {
             for (gargs.items()) |ga| {
                 buf.appendSlice("__") catch return ParseError.MemoryAllocationFailed;
-                try self.append_mangled_dtype_name(buf, ga);
+                try self.append_mangled_dtype_name_depth(buf, ga, depth + 1);
             }
         }
     }

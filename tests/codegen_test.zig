@@ -8363,3 +8363,55 @@ test "a generic container instantiated with a pointer type argument mangles dist
     defer allocator.free(stdout2);
     try std.testing.expectEqualStrings("7 42\n", stdout2);
 }
+
+test "a concrete quirk instantiation with a pointer type argument validates against its own substituted signature" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_quirk_ptr_arg_mangling.fn";
+    const c_path = "codegen_quirk_ptr_arg_mangling.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_quirk_ptr_arg_mangling.exe" else "codegen_quirk_ptr_arg_mangling";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: the SAME pointer-arg mangling gap, but in a THIRD,
+    // entirely independent mangling implementation -- `parser.zig`'s own
+    // `append_mangled_dtype_name`, used to build a concrete generic-quirk
+    // instantiation's identity (`impl PtrBox as Box<Node*>` -> should be
+    // "Box__Node_ptr1", was "Box__Node" -- identical to `Box<Node>`). The
+    // impl's `get() Node*` method was then validated against the WRONG
+    // (unsubstituted, non-pointer) quirk signature and spuriously rejected
+    // as "impl method 'get' return type mismatch: expected Node, got
+    // Node*". Fixed the same way as the codegen-side mangling (suffix a
+    // nested generic arg's pointer depth into the mangled name).
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.c.mem;\n" ++
+        "imp std.quirks;\n" ++
+        "compound Node { num value; }\n" ++
+        "quirk Box<T> { get() T; }\n" ++
+        "compound PtrBox { Node* held; }\n" ++
+        "impl PtrBox as Box<Node*> {\n" ++
+        "  get() Node* { ret self.held; }\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  PtrBox b;\n" ++
+        "  Node* n = malloc(sizeof(Node));\n" ++
+        "  n.value = 33;\n" ++
+        "  b.held = n;\n" ++
+        "  Node* got = b.get();\n" ++
+        "  printf(\"%lld\\n\", got.value);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("33\n", stdout);
+}
