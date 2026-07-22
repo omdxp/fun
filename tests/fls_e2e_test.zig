@@ -2109,6 +2109,61 @@ test "fls e2e: go-to-definition and hover on a method chained onto a real (non-f
         try std.testing.expect(std.mem.indexOf(u8, def_uri, "option.fn") != null);
     }
 
+    // Simulate normal editing (type a character, then delete it — net-zero
+    // text change, so every position below stays valid) via incremental
+    // `didChange` BEFORE re-querying go-to-definition, since a real editing
+    // session sends these constantly and the reported bug was only ever
+    // seen live, never on a freshly-opened, never-edited document.
+    {
+        const insert_json = try escapeJsonAlloc(allocator, "x");
+        defer allocator.free(insert_json);
+        const did_change_insert = try std.fmt.allocPrint(
+            allocator,
+            "{{\"textDocument\":{{\"uri\":\"{s}\",\"version\":2}},\"contentChanges\":[" ++
+                "{{\"range\":{{\"start\":{{\"line\":0,\"character\":0}},\"end\":{{\"line\":0,\"character\":0}}}},\"text\":\"{s}\"}}]}}",
+            .{ doc_uri, insert_json },
+        );
+        defer allocator.free(did_change_insert);
+        try lsp.notify("textDocument/didChange", did_change_insert);
+
+        const did_change_delete = try std.fmt.allocPrint(
+            allocator,
+            "{{\"textDocument\":{{\"uri\":\"{s}\",\"version\":3}},\"contentChanges\":[" ++
+                "{{\"range\":{{\"start\":{{\"line\":0,\"character\":0}},\"end\":{{\"line\":0,\"character\":1}}}},\"text\":\"\"}}]}}",
+            .{doc_uri},
+        );
+        defer allocator.free(did_change_delete);
+        try lsp.notify("textDocument/didChange", did_change_delete);
+    }
+
+    // Same check on the FIRST `unwrap_or` in the file — chained onto
+    // `value.get("name")`, i.e. onto a method call on a function PARAMETER
+    // (not a `let`-bound local like `v`/`n`/`s`), with a shorthand enum
+    // literal (`JsonValue.Null`) as the argument. This is a different
+    // receiver-resolution path than the `v.as_num().unwrap_or(0.0)` case
+    // above and was reported to still fail go-to-definition even after that
+    // one was fixed.
+    {
+        const pos2 = try findPosition(doc_text, "value.get(\"name\").unwrap_or(JsonValue.Null)", 0);
+        const base_off2 = "value.get(\"name\").".len;
+        var col_off2: i64 = 0;
+        while (col_off2 < @as(i64, @intCast("unwrap_or".len))) : (col_off2 += 1) {
+            const params = try std.fmt.allocPrint(
+                allocator,
+                "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+                .{ doc_uri, pos2.line, pos2.col + @as(i64, @intCast(base_off2)) + col_off2 },
+            );
+            defer allocator.free(params);
+            const did = try lsp.request("textDocument/definition", params);
+            var dres = try lsp.waitResponse(did, 15000);
+            defer dres.deinit();
+            const dval = try jsonResultFromResponseObj(dres.parsed.value.object);
+            try std.testing.expect(dval == .array and dval.array.items.len > 0);
+            const def_uri = dval.array.items[0].object.get("uri").?.string;
+            try std.testing.expect(std.mem.indexOf(u8, def_uri, "option.fn") != null);
+        }
+    }
+
     const shutdown_id = try lsp.request("shutdown", "{}");
     var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
     shutdown_res.deinit();
