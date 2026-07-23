@@ -327,6 +327,15 @@ pub const TranspileProcess = struct {
     /// Track whether current function is async (for await semantics in typecheck).
     current_fn_is_async: bool = false,
 
+    /// The function/method node whose body is currently being typechecked
+    /// (null outside any function body, e.g. while checking module globals).
+    /// Stamped onto `GenericFnInstantiation.owner_fn` so a placeholder
+    /// instantiation registered from a call site *inside a generic function's
+    /// own template body* can later be resolved by identity, not by type-param
+    /// NAME -- two unrelated generic functions overwhelmingly both name their
+    /// type param "T", so name-only matching would wrongly cross-substitute.
+    typecheck_owner_fn: ?*ast.Node = null,
+
     /// True while inferring the operand of an `await` unary expression.
     in_await_operand_inference: bool = false,
 
@@ -3125,7 +3134,7 @@ pub const TranspileProcess = struct {
         return buf.toOwnedSlice() catch return TranspileError.MemoryAllocationFailed;
     }
 
-    fn register_generic_fn_instantiation(self: *Self, fn_node: *ast.Node, params: *const utils.Vector(ArrayList(u8)), gargs: []*dtype.DataType, name: []const u8) TranspileError!void {
+    fn register_generic_fn_instantiation(self: *Self, fn_node: *ast.Node, params: *const utils.Vector(ArrayList(u8)), gargs: []*dtype.DataType, name: []const u8, owner_fn: ?*ast.Node) TranspileError!void {
         const root = self.get_root();
         // The key is stored on (and freed by) `root`, so it MUST be allocated with
         // root's allocator. When a generic fn is instantiated from an IMPORTED
@@ -3146,7 +3155,69 @@ pub const TranspileProcess = struct {
             .params = params,
             .args = gargs,
             .name = name,
+            .owner_fn = owner_fn,
         }) catch return TranspileError.MemoryAllocationFailed;
+    }
+
+    /// A generic function calling a DIFFERENT generic function from its own
+    /// template body (e.g. `identity(x)` inside `double_it<T>`) gets an
+    /// instantiation registered at typecheck time too, but only with the
+    /// caller's own still-abstract type param as the arg (`identity__T`) --
+    /// `T` isn't bound to a concrete type until a call site OUTSIDE any
+    /// generic function instantiates `double_it` itself. That placeholder
+    /// entry is filtered out of emission (`mangled_contains_unresolved_placeholder`),
+    /// so `identity__num` was never registered and never emitted, even though
+    /// call-site text for it resolves correctly via `resubstitute_mangled_segments`.
+    ///
+    /// Called once per concrete instantiation `inst` (e.g. `double_it__num`,
+    /// params=["T"], args=[num]) right as it's about to be emitted, with the
+    /// binding therefore known. Scans every OTHER still-placeholder instantiation
+    /// for one whose args reference one of `inst`'s own params, substitutes
+    /// through to get concrete args, and registers the result -- which the
+    /// caller's index-based worklist loop will then pick up and emit in a
+    /// later iteration of the same pass.
+    fn resolve_transitive_generic_fn_instantiations(self: *Self, inst: GenericFnInstantiation) TranspileError!void {
+        if (inst.args.len == 0) return;
+        const root = self.get_root();
+        var i: usize = 0;
+        while (i < root.generic_fn_instantiations.items.len) : (i += 1) {
+            const other = root.generic_fn_instantiations.items[i];
+            if (other.args.len == 0) continue;
+            if (!self.mangled_contains_unresolved_placeholder(other.name)) continue;
+            // Scope by IDENTITY of the enclosing function, not by type-param
+            // NAME: an unrelated generic function elsewhere in the program
+            // (e.g. `ok_or<T>` in std.option) almost certainly also names its
+            // type param "T", so a name-only check would wrongly treat its
+            // placeholder instantiations as belonging to `inst` and substitute
+            // them with `inst`'s unrelated concrete args.
+            const owner = other.owner_fn orelse continue;
+            if (owner != inst.fn_node) continue;
+
+            var any_ref = false;
+            for (other.args) |a| {
+                if (self.dtype_contains_type_param(a, inst.params)) {
+                    any_ref = true;
+                    break;
+                }
+            }
+            if (!any_ref) continue;
+
+            const resolved = self.allocator.alloc(*dtype.DataType, other.args.len) catch return TranspileError.MemoryAllocationFailed;
+            for (other.args, 0..) |a, ai| {
+                resolved[ai] = try self.clone_dtype_with_subst_for_inst(a, inst.params, inst.args);
+            }
+
+            const other_fnv = other.fn_node.node_variant orelse continue;
+            const other_fname = other_fnv.function.name orelse continue;
+            const new_name = try self.mangle_generic_fn_name(other_fname.items, resolved);
+            // Still references a type param further up an even deeper call
+            // chain (e.g. a THIRD generic function called from `identity`'s
+            // own body) -- leave it for a later `inst` in the worklist whose
+            // binding resolves it the rest of the way.
+            if (self.mangled_contains_unresolved_placeholder(new_name)) continue;
+
+            try self.register_generic_fn_instantiation(other.fn_node, other.params, resolved, new_name, null);
+        }
     }
 
     fn append_quirk_method_stub_sig(self: *Self, buf: *ArrayList(u8), m: ast.QuirkMethodSig) TranspileError!void {
@@ -4488,6 +4559,11 @@ pub const TranspileProcess = struct {
         params: *const utils.Vector(ArrayList(u8)),
         args: []*dtype.DataType,
         name: []const u8,
+        /// The generic function whose template body this call site was found
+        /// in, if any (null for calls made from ordinary, non-generic code).
+        /// See `typecheck_owner_fn` for why identity, not name, is used to
+        /// scope `resolve_transitive_generic_fn_instantiations`'s substitution.
+        owner_fn: ?*ast.Node = null,
     };
 
     const PendingWarningControl = struct {
@@ -8195,7 +8271,7 @@ pub const TranspileProcess = struct {
 
                             // Register instantiation and call override for codegen.
                             const spec_name = try self.mangle_generic_fn_name(callee_name.?, gargs);
-                            try self.register_generic_fn_instantiation(fn_node.?, params_ptr, gargs, spec_name);
+                            try self.register_generic_fn_instantiation(fn_node.?, params_ptr, gargs, spec_name, self.typecheck_owner_fn);
                             await_lowering_callee = spec_name;
                             if (node.pos) |p| {
                                 // Store on the ROOT (alongside the instantiation) so the
@@ -9859,6 +9935,9 @@ pub const TranspileProcess = struct {
                 const prev_async = proc.current_fn_is_async;
                 proc.current_fn_is_async = fnv.is_async;
                 defer proc.current_fn_is_async = prev_async;
+                const prev_owner_fn = proc.typecheck_owner_fn;
+                proc.typecheck_owner_fn = if (fnv.name) |fname| proc.find_function_node(fname.items) else null;
+                defer proc.typecheck_owner_fn = prev_owner_fn;
                 try proc.check_body(body, &fn_env, fns, fn_rtype);
 
                 proc.warn_unused_bindings_in_current_scope(&fn_env);
@@ -9990,6 +10069,9 @@ pub const TranspileProcess = struct {
                     const prev_async = proc.current_fn_is_async;
                     proc.current_fn_is_async = fnv.is_async;
                     defer proc.current_fn_is_async = prev_async;
+                    const prev_owner_fn = proc.typecheck_owner_fn;
+                    proc.typecheck_owner_fn = m_ptr;
+                    defer proc.typecheck_owner_fn = prev_owner_fn;
                     try proc.check_body(body, &fn_env, fns, fn_rtype);
 
                     proc.warn_unused_bindings_in_current_scope(&fn_env);
@@ -16815,7 +16897,14 @@ pub const TranspileProcess = struct {
         var emitted = std.StringHashMap(bool).init(self.allocator);
         defer emitted.deinit();
 
-        for (root.generic_fn_instantiations.items) |inst| {
+        // Index-based, re-reading `.items.len` every iteration: emitting one
+        // instantiation's body can register further ones (a generic function
+        // calling a DIFFERENT generic function -- see
+        // `resolve_transitive_generic_fn_instantiations`), and those newly
+        // appended entries must still be visited by this same pass.
+        var i: usize = 0;
+        while (i < root.generic_fn_instantiations.items.len) : (i += 1) {
+            const inst = root.generic_fn_instantiations.items[i];
             if (self.mangled_contains_unresolved_placeholder(inst.name)) continue;
             if (emitted.contains(inst.name)) continue;
             emitted.put(inst.name, true) catch return TranspileError.MemoryAllocationFailed;
@@ -16833,6 +16922,7 @@ pub const TranspileProcess = struct {
                     self.override_fn_name = prev_override;
                 }
 
+                try self.resolve_transitive_generic_fn_instantiations(inst);
                 try self.transpile_node(inst.fn_node.*);
             }
             try self.write("\n\n");
@@ -17042,7 +17132,13 @@ pub const TranspileProcess = struct {
 
     fn emit_generic_function_prototypes(self: *Self, emitted: *std.StringHashMap(bool)) TranspileError!void {
         const root = self.get_root();
-        for (root.generic_fn_instantiations.items) |inst| {
+        // Index-based, re-reading `.items.len` every iteration: see the matching
+        // comment in `emit_generic_function_specializations` -- resolving one
+        // instantiation's binding can register further ones that this same
+        // pass must still visit (so their prototypes are forward-declared too).
+        var i: usize = 0;
+        while (i < root.generic_fn_instantiations.items.len) : (i += 1) {
+            const inst = root.generic_fn_instantiations.items[i];
             if (self.mangled_contains_unresolved_placeholder(inst.name)) continue;
             if (emitted.contains(inst.name)) continue;
             const emitted_key = self.backing_allocator.dupe(u8, inst.name) catch return TranspileError.MemoryAllocationFailed;
@@ -17061,6 +17157,7 @@ pub const TranspileProcess = struct {
                     self.override_fn_name = prev_override;
                 }
 
+                try self.resolve_transitive_generic_fn_instantiations(inst);
                 try self.write_function_prototype(inst.fn_node.*);
             }
         }

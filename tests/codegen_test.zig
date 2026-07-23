@@ -8874,3 +8874,129 @@ test "WaitGroup.add() grows the signalling channel so wait_group_new(0) + add() 
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("remaining=0 cap=20\n", stdout);
 }
+
+test "a generic function calling a DIFFERENT generic function from its own body gets that callee emitted (indirect instantiation)" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_indirect_generic_call.fn";
+    const c_path = "codegen_indirect_generic_call.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_indirect_generic_call.exe" else "codegen_indirect_generic_call";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: a generic function calling a DIFFERENT generic function from
+    // its own template body (`identity(x)` inside `double_it<T>`) had its call
+    // site registered at typecheck time, but only with the CALLER's still-
+    // abstract type param as the arg (`identity__T`) -- `T` isn't bound to a
+    // concrete type until `double_it` itself gets instantiated from ordinary
+    // code, by which point the abstract-template typecheck pass has already
+    // run and moved on. That placeholder entry is filtered out of emission, so
+    // `identity__num` was never registered/emitted even though the call-site
+    // TEXT resolved correctly via `resubstitute_mangled_segments` -- producing
+    // a C compile error ("call to undeclared function 'identity__num'").
+    // Fixed via `resolve_transitive_generic_fn_instantiations`: when a concrete
+    // instantiation (e.g. `double_it__num`) is about to be emitted, it scans
+    // for placeholder instantiations registered from calls made INSIDE that
+    // same function's own body, substitutes through the now-known binding, and
+    // registers the result -- picked up by the same (now index-based, re-
+    // reading `.items.len`) worklist loop, so three levels deep works too.
+    const input =
+        "imp std.c.io;\n" ++
+        "fun identity<T>(T x) T {\n" ++
+        "  ret x;\n" ++
+        "}\n" ++
+        "fun double_it<T>(T x) T {\n" ++
+        "  ret identity(x) + identity(x);\n" ++
+        "}\n" ++
+        "fun level3<T>(T x) T {\n" ++
+        "  ret x;\n" ++
+        "}\n" ++
+        "fun level2<T>(T x) T {\n" ++
+        "  ret level3(x) + level3(x);\n" ++
+        "}\n" ++
+        "fun level1<T>(T x) T {\n" ++
+        "  ret level2(x) + level2(x);\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"%lld %lld\\n\", double_it(21), level1(5));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("42 20\n", stdout);
+}
+
+test "indirect generic instantiation discovery does not cross-substitute unrelated generic functions sharing a type param name" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_indirect_generic_no_cross_subst.fn";
+    const c_path = "codegen_indirect_generic_no_cross_subst.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_indirect_generic_no_cross_subst.exe" else "codegen_indirect_generic_no_cross_subst";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression in the fix above's first draft: `resolve_transitive_generic_fn_instantiations`
+    // initially matched placeholder instantiations by type-param NAME alone
+    // ("does this OTHER instantiation's arg reference a param named 'T'?").
+    // Since nearly every generic function names its type param "T", this
+    // wrongly cross-substituted a totally unrelated generic function's
+    // placeholder entry using the CURRENT instantiation's concrete args.
+    //
+    // `dead_caller<T>` is never called anywhere (mirroring how the real bug
+    // surfaced: std.option's `ok_or<T>` calling a `Result<T>`-returning
+    // helper internally, never invoked by the failing test's actual program)
+    // -- but EVERY function's body gets typechecked once regardless of
+    // whether it's ever called, so `make_box(v)` inside it still registers a
+    // placeholder (`make_box__T`, owner = dead_caller). Separately,
+    // `live_caller<T>` (unrelated, but also names its param "T") IS called
+    // concretely with `num`. A name-only fix, while emitting `live_caller__num`,
+    // would wrongly find `make_box__T` a "match" (same name "T"), substitute
+    // T->num, and register+emit a bogus `make_box__num` returning `Box__num`
+    // -- a compound specialization that was never legitimately seeded (nothing
+    // ever really calls `make_box` or `dead_caller` with a concrete type),
+    // producing an "unknown type name 'Box__num'" C compile error. Scoping by
+    // `owner_fn` identity (not name) means processing `live_caller__num` never
+    // touches `make_box__T` at all, since its owner is `dead_caller`, not
+    // `live_caller`.
+    const input =
+        "imp std.c.io;\n" ++
+        "compound Box<T> {\n" ++
+        "  T value;\n" ++
+        "}\n" ++
+        "fun make_box<T>(T v) Box<T> {\n" ++
+        "  Box<T> b;\n" ++
+        "  b.value = v;\n" ++
+        "  ret b;\n" ++
+        "}\n" ++
+        "fun dead_caller<T>(T v) Box<T> {\n" ++
+        "  ret make_box(v);\n" ++
+        "}\n" ++
+        "fun live_caller<T>(T v) T {\n" ++
+        "  ret v;\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"%lld\\n\", live_caller(7));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("7\n", stdout);
+}
