@@ -8570,12 +8570,14 @@ test "a PLAIN (non-generic) function can fit-match and destructure a concrete ge
     // binding's type from the already-correctly-monomorphized RHS field
     // instead of needing the (unavailable) substitution at all.
     //
-    // Construction of a concrete generic-enum instantiation directly from
-    // non-generic code (e.g. a plain `main()` writing `List.Nil` itself)
-    // remains a separate, NOT-yet-fixed gap -- see the note in the previous
-    // test. This test's `list_nil`/`list_push` stay generic helpers; only
-    // `list_sum` (the part actually being regression-tested here) is a
-    // PLAIN, non-generic function fixed to `List<dec>`.
+    // (Construction of a concrete generic-enum instantiation directly from
+    // non-generic code was a separate gap at the time this test was
+    // written; it's fixed by a later commit -- see the dedicated
+    // "non-generic code can construct..." test below. This test's
+    // `list_nil`/`list_push` stay generic helpers regardless, since only
+    // `list_sum` -- a PLAIN, non-generic function fixed to `List<dec>` --
+    // is what's actually being regression-tested here: fit-matching, not
+    // construction.)
     const input =
         "imp std.c.io;\n" ++
         "imp std.c.mem;\n" ++
@@ -8614,4 +8616,83 @@ test "a PLAIN (non-generic) function can fit-match and destructure a concrete ge
     const stdout = try runExeWithEnv(allocator, exe_path, &.{});
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("sum = 6.0\n", stdout);
+}
+
+test "non-generic code can construct a concrete generic-enum instantiation by re-assigning into an already-declared pointer" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_nongeneric_construct_generic_enum.fn";
+    const c_path = "codegen_nongeneric_construct_generic_enum.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_nongeneric_construct_generic_enum.exe" else "codegen_nongeneric_construct_generic_enum";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: the LAST layer of the recursive-generic-enum gap. Codegen
+    // resolves a construction's mangled ctor name (`List__dec`) either from
+    // a typecheck-recorded "ctor override" (`bind_enum_ctor_expected`,
+    // triggered by a `.Variable` declaration's initializer -- `List<dec>* v
+    // = List.Cons(...)` -- or a `ret`/call-argument's expected type) or from
+    // an ACTIVE generic-function substitution. Neither covered a plain
+    // RE-ASSIGNMENT into an ALREADY-DECLARED variable/dereferenced pointer
+    // (`*n = List.Cons(v, tail);`, as opposed to declaring `n` inline with
+    // an initializer) from ordinary, non-generic code: no override had ever
+    // been recorded for that construction site, and there's no active
+    // substitution outside a generic function, so it fell back to the
+    // bare, never-emitted template name (`List`) and failed to compile.
+    //
+    // Fixed by recording the SAME kind of ctor override in the assignment
+    // ("=") typecheck path too, using the left-hand side's inferred type
+    // as the expected type -- mirroring the existing `.Variable`
+    // declaration case exactly (`bind_enum_ctor_expected`).
+    //
+    // This closes out the recursive generic enum (`List<T>`) gap entirely:
+    // both construction and destructuring now work from BOTH generic and
+    // plain non-generic code.
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.c.mem;\n" ++
+        "imp std.io;\n" ++
+        "imp std.quirks;\n" ++
+        "enum List<T> { Cons(T, List<T>*), Nil }\n" ++
+        "impl List<T> as Display {\n" ++
+        "  pub to_string() str {\n" ++
+        "    fit *self {\n" ++
+        "      List.Cons(v, tail) -> { ret format(\"{} :: {}\", v, *tail); }\n" ++
+        "      List.Nil -> { ret \"nil\"; }\n" ++
+        "    }\n" ++
+        "  }\n" ++
+        "}\n" ++
+        // Plain, non-generic functions -- constructing List<dec> directly by
+        // its bare name, no generic-function wrapper anywhere.
+        "fun list_push(dec v, List<dec>* tail) List<dec>* {\n" ++
+        "  List<dec>* n = malloc(sizeof(List<dec>));\n" ++
+        "  *n = List.Cons(v, tail);\n" ++
+        "  ret n;\n" ++
+        "}\n" ++
+        "fun list_sum(List<dec>* l) dec {\n" ++
+        "  fit *l {\n" ++
+        "    List.Cons(v, tail) -> { ret v + list_sum(tail); }\n" ++
+        "    List.Nil -> { ret 0.0; }\n" ++
+        "  }\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  List<dec>* nil_list = malloc(sizeof(List<dec>));\n" ++
+        "  *nil_list = List.Nil;\n" ++
+        "  List<dec>* l = list_push(3.0, list_push(2.0, list_push(1.0, nil_list)));\n" ++
+        "  printf(\"sum = %.1f\\n\", list_sum(l));\n" ++
+        "  println_fmt(\"list = {}\", *l);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("sum = 6.0\nlist = 3 :: 2 :: 1 :: nil\n", stdout);
 }

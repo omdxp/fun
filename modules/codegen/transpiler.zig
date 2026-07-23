@@ -8476,6 +8476,17 @@ pub const TranspileProcess = struct {
                         if (dot_shorthand_variant_name(right)) |_| {
                             _ = try self.resolve_dot_shorthand_enum_variant(right, enum_name);
                         }
+                        // For a GENERIC enum (`List<dec>`), record the monomorphized
+                        // name at this construction site (mirrors the `.Variable`
+                        // declaration case above) so codegen emits `List__dec` +
+                        // `List__dec_Cons` instead of the bare, never-emitted
+                        // template name. Without this, re-assigning into an
+                        // ALREADY-DECLARED variable/dereferenced pointer (`*n =
+                        // List.Cons(v, tail);`, as opposed to declaring it inline
+                        // with `List<dec>* n = ...`) from a plain, non-generic
+                        // function had no expected-type context at all to resolve
+                        // the concrete instantiation from.
+                        try self.bind_enum_ctor_expected(right, lt);
                     }
 
                     if (right.*.type == .CompoundInit) {
