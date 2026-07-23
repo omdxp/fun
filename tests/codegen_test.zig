@@ -8696,3 +8696,73 @@ test "non-generic code can construct a concrete generic-enum instantiation by re
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("sum = 6.0\nlist = 3 :: 2 :: 1 :: nil\n", stdout);
 }
+
+test "a generic function can call itself recursively (self-recursive generic function call)" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_self_recursive_generic_fn.fn";
+    const c_path = "codegen_self_recursive_generic_fn.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_self_recursive_generic_fn.exe" else "codegen_self_recursive_generic_fn";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: two DISTINCT bugs found via a tree-shaped generic compound
+    // (TreeNode<K, V>) torture test, both about a generic function calling
+    // itself (or another generic function) recursively from within its own
+    // template body:
+    //
+    // 1. bind_generic_param compared a resolved dtype's `.type` enum field
+    //    strictly. A dtype reached through generic-arg substitution (e.g.
+    //    resolving a compound field's type param bound to a primitive like
+    //    `num`) can end up with the right `type_str` ("num") but an
+    //    unpopulated `.type` (still `.Unknown`) -- so comparing `num`
+    //    (expected, `.type = .Num`) against `num` (actual, `.type =
+    //    .Unknown`) spuriously failed as a mismatch, blocking ANY
+    //    self-recursive generic call whose argument's type flows through
+    //    such a substitution. Fixed by falling back to a type_str
+    //    comparison when the actual side's `.type` isn't populated.
+    //
+    // 2. Even once the call typechecked, lookup_generic_call_override
+    //    returned a name baked in from the SINGLE typecheck pass over the
+    //    abstract template -- where a self-recursive (or sibling-generic)
+    //    call's own type args can only be inferred as the bare, still-
+    //    unresolved type param itself (K calling itself with K). The
+    //    override then named the never-emitted "callee__K" regardless of
+    //    which CONCRETE instantiation (`callee__str`, `callee__num`, ...)
+    //    was actually being emitted. Fixed by re-mangling the override
+    //    through the ACTIVE substitution (the same segment-splitting
+    //    approach the sizeof(Generic<T>)-in-a-generic-function fix already
+    //    used, generalized into a shared `resubstitute_mangled_segments`)
+    //    whenever it still names an active type param.
+    //
+    // NOT fixed here (found but out of scope, documented as a known gap):
+    // a generic function calling a DIFFERENT generic function (as opposed
+    // to itself) indirectly -- the callee's concrete instantiation is never
+    // independently registered for emission, only the never-emitted
+    // template-abstract one from the original typecheck pass, so the
+    // (correctly-named, thanks to fix 2) call site references an
+    // undeclared function. This test is scoped to the self-recursive case,
+    // which is now fully fixed.
+    const input =
+        "imp std.c.io;\n" ++
+        "fun countdown<T>(T label, num n) num {\n" ++
+        "  if n <= 0 { ret 0; }\n" ++
+        "  ret 1 + countdown(label, n - 1);\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"%lld\\n\", countdown(\"x\", 5));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("5\n", stdout);
+}

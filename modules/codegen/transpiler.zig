@@ -2045,7 +2045,60 @@ pub const TranspileProcess = struct {
         // because a generic call inside an IMPORTED module is typechecked under a
         // child process but may be emitted via a different process. Reading from
         // the root makes the override visible regardless of which process emits.
-        return self.get_root().generic_call_overrides.get(key);
+        const raw = self.get_root().generic_call_overrides.get(key) orelse return null;
+
+        // A call to a generic function FROM WITHIN another generic function's own
+        // body (a self-recursive call, or a sibling generic call using the same
+        // type param name) was typechecked ONCE against the abstract TEMPLATE —
+        // at that point the callee's own type args can only be inferred as the
+        // bare, still-unresolved type param itself (e.g. `K` calling itself with
+        // `K`), so the recorded override baked in the never-emitted
+        // "callee__K" forever, regardless of which CONCRETE instantiation
+        // (`callee__str`, `callee__num`, ...) is later emitted. Unlike enum
+        // construction/fit (`mangled_enum_with_active_subst`), there was no
+        // per-emission re-resolution step for this. If the stored override still
+        // names an active type param, re-mangle it through the ACTIVE
+        // substitution (arena-owned so it's safe to return without an explicit
+        // free contract matching the existing non-substituted return path).
+        if (self.type_subst_params) |params| {
+            if (self.type_subst_args) |sargs| {
+                if (self.mangled_contains_type_param(raw, params)) {
+                    if (self.resubstitute_mangled_segments(raw, params.*, sargs) catch null) |resolved| {
+                        return resolved;
+                    }
+                }
+            }
+        }
+        return raw;
+    }
+
+    /// Splits `name` on "__" and re-mangles every segment that exactly matches
+    /// an active type param name against its concrete substitution, rejoining
+    /// with "__". Returns an arena-owned string, or null if nothing needed
+    /// substituting. Mirrors the sizeof(Generic<T>)-inside-a-generic-function
+    /// re-mangling this session already added, generalized into a shared helper.
+    fn resubstitute_mangled_segments(self: *Self, name: []const u8, params: utils.Vector(ArrayList(u8)), args: []*dtype.DataType) TranspileError!?[]const u8 {
+        var buf = ArrayList(u8).init(self.arena.allocator());
+        var it = mem.splitSequence(u8, name, "__");
+        var first = true;
+        var changed = false;
+        while (it.next()) |seg| {
+            if (!first) buf.appendSlice("__") catch return TranspileError.MemoryAllocationFailed;
+            first = false;
+            var replaced = false;
+            for (params.items(), 0..) |p, i| {
+                if (!mem.eql(u8, p.items, seg)) continue;
+                const m = self.type_name_mangled_as_arg(args[i]) catch break;
+                defer self.allocator.free(m);
+                buf.appendSlice(m) catch return TranspileError.MemoryAllocationFailed;
+                replaced = true;
+                changed = true;
+                break;
+            }
+            if (!replaced) buf.appendSlice(seg) catch return TranspileError.MemoryAllocationFailed;
+        }
+        if (!changed) return null;
+        return buf.toOwnedSlice() catch return TranspileError.MemoryAllocationFailed;
     }
 
     /// Record that the generic-data-enum construction at `node` resolves to the
@@ -3029,9 +3082,26 @@ pub const TranspileProcess = struct {
         if (expected.pointer_depth != actual.pointer_depth) return false;
         if ((expected.flags != null and expected.flags.?.is_array) != (actual.flags != null and actual.flags.?.is_array)) return false;
         if (expected.type != null and expected.type != .Unknown) {
-            if (expected.type != actual.type) return false;
+            // A dtype resolved through generic-arg substitution (e.g. a
+            // compound field's type param V bound to `num` via a caller's
+            // `TreeNode<K, num>*`) can end up with the right `type_str`
+            // ("num") but an unpopulated `.type` (still `.Unknown`) --
+            // structurally "not yet recognized as the primitive keyword"
+            // even though it unambiguously names it. Comparing `.type`
+            // fields strictly then spuriously rejected `num` (expected,
+            // `.type = .Num`) against `num` (actual, `.type = .Unknown`)
+            // as a mismatch. Fall back to a type_str comparison when
+            // `actual.type` isn't populated, rather than failing outright.
+            if (expected.type != actual.type) {
+                const actual_unresolved = actual.type == null or actual.type == .Unknown;
+                if (!actual_unresolved or !mem.eql(u8, expected.type_str.items, actual.type_str.items)) {
+                    return false;
+                }
+            }
         } else {
-            if (!mem.eql(u8, expected.type_str.items, actual.type_str.items)) return false;
+            if (!mem.eql(u8, expected.type_str.items, actual.type_str.items)) {
+                return false;
+            }
         }
 
         if (expected.generic_args) |eg| {
