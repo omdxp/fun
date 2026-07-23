@@ -9000,3 +9000,67 @@ test "indirect generic instantiation discovery does not cross-substitute unrelat
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("7\n", stdout);
 }
+
+test "a self-recursive CONSTRAINED generic function calling itself with the abstract T passes its own bound" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_constrained_self_recursive.fn";
+    const c_path = "codegen_constrained_self_recursive.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_constrained_self_recursive.exe" else "codegen_constrained_self_recursive";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Previously suspected broken (round-7 notes): a constrained generic
+    // function (`fun f<T: num | dec>`) calling itself recursively from its own
+    // template body, where the recursive call's argument has the function's
+    // own still-abstract `T` (not yet a resolved concrete type), was thought
+    // to fail `impl_allows_generic_args`'s constraint check -- since neither
+    // "num" nor "dec" literally string-equals the bare placeholder "T".
+    // Re-verified this round while investigating a related generic-call gap:
+    // this already works (likely fixed as a side effect of the round-7
+    // `bind_generic_param` fix). Tests both directions: the legitimate
+    // self-recursive call succeeds, AND the constraint still genuinely
+    // rejects a real violation (str doesn't satisfy num | dec) -- guarding
+    // against a future fix accidentally disabling the check outright.
+    const input =
+        "imp std.c.io;\n" ++
+        "fun sum_down<T: num | dec>(T n) T {\n" ++
+        "  if n <= 0 {\n" ++
+        "    ret n;\n" ++
+        "  }\n" ++
+        "  ret n + sum_down(n - 1);\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"%lld\\n\", sum_down(5));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("15\n", stdout);
+
+    // The constraint must still genuinely reject a real violation.
+    const bad_ifilepath = "codegen_constrained_self_recursive_bad.fn";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, bad_ifilepath) catch {};
+    const bad_input =
+        "imp std.c.io;\n" ++
+        "fun sum_down<T: num | dec>(T n) T {\n" ++
+        "  if n <= 0 {\n" ++
+        "    ret n;\n" ++
+        "  }\n" ++
+        "  ret n + sum_down(n - 1);\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"%s\\n\", sum_down(\"hi\"));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    try runTranspileExpectFailure(allocator, bad_ifilepath, bad_input);
+}
