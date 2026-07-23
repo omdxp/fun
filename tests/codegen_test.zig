@@ -9064,3 +9064,62 @@ test "a self-recursive CONSTRAINED generic function calling itself with the abst
         "}\n";
     try runTranspileExpectFailure(allocator, bad_ifilepath, bad_input);
 }
+
+test "a generic impl method calling a DIFFERENT generic free function from its own body gets that callee emitted" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_impl_method_indirect_generic_call.fn";
+    const c_path = "codegen_impl_method_indirect_generic_call.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_impl_method_indirect_generic_call.exe" else "codegen_impl_method_indirect_generic_call";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Same class of bug as the free-function case above, but through a
+    // DIFFERENT emission path: a generic IMPL METHOD (`Box<T>.get()`) calling
+    // a generic FREE function (`identity`) from its own body. Concrete impl
+    // methods are emitted via `emit_plain_impl_methods_from_node`, which never
+    // touches `generic_fn_instantiations` at all -- so even though the call
+    // site's abstract-template typecheck pass DOES register a placeholder
+    // (`identity__T`, owner = get()'s own node) exactly like the free-function
+    // case, nothing ever ran `resolve_transitive_generic_fn_instantiations`
+    // against it, since the impl-method loop never visits that list. Fixed by
+    // a new `seed_generic_impl_method_transitive_fn_instantiations`, which
+    // walks concrete impl instantiations (mirroring
+    // `seed_forced_generic_instantiations_from_impl_signatures_node`) and, for
+    // each `(instantiation, method)` pair, hands a synthesized
+    // `GenericFnInstantiation` to the EXISTING (unmodified)
+    // `resolve_transitive_generic_fn_instantiations` -- reusing its owner_fn-
+    // scoped substitution logic as-is, since a method's own node stands in
+    // fine as the "owner" of any placeholder calls found inside it.
+    const input =
+        "imp std.c.io;\n" ++
+        "fun identity<T>(T x) T {\n" ++
+        "  ret x;\n" ++
+        "}\n" ++
+        "compound Box<T> {\n" ++
+        "  T value;\n" ++
+        "}\n" ++
+        "impl Box<T> {\n" ++
+        "  pub get() T {\n" ++
+        "    ret identity(self.value);\n" ++
+        "  }\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  Box<num> b;\n" ++
+        "  b.value = 99;\n" ++
+        "  printf(\"%lld\\n\", b.get());\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("99\n", stdout);
+}

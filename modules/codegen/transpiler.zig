@@ -16614,6 +16614,73 @@ pub const TranspileProcess = struct {
         try self.seed_forced_generic_instantiations_from_impl_signatures_module(self.get_root());
     }
 
+    /// Mirrors `seed_forced_generic_instantiations_from_impl_signatures_node`'s
+    /// discovery of concrete instantiations of a generic impl (`Box<num>` for
+    /// `impl Box<T>`), but instead of registering the METHOD's own return/arg
+    /// types, it treats each `(concrete instantiation, method)` pair as an
+    /// implicit `GenericFnInstantiation` and hands it to
+    /// `resolve_transitive_generic_fn_instantiations` -- the same worklist-seeding
+    /// helper written for a generic FREE function calling a different generic
+    /// free function. That helper only needs `.fn_node`/`.params`/`.args` (the
+    /// synthesized `.name` is never read), and already scopes its substitution
+    /// by `owner_fn` IDENTITY, so it works unmodified for a method's own node
+    /// standing in as the "owner" of any placeholder calls found inside it.
+    fn seed_generic_impl_method_transitive_fn_instantiations_node(self: *Self, n: *ast.Node) TranspileError!void {
+        if (n.type != .Impl or n.node_variant == null) return;
+        const im = n.node_variant.?.impl;
+        const params = self.impl_type_params(n) orelse return;
+
+        var inst_keys = std.StringHashMap(bool).init(self.allocator);
+        defer {
+            var it = inst_keys.iterator();
+            while (it.next()) |e| {
+                self.allocator.free(e.key_ptr.*);
+            }
+            inst_keys.deinit();
+        }
+
+        var inst_list = ArrayList(*const dtype.DataType).init(self.allocator);
+        defer inst_list.deinit();
+        const base_name = if (mem.indexOf(u8, im.type_name.items, "__")) |idx| im.type_name.items[0..idx] else im.type_name.items;
+        try self.collect_generic_instantiations_recursive(self, base_name, &inst_keys, &inst_list);
+
+        for (inst_list.items) |dt| {
+            if (dt.generic_args == null) continue;
+            const gargs = dt.generic_args.?.items();
+            if (gargs.len != params.count) continue;
+            if (!self.generic_args_are_concrete(params, gargs)) continue;
+            if (self.dtype_contains_type_param(dt, params)) continue;
+
+            const mangled = try self.type_name_mangled(dt);
+            defer self.allocator.free(mangled);
+            if (self.mangled_contains_type_param(mangled, params)) continue;
+            if (self.mangled_contains_unresolved_placeholder(mangled)) continue;
+
+            for (im.methods.items()) |m| {
+                if (m.type != .Function or m.node_variant == null) continue;
+                const synthetic_inst = GenericFnInstantiation{ .fn_node = m, .params = params, .args = gargs, .name = "" };
+                try self.resolve_transitive_generic_fn_instantiations(synthetic_inst);
+            }
+        }
+    }
+
+    fn seed_generic_impl_method_transitive_fn_instantiations_module(self: *Self, proc: *Self) TranspileError!void {
+        for (proc.nodes.items()) |*n| {
+            try self.seed_generic_impl_method_transitive_fn_instantiations_node(n);
+        }
+        for (proc.owned_nodes.items) |n| {
+            try self.seed_generic_impl_method_transitive_fn_instantiations_node(n);
+        }
+
+        for (proc.children.items) |child| {
+            try self.seed_generic_impl_method_transitive_fn_instantiations_module(child);
+        }
+    }
+
+    fn seed_generic_impl_method_transitive_fn_instantiations(self: *Self) TranspileError!void {
+        try self.seed_generic_impl_method_transitive_fn_instantiations_module(self.get_root());
+    }
+
     /// For each impl with `type_param_forced_insts` (from constrained type params such as
     /// `impl Vec<T: num | dec>`), register the concrete specializations as forced generic
     /// instantiations so that all methods are emitted even if those types are never
@@ -17032,6 +17099,17 @@ pub const TranspileProcess = struct {
         // field-driven generic specializations are visible to impl emission.
         try self.seed_forced_generic_instantiations_from_impl_signatures();
         try self.seed_constrained_impl_instantiations();
+
+        // A generic impl method calling a DIFFERENT generic free function from
+        // its own body (e.g. `identity(self.value)` inside `Box<T>.get()`) only
+        // gets a placeholder instantiation registered at typecheck time
+        // (`identity__T`) -- concrete impl methods are emitted through a
+        // separate mechanism (`emit_plain_impl_methods_from_node`) that never
+        // touches `generic_fn_instantiations` at all, so nothing ever resolves
+        // that placeholder the way an ordinary generic-free-function caller
+        // does. Must run before `emit_function_prototypes_all()` below so the
+        // newly-registered concrete callee gets forward-declared in time.
+        try self.seed_generic_impl_method_transitive_fn_instantiations();
 
         // Emit forward declarations for all functions so calls work even when
         // function bodies are declared later in the file.
