@@ -1202,10 +1202,48 @@ test "diagnostic: allow integer_literal_out_of_range suppresses the warning" {
 
 test "diagnostic: blocking_fork_deadlock warns on wait_group_new(0) with fork-in-loop" {
     const allocator = std.testing.allocator;
-    const ifilepath = "blocking_fork_deadlock_warn.fn";
+    // Filename deliberately avoids the substring "blocking_fork_deadlock" --
+    // it would otherwise appear in every warning's `Location:` line (the
+    // filename is always printed), making the assertion below pass vacuously
+    // regardless of which warning category actually fired.
+    const ifilepath = "wg_zero_cap_no_add_warn.fn";
 
-    // A WaitGroup created with a literal 0 (signal buffer capacity 1) that is
-    // done()'d from tasks forked in a loop is the classic deadlock shape.
+    // A WaitGroup created with a literal 0 (signal buffer capacity 1), never
+    // grown via add(), that is done()'d from tasks forked in a loop is the
+    // classic deadlock shape: the buffer stays clamped to capacity 1.
+    const input =
+        "imp std.task;\n" ++
+        "imp std.io;\n" ++
+        "async fun worker(WaitGroup* wg) {\n" ++
+        "  defer wg.done();\n" ++
+        "}\n" ++
+        "fun main() {\n" ++
+        "  WaitGroup wg = wait_group_new(0);\n" ++
+        "  defer wg.destroy();\n" ++
+        "  for i : 0..4 {\n" ++
+        "    fork worker(&wg);\n" ++
+        "  }\n" ++
+        "  wg.wait();\n" ++
+        "}\n";
+
+    const res = try runTranspileWithWarnings(allocator, ifilepath, input, true);
+    defer {
+        allocator.free(res.out);
+        if (res.warnings) |w| allocator.free(w);
+    }
+
+    try std.testing.expect(res.warnings != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "[Warning:blocking_fork_deadlock]") != null);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+}
+
+test "diagnostic: blocking_fork_deadlock does NOT warn when add() grows the zero-cap WaitGroup" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "wg_zero_cap_with_add_no_warn.fn";
+
+    // Same zero-cap-in-a-fork-loop shape as above, but paired with add():
+    // add() now grows the signalling channel to match, so this is no longer
+    // the "clamped to capacity 1 forever" hazard the lint exists to catch.
     const input =
         "imp std.task;\n" ++
         "imp std.io;\n" ++
@@ -1228,8 +1266,9 @@ test "diagnostic: blocking_fork_deadlock warns on wait_group_new(0) with fork-in
         if (res.warnings) |w| allocator.free(w);
     }
 
-    try std.testing.expect(res.warnings != null);
-    try std.testing.expect(std.mem.indexOf(u8, res.warnings.?, "blocking_fork_deadlock") != null);
+    if (res.warnings) |w| {
+        try std.testing.expect(std.mem.indexOf(u8, w, "[Warning:blocking_fork_deadlock]") == null);
+    }
     std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
 }
 

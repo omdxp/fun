@@ -6988,8 +6988,10 @@ pub const TranspileProcess = struct {
         if ((a.base == .Chr and b.base == .Num) or (a.base == .Num and b.base == .Chr)) return true;
 
         // C-style null pointer constant comparisons: allow `ptr == 0` / `ptr != 0`.
-        if (is_pointer_type(a) and !b.is_array and b.pointer_depth == 0 and b.is_null_literal) return true;
-        if (is_pointer_type(b) and !a.is_array and a.pointer_depth == 0 and a.is_null_literal) return true;
+        // Array types (`T[]`, including unresolved generic element types) decay to
+        // pointers under the hood, so they're nil-comparable too, not just `is_pointer_type`.
+        if ((is_pointer_type(a) or a.is_array) and !b.is_array and b.pointer_depth == 0 and b.is_null_literal) return true;
+        if ((is_pointer_type(b) or b.is_array) and !a.is_array and a.pointer_depth == 0 and a.is_null_literal) return true;
 
         // Also allow `str` to compare against null constant: `s == 0` / `s != 0`.
         if (!a.is_array and a.pointer_depth == 0 and a.base == .Str and !b.is_array and b.pointer_depth == 0 and b.is_null_literal) return true;
@@ -10245,6 +10247,11 @@ pub const TranspileProcess = struct {
                 for (call_args.items) |arg_ptr| {
                     const vname = addr_of_operand_name(arg_ptr.*) orelse continue;
                     if (!zerocap_wgs.contains(vname)) continue;
+                    // add() grows the signalling buffer to match, so a
+                    // wait_group_new(0) that's paired with add() isn't the
+                    // "clamped to capacity 1 forever" hazard this lint exists
+                    // to catch.
+                    if (body_calls_wait_group_add(body, vname)) continue;
                     proc.report_warning(
                         .blocking_fork_deadlock,
                         f.node.*,
@@ -10316,6 +10323,56 @@ pub const TranspileProcess = struct {
             };
         }
         return false;
+    }
+
+    /// True when `body` contains a call `<vname>.add(...)` anywhere (any
+    /// nesting depth — inside a fork loop, an `if`, etc.). `WaitGroup.add()`
+    /// grows its signalling buffer to match the new expected count (see
+    /// std.task.fn), so a `wait_group_new(0)` that's always paired with
+    /// `add()` before use is NOT the "clamped to capacity 1 forever" hazard
+    /// `collect_zero_cap_wait_groups` exists to catch — only a
+    /// `wait_group_new(0)` that never grows its own buffer is.
+    fn body_calls_wait_group_add(node: *ast.Node, vname: []const u8) bool {
+        const nv = node.node_variant orelse return false;
+        switch (node.type) {
+            .Body => {
+                for (nv.body.statements.items()) |s| {
+                    if (body_calls_wait_group_add(s, vname)) return true;
+                }
+                return false;
+            },
+            .StatementIf => return body_calls_wait_group_add(nv.statement.if_stmt.body, vname),
+            .StatementElseIf => return body_calls_wait_group_add(nv.statement.elif_stmt.body, vname),
+            .StatementElse => return body_calls_wait_group_add(nv.statement.else_stmt.body, vname),
+            .StatementFor => {
+                const body_node = switch (nv.statement.for_stmt) {
+                    .cond => |c| c.body,
+                    .iter => |it| it.body,
+                    .range => |r| r.body,
+                };
+                return body_calls_wait_group_add(body_node, vname);
+            },
+            .StatementFit => {
+                for (nv.statement.fit_stmt.branches.items()) |br| {
+                    if (body_calls_wait_group_add(br.body, vname)) return true;
+                }
+                return false;
+            },
+            .Expression => {
+                const e = nv.exp;
+                if (!mem.eql(u8, e.op, "()")) return false;
+                const callee = e.left orelse return false;
+                if (callee.type != .Expression or callee.node_variant == null) return false;
+                const dot = callee.node_variant.?.exp;
+                if (!mem.eql(u8, dot.op, ".")) return false;
+                const recv = dot.left orelse return false;
+                const method = dot.right orelse return false;
+                if (recv.type != .Identifier or recv.data == null) return false;
+                if (method.type != .Identifier or method.data == null) return false;
+                return mem.eql(u8, recv.data.?.sval.items, vname) and mem.eql(u8, method.data.?.sval.items, "add");
+            },
+            else => return false,
+        }
     }
 
     /// If `expr` is a `channel_new_cap(<buffering>, <cap>)` call whose CAPACITY

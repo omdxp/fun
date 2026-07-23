@@ -2108,6 +2108,62 @@ impl Channel<T> {
     ret self.cap;
   }
 
+  // Grow the buffer to at least `new_cap`, preserving any already-queued
+  // values in order. No-op if `new_cap` is not larger than the current
+  // capacity.
+  //
+  // Params:
+  // - new_cap: minimum capacity the buffer should have afterward
+  //
+  // Returns:
+  // - 0 on success (including the no-op case)
+  // - nonzero backend sync/init code on failure
+  // - a nonzero alloc-failure code if the new buffer could not be allocated
+  pub grow_capacity(num new_cap) num {
+    let rc = self.init();
+    if rc != 0 {
+      ret rc;
+    }
+
+    rc = runtime_mutex_lock(&self.mu);
+    if rc != 0 {
+      ret rc;
+    }
+    defer runtime_mutex_unlock(&self.mu);
+
+    if new_cap <= self.cap {
+      ret channel_rc_ok();
+    }
+
+    T[] new_data = malloc(sizeof(T) * new_cap);
+    if new_data == nil {
+      ret channel_rc_alloc_failed();
+    }
+
+    num i = 0;
+    for i < self.count {
+      num src = (self.head + i) % self.cap;
+      new_data[i] = self.data[src];
+      i = i + 1;
+    }
+
+    if self.has_buffer == true {
+      free(self.data);
+    }
+    self.data = new_data;
+    self.has_buffer = true;
+    self.cap = new_cap;
+    self.head = 0;
+    self.tail = self.count;
+    if self.tail >= self.cap {
+      self.tail = 0;
+    }
+
+    // There's more room now; wake anyone blocked in send() waiting for it.
+    _ = runtime_condvar_broadcast(&self.can_send);
+    ret channel_rc_ok();
+  }
+
   // Destroy channel storage and synchronization primitives.
   // 
   // Note:

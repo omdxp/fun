@@ -8766,3 +8766,111 @@ test "a generic function can call itself recursively (self-recursive generic fun
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("5\n", stdout);
 }
+
+test "a generic array-typed value (T[]) compares against nil like any other pointer" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_generic_array_nil_compare.fn";
+    const c_path = "codegen_generic_array_nil_compare.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_generic_array_nil_compare.exe" else "codegen_generic_array_nil_compare";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: `is_pointer_type` (used by the `==`/`!=` nil-literal special
+    // case in `can_compare_or_match`) required `!is_array`, so ANY array-typed
+    // value -- a concrete `num[]` or an unresolved generic `T[]` local inside a
+    // generic impl method -- was rejected as "expects both sides to have the
+    // same type" when compared against `nil`, even though arrays decay to
+    // pointers under the hood (a `T[]` field/local already accepts a `malloc()`
+    // assignment directly). Found while adding `Channel<T>.grow_capacity()`,
+    // whose `malloc()`-failure check (`if new_data == nil`) needed this. Fixed
+    // by letting array types satisfy the same nil-comparison branch pointers do.
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.c.mem;\n" ++
+        "compound Box<T> {\n" ++
+        "  T[] data;\n" ++
+        "}\n" ++
+        "impl Box<T> {\n" ++
+        "  pub alloc(num n) num {\n" ++
+        "    self.data = malloc(sizeof(T) * n);\n" ++
+        "    if self.data == nil {\n" ++
+        "      ret 1;\n" ++
+        "    }\n" ++
+        "    ret 0;\n" ++
+        "  }\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  num[] a = malloc(sizeof(num) * 4);\n" ++
+        "  printf(\"%d %d\\n\", a == nil, nil == a);\n" ++
+        "  free(a);\n" ++
+        "  Box<num> b;\n" ++
+        "  printf(\"%lld\\n\", b.alloc(4));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("0 0\n0\n", stdout);
+}
+
+test "WaitGroup.add() grows the signalling channel so wait_group_new(0) + add() in a fork loop never deadlocks" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_waitgroup_add_grows_channel.fn";
+    const c_path = "codegen_waitgroup_add_grows_channel.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_waitgroup_add_grows_channel.exe" else "codegen_waitgroup_add_grows_channel";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: `WaitGroup.add(n)` used to only bump `self.expected` without
+    // growing the underlying signalling channel, so `wait_group_new(0)` +
+    // `add(1)` in a fork loop (a documented-safe pattern) could deadlock once
+    // more than one task's `done()` needed to queue up before `wait()` started
+    // draining. Fixed by having `add()` call the new `Channel<T>.grow_capacity()`
+    // to keep the buffer sized to `expected`. Also covers the paired fix to
+    // `remaining()`, which used to derive "signals left" from the channel's
+    // live queue depth -- correct only pre-drain, but wrong (reporting the full
+    // count again) right after `wait()` fully drains it. Fixed by having
+    // `wait()` decrement `expected` as it drains and `remaining()` just return it.
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.task;\n" ++
+        "imp std.channel;\n" ++
+        "async fun worker(WaitGroup* wg) {\n" ++
+        "  wg.done();\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  WaitGroup wg = wait_group_new(0);\n" ++
+        "  num i = 0;\n" ++
+        "  for i < 20 {\n" ++
+        "    wg.add(1);\n" ++
+        "    fork worker(&wg);\n" ++
+        "    i = i + 1;\n" ++
+        "  }\n" ++
+        "  wg.wait();\n" ++
+        "  printf(\"remaining=%lld cap=%lld\\n\", wg.remaining(), wg.signals.capacity());\n" ++
+        "  wg.destroy();\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnvTimeout(allocator, exe_path, &.{}, 15_000);
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("remaining=0 cap=20\n", stdout);
+}

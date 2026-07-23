@@ -55,19 +55,17 @@ pub compound WaitGroup {
 }
 
 // Create a WaitGroup expecting `n` tasks to complete.
-// 
-// IMPORTANT: pass the FULL number of tasks up front. The signalling channel is
-// buffered to `n` so `done()` never blocks before `wait()` starts draining. If
-// you instead create it with `wait_group_new(0)` and grow the count later with
-// `add()`, the buffer stays clamped to 1 — so once more than one task calls
-// `done()` before `wait()` runs (the usual fork-in-a-loop-then-wait shape), the
-// extra `done()` calls block and the program can DEADLOCK when many tasks are in
-// flight. The compiler warns about this pattern (blocking_fork_deadlock). Prefer
-// `wait_group_new(count)`.
-// 
+//
+// The signalling channel is buffered to `n` so `done()` never blocks before
+// `wait()` starts draining. Passing the full count up front avoids the buffer
+// growth `add()` would otherwise need to do later, but growing via
+// `wait_group_new(0)` + `add()` in a loop is also safe: `add()` grows the
+// signalling buffer to match, so `done()` still never blocks before `wait()`
+// drains it.
+//
 // Params:
 // - n: number of virtual tasks that will each call `done()` once
-// 
+//
 // Returns:
 // - a WaitGroup whose `wait()` blocks until `n` completions arrive
 pub fun wait_group_new(num n) WaitGroup {
@@ -83,15 +81,13 @@ pub fun wait_group_new(num n) WaitGroup {
 }
 
 impl WaitGroup {
-  // Add `n` to the expected count. Call before `wait()` to add more tasks to wait for.
-  // 
-  // NOTE: this only grows the number `wait()` expects; it does NOT grow the
-  // signalling buffer. If the group was created with `wait_group_new(0)`, that
-  // buffer is capacity 1 and `done()` will block once a second task signals
-  // before `wait()` drains — size the group up front with `wait_group_new(count)`
-  // instead of `wait_group_new(0)` + `add()` in a loop.
+  // Add `n` to the expected count. Call before `wait()` to add more tasks to
+  // wait for. Also grows the signalling buffer to match, so `done()` still
+  // never blocks before `wait()` drains it — safe to use repeatedly (e.g.
+  // `wait_group_new(0)` + `add(1)` in a fork loop), not just up front.
   pub add(num n) {
     self.expected = self.expected + n;
+    let _rc = self.signals.grow_capacity(self.expected);
   }
 
   // Signal that one task has finished. Called from inside a forked task body.
@@ -101,20 +97,18 @@ impl WaitGroup {
 
   // Block until all expected tasks have signalled `done()`.
   pub wait() {
-    num got = 0;
-    for got < self.expected {
+    for self.expected > 0 {
       let _sig = <- self.signals;
-      got = got + 1;
+      self.expected = self.expected - 1;
     }
   }
 
   // Number of tasks this group is still waiting on (best-effort, unsynchronized).
   pub remaining() num {
-    let pending = self.expected - self.signals.len();
-    if pending < 0 {
+    if self.expected < 0 {
       ret 0;
     }
-    ret pending;
+    ret self.expected;
   }
 
   // Free the underlying channel. Call after `wait()` returns.
