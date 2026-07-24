@@ -4,8 +4,10 @@ const process = std.process;
 const codegen = @import("codegen");
 const lexer = @import("lexer");
 const token = lexer.token;
+const parser = @import("parser");
 const utils = @import("utils");
 const builtin = @import("builtin");
+pub const manifest = @import("manifest.zig");
 
 /// Compatibility shim: ArrayList with embedded allocator (old API style).
 fn ArrayList(comptime T: type) type {
@@ -30,6 +32,9 @@ pub const CliError = error{
     ExecutionFailed,
     /// Error indicating that help information should be displayed.
     ShowHelp,
+    /// Error indicating `fun build` could not find a `fun.toml` manifest in
+    /// the current directory.
+    ManifestNotFound,
 };
 
 /// `CliOptions` represents the command-line options for the transpiler.
@@ -111,6 +116,7 @@ fn print_usage(io: std.Io) void {
         \\Usage:
         \\  fun -in <input_file> [-fmt | -fmt-all | -fmt-diag | -fmt-check | -fmt-check-all] [-out <output_file>] [-no-exec] [-outf] [-ast] [-g] [-warn-unused] [-test] [-help] [-- <program args...>]
         \\  fun test <input_file>   (shorthand for `fun -in <input_file> -test`)
+        \\  fun build               (reads ./fun.toml, installs binaries under fun-out/bin/)
         \\  fun -fmt-check-all [-in <file_or_dir>]
         \\  fun -version
         \\
@@ -3059,6 +3065,125 @@ pub fn format_file_check(allocator: mem.Allocator, io: std.Io, input_file: []con
 /// Returns:
 /// - Might return error.CompilationFailed if GCC compilation fails.
 /// - Might return other errors from file operations or process execution.
+/// Invokes a C compiler on `c_path`, producing `exe_file`. Honors
+/// `FUN_CC`/`FUN_CC_ARGS` env var overrides, falling back to a list of
+/// default compiler candidates (see `get_default_compiler_candidates`).
+/// Shared by `compile_and_run` (compile + run + delete) and `compile_to_exe`
+/// (compile + keep, used by `fun build`) -- callers decide what happens to
+/// the resulting binary; this only handles getting it built.
+fn invoke_c_compiler_to_exe(allocator: mem.Allocator, io: std.Io, c_path: []const u8, exe_file: []const u8, debug_info: bool) !void {
+    var fun_cc: ?[]const u8 = null;
+    var fun_cc_args: ?[]const u8 = null;
+    if (std.c.getenv("FUN_CC")) |z| {
+        const s = std.mem.sliceTo(z, 0);
+        if (s.len > 0) fun_cc = try allocator.dupe(u8, s);
+    }
+    defer if (fun_cc) |v| allocator.free(v);
+
+    if (std.c.getenv("FUN_CC_ARGS")) |z| {
+        const s = std.mem.sliceTo(z, 0);
+        if (s.len > 0) fun_cc_args = try allocator.dupe(u8, s);
+    }
+    defer if (fun_cc_args) |v| allocator.free(v);
+
+    if (fun_cc != null and fun_cc.?.len > 0) {
+        var argv_list = ArrayList([]const u8).init(allocator);
+        defer argv_list.deinit();
+        defer free_arg_list(allocator, argv_list.items);
+        var used_template = false;
+        var non_template_base_argc: usize = 0;
+
+        var base = try parse_command_line(allocator, fun_cc.?);
+        defer base.deinit();
+        defer free_arg_list(allocator, base.items);
+
+        const uses_template = std.mem.indexOf(u8, fun_cc.?, "{src}") != null or std.mem.indexOf(u8, fun_cc.?, "{out}") != null;
+        used_template = uses_template;
+        if (uses_template) {
+            for (base.items) |a| {
+                const replaced = try replace_placeholders(allocator, a, c_path, exe_file);
+                try argv_list.append(replaced);
+            }
+        } else {
+            for (base.items) |a| {
+                try argv_list.append(try allocator.dupe(u8, a));
+            }
+            non_template_base_argc = base.items.len;
+            const flavor = if (argv_list.items.len >= 1) detect_compiler_flavor(argv_list.items[0]) else .unknown;
+            try append_default_compile_args(allocator, &argv_list, flavor, c_path, exe_file, debug_info);
+        }
+
+        var using_zig = false;
+        if (argv_list.items.len >= 1) {
+            const cc_base = std.fs.path.basename(argv_list.items[0]);
+            if (std.mem.eql(u8, cc_base, "zig") or std.mem.eql(u8, cc_base, "zig.exe")) {
+                using_zig = true;
+            }
+        }
+
+        if (fun_cc_args != null and fun_cc_args.?.len > 0) {
+            var extra = try parse_command_line(allocator, fun_cc_args.?);
+            defer extra.deinit();
+            defer free_arg_list(allocator, extra.items);
+            try append_fun_cc_extra_args(allocator, &argv_list, extra.items, using_zig, used_template, non_template_base_argc);
+        }
+
+        const result = std.process.run(allocator, io, .{
+            .argv = argv_list.items,
+        }) catch |err| switch (err) {
+            error.FileNotFound => return CliError.MissingCCompiler,
+            else => return err,
+        };
+        defer {
+            allocator.free(result.stdout);
+            allocator.free(result.stderr);
+        }
+
+        if (result.term.exited != 0) {
+            std.Io.File.stderr().writeStreamingAll(io, "Compilation error:\n") catch {};
+            std.Io.File.stderr().writeStreamingAll(io, result.stderr) catch {};
+            return CliError.CompilationFailed;
+        }
+    } else {
+        const candidates = get_default_compiler_candidates();
+        var any_compiler_found = false;
+
+        for (candidates) |candidate| {
+            var argv_list = ArrayList([]const u8).init(allocator);
+            defer argv_list.deinit();
+            defer free_arg_list(allocator, argv_list.items);
+
+            try argv_list.append(try allocator.dupe(u8, candidate.cmd));
+            for (candidate.extra) |a| {
+                try argv_list.append(try allocator.dupe(u8, a));
+            }
+            try append_default_compile_args(allocator, &argv_list, candidate.flavor, c_path, exe_file, debug_info);
+
+            const result = std.process.run(allocator, io, .{
+                .argv = argv_list.items,
+            }) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => return err,
+            };
+            defer {
+                allocator.free(result.stdout);
+                allocator.free(result.stderr);
+            }
+
+            any_compiler_found = true;
+            if (result.term.exited != 0) {
+                std.Io.File.stderr().writeStreamingAll(io, "Compilation error:\n") catch {};
+                std.Io.File.stderr().writeStreamingAll(io, result.stderr) catch {};
+                return CliError.CompilationFailed;
+            }
+
+            break;
+        }
+
+        if (!any_compiler_found) return CliError.MissingCCompiler;
+    }
+}
+
 pub fn compile_and_run(allocator: mem.Allocator, io: std.Io, c_file_or_content: []const u8, is_file: bool, input_file: []const u8, program_args: []const []const u8, debug_info: bool) !void {
     const input_path = std.fs.path.basename(input_file);
     const extension_index = std.mem.lastIndexOf(u8, input_path, ".");
@@ -3121,119 +3246,7 @@ pub fn compile_and_run(allocator: mem.Allocator, io: std.Io, c_file_or_content: 
         allocator.free(temp_name.?);
     };
 
-    // Compile the C file
-    {
-        var fun_cc: ?[]const u8 = null;
-        var fun_cc_args: ?[]const u8 = null;
-        if (std.c.getenv("FUN_CC")) |z| {
-            const s = std.mem.sliceTo(z, 0);
-            if (s.len > 0) fun_cc = try allocator.dupe(u8, s);
-        }
-        defer if (fun_cc) |v| allocator.free(v);
-
-        if (std.c.getenv("FUN_CC_ARGS")) |z| {
-            const s = std.mem.sliceTo(z, 0);
-            if (s.len > 0) fun_cc_args = try allocator.dupe(u8, s);
-        }
-        defer if (fun_cc_args) |v| allocator.free(v);
-
-        if (fun_cc != null and fun_cc.?.len > 0) {
-            var argv_list = ArrayList([]const u8).init(allocator);
-            defer argv_list.deinit();
-            defer free_arg_list(allocator, argv_list.items);
-            var used_template = false;
-            var non_template_base_argc: usize = 0;
-
-            var base = try parse_command_line(allocator, fun_cc.?);
-            defer base.deinit();
-            defer free_arg_list(allocator, base.items);
-
-            const uses_template = std.mem.indexOf(u8, fun_cc.?, "{src}") != null or std.mem.indexOf(u8, fun_cc.?, "{out}") != null;
-            used_template = uses_template;
-            if (uses_template) {
-                for (base.items) |a| {
-                    const replaced = try replace_placeholders(allocator, a, c_path, exe_file);
-                    try argv_list.append(replaced);
-                }
-            } else {
-                for (base.items) |a| {
-                    try argv_list.append(try allocator.dupe(u8, a));
-                }
-                non_template_base_argc = base.items.len;
-                const flavor = if (argv_list.items.len >= 1) detect_compiler_flavor(argv_list.items[0]) else .unknown;
-                try append_default_compile_args(allocator, &argv_list, flavor, c_path, exe_file, debug_info);
-            }
-
-            var using_zig = false;
-            if (argv_list.items.len >= 1) {
-                const cc_base = std.fs.path.basename(argv_list.items[0]);
-                if (std.mem.eql(u8, cc_base, "zig") or std.mem.eql(u8, cc_base, "zig.exe")) {
-                    using_zig = true;
-                }
-            }
-
-            if (fun_cc_args != null and fun_cc_args.?.len > 0) {
-                var extra = try parse_command_line(allocator, fun_cc_args.?);
-                defer extra.deinit();
-                defer free_arg_list(allocator, extra.items);
-                try append_fun_cc_extra_args(allocator, &argv_list, extra.items, using_zig, used_template, non_template_base_argc);
-            }
-
-            const result = std.process.run(allocator, io, .{
-                .argv = argv_list.items,
-            }) catch |err| switch (err) {
-                error.FileNotFound => return CliError.MissingCCompiler,
-                else => return err,
-            };
-            defer {
-                allocator.free(result.stdout);
-                allocator.free(result.stderr);
-            }
-
-            if (result.term.exited != 0) {
-                std.Io.File.stderr().writeStreamingAll(io, "Compilation error:\n") catch {};
-                std.Io.File.stderr().writeStreamingAll(io, result.stderr) catch {};
-                return CliError.CompilationFailed;
-            }
-        } else {
-            const candidates = get_default_compiler_candidates();
-            var any_compiler_found = false;
-
-            for (candidates) |candidate| {
-                var argv_list = ArrayList([]const u8).init(allocator);
-                defer argv_list.deinit();
-                defer free_arg_list(allocator, argv_list.items);
-
-                try argv_list.append(try allocator.dupe(u8, candidate.cmd));
-                for (candidate.extra) |a| {
-                    try argv_list.append(try allocator.dupe(u8, a));
-                }
-                try append_default_compile_args(allocator, &argv_list, candidate.flavor, c_path, exe_file, debug_info);
-
-                const result = std.process.run(allocator, io, .{
-                    .argv = argv_list.items,
-                }) catch |err| switch (err) {
-                    error.FileNotFound => continue,
-                    else => return err,
-                };
-                defer {
-                    allocator.free(result.stdout);
-                    allocator.free(result.stderr);
-                }
-
-                any_compiler_found = true;
-                if (result.term.exited != 0) {
-                    std.Io.File.stderr().writeStreamingAll(io, "Compilation error:\n") catch {};
-                    std.Io.File.stderr().writeStreamingAll(io, result.stderr) catch {};
-                    return CliError.CompilationFailed;
-                }
-
-                break;
-            }
-
-            if (!any_compiler_found) return CliError.MissingCCompiler;
-        }
-    }
+    try invoke_c_compiler_to_exe(allocator, io, c_path, exe_file, debug_info);
 
     // Run the compiled program
     {
@@ -3291,4 +3304,75 @@ pub fn compile_and_run(allocator: mem.Allocator, io: std.Io, c_file_or_content: 
     }
 
     // Executable cleanup handled via defer above.
+}
+
+/// Compiles a `.c` file to a binary at `exe_output_path` and KEEPS it (does
+/// not run it, does not delete it) -- used by `fun build`, unlike
+/// `compile_and_run` (which always runs the binary once and deletes it
+/// afterward). `exe_output_path` is used verbatim as the compiler's `-o`
+/// target, so the caller decides the final name/location (already resolved,
+/// including the platform's `.exe` suffix on Windows).
+pub fn compile_to_exe(allocator: mem.Allocator, io: std.Io, c_path: []const u8, exe_output_path: []const u8, debug_info: bool) !void {
+    try invoke_c_compiler_to_exe(allocator, io, c_path, exe_output_path, debug_info);
+}
+
+/// `fun build`: reads `./fun.toml`, compiles each declared `[[bin]]` target,
+/// and installs the resulting binaries under `fun-out/bin/`. Unlike a plain
+/// `fun -in file.fn`, nothing is run afterward -- matching `zig build`
+/// (compile only; `zig build run`/`fun -in ... ` are the "compile and run"
+/// paths). Fun's own `imp` already does path-based module resolution, so
+/// the manifest only needs to declare build TARGETS, not an import graph.
+pub fn run_build(allocator: mem.Allocator, io: std.Io, debug_info: bool) !void {
+    const manifest_path = "fun.toml";
+    const text = std.Io.Dir.cwd().readFileAlloc(io, manifest_path, allocator, .limited(1024 * 1024)) catch |err| switch (err) {
+        error.FileNotFound => return CliError.ManifestNotFound,
+        else => return err,
+    };
+    defer allocator.free(text);
+
+    var m = try manifest.parse(allocator, text);
+    defer m.deinit();
+
+    try std.Io.Dir.cwd().createDirPath(io, "fun-out/bin");
+
+    for (m.bins) |b| {
+        const out_c_path = try std.fmt.allocPrint(allocator, "{s}.fun-build.c", .{b.name});
+        defer allocator.free(out_c_path);
+        defer std.Io.Dir.cwd().deleteFile(io, out_c_path) catch {};
+
+        var tp = try codegen.TranspileProcess.init(allocator, b.path, out_c_path, .{
+            .exec = false,
+            .outf = true,
+            .debug_info = debug_info,
+        });
+        var lp = lexer.LexProcess.init(&tp);
+        var pp = parser.ParseProcess.init(&tp);
+        defer {
+            lp.deinit();
+            tp.deinit();
+        }
+        try lp.lex();
+        try pp.parse();
+        try tp.transpile();
+
+        const exe_name = if (builtin.target.os.tag == .windows)
+            try std.fmt.allocPrint(allocator, "fun-out/bin/{s}.exe", .{b.name})
+        else
+            try std.fmt.allocPrint(allocator, "fun-out/bin/{s}", .{b.name});
+        defer allocator.free(exe_name);
+
+        try compile_to_exe(allocator, io, out_c_path, exe_name, debug_info);
+
+        // Only print progress OUTSIDE of tests: under `zig build test`, this
+        // process's real stdout carries the `--listen=-` build-protocol
+        // stream, not plain text -- writing raw text into it stalls the
+        // build runner waiting on a well-formed protocol frame that never
+        // arrives (same reason `compile_and_run`'s "run the program" step
+        // branches on `builtin.is_test` instead of inheriting stdio there).
+        if (!builtin.is_test) {
+            var buf: [512]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "built {s} -> {s}\n", .{ b.name, exe_name }) catch "built\n";
+            std.Io.File.stdout().writeStreamingAll(io, msg) catch {};
+        }
+    }
 }

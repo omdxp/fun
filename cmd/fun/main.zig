@@ -41,6 +41,9 @@ fn print_error_and_exit(io: std.Io, err: anyerror) noreturn {
         cli.CliError.ShowHelp => {
             std.process.exit(0);
         },
+        cli.CliError.ManifestNotFound => {
+            stderr.writeStreamingAll(io, "Error: no fun.toml manifest found in the current directory\n") catch {};
+        },
         // Formatting uses the same lexer/transpiler error types; they are printed elsewhere.
         error.FileNotFound => {
             stderr.writeStreamingAll(io, "Error: Input file not found\n") catch {};
@@ -72,6 +75,21 @@ pub fn main(init: std.process.Init) void {
             std.Io.File.stdout().writeStreamingAll(init.io, ver_str) catch {};
             return;
         }
+    }
+
+    // `fun build`: reads `./fun.toml` and compiles each declared `[[bin]]`
+    // target into `fun-out/bin/`. No compile pipeline / CliOptions needed
+    // for this one -- it's a manifest-driven multi-file operation, not a
+    // single `-in <file>` compile.
+    if (argv.len >= 1 and std.mem.eql(u8, argv[0], "build")) {
+        const debug_info = blk: {
+            for (argv[1..]) |a| {
+                if (std.mem.eql(u8, a, "-g")) break :blk true;
+            }
+            break :blk false;
+        };
+        cli.run_build(global_allocator, init.io, debug_info) catch |err| print_error_and_exit(init.io, err);
+        return;
     }
 
     // `fun test <path> [...rest]` is shorthand for `fun -in <path> -test

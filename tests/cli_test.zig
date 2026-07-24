@@ -103,3 +103,61 @@ test "parse_args keeps directory input for -fmt-check-all" {
     try std.testing.expect(options.fmt_check_all);
     try std.testing.expectEqualStrings("examples", options.input_file);
 }
+
+test "run_build: compiles a fun.toml manifest's bin target and it runs correctly" {
+    const allocator = std.testing.allocator;
+    defer cleanupCliTestArtifacts();
+
+    const manifest_path = "fun.toml";
+    const fn_path = "cli_run_build_hello.fn";
+    const exe_path = if (@import("builtin").target.os.tag == .windows)
+        "fun-out/bin/cli_run_build_hello.exe"
+    else
+        "fun-out/bin/cli_run_build_hello";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, manifest_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, fn_path) catch {};
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, "fun-out") catch {};
+
+    {
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, manifest_path, .{ .truncate = true });
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(std.testing.io, "[package]\n" ++
+            "name = \"cli-run-build-test\"\n" ++
+            "\n" ++
+            "[[bin]]\n" ++
+            "name = \"cli_run_build_hello\"\n" ++
+            "path = \"cli_run_build_hello.fn\"\n");
+    }
+    {
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, fn_path, .{ .truncate = true });
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(std.testing.io, "imp std.c.io;\n" ++
+            "fun main() num {\n" ++
+            "  printf(\"built by fun build\\n\");\n" ++
+            "  ret 0;\n" ++
+            "}\n");
+    }
+
+    try cli.run_build(allocator, std.testing.io, false);
+
+    const exe_abs = blk: {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const n = try std.Io.Dir.cwd().realPathFile(std.testing.io, exe_path, &buf);
+        break :blk try allocator.dupe(u8, buf[0..n]);
+    };
+    defer allocator.free(exe_abs);
+    const result = try std.process.run(allocator, std.testing.io, .{ .argv = &.{exe_abs} });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    switch (result.term) {
+        .exited => |code| try std.testing.expect(code == 0),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqualStrings("built by fun build\n", result.stdout);
+}
+
+test "run_build: missing fun.toml reports ManifestNotFound" {
+    // No manifest written in this test's CWD; the surrounding suite doesn't
+    // leave one behind either (cleaned up via defers in the tests above).
+    try std.testing.expectError(cli.CliError.ManifestNotFound, cli.run_build(std.testing.allocator, std.testing.io, false));
+}

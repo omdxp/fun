@@ -588,6 +588,7 @@ wait to avoid warning on slow-but-live operations.
 ```
 fun -in <input_file> [-out <output_file>] [-no-exec] [-outf] [-ast] [-test] [-help]
 fun test <input_file>   (shorthand for `fun -in <input_file> -test`)
+fun build                (reads ./fun.toml, installs binaries under fun-out/bin/)
 ```
 
 ## Errors and Warnings
