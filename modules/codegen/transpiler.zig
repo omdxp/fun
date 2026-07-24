@@ -149,6 +149,13 @@ pub const TranspileProcessFlags = packed struct {
     /// map back to Fun source lines.  Also causes the C compiler to be invoked with
     /// `-g` (DWARF symbols) instead of `-g0`.
     debug_info: bool = false,
+
+    /// When true (the `fun test` CLI subcommand), `test "name" { ... }` blocks
+    /// are type-checked and emitted as C functions, and a generated runner
+    /// `main` replaces any user-defined `main`. When false (an ordinary
+    /// compile), `test` blocks are parsed but otherwise completely ignored —
+    /// not type-checked, not emitted — matching `zig build` vs `zig test`.
+    test_mode: bool = false,
 };
 
 /// GlobalSymbolInfo tracks information about symbols across modules
@@ -10394,6 +10401,31 @@ pub const TranspileProcess = struct {
             }
         }
 
+        // `test "name" { ... }` blocks: only type-checked in `fun test` mode
+        // (matching `zig build` vs `zig test` -- an ordinary compile ignores
+        // them entirely, not even type-checking their bodies, so a program
+        // doesn't need its test dependencies to compile just to run normally).
+        if (proc.flags.test_mode) {
+            for (proc.nodes.items()) |node| {
+                if (node.type != .Test or node.node_variant == null) continue;
+                const tv = node.node_variant.?.test_decl;
+
+                var test_env = TypeEnv.init(proc.allocator);
+                defer test_env.deinit();
+                try test_env.push();
+
+                for (proc.nodes.items()) |*gn| {
+                    if (gn.type == .Variable and gn.node_variant != null and gn.binded == null) {
+                        const v = gn.node_variant.?.variable;
+                        try test_env.put_current_marked(v.name.items, try proc.type_from_dtype_with_mangled(v.type), gn);
+                    }
+                }
+
+                try proc.check_body(tv.body, &test_env, fns, CheckedType{ .base = .Void });
+                proc.warn_unused_bindings_in_current_scope(&test_env);
+            }
+        }
+
         try proc.run_concurrency_lints();
         try proc.emit_unused_top_level_warnings();
     }
@@ -17526,12 +17558,19 @@ pub const TranspileProcess = struct {
         for (self.nodes.items()) |node| {
             if (node.type != .Import) { // Skip import nodes as they've been processed
                 if (node.type == .Compound or node.type == .Quirk) continue;
+                // `test` blocks are handled separately below (only in test
+                // mode, via `emit_test_mode_functions_and_runner`) -- an
+                // ordinary compile ignores them entirely.
+                if (node.type == .Test) continue;
                 if (node.type == .Function and node.node_variant != null) {
                     const function = node.node_variant.?.function;
                     if (function.type_params != null) continue;
                     if (self.function_has_unresolved_placeholder(node)) continue;
                     if (function.name) |fname| {
                         if (self.mangled_contains_unresolved_placeholder(fname.items)) continue;
+                        // The generated test-runner `main` (below) replaces any
+                        // user-defined `main` in test mode.
+                        if (self.flags.test_mode and mem.eql(u8, fname.items, "main")) continue;
                     }
                 }
                 try self.transpile_node(node);
@@ -17539,7 +17578,83 @@ pub const TranspileProcess = struct {
             }
         }
 
+        if (self.flags.test_mode and !self.is_importing) {
+            try self.emit_test_mode_functions_and_runner();
+        }
+
         try self.finalize_warning_expectations();
+    }
+
+    /// Emits each `test "name" { ... }` block (from this module and any
+    /// imported/child modules) as its own C function, plus a generated
+    /// `main` that calls each in sequence and reports PASS/a summary.
+    ///
+    /// `assert`/`panic` failures `abort()` the whole process (their existing,
+    /// unchanged semantics) -- there is no per-test recovery in this first
+    /// version, so a failing test's message/abort is the last thing printed
+    /// and no later tests run in that case. Simple and honest about the
+    /// current assert/panic contract; revisit with per-test process
+    /// isolation if Phase 1 (the self-hosted compiler's own test suite)
+    /// shows a real need to see every failure in one run.
+    fn emit_test_mode_functions_and_runner(self: *Self) TranspileError!void {
+        const TestRef = struct { name: []const u8, body: *ast.Node };
+        var tests = ArrayList(TestRef).init(self.allocator);
+        defer tests.deinit();
+
+        const Collector = struct {
+            fn collect(proc: *Self, out: *ArrayList(TestRef)) TranspileError!void {
+                for (proc.nodes.items()) |node| {
+                    if (node.type != .Test or node.node_variant == null) continue;
+                    const tv = node.node_variant.?.test_decl;
+                    out.append(.{ .name = tv.name, .body = tv.body }) catch return TranspileError.MemoryAllocationFailed;
+                }
+                for (proc.children.items) |child| {
+                    try collect(child, out);
+                }
+            }
+        };
+        try Collector.collect(self, &tests);
+
+        if (tests.items.len == 0) {
+            try self.write("int main(void) {\n  printf(\"no tests found\\n\");\n  return 0;\n}\n");
+            return;
+        }
+
+        for (tests.items, 0..) |t, i| {
+            self.reset_function_defer_state();
+            const prev_in_fn_body = self.in_function_body;
+            const prev_body_depth = self.function_body_depth;
+            const prev_var = self.current_fn_is_variadic;
+            const prev_fn_return = self.current_fn_return;
+            self.in_function_body = true;
+            self.function_body_depth = 0;
+            self.current_fn_is_variadic = false;
+            self.current_fn_return = .{ .base = .Void };
+            defer {
+                self.in_function_body = prev_in_fn_body;
+                self.function_body_depth = prev_body_depth;
+                self.current_fn_is_variadic = prev_var;
+                self.current_fn_return = prev_fn_return;
+            }
+
+            try self.print("static void __fun_test_{d}(void) {{\n", .{i});
+            try self.transpile_node(t.body.*);
+            try self.write("\n}\n\n");
+        }
+
+        try self.write("int main(void) {\n");
+        try self.print("  int total = {d};\n", .{tests.items.len});
+        try self.write("  int passed = 0;\n");
+        for (tests.items, 0..) |t, i| {
+            try self.write("  printf(\"test: %s ... \", \"");
+            try self.write_c_string_literal_body(t.name);
+            try self.write("\");\n");
+            try self.print("  __fun_test_{d}();\n", .{i});
+            try self.write("  printf(\"PASS\\n\"); passed++;\n");
+        }
+        try self.write("  printf(\"%d/%d tests passed\\n\", passed, total);\n");
+        try self.write("  return 0;\n");
+        try self.write("}\n");
     }
 
     fn emit_function_prototypes_all(self: *Self) TranspileError!void {

@@ -173,6 +173,9 @@ pub const NodeType = enum {
     Enum,
     /// Represents an implementation block binding a compound type to a quirk.
     Impl,
+    /// Represents a `test "name" { ... }` declaration (top-level only). Skipped
+    /// entirely by an ordinary compile; only emitted/run in `fun test` mode.
+    Test,
     /// Represents a blank node.
     Blank,
 };
@@ -266,6 +269,13 @@ pub const Node = struct {
         panic_expr: struct {
             /// The message expression (must resolve to `str`).
             message: *Node,
+        },
+        /// A `test "name" { ... }` declaration (see `NodeType.Test`).
+        test_decl: struct {
+            /// The test's descriptive name (borrowed from the string token,
+            /// like `warning_ctrl.reason` -- not owned by this node).
+            name: []const u8,
+            body: *Node,
         },
         /// The compound initializer node.
         compound_init: struct {

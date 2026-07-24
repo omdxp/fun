@@ -1429,6 +1429,30 @@ test "fls index: function-type parameter (fun(T1, T2) R) does not crash indexing
     try std.testing.expect(data.len % 5 == 0);
 }
 
+test "fls index: test blocks (test \"name\" { ... }) do not crash indexing" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // `test` blocks are new (Phase 0.5 of the self-hosting rewrite); this just
+    // guards against a crash/hang in FLS's AST-backed indexing/semantic-token
+    // building when it encounters the new `.Test` node type.
+    const text =
+        "fun add(num a, num b) num {\n" ++
+        "  ret a + b;\n" ++
+        "}\n\n" ++
+        "test \"add works\" {\n" ++
+        "  assert add(2, 3) == 5, \"expected 5\";\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    const data = try buildSemanticTokens(allocator, idx);
+    defer allocator.free(data);
+    try std.testing.expect(data.len % 5 == 0);
+}
+
 test "fls index: known lowercase C typedef names get type-color semantic tokens, not identifier" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();

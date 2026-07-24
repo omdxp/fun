@@ -1151,3 +1151,42 @@ test "-fmt keeps a space between ret/if/fit and a parenthesized sub-expression" 
     try std.testing.expect(std.mem.indexOf(u8, got, "if (status & 127) == 0") != null);
     try std.testing.expect(std.mem.indexOf(u8, got, "if(status") == null);
 }
+
+test "-fmt spaces/indents a test block body and separates it from a preceding function" {
+    const allocator = std.testing.allocator;
+
+    // `test` is new (Phase 0.5): its `{` follows a STRING (the test's name),
+    // not the `)`/identifier shapes `fun`/`compound`/etc. use, and its own
+    // closing `}` wasn't recognized as needing a blank-line separator before
+    // a FOLLOWING `test`/`fun` either -- both fixed in
+    // `is_top_level_construct_keyword` and the block-brace detection.
+    const ugly =
+        "fun add(num a,num b) num {\n" ++
+        "ret a+b;\n" ++
+        "}\n" ++
+        "test \"add works\"    {\n" ++
+        "assert add(2,3)==5,\"expected 5\";\n" ++
+        "}\n";
+
+    const path = try writeTempFnFile(allocator, "fmttestblock", ugly);
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+
+    try std.testing.expectEqualStrings(
+        "fun add(num a, num b) num {\n" ++
+            "  ret a + b;\n" ++
+            "}\n" ++
+            "\n" ++
+            "test \"add works\" {\n" ++
+            "  assert add(2, 3) == 5, \"expected 5\";\n" ++
+            "}\n",
+        got,
+    );
+}

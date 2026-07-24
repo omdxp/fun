@@ -81,6 +81,12 @@ pub const CliOptions = struct {
 
     /// Arguments passed to the compiled program (everything after `--`).
     program_args: [][]const u8,
+
+    /// Flag to compile in TEST mode: `test "name" { ... }` blocks are
+    /// type-checked/emitted and a generated runner `main` replaces any
+    /// user-defined `main`. Set by `-test` or the `fun test <path>`
+    /// subcommand form (see `cmd/fun/main.zig`).
+    test_mode: bool,
 };
 
 pub fn free_options(allocator: mem.Allocator, options: CliOptions) void {
@@ -103,7 +109,8 @@ pub fn free_options(allocator: mem.Allocator, options: CliOptions) void {
 fn print_usage(io: std.Io) void {
     std.Io.File.stderr().writeStreamingAll(io,
         \\Usage:
-        \\  fun -in <input_file> [-fmt | -fmt-all | -fmt-diag | -fmt-check | -fmt-check-all] [-out <output_file>] [-no-exec] [-outf] [-ast] [-g] [-warn-unused] [-help] [-- <program args...>]
+        \\  fun -in <input_file> [-fmt | -fmt-all | -fmt-diag | -fmt-check | -fmt-check-all] [-out <output_file>] [-no-exec] [-outf] [-ast] [-g] [-warn-unused] [-test] [-help] [-- <program args...>]
+        \\  fun test <input_file>   (shorthand for `fun -in <input_file> -test`)
         \\  fun -fmt-check-all [-in <file_or_dir>]
         \\  fun -version
         \\
@@ -119,6 +126,7 @@ fn print_usage(io: std.Io) void {
         \\  -g                Enable debug info: source-level Fun→C mapping + DWARF symbols (optional)
         \\  -warn-unused      Emit unused import/variable/function/compound warnings (optional)
         \\  -warn-unused-lenient  Like -warn-unused but still emits unused warnings when the file has an unrelated type error (used by fls) (optional)
+        \\  -test             Compile `test "name" { ... }` blocks into a runner binary instead of the normal program (optional)
         \\  -out     <file>   Output file (optional, defaults to input filename with .c extension)
         \\  -no-exec          Disable automatic compilation and execution (optional, execution enabled by default)
         \\  -outf             Generate .c output file (optional, disabled by default)
@@ -163,6 +171,7 @@ pub fn parse_args(allocator: mem.Allocator, io: std.Io, argv: []const []const u8
     var debug_info = false;
     var warn_unused = false;
     var warn_unused_lenient = false;
+    var test_mode = false;
     var program_args = ArrayList([]const u8).init(allocator);
     errdefer {
         for (program_args.items) |p| allocator.free(p);
@@ -221,6 +230,8 @@ pub fn parse_args(allocator: mem.Allocator, io: std.Io, argv: []const []const u8
         } else if (std.mem.eql(u8, arg, "-warn-unused-lenient")) {
             warn_unused = true;
             warn_unused_lenient = true;
+        } else if (std.mem.eql(u8, arg, "-test")) {
+            test_mode = true;
         }
     }
 
@@ -260,6 +271,7 @@ pub fn parse_args(allocator: mem.Allocator, io: std.Io, argv: []const []const u8
         .warn_unused = warn_unused,
         .warn_unused_lenient = warn_unused_lenient,
         .program_args = try program_args.toOwnedSlice(),
+        .test_mode = test_mode,
     };
 }
 
@@ -1593,7 +1605,8 @@ fn is_top_level_construct_keyword(kw: []const u8) bool {
         std.mem.eql(u8, kw, "compound") or
         std.mem.eql(u8, kw, "quirk") or
         std.mem.eql(u8, kw, "enum") or
-        std.mem.eql(u8, kw, "impl");
+        std.mem.eql(u8, kw, "impl") or
+        std.mem.eql(u8, kw, "test");
 }
 
 fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, line_starts: []const usize) !void {
@@ -1835,7 +1848,7 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
             if (std.mem.eql(u8, kw2, "fun")) {
                 in_fun_signature = true;
             }
-            if (std.mem.eql(u8, kw2, "compound") or std.mem.eql(u8, kw2, "quirk") or std.mem.eql(u8, kw2, "impl")) {
+            if (std.mem.eql(u8, kw2, "compound") or std.mem.eql(u8, kw2, "quirk") or std.mem.eql(u8, kw2, "impl") or std.mem.eql(u8, kw2, "test")) {
                 pending_decl_block_open = true;
             }
             if (std.mem.eql(u8, kw2, "enum")) {

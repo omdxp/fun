@@ -50,6 +50,43 @@ fn runTranspile(allocator: std.mem.Allocator, input_path: []const u8, input: []c
     return allocator.dupe(u8, out);
 }
 
+/// Like `runTranspile`, but with `test_mode` on: `test "name" { ... }` blocks
+/// are type-checked/emitted and a generated runner `main` replaces any
+/// user-defined `main` -- mirrors the `fun test <path>` CLI subcommand.
+fn runTranspileTestMode(allocator: std.mem.Allocator, input_path: []const u8, input: []const u8) ![]const u8 {
+    {
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, input_path, .{ .read = true, .truncate = true });
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, input);
+    }
+
+    const out_path = try std.fmt.allocPrint(allocator, "{s}.out.c", .{input_path});
+    defer allocator.free(out_path);
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, out_path) catch {};
+
+    var transpile_proc = try codegen.TranspileProcess.init(allocator, input_path, out_path, .{
+        .outf = false,
+        .preload_imports = false,
+        .preload_std_imports = false,
+        .emit_stderr = false,
+        .test_mode = true,
+    });
+    var lex_proc = lexer.LexProcess.init(&transpile_proc);
+    var parse_proc = ParseProcess.init(&transpile_proc);
+
+    defer {
+        lex_proc.deinit();
+        transpile_proc.deinit();
+    }
+
+    try lex_proc.lex();
+    try parse_proc.parse();
+    try transpile_proc.transpile();
+
+    const out = transpile_proc.get_output() orelse return error.NoOutput;
+    return allocator.dupe(u8, out);
+}
+
 fn runTranspileExpectFailure(allocator: std.mem.Allocator, input_path: []const u8, input: []const u8) !void {
     const out_owned = runTranspile(allocator, input_path, input) catch {
         std.Io.Dir.cwd().deleteFile(std.testing.io, input_path) catch {};
@@ -10039,4 +10076,139 @@ test "Vec<T>.sort_by(cmp): num, str, and compound comparators" {
     const stdout = try runExeWithEnv(allocator, exe_path, &.{});
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("5 3 1 \n1:9 5:1 5:2 \n", stdout);
+}
+
+test "test blocks: an ordinary (non-test-mode) compile ignores them entirely" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_test_block_ignored.fn";
+    const c_path = "codegen_test_block_ignored.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_test_block_ignored.exe" else "codegen_test_block_ignored";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // `test` blocks are new (Phase 0.5): matching `zig build` vs `zig test`,
+    // an ORDINARY compile must not even type-check a test's body -- a test
+    // block referencing something broken/nonexistent must not stop the
+    // program from compiling and running normally.
+    const input =
+        "imp std.c.io;\n\n" ++
+        "test \"references something broken\" {\n" ++
+        "  assert this_does_not_exist() == 1, \"unreachable in a normal compile\";\n" ++
+        "}\n\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"normal run\\n\");\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "__fun_test_") == null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("normal run\n", stdout);
+}
+
+test "test blocks: fun test mode runs all-passing tests and reports a summary" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_test_block_pass.fn";
+    const c_path = "codegen_test_block_pass.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_test_block_pass.exe" else "codegen_test_block_pass";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    const input =
+        "fun add(num a, num b) num {\n" ++
+        "  ret a + b;\n" ++
+        "}\n\n" ++
+        "test \"add works\" {\n" ++
+        "  assert add(2, 3) == 5, \"expected 5\";\n" ++
+        "}\n\n" ++
+        "test \"add handles negatives\" {\n" ++
+        "  assert add(-1, -2) == -3, \"expected -3\";\n" ++
+        "}\n";
+
+    const out_owned = try runTranspileTestMode(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings(
+        "test: add works ... PASS\ntest: add handles negatives ... PASS\n2/2 tests passed\n",
+        stdout,
+    );
+}
+
+test "test blocks: a failing assert aborts the runner, leaving earlier PASS output intact" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_test_block_fail.fn";
+    const c_path = "codegen_test_block_fail.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_test_block_fail.exe" else "codegen_test_block_fail";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // `assert`/`panic` keep their existing hard-abort semantics inside a test
+    // (no per-test recovery in this first version): a failing test kills the
+    // whole runner immediately, so a LATER test never runs. This is the
+    // documented v1 tradeoff (see `emit_test_mode_functions_and_runner`).
+    const input =
+        "test \"passes\" {\n" ++
+        "  assert true, \"ok\";\n" ++
+        "}\n\n" ++
+        "test \"fails\" {\n" ++
+        "  assert 1 == 2, \"one is not two\";\n" ++
+        "}\n\n" ++
+        "test \"never reached\" {\n" ++
+        "  assert false, \"should not run\";\n" ++
+        "}\n";
+
+    const out_owned = try runTranspileTestMode(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+
+    // Run directly (not via `runExeWithEnv`, which discards stdout on a
+    // non-exited/nonzero result) so the partial PASS output survives the
+    // abort for inspection.
+    const exe_abs = blk: {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const n = try std.Io.Dir.cwd().realPathFile(std.testing.io, exe_path, &buf);
+        break :blk try allocator.dupe(u8, buf[0..n]);
+    };
+    defer allocator.free(exe_abs);
+    var env_map = try std.testing.environ.createMap(allocator);
+    defer env_map.deinit();
+    const result = try std.process.run(allocator, std.testing.io, .{
+        .argv = &.{exe_abs},
+        .environ_map = &env_map,
+        .stdout_limit = .limited(1024 * 1024),
+        .stderr_limit = .limited(1024 * 1024),
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // Did NOT exit cleanly (aborted).
+    switch (result.term) {
+        .exited => |code| try std.testing.expect(code != 0),
+        else => {},
+    }
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "one is not two") != null);
+    try std.testing.expectEqualStrings("test: passes ... PASS\ntest: fails ... ", result.stdout);
 }

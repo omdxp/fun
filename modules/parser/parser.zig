@@ -4471,6 +4471,63 @@ pub const ParseProcess = struct {
         self.transpile_proc.finish_scope();
     }
 
+    /// Parses a `test "name" { ... }` declaration (top-level only, like `fun`).
+    ///
+    /// Syntax: `test "description" { ...body... }`
+    ///
+    /// Skipped entirely by an ordinary compile; only emitted/run in `fun test`
+    /// mode (see `transpile_test_declarations` / the CLI's `test` subcommand).
+    /// The body reuses ordinary statement parsing, so `assert`, `panic`,
+    /// `if`/`for`, etc. all just work inside, same as a function body.
+    fn parse_test(self: *Self, hist: *utils.History) ParseError!void {
+        if (!hist.flags.is_global_scope) {
+            self.transpile_proc.err("'test' declarations are only valid at the top level", .{});
+            return ParseError.InvalidStatement;
+        }
+        const test_token = self.token_next(); // skip 'test'
+        const name_tok = self.token_next();
+        if (name_tok == null or name_tok.?.type != .String) {
+            self.transpile_proc.err("expected a string name after 'test'", .{});
+            return ParseError.InvalidString;
+        }
+        const name = name_tok.?.data.sval.items;
+
+        _ = try self.transpile_proc.new_scope();
+        errdefer self.transpile_proc.finish_scope();
+
+        // A dummy function context so ordinary statement parsing (`if`/`for`/
+        // `ret`/etc., which check `parser_current_function != null` to reject
+        // top-level use) works the same inside a test body as inside a
+        // real function body.
+        const prev_fn = self.parser_current_function;
+        self.parser_current_function = ast.Node{ .type = .Function, .node_variant = .{ .function = .{} } };
+        defer self.parser_current_function = prev_fn;
+
+        var hist_body = utils.History.init(self.transpile_proc.allocator, .{ .inside_function_body = true });
+        defer hist_body.deinit();
+        try self.parse_body(&hist_body);
+        const body_node = self.node_pop();
+        if (body_node == null) {
+            self.transpile_proc.err("expected test body", .{});
+            return ParseError.InvalidStatement;
+        }
+        const body = self.transpile_proc.allocator.create(ast.Node) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+        errdefer self.transpile_proc.allocator.destroy(body);
+        body.* = body_node.?;
+
+        self.transpile_proc.finish_scope();
+
+        self.transpile_proc.nodes.push(ast.Node{
+            .type = .Test,
+            .pos = if (test_token) |t| t.pos else null,
+            .node_variant = .{ .test_decl = .{ .name = name, .body = body } },
+        }) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+    }
+
     /// Parses a return statement.
     ///
     /// This function expects the 'ret' keyword, followed by an optional expression, and a semicolon.
@@ -5490,6 +5547,8 @@ pub const ParseProcess = struct {
             return try self.parse_function(false, true);
         } else if (mem.eql(u8, "fun", sval)) {
             return try self.parse_function(false, false);
+        } else if (mem.eql(u8, "test", sval)) {
+            return try self.parse_test(hist);
         } else if (mem.eql(u8, "for", sval)) {
             return try self.parse_for_statement(hist);
         } else if (mem.eql(u8, "if", sval)) {
@@ -6360,7 +6419,7 @@ pub const ParseProcess = struct {
             self.transpile_proc.err("expected declaration after keyword", .{});
             return ParseError.InvalidStatement;
         };
-        if (n.type != .Function) {
+        if (n.type != .Function and n.type != .Test) {
             try self.transpile_proc.register_global_node_symbol(n);
         }
         self.transpile_proc.nodes.push(n) catch {

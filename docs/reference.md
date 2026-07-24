@@ -586,7 +586,8 @@ wait to avoid warning on slow-but-live operations.
 
 ## CLI
 ```
-fun -in <input_file> [-out <output_file>] [-no-exec] [-outf] [-ast] [-help]
+fun -in <input_file> [-out <output_file>] [-no-exec] [-outf] [-ast] [-test] [-help]
+fun test <input_file>   (shorthand for `fun -in <input_file> -test`)
 ```
 
 ## Errors and Warnings

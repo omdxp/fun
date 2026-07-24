@@ -183,6 +183,28 @@ payload; payload-free variants still coexist.
     - Only supported as a parameter type today (not as a return type, local, or
       compound field). Used by `Vec<T>.sort_by(cmp)` for custom comparators.
 
+### Testing
+- **Declaration**: `test "description" { ... }` at the top level (like `fun`). The
+  body reuses ordinary statement parsing, so `assert`, `panic`, `if`/`for`, etc.
+  all just work inside.
+    ```fun
+    fun add(num a, num b) num { ret a + b; }
+
+    test "add works" {
+      assert add(2, 3) == 5, "expected 5";
+    }
+    ```
+- **Ignored by an ordinary compile**: matching `zig build` vs `zig test`, `fun -in
+  file.fn` never type-checks or emits `test` blocks at all — a test referencing
+  something broken doesn't stop the normal program from compiling.
+- **Running tests**: `fun test <path>` (shorthand for `fun -in <path> -test`)
+  compiles `test` blocks into a runner binary and runs it. Each test prints
+  `test: <name> ... PASS` as it completes, then a `N/N tests passed` summary.
+- **Failure semantics**: `assert`/`panic` keep their normal abort-the-process
+  behavior inside a test — there's no per-test recovery yet, so a failing test
+  aborts the whole run immediately and no later test executes. The output up to
+  that point (including the failing assertion's message) is still visible.
+
 ### Async / Await
 - **Async function declaration**: `async fun name(args) type { ... }`
 - **Await usage**: `await` is valid only inside an `async fun` body.

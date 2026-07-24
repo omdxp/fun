@@ -74,7 +74,23 @@ pub fn main(init: std.process.Init) void {
         }
     }
 
-    const options = cli.parse_args(global_allocator, init.io, argv) catch |err| print_error_and_exit(init.io, err);
+    // `fun test <path> [...rest]` is shorthand for `fun -in <path> -test
+    // [...rest]`, mirroring `zig test <path>`. Only rewritten when a path
+    // actually follows "test" -- otherwise pass argv through unchanged so
+    // `cli.parse_args` reports its own (still sensible) missing-input error.
+    const effective_argv: []const []const u8 = blk: {
+        if (argv.len >= 2 and std.mem.eql(u8, argv[0], "test")) {
+            var rewritten = global_allocator.alloc([]const u8, argv.len + 1) catch |err| print_error_and_exit(init.io, err);
+            rewritten[0] = "-in";
+            rewritten[1] = argv[1];
+            rewritten[2] = "-test";
+            for (argv[2..], 0..) |a, i| rewritten[3 + i] = a;
+            break :blk rewritten;
+        }
+        break :blk argv;
+    };
+
+    const options = cli.parse_args(global_allocator, init.io, effective_argv) catch |err| print_error_and_exit(init.io, err);
     defer cli.free_options(global_allocator, options);
 
     if (options.fmt_all) {
@@ -167,6 +183,7 @@ fn run_pipeline(ctx: anytype) void {
             .debug_info = options.debug_info,
             .emit_unused_warnings = options.warn_unused,
             .warn_unused_lenient = options.warn_unused_lenient,
+            .test_mode = options.test_mode,
         },
     ) catch |err| print_error_and_exit(io, err);
 
