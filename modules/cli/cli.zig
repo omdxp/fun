@@ -1851,6 +1851,30 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                 if (jcond < toks.len) {
                     const cond_has_parens = toks[jcond].type == .Operator and std.mem.eql(u8, toks[jcond].data.sval.items, "(");
 
+                    // A leading `(` only wraps the WHOLE condition (safe to
+                    // strip, `if (a) {` -> `if a {`) when its MATCHING `)` is
+                    // immediately followed by `{`. If more operators follow
+                    // the `)` (`if (status & 127) == 0 {`), the parens only
+                    // group a SUB-expression -- stripping them would silently
+                    // change the parsed expression tree (Fun, like C, binds
+                    // `==` tighter than `&`/`|`/`^`, so `status & 127 == 0`
+                    // means `status & (127 == 0)`, not `(status & 127) == 0`).
+                    var parens_wrap_whole_cond = false;
+                    if (cond_has_parens) {
+                        var pdepth: isize = 1;
+                        var k = jcond + 1;
+                        while (k < toks.len and pdepth > 0) : (k += 1) {
+                            const tk = toks[k];
+                            if (tk.type == .Operator and std.mem.eql(u8, tk.data.sval.items, "(")) pdepth += 1;
+                            if (tk.type == .Symbol and tk.data.cval == ')') pdepth -= 1;
+                        }
+                        var k2 = k;
+                        while (k2 < toks.len and (toks[k2].type == .NewLine or toks[k2].type == .Comment)) : (k2 += 1) {}
+                        if (k2 < toks.len and toks[k2].type == .Symbol and toks[k2].data.cval == '{') {
+                            parens_wrap_whole_cond = true;
+                        }
+                    }
+
                     // Scan forward to determine if this `if` uses a `{` block before the next `;`.
                     var depth_paren: isize = 0;
                     var depth_bracket: isize = 0;
@@ -1881,7 +1905,7 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                         }
                     }
 
-                    if (is_block and cond_has_parens) {
+                    if (is_block and parens_wrap_whole_cond) {
                         skipping_cond_outer_parens = true;
                         cond_paren_depth = 0;
                         pending_control_block_open = true;
@@ -2272,6 +2296,17 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                 if (t2.type == .Operator and (std.mem.eql(u8, t2.data.sval.items, "(") or std.mem.eql(u8, t2.data.sval.items, "["))) {
                     if (pt2.type == .Symbol and pt2.data.cval == '>') break :blk false;
                     if (pt2.type == .Operator and std.mem.eql(u8, pt2.data.sval.items, ">")) break :blk false;
+                    // A statement keyword taking a parenthesized OPERAND (`ret (x) & y;`,
+                    // `if (a) {`, `fit (x) {`) is not a call/index -- unlike a real
+                    // callee name, it must not glue to the paren (`ret(x)` reads as a
+                    // function call). `fun`/type-name-like keywords are NOT included
+                    // here since those legitimately precede a real parameter list.
+                    if (pt2.type == .Keyword) {
+                        const kw = pt2.data.sval.items;
+                        if (std.mem.eql(u8, kw, "ret") or std.mem.eql(u8, kw, "if") or std.mem.eql(u8, kw, "elif") or std.mem.eql(u8, kw, "for") or std.mem.eql(u8, kw, "fit") or std.mem.eql(u8, kw, "await")) {
+                            break :blk true;
+                        }
+                    }
                     // Distinguish grouping after spaced operators (e.g. `|| (`) from calls/indexing (e.g. `foo(`).
                     if (pt2.type == .Operator and operator_needs_spaces(pt2.data.sval.items)) break :blk true;
                     break :blk false;

@@ -929,6 +929,23 @@ fn expectHoverContains(allocator: Allocator, result_val: std.json.Value, needle:
     return error.TestUnexpectedResult;
 }
 
+fn expectHoverNotContains(allocator: Allocator, result_val: std.json.Value, needle: []const u8) !void {
+    if (!hoverContains(result_val, needle)) return;
+
+    const dumped = blk: {
+        var _aw = std.Io.Writer.Allocating.init(allocator);
+        defer _aw.deinit();
+        std.json.fmt(result_val, .{}).format(&_aw.writer) catch break :blk null;
+        const _s = _aw.toOwnedSlice() catch break :blk null;
+        break :blk _s;
+    };
+    if (dumped) |s| {
+        defer allocator.free(s);
+        std.debug.print("\n[fls_e2e] hover unexpectedly contains '{s}'\n{s}\n", .{ needle, s });
+    }
+    return error.TestUnexpectedResult;
+}
+
 fn hoverContains(result_val: std.json.Value, needle: []const u8) bool {
     if (result_val == .null) return false;
     if (result_val != .object) return false;
@@ -6238,6 +6255,71 @@ test "fls e2e: nil and fork keywords have hover docs and completion entries" {
     // Note: `nil` and `fork` are also added to the keyword-completion list (the same
     // array validated by the async/await completion test), so completion membership
     // is covered there; this test focuses on the hover docs unique to nil/fork.
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: fork used as an ordinary function (not the statement) does not get keyword hover" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    // `fork` is a CONTEXTUAL keyword: reserved only in statement position
+    // (`fork some_call();`), so it can also be declared/called as an ordinary
+    // function (e.g. a raw libc `fork()` binding). Hovering over ITS OWN
+    // declaration or a call to it must show ordinary identifier behavior
+    // (i.e. NOT the "virtual thread" keyword doc from the test above) --
+    // `buildSemanticTokens` reads the exact same underlying classification
+    // this hover check does, so this also guards the syntax-highlighting
+    // color (previously misreported as keyword-blue for a `fork()` binding).
+    const doc_text =
+        "pub fun fork() num;\n\n" ++
+        "fun main() num {\n" ++
+        "  let pid = fork();\n" ++
+        "  ret pid;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-fork-as-fn.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // Hover on the DECLARATION's `fork`.
+    const decl_pos = try findPosition(doc_text, "pub fun fork() num;\n", 0);
+    const decl_hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, decl_pos.line, decl_pos.col + @as(i64, @intCast("pub fun fo".len)) },
+    );
+    defer allocator.free(decl_hover_params);
+    const decl_hover_id = try lsp.request("textDocument/hover", decl_hover_params);
+    var decl_hover_res = try lsp.waitResponse(decl_hover_id, 15000);
+    defer decl_hover_res.deinit();
+    const decl_hover_val = try jsonResultFromResponseObj(decl_hover_res.parsed.value.object);
+    try expectHoverNotContains(allocator, decl_hover_val, "virtual thread");
+
+    // Hover on the CALL SITE's `fork`.
+    const call_pos = try findPosition(doc_text, "  let pid = fork();\n", 0);
+    const call_hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, call_pos.line, call_pos.col + @as(i64, @intCast("  let pid = fo".len)) },
+    );
+    defer allocator.free(call_hover_params);
+    const call_hover_id = try lsp.request("textDocument/hover", call_hover_params);
+    var call_hover_res = try lsp.waitResponse(call_hover_id, 15000);
+    defer call_hover_res.deinit();
+    const call_hover_val = try jsonResultFromResponseObj(call_hover_res.parsed.value.object);
+    try expectHoverNotContains(allocator, call_hover_val, "virtual thread");
 
     const shutdown_id = try lsp.request("shutdown", "{}");
     var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);

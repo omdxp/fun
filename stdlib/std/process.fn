@@ -1,0 +1,235 @@
+// Spawn child processes and capture (or inherit) their output.
+// 
+// Usage:
+// ```
+// imp std.process;
+//
+// Vec<str> args;
+// args.init(0);
+// args.push("echo");
+// args.push("hello");
+// let argv = argv_from(&args);
+// let res = run(argv);
+// if res.is_ok() {
+//   let out = res.unwrap();
+//   printf("exit=%lld out=%s\n", out.exit_code, out.stdout_text);
+// }
+// free_argv(argv);
+// ```
+
+imp std.c.process;
+imp std.c.mem;
+imp std.string;
+imp std.result;
+imp std.channel;
+imp std.vec;
+
+// The outcome of a captured child process run: its exit status and the full
+// text it wrote to stdout/stderr.
+pub compound ProcessResult {
+  // Process exit code (0-255 on a normal exit; 128+signal on a fatal signal,
+  // matching the shell convention).
+  num exit_code;
+  // Everything the child wrote to stdout.
+  str stdout_text;
+  // Everything the child wrote to stderr.
+  str stderr_text;
+}
+
+fun _empty_process_result() ProcessResult {
+  ProcessResult r;
+  r.exit_code = -1;
+  r.stdout_text = "";
+  r.stderr_text = "";
+  ret r;
+}
+
+// Build a NULL-terminated argument vector (the shape `run`/`spawn_inherited`
+// need) from a plain list of arguments. A Fun array LITERAL can't mix `str`
+// elements with a trailing `nil` sentinel (elements must share one type), so
+// callers build the list via `Vec<str>` and convert it here instead.
+// 
+// Params:
+// - args: the program name (conventionally repeated as argv[0]) followed by
+// its arguments, in order
+// 
+// Returns:
+// - a NULL-terminated argument vector suitable for `run`/`spawn_inherited`;
+// free with `free_argv` once done (the individual strings are borrowed
+// from `args`, not copied, so only the array itself needs freeing)
+pub fun argv_from(Vec<str>* args) str[] {
+  str[] out = malloc(sizeof(str) * (args.len + 1));
+  num i = 0;
+  for i < args.len {
+    out[i] = args.get(i);
+    i = i + 1;
+  }
+  out[args.len] = nil;
+  ret out;
+}
+
+// Free an argument vector built by `argv_from`.
+pub fun free_argv(str[] argv) {
+  free(argv);
+}
+
+// Open a pipe, returning its (read_fd, write_fd) pair via out params.
+// 
+// Returns:
+// - 0 on success
+// - -1 on failure (out params untouched)
+fun _open_pipe(num* out_read_fd, num* out_write_fd) num {
+  i32* fds = malloc(sizeof(i32) * 2);
+  if fds == nil {
+    ret -1;
+  }
+  if pipe(fds) != 0 {
+    free(fds);
+    ret -1;
+  }
+  out_read_fd[0] = fds[0];
+  out_write_fd[0] = fds[1];
+  free(fds);
+  ret 0;
+}
+
+// Decode a POSIX `waitpid` status into a shell-style exit code: the process's
+// own exit code on a normal exit, or 128+signal on termination by a signal.
+// Matches glibc/BSD/Darwin's wait(2) status layout (see std.c.process's
+// module doc comment) -- can't use the WIFEXITED/WEXITSTATUS C macros
+// directly since function-like macros can't be bound as Fun signatures.
+fun _decode_wait_status(i32 status) num {
+  // 0x7f == 127 (low 7 bits: the terminating-signal number, 0 for a normal
+  // exit); 0xFF == 255 (low 8 bits: the exit code stashed in bits 8-15). No
+  // hex literal syntax in Fun today, hence the decimal spelling.
+  num term_sig = status & 127;
+  // `if (expr) ...` mis-parses when the leading paren is just a
+  // sub-expression (not the whole condition) followed by more operators --
+  // binding the comparison to a name first sidesteps it.
+  bin exited_normally = term_sig == 0;
+  if exited_normally {
+    ret (status >> 8) & 255;
+  }
+  ret 128 + term_sig;
+}
+
+fun _wait_exit_code(num pid) num {
+  i32* status = malloc(sizeof(i32));
+  waitpid(pid, status, 0);
+  let code = _decode_wait_status(status[0]);
+  free(status);
+  ret code;
+}
+
+// Drain a pipe's read end to completion (until EOF), closing it when done,
+// and send the fully joined text back over `out`. Run as its own virtual
+// thread (via `fork`) so stdout and stderr can be drained CONCURRENTLY --
+// reading them one after the other risks a deadlock if the child fills the
+// OTHER pipe's kernel buffer while this side is blocked waiting on the first.
+async fun _drain_pipe(num fd, Channel<str>* out) {
+  let b = string_builder_init(256);
+  for true {
+    raw* buf = malloc(4097);
+    if buf == nil {
+      break;
+    }
+    let n = read(fd, buf, 4096);
+    if n <= 0 {
+      free(buf);
+      break;
+    }
+    str chunk = buf;
+    chunk[n] = '\0';
+    b.append(chunk);
+  }
+  let _rc = close(fd);
+  out <- b.build();
+  b.free();
+}
+
+// Spawn `argv[0]` (searched via PATH) with the given argument vector,
+// capturing its stdout and stderr separately and waiting for it to exit.
+// 
+// Params:
+// - argv: NULL-terminated argument vector (argv[0] is both the program to
+// run and, conventionally, the first element of its own argv)
+// 
+// Returns:
+// - `Ok(ProcessResult)` once the child has exited, with its captured output
+// - `Err` if the process could not be spawned at all (e.g. not found)
+pub fun run(str[] argv) Result<ProcessResult> {
+  num out_read = 0;
+  num out_write = 0;
+  if _open_pipe(&out_read, &out_write) != 0 {
+    ret err_kind(.System, "process.run: stdout pipe failed", _empty_process_result());
+  }
+
+  num err_read = 0;
+  num err_write = 0;
+  if _open_pipe(&err_read, &err_write) != 0 {
+    close(out_read);
+    close(out_write);
+    ret err_kind(.System, "process.run: stderr pipe failed", _empty_process_result());
+  }
+
+  posix_spawn_file_actions_t fa;
+  posix_spawn_file_actions_init(&fa);
+  posix_spawn_file_actions_adddup2(&fa, out_write, 1);
+  posix_spawn_file_actions_adddup2(&fa, err_write, 2);
+  posix_spawn_file_actions_addclose(&fa, out_read);
+  posix_spawn_file_actions_addclose(&fa, out_write);
+  posix_spawn_file_actions_addclose(&fa, err_read);
+  posix_spawn_file_actions_addclose(&fa, err_write);
+
+  pid_t pid = 0;
+  let spawn_rc = posix_spawnp(&pid, argv[0], &fa, nil, argv, environ_ptr());
+  posix_spawn_file_actions_destroy(&fa);
+  close(out_write);
+  close(err_write);
+  if spawn_rc != 0 {
+    close(out_read);
+    close(err_read);
+    ret err_kind(.System, "process.run: spawn failed", _empty_process_result());
+  }
+
+  Channel<str> stdout_ch = channel_new_cap("", 1);
+  Channel<str> stderr_ch = channel_new_cap("", 1);
+  fork _drain_pipe(out_read, &stdout_ch);
+  fork _drain_pipe(err_read, &stderr_ch);
+
+  // Each channel receive already blocks until its `_drain_pipe` task sends --
+  // no separate WaitGroup needed on top of that.
+  let out_text = <- stdout_ch;
+  let err_text = <- stderr_ch;
+  stdout_ch.destroy();
+  stderr_ch.destroy();
+
+  let exit_code = _wait_exit_code(pid);
+
+  ProcessResult result;
+  result.exit_code = exit_code;
+  result.stdout_text = out_text;
+  result.stderr_text = err_text;
+  ret ok(result);
+}
+
+// Spawn `argv[0]` (searched via PATH) with inherited stdio (stdin/stdout/
+// stderr all pass straight through to the caller's own, unlike `run`), wait
+// for it to exit, and return its exit code. Used for running a compiled
+// program interactively rather than capturing a tool's diagnostic output.
+// 
+// Params:
+// - argv: NULL-terminated argument vector
+// 
+// Returns:
+// - the child's exit code on success (shell-style: 128+signal on a fatal
+// signal)
+// - -1 if the process could not be spawned at all
+pub fun spawn_inherited(str[] argv) num {
+  pid_t pid = 0;
+  let spawn_rc = posix_spawnp(&pid, argv[0], nil, nil, argv, environ_ptr());
+  if spawn_rc != 0 {
+    ret -1;
+  }
+  ret _wait_exit_code(pid);
+}

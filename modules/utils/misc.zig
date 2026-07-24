@@ -107,7 +107,6 @@ pub fn is_keyword(str: []const u8) bool {
         mem.eql(u8, "else", str) or
         mem.eql(u8, "true", str) or mem.eql(u8, "false", str) or
         mem.eql(u8, "nil", str) or
-        mem.eql(u8, "fork", str) or
         mem.eql(u8, "fit", str) or mem.eql(u8, "ret", str) or
         mem.eql(u8, "for", str) or
         mem.eql(u8, "async", str) or
@@ -302,6 +301,10 @@ pub fn get_c_typedef_alias_datatype_type(dt: []const u8) ?dtype.DataTypeType {
     if (mem.eql(u8, "pthread_mutexattr_t", dt)) return .Unknown;
     if (mem.eql(u8, "pthread_cond_t", dt)) return .Unknown;
     if (mem.eql(u8, "pthread_condattr_t", dt)) return .Unknown;
+    // `spawn.h` / `sys/wait.h`
+    if (mem.eql(u8, "pid_t", dt)) return .Num;
+    if (mem.eql(u8, "posix_spawn_file_actions_t", dt)) return .Unknown;
+    if (mem.eql(u8, "posix_spawnattr_t", dt)) return .Unknown;
     return null;
 }
 

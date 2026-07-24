@@ -258,12 +258,38 @@ pub fn buildIndexFromTextAt(allocator: Allocator, text: []const u8, tmp_dir_path
     defer lp.deinit();
     try lp.lex();
 
+    const all_tokens = tp.tokens.items();
+
+    // `fork` is a CONTEXTUAL keyword at the parser level: reserved only in
+    // statement position (`fork some_call();`), so it can also be called as
+    // an ordinary function elsewhere (`let pid = fork();`, or `pub fun
+    // fork() num;` binding its declaration). Mirrors the parser's own
+    // disambiguation (`parse_statement`): whatever immediately follows is a
+    // `(` means this "fork" is being used/declared as a function -- keep it
+    // an identifier so hover/completion shows the FUNCTION's own doc, not the
+    // keyword's; anything else (the spawned call's own callee name) means
+    // this is the fork STATEMENT keyword.
+    const isForkFollowedByParen = struct {
+        fn call(tokens: []const @TypeOf(all_tokens[0]), fork_idx: usize) bool {
+            var j = fork_idx + 1;
+            while (j < tokens.len) : (j += 1) {
+                const nt = tokens[j];
+                if (nt.type == .NewLine or nt.type == .Comment) continue;
+                return nt.type == .Operator and nt.data == .sval and std.mem.eql(u8, nt.data.sval.items, "(");
+            }
+            return false;
+        }
+    }.call;
+
     var tokens_out = ArrayList(TokenLite).init(tmp_alloc);
-    for (tp.tokens.items()) |t| {
+    for (all_tokens, 0..) |t, tok_idx| {
         if (t.type == .NewLine) continue;
 
         const kind: TokenLiteKind = switch (t.type) {
-            .Identifier => .identifier,
+            .Identifier => if (t.data == .sval and std.mem.eql(u8, t.data.sval.items, "fork") and !isForkFollowedByParen(all_tokens, tok_idx))
+                .keyword
+            else
+                .identifier,
             .Keyword => .keyword,
             .Number => .number,
             .String => .string,
@@ -1330,4 +1356,82 @@ test "fls index: method with nested-generic return type has a bounded signature 
         if (s.value_type) |vt| try std.testing.expectEqualStrings("Option<Vec<JsonValue>>", vt);
     }
     try std.testing.expect(found);
+}
+
+test "fls index: function signature/hover includes an array return type" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // `T[]` return types are a new language feature (previously only legal
+    // as a parameter type, "expected symbol ';'" as a return type) -- confirm
+    // FLS's AST-backed signature/hover enrichment (which reads the same
+    // parsed `dtype.DataType` the compiler does) formats it the same way it
+    // already does for array-typed params/fields, not just that the compiler
+    // accepts the syntax.
+    const text =
+        "fun make_names() str[] {\n" ++
+        "  str[] out;\n" ++
+        "  ret out;\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found = false;
+    for (idx.symbols) |s| {
+        if (s.kind != .function) continue;
+        if (!std.mem.eql(u8, s.name, "make_names")) continue;
+        found = true;
+        try std.testing.expect(s.detail != null);
+        try std.testing.expectEqualStrings("fun make_names() str[]", s.detail.?);
+        try std.testing.expect(s.value_type != null);
+        try std.testing.expectEqualStrings("str[]", s.value_type.?);
+        break;
+    }
+    try std.testing.expect(found);
+}
+
+test "fls index: known lowercase C typedef names get type-color semantic tokens, not identifier" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // `posix_spawn_file_actions_t` is a lowercase (non-PascalCase) C typedef
+    // name registered in `utils.get_c_typedef_alias_datatype_type`. The
+    // `looks_type_like_ident` shape heuristic in `buildSemanticTokens` only
+    // fires for capitalized names, so this exercises the separate
+    // `get_c_typedef_alias_datatype_type`-driven path that must catch it too
+    // -- both as a pointer-suffixed parameter type and as a bare local
+    // declaration's type (`Type name;`, no initializer).
+    const text =
+        "pub fun posix_spawn_file_actions_init(posix_spawn_file_actions_t* actions) num;\n\n" ++
+        "fun main() num {\n" ++
+        "  posix_spawn_file_actions_t fa;\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    const data = try buildSemanticTokens(allocator, idx);
+    defer allocator.free(data);
+
+    try std.testing.expect(data.len % 5 == 0);
+
+    var checked_param_type = false;
+    var checked_local_decl_type = false;
+    for (idx.tokens, 0..) |t, i| {
+        if (t.kind != .identifier) continue;
+        if (!std.mem.eql(u8, t.text, "posix_spawn_file_actions_t")) continue;
+        const token_type = data[i * 5 + 3];
+        try std.testing.expectEqual(@as(u32, 7), token_type);
+        if (!checked_param_type) {
+            checked_param_type = true;
+        } else {
+            checked_local_decl_type = true;
+        }
+    }
+    try std.testing.expect(checked_param_type);
+    try std.testing.expect(checked_local_decl_type);
 }

@@ -1122,3 +1122,32 @@ test "-fmt spaces a leading-dot enum shorthand after ret" {
     try std.testing.expect(std.mem.indexOf(u8, got, "ret .N(n);") != null);
     try std.testing.expect(std.mem.indexOf(u8, got, "ret.N") == null);
 }
+
+test "-fmt keeps a space between ret/if/fit and a parenthesized sub-expression" {
+    const allocator = std.testing.allocator;
+
+    // `ret (status >> 8) & 255;` -- the leading paren here groups a
+    // SUB-expression (there's more after the `)`), not a call/whole-condition
+    // grouping. The statement-keyword spacing rule once treated any
+    // keyword-then-`(` the same as an identifier-then-`(` (a call), gluing
+    // `ret(status >> 8)` -- which reads as calling `ret` as a function.
+    const ugly =
+        "fun f(num status) num { ret (status >> 8) & 255; }\n" ++
+        "fun g(num status) num { if (status & 127) == 0 { ret 1; } ret 0; }\n";
+
+    const path = try writeTempFnFile(allocator, "fmtretparen", ugly);
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+
+    try std.testing.expect(std.mem.indexOf(u8, got, "ret (status >> 8) & 255;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "ret(status") == null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "if (status & 127) == 0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "if(status") == null);
+}

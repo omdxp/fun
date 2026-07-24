@@ -5182,6 +5182,10 @@ pub const TranspileProcess = struct {
             .{ .name = "pthread_mutexattr_t", .module = "std.c.thread" },
             .{ .name = "pthread_cond_t", .module = "std.c.thread" },
             .{ .name = "pthread_condattr_t", .module = "std.c.thread" },
+            // spawn.h / sys/wait.h -> std.c.process
+            .{ .name = "pid_t", .module = "std.c.process" },
+            .{ .name = "posix_spawn_file_actions_t", .module = "std.c.process" },
+            .{ .name = "posix_spawnattr_t", .module = "std.c.process" },
             // NOTE: stdint.h types (int*_t / intptr_t / uintptr_t) intentionally
             // omitted — there is no std.c.stdint Fun module to attribute them to.
         };
@@ -12992,6 +12996,26 @@ pub const TranspileProcess = struct {
         return self.write_type_no_subst(data_type);
     }
 
+    /// Writes a function/method's C return type, INCLUDING the extra pointer
+    /// level(s) a `T[]` return type needs. Unlike a parameter or local
+    /// variable -- which express an array via C's postfix `T name[]`
+    /// declarator or an explicit `array_as_pointer` prefix star, both handled
+    /// separately from `write_type` at their own call sites -- a C function
+    /// return type has no such postfix form (you can't write `T f()[]`), so
+    /// the array-ness has to become an ordinary leading `*` here instead, one
+    /// per array dimension. Shared by every call site that emits a return
+    /// type as part of a real C function/method signature (prototypes,
+    /// definitions, quirk vtables/wrappers, generic instantiations, async
+    /// support scaffolding) so none of them silently drop this again.
+    fn write_return_type(self: *Self, rt: dtype.DataType) TranspileError!void {
+        try self.write_type(rt);
+        if (rt.flags != null and rt.flags.?.is_array) {
+            const depth: usize = if (rt.array_depth > 0) rt.array_depth else 1;
+            var i: usize = 0;
+            while (i < depth) : (i += 1) try self.write("*");
+        }
+    }
+
     fn c_ident_sanitize(self: *Self, raw: []const u8) TranspileError![]const u8 {
         var out = ArrayList(u8).init(self.allocator);
         errdefer out.deinit();
@@ -15488,7 +15512,7 @@ pub const TranspileProcess = struct {
             try self.write(" {\n");
             for (q.methods.items()) |m| {
                 try self.write("  ");
-                try self.write_type(m.rtype);
+                try self.write_return_type(m.rtype);
                 try self.write(" (*");
                 try self.write(m.name.items);
                 try self.write(")(void* self");
@@ -15580,7 +15604,7 @@ pub const TranspileProcess = struct {
             defer if (impl_fn_owned) self.allocator.free(impl_fn_name);
 
             if (fnv.rtype) |rt| {
-                try self.write_type(rt);
+                try self.write_return_type(rt);
             } else {
                 try self.write("void");
             }
@@ -15694,7 +15718,7 @@ pub const TranspileProcess = struct {
                 defer self.backing_allocator.free(wrap_name);
 
                 try self.write("static ");
-                try self.write_type(m.rtype);
+                try self.write_return_type(m.rtype);
                 try self.write(" ");
                 try self.write(wrap_name);
                 try self.write("(void* self");
@@ -16033,7 +16057,7 @@ pub const TranspileProcess = struct {
                         }
 
                         if (fnv.rtype) |rt| {
-                            try self.write_type(rt);
+                            try self.write_return_type(rt);
                         } else {
                             try self.write("void");
                         }
@@ -16101,7 +16125,7 @@ pub const TranspileProcess = struct {
                         }
 
                         if (fnv.rtype) |rt| {
-                            try self.write_type(rt);
+                            try self.write_return_type(rt);
                         } else {
                             try self.write("void");
                         }
@@ -16145,7 +16169,7 @@ pub const TranspileProcess = struct {
             emitted.put(fname, true) catch return TranspileError.MemoryAllocationFailed;
 
             if (fnv.rtype) |rt| {
-                try self.write_type(rt);
+                try self.write_return_type(rt);
             } else {
                 try self.write("void");
             }
@@ -17605,7 +17629,7 @@ pub const TranspileProcess = struct {
         if (fnv.rtype) |rt| {
             if (rt.type != .Void) {
                 try self.write("  ");
-                try self.write_type(rt);
+                try self.write_return_type(rt);
                 try self.write(" __result;\n");
             }
         }
@@ -17626,7 +17650,7 @@ pub const TranspileProcess = struct {
 
         if (fnv.rtype) |rt| {
             try self.write("static ");
-            try self.write_type(rt);
+            try self.write_return_type(rt);
         } else {
             try self.write("static void");
         }
@@ -17638,7 +17662,7 @@ pub const TranspileProcess = struct {
 
         if (fnv.rtype) |rt| {
             try self.write("static ");
-            try self.write_type(rt);
+            try self.write_return_type(rt);
         } else {
             try self.write("static void");
         }
@@ -17741,7 +17765,7 @@ pub const TranspileProcess = struct {
         if (pos_opt) |pos| try self.write_pos_line_directive(pos);
         if (fnv.rtype) |rt| {
             try self.write("static ");
-            try self.write_type(rt);
+            try self.write_return_type(rt);
         } else {
             try self.write("static void");
         }
@@ -17756,7 +17780,7 @@ pub const TranspileProcess = struct {
             if (rt.type != .Void) {
                 if (pos_opt) |pos| try self.write_pos_line_directive(pos);
                 try self.write("  ");
-                try self.write_type(rt);
+                try self.write_return_type(rt);
                 try self.write(" __result = __payload->__result;\n");
                 if (pos_opt) |pos| try self.write_pos_line_directive(pos);
                 try self.write("  free(__payload);\n");
@@ -17777,7 +17801,7 @@ pub const TranspileProcess = struct {
         if (pos_opt) |pos| try self.write_pos_line_directive(pos);
         if (fnv.rtype) |rt| {
             try self.write("static ");
-            try self.write_type(rt);
+            try self.write_return_type(rt);
         } else {
             try self.write("static void");
         }
@@ -17989,7 +18013,7 @@ pub const TranspileProcess = struct {
         }
 
         if (function.rtype) |rtype| {
-            try self.write_type(rtype);
+            try self.write_return_type(rtype);
         } else {
             try self.write("void");
         }
@@ -18246,6 +18270,17 @@ pub const TranspileProcess = struct {
             try self.write("static FILE* stdout_stream(void){ return stdout; }\n");
             try self.write("static FILE* stderr_stream(void){ return stderr; }\n");
             try self.write("static FILE* stdin_stream(void){ return stdin; }\n");
+            // `environ` (the process environment, needed by std.c.process's
+            // posix_spawn binding to inherit the parent's env) is a global, not a
+            // callable symbol -- same reasoning as the stdout/stderr/stdin
+            // wrappers above: a bare `extern char** environ;` declaration is not
+            // portable (MinGW/MSVC spell it `_environ`), so wrap it.
+            try self.write("#ifdef _WIN32\n");
+            try self.write("static char** environ_ptr(void){ return _environ; }\n");
+            try self.write("#else\n");
+            try self.write("extern char** environ;\n");
+            try self.write("static char** environ_ptr(void){ return environ; }\n");
+            try self.write("#endif\n");
             try self.write("#ifdef _WIN32\n");
             try self.write("#include <windows.h>\n");
             try self.write("typedef HANDLE __fun_thread_t;\n");
@@ -20129,7 +20164,7 @@ pub const TranspileProcess = struct {
                         }
                     }
                     if (function.rtype) |rtype| {
-                        try self.write_type(rtype);
+                        try self.write_return_type(rtype);
                     } else {
                         try self.write("void");
                     }
@@ -21296,6 +21331,24 @@ pub const TranspileProcess = struct {
             // `std.c.thread*` imports are handled specially in `write_std_imports`:
             // - on Windows, emit Win32-backed pthread-compatible definitions
             // - otherwise, include `<pthread.h>`
+            try self.process_std_module_import(import_node, import_path);
+            return;
+        } else if (mem.eql(u8, import_path, "std.c.process")) {
+            // Needs THREE headers (posix_spawn, waitpid, pipe/read/write/dup2/close),
+            // not the single-header-per-import pattern the rest of this chain uses.
+            const needed = [_][]const u8{ "spawn.h", "sys/wait.h", "unistd.h" };
+            for (needed) |h| {
+                var already = false;
+                for (self.std_imports.items) |existing| {
+                    if (mem.eql(u8, existing, h)) {
+                        already = true;
+                        break;
+                    }
+                }
+                if (already) continue;
+                const dup = self.allocator.dupe(u8, h) catch return TranspileError.MemoryAllocationFailed;
+                self.std_imports.append(dup) catch return TranspileError.MemoryAllocationFailed;
+            }
             try self.process_std_module_import(import_node, import_path);
             return;
         } else if (mem.eql(u8, import_path, "std.c.limits")) {

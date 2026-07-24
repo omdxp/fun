@@ -9476,3 +9476,182 @@ test "constructing a generic enum from a method's own type param does not cross-
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("hi\n99\nnone\n", stdout);
 }
+
+test "fork is a CONTEXTUAL keyword: usable as an ordinary function" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_fork_contextual_keyword.fn";
+    const c_path = "codegen_fork_contextual_keyword.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_fork_contextual_keyword.exe" else "codegen_fork_contextual_keyword";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Found while adding a std.c.process module (self-hosting Phase 0):
+    // `fork` was an UNCONDITIONAL lexer keyword, so a raw libc `fork()`
+    // binding couldn't be declared under its real name at all ("expected
+    // identifier, got 'Keyword'"). Fixed by making `fork` CONTEXTUAL:
+    // `is_keyword` no longer reserves it at the lexer level, and
+    // `parse_statement` recognizes the fork STATEMENT by peeking one token
+    // ahead -- a `(` immediately after "fork" means it's being used/declared
+    // as an ordinary function (`fork()`, `pub fun fork() num { ... }`);
+    // anything else (the spawned call's own callee name) means the fork
+    // STATEMENT (`fork worker(...)`).
+    //
+    // Deliberately does NOT ALSO use the fork STATEMENT in this same file:
+    // that pulls in `#include <unistd.h>` (for the M:N scheduler's CPU-count
+    // check), which declares the REAL libc `fork()` -- a user-defined `fork`
+    // symbol of ANY signature would then conflict with it at the C level
+    // ("conflicting types for 'fork'"), regardless of this parser fix. The
+    // fork STATEMENT itself already has enormous existing coverage
+    // (WaitGroup/channel tests throughout this file) that continues to pass
+    // unmodified, confirming this fix doesn't regress it.
+    const input =
+        "imp std.c.io;\n" ++
+        "pub fun fork() num {\n" ++
+        "  ret 42;\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  let pid = fork();\n" ++
+        "  printf(\"%lld\\n\", pid);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("42\n", stdout);
+}
+
+test "array return types: T[] is a valid function return type, with a body and signature-only" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_array_return_type.fn";
+    const c_path = "codegen_array_return_type.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_array_return_type.exe" else "codegen_array_return_type";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Found while adding `std.process`'s `argv_from`/`environ_ptr` helpers
+    // (self-hosting Phase 0): `T[]` was accepted as a PARAMETER type but not
+    // as a function RETURN type ("expected symbol ';'") -- the return-type
+    // parse sites (plain functions, quirk method signatures, impl methods)
+    // called `parse_datatype` but never `parse_array_brackets` afterward.
+    // Fixed by adding the same `if (next_token_is_operator("["))
+    // parse_array_brackets(...)` step used for parameters to each return-type
+    // site, and making `parse_array_brackets` initialize `dt.flags` itself
+    // (`orelse .{}`) instead of assuming a caller already set it, since the
+    // return-type call sites start from a bare `.{ .type_str = ... }` with
+    // `flags == null`. Also covers a signature-only (no body) declaration,
+    // which exercises the same "expected symbol ';'" failure mode directly.
+    //
+    // A SECOND, separate bug surfaced right behind the first: `write_type`
+    // (shared by the C prototype AND the definition) only ever added a `*`
+    // for `pointer_depth`/`is_pointer`, never for `is_array` -- so `str[]`
+    // emitted as plain `char*` instead of `char**`. Assigning the call result
+    // to a `str[]`-typed local (as above) happened to still "work" because
+    // the raw pointer VALUE is unaffected by the C-side type being one
+    // pointer level too shallow. Indexing the call result DIRECTLY
+    // (`make_names()[1]`, no intermediate variable) does NOT survive that:
+    // with the wrong return type, `[1]` indexes into individual bytes of
+    // whatever `out[0]` points to instead of into `out`'s own elements --
+    // this is the case that must stay covered, since the intermediate-
+    // variable form alone would NOT have caught a regression here. Fixed via
+    // a shared `write_return_type` helper (adds one `*` per `array_depth` on
+    // top of `write_type`) used at every place a return type is emitted as
+    // part of a real C function/method signature.
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.c.mem;\n\n" ++
+        "pub fun unused_signature_only() str[];\n\n" ++
+        "fun make_names() str[] {\n" ++
+        "  str[] out = malloc(sizeof(str) * 3);\n" ++
+        "  out[0] = \"a\";\n" ++
+        "  out[1] = \"b\";\n" ++
+        "  out[2] = nil;\n" ++
+        "  ret out;\n" ++
+        "}\n\n" ++
+        "fun main() num {\n" ++
+        "  str[] names = make_names();\n" ++
+        "  printf(\"%s %s\\n\", names[0], make_names()[1]);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("a b\n", stdout);
+}
+
+test "std.process: run() captures stdout/exit code, spawn_inherited() returns exit code" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_process.fn";
+    const c_path = "codegen_std_process.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_std_process.exe" else "codegen_std_process";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // End-to-end coverage for the new `std.process` module (Phase 0 of the
+    // self-hosting rewrite): `argv_from` (Vec<str> -> NULL-terminated argv,
+    // needed since a Fun array literal can't mix `str` elements with a
+    // trailing `nil`), `run()` (posix_spawn + captured stdout/stderr via
+    // Channel/fork, matching the stdlib's existing concurrency idioms rather
+    // than raw threads), and `spawn_inherited()` (inherited stdio, exit code
+    // only). `Vec<T>` needs an explicit `.init()` before use -- a bare
+    // declaration is uninitialized, not zero-valued -- easy to miss since it
+    // does not surface as a compile-time error, only a garbage `len`/`cap` at
+    // runtime.
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.process;\n" ++
+        "imp std.vec;\n\n" ++
+        "fun main() num {\n" ++
+        "  Vec<str> args;\n" ++
+        "  args.init(0);\n" ++
+        "  args.push(\"echo\");\n" ++
+        "  args.push(\"hello from child\");\n" ++
+        "  let child_argv = argv_from(&args);\n\n" ++
+        "  let res = run(child_argv);\n" ++
+        "  if res.is_ok() {\n" ++
+        "    let out = res.unwrap();\n" ++
+        "    printf(\"exit=%lld out=[%s] err=[%s]\\n\", out.exit_code, out.stdout_text, out.stderr_text);\n" ++
+        "  } else {\n" ++
+        "    printf(\"spawn failed\\n\");\n" ++
+        "  }\n" ++
+        "  free_argv(child_argv);\n\n" ++
+        "  Vec<str> args2;\n" ++
+        "  args2.init(0);\n" ++
+        "  args2.push(\"false\");\n" ++
+        "  let child_argv2 = argv_from(&args2);\n" ++
+        "  let code = spawn_inherited(child_argv2);\n" ++
+        "  printf(\"spawn_inherited exit=%lld\\n\", code);\n" ++
+        "  free_argv(child_argv2);\n\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("exit=0 out=[hello from child\n] err=[]\nspawn_inherited exit=1\n", stdout);
+}

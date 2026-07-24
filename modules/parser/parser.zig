@@ -558,6 +558,21 @@ pub const ParseProcess = struct {
             return try self.parse_keyword(hist);
         }
 
+        // `fork` is a CONTEXTUAL keyword: reserved only in statement position
+        // immediately followed by a call to spawn (`fork worker(&wg, i);`), so
+        // it can also be bound/called as an ordinary identifier elsewhere
+        // (e.g. a `std.c.process` binding for the POSIX `fork()` syscall).
+        // Disambiguate by what immediately follows: a `(` means `fork` itself
+        // is being called as a function (`fork()`); anything else (the
+        // spawned call's own callee name) means this is the fork STATEMENT.
+        if (t.?.type == .Identifier and mem.eql(u8, t.?.data.sval.items, "fork")) {
+            const after = self.token_peek_n(1);
+            const calls_fork_itself = after != null and after.?.type == .Operator and mem.eql(u8, after.?.data.sval.items, "(");
+            if (!calls_fork_itself) {
+                return try self.parse_fork_statement(hist);
+            }
+        }
+
         // User-defined type variable declarations start with an identifier datatype, e.g.:
         // `Point p;`, `Point p = ...;`, `Point* p;`, `Point** p = ...;`
         // Detect `<Identifier> [* ...] <Identifier>` and parse it as a variable declaration.
@@ -3295,6 +3310,11 @@ pub const ParseProcess = struct {
             const rtok = self.token_peek_next();
             if (rtok != null and (rtok.?.type == .Keyword and utils.keyword_is_datatype(rtok.?.data.sval.items)) or rtok.?.type == .Identifier) {
                 try self.parse_datatype(&rtype);
+                if (self.next_token_is_operator("[")) {
+                    var hist_rtype = utils.History.init(self.transpile_proc.allocator, .{});
+                    defer hist_rtype.deinit();
+                    try self.parse_array_brackets(&rtype, &hist_rtype);
+                }
             } else {
                 rtype.type = .Void;
                 rtype.type_str.appendSlice("void") catch {
@@ -3843,6 +3863,11 @@ pub const ParseProcess = struct {
             const rtok = self.token_peek_next();
             if (rtok != null and ((rtok.?.type == .Keyword and utils.keyword_is_datatype(rtok.?.data.sval.items)) or rtok.?.type == .Identifier)) {
                 try self.parse_datatype(&rtype);
+                if (self.next_token_is_operator("[")) {
+                    var hist_rtype = utils.History.init(self.transpile_proc.allocator, .{});
+                    defer hist_rtype.deinit();
+                    try self.parse_array_brackets(&rtype, &hist_rtype);
+                }
                 fn_node.node_variant.?.function.rtype = rtype;
             }
 
@@ -3955,7 +3980,9 @@ pub const ParseProcess = struct {
         while (self.next_token_is_operator("[")) {
             const lbracket_token = self.token_peek_next();
             try self.expect_op("[");
-            dt.*.flags.?.is_array = true;
+            var flags = dt.*.flags orelse dtype.DataTypeFlags{};
+            flags.is_array = true;
+            dt.*.flags = flags;
             depth += 1;
             if (self.next_token_is_symbol(']')) {
                 try self.expect_sym(']');
@@ -4331,6 +4358,11 @@ pub const ParseProcess = struct {
         const rtype_token = self.token_peek_next();
         if (rtype_token != null and ((rtype_token.?.type == .Keyword and utils.keyword_is_datatype(rtype_token.?.data.sval.items)) or rtype_token.?.type == .Identifier)) {
             try self.parse_datatype(&dt);
+            if (self.next_token_is_operator("[")) {
+                var hist_rtype = utils.History.init(self.transpile_proc.allocator, .{});
+                defer hist_rtype.deinit();
+                try self.parse_array_brackets(&dt, &hist_rtype);
+            }
         } else {
             var type_str = ArrayList(u8).init(self.transpile_proc.allocator);
             type_str.appendSlice("void") catch {
@@ -5407,8 +5439,6 @@ pub const ParseProcess = struct {
             _ = try self.parse_await_operand(hist);
             try self.expect_sym(';');
             return;
-        } else if (mem.eql(u8, "fork", sval)) {
-            return try self.parse_fork_statement(hist);
         } else if (mem.eql(u8, "nil", sval)) {
             // The `nil` literal (a null pointer/string sentinel). `parse_keyword`
             // only PEEKS, so we must consume the token here (unlike `true`/`false`,
