@@ -74,11 +74,15 @@ pub fun is_xdigit(chr c) bin {
 }
 
 // Converts a character to lowercase if possible, else returns it unchanged.
-pub fun to_lower(chr c) chr {
+// Named `_chr` (not `to_lower`) to avoid colliding with std.string's
+// str-level `to_lower` when both modules are imported together.
+pub fun to_lower_chr(chr c) chr {
   ret tolower(c);
 }
 
 // Converts a character to uppercase if possible, else returns it unchanged.
-pub fun to_upper(chr c) chr {
+// Named `_chr` (not `to_upper`) to avoid colliding with std.string's
+// str-level `to_upper` when both modules are imported together.
+pub fun to_upper_chr(chr c) chr {
   ret toupper(c);
 }

@@ -1,0 +1,59 @@
+// Keyword/operator tables the lexer depends on. Ported directly from
+// modules/utils/misc.zig's `is_keyword`/`is_boolean_keyword`/`op_valid`/
+// `is_single_operator`/`op_treated_as_one` -- these are pure, self-contained
+// lookup tables (not lexer STATE), so they live in their own module rather
+// than inside lexer.fn.
+// 
+// Note: sized integer types (`u8`, `i32`, `iN`/`uN`, `f32`/`f64`) are
+// DELIBERATELY excluded from `is_keyword` here, matching the Zig original
+// exactly -- they lex as ordinary IDENTIFIERS; a separate `keyword_is_datatype`
+// table (used by the PARSER for type-position disambiguation, not by the
+// lexer) is where those get recognized. Porting that is the parser's job,
+// not this module's.
+
+pub fun is_keyword(str s) bin {
+  fit s {
+    "imp", "pub", "fun", "as", "enum", "compound", "quirk", "impl", "let", "defer", "asm", "volatile", "arch", "void", "raw", "num", "dec", "str", "bin", "chr", "if", "elif", "else", "true", "false", "nil", "fit", "ret", "for", "async", "await", "break", "continue", "allow", "expect", "assert", "panic", "test" -> {
+      ret true;
+    }
+    _ -> { ret false; }
+  }
+}
+
+pub fun is_boolean_keyword(str s) bin {
+  fit s {
+    "true", "false" -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
+// An operator character that is always treated as a single-character unit
+// even when a longer run of operator characters might otherwise follow it
+// (e.g. `(` never combines with a following char into a multi-char op).
+pub fun op_treated_as_one(chr op) bin {
+  fit op {
+    '(', '[', ',', '*' -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
+// A character that may participate in a multi-character operator.
+pub fun is_single_operator(chr op) bin {
+  fit op {
+    '+', '-', '/', '*', '=', '>', '<', '|', '&', '^', '%', '~', '!', '(', '[', ',', '.', ':', '#', '$' -> {
+      ret true;
+    }
+    _ -> { ret false; }
+  }
+}
+
+// Every valid operator TEXT (as opposed to `is_single_operator`, which
+// checks a single CHARACTER that may be part of one).
+pub fun op_valid(str op) bin {
+  fit op {
+    "+", "-", "*", "/", "!", "^", "+=", "-=", "*=", "/=", ">>", "%=", "&=", "|=", "^=", ">>=", "<<", "<<=", ">", "<", ">=", "<=", "||", "&&", "|", "&", "++", "--", "=", "!=", "==", "(", "[", ",", ".", "..", "...", ":", "::", "~", "<-", "%", "->", "#", "$" -> {
+      ret true;
+    }
+    _ -> { ret false; }
+  }
+}

@@ -2002,7 +2002,11 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                 if (idx == close_i) {
                     inline_arm_close = null;
                     const last = if (state.out.items.len > 0) state.out.items[state.out.items.len - 1] else 0;
-                    if (last != ' ') try state.out.append(' ');
+                    // An EMPTY inline body (`{}`) stays compact -- only pad with a
+                    // space before `}` when there's actual content between the
+                    // braces (`{ ret x; }`), matching the `{}` convention used
+                    // for empty bodies elsewhere.
+                    if (last != ' ' and last != '{') try state.out.append(' ');
                     try state.out.append('}');
                     // A fit-branch separator comma must stay glued to THIS arm's close
                     // (`... },`) rather than leading the next line (`, next -> ...`).
@@ -2529,7 +2533,7 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
         // Track unary prefix ops so we don't insert a space after them.
         if (t2.type == .Operator) {
             const op2 = t2.data.sval.items;
-            if ((std.mem.eql(u8, op2, "-") or std.mem.eql(u8, op2, "+") or std.mem.eql(u8, op2, "&") or std.mem.eql(u8, op2, "*"))) {
+            if ((std.mem.eql(u8, op2, "-") or std.mem.eql(u8, op2, "+") or std.mem.eql(u8, op2, "&") or std.mem.eql(u8, op2, "*") or std.mem.eql(u8, op2, "!"))) {
                 const is_pointer_decl_star = std.mem.eql(u8, op2, "*") and blk_ptr: {
                     const prev = state.prev_token.*;
                     if (prev == null) break :blk_ptr false;

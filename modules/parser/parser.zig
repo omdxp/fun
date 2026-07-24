@@ -2455,6 +2455,15 @@ pub const ParseProcess = struct {
                 self.transpile_proc.nodes.push(exp_node) catch {
                     return ParseError.MemoryAllocationFailed;
                 };
+                // Check for a postfix continuation -- most importantly a call
+                // `(...)` turning a data-carrying variant shorthand into a
+                // construction (`.Cval('a')`), same as `parse_for_parenthesis`
+                // does after building an ordinary atom. Without this, a
+                // following `(` was left unconsumed here and got misattached
+                // to whatever expression enclosed this one (e.g. `d = .Cval`
+                // parsed as a complete assignment, with a stray `('a')` then
+                // misparsed as a call on the WHOLE assignment expression).
+                try self.parse_additional_expression(hist.flags);
                 return;
             }
             // Prefix channel receive: `<-ch` -> `ch.recv()`. Parse the channel
@@ -4591,8 +4600,9 @@ pub const ParseProcess = struct {
             }
             _ = self.token_next(); // skip elif
 
-            // Parse condition. If written as `elif (cond) ...`, do not let the condition
-            // parse consume the following statement tokens.
+            // Parse condition -- see parse_if_statement for why the leading
+            // `(` is stripped explicitly and further binary continuation is
+            // picked up afterward via the general expression loop.
             var condition_node: ?ast.Node = null;
             if (self.next_token_is_operator("(")) {
                 try self.expect_op("(");
@@ -4602,6 +4612,15 @@ pub const ParseProcess = struct {
             } else {
                 try self.parse_expressionable_root(hist);
                 condition_node = self.node_pop();
+            }
+            if (self.token_peek_next()) |nt| {
+                if (utils.is_binary_only_operator(nt)) {
+                    self.transpile_proc.nodes.push(condition_node.?) catch {
+                        return ParseError.MemoryAllocationFailed;
+                    };
+                    try self.parse_expressionable(hist);
+                    condition_node = self.node_pop();
+                }
             }
             if (condition_node.?.type == .Expression and mem.eql(u8, condition_node.?.node_variant.?.exp.op, "=")) {
                 self.transpile_proc.err("expected expression, got assignment", .{});
@@ -4715,8 +4734,20 @@ pub const ParseProcess = struct {
             return ParseError.InvalidStatement;
         }
 
-        // Parse condition. If written as `if (cond) ...`, do not let the condition
-        // parse consume the following statement tokens.
+        // Parse condition. A leading `(` is stripped explicitly here rather
+        // than left to the general expression atom parser: `parse_expression`'s
+        // `(` branch (`parse_for_parenthesis`) unconditionally tells its
+        // caller's loop "there may be more to parse", which is correct MID
+        // expression but wrong as the top-level condition parse -- when a
+        // bare parenthesized group is immediately followed by an unrelated
+        // statement-starting token (the single-statement `if (a) b = c;`
+        // body), that loop wrongly consumed `b = c` as a SECOND, unrelated
+        // atom and silently discarded the `(a)` condition entirely. So the
+        // outer parens are stripped manually (as before), and further
+        // binary-operator continuation (`(a || b) && c`) is picked up
+        // explicitly afterward instead, via the SAME general expression loop
+        // but properly seeded with the already-parsed condition as its left
+        // operand.
         var condition_node: ?ast.Node = null;
         if (self.next_token_is_operator("(")) {
             try self.expect_op("(");
@@ -4726,6 +4757,15 @@ pub const ParseProcess = struct {
         } else {
             try self.parse_expressionable_root(hist);
             condition_node = self.node_pop();
+        }
+        if (self.token_peek_next()) |nt| {
+            if (utils.is_binary_only_operator(nt)) {
+                self.transpile_proc.nodes.push(condition_node.?) catch {
+                    return ParseError.MemoryAllocationFailed;
+                };
+                try self.parse_expressionable(hist);
+                condition_node = self.node_pop();
+            }
         }
         if (condition_node.?.type == .Expression and mem.eql(u8, condition_node.?.node_variant.?.exp.op, "=")) {
             self.transpile_proc.err("expected expression, got assignment", .{});

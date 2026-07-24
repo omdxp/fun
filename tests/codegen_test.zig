@@ -9909,7 +9909,7 @@ test "std.ctype: chr/bin wrappers over std.c.ctype" {
         "fun main() num {\n" ++
         "  printf(\"%d %d %d %d\\n\", is_digit('5'), is_digit('x'), is_alpha('x'), is_alpha('5'));\n" ++
         "  printf(\"%d %d\\n\", is_space(' '), is_space('x'));\n" ++
-        "  printf(\"%c%c\\n\", to_upper('a'), to_lower('A'));\n" ++
+        "  printf(\"%c%c\\n\", to_upper_chr('a'), to_lower_chr('A'));\n" ++
         "  ret 0;\n" ++
         "}\n";
 

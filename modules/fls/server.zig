@@ -5006,6 +5006,41 @@ pub const LspServer = struct {
                     const p = params.items[@intCast(active)];
                     if (self.parseTypeNameFromParamLabel(p.label)) |tname| {
                         if (self.findEnumDefinitionAnyDoc(uri, tname)) |hit| return hit.sym.name;
+                        // `tname` isn't a real type -- it's the callee's OWN unresolved
+                        // generic type param (e.g. `ok<T>(T value) Result<T>`, `tname`
+                        // = "T"). If this call is the direct `ret` expression of a
+                        // function whose declared return type is the SAME generic
+                        // container the callee returns (`Result<Option<Token>>` for a
+                        // callee returning `Result<T>`), unify T with the enclosing
+                        // return type's own generic argument instead of giving up --
+                        // without this, `ret ok(.Some(x));` never resolved `.Some`'s
+                        // enum (Option) at all, since "T" isn't findable as an enum.
+                        if (returnTypeNameFromSignatureLabel(sig.label)) |callee_ret_base| {
+                            var r: isize = @as(isize, @intCast(dot_i)) - 1;
+                            var in_ret = false;
+                            while (r >= 0) : (r -= 1) {
+                                const t = idx.tokens[@intCast(r)];
+                                if (t.kind == .comment) continue;
+                                if ((t.kind == .symbol or t.kind == .operator) and
+                                    (std.mem.eql(u8, t.text, ";") or std.mem.eql(u8, t.text, "{") or std.mem.eql(u8, t.text, "}"))) break;
+                                if (t.kind == .keyword and std.mem.eql(u8, t.text, "ret")) {
+                                    in_ret = true;
+                                    break;
+                                }
+                            }
+                            if (in_ret) {
+                                if (self.enclosingFunctionReturnTypeName(idx, dot_i)) |enc_base| {
+                                    if (std.mem.eql(u8, enc_base, callee_ret_base)) {
+                                        if (self.enclosingFunctionReturnTypeGenericArgs(idx, dot_i)) |args| {
+                                            if (args.len != 0) {
+                                                const arg_base = baseTypeNameForLookup(args[0]);
+                                                if (self.isEnumTypeName(uri, arg_base)) return arg_base;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -5023,6 +5058,24 @@ pub const LspServer = struct {
                         const lt = idx.tokens[@intCast(j)];
                         if (lt.kind == .comment) continue;
                         if (lt.kind == .identifier) {
+                            // `recv.field = .Variant`: `lt` is a field name, not a bare
+                            // variable -- resolve the receiver's type and look up the
+                            // field's declared type instead of treating `lt.text` as a
+                            // variable name (which would silently fail to resolve, since
+                            // no variable named e.g. `type` exists for `t.type = .Number`).
+                            if (j >= 2 and isDotToken(idx.tokens[@intCast(j - 1)])) {
+                                if (self.resolveTypeOfExprEndingAtToken(idx, uri, dot_pos, @intCast(j - 2))) |recv_type| {
+                                    const hit = self.findMemberByContainerFresh(uri, recv_type, lt.text, .field) orelse
+                                        self.findMemberByContainerFresh(uri, recv_type, lt.text, .property);
+                                    if (hit) |h| {
+                                        if (h.sym.value_type) |vt| {
+                                            const base = baseTypeNameForLookup(vt);
+                                            if (self.isEnumTypeName(uri, base)) return base;
+                                        }
+                                    }
+                                }
+                                break;
+                            }
                             if (std.mem.eql(u8, t.text, "=")) {
                                 if (self.inferDeclTypeBeforeName(idx, @intCast(j))) |tn| {
                                     if (self.isEnumTypeName(uri, tn)) return tn;
@@ -5135,8 +5188,14 @@ pub const LspServer = struct {
     /// function-header `) RetType {`; the first such header found is the enclosing
     /// function (e.g. `... ) Option<num> {` -> "Option"). Returns null if not inside a
     /// typed function body, or the nearest enclosing function has no named return type.
-    fn enclosingFunctionReturnTypeName(self: *LspServer, idx: *const Index, tok_i: usize) ?[]const u8 {
-        _ = self;
+    /// Finds the token range `(rp, oi)` of the nearest enclosing function's
+    /// return type -- `rp` is its param list's closing `)`, `oi` is the `{`
+    /// opening its body, with the return-type tokens in between (possibly
+    /// none, for a void function). Shared by `enclosingFunctionReturnTypeName`
+    /// (base name only) and `enclosingFunctionReturnTypeGenericArgs` (full
+    /// generic-arg text, needed to unify a generic wrapper call's type param
+    /// against the enclosing function's actual declared instantiation).
+    fn findEnclosingFunctionReturnTypeRange(idx: *const Index, tok_i: usize) ?struct { rp: usize, oi: usize } {
         const toks = idx.tokens;
         var search_from: isize = @as(isize, @intCast(tok_i)) - 1;
 
@@ -5191,22 +5250,45 @@ pub const LspServer = struct {
                 search_from = @as(isize, @intCast(oi)) - 1;
                 continue;
             }
-            const rp = rparen_i.?;
-            // Return-type base name = first identifier token after `)` (before `{`).
-            var m: usize = rp + 1;
-            while (m < oi) : (m += 1) {
-                const t = toks[m];
-                if (t.kind == .comment) continue;
-                if (t.kind == .identifier) return baseTypeNameForLookup(t.text);
-                if (t.kind == .symbol or t.kind == .operator) {
-                    // `) {` with nothing between -> a void function (or a non-fn header like
-                    // `if (...) {`). No named return type here; stop (don't misclimb).
-                    if (std.mem.eql(u8, t.text, "{")) return null;
-                }
-            }
-            return null;
+            return .{ .rp = rparen_i.?, .oi = oi };
         }
         return null;
+    }
+
+    fn enclosingFunctionReturnTypeName(self: *LspServer, idx: *const Index, tok_i: usize) ?[]const u8 {
+        _ = self;
+        const range = findEnclosingFunctionReturnTypeRange(idx, tok_i) orelse return null;
+        const toks = idx.tokens;
+        // Return-type base name = first identifier token after `)` (before `{`).
+        var m: usize = range.rp + 1;
+        while (m < range.oi) : (m += 1) {
+            const t = toks[m];
+            if (t.kind == .comment) continue;
+            if (t.kind == .identifier) return baseTypeNameForLookup(t.text);
+            if (t.kind == .symbol or t.kind == .operator) {
+                // `) {` with nothing between -> a void function (or a non-fn header like
+                // `if (...) {`). No named return type here; stop (don't misclimb).
+                if (std.mem.eql(u8, t.text, "{")) return null;
+            }
+        }
+        return null;
+    }
+
+    /// Like `enclosingFunctionReturnTypeName`, but returns the generic argument
+    /// SPELLINGS of the enclosing function's return type (e.g. `["Option<Token>"]`
+    /// for a `Result<Option<Token>>` return type), or null if it isn't generic.
+    fn enclosingFunctionReturnTypeGenericArgs(self: *LspServer, idx: *const Index, tok_i: usize) ?[]const []const u8 {
+        _ = self;
+        const range = findEnclosingFunctionReturnTypeRange(idx, tok_i) orelse return null;
+        const toks = idx.tokens;
+        var buf = ArrayList(u8).init(@constCast(&idx.arena).allocator());
+        var m: usize = range.rp + 1;
+        while (m < range.oi) : (m += 1) {
+            const t = toks[m];
+            if (t.kind == .comment) continue;
+            buf.appendSlice(t.text) catch return null;
+        }
+        return genericArgSpellingsArena(idx, buf.items);
     }
 
     /// Extract the base type name from a function signature label's return type, e.g.

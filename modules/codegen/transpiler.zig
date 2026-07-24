@@ -5695,6 +5695,30 @@ pub const TranspileProcess = struct {
             if (self.enum_payload_is_type_param(path.enum_name, ptypes[i]) or
                 self.enum_payload_references_type_param(path.enum_name, ptypes[i]))
             {
+                // If this construction site's concrete instantiation was
+                // already bound (e.g. via `bind_enum_ctor_expected` from an
+                // enclosing `ret`/`let`: `ret .Some(.Cval('a'));` in a
+                // function returning `Option<Data>`), resolve a nested
+                // shorthand payload argument against the bound concrete
+                // type. Without this, a shorthand argument sitting in a
+                // bare-type-param payload slot (T isn't resolvable here on
+                // its own -- that's exactly why this branch exists) was
+                // never resolved and failed later with "method calls
+                // require a named receiver" (a blank dot-path misread as a
+                // method-call receiver).
+                if (self.lookup_enum_ctor_override(node)) |mangled| {
+                    const prefix_len = path.enum_name.len + 2; // "Enum__"
+                    if (mangled.len > prefix_len and mem.startsWith(u8, mangled, path.enum_name) and mem.eql(u8, mangled[path.enum_name.len .. path.enum_name.len + 2], "__")) {
+                        const concrete_name = mangled[prefix_len..];
+                        if (self.expected_enum_name(.{ .base = .Unknown, .name = concrete_name })) |enum_name| {
+                            if (dot_shorthand_variant_name(arg)) |_| {
+                                _ = try self.resolve_dot_shorthand_enum_variant(arg, enum_name);
+                            } else {
+                                try self.resolve_shorthand_enum_call(arg, enum_name);
+                            }
+                        }
+                    }
+                }
                 _ = try self.infer_expr_type(arg.*, env, fns);
                 continue;
             }
@@ -5703,6 +5727,21 @@ pub const TranspileProcess = struct {
             const expected = try self.type_from_dtype_with_mangled(ptypes[i]);
             if (ptypes[i].generic_args != null) {
                 self.register_generic_instantiation(ptypes[i]) catch {};
+            }
+            // Enum shorthand payload: `Option.Some(.Cval('a'))` where the
+            // payload field's own type is itself an enum. Without this, a
+            // nested shorthand argument (bare `.Variant` or a data-carrying
+            // `.Variant(...)` call) was never resolved and failed later with
+            // "method calls require a named receiver" (a blank dot-path
+            // misread as a method-call receiver).
+            if (self.expected_enum_name(expected)) |enum_name| {
+                if (dot_shorthand_variant_name(arg)) |_| {
+                    _ = try self.resolve_dot_shorthand_enum_variant(arg, enum_name);
+                } else {
+                    try self.resolve_shorthand_enum_call(arg, enum_name);
+                    try self.resolve_shorthand_args_via_generic_wrapper(arg, expected, fns);
+                }
+                try self.bind_enum_ctor_expected(arg, expected);
             }
             const actual = try self.infer_expr_type(arg.*, env, fns);
             if (is_known_type(expected) and is_known_type(actual) and !(try self.can_implicit_coerce(expected, actual))) {
@@ -5799,6 +5838,63 @@ pub const TranspileProcess = struct {
         // Reuse the non-call rewrite on the callee path (mutates its blank LHS to
         // the enum name and validates the variant exists).
         _ = try self.resolve_dot_shorthand_enum_variant(callee, enum_name);
+    }
+
+    /// When `node` is a call to a generic function whose declared return type
+    /// is the SAME named container as `expected` (e.g. `ok<T>(T value)
+    /// Result<T>` called where `expected` is `Result<Option<Token>>`),
+    /// resolves any of the call's ARGUMENTS that are themselves enum-variant
+    /// shorthand (`.None`, `.Some(x)`) against `expected`'s own generic
+    /// argument. The callee's abstract template has no concrete `T` to
+    /// resolve the shorthand against on its own -- generic instantiation only
+    /// happens after typecheck -- so without this, `ret ok(.None);` left
+    /// `.None` as an unresolved blank dot-path and failed at codegen with
+    /// "field access requires a compound-typed value".
+    fn resolve_shorthand_args_via_generic_wrapper(self: *Self, node: *ast.Node, expected: CheckedType, fns: *const std.StringHashMap(FnSig)) TranspileError!void {
+        if (node.type != .Expression or node.node_variant == null) return;
+        const exp = node.node_variant.?.exp;
+        if (!mem.eql(u8, exp.op, "()")) return;
+        const callee = exp.left orelse return;
+        if (callee.type != .Identifier or callee.data == null) return;
+        const expected_dt = expected.dtype_ref orelse return;
+        const gargs = expected_dt.generic_args orelse return;
+        if (gargs.count == 0) return;
+        const expected_name = self.expected_enum_name(expected) orelse return;
+        const sig = fns.get(callee.data.?.sval.items) orelse return;
+        const callee_rt_name = sig.rtype.name orelse return;
+        if (!mem.eql(u8, callee_rt_name, expected_name)) return;
+        const type_params = sig.type_params orelse return;
+        if (type_params.count == 0) return;
+        // Only the FIRST type param is substituted -- the wrapper functions
+        // this targets (`ok<T>`, `err_kind<T>`, `some<T>`) all have exactly
+        // one, and matching by NAME below is what keeps this from touching
+        // an unrelated concrete-typed argument (see below).
+        const tparam_name = type_params.items()[0].items;
+        const inner_dt = gargs.items()[0];
+        const inner_t = try self.type_from_dtype_with_mangled(inner_dt);
+        const inner_enum = self.expected_enum_name(inner_t) orelse return;
+
+        var args_list = ArrayList(*ast.Node).init(self.allocator);
+        defer args_list.deinit();
+        if (exp.right) |right| {
+            try self.flatten_call_args_ptr(right, &args_list);
+        }
+        for (args_list.items, 0..) |arg, i| {
+            if (i >= sig.args.len) break;
+            // Only resolve arguments whose DECLARED param type is genuinely
+            // the callee's own bare type param -- e.g. `err_kind<T>(ErrorKind
+            // kind, str message, T default)`'s first argument is a REAL,
+            // unrelated `ErrorKind` and must not be resolved against T's
+            // binding too.
+            const param_name = sig.args[i].name orelse continue;
+            if (!mem.eql(u8, param_name, tparam_name)) continue;
+            if (dot_shorthand_variant_name(arg)) |_| {
+                _ = try self.resolve_dot_shorthand_enum_variant(arg, inner_enum);
+            } else {
+                try self.resolve_shorthand_enum_call(arg, inner_enum);
+                try self.bind_enum_ctor_expected(arg, inner_t);
+            }
+        }
     }
 
     fn infer_let_enum_dot_shorthand(self: *Self, node: *ast.Node) TranspileError!?CheckedType {
@@ -8891,6 +8987,18 @@ pub const TranspileProcess = struct {
                     if (self.expected_enum_name(lt)) |enum_name| {
                         if (dot_shorthand_variant_name(right)) |_| {
                             _ = try self.resolve_dot_shorthand_enum_variant(right, enum_name);
+                        } else {
+                            // Shorthand data-variant construction in assignment
+                            // position: `d = .Cval('a');` or `f.data = .Cval('a');`.
+                            // Without this, only the plain-variant shorthand
+                            // (`c = .Blue`) was resolved here -- a data-carrying
+                            // variant's shorthand CALL (`.Cval(...)`) fell through
+                            // with no enum context and was misdiagnosed as an
+                            // ordinary (nonexistent) function call.
+                            try self.resolve_shorthand_enum_call(right, enum_name);
+                            // Or nested one level inside a generic wrapper call
+                            // (`d = ok(.None);`) -- see the function doc.
+                            try self.resolve_shorthand_args_via_generic_wrapper(right, lt, fns);
                         }
                         // For a GENERIC enum (`List<dec>`), record the monomorphized
                         // name at this construction site (mirrors the `.Variable`
@@ -9113,6 +9221,9 @@ pub const TranspileProcess = struct {
                             } else {
                                 // Shorthand data-variant construction: `.Variant(args)`.
                                 try self.resolve_shorthand_enum_call(val, enum_name);
+                                // Or nested one level inside a generic wrapper call
+                                // (`let t = ok(.Some(x));`) -- see the function doc.
+                                try self.resolve_shorthand_args_via_generic_wrapper(val, vtype, fns);
                             }
                             // For a GENERIC enum (`Option<num>`), record the
                             // monomorphized name at the construction site so codegen
@@ -9150,6 +9261,9 @@ pub const TranspileProcess = struct {
                             } else {
                                 // Shorthand data-variant construction in return position.
                                 try self.resolve_shorthand_enum_call(rv, enum_name);
+                                // Or nested one level inside a generic wrapper call
+                                // (`ret ok(.None);`) -- see the function doc.
+                                try self.resolve_shorthand_args_via_generic_wrapper(rv, fn_rtype, fns);
                             }
                             // Generic enum returned (`ret Option.Some(x)` in a fn whose
                             // return type is `Option<num>`): record the monomorphized
@@ -9525,7 +9639,7 @@ pub const TranspileProcess = struct {
     }
 
     fn collect_fn_sigs(self: *Self, proc: *Self, fns: *std.StringHashMap(FnSig), owned_args: *ArrayList([]CheckedType)) TranspileError!void {
-        for (proc.nodes.items()) |node| {
+        for (proc.nodes.items(), 0..) |node, node_i| {
             if (node.type != .Function or node.node_variant == null) continue;
             const fnv = node.node_variant.?.function;
             if (fnv.name == null) continue;
@@ -9572,12 +9686,20 @@ pub const TranspileProcess = struct {
             } else .{ .base = .Void };
             try self.register_generic_instantiation_from_checked_type(fn_rtype);
             const fn_min_args = count_required_args_from_node(args_vec);
+            // A pointer into `fnv.type_params` itself would dangle: `fnv` is a
+            // by-value copy of this loop iteration's node, reused (and thus
+            // overwritten) by the NEXT iteration's `fnv` at the same stack
+            // slot. Any `FnSig` stored with such a pointer would have it
+            // silently corrupted by the time something dereferences it later
+            // (e.g. `type_params.items()[0].items` reading garbage) -- point
+            // into the STABLE backing array (`proc.nodes`) instead.
+            const stable_type_params = if (fnv.type_params != null) &proc.nodes.items()[node_i].node_variant.?.function.type_params.? else null;
             fns.put(name, .{
                 .rtype = fn_rtype,
                 .args = args_slice,
                 .is_variadic = fnv.is_variadic,
                 .is_async = fnv.is_async,
-                .type_params = if (fnv.type_params) |*params| params else null,
+                .type_params = stable_type_params,
                 .min_args = fn_min_args,
             }) catch {
                 return TranspileError.MemoryAllocationFailed;
@@ -9591,7 +9713,7 @@ pub const TranspileProcess = struct {
                         .args = args_slice,
                         .is_variadic = fnv.is_variadic,
                         .is_async = fnv.is_async,
-                        .type_params = if (fnv.type_params) |*params| params else null,
+                        .type_params = stable_type_params,
                         .min_args = fn_min_args,
                     }) catch {
                         return TranspileError.MemoryAllocationFailed;
@@ -9647,12 +9769,17 @@ pub const TranspileProcess = struct {
             } else .{ .base = .Void };
             try self.register_generic_instantiation_from_checked_type(fn_rtype);
             const fn_min_args = count_required_args_from_node(args_vec);
+            // See the matching comment in the `proc.nodes` loop above: point
+            // into `node_ptr` (already a stable pointer) instead of the
+            // by-value `fnv`/`node` copies, which don't survive past this
+            // loop iteration.
+            const stable_type_params = if (fnv.type_params != null) &node_ptr.node_variant.?.function.type_params.? else null;
             fns.put(name, .{
                 .rtype = fn_rtype,
                 .args = args_slice,
                 .is_variadic = fnv.is_variadic,
                 .is_async = fnv.is_async,
-                .type_params = if (fnv.type_params) |*params| params else null,
+                .type_params = stable_type_params,
                 .min_args = fn_min_args,
             }) catch {
                 return TranspileError.MemoryAllocationFailed;
@@ -9666,7 +9793,7 @@ pub const TranspileProcess = struct {
                         .args = args_slice,
                         .is_variadic = fnv.is_variadic,
                         .is_async = fnv.is_async,
-                        .type_params = if (fnv.type_params) |*params| params else null,
+                        .type_params = stable_type_params,
                         .min_args = fn_min_args,
                     }) catch {
                         return TranspileError.MemoryAllocationFailed;
