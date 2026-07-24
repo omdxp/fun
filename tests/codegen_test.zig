@@ -9396,3 +9396,83 @@ test "method chaining on a generic method's own-type-param call result monomorph
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("chained\n", stdout);
 }
+
+test "constructing a generic enum from a method's own type param does not cross-substitute via a name collision" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_method_own_type_param_enum_ctor.fn";
+    const c_path = "codegen_method_own_type_param_enum_ctor.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_method_own_type_param_enum_ctor.exe" else "codegen_method_own_type_param_enum_ctor";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression found while further torture-testing the method-own-type-param
+    // feature: `wrap<U>(U x) Maybe<U> { ret Maybe.Has(x); }` on `impl Box<T>`
+    // constructed the WRONG concrete enum instantiation ("Maybe__num" instead
+    // of "Maybe__str" for `b.wrap("hi")`). Root cause: `mangled_enum_with_active_subst`
+    // resolved a constructed enum's type arg by matching the enum's OWN
+    // internal template param NAME against the active (combined impl+method)
+    // substitution's param list -- and `Maybe<T>`'s own declared param
+    // happens to ALSO be conventionally named "T", the same name as the
+    // ENCLOSING impl's `Box<T>` -- so it coincidentally (and wrongly) resolved
+    // via Box's T instead of the method's own U (which is what the
+    // constructed value's actual type is). A more precise fallback already
+    // existed (deriving the instance from the CURRENT method's own declared
+    // return type when it names the enum directly) but was only reachable
+    // when the buggy name-match failed to find anything -- here it wrongly
+    // "succeeded" first. Fixed by checking the precise, structurally-grounded
+    // return-type-based resolution FIRST, and by setting
+    // `current_method_return_dtype` in `emit_generic_function_specializations`
+    // (previously only set by the OLDER plain-impl-method emission loops, so
+    // never available at all for a method-own-type-param instantiation, which
+    // routes through the newer worklist-based emission from round 9).
+    // Covers both a value-carrying and a value-less variant, and a case where
+    // U happens to resolve to the SAME concrete type as T (no collision to
+    // observe, but must not regress).
+    const input =
+        "imp std.c.io;\n" ++
+        "enum Maybe<T> {\n" ++
+        "  Has(T),\n" ++
+        "  None,\n" ++
+        "}\n" ++
+        "compound Box<T> {\n" ++
+        "  T value;\n" ++
+        "}\n" ++
+        "impl Box<T> {\n" ++
+        "  pub wrap<U>(U x) Maybe<U> {\n" ++
+        "    ret Maybe.Has(x);\n" ++
+        "  }\n" ++
+        "  pub empty<U>(U x) Maybe<U> {\n" ++
+        "    ret Maybe.None;\n" ++
+        "  }\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  Box<num> b;\n" ++
+        "  b.value = 0;\n" ++
+        "  fit b.wrap(\"hi\") {\n" ++
+        "    .Has(v) -> { printf(\"%s\\n\", v); }\n" ++
+        "    .None -> { printf(\"none\\n\"); }\n" ++
+        "  }\n" ++
+        "  fit b.wrap(99) {\n" ++
+        "    .Has(v) -> { printf(\"%lld\\n\", v); }\n" ++
+        "    .None -> { printf(\"none\\n\"); }\n" ++
+        "  }\n" ++
+        "  fit b.empty(99) {\n" ++
+        "    .Has(v) -> { printf(\"%lld\\n\", v); }\n" ++
+        "    .None -> { printf(\"none\\n\"); }\n" ++
+        "  }\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("hi\n99\nnone\n", stdout);
+}

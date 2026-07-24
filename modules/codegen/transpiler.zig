@@ -13336,6 +13336,26 @@ pub const TranspileProcess = struct {
     fn mangled_enum_with_active_subst(self: *Self, enum_name: []const u8) ?[]const u8 {
         const params = self.type_subst_params orelse return null;
         const args = self.type_subst_args orelse return null;
+
+        // Prefer resolving directly from the CURRENT method's own declared
+        // return type when it names this enum directly (e.g. `wrap<U>(U x)
+        // Maybe<U>` constructing `Maybe.Has(...)` in its body) -- this reads
+        // the ACTUAL written type structure, so unlike the name-matching loop
+        // below it can't be fooled by a coincidental NAME collision between
+        // the enum's own template param and one of the active substitution's
+        // params (e.g. both conventionally called "T": the enclosing impl's
+        // `Box<T>` and an unrelated `Maybe<T>`'s own internal param).
+        if (self.current_method_return_dtype) |rdt| {
+            if (mem.eql(u8, rdt.type_str.items, enum_name)) {
+                if (self.type_name_mangled_with_subst(rdt, params.*, args) catch null) |m| {
+                    // m is owned by the allocator; copy onto the arena for a
+                    // stable, no-free return, matching this function's contract.
+                    defer self.allocator.free(m);
+                    return self.arena.allocator().dupe(u8, m) catch null;
+                }
+            }
+        }
+
         const reg = self.root_registry() orelse return null;
         const enode = reg.enums_by_name.get(enum_name) orelse return null;
         if (enode.node_variant == null) return null;
@@ -13354,24 +13374,7 @@ pub const TranspileProcess = struct {
                     break;
                 }
             }
-            // The enum's own param (`T`) may not appear among the active params (which
-            // are the enclosing TYPE's params, e.g. `K`/`V` for `MapIter<K,V>`). In
-            // that case derive the instance from the current method's declared return
-            // type (`Option<K>` -> mangle K via the subst -> `Option__str`).
-            if (resolved == null) {
-                if (self.current_method_return_dtype) |rdt| {
-                    if (mem.eql(u8, rdt.type_str.items, enum_name)) {
-                        if (self.type_name_mangled_with_subst(rdt, params.*, args) catch null) |m| {
-                            // m is owned by the allocator; copy onto the arena for a
-                            // stable, no-free return, matching this function's contract.
-                            defer self.allocator.free(m);
-                            buf.deinit();
-                            return self.arena.allocator().dupe(u8, m) catch null;
-                        }
-                    }
-                }
-                return null; // unresolved param -> not concrete
-            }
+            if (resolved == null) return null; // unresolved param -> not concrete
             const rt = resolved.?;
             const arg_name = self.type_name_mangled_as_arg(rt) catch return null;
             defer self.allocator.free(arg_name);
@@ -17204,13 +17207,23 @@ pub const TranspileProcess = struct {
                 const prev_params = self.type_subst_params;
                 const prev_args = self.type_subst_args;
                 const prev_override = self.override_fn_name;
+                const prev_ret = self.current_method_return_dtype;
                 self.type_subst_params = inst.params;
                 self.type_subst_args = inst.args;
                 self.override_fn_name = inst.name;
+                // Needed by `mangled_enum_with_active_subst`'s fallback: without
+                // it, a method whose own type param (e.g. `wrap<U>(U x) Maybe<U>`)
+                // appears in a constructed enum's type arg can wrongly resolve
+                // via a coincidental NAME collision instead (e.g. `Maybe<T>`'s own
+                // internal template param also happens to be called "T", same as
+                // the enclosing impl's own T) -- see the fallback's own comment.
+                const inst_fnv = if (inst.fn_node.node_variant) |nv| nv.function else null;
+                self.current_method_return_dtype = if (inst_fnv) |fnv| (if (fnv.rtype) |*rt| rt else null) else null;
                 defer {
                     self.type_subst_params = prev_params;
                     self.type_subst_args = prev_args;
                     self.override_fn_name = prev_override;
+                    self.current_method_return_dtype = prev_ret;
                 }
 
                 try self.resolve_transitive_generic_fn_instantiations(inst);
