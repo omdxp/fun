@@ -7972,7 +7972,147 @@ pub const TranspileProcess = struct {
                             const reg = self.root_registry();
                             const recv_is_quirk = if (reg) |r| r.quirk_sig_by_name.contains(recv_name) else false;
 
-                            if (recv_is_quirk) {
+                            // A method may declare its OWN type parameter(s) in addition to
+                            // the impl's (`impl Box<T> { pub map<U>(U x) U { ... } }`).
+                            // Detect and handle this BEFORE the ordinary dispatch below,
+                            // which assumes every param type is already concrete -- combines
+                            // the receiver's already-known impl-level type args (if any) with
+                            // ones inferred from THIS call's arguments for the method's own
+                            // params, then reuses the SAME `generic_fn_instantiations`
+                            // machinery a generic free function's call site uses (register +
+                            // call-site override), since emission never cares whether
+                            // `fn_node` is a free function or a method's own node.
+                            var handled_generic_method_call = false;
+                            if (!recv_is_quirk) {
+                                const recv_base = if (mem.indexOf(u8, recv_name_canon, "__")) |idx| recv_name_canon[0..idx] else recv_name_canon;
+                                if (self.find_plain_impl_method_node(recv_base, mname)) |hit| {
+                                    const mfnv = hit.method_node.node_variant.?.function;
+                                    if (mfnv.type_params) |method_params_val| {
+                                        const method_params_ptr: *const utils.Vector(ArrayList(u8)) = &method_params_val;
+
+                                        const impl_params = self.impl_type_params(hit.impl_node);
+                                        const recv_dt_for_impl = if (recv_t.dtype_ref) |dt| dt else self.lookup_receiver_dtype(recv.*) orelse null;
+                                        const impl_args: []*dtype.DataType = blk: {
+                                            const dt = recv_dt_for_impl orelse break :blk &[_]*dtype.DataType{};
+                                            const ga = dt.generic_args orelse break :blk &[_]*dtype.DataType{};
+                                            break :blk ga.items();
+                                        };
+
+                                        const margs_items = if (mfnv.args) |a| a.items() else &[_]*ast.Node{};
+                                        // First declared arg is the implicit `self`; user args start at index 1.
+                                        const user_margs = if (margs_items.len > 0) margs_items[1..] else margs_items;
+
+                                        if (args_nodes.items.len != user_margs.len) {
+                                            self.report_type_error(node, "method '{s}' expects {d} args, got {d}", .{ mname, user_margs.len, args_nodes.items.len });
+                                            return TranspileError.WrongArgCount;
+                                        }
+
+                                        var mbindings = std.StringHashMap(*dtype.DataType).init(self.allocator);
+                                        defer mbindings.deinit();
+
+                                        for (args_nodes.items, 0..) |arg_node, idx| {
+                                            const marg = user_margs[idx];
+                                            if (marg.type != .Variable or marg.node_variant == null) continue;
+                                            const declared_dt = marg.node_variant.?.variable.type;
+                                            // Resolve any reference to the IMPL's own T first, so only
+                                            // the method's OWN param(s) remain to solve for.
+                                            const declared_dt_impl_resolved: *const dtype.DataType = if (impl_params) |ip|
+                                                try self.clone_dtype_with_subst_for_inst(declared_dt, ip, impl_args)
+                                            else
+                                                declared_dt;
+
+                                            const actual_ct = try self.infer_expr_type(arg_node.*, env, fns);
+                                            const actual_dt = (try self.checked_type_to_dtype(actual_ct)) orelse {
+                                                self.report_type_error(node, "cannot infer generic argument from value", .{});
+                                                return TranspileError.TypeMismatch;
+                                            };
+
+                                            const ok = try self.bind_generic_param(declared_dt_impl_resolved, actual_dt, method_params_ptr, &mbindings);
+                                            if (!ok) {
+                                                self.report_type_error(node, "type mismatch in call to method '{s}' argument {d}", .{ mname, idx + 1 });
+                                                return TranspileError.TypeMismatch;
+                                            }
+                                        }
+
+                                        const method_gargs = self.allocator.alloc(*dtype.DataType, method_params_ptr.count) catch {
+                                            return TranspileError.MemoryAllocationFailed;
+                                        };
+                                        var mpi: usize = 0;
+                                        for (method_params_ptr.items()) |p| {
+                                            if (mbindings.get(p.items)) |dt_ptr| {
+                                                method_gargs[mpi] = dt_ptr;
+                                            } else {
+                                                self.report_type_error(node, "cannot infer generic parameter '{s}' for method '{s}'", .{ p.items, mname });
+                                                return TranspileError.TypeMismatch;
+                                            }
+                                            mpi += 1;
+                                        }
+
+                                        if (!impl_allows_generic_args(mfnv.type_param_forced_insts, method_gargs)) {
+                                            self.report_type_error(node, "call to method '{s}' violates generic constraint: type argument does not satisfy the declared bound", .{mname});
+                                            return TranspileError.TypeMismatch;
+                                        }
+
+                                        // Combine impl-level params/args with the method's own, so
+                                        // codegen substitution (a linear name lookup) resolves
+                                        // references to EITHER scope uniformly. Root-allocated: the
+                                        // combined record outlives this call's typecheck.
+                                        const root_alloc = self.get_root().allocator;
+                                        var combined_params = utils.Vector(ArrayList(u8)).init(root_alloc);
+                                        if (impl_params) |ip| {
+                                            for (ip.items()) |p| {
+                                                var cloned = ArrayList(u8).init(root_alloc);
+                                                cloned.appendSlice(p.items) catch return TranspileError.MemoryAllocationFailed;
+                                                combined_params.push(cloned) catch return TranspileError.MemoryAllocationFailed;
+                                            }
+                                        }
+                                        for (method_params_ptr.items()) |p| {
+                                            var cloned = ArrayList(u8).init(root_alloc);
+                                            cloned.appendSlice(p.items) catch return TranspileError.MemoryAllocationFailed;
+                                            combined_params.push(cloned) catch return TranspileError.MemoryAllocationFailed;
+                                        }
+                                        const combined_params_ptr = root_alloc.create(utils.Vector(ArrayList(u8))) catch return TranspileError.MemoryAllocationFailed;
+                                        combined_params_ptr.* = combined_params;
+
+                                        const combined_args = root_alloc.alloc(*dtype.DataType, impl_args.len + method_gargs.len) catch return TranspileError.MemoryAllocationFailed;
+                                        for (impl_args, 0..) |a, i| combined_args[i] = a;
+                                        for (method_gargs, 0..) |a, i| combined_args[impl_args.len + i] = a;
+
+                                        const method_base_name_buf = std.fmt.allocPrint(self.allocator, "{s}__{s}", .{ recv_name_canon, mname }) catch return TranspileError.MemoryAllocationFailed;
+                                        defer self.allocator.free(method_base_name_buf);
+                                        const combined_name = try self.mangle_generic_fn_name(method_base_name_buf, method_gargs);
+
+                                        try self.register_generic_fn_instantiation(hit.method_node, combined_params_ptr, combined_args, combined_name, self.typecheck_owner_fn);
+
+                                        if (node.pos) |p| {
+                                            const root = self.get_root();
+                                            const key = try self.call_pos_key_alloc(p);
+                                            if (!root.generic_call_overrides.contains(key)) {
+                                                root.generic_call_overrides.put(key, combined_name) catch return TranspileError.MemoryAllocationFailed;
+                                            } else {
+                                                self.allocator.free(key);
+                                            }
+                                        }
+
+                                        if (mfnv.rtype) |rt| {
+                                            call_rtype = try self.type_from_dtype_with_subst(&rt, combined_params_ptr.*, combined_args);
+                                        } else {
+                                            call_rtype = .{ .base = .Void };
+                                        }
+                                        callee_is_async = mfnv.is_async;
+                                        callee_async_known = true;
+                                        plain_method_name = mname;
+                                        await_lowering_callee = combined_name;
+
+                                        handled_generic_method_call = true;
+                                    }
+                                }
+                            }
+
+                            if (handled_generic_method_call) {
+                                // Falls through to the shared post-processing below
+                                // (`await_lowering_callee`, async validation, return).
+                            } else if (recv_is_quirk) {
                                 method_sig = self.lookup_quirk_method(node, recv_name, mname) orelse {
                                     self.report_type_error(node, "quirk '{s}' has no method '{s}'", .{ recv_name, mname });
                                     return TranspileError.NotCallable;
@@ -10026,16 +10166,37 @@ pub const TranspileProcess = struct {
                 // default and precedes user params, so it never triggers a false positive.)
                 try proc.validate_default_param_order(fnv.args, m);
 
+                // A method may declare its OWN type param(s) in addition to the
+                // impl's (`impl Box<T> { pub map<U>(U x) U { ... } }`) -- extend
+                // the impl-level `allow_params` with the method's own for THIS
+                // method's body only, so references to U (in its return type, arg
+                // types, or operators like `x + x` inside its body) resolve as a
+                // known in-scope type-param name rather than an unknown type.
+                var method_allow_params = allow_params;
+                var method_allow_store: ?ArrayList([]const u8) = null;
+                defer if (method_allow_store) |*s| s.deinit();
+                if (fnv.type_params) |*mparams| {
+                    var buf = ArrayList([]const u8).init(proc.allocator);
+                    if (allow_params) |ap| {
+                        for (ap) |p| buf.append(p) catch return TranspileError.MemoryAllocationFailed;
+                    }
+                    for (mparams.items()) |p| {
+                        buf.append(p.items) catch return TranspileError.MemoryAllocationFailed;
+                    }
+                    method_allow_store = buf;
+                    method_allow_params = method_allow_store.?.items;
+                }
+
                 const fn_rtype: CheckedType = if (fnv.rtype) |rt| try proc.type_from_dtype_with_mangled(&rt) else CheckedType{ .base = .Void };
 
                 if (fnv.rtype) |rt| {
-                    try proc.ensure_dtype_visible(n.*, &rt, allow_params);
+                    try proc.ensure_dtype_visible(n.*, &rt, method_allow_params);
                 }
 
                 var fn_env = TypeEnv.init(proc.allocator);
                 defer fn_env.deinit();
                 try fn_env.push();
-                fn_env.set_type_params(allow_params);
+                fn_env.set_type_params(method_allow_params);
 
                 // Add module-level globals.
                 for (proc.nodes.items()) |*gn| {
@@ -10058,7 +10219,7 @@ pub const TranspileProcess = struct {
                             try fn_env.put_current("self", self_type);
                             continue;
                         }
-                        try proc.ensure_dtype_visible(n.*, v.type, allow_params);
+                        try proc.ensure_dtype_visible(n.*, v.type, method_allow_params);
                         try fn_env.put_current_decl(v.name.items, try proc.type_from_dtype_with_mangled(v.type), arg_ptr);
                     }
                 }
@@ -15791,6 +15952,12 @@ pub const TranspileProcess = struct {
                 for (im.methods.items()) |m| {
                     if (m.type != .Function or m.node_variant == null) continue;
                     const fnv = m.node_variant.?.function;
+                    // Methods with their OWN type param (`pub map<U>(...)`) are
+                    // emitted via `generic_fn_instantiations` instead (registered
+                    // per-call-site, since a method can be called with several
+                    // DIFFERENT concrete U's) -- skip them here to avoid emitting
+                    // a broken, un-substituted duplicate.
+                    if (fnv.type_params != null) continue;
                     if (fnv.name == null) continue;
                     const base = base_method_name_from_generated(fnv.name.?.items) orelse continue;
                     const spec_name = std.fmt.allocPrint(self.allocator, "{s}__{s}", .{ mangled, base }) catch {
@@ -15858,6 +16025,7 @@ pub const TranspileProcess = struct {
                 for (im.methods.items()) |m| {
                     if (m.type != .Function or m.node_variant == null) continue;
                     const fnv = m.node_variant.?.function;
+                    if (fnv.type_params != null) continue;
                     if (fnv.name == null) continue;
                     const base = base_method_name_from_generated(fnv.name.?.items) orelse continue;
                     const spec_name = std.fmt.allocPrint(self.allocator, "{s}__{s}", .{ mangled_name, base }) catch {
@@ -15915,6 +16083,7 @@ pub const TranspileProcess = struct {
         for (im.methods.items()) |m| {
             if (m.type != .Function or m.node_variant == null) continue;
             const fnv = m.node_variant.?.function;
+            if (fnv.type_params != null) continue;
             if (fnv.name == null) continue;
             const fname = fnv.name.?.items;
 
@@ -16824,6 +16993,8 @@ pub const TranspileProcess = struct {
                 for (im.methods.items()) |m| {
                     if (m.type != .Function or m.node_variant == null) continue;
                     const fnv = m.node_variant.?.function;
+                    // See the matching skip in `emit_plain_impl_method_prototypes_from_node`.
+                    if (fnv.type_params != null) continue;
                     if (fnv.body == null) continue;
                     if (fnv.name == null) continue;
                     const base = base_method_name_from_generated(fnv.name.?.items) orelse continue;
@@ -16876,6 +17047,7 @@ pub const TranspileProcess = struct {
                 for (im.methods.items()) |m| {
                     if (m.type != .Function or m.node_variant == null) continue;
                     const fnv = m.node_variant.?.function;
+                    if (fnv.type_params != null) continue;
                     if (fnv.body == null) continue;
                     if (fnv.name == null) continue;
                     const base = base_method_name_from_generated(fnv.name.?.items) orelse continue;
@@ -16918,6 +17090,7 @@ pub const TranspileProcess = struct {
         for (im.methods.items()) |m| {
             if (m.type != .Function or m.node_variant == null) continue;
             const fnv = m.node_variant.?.function;
+            if (fnv.type_params != null) continue;
             if (fnv.body == null) continue;
             if (fnv.name == null) continue;
             const fname = fnv.name.?.items;
@@ -18820,7 +18993,12 @@ pub const TranspileProcess = struct {
                                         }
                                         const type_name_canon = self.canonical_compound_name(type_name);
                                         const mname = member.?.data.?.sval.items;
-                                        if (self.lookup_plain_impl_method_fn(&node, type_name_canon, mname)) |fn_name| {
+                                        // A method with its OWN type param (`pub map<U>(...)`)
+                                        // was registered at typecheck time under a combined
+                                        // name (`Box__num__map__str`) recorded as a call-site
+                                        // override -- `lookup_plain_impl_method_fn` alone would
+                                        // only ever find the un-substituted `Box__num__map`.
+                                        if (self.lookup_generic_call_override(node) orelse self.lookup_plain_impl_method_fn(&node, type_name_canon, mname)) |fn_name| {
                                             try self.write("(");
                                             try self.write_module_impl_method_ref(fn_name);
                                             try self.write("(");

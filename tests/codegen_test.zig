@@ -9123,3 +9123,158 @@ test "a generic impl method calling a DIFFERENT generic free function from its o
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("99\n", stdout);
 }
+
+test "an impl method can declare its OWN generic type parameter beyond the impl's" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_method_own_type_param.fn";
+    const c_path = "codegen_method_own_type_param.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_method_own_type_param.exe" else "codegen_method_own_type_param";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // New language feature (not a bug fix): a method can now declare its OWN
+    // type parameter in addition to its impl's (`impl Box<T> { pub map<U>(U x)
+    // U { ... } }`), a common shape in real-world generic collection APIs
+    // (`Vec<T>.map<U>(fn) Vec<U>`) that the parser previously rejected outright
+    // ("expected operator '('" right after the method name -- no `<...>`
+    // handling existed there at all).
+    //
+    // Implementation touches parser, typecheck, and codegen:
+    // - Parser: `parse_impl` now calls the same `parse_impl_type_params_with_constraints`
+    //   free functions use, right after the method name, storing onto the same
+    //   `type_params`/`type_param_forced_insts` fields.
+    // - Typecheck: a NEW generic-method-call branch (in the `.` call-dispatch
+    //   path of `infer_expr_type`, guarded by `mfnv.type_params != null`) infers
+    //   the method's own type arg(s) from the call arguments via
+    //   `bind_generic_param` (first substituting any reference to the IMPL's
+    //   own T through the receiver's already-known concrete args), combines
+    //   impl-level params/args with the method's own into one record, and
+    //   registers it via the EXISTING `generic_fn_instantiations` machinery
+    //   (reusing `register_generic_fn_instantiation`/the emission worklist
+    //   as-is -- it never cared whether `fn_node` was a free function or a
+    //   method). Also fixes a related gap surfaced by this: the per-method
+    //   body-typecheck loop only put the IMPL's type params in scope
+    //   (`allow_params`), never the method's own, so even a body-only
+    //   reference (`ret x + x;` inside a `map<U: num | dec>`) failed with
+    //   "operator '+' expects num/dec operands" -- fixed by extending
+    //   `allow_params` with the method's own type params for that method only.
+    // - Codegen: the bare-identifier-receiver method-call emission site
+    //   (`b.map(...)`) previously called `lookup_plain_impl_method_fn` directly,
+    //   which only knows the un-substituted name (`Box__num__map`); now checks
+    //   `lookup_generic_call_override` first, mirroring the free-function call
+    //   site's pattern.
+    // - The three OLD plain-impl-method emission loops (which walk every impl
+    //   instantiation x every method unconditionally) now skip any method with
+    //   its own `type_params`, since those are emitted via the instantiation
+    //   worklist instead -- otherwise they'd emit a second, broken,
+    //   un-substituted copy alongside the correct one.
+    //
+    // This test covers: calling the SAME generic method with two DIFFERENT
+    // concrete U's (num and str) from one program, and a constrained method
+    // type param (`sum_with<U: num | dec>`) whose body uses `+` on the
+    // still-abstract U during the one-time template typecheck pass.
+    const input =
+        "imp std.c.io;\n" ++
+        "fun identity<T>(T x) T {\n" ++
+        "  ret x;\n" ++
+        "}\n" ++
+        "compound Box<T> {\n" ++
+        "  T value;\n" ++
+        "}\n" ++
+        "impl Box<T> {\n" ++
+        "  pub map<U>(U other) U {\n" ++
+        "    ret identity(other);\n" ++
+        "  }\n" ++
+        "  pub sum_with<U: num | dec>(U other) U {\n" ++
+        "    ret other + other;\n" ++
+        "  }\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  Box<num> b;\n" ++
+        "  b.value = 1;\n" ++
+        "  printf(\"%lld %s %lld\\n\", b.map(77), b.map(\"hello\"), b.sum_with(21));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("77 hello 42\n", stdout);
+}
+
+test "a method's own generic type param constraint is still enforced against a real violation" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_method_own_type_param_bad.fn";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+
+    const input =
+        "imp std.c.io;\n" ++
+        "compound Box<T> {\n" ++
+        "  T value;\n" ++
+        "}\n" ++
+        "impl Box<T> {\n" ++
+        "  pub sum_with<U: num | dec>(U other) U {\n" ++
+        "    ret other + other;\n" ++
+        "  }\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  Box<num> b;\n" ++
+        "  b.value = 1;\n" ++
+        "  printf(\"%s\\n\", b.sum_with(\"bad\"));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+    try runTranspileExpectFailure(allocator, ifilepath, input);
+}
+
+test "an impl method's own generic type param also works on a non-generic impl/compound" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_method_own_type_param_nongeneric_impl.fn";
+    const c_path = "codegen_method_own_type_param_nongeneric_impl.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_method_own_type_param_nongeneric_impl.exe" else "codegen_method_own_type_param_nongeneric_impl";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Same feature, but the IMPL itself isn't generic at all (`impl Registry { pub
+    // echo<U>(...) ... }`) -- covers the "no impl-level type params to combine
+    // with" branch, distinct from the `Box<T>` case above.
+    const input =
+        "imp std.c.io;\n" ++
+        "fun identity<T>(T x) T {\n" ++
+        "  ret x;\n" ++
+        "}\n" ++
+        "compound Registry {\n" ++
+        "  num count;\n" ++
+        "}\n" ++
+        "impl Registry {\n" ++
+        "  pub echo<U>(U x) U {\n" ++
+        "    ret identity(x);\n" ++
+        "  }\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  Registry r;\n" ++
+        "  r.count = 0;\n" ++
+        "  printf(\"%lld\\n\", r.echo(123));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("123\n", stdout);
+}

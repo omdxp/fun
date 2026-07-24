@@ -3717,6 +3717,17 @@ pub const ParseProcess = struct {
                 return ParseError.MemoryAllocationFailed;
             };
 
+            // A method may declare its OWN type parameter(s) in addition to the
+            // impl's (`impl Box<T> { pub map<U>(U x) U { ... } }`) -- parsed
+            // identically to a free function's `<T>`/`<T: a | b>` list, stored
+            // on the SAME `type_params`/`type_param_forced_insts` fields.
+            // Optional: absent for an ordinary (non-generic-method) method.
+            {
+                const parsed_mtp = try self.parse_impl_type_params_with_constraints();
+                fn_node.node_variant.?.function.type_params = parsed_mtp.params;
+                fn_node.node_variant.?.function.type_param_forced_insts = parsed_mtp.forced_insts;
+            }
+
             // Mark that we're inside a function for statement parsing (`if`, `for`, `ret`, etc).
             const prev_func = self.parser_current_function;
             self.parser_current_function = fn_node;
