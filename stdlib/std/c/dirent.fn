@@ -1,0 +1,62 @@
+// Directory iteration/creation/kind-check helpers.
+// 
+// Notes:
+// - Unlike the rest of `std.c.*`, these are NOT thin bindings to a real libc
+// function name: POSIX (opendir/readdir/DIR*) and Win32
+// (FindFirstFile/FindNextFile) directory APIs differ too much to bind
+// directly, and `struct dirent`'s layout isn't something Fun can safely
+// mirror as a compound across platforms. The compiler instead emits a small
+// hand-written C wrapper for each of these directly into every program's
+// prelude (see `transpile_prelude` in the compiler) -- one POSIX body, one
+// Win32 body, same C name either way -- so these declarations just describe
+// that wrapper's signature to Fun's type checker. Each wrapper's C
+// signature is written to match a Fun type exactly (`void*` <-> `raw*`,
+// `long long` <-> `num`, `char*`/`const char*` <-> `str`), so (unlike a raw
+// libc binding) there's no ABI-width mismatch to worry about here.
+
+// Open a directory for iteration.
+// 
+// Params:
+// - path: directory path
+// 
+// Returns:
+// - an opaque directory handle, or `nil` on failure
+pub fun __fun_dir_open(str path) raw*;
+
+// Read the next entry's name from a directory handle. Includes `.`/`..` and
+// the platform's usual ordering guarantees (i.e. none) -- callers that want
+// a filtered/sorted listing do that themselves.
+// 
+// Params:
+// - dirp: handle from `__fun_dir_open`
+// 
+// Returns:
+// - the next entry's name, or `nil` once entries are exhausted
+pub fun __fun_dir_read_name(raw* dirp) str;
+
+// Close a directory handle opened by `__fun_dir_open`.
+// 
+// Params:
+// - dirp: handle from `__fun_dir_open`
+// 
+// Returns:
+// - 0 on success, -1 on failure or a null handle
+pub fun __fun_dir_close(raw* dirp) num;
+
+// Check whether `path` names a directory.
+// 
+// Params:
+// - path: path to check
+// 
+// Returns:
+// - 1 if `path` is a directory, 0 otherwise (including on a null/missing path)
+pub fun __fun_path_is_dir(str path) num;
+
+// Create a single directory (not recursive -- the parent must already exist).
+// 
+// Params:
+// - path: directory path to create
+// 
+// Returns:
+// - 0 on success, -1 on failure (including if it already exists)
+pub fun __fun_make_dir(str path) num;

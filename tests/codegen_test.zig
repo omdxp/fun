@@ -9655,3 +9655,75 @@ test "std.process: run() captures stdout/exit code, spawn_inherited() returns ex
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("exit=0 out=[hello from child\n] err=[]\nspawn_inherited exit=1\n", stdout);
 }
+
+test "std.fs: is_dir/make_dir/list_dir/walk_dir" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_fs_dirs.fn";
+    const c_path = "codegen_std_fs_dirs.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_std_fs_dirs.exe" else "codegen_std_fs_dirs";
+    const scratch_dir = "codegen_std_fs_dirs_scratch";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, scratch_dir) catch {};
+
+    // Directory ops (Phase 0 of the self-hosting rewrite): `walk_dir` in
+    // particular needs to exist for `fun build` to discover a project's
+    // `.fn` sources without listing them one by one. Layout:
+    //   scratch/a.fn
+    //   scratch/b.txt
+    //   scratch/sub/c.fn
+    std.Io.Dir.cwd().deleteTree(std.testing.io, scratch_dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, scratch_dir ++ "/sub");
+    {
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, scratch_dir ++ "/a.fn", .{ .truncate = true });
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(std.testing.io, "// a\n");
+    }
+    {
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, scratch_dir ++ "/b.txt", .{ .truncate = true });
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(std.testing.io, "not fun source\n");
+    }
+    {
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, scratch_dir ++ "/sub/c.fn", .{ .truncate = true });
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(std.testing.io, "// c\n");
+    }
+
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.fs;\n" ++
+        "imp std.vec;\n\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"is_dir=%lld\\n\", is_dir(\"" ++ scratch_dir ++ "\"));\n" ++
+        "  printf(\"is_dir_file=%lld\\n\", is_dir(\"" ++ scratch_dir ++ "/a.fn\"));\n\n" ++
+        "  let mk = make_dir(\"" ++ scratch_dir ++ "/newdir\");\n" ++
+        "  printf(\"make_dir_ok=%lld\\n\", mk.is_ok());\n\n" ++
+        "  let listed = list_dir(\"" ++ scratch_dir ++ "\");\n" ++
+        "  if listed.is_ok() {\n" ++
+        "    printf(\"list_dir_count=%lld\\n\", listed.unwrap().len);\n" ++
+        "  }\n\n" ++
+        "  let files = walk_dir(\"" ++ scratch_dir ++ "\");\n" ++
+        "  printf(\"walk_dir_count=%lld\\n\", files.len);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    // list_dir sees the 4 immediate entries (a.fn, b.txt, sub, newdir --
+    // newdir was just created above); walk_dir finds exactly the 2 `.fn`
+    // files, recursing into `sub`.
+    try std.testing.expectEqualStrings(
+        "is_dir=1\nis_dir_file=0\nmake_dir_ok=1\nlist_dir_count=4\nwalk_dir_count=2\n",
+        stdout,
+    );
+}

@@ -10,8 +10,10 @@ imp std.io;
 imp std.channel;
 imp std.c.io;
 imp std.c.mem;
+imp std.c.dirent;
 imp std.vec;
 imp std.result;
+imp std.string;
 
 // File system helper container.
 pub compound Fs {
@@ -24,6 +26,54 @@ pub compound Fs {
 pub fun fs() Fs {
   Fs f;
   ret f;
+}
+
+// Copy a directory-entry name into a Fun-owned buffer. `__fun_dir_read_name`
+// returns a pointer into a buffer the OS reuses/overwrites on the next
+// `__fun_dir_read_name`/`__fun_dir_close` call (POSIX's `struct dirent`
+// living inside the `DIR*`, or Win32's reused `WIN32_FIND_DATAA`) -- names
+// that outlive the current loop iteration (e.g. pushed into a `Vec<str>`)
+// must be duplicated first.
+fun _dup_cstr(str s) str {
+  let b = string_builder_init(len(s));
+  b.append(s);
+  let out = b.build();
+  b.free();
+  ret out;
+}
+
+// Recursively collect `.fn` file paths under `path` into `out`.
+fun _walk_dir_collect(str path, Vec<str>* out) {
+  raw* d = __fun_dir_open(path);
+  if d == nil {
+    ret;
+  }
+  for true {
+    str name = __fun_dir_read_name(d);
+    if name == nil {
+      break;
+    }
+    if equals(name, ".") || equals(name, "..") {
+      continue;
+    }
+
+    let b = string_builder_init(len(path) + len(name) + 1);
+    b.append(path);
+    b.append("/");
+    b.append(name);
+    let full = b.build();
+    b.free();
+
+    if __fun_path_is_dir(full) != 0 {
+      _walk_dir_collect(full, out);
+      free(full);
+    } elif ends_with(full, ".fn") {
+      out.push(full);
+    } else {
+      free(full);
+    }
+  }
+  __fun_dir_close(d);
 }
 
 impl Fs {
@@ -299,6 +349,81 @@ impl Fs {
     }
     ret ok(out);
   }
+
+  // Check whether path names a directory.
+  // 
+  // Params:
+  // - path: path to check
+  // 
+  // Returns:
+  // - true if path is an existing directory
+  pub is_dir(str path) bin {
+    ret __fun_path_is_dir(path) != 0;
+  }
+
+  // Create a single directory. The parent must already exist -- this is not
+  // recursive (see `walk_dir` for recursive traversal of existing
+  // directories; a recursive `mkdir -p` is not provided here).
+  // 
+  // Params:
+  // - path: directory path to create
+  // 
+  // Returns:
+  // - Result<bin> Ok(true) on success, Err on failure (including if the
+  // directory already exists)
+  pub make_dir(str path) Result<bin> {
+    if __fun_make_dir(path) != 0 {
+      ret err_kind(.Io, "make_dir failed", false);
+    }
+    ret ok(true);
+  }
+
+  // List the immediate entries of a directory (excludes `.`/`..`; includes
+  // both files and subdirectories, unfiltered by name).
+  // 
+  // Params:
+  // - path: directory path
+  // 
+  // Returns:
+  // - Result<Vec<str>> Ok(names) on success, Err if the directory can't be opened
+  pub list_dir(str path) Result<Vec<str>> {
+    raw* d = __fun_dir_open(path);
+    if d == nil {
+      Vec<str> empty;
+      empty.init(0);
+      ret err_kind(.Io, "list_dir: could not open directory", empty);
+    }
+    Vec<str> out;
+    out.init(8);
+    for true {
+      str name = __fun_dir_read_name(d);
+      if name == nil {
+        break;
+      }
+      if equals(name, ".") || equals(name, "..") {
+        continue;
+      }
+      out.push(_dup_cstr(name));
+    }
+    __fun_dir_close(d);
+    ret ok(out);
+  }
+
+  // Recursively discover every `.fn` file under a directory. Used by the
+  // build tooling to find a project's source files without an explicit
+  // per-file manifest entry.
+  // 
+  // Params:
+  // - path: root directory to search
+  // 
+  // Returns:
+  // - Vec<str> of `.fn` file paths (empty if `path` isn't a readable directory)
+  pub walk_dir(str path) Vec<str> {
+    Vec<str> out;
+    out.init(16);
+    _walk_dir_collect(path, &out);
+    ret out;
+  }
 }
 
 // Check file existence.
@@ -410,6 +535,54 @@ pub fun try_size(str path) Result<num> {
 pub fun read_lines(str path, num max_len) Vec<str> {
   let f = fs();
   ret f.read_lines(path, max_len);
+}
+
+// Check whether path names a directory.
+// 
+// Params:
+// - path: path to check
+// 
+// Returns:
+// - true if path is an existing directory
+pub fun is_dir(str path) bin {
+  let f = fs();
+  ret f.is_dir(path);
+}
+
+// Create a single directory (parent must already exist; not recursive).
+// 
+// Params:
+// - path: directory path to create
+// 
+// Returns:
+// - Result<bin> Ok(true) on success, Err on failure
+pub fun make_dir(str path) Result<bin> {
+  let f = fs();
+  ret f.make_dir(path);
+}
+
+// List the immediate entries of a directory (excludes `.`/`..`).
+// 
+// Params:
+// - path: directory path
+// 
+// Returns:
+// - Result<Vec<str>> Ok(names) on success, Err if the directory can't be opened
+pub fun list_dir(str path) Result<Vec<str>> {
+  let f = fs();
+  ret f.list_dir(path);
+}
+
+// Recursively discover every `.fn` file under a directory.
+// 
+// Params:
+// - path: root directory to search
+// 
+// Returns:
+// - Vec<str> of `.fn` file paths (empty if path isn't a readable directory)
+pub fun walk_dir(str path) Vec<str> {
+  let f = fs();
+  ret f.walk_dir(path);
 }
 
 // Copy a file in chunks with optional cancellation and non-blocking progress updates.

@@ -18281,6 +18281,34 @@ pub const TranspileProcess = struct {
             try self.write("extern char** environ;\n");
             try self.write("static char** environ_ptr(void){ return environ; }\n");
             try self.write("#endif\n");
+            // Directory iteration/creation/kind-check helpers for `std.c.dirent`
+            // (backing `std.fs`'s `list_dir`/`walk_dir`/`is_dir`/`make_dir`). Real
+            // libc directory APIs differ enough across platforms (POSIX
+            // opendir/readdir/DIR* vs. Win32 FindFirstFile/FindNextFile, and
+            // `struct dirent`'s layout isn't something Fun can safely mirror as a
+            // compound) that hand-written wrappers -- same approach as
+            // `environ_ptr` above -- are the portable option: each wrapper's C
+            // signature is written to match a Fun type EXACTLY (`void*` <->
+            // `raw*`, `long long` <-> `num`, `char*`/`const char*` <-> `str`),
+            // sidestepping the ABI-width mismatches a raw libc binding risks.
+            try self.write("#ifdef _WIN32\n");
+            try self.write("#include <direct.h>\n");
+            try self.write("#include <sys/stat.h>\n");
+            try self.write("typedef struct { HANDLE h; WIN32_FIND_DATAA data; int started; } __fun_dir_iter;\n");
+            try self.write("static void* __fun_dir_open(const char* path) { if (!path) return NULL; char pattern[4096]; snprintf(pattern, sizeof(pattern), \"%s\\\\*\", path); __fun_dir_iter* it = (__fun_dir_iter*)malloc(sizeof(__fun_dir_iter)); if (!it) return NULL; it->h = FindFirstFileA(pattern, &it->data); it->started = 0; if (it->h == INVALID_HANDLE_VALUE) { free(it); return NULL; } return it; }\n");
+            try self.write("static char* __fun_dir_read_name(void* dirp) { __fun_dir_iter* it = (__fun_dir_iter*)dirp; if (!it) return NULL; if (it->started) { if (!FindNextFileA(it->h, &it->data)) return NULL; } else { it->started = 1; } return it->data.cFileName; }\n");
+            try self.write("static long long __fun_dir_close(void* dirp) { __fun_dir_iter* it = (__fun_dir_iter*)dirp; if (!it) return -1; FindClose(it->h); free(it); return 0; }\n");
+            try self.write("static long long __fun_path_is_dir(const char* path) { if (!path) return 0; struct _stat st; if (_stat(path, &st) != 0) return 0; return (st.st_mode & _S_IFDIR) ? 1 : 0; }\n");
+            try self.write("static long long __fun_make_dir(const char* path) { if (!path) return -1; return _mkdir(path); }\n");
+            try self.write("#else\n");
+            try self.write("#include <dirent.h>\n");
+            try self.write("#include <sys/stat.h>\n");
+            try self.write("static void* __fun_dir_open(const char* path) { if (!path) return NULL; return (void*)opendir(path); }\n");
+            try self.write("static char* __fun_dir_read_name(void* dirp) { if (!dirp) return NULL; struct dirent* e = readdir((DIR*)dirp); return e ? e->d_name : NULL; }\n");
+            try self.write("static long long __fun_dir_close(void* dirp) { if (!dirp) return -1; return (long long)closedir((DIR*)dirp); }\n");
+            try self.write("static long long __fun_path_is_dir(const char* path) { if (!path) return 0; struct stat st; if (stat(path, &st) != 0) return 0; return S_ISDIR(st.st_mode) ? 1 : 0; }\n");
+            try self.write("static long long __fun_make_dir(const char* path) { if (!path) return -1; return mkdir(path, 0755); }\n");
+            try self.write("#endif\n");
             try self.write("#ifdef _WIN32\n");
             try self.write("#include <windows.h>\n");
             try self.write("typedef HANDLE __fun_thread_t;\n");
@@ -21371,6 +21399,16 @@ pub const TranspileProcess = struct {
             // Deadlock-watchdog hooks: no libc header — the symbols
             // (`__fun_wd_enter_wait`/`__fun_wd_leave_wait`/`__fun_wd_warn`) are
             // emitted directly into the prelude by the compiler. Nothing to include.
+            return;
+        } else if (mem.eql(u8, import_path, "std.c.dirent")) {
+            // Directory iteration/creation/kind-check helpers
+            // (`__fun_dir_open`/`__fun_dir_read_name`/`__fun_dir_close`/
+            // `__fun_path_is_dir`/`__fun_make_dir`) are emitted directly into
+            // the prelude by the compiler (see `transpile_prelude`) — no
+            // libc header to pull in here, unlike the rest of this chain.
+            // Still load the signature module so type-checking sees these
+            // functions' signatures.
+            try self.process_std_module_import(import_node, import_path);
             return;
         } else {
             self.report_error(import_node, "Unsupported standard library import: {s}", .{import_path});
