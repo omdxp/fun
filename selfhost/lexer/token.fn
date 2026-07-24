@@ -1,7 +1,8 @@
 // Token types for the self-hosted Fun compiler's lexer.
 // 
-// Ported from modules/lexer/token.zig, with two deliberate simplifications
-// (confirmed by grepping the whole Zig codebase before dropping either):
+// Ported from the previous lexer's token module, with two deliberate
+// simplifications (confirmed by grepping the whole codebase before dropping
+// either):
 // - `NumberType` (the Normal/Long/Float/Double distinction on a numeric
 // literal) is dropped entirely -- nothing in the transpiler's codegen
 // ever reads it; a Number token already distinguishes integer vs decimal
@@ -11,7 +12,8 @@
 
 imp std.string;
 
-// The kind of lexical token. Mirrors `token.zig`'s `TokenType` exactly.
+// The kind of lexical token. Mirrors the previous implementation's
+// `TokenType` exactly.
 pub enum TokenType {
   Identifier,
   Keyword,

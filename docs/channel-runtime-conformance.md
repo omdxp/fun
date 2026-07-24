@@ -69,7 +69,7 @@ A micro-benchmark validates select round-robin fairness and timeout stability:
 
 ## CI Gate
 
-The tests in tests/codegen_test.zig are the executable gate:
+The following tests are the executable gate:
 
 - `std.channel runtime conformance matrix is stable across backend selectors`
 - `std.channel fairness and timeout benchmark stays within backend thresholds`

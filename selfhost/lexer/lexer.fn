@@ -1,8 +1,8 @@
 // The self-hosted Fun compiler's lexer: turns Fun source text into a
-// Vec<Token>. Ported from modules/lexer/lexer.zig.
+// Vec<Token>. Ported from the previous implementation's lexer module.
 // 
-// Design differences from the Zig original (each confirmed necessary/safe
-// by reading the Zig source and grepping for downstream consumers before
+// Design differences from the original (each confirmed necessary/safe by
+// reading the original source and grepping for downstream consumers before
 // diverging):
 // - Reads the WHOLE source into a `str` up front (via `std.fs`, already
 // built in Phase 0) and lexes with an index cursor, instead of the
@@ -12,8 +12,8 @@
 // syscall per character.
 // - Drops `curr_exp_count`/`parenthesis_buf`/`arg_str_buf`/
 // `start_expression`/`finish_expression`: written to throughout the
-// original but never actually READ anywhere in the whole Zig codebase
-// (grepped to confirm) -- vestigial bookkeeping for a removed feature.
+// original but never actually READ anywhere in the whole codebase (grepped
+// to confirm) -- vestigial bookkeeping for a removed feature.
 // - Drops the `asm` raw-body lexing mode (scanning `asm { ... }` as an
 // opaque text blob). Inline assembly is a niche feature the self-hosted
 // compiler's OWN source has no need for; deferred rather than ported
@@ -427,8 +427,8 @@ impl Lexer {
   }
 
   // A single escape character (the byte AFTER the backslash) to its decoded
-  // value, or an error for an unrecognized escape. Matches the C escape
-  // sequences the Zig lexer's `get_escape_char` supports.
+  // value, or an error for an unrecognized escape. Matches the escape
+  // sequences the original implementation's `get_escape_char` supports.
   _decode_escape_char(chr c) Result<chr> {
     fit c {
       'n' -> { ret ok('\n'); }
@@ -773,4 +773,161 @@ pub fun tokenize(str src, str filename) Result<Vec<Token>> {
     }
   }
   ret ok(lex.tokens);
+}
+
+// Test-only helper: tokenize `src` and unwrap, aborting the test with a clear
+// message if lexing itself fails (rather than every test re-checking is_err()).
+fun _lex(str src) Vec<Token> {
+  let r = tokenize(src, "test.fn");
+  assert ! r.is_err(), "tokenize() returned an error";
+  ret r.unwrap();
+}
+
+test "lexes identifiers and keywords" {
+  let toks = _lex("let x fun_name");
+  assert toks.len == 3, "expected 3 tokens";
+  assert token_is_keyword(toks.get(0), "let"), "token 0 should be keyword 'let'";
+  fit toks.get(1).data {
+    .Sval(s) -> { assert equals(s, "x"), "token 1 should be identifier 'x'"; }
+    _ -> { panic("token 1 should carry Sval"); }
+  }
+  assert toks.get(1).type == .Identifier, "token 1 should be Identifier";
+  fit toks.get(2).data {
+    .Sval(s) -> { assert equals(s, "fun_name"), "token 2 should be identifier 'fun_name'"; }
+    _ -> { panic("token 2 should carry Sval"); }
+  }
+}
+
+test "lexes integer and decimal numbers" {
+  let ints = _lex("42");
+  assert ints.len == 1, "expected 1 token";
+  fit ints.get(0).data {
+    .Num(n) -> { assert n == 42, "expected 42"; }
+    _ -> { panic("expected Num"); }
+  }
+
+  let decs = _lex("3.14");
+  assert decs.len == 1, "expected 1 token";
+  fit decs.get(0).data {
+    .Dec(d) -> { assert d == 3.14, "expected 3.14"; }
+    _ -> { panic("expected Dec"); }
+  }
+
+  // Trailing dot with no fraction: `1.` is a decimal `1.0`.
+  let trailing = _lex("1.");
+  assert trailing.len == 1, "expected 1 token";
+  fit trailing.get(0).data {
+    .Dec(d) -> { assert d == 1.0, "expected 1.0"; }
+    _ -> { panic("expected Dec"); }
+  }
+
+  // Leading dot immediately followed by a digit: `.5` starts a number.
+  let leading = _lex(".5");
+  assert leading.len == 1, "expected 1 token";
+  fit leading.get(0).data {
+    .Dec(d) -> { assert d == 0.5, "expected 0.5"; }
+    _ -> { panic("expected Dec"); }
+  }
+}
+
+test "range operator is not swallowed by number lexing" {
+  let toks = _lex("0..3");
+  assert toks.len == 3, "expected 3 tokens (0, .., 3)";
+  fit toks.get(0).data {
+    .Num(n) -> { assert n == 0, "expected 0"; }
+    _ -> { panic("expected Num"); }
+  }
+  assert token_is_operator(toks.get(1), ".."), "expected '..' operator";
+  fit toks.get(2).data {
+    .Num(n) -> { assert n == 3, "expected 3"; }
+    _ -> { panic("expected Num"); }
+  }
+}
+
+test "lexes hex and binary special numbers" {
+  let hex = _lex("0xFF");
+  assert hex.len == 1, "expected 1 token";
+  fit hex.get(0).data {
+    .Num(n) -> { assert n == 255, "expected 255"; }
+    _ -> { panic("expected Num"); }
+  }
+
+  let binlit = _lex("0b1010");
+  assert binlit.len == 1, "expected 1 token";
+  fit binlit.get(0).data {
+    .Num(n) -> { assert n == 10, "expected 10"; }
+    _ -> { panic("expected Num"); }
+  }
+
+  // A non-zero leading digit never triggers hex/binary special-number lexing.
+  let ident_like = _lex("10x");
+  assert ident_like.len == 2, "expected 2 tokens (10, x)";
+  fit ident_like.get(1).data {
+    .Sval(s) -> { assert equals(s, "x"), "expected identifier 'x'"; }
+    _ -> { panic("expected Sval"); }
+  }
+}
+
+test "lexes number suffixes without tracking their distinction" {
+  let long_suffix = _lex("10L");
+  assert long_suffix.len == 1, "expected 1 token";
+  fit long_suffix.get(0).data {
+    .Num(n) -> { assert n == 10, "expected 10"; }
+    _ -> { panic("expected Num"); }
+  }
+
+  let float_suffix = _lex("10f");
+  assert float_suffix.len == 1, "expected 1 token";
+  fit float_suffix.get(0).data {
+    .Dec(d) -> { assert d == 10.0, "expected 10.0"; }
+    _ -> { panic("expected Dec"); }
+  }
+}
+
+test "lexes string literals with escapes preserved verbatim" {
+  // Source text (6 chars): "hi\n" -- a quoted string containing a literal
+  // backslash-n, NOT a real newline.
+  let toks = _lex("\"hi\\n\"");
+  assert toks.len == 1, "expected 1 token";
+  assert toks.get(0).type == .String, "expected String token";
+  fit toks.get(0).data {
+    // The token's own text is 4 chars: h, i, backslash, n -- verbatim, since
+    // the emitted C string literal reinterprets `\n` itself at compile time.
+    .Sval(s) -> { assert equals(s, "hi\\n"), "expected verbatim 'hi\\n'"; }
+    _ -> { panic("expected Sval"); }
+  }
+}
+
+test "lexes character literals with escapes decoded" {
+  // Source text (4 chars): '\n' -- a quoted character escape.
+  let toks = _lex("'\\n'");
+  assert toks.len == 1, "expected 1 token";
+  fit toks.get(0).data {
+    // Unlike strings, a character escape IS decoded to its real byte value.
+    .Cval(c) -> { assert c == '\n', "expected decoded newline byte"; }
+    _ -> { panic("expected Cval"); }
+  }
+}
+
+test "lexes operators via maximal munch" {
+  let toks = _lex("a >= b != c");
+  assert toks.len == 5, "expected 5 tokens";
+  assert token_is_operator(toks.get(1), ">="), "expected '>=' as one token";
+  assert token_is_operator(toks.get(3), "!="), "expected '!=' as one token";
+}
+
+test "lexes line and block comments" {
+  let toks = _lex("// hi\n/* bye */");
+  assert toks.len == 3, "expected 3 tokens (comment, newline, comment)";
+  assert toks.get(0).type == .Comment, "expected line Comment token";
+  assert toks.get(1).type == .NewLine, "expected NewLine token";
+  assert toks.get(2).type == .Comment, "expected block Comment token";
+}
+
+test "lexes symbols and newlines" {
+  let toks = _lex("{}\n");
+  assert toks.len == 3, "expected 3 tokens";
+  assert token_is_symbol(toks.get(0), '{'), "expected '{' symbol";
+  assert token_is_symbol(toks.get(1), '}'), "expected '}' symbol";
+  assert toks.get(2).type == .NewLine, "expected NewLine token";
 }

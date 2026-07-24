@@ -1632,6 +1632,30 @@ pub const TranspileProcess = struct {
         if (dt.type_str.items.len == 0) return;
         if (@intFromPtr(dt.type_str.items.ptr) == 0) return;
         if (self.dtype_has_unresolved_placeholder(dt)) return;
+        // Reject an instantiation whose OWN generic arg names a generic type
+        // but is missing its own required generic arguments (e.g.
+        // `Result<Option>` instead of `Result<Option<Token>>`) -- see the
+        // matching check/comment in `register_generic_fn_instantiation`.
+        if (self.root_registry()) |reg| {
+            for (dt.generic_args.?.items()) |ga| {
+                if (ga.generic_args != null) continue;
+                if (ga.type_str.items.len == 0) continue;
+                const required: usize = blk: {
+                    if (reg.enums_by_name.get(ga.type_str.items)) |enode| {
+                        if (enode.node_variant) |nv| {
+                            if (nv.enum_decl.type_params) |tp| break :blk tp.count;
+                        }
+                    }
+                    if (reg.compounds_by_name.get(ga.type_str.items)) |cnode| {
+                        if (cnode.node_variant) |nv| {
+                            if (nv.compound.type_params) |tp| break :blk tp.count;
+                        }
+                    }
+                    break :blk 0;
+                };
+                if (required > 0) return;
+            }
+        }
         const root = self.get_root();
         const local_key = try self.type_name_mangled(dt);
         if (root.forced_generic_instantiation_keys.contains(local_key)) {
@@ -3155,6 +3179,42 @@ pub const TranspileProcess = struct {
         if (root.generic_fn_instantiation_keys.contains(key)) {
             root.allocator.free(key);
             return;
+        }
+        // Reject an instantiation whose bound arg NAMES a generic type but is
+        // missing its own required generic arguments (e.g. binding a generic
+        // wrapper's `T` to a bare "Option" instead of "Option<Token>"). Such a
+        // dtype is structurally incomplete and could never be validly
+        // emitted -- one arose from a legitimate call site (`ok(.None)`
+        // inside a function returning `Result<Option<Token>>`), but a
+        // SEPARATE, independent re-inference of that same shorthand `.None`
+        // argument (elsewhere in the typecheck/codegen pipeline) didn't carry
+        // the concrete instantiation through, producing this phantom
+        // duplicate alongside the correct one. Silently dropping it here is
+        // safe: the correct, fully-specified instantiation is registered
+        // separately (under a different mangled key) and is what real
+        // codegen actually emits.
+        if (self.root_registry()) |reg| {
+            for (gargs) |g| {
+                if (g.generic_args != null) continue;
+                if (g.type_str.items.len == 0) continue;
+                const required: usize = blk: {
+                    if (reg.enums_by_name.get(g.type_str.items)) |enode| {
+                        if (enode.node_variant) |nv| {
+                            if (nv.enum_decl.type_params) |tp| break :blk tp.count;
+                        }
+                    }
+                    if (reg.compounds_by_name.get(g.type_str.items)) |cnode| {
+                        if (cnode.node_variant) |nv| {
+                            if (nv.compound.type_params) |tp| break :blk tp.count;
+                        }
+                    }
+                    break :blk 0;
+                };
+                if (required > 0) {
+                    root.allocator.free(key);
+                    return;
+                }
+            }
         }
         root.generic_fn_instantiation_keys.put(key, true) catch return TranspileError.MemoryAllocationFailed;
         root.generic_fn_instantiations.append(.{
@@ -5749,6 +5809,23 @@ pub const TranspileProcess = struct {
                 return TranspileError.TypeMismatch;
             }
         }
+        // If this construction site was already bound to a concrete generic
+        // instantiation (e.g. `Option__Token`, via `bind_enum_ctor_expected`
+        // from an enclosing `ret`/`let`/generic-wrapper-call resolution),
+        // carry that concrete dtype forward instead of the bare
+        // `{name: "Option"}`. Without this, a later INDEPENDENT re-inference
+        // of this same `.Some(x)` construction (e.g. a generic wrapper call's
+        // own T-inference from its argument) saw an incomplete,
+        // dtype_ref-less type and bound T to it, producing a malformed
+        // "Result__Option" (missing its own argument) instance/call-site
+        // override that could never be satisfied -- misreported as a cyclic
+        // dependency at typecheck time, or an undeclared-function error at
+        // codegen time.
+        if (self.lookup_enum_ctor_override(node)) |mangled| {
+            if (try self.dtype_from_mangled_type(mangled)) |synth_dt| {
+                return .{ .base = .Unknown, .name = path.enum_name, .mangled_name = mangled, .dtype_ref = synth_dt };
+            }
+        }
         return .{ .base = .Unknown, .name = path.enum_name };
     }
 
@@ -5892,8 +5969,18 @@ pub const TranspileProcess = struct {
                 _ = try self.resolve_dot_shorthand_enum_variant(arg, inner_enum);
             } else {
                 try self.resolve_shorthand_enum_call(arg, inner_enum);
-                try self.bind_enum_ctor_expected(arg, inner_t);
             }
+            // Record the concrete monomorphized instance (`Option__Token`) for
+            // BOTH shapes -- a bare value (`.None`) and a construction call
+            // (`.Some(x)`). Without this for the bare-value case, a later
+            // independent re-inference of this same arg (e.g. the callee's
+            // OWN generic-function-call machinery inferring `ok<T>`'s T from
+            // its argument) had no concrete dtype to consult, fell back to a
+            // dtype_ref-less bare "Option" CheckedType, and spuriously bound
+            // T to that incomplete type -- producing a malformed "Result__Option"
+            // (missing its own argument) instantiation that could never be
+            // satisfied, intermittently misreported as a cyclic dependency.
+            try self.bind_enum_ctor_expected(arg, inner_t);
         }
     }
 
@@ -8813,6 +8900,26 @@ pub const TranspileProcess = struct {
                         const enum_name = left.*.data.?.sval.items;
                         const variant_name = right.*.data.?.sval.items;
                         if (try self.resolve_enum_variant_constant_type(node, enum_name, variant_name)) |t| {
+                            // If this specific site was already bound to a concrete
+                            // generic instantiation (e.g. `Option__Token`, recorded
+                            // when a shorthand `.None`/`.Some(x)` was resolved
+                            // against an outer expected type), carry that concrete
+                            // dtype forward instead of the bare `{name: "Option"}`.
+                            // Without this, a later INDEPENDENT re-inference of this
+                            // same node (e.g. a generic wrapper call's own T-inference
+                            // from its argument) saw an incomplete, dtype_ref-less
+                            // type and bound T to it, producing a malformed
+                            // "Result__Option" (missing its own argument) instance
+                            // that could never be satisfied -- misreported as a
+                            // cyclic dependency.
+                            if (self.lookup_enum_ctor_override(node)) |mangled| {
+                                if (try self.dtype_from_mangled_type(mangled)) |synth_dt| {
+                                    var t2 = t;
+                                    t2.mangled_name = mangled;
+                                    t2.dtype_ref = synth_dt;
+                                    return t2;
+                                }
+                            }
                             return t;
                         }
                     }

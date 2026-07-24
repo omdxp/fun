@@ -1999,13 +1999,18 @@ pub const ParseProcess = struct {
     fn parse_for_normal_unary(self: *Self, parent_flags: ?utils.HistoryFlags) ParseError!void {
         const unary_tok = self.token_next();
         const unary_op = unary_tok.?.data.sval.items;
-        // Carry `stop_at_comma` from the enclosing context (e.g. a compound
-        // initializer field `name = &x,`) so the unary operand parse does not
-        // greedily consume past the comma into the next field.
-        var flags: utils.HistoryFlags = .{ .expression_is_unary = true };
-        if (parent_flags) |pf| {
-            if (pf.stop_at_comma) flags.stop_at_comma = true;
-        }
+        _ = parent_flags;
+        // A unary operand always stops at a top-level `,` -- comma binds
+        // looser than any unary operator in this language, so `!a, b` must
+        // always parse as `(!a), b`, never `!(a, b)`, regardless of whether
+        // the ENCLOSING context also cares about commas (a compound
+        // initializer field `name = &x,`, but just as much a bare
+        // `assert !r.is_err(), "msg";`, which previously had no reason to set
+        // `stop_at_comma` on itself -- relying on this unary operand parse to
+        // stop for it -- and so had the whole `"msg"` silently swallowed into
+        // the unary's operand, changing `!r.is_err()`'s type to `str` and
+        // failing typecheck with "unary '!' expects bin operand").
+        const flags: utils.HistoryFlags = .{ .expression_is_unary = true, .stop_at_comma = true };
         var hist = utils.History.init(self.transpile_proc.allocator, flags);
         defer hist.deinit();
         try self.parse_expressionable(&hist);
@@ -4604,7 +4609,9 @@ pub const ParseProcess = struct {
             // `(` is stripped explicitly and further binary continuation is
             // picked up afterward via the general expression loop.
             var condition_node: ?ast.Node = null;
+            var had_leading_paren = false;
             if (self.next_token_is_operator("(")) {
+                had_leading_paren = true;
                 try self.expect_op("(");
                 try self.parse_expressionable_root(hist);
                 condition_node = self.node_pop();
@@ -4615,6 +4622,23 @@ pub const ParseProcess = struct {
             }
             if (self.token_peek_next()) |nt| {
                 if (utils.is_binary_only_operator(nt)) {
+                    // See parse_if_statement for why the stripped parens must
+                    // be re-wrapped here: without it, `(a || b) && c` loses
+                    // its grouping and codegen's default binary-op emission
+                    // (no auto-parens around sub-expressions) silently
+                    // miscompiles it as `a || b && c`.
+                    if (had_leading_paren) {
+                        const inner = self.transpile_proc.allocator.create(ast.Node) catch {
+                            return ParseError.MemoryAllocationFailed;
+                        };
+                        errdefer self.transpile_proc.allocator.destroy(inner);
+                        inner.* = condition_node.?;
+                        condition_node = ast.Node{
+                            .type = .ExpressionParenthesis,
+                            .pos = inner.*.pos,
+                            .node_variant = .{ .paren = .{ .exp = inner } },
+                        };
+                    }
                     self.transpile_proc.nodes.push(condition_node.?) catch {
                         return ParseError.MemoryAllocationFailed;
                     };
@@ -4749,7 +4773,9 @@ pub const ParseProcess = struct {
         // but properly seeded with the already-parsed condition as its left
         // operand.
         var condition_node: ?ast.Node = null;
+        var had_leading_paren = false;
         if (self.next_token_is_operator("(")) {
+            had_leading_paren = true;
             try self.expect_op("(");
             try self.parse_expressionable_root(hist);
             condition_node = self.node_pop();
@@ -4760,6 +4786,29 @@ pub const ParseProcess = struct {
         }
         if (self.token_peek_next()) |nt| {
             if (utils.is_binary_only_operator(nt)) {
+                // Re-wrap in an `.ExpressionParenthesis` when the condition
+                // came from an EXPLICIT leading `(...)`: the parens were
+                // stripped above to avoid the atom-parser's "(" quirk (see
+                // the comment above), but the grouping they express is still
+                // semantically real -- `(a || b) && c` must stay grouped
+                // that way. Pushing the BARE inner expression here (as
+                // opposed to only when it started with `(`) would silently
+                // lose that grouping: codegen's default binary-op emission
+                // does not add parens around sub-expressions on its own, so
+                // `(a || b) && c` would emit as `a || b && c`, which C parses
+                // as `a || (b && c)` -- a real, silent miscompilation.
+                if (had_leading_paren) {
+                    const inner = self.transpile_proc.allocator.create(ast.Node) catch {
+                        return ParseError.MemoryAllocationFailed;
+                    };
+                    errdefer self.transpile_proc.allocator.destroy(inner);
+                    inner.* = condition_node.?;
+                    condition_node = ast.Node{
+                        .type = .ExpressionParenthesis,
+                        .pos = inner.*.pos,
+                        .node_variant = .{ .paren = .{ .exp = inner } },
+                    };
+                }
                 self.transpile_proc.nodes.push(condition_node.?) catch {
                     return ParseError.MemoryAllocationFailed;
                 };

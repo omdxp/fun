@@ -574,7 +574,11 @@ pub fn buildSemanticTokens(allocator: Allocator, idx: *const Index) ![]u32 {
         const length: u32 = @intCast(len_i64);
 
         const token_type: u32 = switch (t.kind) {
-            .keyword => if (utils.keyword_is_datatype(t.text)) 7 else 0,
+            // `panic` is lexed as a keyword (it's reserved, so it can't also
+            // be user-declared as a function name) but is used EXCLUSIVELY
+            // with call syntax (`panic("msg")`) -- style it like the
+            // function it reads as, not like a control keyword (`if`/`ret`).
+            .keyword => if (std.mem.eql(u8, t.text, "panic")) 5 else if (utils.keyword_is_datatype(t.text)) 7 else 0,
             .comment => 1,
             .string => 2,
             .number => 3,
