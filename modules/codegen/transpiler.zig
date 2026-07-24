@@ -13968,6 +13968,31 @@ pub const TranspileProcess = struct {
             const rt = hit.method_node.node_variant.?.function.rtype orelse return null;
             if (rt.pointer_depth != 0) return null;
 
+            // A method with its OWN type param (`pub wrap<U>(U x) Box<U>`) needs
+            // its return type substituted through the COMBINED impl+method
+            // params/args for THIS specific call (recovered via the registered
+            // call-site override), not just the impl's own -- mirroring the
+            // free-function generic case above. Otherwise e.g. `Box<U>` would
+            // substitute nothing (U isn't one of the impl's own params) and
+            // leak the literal, un-mangled placeholder name `Box__U`.
+            if (hit.method_node.node_variant.?.function.type_params != null) {
+                if (self.lookup_generic_call_override(node)) |spec_name| {
+                    const root = self.get_root();
+                    for (root.generic_fn_instantiations.items) |inst| {
+                        if (!mem.eql(u8, inst.name, spec_name)) continue;
+                        const mangled = self.type_name_mangled_with_subst(&rt, inst.params.*, inst.args) catch return null;
+                        const mbase = if (mem.indexOf(u8, mangled, "__")) |bi| mangled[0..bi] else mangled;
+                        const reg = root.type_registry;
+                        if (reg != null and (reg.?.compounds_by_name.contains(mbase) or reg.?.enums_by_name.contains(mbase))) {
+                            return mangled; // arena-owned
+                        }
+                        self.allocator.free(@constCast(mangled));
+                        return null;
+                    }
+                }
+                return null;
+            }
+
             // If the receiver is a GENERIC instance and the method's return type
             // mentions the type params (e.g. `with(T) Box<T>` on a `Box<num>`, or
             // `values() Vec<V>` on a `Map<num,num>`), MONOMORPHIZE the return type

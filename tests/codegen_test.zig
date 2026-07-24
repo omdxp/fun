@@ -9336,3 +9336,63 @@ test "a method with its own type param calling a SIBLING method that also has it
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("9\n", stdout);
 }
+
+test "method chaining on a generic method's own-type-param call result monomorphizes correctly" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_method_own_type_param_chaining.fn";
+    const c_path = "codegen_method_own_type_param_chaining.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_method_own_type_param_chaining.exe" else "codegen_method_own_type_param_chaining";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression found while further torture-testing the method-own-type-param
+    // feature: `b.wrap("chained").get()` -- `wrap<U>(U x) Box<U>` returns a
+    // DIFFERENT concrete instantiation (`Box<str>`) than the receiver's own
+    // (`Box<num>`), and chaining a follow-up method call on that rvalue result
+    // requires materializing it into a temp of the right C type. The chaining
+    // codegen (`expr_compound_return_type_name`) resolved the method's return
+    // type by substituting only through the IMPL's own type params
+    // (`impl_type_params`), which doesn't include the method's own `U` at all --
+    // so `Box<U>` substituted nothing and leaked the literal, un-mangled
+    // placeholder name `Box__U` as the temp variable's C type ("use of
+    // undeclared identifier 'Box__U'"). Fixed by checking for the method's own
+    // `type_params` first and, when present, resolving the ACTUAL combined
+    // impl+method instantiation via the registered call-site override (mirroring
+    // how the sibling free-function-generic-return-type case just above it
+    // already did this), substituting the return type through the combined
+    // params/args instead of just the impl's own.
+    const input =
+        "imp std.c.io;\n" ++
+        "compound Box<T> {\n" ++
+        "  T value;\n" ++
+        "}\n" ++
+        "impl Box<T> {\n" ++
+        "  pub wrap<U>(U x) Box<U> {\n" ++
+        "    Box<U> b;\n" ++
+        "    b.value = x;\n" ++
+        "    ret b;\n" ++
+        "  }\n" ++
+        "  pub get() T {\n" ++
+        "    ret self.value;\n" ++
+        "  }\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  Box<num> b;\n" ++
+        "  b.value = 0;\n" ++
+        "  printf(\"%s\\n\", b.wrap(\"chained\").get());\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("chained\n", stdout);
+}
