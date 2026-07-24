@@ -1423,6 +1423,16 @@ pub const LspServer = struct {
                         "M:N scheduler pool. The target must be an `async fun`; results\n" ++
                         "flow back over channels. `main` drains all forks before exiting.\n",
                 );
+            } else if (std.mem.eql(u8, tok.text, "panic")) {
+                try buf.appendSlice(
+                    "```fun\n" ++
+                        "panic(\"message\")\n" ++
+                        "```\n" ++
+                        "Prints the message and aborts. Unifies with WHATEVER type is\n" ++
+                        "expected at its use site (like `nil` does for pointers), so it\n" ++
+                        "works as a `ret` value, a `let` initializer, a fit-arm body, or\n" ++
+                        "a call argument regardless of that position's real type.\n",
+                );
             } else {
                 try self.sendResponseJson(id_val, "null");
                 return;
@@ -6373,7 +6383,7 @@ pub const LspServer = struct {
             const keywords = [_][]const u8{
                 "imp",  "as",    "pub",    "async", "fun",   "compound", "quirk", "impl", "enum", "asm", "volatile", "arch", "defer", "await", "ret",   "if",
                 "elif", "else",  "for",    "fit",   "break", "continue", "void",  "raw",  "num",  "dec", "str",      "bin",  "chr",   "true",  "false", "nil",
-                "fork", "allow", "expect",
+                "fork", "allow", "expect", "panic",
             };
             for (keywords) |kw| {
                 if (prefix.len == 0 or std.mem.startsWith(u8, kw, prefix)) {
@@ -6385,6 +6395,8 @@ pub const LspServer = struct {
                         try self.allocator.dupe(u8, "keyword: the null literal (transpiles to NULL)")
                     else if (std.mem.eql(u8, kw, "fork"))
                         try self.allocator.dupe(u8, "keyword: spawn a fire-and-forget virtual thread")
+                    else if (std.mem.eql(u8, kw, "panic"))
+                        try self.allocator.dupe(u8, "keyword: print a message and abort; unifies with any expected type")
                     else
                         null;
                     try items.append(.{ .label = try self.allocator.dupe(u8, kw), .kind = 14, .detail = kw_detail });
@@ -6770,9 +6782,9 @@ pub const LspServer = struct {
         const keywords_all = [_][]const u8{
             "imp",  "as",    "pub",    "async", "fun",   "compound", "quirk", "impl", "enum", "asm", "volatile", "arch", "defer", "await", "ret",   "if",
             "elif", "else",  "for",    "fit",   "break", "continue", "void",  "raw",  "num",  "dec", "str",      "bin",  "chr",   "true",  "false", "nil",
-            "fork", "allow", "expect",
+            "fork", "allow", "expect", "panic",
         };
-        const keywords_call_arg = [_][]const u8{ "true", "false", "nil" };
+        const keywords_call_arg = [_][]const u8{ "true", "false", "nil", "panic" };
         const keywords: []const []const u8 = if (at_call_arg_start) &keywords_call_arg else &keywords_all;
         for (keywords) |kw| {
             if (prefix.len == 0 or std.mem.startsWith(u8, kw, prefix)) {
@@ -6780,6 +6792,8 @@ pub const LspServer = struct {
                     try self.allocator.dupe(u8, "keyword: declare async function or method")
                 else if (std.mem.eql(u8, kw, "await"))
                     try self.allocator.dupe(u8, "keyword: await async call result (inside async functions)")
+                else if (std.mem.eql(u8, kw, "panic"))
+                    try self.allocator.dupe(u8, "keyword: print a message and abort; unifies with any expected type")
                 else
                     null;
                 try items.append(.{ .label = try self.allocator.dupe(u8, kw), .kind = 14, .detail = kw_detail });

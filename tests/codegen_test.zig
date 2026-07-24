@@ -9727,3 +9727,90 @@ test "std.fs: is_dir/make_dir/list_dir/walk_dir" {
         stdout,
     );
 }
+
+test "panic(msg) in return position lowers to a bare fprintf+abort (no return-value machinery)" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_panic_ret.fn";
+
+    // No type-checking gymnastics needed here: `panic(...)` unifies with
+    // whatever the function's real return type is (`num`), so `ret
+    // panic(...)` must NOT synthesize any dummy return value -- `abort()`
+    // (C11 `_Noreturn`) never returns, so there's nothing left to return.
+    const input =
+        "fun foo(num x) num {\n" ++
+        "  if x < 0 {\n" ++
+        "    ret panic(\"x must be non-negative\");\n" ++
+        "  }\n" ++
+        "  ret x * 2;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "fprintf(stderr_stream(), \"panic: %s\\n\", \"x must be non-negative\"); abort();") != null);
+    // No dummy `return`/value should follow the abort on this path.
+    const abort_idx = std.mem.indexOf(u8, out_owned, "abort();").?;
+    const after_abort = out_owned[abort_idx + "abort();".len ..];
+    const next_brace = std.mem.indexOfScalar(u8, after_abort, '}').?;
+    try std.testing.expect(std.mem.indexOf(u8, after_abort[0..next_brace], "return") == null);
+}
+
+test "panic(msg) in a general expression position lowers to a GNU statement expression" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_panic_expr.fn";
+
+    // Used as a `let` initializer (not the special-cased return position),
+    // `panic(...)` still needs to be ONE C expression, so it lowers to a `({
+    // ...; 0; })` statement expression instead.
+    const input =
+        "fun main() num {\n" ++
+        "  num x = panic(\"cannot happen\");\n" ++
+        "  ret x;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "({ fprintf(stderr_stream(), \"panic: %s\\n\", \"cannot happen\"); abort(); 0; })") != null);
+}
+
+test "panic(msg): unreached branch does not affect the normal return path" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_panic_e2e.fn";
+    const c_path = "codegen_panic_e2e.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_panic_e2e.exe" else "codegen_panic_e2e";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // End-to-end proof that a function using `ret panic(...)` in an
+    // unreachable branch still compiles AND runs correctly on the normal
+    // path -- the panic-handling codegen must not corrupt the ordinary
+    // `ret x * 2;` return.
+    const input =
+        "imp std.c.io;\n\n" ++
+        "fun foo(num x) num {\n" ++
+        "  if x < 0 {\n" ++
+        "    ret panic(\"x must be non-negative\");\n" ++
+        "  }\n" ++
+        "  ret x * 2;\n" ++
+        "}\n\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"%lld\\n\", foo(5));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("10\n", stdout);
+}

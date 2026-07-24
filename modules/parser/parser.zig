@@ -3008,6 +3008,15 @@ pub const ParseProcess = struct {
                     return true;
                 }
 
+                // `panic("msg")` as a primary EXPRESSION operand -- same rationale as
+                // `nil` above (so it composes with surrounding operators/contexts, e.g.
+                // as a fit-arm body or a `ret` operand), but it also takes an explicit
+                // parenthesized message argument.
+                if (mem.eql(u8, kw, "panic")) {
+                    try self.parse_panic_expr(hist);
+                    return true;
+                }
+
                 // Phase 1 async surface: parse `await expr` and lower it as `expr`.
                 if (mem.eql(u8, kw, "await")) {
                     return try self.parse_await_operand(hist);
@@ -5454,6 +5463,14 @@ pub const ParseProcess = struct {
             return try self.parse_warning_control(.expect);
         } else if (mem.eql(u8, "assert", sval)) {
             return try self.parse_assert(hist);
+        } else if (mem.eql(u8, "panic", sval)) {
+            // `panic("msg");` used as its own STATEMENT (not nested inside a
+            // `ret`/`let`/fit-arm). Reuses the same expression-level parse as
+            // the primary-operand path below, then consumes the trailing `;`
+            // like any other expression-statement.
+            try self.parse_panic_expr(hist);
+            try self.expect_sym(';');
+            return;
         } else if (mem.eql(u8, "break", sval)) {
             _ = self.token_next(); // skip break
             self.transpile_proc.nodes.push(ast.Node{ .type = .StatementBreak, .pos = t.?.pos }) catch {
@@ -5599,6 +5616,35 @@ pub const ParseProcess = struct {
             return ParseError.MemoryAllocationFailed;
         };
         try self.expect_sym(';');
+    }
+
+    /// Parses a `panic("msg")` EXPRESSION (leaves a `.Panic` node on the node
+    /// stack; does NOT consume a trailing `;` -- callers in statement position
+    /// do that themselves, matching how other expression-statements work).
+    ///
+    /// Syntax: `panic(<message expression>)`
+    fn parse_panic_expr(self: *Self, hist: *utils.History) ParseError!void {
+        const panic_tok = self.token_next(); // skip 'panic'
+        try self.expect_op("(");
+        try self.parse_expressionable_root(hist);
+        const msg_node = self.node_pop();
+        if (msg_node == null) {
+            self.transpile_proc.err("expected message expression after 'panic('", .{});
+            return ParseError.InvalidExpression;
+        }
+        try self.expect_sym(')');
+        const msg_ptr = self.transpile_proc.allocator.create(ast.Node) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+        errdefer self.transpile_proc.allocator.destroy(msg_ptr);
+        msg_ptr.* = msg_node.?;
+        self.transpile_proc.nodes.push(ast.Node{
+            .type = .Panic,
+            .pos = if (panic_tok) |pt| pt.pos else null,
+            .node_variant = .{ .panic_expr = .{ .message = msg_ptr } },
+        }) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
     }
 
     fn parse_pub_declaration(self: *Self) ParseError!void {

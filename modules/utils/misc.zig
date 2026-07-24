@@ -115,7 +115,8 @@ pub fn is_keyword(str: []const u8) bool {
         mem.eql(u8, "continue", str) or
         mem.eql(u8, "allow", str) or
         mem.eql(u8, "expect", str) or
-        mem.eql(u8, "assert", str);
+        mem.eql(u8, "assert", str) or
+        mem.eql(u8, "panic", str);
 }
 
 /// Checks if the given character is a boolean keyword.
@@ -916,6 +917,13 @@ pub fn print_node(node: ast.Node, writer: *std.Io.Writer, depth: usize) !void {
         .Nil => {
             try print_indent(writer, depth + 1);
             try writer.print("nil\n", .{});
+        },
+        .Panic => {
+            if (node.node_variant != null) {
+                try print_indent(writer, depth + 1);
+                try writer.print("Message:\n", .{});
+                try print_node(node.node_variant.?.panic_expr.message.*, writer, depth + 2);
+            }
         },
         .StatementFork => {
             if (node.node_variant != null) {

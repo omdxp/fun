@@ -127,6 +127,12 @@ pub const NodeType = enum {
     Boolean,
     /// Represents the `nil` literal (a null pointer/string sentinel; emits C `NULL`).
     Nil,
+    /// Represents a `panic(msg)` expression: unifies with WHATEVER type is
+    /// expected at its use site (like `nil` does for pointers), so it can be
+    /// used as `ret panic("msg");`/a `let` initializer/a fit-arm body/etc.
+    /// regardless of the surrounding type. Never actually produces a value:
+    /// prints the message and aborts.
+    Panic,
     /// Represents a `fork` statement node (fire-and-forget virtual-thread spawn).
     StatementFork,
     /// Represents an elif statement node.
@@ -255,6 +261,11 @@ pub const Node = struct {
         bracket: struct {
             /// The inner expression of the bracket.
             inner: *Node,
+        },
+        /// A `panic(msg)` expression (see `NodeType.Panic`).
+        panic_expr: struct {
+            /// The message expression (must resolve to `str`).
+            message: *Node,
         },
         /// The compound initializer node.
         compound_init: struct {

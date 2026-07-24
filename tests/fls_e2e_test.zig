@@ -6262,6 +6262,50 @@ test "fls e2e: nil and fork keywords have hover docs and completion entries" {
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: panic keyword has a hover doc" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "fun foo(num x) num {\n" ++
+        "  if x < 0 {\n" ++
+        "    ret panic(\"x must be non-negative\");\n" ++
+        "  }\n" ++
+        "  ret x * 2;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-panic.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // Hover on `panic` -> mentions unifying with the expected type.
+    const panic_pos = try findPosition(doc_text, "    ret panic(\"x must be non-negative\");\n", 0);
+    const panic_hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, panic_pos.line, panic_pos.col + @as(i64, @intCast("    ret pa".len)) },
+    );
+    defer allocator.free(panic_hover_params);
+    const panic_hover_id = try lsp.request("textDocument/hover", panic_hover_params);
+    var panic_hover_res = try lsp.waitResponse(panic_hover_id, 15000);
+    defer panic_hover_res.deinit();
+    const panic_hover_val = try jsonResultFromResponseObj(panic_hover_res.parsed.value.object);
+    try expectHoverContains(allocator, panic_hover_val, "Unifies");
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: fork used as an ordinary function (not the statement) does not get keyword hover" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();

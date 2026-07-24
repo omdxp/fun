@@ -4406,6 +4406,10 @@ pub const TranspileProcess = struct {
         pointer_depth: usize = 0,
         /// True when this value is the integer literal 0 (C null pointer constant).
         is_null_literal: bool = false,
+        /// True when this value is a `panic("msg")` expression -- unifies with
+        /// WHATEVER type is expected at its use site (see `can_implicit_coerce`),
+        /// same idea as `is_null_literal` but for any type, not just pointers/str.
+        is_panic_literal: bool = false,
         /// For user-defined types, `base` is `.Unknown` and `name` holds the identifier.
         name: ?[]const u8 = null,
         /// For generic specializations, a mangled name (e.g. Vec__num).
@@ -6963,6 +6967,11 @@ pub const TranspileProcess = struct {
 
         if (CheckedType.eql(expected_n, actual_n)) return true;
 
+        // `panic("msg")` unifies with WHATEVER type is expected -- it never
+        // actually produces a value (prints the message and aborts), so it's
+        // compatible with any type at all, not just pointers/str like `nil`.
+        if (actual_n.is_panic_literal) return true;
+
         // Allow equivalent enum types referenced through different visible names
         // (e.g. `ErrorCode` and `err__ErrorCode`).
         if (self.are_same_enum_type(expected_n, actual_n)) return true;
@@ -7482,6 +7491,22 @@ pub const TranspileProcess = struct {
             // sentinel. The is_null_literal flag drives the existing coercions to
             // pointer and str (and == comparisons against them).
             .Nil => return .{ .base = .Num, .is_null_literal = true },
+            // `panic("msg")` never actually produces a value (prints the message
+            // and aborts); the is_panic_literal flag makes `can_implicit_coerce`
+            // accept it in place of ANY expected type, so it composes with a
+            // `ret`/`let`/fit-arm/argument position regardless of that position's
+            // real type. `.Unknown` base is a placeholder -- callers must check
+            // `is_panic_literal` before relying on `base` for a panic value.
+            .Panic => {
+                if (node.node_variant) |nv| {
+                    const mt = try self.infer_expr_type(nv.panic_expr.message.*, env, fns);
+                    if (mt.base != .Str) {
+                        self.report_type_error(node, "panic message must be str", .{});
+                        return TranspileError.TypeMismatch;
+                    }
+                }
+                return .{ .base = .Unknown, .is_panic_literal = true };
+            },
             .Character => return .{ .base = .Chr },
             .Identifier => {
                 if (node.data == null) return .{ .base = .Unknown };
@@ -11678,6 +11703,10 @@ pub const TranspileProcess = struct {
                     self.deinit_node(paren.exp.*);
                     allocator.destroy(paren.exp);
                 },
+                .panic_expr => |p| {
+                    self.deinit_node(p.message.*);
+                    allocator.destroy(p.message);
+                },
                 .variable => |variable| {
                     if (variable.val) |val| {
                         self.deinit_node(val.*);
@@ -12182,10 +12211,23 @@ pub const TranspileProcess = struct {
         }
     }
 
+    /// Emits the shared `fprintf(...); abort();` pair a `panic(msg)` lowers to,
+    /// as bare C STATEMENTS (no wrapping expression, no trailing dummy value).
+    /// Used directly in return-statement position (where `abort()` never
+    /// returning means no value is needed at all) and wrapped in a `({ ...
+    /// 0; })` GNU statement expression everywhere else `.Panic` is emitted as
+    /// a general expression (see the `.Panic` case in the main transpile
+    /// switch).
+    fn write_panic_message_and_abort(self: *Self, message: ast.Node) TranspileError!void {
+        try self.write("fprintf(stderr_stream(), \"panic: %s\\n\", ");
+        try self.transpile_node(message);
+        try self.write("); abort();");
+    }
+
     fn node_needs_trailing_semicolon(self: *Self, node: ast.Node) bool {
         _ = self;
         return switch (node.type) {
-            .Expression, .ExpressionParenthesis, .Unary => true,
+            .Expression, .ExpressionParenthesis, .Unary, .Panic => true,
             else => false,
         };
     }
@@ -12329,6 +12371,12 @@ pub const TranspileProcess = struct {
     fn node_is_scope_terminator(node: *ast.Node) bool {
         return switch (node.type) {
             .StatementReturn, .StatementBreak, .StatementContinue => true,
+            // A bare `panic("msg");` statement ALWAYS aborts (unlike `assert`,
+            // whose condition might not fire) -- treat it as a terminator too,
+            // so it doesn't trigger a false-positive `missing_return` when
+            // it's a function's last statement, and so codegen doesn't emit
+            // dead defer/fork-wait-idle cleanup after it.
+            .Panic => true,
             else => false,
         };
     }
@@ -12406,7 +12454,10 @@ pub const TranspileProcess = struct {
         while (i < stmts.len) : (i += 1) {
             const s = stmts[i];
             switch (s.type) {
-                .StatementReturn, .StatementBreak, .StatementContinue => return true,
+                // A bare `panic("msg");` ALWAYS aborts (unlike `assert`, whose
+                // condition might not fire), so it terminates the scope just
+                // like `ret`/`break`/`continue`.
+                .StatementReturn, .StatementBreak, .StatementContinue, .Panic => return true,
                 .StatementIf => {
                     // Gather the if + following elif* + optional else (siblings).
                     const if_v = s.node_variant.?.statement.if_stmt;
@@ -20487,6 +20538,15 @@ pub const TranspileProcess = struct {
                         try self.transpile_scoped_block(else_s.body, .normal);
                     },
                     .return_stmt => |rn| {
+                        // `ret panic("msg");` never actually returns a value (it prints
+                        // the message and aborts), so bypass the whole return-value
+                        // machinery below (defers/main/fork/quirk-coercion) entirely --
+                        // same "abort now, no cleanup" semantics as `assert`'s codegen.
+                        if (rn.*.type == .Panic) {
+                            try self.write_indent();
+                            try self.write_panic_message_and_abort(rn.*.node_variant.?.panic_expr.message.*);
+                            return;
+                        }
                         // A `ret <expr>` must compute its value BEFORE the defers run,
                         // because a defer may mutate a variable the expression reads
                         // (`num x = 5; defer x = 999; ret x + 1;` must return 6, not
@@ -21211,6 +21271,24 @@ pub const TranspileProcess = struct {
             },
             // The `nil` literal lowers to the C null-pointer constant `NULL`.
             .Nil => try self.write("NULL"),
+            // `panic("msg")` used as a RETURN value is special-cased at the
+            // `.return_stmt` site above (no dummy value needed there, since
+            // `abort()` never returns). Everywhere ELSE (a `let` initializer,
+            // fit-arm body, function argument, ...) still needs a single C
+            // EXPRESSION of SOME concrete type, so this lowers to a GNU C
+            // statement expression that prints the message, aborts, and
+            // trails off with a plain `0` -- C's very permissive implicit
+            // conversions accept that as almost any scalar/pointer type
+            // (though NOT a struct/union return type; that combination isn't
+            // supported yet). `stderr_stream()`/`abort()` are always present
+            // (see `transpile_prelude`), so no import is required for this.
+            .Panic => {
+                if (node.node_variant) |nv| {
+                    try self.write("({ ");
+                    try self.write_panic_message_and_abort(nv.panic_expr.message.*);
+                    try self.write(" 0; })");
+                }
+            },
             else => {},
         }
     }

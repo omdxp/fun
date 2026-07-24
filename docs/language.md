@@ -98,7 +98,8 @@ payload; payload-free variants still coexist.
 - **Elif**: Else-if chaining.
 - **Pattern Matching**: `fit` statement for exhaustive and non-exhaustive matches.
 - **Assert**: `assert <condition>;` aborts if condition is false. Optional message: `assert <condition>, "msg";`. Constant assertions may emit `assert_constant`.
-- **Unreachable Statements**: Statements after `ret`, `break`, or `continue` may emit `unreachable_code`.
+- **Panic**: `panic("message")` prints the message and aborts. Unlike `assert`, it's an EXPRESSION that unifies with whatever type is expected at its use site (the same way `nil` unifies with any pointer type), so it composes as a `ret` value, a `let` initializer, a fit-arm body, or a call argument: `ret panic("unreachable");`. Also usable as its own bare statement.
+- **Unreachable Statements**: Statements after `ret`, `break`, `continue`, or a bare `panic(...)` may emit `unreachable_code`.
 - **For Loops**:
     - Range: `for i : 0..10 { ... }`
     - Array: `for item : arr { ... }`
