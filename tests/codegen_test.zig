@@ -9814,3 +9814,229 @@ test "panic(msg): unreached branch does not affect the normal return path" {
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("10\n", stdout);
 }
+
+test "chr and num implicitly coerce both ways (assignment and call arguments)" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_chr_num_coerce.fn";
+    const c_path = "codegen_chr_num_coerce.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_chr_num_coerce.exe" else "codegen_chr_num_coerce";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Found while adding `std.ctype` (Phase 0 of the self-hosting rewrite):
+    // `chr` and `num` already interoperated freely in arithmetic
+    // (`is_numeric_type` treats `.Chr` as numeric) and comparisons
+    // (`can_compare_or_match` explicitly allows both directions), but NOT in
+    // plain assignment or function-argument passing -- `isalnum(chr_val)`
+    // and `num n = chr_val;` both failed to typecheck, forcing an awkward
+    // `chr_val + 0` arithmetic-promotion workaround to call any
+    // `num`-parameter C binding with a `chr` value. Fixed by extending
+    // `can_implicit_coerce` to allow the same bidirectional interop
+    // assignment/arguments already got via comparison.
+    const input =
+        "imp std.c.io;\n\n" ++
+        "fun main() num {\n" ++
+        "  chr c = 'a';\n" ++
+        "  num n = c;\n" ++
+        "  chr back = n + 1;\n" ++
+        "  printf(\"%lld %c\\n\", n, back);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("97 b\n", stdout);
+}
+
+test "std.ctype: chr/bin wrappers over std.c.ctype" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_std_ctype.fn";
+    const c_path = "codegen_std_ctype.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_std_ctype.exe" else "codegen_std_ctype";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.ctype;\n\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"%d %d %d %d\\n\", is_digit('5'), is_digit('x'), is_alpha('x'), is_alpha('5'));\n" ++
+        "  printf(\"%d %d\\n\", is_space(' '), is_space('x'));\n" ++
+        "  printf(\"%c%c\\n\", to_upper('a'), to_lower('A'));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("1 0 1 0\n1 0\nAa\n", stdout);
+}
+
+test "function-type parameter: passing a function by name and calling it through a param" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_fn_type_param.fn";
+    const c_path = "codegen_fn_type_param.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_fn_type_param.exe" else "codegen_fn_type_param";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // First-class function parameters (Phase 0 of the self-hosting rewrite):
+    // `fun(T1, T2) R` reuses the `fun` keyword as a TYPE (rather than
+    // inventing new syntax) for a parameter that accepts a function by name
+    // and can be called through it (`cb(a, b)` inside `apply`). Needed for
+    // `Vec<T>.sort_by(cmp)`; also generally useful for map/filter/for_each-
+    // style patterns the self-hosted compiler will likely want. A bare
+    // function name used as a value infers as an opaque `raw*` (not
+    // signature-checked against `fn_sig` at the CALL-SITE that passes it,
+    // matching the existing `raw* start_routine`-style callback bindings),
+    // but calls THROUGH the parameter (`cb(a, b)`) ARE checked against the
+    // declared `fun(T1, T2) R` signature (arg count + types).
+    const input =
+        "imp std.c.io;\n\n" ++
+        "fun add(num a, num b) num {\n" ++
+        "  ret a + b;\n" ++
+        "}\n\n" ++
+        "fun mul(num a, num b) num {\n" ++
+        "  ret a * b;\n" ++
+        "}\n\n" ++
+        "fun apply(num a, num b, fun(num, num) num cb) num {\n" ++
+        "  ret cb(a, b);\n" ++
+        "}\n\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"%lld\\n\", apply(2, 3, add));\n" ++
+        "  printf(\"%lld\\n\", apply(2, 3, mul));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("5\n6\n", stdout);
+}
+
+test "function-type parameter: wrong arg count/type calling through the param is a type error" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_fn_type_param_argcheck.fn";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+
+    try std.testing.expectError(error.WrongArgCount, runTranspile(allocator, ifilepath,
+        \\fun apply(num a, num b, fun(num, num) num cb) num {
+        \\  ret cb(a);
+        \\}
+        \\
+    ));
+
+    try std.testing.expectError(error.TypeMismatch, runTranspile(allocator, ifilepath,
+        \\fun apply(num a, str s, fun(num, num) num cb) num {
+        \\  ret cb(a, s);
+        \\}
+        \\
+    ));
+}
+
+test "Vec<T>.sort_by(cmp): num, str, and compound comparators" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_vec_sort_by.fn";
+    const c_path = "codegen_vec_sort_by.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_vec_sort_by.exe" else "codegen_vec_sort_by";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // The motivating Phase-0 use case: sorting compiler diagnostics by
+    // (line, col) needs a comparator, not just ascending/descending numeric
+    // order -- exercises the generic `impl Vec<T>` method correctly
+    // monomorphizing the `fun(T, T) num` comparator parameter's C function-
+    // pointer type per concrete `T` (num/str/a user compound), not just
+    // once for the unbound generic template.
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.vec;\n\n" ++
+        "compound Diag {\n" ++
+        "  num line;\n" ++
+        "  num col;\n" ++
+        "}\n\n" ++
+        "fun cmp_num_desc(num a, num b) num {\n" ++
+        "  ret b - a;\n" ++
+        "}\n\n" ++
+        "fun cmp_diag(Diag a, Diag b) num {\n" ++
+        "  if a.line != b.line {\n" ++
+        "    ret a.line - b.line;\n" ++
+        "  }\n" ++
+        "  ret a.col - b.col;\n" ++
+        "}\n\n" ++
+        "fun main() num {\n" ++
+        "  Vec<num> nums;\n" ++
+        "  nums.init(0);\n" ++
+        "  nums.push(5);\n" ++
+        "  nums.push(1);\n" ++
+        "  nums.push(3);\n" ++
+        "  nums.sort_by(cmp_num_desc);\n" ++
+        "  num i = 0;\n" ++
+        "  for i < nums.len {\n" ++
+        "    printf(\"%lld \", nums.get(i));\n" ++
+        "    i = i + 1;\n" ++
+        "  }\n" ++
+        "  printf(\"\\n\");\n\n" ++
+        "  Vec<Diag> diags;\n" ++
+        "  diags.init(0);\n" ++
+        "  Diag d1;\n" ++
+        "  d1.line = 5;\n" ++
+        "  d1.col = 2;\n" ++
+        "  Diag d2;\n" ++
+        "  d2.line = 1;\n" ++
+        "  d2.col = 9;\n" ++
+        "  Diag d3;\n" ++
+        "  d3.line = 5;\n" ++
+        "  d3.col = 1;\n" ++
+        "  diags.push(d1);\n" ++
+        "  diags.push(d2);\n" ++
+        "  diags.push(d3);\n" ++
+        "  diags.sort_by(cmp_diag);\n" ++
+        "  i = 0;\n" ++
+        "  for i < diags.len {\n" ++
+        "    let d = diags.get(i);\n" ++
+        "    printf(\"%lld:%lld \", d.line, d.col);\n" ++
+        "    i = i + 1;\n" ++
+        "  }\n" ++
+        "  printf(\"\\n\");\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("5 3 1 \n1:9 5:1 5:2 \n", stdout);
+}

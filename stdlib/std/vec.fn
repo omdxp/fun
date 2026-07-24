@@ -60,7 +60,7 @@ impl Vec<T> as Sized {
 
 impl Vec<T> {
   // Initialize the vector with an optional starting capacity.
-  //
+  // 
   // Params:
   // - cap: requested initial capacity
   pub init(num cap = 8) {
@@ -436,6 +436,31 @@ impl Vec<T> {
     it.src = self;
     it.idx = 0;
     ret it;
+  }
+
+  // Sort elements in place using a custom comparator (stable insertion sort).
+  // Unlike the numeric `sort()`/`sort_desc()` (only available on `Vec<num>`/
+  // `Vec<dec>`), this works for ANY element type -- e.g. sorting compiler
+  // diagnostics by line/col, or `Vec<str>` by length instead of lexically.
+  // 
+  // Params:
+  // - cmp: comparator returning negative if `a` sorts before `b`, positive if
+  // `a` sorts after `b`, or 0 if they're equal (`strcmp`/`qsort` convention)
+  pub sort_by(fun(T, T) num cmp) {
+    num i = 1;
+    for i < self.len {
+      T key = self.data[i];
+      num j = i - 1;
+      for j >= 0 {
+        if cmp(self.data[j], key) <= 0 {
+          break;
+        }
+        self.data[j + 1] = self.data[j];
+        j = j - 1;
+      }
+      self.data[j + 1] = key;
+      i = i + 1;
+    }
   }
 }
 

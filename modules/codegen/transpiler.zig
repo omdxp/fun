@@ -4918,6 +4918,22 @@ pub const TranspileProcess = struct {
         return t;
     }
 
+    /// Builds a `FnSig` (the shape ordinary call-checking already knows how to
+    /// validate arguments/arity against) from a function-TYPE parameter's
+    /// `dtype.FnTypeSig` (params + return type parsed from `fun(T1, T2) R`).
+    fn fn_sig_from_dtype_fn_sig(self: *Self, sig: *const dtype.FnTypeSig) TranspileError!FnSig {
+        var args = ArrayList(CheckedType).initCapacity(self.allocator, sig.params.count) catch {
+            return TranspileError.MemoryAllocationFailed;
+        };
+        for (sig.params.items()) |p| {
+            args.append(type_from_dtype(p)) catch return TranspileError.MemoryAllocationFailed;
+        }
+        return .{
+            .rtype = type_from_dtype(sig.rtype),
+            .args = args.toOwnedSlice() catch return TranspileError.MemoryAllocationFailed,
+        };
+    }
+
     fn ensure_named_type_visible(self: *Self, ref_node: ast.Node, name: []const u8) TranspileError!void {
         const base_name = if (mem.indexOf(u8, name, "__")) |idx| name[0..idx] else name;
         // Builtins are always visible.
@@ -5006,6 +5022,15 @@ pub const TranspileProcess = struct {
     }
 
     fn ensure_dtype_visible(self: *Self, ref_node: ast.Node, dt: *const dtype.DataType, allow: ?[]const []const u8) TranspileError!void {
+        // A function-type parameter (`fun(T1, T2) R`) is not a named type to
+        // look up -- `type_str` is just a synthesized display string. Recurse
+        // into its param/return types instead (so THEIR visibility is still
+        // checked) and skip the named-type lookup below entirely.
+        if (dt.fn_sig) |sig| {
+            for (sig.params.items()) |p| try self.ensure_dtype_visible(ref_node, p, allow);
+            try self.ensure_dtype_visible(ref_node, sig.rtype, allow);
+            return;
+        }
         // A C typedef type name (`size_t`, `time_t`, `FILE`, `va_list`, …) is
         // resolved to a primitive semantic type during parsing, so `dt.type` is
         // often non-Unknown and the visibility check below is skipped. Mark the
@@ -6972,6 +6997,20 @@ pub const TranspileProcess = struct {
         // compatible with any type at all, not just pointers/str like `nil`.
         if (actual_n.is_panic_literal) return true;
 
+        // A bare function name used as a value (e.g. passing `add` where a
+        // `fun(num, num) num` parameter is expected, as in `sort_by(cmp)`)
+        // infers as an opaque `raw*` (see `infer_expr_type`'s `.Identifier`
+        // case) -- accept it wherever a function-type parameter is expected.
+        // Not signature-checked against the declared `fn_sig` yet (matches
+        // the existing `raw* start_routine`-style callback bindings, which
+        // are similarly unchecked); a real mismatch still fails at the C
+        // level, same as those.
+        if (expected_n.dtype_ref != null and expected_n.dtype_ref.?.fn_sig != null and
+            actual_n.base == .Raw and actual_n.pointer_depth == 1 and !actual_n.is_array)
+        {
+            return true;
+        }
+
         // Allow equivalent enum types referenced through different visible names
         // (e.g. `ErrorCode` and `err__ErrorCode`).
         if (self.are_same_enum_type(expected_n, actual_n)) return true;
@@ -7081,6 +7120,20 @@ pub const TranspileProcess = struct {
 
         // Allow widening conversions.
         if (expected_n.base == .Dec and actual_n.base == .Num and !expected_n.is_array and expected_n.pointer_depth == 0) return true;
+
+        // `chr`/`num` already interoperate freely in arithmetic and comparisons
+        // (see `can_compare_or_match` below, and `is_numeric_type` treating
+        // `.Chr` as numeric) -- C itself allows implicit int<->char conversion
+        // both ways, so extend that same bidirectional interop to assignment/
+        // argument-passing instead of only letting it through via a `c + 0`
+        // arithmetic-promotion workaround. Needed for e.g. `std.ctype`'s
+        // `chr`-typed wrappers to call the underlying `num`-typed `std.c.ctype`
+        // bindings directly.
+        if (!expected_n.is_array and expected_n.pointer_depth == 0 and !actual_n.is_array and actual_n.pointer_depth == 0) {
+            if ((expected_n.base == .Num and actual_n.base == .Chr) or (expected_n.base == .Chr and actual_n.base == .Num)) {
+                return true;
+            }
+        }
         return false;
     }
 
@@ -7845,7 +7898,20 @@ pub const TranspileProcess = struct {
                             return .{ .base = .Num };
                         }
 
-                        if (fns.get(fname)) |sig| {
+                        // Calling a function-TYPED local/parameter (`fun(T1, T2) R
+                        // cb`), e.g. inside `sort_by`'s comparator body. A local of
+                        // this shape shadows any same-named top-level function,
+                        // matching ordinary scoping.
+                        const fn_param_sig: ?FnSig = blk_fn_param_call: {
+                            const vt = env.get(fname) orelse break :blk_fn_param_call null;
+                            const dref = vt.dtype_ref orelse break :blk_fn_param_call null;
+                            const fsig = dref.fn_sig orelse break :blk_fn_param_call null;
+                            break :blk_fn_param_call try self.fn_sig_from_dtype_fn_sig(fsig);
+                        };
+                        if (fn_param_sig) |sig| {
+                            maybe_sig = sig;
+                            call_rtype = sig.rtype;
+                        } else if (fns.get(fname)) |sig| {
                             maybe_sig = sig;
                             call_rtype = sig.rtype;
                             callee_is_async = sig.is_async;
@@ -11735,6 +11801,16 @@ pub const TranspileProcess = struct {
                             }
                         }
                         array.brackets.deinit();
+                    }
+                    if (variable.type.fn_sig) |sig| {
+                        for (sig.params.items()) |p| {
+                            p.type_str.deinit();
+                            allocator.destroy(p);
+                        }
+                        sig.params.deinit();
+                        sig.rtype.type_str.deinit();
+                        allocator.destroy(sig.rtype);
+                        allocator.destroy(sig);
                     }
                     allocator.destroy(variable.type);
                     variable.name.deinit();
@@ -19934,6 +20010,25 @@ pub const TranspileProcess = struct {
             },
             .Variable => {
                 const variable = node.node_variant.?.variable;
+
+                // A function-TYPE parameter (`fun(T1, T2) R name`) needs C's
+                // function-pointer declarator shape, which wraps the NAME
+                // (`R (*name)(T1, T2)`) instead of following it like an
+                // ordinary `Type name` declaration -- write it directly and
+                // skip the rest of this case (no array/initializer handling
+                // applies to a function-type parameter).
+                if (variable.type.fn_sig) |sig| {
+                    try self.write_type(sig.rtype.*);
+                    try self.write(" (*");
+                    try self.write(variable.name.items);
+                    try self.write(")(");
+                    for (sig.params.items(), 0..) |p, i| {
+                        if (i > 0) try self.write(", ");
+                        try self.write_type(p.*);
+                    }
+                    try self.write(")");
+                    return;
+                }
 
                 // A local `T[]` variable initialized from a NON-array-literal rvalue
                 // (a pointer/identifier/call, e.g. `num[] a = malloc(...)` — the

@@ -1,0 +1,84 @@
+// Ergonomic `chr`/`bin` wrappers over `std.c.ctype`'s raw `num`-returning C
+// bindings, so lexer-style code reads naturally (`is_digit(c)` instead of
+// `isdigit(c) != 0`, with `c` passed as a plain `chr` instead of needing to
+// be widened to `num` first).
+// 
+// Usage:
+// ```
+// imp std.ctype;
+//
+// chr c = 'a';
+// if is_alpha(c) { ... }
+// ```
+
+imp std.c.ctype;
+
+// Checks if the character is alphanumeric (a-z, A-Z, 0-9).
+pub fun is_alnum(chr c) bin {
+  ret isalnum(c) != 0;
+}
+
+// Checks if the character is alphabetic (a-z, A-Z).
+pub fun is_alpha(chr c) bin {
+  ret isalpha(c) != 0;
+}
+
+// Checks if the character is blank (space or tab).
+pub fun is_blank(chr c) bin {
+  ret isblank(c) != 0;
+}
+
+// Checks if the character is a control character.
+pub fun is_cntrl(chr c) bin {
+  ret iscntrl(c) != 0;
+}
+
+// Checks if the character is a decimal digit (0-9).
+pub fun is_digit(chr c) bin {
+  ret isdigit(c) != 0;
+}
+
+// Checks if the character has a graphical representation (printable, not space).
+pub fun is_graph(chr c) bin {
+  ret isgraph(c) != 0;
+}
+
+// Checks if the character is lowercase.
+pub fun is_lower(chr c) bin {
+  ret islower(c) != 0;
+}
+
+// Checks if the character is printable (including space).
+pub fun is_print(chr c) bin {
+  ret isprint(c) != 0;
+}
+
+// Checks if the character is punctuation.
+pub fun is_punct(chr c) bin {
+  ret ispunct(c) != 0;
+}
+
+// Checks if the character is whitespace (space, tab, newline, etc.).
+pub fun is_space(chr c) bin {
+  ret isspace(c) != 0;
+}
+
+// Checks if the character is uppercase.
+pub fun is_upper(chr c) bin {
+  ret isupper(c) != 0;
+}
+
+// Checks if the character is a hexadecimal digit (0-9, a-f, A-F).
+pub fun is_xdigit(chr c) bin {
+  ret isxdigit(c) != 0;
+}
+
+// Converts a character to lowercase if possible, else returns it unchanged.
+pub fun to_lower(chr c) chr {
+  ret tolower(c);
+}
+
+// Converts a character to uppercase if possible, else returns it unchanged.
+pub fun to_upper(chr c) chr {
+  ret toupper(c);
+}

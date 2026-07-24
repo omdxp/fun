@@ -63,4 +63,16 @@ pub const DataType = struct {
 
     /// Optional generic arguments (e.g. Vec<num> -> [num]).
     generic_args: ?utils.Vector(*DataType) = null,
+
+    /// For a FUNCTION-type parameter (`fun(T1, T2) R name`), the parameter
+    /// types and return type of the callback signature. Null for ordinary
+    /// (non-function) types. Function types are only supported as parameter
+    /// types today (not as return types, locals, or compound fields).
+    fn_sig: ?*FnTypeSig = null,
+};
+
+/// A function-type signature attached to a `DataType` (see `DataType.fn_sig`).
+pub const FnTypeSig = struct {
+    params: utils.Vector(*DataType),
+    rtype: *DataType,
 };

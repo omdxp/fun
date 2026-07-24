@@ -1392,6 +1392,43 @@ test "fls index: function signature/hover includes an array return type" {
     try std.testing.expect(found);
 }
 
+test "fls index: function-type parameter (fun(T1, T2) R) does not crash indexing" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // First-class function parameters are new (Phase 0 of the self-hosting
+    // rewrite, added for `Vec<T>.sort_by(cmp)`); this just guards against a
+    // crash/hang in FLS's best-effort AST-backed signature enrichment when it
+    // encounters the new `fun(T1, T2) R` parameter-type shape -- the token
+    // stream still contains the literal `fun(num, num) num` text either way,
+    // so a plain "doesn't crash and finds the function" bar is the right one
+    // here rather than asserting an exact `detail` string.
+    const text =
+        "fun add(num a, num b) num {\n" ++
+        "  ret a + b;\n" ++
+        "}\n\n" ++
+        "fun apply(num a, num b, fun(num, num) num cb) num {\n" ++
+        "  ret cb(a, b);\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found = false;
+    for (idx.symbols) |s| {
+        if (s.kind != .function) continue;
+        if (!std.mem.eql(u8, s.name, "apply")) continue;
+        found = true;
+        break;
+    }
+    try std.testing.expect(found);
+
+    const data = try buildSemanticTokens(allocator, idx);
+    defer allocator.free(data);
+    try std.testing.expect(data.len % 5 == 0);
+}
+
 test "fls index: known lowercase C typedef names get type-color semantic tokens, not identifier" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();

@@ -167,6 +167,21 @@ payload; payload-free variants still coexist.
       like `num* p = nil` are allowed.
     - Works for free functions and methods (including generic, `async`, and
       pointer-receiver methods).
+- **Function-type parameters**: a parameter can accept a function BY NAME and be
+  called through it, using `fun(T1, T2, ...) R` as the parameter's type (reusing
+  the `fun` keyword rather than new syntax, since it reads like the signature it
+  accepts):
+    ```fun
+    fun add(num a, num b) num { ret a + b; }
+    fun apply(num a, num b, fun(num, num) num cb) num { ret cb(a, b); }
+    apply(2, 3, add); // 5
+    ```
+    - Calls THROUGH the parameter (`cb(a, b)`) are checked against the declared
+      signature (argument count and types).
+    - Passing a function BY NAME as the argument is not itself signature-checked
+      at the call site yet — a real mismatch surfaces as a C compiler error.
+    - Only supported as a parameter type today (not as a return type, local, or
+      compound field). Used by `Vec<T>.sort_by(cmp)` for custom comparators.
 
 ### Async / Await
 - **Async function declaration**: `async fun name(args) type { ... }`

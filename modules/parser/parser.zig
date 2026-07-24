@@ -1332,6 +1332,13 @@ pub const ParseProcess = struct {
     /// - Returns an error if reading the next token fails.
     /// - Logs an error message if the next token is not a datatype keyword.
     fn parse_datatype(self: *Self, dt: *dtype.DataType) ParseError!void {
+        // A function-type parameter: `fun(T1, T2) R name`. Reuses the `fun`
+        // keyword rather than inventing new syntax, since it reads exactly
+        // like the signature of the function it accepts. Only supported as a
+        // parameter type today (not as a return type, local, or field).
+        if (self.next_token_is_keyword("fun")) {
+            return try self.parse_fn_type_datatype(dt);
+        }
         const dt_token = self.token_next();
         if (dt_token == null or (dt_token.?.type != .Keyword and dt_token.?.type != .Identifier)) {
             self.transpile_proc.err("expected datatype, got '{s}'", .{if (dt_token) |t| @tagName(t.type) else "null"});
@@ -1398,6 +1405,61 @@ pub const ParseProcess = struct {
             dt.*.flags = flags;
             dt.*.pointer_depth = ptr_depth;
         }
+    }
+
+    /// Parses a function-TYPE datatype: `fun(T1, T2, ...) R`. Called from
+    /// `parse_datatype` when the leading token is the `fun` keyword. `dt` ends
+    /// up with `.type = .Unknown` and `.fn_sig` populated (params + return
+    /// type); `type_str` holds a synthesized human-readable signature for
+    /// diagnostics/hover, not a real C type name (codegen reads `fn_sig`
+    /// directly instead).
+    fn parse_fn_type_datatype(self: *Self, dt: *dtype.DataType) ParseError!void {
+        _ = self.token_next(); // skip 'fun'
+        try self.expect_op("(");
+
+        var params = utils.Vector(*dtype.DataType).init(self.transpile_proc.allocator);
+        errdefer {
+            for (params.items()) |p| {
+                p.type_str.deinit();
+                self.transpile_proc.allocator.destroy(p);
+            }
+            params.deinit();
+        }
+        while (!self.next_token_is_symbol(')')) {
+            const pdt = self.transpile_proc.allocator.create(dtype.DataType) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer self.transpile_proc.allocator.destroy(pdt);
+            pdt.* = dtype.DataType{ .type_str = ArrayList(u8).init(self.transpile_proc.allocator), .flags = .{} };
+            try self.parse_datatype(pdt);
+            params.push(pdt) catch return ParseError.MemoryAllocationFailed;
+            if (!self.next_token_is_operator(",")) break;
+            _ = self.token_next(); // skip ','
+        }
+        try self.expect_sym(')');
+
+        const rtype_ptr = self.transpile_proc.allocator.create(dtype.DataType) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+        errdefer self.transpile_proc.allocator.destroy(rtype_ptr);
+        const rtok = self.token_peek_next();
+        if (rtok != null and ((rtok.?.type == .Keyword and utils.keyword_is_datatype(rtok.?.data.sval.items)) or rtok.?.type == .Identifier)) {
+            rtype_ptr.* = dtype.DataType{ .type_str = ArrayList(u8).init(self.transpile_proc.allocator), .flags = .{} };
+            try self.parse_datatype(rtype_ptr);
+        } else {
+            rtype_ptr.* = dtype.DataType{ .type = .Void, .type_str = ArrayList(u8).init(self.transpile_proc.allocator) };
+            rtype_ptr.*.type_str.appendSlice("void") catch return ParseError.MemoryAllocationFailed;
+        }
+
+        const sig = self.transpile_proc.allocator.create(dtype.FnTypeSig) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+        sig.* = .{ .params = params, .rtype = rtype_ptr };
+
+        dt.*.type = .Unknown;
+        dt.*.fn_sig = sig;
+        dt.*.type_str = ArrayList(u8).init(self.transpile_proc.allocator);
+        dt.*.type_str.appendSlice("fun(...)") catch return ParseError.MemoryAllocationFailed;
     }
 
     /// Parses a single token to a node.
