@@ -9278,3 +9278,61 @@ test "an impl method's own generic type param also works on a non-generic impl/c
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("123\n", stdout);
 }
+
+test "a method with its own type param calling a SIBLING method that also has its own type param" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_method_own_type_param_calls_method.fn";
+    const c_path = "codegen_method_own_type_param_calls_method.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_method_own_type_param_calls_method.exe" else "codegen_method_own_type_param_calls_method";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression found while further torture-testing the method-own-type-param
+    // feature above: `outer<V>`'s body calls `self.inner(x)`, where `inner<U>`
+    // ALSO has its own type param -- i.e. the "indirect generic call" pattern
+    // (rounds 9-10) but with a method as BOTH caller and callee. The call-site
+    // TEXT resolved correctly (via the existing `resubstitute_mangled_segments`
+    // machinery), but the callee was registered under the WRONG mangled name:
+    // `resolve_transitive_generic_fn_instantiations` naively appended ALL
+    // resolved args to the callee's OWN generated name (`Box__inner`, the
+    // `Type__method` convention), producing `Box__inner__num__num` instead of
+    // the method convention `Box__num__inner__num` -- so the call site
+    // referenced a function that was never declared under ITS name either.
+    // Fixed by adding `GenericFnInstantiation.impl_arg_count` (how many of the
+    // combined params/args are impl-level vs. the method's own), letting
+    // `resolve_transitive_generic_fn_instantiations` reconstruct the correct
+    // `Type__implargs__method__ownargs` shape for method-owned instantiations
+    // instead of blindly using the free-function `fn_own_name__allargs` one.
+    const input =
+        "imp std.c.io;\n" ++
+        "compound Box<T> {\n" ++
+        "  T value;\n" ++
+        "}\n" ++
+        "impl Box<T> {\n" ++
+        "  pub inner<U>(U x) U {\n" ++
+        "    ret x;\n" ++
+        "  }\n" ++
+        "  pub outer<V>(V x) V {\n" ++
+        "    ret self.inner(x);\n" ++
+        "  }\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  Box<num> b;\n" ++
+        "  b.value = 0;\n" ++
+        "  printf(\"%lld\\n\", b.outer(9));\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("9\n", stdout);
+}

@@ -3134,7 +3134,7 @@ pub const TranspileProcess = struct {
         return buf.toOwnedSlice() catch return TranspileError.MemoryAllocationFailed;
     }
 
-    fn register_generic_fn_instantiation(self: *Self, fn_node: *ast.Node, params: *const utils.Vector(ArrayList(u8)), gargs: []*dtype.DataType, name: []const u8, owner_fn: ?*ast.Node) TranspileError!void {
+    fn register_generic_fn_instantiation(self: *Self, fn_node: *ast.Node, params: *const utils.Vector(ArrayList(u8)), gargs: []*dtype.DataType, name: []const u8, owner_fn: ?*ast.Node, impl_arg_count: usize) TranspileError!void {
         const root = self.get_root();
         // The key is stored on (and freed by) `root`, so it MUST be allocated with
         // root's allocator. When a generic fn is instantiated from an IMPORTED
@@ -3156,6 +3156,7 @@ pub const TranspileProcess = struct {
             .args = gargs,
             .name = name,
             .owner_fn = owner_fn,
+            .impl_arg_count = impl_arg_count,
         }) catch return TranspileError.MemoryAllocationFailed;
     }
 
@@ -3209,14 +3210,30 @@ pub const TranspileProcess = struct {
 
             const other_fnv = other.fn_node.node_variant orelse continue;
             const other_fname = other_fnv.function.name orelse continue;
-            const new_name = try self.mangle_generic_fn_name(other_fname.items, resolved);
+            // A METHOD's own generated name is `Type__method` (e.g. `Box__inner`,
+            // unmangled for generics) -- naively appending ALL resolved args to
+            // it (the free-function convention) produces `Box__inner__num__num`
+            // instead of the method naming convention `Box__num__inner__num`.
+            // Reconstruct it properly when `impl_arg_count` marks this as a
+            // method-shaped instantiation (impl-level args first, then the
+            // method's own).
+            const new_name = if (other.impl_arg_count > 0 and other.impl_arg_count <= resolved.len) blk: {
+                const method_base = base_method_name_from_generated(other_fname.items) orelse
+                    break :blk try self.mangle_generic_fn_name(other_fname.items, resolved);
+                const type_base = other_fname.items[0 .. other_fname.items.len - method_base.len - 2];
+                const type_mangled = try self.mangle_generic_fn_name(type_base, resolved[0..other.impl_arg_count]);
+                defer self.allocator.free(type_mangled);
+                const type_and_method = std.fmt.allocPrint(self.allocator, "{s}__{s}", .{ type_mangled, method_base }) catch return TranspileError.MemoryAllocationFailed;
+                defer self.allocator.free(type_and_method);
+                break :blk try self.mangle_generic_fn_name(type_and_method, resolved[other.impl_arg_count..]);
+            } else try self.mangle_generic_fn_name(other_fname.items, resolved);
             // Still references a type param further up an even deeper call
             // chain (e.g. a THIRD generic function called from `identity`'s
             // own body) -- leave it for a later `inst` in the worklist whose
             // binding resolves it the rest of the way.
             if (self.mangled_contains_unresolved_placeholder(new_name)) continue;
 
-            try self.register_generic_fn_instantiation(other.fn_node, other.params, resolved, new_name, null);
+            try self.register_generic_fn_instantiation(other.fn_node, other.params, resolved, new_name, null, other.impl_arg_count);
         }
     }
 
@@ -4564,6 +4581,15 @@ pub const TranspileProcess = struct {
         /// See `typecheck_owner_fn` for why identity, not name, is used to
         /// scope `resolve_transitive_generic_fn_instantiations`'s substitution.
         owner_fn: ?*ast.Node = null,
+        /// For a METHOD with its own type param (`impl Box<T> { pub map<U>(...) }`),
+        /// `params`/`args` are the impl-level params/args (e.g. ["T"]) followed by
+        /// the method's own (e.g. ["U"]) -- this is how many of the LEADING
+        /// entries belong to the impl, so `resolve_transitive_generic_fn_instantiations`
+        /// can reconstruct the method naming convention (`Type__method__ownargs`)
+        /// instead of the free-function one (`fn_name__allargs`) when re-mangling
+        /// a placeholder found by IDENTITY under a method's own node. 0 for a
+        /// free function or an ordinary (non-generic-method) method.
+        impl_arg_count: usize = 0,
     };
 
     const PendingWarningControl = struct {
@@ -8082,7 +8108,7 @@ pub const TranspileProcess = struct {
                                         defer self.allocator.free(method_base_name_buf);
                                         const combined_name = try self.mangle_generic_fn_name(method_base_name_buf, method_gargs);
 
-                                        try self.register_generic_fn_instantiation(hit.method_node, combined_params_ptr, combined_args, combined_name, self.typecheck_owner_fn);
+                                        try self.register_generic_fn_instantiation(hit.method_node, combined_params_ptr, combined_args, combined_name, self.typecheck_owner_fn, impl_args.len);
 
                                         if (node.pos) |p| {
                                             const root = self.get_root();
@@ -8411,7 +8437,7 @@ pub const TranspileProcess = struct {
 
                             // Register instantiation and call override for codegen.
                             const spec_name = try self.mangle_generic_fn_name(callee_name.?, gargs);
-                            try self.register_generic_fn_instantiation(fn_node.?, params_ptr, gargs, spec_name, self.typecheck_owner_fn);
+                            try self.register_generic_fn_instantiation(fn_node.?, params_ptr, gargs, spec_name, self.typecheck_owner_fn, 0);
                             await_lowering_callee = spec_name;
                             if (node.pos) |p| {
                                 // Store on the ROOT (alongside the instantiation) so the
