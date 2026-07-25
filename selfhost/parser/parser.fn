@@ -345,6 +345,50 @@ impl ParseState {
     ret depth;
   }
 
+  // Resolves the n-th significant token strictly before physical index
+  // `exclusive_end` (n = 0 -> the closest one). Always a linear backward
+  // scan -- see the file-level note on the deferred O(1) lookahead cache.
+  pub token_peek_prev_significant(num exclusive_end, num n) Option<Token> {
+    num idx = exclusive_end - 1;
+    num seen = 0;
+    for idx >= 0 {
+      fit self.tokens_at(idx) {
+        .Some(t) -> {
+          if !token_is_nl_or_comment_or_newline_separator(t) {
+            if seen == n {
+              ret .Some(t);
+            }
+            seen = seen + 1;
+          }
+        }
+        .None -> { ret .None; }
+      }
+      idx = idx - 1;
+    }
+    ret .None;
+  }
+
+  // Peeks the previous non-skippable token (relative to the most recently
+  // consumed token).
+  pub token_peek_prev() Option<Token> {
+    ret self.token_peek_prev_significant(self.pindex - 1, 0);
+  }
+
+  // Peeks the n-th previous non-skippable token (relative to the most
+  // recently consumed token). `n = 0` is equivalent to `token_peek_prev`.
+  pub token_peek_prev_n(num n) Option<Token> {
+    ret self.token_peek_prev_significant(self.pindex - 1, n);
+  }
+
+  // Peeks the n-th previous non-skippable token relative to the NEXT token
+  // to be consumed (i.e. what `token_peek_next` would return sits at
+  // `self.pindex`; this looks backward from `pindex - 1`, `pindex - 2`, ...).
+  // Often the more intuitive notion of "previous" for context-sensitive
+  // parsing that hasn't consumed the token it's inspecting yet.
+  pub token_peek_prev_stream_n(num n) Option<Token> {
+    ret self.token_peek_prev_significant(self.pindex, n);
+  }
+
   // Expects the next significant token to be the symbol `c`. Reports and
   // returns an error if it is anything else.
   pub expect_sym(chr c) Option<ParseErrorKind> {
@@ -689,6 +733,146 @@ impl Parser {
     self.state.nodes.push(*n);
   }
 
+  // Consumes the next token and turns it into a single leaf AST node: a
+  // number/character literal, an identifier, a string literal, or a
+  // boolean literal. Anything else (an operator, a grouping symbol, a
+  // keyword, ...) is an error -- this handles exactly the PRIMARY tokens
+  // of an expression, not operators or grouping, which belong to the
+  // expression parser built on top of this.
+  pub parse_single_token_to_node() Option<ParseErrorKind> {
+    let tok = self.state.token_next();
+    if tok.is_none() {
+      self.state.err("expected token, got eof");
+      ret .Some(ParseErrorKind.InvalidToken);
+    }
+    let t = tok.unwrap();
+    fit t.type {
+      .Number -> {
+        fit t.data {
+          .Num(n) -> {
+            Node node = node_new(NodeKind.Number(TokenData.Num(n)));
+            node.pos = t.pos;
+            node.has_pos = true;
+            self.create_node(&node);
+          }
+          .Dec(d) -> {
+            Node node = node_new(NodeKind.Number(TokenData.Dec(d)));
+            node.pos = t.pos;
+            node.has_pos = true;
+            self.create_node(&node);
+          }
+          // A character literal lexes as a `Number`-type token carrying
+          // `Cval` data (see lexer.fn's `_read_char`); it becomes a
+          // `Character` AST node here, not a `Number` one.
+          .Cval(c) -> {
+            Node node = node_new(NodeKind.Character(c));
+            node.pos = t.pos;
+            node.has_pos = true;
+            self.create_node(&node);
+          }
+          _ -> {
+            self.state.err("invalid number token");
+            ret .Some(ParseErrorKind.InvalidToken);
+          }
+        }
+      }
+      .Identifier -> {
+        str name = "";
+        fit t.data {
+          .Sval(s) -> { name = s; }
+          _ -> {}
+        }
+
+        let prev = self.state.token_peek_prev();
+        bin is_member_access = false;
+        fit prev {
+          .Some(p) -> { is_member_access = token_is_operator(p, "."); }
+          .None -> {}
+        }
+
+        // Allow type operands inside `sizeof(Type)` even when the
+        // identifier isn't declared as a value symbol yet (supports
+        // forward-declared custom types).
+        bin is_sizeof_type_operand = false;
+        fit prev {
+          .Some(p) -> {
+            if token_is_operator(p, "(") {
+              fit self.state.token_peek_prev_n(1) {
+                .Some(p2) -> {
+                  if p2.type == TokenType.Identifier {
+                    fit p2.data {
+                      .Sval(s2) -> { is_sizeof_type_operand = equals(s2, "sizeof"); }
+                      _ -> {}
+                    }
+                  }
+                }
+                .None -> {}
+              }
+            }
+          }
+          .None -> {}
+        }
+
+        // `_` is a wildcard identifier (used by `fit` default branches):
+        // accepted even when not declared. Otherwise an identifier that
+        // isn't a known scope entity/symbol/global symbol is only valid
+        // as a member-access target, an ALL_CAPS C-macro-style constant,
+        // an out-of-order function call (`foo(...)`), a possible enum
+        // member access (`Foo.Bar`), or inside a `fit` condition (where
+        // data-carrying-enum pattern bindings aren't in scope yet).
+        if !equals(name, "_") {
+          if !is_member_access {
+            if !is_sizeof_type_operand && self.state.get_scope_entity(name) == nil {
+              if self.state.get_symbol(name).is_none() && !self.state.global_symbols.has(name) {
+                if !_is_c_macro_ident(name) {
+                  bin is_possible_enum_member_access = self.state.next_token_is_operator(".");
+                  if !self.state.next_token_is_operator("(") && !is_possible_enum_member_access && !self.in_fit_condition {
+                    let msg = format("unknown identifier '{str}'", name);
+                    defer free(msg);
+                    self.state.err(msg);
+                    ret .Some(ParseErrorKind.InvalidIdentifier);
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        Node node = node_new(NodeKind.Identifier(name));
+        node.pos = t.pos;
+        node.has_pos = true;
+        self.create_node(&node);
+      }
+      .String -> {
+        fit t.data {
+          .Sval(s) -> {
+            Node node = node_new(NodeKind.String(s));
+            node.pos = t.pos;
+            node.has_pos = true;
+            self.create_node(&node);
+          }
+          _ -> {}
+        }
+      }
+      .Boolean -> {
+        fit t.data {
+          .Bval(b) -> {
+            Node node = node_new(NodeKind.Boolean(b));
+            node.pos = t.pos;
+            node.has_pos = true;
+            self.create_node(&node);
+          }
+          _ -> {}
+        }
+      }
+      _ -> {
+        self.state.err("expected single token");
+        ret .Some(ParseErrorKind.InvalidToken);
+      }
+    }
+    ret .None;
+  }
+
   // Builds a new scope entity for `node`, deriving its lookup name from the
   // node's kind (identifiers/functions/variables are nameable; anything
   // else gets an empty name and is never found by `get_scope_entity`).
@@ -984,6 +1168,126 @@ test "parse_generic_type_args pointer-typed generic argument" {
   assert inner.pointer_depth == 1, "expected inner pointer depth 1";
 }
 
+test "token_peek_prev/token_peek_prev_n look backward from the last consumed token" {
+  ParseState st = _state_from("a b c");
+  st.token_next();
+  assert st.token_peek_prev().is_none(), "no token consumed before 'a'";
+
+  st.token_next();
+  st.token_next();
+  fit st.token_peek_prev().unwrap().data {
+    .Sval(s) -> { assert equals(s, "b"), "prev of 'c' should be 'b'"; }
+    _ -> { panic("expected Sval"); }
+  }
+  fit st.token_peek_prev_n(1).unwrap().data {
+    .Sval(s) -> { assert equals(s, "a"), "prev_n(1) of 'c' should be 'a'"; }
+    _ -> { panic("expected Sval"); }
+  }
+}
+
+test "token_peek_prev_stream_n looks backward from the not-yet-consumed token" {
+  ParseState st = _state_from("a b c");
+  st.token_next();
+  // Cursor now sits on 'b' (not yet consumed): prev_stream_n(0) should
+  // still see 'a', matching what `token_peek_prev` would see AFTER
+  // consuming 'b', without actually consuming it.
+  fit st.token_peek_prev_stream_n(0).unwrap().data {
+    .Sval(s) -> { assert equals(s, "a"), "prev_stream_n(0) should see 'a'"; }
+    _ -> { panic("expected Sval"); }
+  }
+}
+
+test "parse_single_token_to_node reads number/dec/char literals" {
+  ParseState st = _state_from("42");
+  Parser p = parser_new(&st);
+  assert p.parse_single_token_to_node().is_none(), "expected 42 to parse";
+  let n = st.nodes.get(0);
+  fit n.kind {
+    .Number(d) -> {
+      fit d {
+        .Num(v) -> { assert v == 42, "expected 42"; }
+        _ -> { panic("expected Num"); }
+      }
+    }
+    _ -> { panic("expected Number node"); }
+  }
+
+  ParseState st2 = _state_from("'x'");
+  Parser p2 = parser_new(&st2);
+  assert p2.parse_single_token_to_node().is_none(), "expected 'x' to parse";
+  let n2 = st2.nodes.get(0);
+  fit n2.kind {
+    .Character(c) -> { assert c == 'x', "expected 'x'"; }
+    _ -> { panic("expected Character node"); }
+  }
+}
+
+test "parse_single_token_to_node reads string and boolean literals" {
+  ParseState st = _state_from("\"hi\"");
+  Parser p = parser_new(&st);
+  assert p.parse_single_token_to_node().is_none(), "expected \"hi\" to parse";
+  let n = st.nodes.get(0);
+  fit n.kind {
+    .String(s) -> { assert equals(s, "hi"), "expected 'hi'"; }
+    _ -> { panic("expected String node"); }
+  }
+
+  ParseState st2 = _state_from("true");
+  Parser p2 = parser_new(&st2);
+  assert p2.parse_single_token_to_node().is_none(), "expected true to parse";
+  let n2 = st2.nodes.get(0);
+  fit n2.kind {
+    .Boolean(b) -> { assert b, "expected true"; }
+    _ -> { panic("expected Boolean node"); }
+  }
+}
+
+test "parse_single_token_to_node accepts a declared identifier" {
+  ParseState st = _state_from("x");
+  Scope root = scope_new();
+  st.scope_root = &root;
+  st.has_scope_root = true;
+  st.scope_current = &root;
+  st.has_scope_current = true;
+  ScopeEntity* e = malloc(sizeof(ScopeEntity));
+  * e =scope_entity_new("x");
+  st.push_scope_entity(e);
+
+  Parser p = parser_new(&st);
+  assert p.parse_single_token_to_node().is_none(), "expected declared 'x' to parse";
+  let n = st.nodes.get(0);
+  fit n.kind {
+    .Identifier(s) -> { assert equals(s, "x"), "expected identifier 'x'"; }
+    _ -> { panic("expected Identifier node"); }
+  }
+}
+
+test "parse_single_token_to_node accepts wildcard, macro-style, and call-position identifiers without declaration" {
+  ParseState st = _state_from("_");
+  Parser p = parser_new(&st);
+  assert p.parse_single_token_to_node().is_none(), "expected '_' to parse undeclared";
+
+  ParseState st2 = _state_from("INT_MAX");
+  Parser p2 = parser_new(&st2);
+  assert p2.parse_single_token_to_node().is_none(), "expected ALL_CAPS macro-style name to parse undeclared";
+
+  ParseState st3 = _state_from("foo(");
+  Parser p3 = parser_new(&st3);
+  assert p3.parse_single_token_to_node().is_none(), "expected a call-position identifier to parse undeclared";
+}
+
+test "parse_single_token_to_node reports an error for an unknown plain identifier" {
+  ParseState st = _state_from("mystery");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_single_token_to_node();
+  assert err.is_some(), "expected an error for an undeclared, non-special identifier";
+  fit err.unwrap() {
+    .InvalidIdentifier -> {}
+    _ -> { panic("expected InvalidIdentifier"); }
+  }
+}
+
 // The lookup name a new scope entity for `node` should carry; empty for a
 // node kind that never introduces a nameable binding.
 fun _scope_entity_name(Node* node) str {
@@ -993,4 +1297,32 @@ fun _scope_entity_name(Node* node) str {
     .Variable(v) -> { ret v.name; }
     _ -> { ret ""; }
   }
+}
+
+// True if `name` looks like a C preprocessor macro constant
+// (`SCREAMING_SNAKE_CASE`): starts with an uppercase letter or `_`, and
+// every character is an uppercase letter, digit, or `_`. Such identifiers
+// are accepted as expression operands even when undeclared, since a
+// program using `std.c.*` bindings routinely references real macro
+// constants (`INT_MAX`, `O_RDONLY`, ...) that this compiler never sees a
+// declaration for.
+fun _is_c_macro_ident(str name) bin {
+  if len(name) == 0 {
+    ret false;
+  }
+  chr first = name[0];
+  if !((first >= 'A' && first <= 'Z') || first == '_') {
+    ret false;
+  }
+  num i = 0;
+  for i < len(name) {
+    chr c = name[i];
+    bin is_upper = c >= 'A' && c <= 'Z';
+    bin is_digit_c = c >= '0' && c <= '9';
+    if !(is_upper || is_digit_c || c == '_') {
+      ret false;
+    }
+    i = i + 1;
+  }
+  ret true;
 }
