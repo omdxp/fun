@@ -1752,11 +1752,139 @@ impl Parser {
     ret self.state.expect_sym(';');
   }
 
-  // Parses one statement: a `{ ... }` nested body, a `let` declaration, or
-  // an expression statement terminated by `;`.
+  // Parses `ret;` (bare) or `ret <expr>;`.
+  pub parse_return() Option<ParseErrorKind> {
+    let ret_tok = self.state.token_peek_next();
+    self.state.token_next();
+
+    if self.state.next_token_is_symbol(';') {
+      let serr = self.state.expect_sym(';');
+      if serr.is_some() {
+        ret serr;
+      }
+      Node node = node_new(NodeKind.StatementReturn(nil));
+      fit ret_tok {
+        .Some(t) -> {
+          node.pos = t.pos;
+          node.has_pos = true;
+        }
+        .None -> {}
+      }
+      self.create_node(&node);
+      ret .None;
+    }
+
+    let eerr = self.parse_expressionable_root();
+    if eerr.is_some() {
+      ret eerr;
+    }
+    let maybe_exp = self.state.node_pop();
+    if maybe_exp.is_none() {
+      self.state.err("expected return value");
+      ret .Some(ParseErrorKind.InvalidExpression);
+    }
+    Node* exp = malloc(sizeof(Node));
+    *exp = maybe_exp.unwrap();
+
+    Node node = node_new(NodeKind.StatementReturn(exp));
+    fit ret_tok {
+      .Some(t) -> {
+        node.pos = t.pos;
+        node.has_pos = true;
+      }
+      .None -> {}
+    }
+    self.create_node(&node);
+    ret self.state.expect_sym(';');
+  }
+
+  // Parses `assert <condition>;` or `assert <condition>, <message>;`. The
+  // condition expression parse may already consume the whole `cond,
+  // message` as a single `,`-Expression (this port's `,` is an ordinary
+  // binary operator in the precedence table, unlike the original's
+  // separate comma-expression dispatch) -- split that apart when it
+  // happens; otherwise look for an explicit trailing `, message`.
+  pub parse_assert() Option<ParseErrorKind> {
+    let assert_tok = self.state.token_peek_next();
+    self.state.token_next();
+
+    let eerr = self.parse_expressionable_root();
+    if eerr.is_some() {
+      ret eerr;
+    }
+    let maybe_exp = self.state.node_pop();
+    if maybe_exp.is_none() {
+      self.state.err("expected assert condition");
+      ret .Some(ParseErrorKind.InvalidExpression);
+    }
+    Node exp_val = maybe_exp.unwrap();
+
+    bin is_comma_expr = false;
+    fit exp_val.kind {
+      .Expression(e) -> {
+        if equals(e.op, ",") {
+          is_comma_expr = true;
+        }
+      }
+      _ -> {}
+    }
+
+    Node* cond_ptr = nil;
+    Node* msg_ptr = nil;
+    bin has_msg = false;
+
+    if is_comma_expr {
+      fit exp_val.kind {
+        .Expression(e) -> {
+          cond_ptr = e.left;
+          msg_ptr = e.right;
+          has_msg = true;
+        }
+        _ -> {}
+      }
+    } else {
+      cond_ptr = malloc(sizeof(Node));
+      *cond_ptr = exp_val;
+
+      if self.state.next_token_is_operator(",") {
+        self.state.token_next();
+        let merr = self.parse_expressionable_root();
+        if merr.is_some() {
+          ret merr;
+        }
+        let maybe_msg = self.state.node_pop();
+        if maybe_msg.is_none() {
+          self.state.err("expected assert message");
+          ret .Some(ParseErrorKind.InvalidExpression);
+        }
+        msg_ptr = malloc(sizeof(Node));
+        *msg_ptr = maybe_msg.unwrap();
+        has_msg = true;
+      }
+    }
+
+    AssertNode an;
+    an.condition = cond_ptr;
+    an.message = msg_ptr;
+    an.has_message = has_msg;
+
+    Node node = node_new(NodeKind.StatementAssert(an));
+    fit assert_tok {
+      .Some(t) -> {
+        node.pos = t.pos;
+        node.has_pos = true;
+      }
+      .None -> {}
+    }
+    self.create_node(&node);
+    ret self.state.expect_sym(';');
+  }
+
+  // Parses one statement: a `{ ... }` nested body, a `let` declaration, a
+  // `ret`/`assert` statement, or an expression statement terminated by `;`.
   // 
   // Deliberately simplified from the original for this slice: no keyword
-  // dispatch beyond `let` (`if`/`for`/`fit`/`ret`/`assert`/`compound`/...
+  // dispatch beyond `let`/`ret`/`assert` (`if`/`for`/`fit`/`compound`/...
   // each need their own parsing infrastructure not ported yet -- an
   // unsupported keyword reports a clean "not yet supported" error rather
   // than silently misparsing), no `fork`-statement contextual-keyword
@@ -1779,6 +1907,12 @@ impl Parser {
       }
       if equals(kw, "let") {
         ret self.parse_let_declaration(false);
+      }
+      if equals(kw, "ret") {
+        ret self.parse_return();
+      }
+      if equals(kw, "assert") {
+        ret self.parse_assert();
       }
       let msg = format("keyword '{str}' is not yet supported in statement position", kw);
       defer free(msg);
@@ -2892,6 +3026,114 @@ test "parse_statement reports a clean error for an unsupported keyword" {
   fit err.unwrap() {
     .InvalidStatement -> {}
     _ -> { panic("expected InvalidStatement"); }
+  }
+}
+
+test "parse_return parses a bare ret" {
+  ParseState st = _state_from("ret;");
+  Parser p = parser_new(&st);
+  assert p.parse_return().is_none(), "expected 'ret;' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementReturn(exp) -> { assert exp == nil, "expected no return value"; }
+    _ -> { panic("expected a StatementReturn node"); }
+  }
+}
+
+test "parse_return parses ret with a value" {
+  Vec<str> names;
+  names.init(0);
+  names.push("x");
+  ParseState st = _state_with_declared("ret x + 1;", names);
+  Parser p = parser_new(&st);
+  assert p.parse_return().is_none(), "expected 'ret x + 1;' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementReturn(exp) -> {
+      assert exp != nil, "expected a return value";
+      fit exp.kind {
+        .Expression(e) -> { assert equals(e.op, "+"), "expected op '+'"; }
+        _ -> { panic("expected an Expression return value"); }
+      }
+    }
+    _ -> { panic("expected a StatementReturn node"); }
+  }
+}
+
+test "parse_assert parses a condition with no message" {
+  Vec<str> names;
+  names.init(0);
+  names.push("cond");
+  ParseState st = _state_with_declared("assert cond;", names);
+  Parser p = parser_new(&st);
+  assert p.parse_assert().is_none(), "expected 'assert cond;' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementAssert(a) -> {
+      assert !a.has_message, "expected no message";
+      fit a.condition.kind {
+        .Identifier(s) -> { assert equals(s, "cond"), "expected condition 'cond'"; }
+        _ -> { panic("expected Identifier 'cond'"); }
+      }
+    }
+    _ -> { panic("expected a StatementAssert node"); }
+  }
+}
+
+test "parse_assert parses a condition with a message" {
+  Vec<str> names;
+  names.init(0);
+  names.push("cond");
+  ParseState st = _state_with_declared("assert cond, \"boom\";", names);
+  Parser p = parser_new(&st);
+  assert p.parse_assert().is_none(), "expected 'assert cond, \"boom\";' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementAssert(a) -> {
+      assert a.has_message, "expected a message";
+      fit a.condition.kind {
+        .Identifier(s) -> { assert equals(s, "cond"), "expected condition 'cond'"; }
+        _ -> { panic("expected Identifier 'cond'"); }
+      }
+      fit a.message.kind {
+        .String(s) -> { assert equals(s, "boom"), "expected message 'boom'"; }
+        _ -> { panic("expected String message 'boom'"); }
+      }
+    }
+    _ -> { panic("expected a StatementAssert node"); }
+  }
+}
+
+test "parse_body parses a body mixing let, ret, and assert statements" {
+  Vec<str> names;
+  names.init(0);
+  names.push("cond");
+  ParseState st = _state_with_declared("{ let x = 1; assert cond; ret x; }", names);
+  Parser p = parser_new(&st);
+  assert p.parse_body().is_none(), "expected the mixed body to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Body(b) -> {
+      assert b.statements.len == 3, "expected 3 statements";
+      let s0 = b.statements.get(0);
+      let s1 = b.statements.get(1);
+      let s2 = b.statements.get(2);
+      fit s0.kind {
+        .Variable(v) -> {
+          assert equals(v.name, "x"), "expected first statement to declare 'x'";
+        }
+        _ -> { panic("expected a Variable statement"); }
+      }
+      fit s1.kind {
+        .StatementAssert(a) -> {}
+        _ -> { panic("expected a StatementAssert statement"); }
+      }
+      fit s2.kind {
+        .StatementReturn(exp) -> {}
+        _ -> { panic("expected a StatementReturn statement"); }
+      }
+    }
+    _ -> { panic("expected a Body node"); }
   }
 }
 
