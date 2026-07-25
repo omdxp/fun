@@ -10636,10 +10636,15 @@ pub const TranspileProcess = struct {
         }
 
         // `test "name" { ... }` blocks: only type-checked in `fun test` mode
-        // (matching `zig build` vs `zig test` -- an ordinary compile ignores
-        // them entirely, not even type-checking their bodies, so a program
-        // doesn't need its test dependencies to compile just to run normally).
-        if (proc.flags.test_mode) {
+        // (an ordinary compile ignores them entirely, not even type-checking
+        // their bodies, so a program doesn't need its test dependencies to
+        // compile just to run normally) -- OR when `emit_unused_warnings` is
+        // set (fls's lenient diagnostic pass, `-warn-unused-lenient`, which
+        // shells out WITHOUT `-test`). Without this, a private helper used
+        // only from a test block (e.g. a small `_lex` wrapper around
+        // `tokenize` for test fixtures) was always reported as "unused" by
+        // fls, since its only call site was never even visited.
+        if (proc.flags.test_mode or proc.flags.emit_unused_warnings) {
             for (proc.nodes.items()) |node| {
                 if (node.type != .Test or node.node_variant == null) continue;
                 const tv = node.node_variant.?.test_decl;

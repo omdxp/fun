@@ -2203,7 +2203,7 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                         const unary_ctx = blk_unary: {
                             if (pt2.type == .Keyword) {
                                 const kw = pt2.data.sval.items;
-                                if (std.mem.eql(u8, kw, "ret") or std.mem.eql(u8, kw, "if") or std.mem.eql(u8, kw, "elif") or std.mem.eql(u8, kw, "for") or std.mem.eql(u8, kw, "fit")) break :blk_unary true;
+                                if (std.mem.eql(u8, kw, "ret") or std.mem.eql(u8, kw, "if") or std.mem.eql(u8, kw, "elif") or std.mem.eql(u8, kw, "for") or std.mem.eql(u8, kw, "fit") or std.mem.eql(u8, kw, "assert")) break :blk_unary true;
                             }
                             if (is_word_like(pt2)) break :blk_unary false;
                             if (pt2.type == .Symbol and is_closing_symbol(pt2.data.cval)) break :blk_unary false;
@@ -2229,7 +2229,7 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                     const unary_ctx = blk_unary_sym: {
                         if (pt2.type == .Keyword) {
                             const kw = pt2.data.sval.items;
-                            if (std.mem.eql(u8, kw, "ret") or std.mem.eql(u8, kw, "if") or std.mem.eql(u8, kw, "elif") or std.mem.eql(u8, kw, "for") or std.mem.eql(u8, kw, "fit")) break :blk_unary_sym true;
+                            if (std.mem.eql(u8, kw, "ret") or std.mem.eql(u8, kw, "if") or std.mem.eql(u8, kw, "elif") or std.mem.eql(u8, kw, "for") or std.mem.eql(u8, kw, "fit") or std.mem.eql(u8, kw, "assert")) break :blk_unary_sym true;
                         }
                         if (is_word_like(pt2)) break :blk_unary_sym false;
                         if (pt2.type == .Symbol and is_closing_symbol(pt2.data.cval)) break :blk_unary_sym false;
@@ -2326,7 +2326,7 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                     // here since those legitimately precede a real parameter list.
                     if (pt2.type == .Keyword) {
                         const kw = pt2.data.sval.items;
-                        if (std.mem.eql(u8, kw, "ret") or std.mem.eql(u8, kw, "if") or std.mem.eql(u8, kw, "elif") or std.mem.eql(u8, kw, "for") or std.mem.eql(u8, kw, "fit") or std.mem.eql(u8, kw, "await")) {
+                        if (std.mem.eql(u8, kw, "ret") or std.mem.eql(u8, kw, "if") or std.mem.eql(u8, kw, "elif") or std.mem.eql(u8, kw, "for") or std.mem.eql(u8, kw, "fit") or std.mem.eql(u8, kw, "assert") or std.mem.eql(u8, kw, "await")) {
                             break :blk true;
                         }
                     }
@@ -2551,7 +2551,7 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                     if (pt.type == .Keyword) {
                         const kw = pt.data.sval.items;
                         // Keywords that are followed by an expression.
-                        if (std.mem.eql(u8, kw, "ret") or std.mem.eql(u8, kw, "if") or std.mem.eql(u8, kw, "elif") or std.mem.eql(u8, kw, "for") or std.mem.eql(u8, kw, "fit")) break :blk true;
+                        if (std.mem.eql(u8, kw, "ret") or std.mem.eql(u8, kw, "if") or std.mem.eql(u8, kw, "elif") or std.mem.eql(u8, kw, "for") or std.mem.eql(u8, kw, "fit") or std.mem.eql(u8, kw, "assert")) break :blk true;
                     }
                     if (is_word_like(pt)) break :blk false;
                     if (pt.type == .Symbol and is_closing_symbol(pt.data.cval)) break :blk false;

@@ -779,7 +779,7 @@ pub fun tokenize(str src, str filename) Result<Vec<Token>> {
 // message if lexing itself fails (rather than every test re-checking is_err()).
 fun _lex(str src) Vec<Token> {
   let r = tokenize(src, "test.fn");
-  assert ! r.is_err(), "tokenize() returned an error";
+  assert !r.is_err(), "tokenize() returned an error";
   ret r.unwrap();
 }
 
