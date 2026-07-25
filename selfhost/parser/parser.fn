@@ -559,6 +559,127 @@ impl ParseState {
     }
   }
 
+  // Parses `<T>` or `<T: a | b, U: c>` generic type PARAMETERS in a
+  // function/impl header (as opposed to `parse_generic_type_args`, which
+  // parses generic ARGUMENTS at a type-reference site). A no-op (not an
+  // error) when there's no `<...>` at all -- generics are optional.
+  // 
+  // Fills `out_params` with the parameter names. When any parameter
+  // carries a `: constraint` bound, also fills `out_forced_insts` with the
+  // Cartesian product of every parameter's constraint set: one combo per
+  // product term, each a `Vec<str>` of one concrete type per parameter (in
+  // parameter order) -- e.g. `<T: num | dec>` produces `[["num"],
+  // ["dec"]]`; `<T: num | dec, U: a | b>` produces all four `[T, U]`
+  // pairings. Used elsewhere to type-check that a generic call's inferred
+  // type arguments satisfy the constraints; parsing doesn't interpret the
+  // constraint names itself; they're just captured as strings.
+  pub parse_type_params_with_constraints(Vec<str>* out_params, Vec<Vec<str>> *out_forced_insts) Option<ParseErrorKind> {
+    self.split_angle_opener_token_if_needed();
+    if !self.next_token_is_angle_open() {
+      ret .None;
+    }
+    self.token_next(); // consume '<'
+
+    Vec<Vec<str>> param_constraints;
+    param_constraints.init(0);
+    bin has_constraints = false;
+
+    for true {
+      let tok = self.token_next();
+      if tok.is_none() || tok.unwrap().type != TokenType.Identifier {
+        self.err("expected generic parameter name");
+        ret .Some(ParseErrorKind.InvalidIdentifier);
+      }
+      str name = "";
+      fit tok.unwrap().data {
+        .Sval(s) -> { name = s; }
+        _ -> {}
+      }
+      out_params.push(name);
+
+      Vec<str> constraints;
+      constraints.init(0);
+      if self.next_token_is_operator(":") {
+        self.token_next(); // consume ':'
+        has_constraints = true;
+        for true {
+          let ct = self.token_next();
+          if ct.is_none() {
+            self.err("expected type name in constraint after ':'");
+            ret .Some(ParseErrorKind.InvalidIdentifier);
+          }
+          let ctok = ct.unwrap();
+          if ctok.type != TokenType.Keyword && ctok.type != TokenType.Identifier {
+            self.err("expected type name in constraint");
+            ret .Some(ParseErrorKind.InvalidIdentifier);
+          }
+          str cname = "";
+          fit ctok.data {
+            .Sval(s) -> { cname = s; }
+            _ -> {}
+          }
+          constraints.push(cname);
+          if self.next_token_is_operator("|") {
+            self.token_next();
+            continue;
+          }
+          break;
+        }
+      }
+      param_constraints.push(constraints);
+
+      if self.next_token_is_operator(",") {
+        self.token_next();
+        continue;
+      }
+      break;
+    }
+
+    self.split_angle_closer_token_if_needed();
+    if self.next_token_is_operator(">") {
+      let err = self.expect_op(">");
+      if err.is_some() {
+        ret err;
+      }
+    } else {
+      let err = self.expect_sym('>');
+      if err.is_some() {
+        ret err;
+      }
+    }
+
+    if has_constraints {
+      Vec<Vec<str>> combos;
+      combos.init(0);
+      Vec<str> initial;
+      initial.init(0);
+      combos.push(initial);
+
+      for pc : param_constraints {
+        Vec<Vec<str>> new_combos;
+        new_combos.init(0);
+        for existing : combos {
+          for ct : pc {
+            Vec<str> new_combo;
+            new_combo.init(0);
+            for et : existing {
+              new_combo.push(et);
+            }
+            new_combo.push(ct);
+            new_combos.push(new_combo);
+          }
+        }
+        combos = new_combos;
+      }
+
+      for combo : combos {
+        out_forced_insts.push(combo);
+      }
+    }
+
+    ret .None;
+  }
+
   // Parses a bracketed generic-argument list (`<T, U>`) into `dt.generic_args`,
   // if the next significant token opens one. A no-op (not an error) when it
   // doesn't, since a type name may simply not be generic.
@@ -2212,13 +2333,17 @@ impl Parser {
   }
 
   // Parses a comma-separated argument list up to (not including) the
-  // closing `)`, appending each argument node to `out_args`.
-  // 
-  // Deliberately simplified from the original for this slice: no `...`
-  // variadic-argument support (needs its own synthetic `vargs: Vec`
-  // handling, deferred).
-  _parse_function_args(Vec<Node*>* out_args) Option<ParseErrorKind> {
+  // closing `)`, appending each argument node to `out_args`. A trailing
+  // `...` (either as the whole list, `f(...)`, or after named args,
+  // `f(str fmt, ...)`) sets `*out_is_variadic` and stops -- it's never
+  // itself an argument node.
+  _parse_function_args(Vec<Node*>* out_args, bin* out_is_variadic) Option<ParseErrorKind> {
     for !self.state.next_token_is_symbol(')') {
+      if self.state.next_token_is_operator("...") {
+        self.state.token_next();
+        *out_is_variadic = true;
+        break;
+      }
       let verr = self._parse_full_variable();
       if verr.is_some() {
         ret verr;
@@ -2254,10 +2379,10 @@ impl Parser {
   // top-level parse loop, which doesn't exist yet either; callable and
   // tested standalone until that loop is ported.
   // 
-  // Deliberately simplified from the original for this slice: no generic
-  // type parameters (`fun f<T>`), no variadic arguments, and no array-
-  // bracket return type (`T[]`) -- each needs infrastructure not ported
-  // yet, matching the same deferrals as `parse_datatype`/`parse_variable`.
+  // Deliberately simplified from the original for this slice: no array-
+  // bracket return type (`T[]`) -- needs `parse_array_brackets`, deferred
+  // along with every other array-bracket use (see `parse_datatype`'s doc
+  // comment).
   pub parse_function(bin is_public, bin is_async) Option<ParseErrorKind> {
     self.state.new_scope();
 
@@ -2294,13 +2419,36 @@ impl Parser {
     self.current_function = fn_node_ptr;
     self.has_current_function = true;
 
+    Vec<str> type_params;
+    type_params.init(0);
+    Vec<Vec<str>> type_param_forced_insts;
+    type_param_forced_insts.init(0);
+    let tperr = self.state.parse_type_params_with_constraints(
+      &type_params,
+      &type_param_forced_insts
+    );
+    if tperr.is_some() {
+      ret tperr;
+    }
+    fit fn_node_ptr.kind {
+      .Function(curtp) -> {
+        curtp.type_params = type_params;
+        curtp.has_type_params = type_params.len > 0;
+        curtp.type_param_forced_insts = type_param_forced_insts;
+        curtp.has_type_param_forced_insts = type_param_forced_insts.len > 0;
+        fn_node_ptr.kind = NodeKind.Function(curtp);
+      }
+      _ -> {}
+    }
+
     let operr = self.state.expect_op("(");
     if operr.is_some() {
       ret operr;
     }
     Vec<Node*> args;
     args.init(0);
-    let aerr = self._parse_function_args(&args);
+    bin is_variadic = false;
+    let aerr = self._parse_function_args(&args, &is_variadic);
     if aerr.is_some() {
       ret aerr;
     }
@@ -2313,9 +2461,36 @@ impl Parser {
       .Function(cur) -> {
         cur.args = args;
         cur.has_args = true;
+        cur.is_variadic = is_variadic;
         fn_node_ptr.kind = NodeKind.Function(cur);
       }
       _ -> {}
+    }
+
+    // A variadic function's `...` args are collected into a synthetic
+    // `vargs: Vec` binding, registered in scope (but NOT emitted as a
+    // declaration node -- it's synthesized by codegen, matching the
+    // for-loop range/iterator variables' same on-stack-entity treatment)
+    // so the body can reference `vargs` by name.
+    if is_variadic {
+      DataType* vdt = malloc(sizeof(DataType));
+      *vdt = dtype_new();
+      vdt.kind = DataTypeType.Unknown;
+      vdt.type_str = "Vec";
+
+      VariableNode vv;
+      vv.var_type = vdt;
+      vv.name = "vargs";
+      vv.has_val = false;
+
+      Node vnode = node_new(NodeKind.Variable(vv));
+      vnode.pos = fn_node_ptr.pos;
+      vnode.has_pos = fn_node_ptr.has_pos;
+
+      Node* vnode_ptr = malloc(sizeof(Node));
+      *vnode_ptr = vnode;
+      ScopeEntity* ventity = self.new_scope_entity(vnode_ptr);
+      self.state.push_scope_entity(ventity);
     }
 
     DataType* rtype = malloc(sizeof(DataType));
@@ -4480,6 +4655,76 @@ test "parse_function requires an identifier after 'fun'" {
   Parser p = parser_new(&st);
   let err = p.parse_function(false, false);
   assert err.is_some(), "expected an error for a missing function name";
+}
+
+test "parse_function parses generic type parameters with no constraints" {
+  ParseState st = _state_from("fun identity<T>(T x) T { ret x; }");
+  Parser p = parser_new(&st);
+  assert p.parse_function(true, false).is_none(), "expected the generic function to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Function(f) -> {
+      assert f.has_type_params, "expected type params";
+      assert f.type_params.len == 1, "expected 1 type param";
+      assert equals(f.type_params.get(0), "T"), "expected type param 'T'";
+      assert !f.has_type_param_forced_insts, "expected no forced instantiations without constraints";
+    }
+    _ -> { panic("expected a Function node"); }
+  }
+}
+
+test "parse_function parses constrained generic type parameters into forced instantiations" {
+  ParseState st = _state_from("fun add<T: num | dec>(T a, T b) T { ret a; }");
+  Parser p = parser_new(&st);
+  assert p.parse_function(true, false).is_none(), "expected the constrained generic function to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Function(f) -> {
+      assert f.has_type_params, "expected type params";
+      assert f.type_params.len == 1, "expected 1 type param";
+      assert f.has_type_param_forced_insts, "expected forced instantiations";
+      assert f.type_param_forced_insts.len == 2, "expected 2 forced instantiations (num, dec)";
+      let combo0 = f.type_param_forced_insts.get(0);
+      let combo1 = f.type_param_forced_insts.get(1);
+      assert combo0.len == 1, "expected 1 type per combo";
+      assert equals(combo0.get(0), "num"), "expected the first combo to be 'num'";
+      assert equals(combo1.get(0), "dec"), "expected the second combo to be 'dec'";
+    }
+    _ -> { panic("expected a Function node"); }
+  }
+}
+
+test "parse_function parses variadic arguments and registers a 'vargs' scope entity" {
+  ParseState st = _state_from("fun log(str fmt, ...) num { ret vargs; }");
+  Parser p = parser_new(&st);
+  assert p.parse_function(true, false).is_none(), "expected the variadic function to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Function(f) -> {
+      assert f.is_variadic, "expected is_variadic to be true";
+      assert f.args.len == 1, "expected 1 named arg ('fmt'); '...' is not itself an arg";
+      let a0 = f.args.get(0);
+      fit a0.kind {
+        .Variable(v) -> { assert equals(v.name, "fmt"), "expected the named arg 'fmt'"; }
+        _ -> { panic("expected a Variable arg"); }
+      }
+    }
+    _ -> { panic("expected a Function node"); }
+  }
+}
+
+test "parse_function parses a bodyless variadic C-binding declaration" {
+  ParseState st = _state_from("fun printf(str fmt, ...) num;");
+  Parser p = parser_new(&st);
+  assert p.parse_function(true, false).is_none(), "expected the bodyless variadic declaration to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Function(f) -> {
+      assert f.is_variadic, "expected is_variadic to be true";
+      assert !f.has_body, "expected no body";
+    }
+    _ -> { panic("expected a Function node"); }
+  }
 }
 
 test "parse_for_statement parses an infinite loop with no condition" {
