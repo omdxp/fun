@@ -3123,18 +3123,147 @@ impl Parser {
     ret self.state.expect_sym(';');
   }
 
-  // Parses one top-level item: `pub`/`async fun`/`fun`, a bare-datatype-
-  // keyword global variable (`num x = 5;`), or -- for everything
+  // Parses `imp path;` or `imp path as alias;`, including parent-
+  // traversal path segments (`imp ..defs.user;`, `imp ...deep.thing;` --
+  // each PAIR of leading dots means "go up one directory"; `leading_dots`
+  // sums the length of every leading all-dot operator token, so this
+  // still works whether the lexer handed back `..` as one token or `.`
+  // `.` as two).
+  // 
+  // Deliberately simplified from the original for this slice: the parsed
+  // path/alias is recorded on the `Import` node, but nothing is done to
+  // actually RESOLVE it -- the original's `preload_import_global_symbols`
+  // / `preload_std_import_global_symbols` read the imported file (or a
+  // hardcoded stdlib symbol table) off disk to preload its exported names
+  // for identifier validation, which is real filesystem work tied to a
+  // whole module-resolution subsystem, not something the parser alone
+  // can or should do. Until that's ported, a plain (non-call) reference
+  // to an imported name relies on the same "unknown identifier" bypasses
+  // `parse_single_token_to_node` already documents (out-of-order calls,
+  // `fit` conditions, ALL_CAPS macro-style constants) rather than genuine
+  // resolution.
+  pub parse_import() Option<ParseErrorKind> {
+    let imp_tok = self.state.token_next(); // consume 'imp'
+
+    num leading_dots = 0;
+    for true {
+      fit self.state.token_peek_next() {
+        .Some(t) -> {
+          if !_is_dot_run_operator(t) {
+            break;
+          }
+          self.state.token_next();
+          str s = "";
+          fit t.data {
+            .Sval(sv) -> { s = sv; }
+            _ -> {}
+          }
+          leading_dots = leading_dots + len(s);
+        }
+        .None -> { break; }
+      }
+    }
+    if leading_dots % 2 != 0 {
+      self.state.err("invalid import path: expected '.' after '.'");
+      ret .Some(ParseErrorKind.InvalidIdentifier);
+    }
+
+    let folder_tok = self.state.token_next();
+    if folder_tok.is_none() || folder_tok.unwrap().type != TokenType.Identifier {
+      self.state.err("expected folder identifier after import");
+      ret .Some(ParseErrorKind.InvalidIdentifier);
+    }
+    str folder_name = "";
+    fit folder_tok.unwrap().data {
+      .Sval(s) -> { folder_name = s; }
+      _ -> {}
+    }
+
+    str path = folder_name;
+    num i = 0;
+    for i < leading_dots {
+      path = format("{chr}{str}", '.', path);
+      i = i + 1;
+    }
+
+    for true {
+      bin is_dot_run = false;
+      fit self.state.token_peek_next() {
+        .Some(t) -> { is_dot_run = _is_dot_run_operator(t); }
+        .None -> {}
+      }
+      if !is_dot_run {
+        break;
+      }
+      let dot_tok = self.state.token_next().unwrap();
+      let part_tok = self.state.token_next();
+      if part_tok.is_none() || part_tok.unwrap().type != TokenType.Identifier {
+        self.state.err("expected identifier after '.' in import path");
+        ret .Some(ParseErrorKind.InvalidIdentifier);
+      }
+      str dot_op = "";
+      fit dot_tok.data {
+        .Sval(s) -> { dot_op = s; }
+        _ -> {}
+      }
+      str part_name = "";
+      fit part_tok.unwrap().data {
+        .Sval(s) -> { part_name = s; }
+        _ -> {}
+      }
+      path = format("{str}{str}{str}", path, dot_op, part_name);
+    }
+
+    str alias = "";
+    bin has_alias = false;
+    if self.state.next_token_is_keyword("as") {
+      self.state.token_next(); // consume 'as'
+      let alias_tok = self.state.token_next();
+      if alias_tok.is_none() || alias_tok.unwrap().type != TokenType.Identifier {
+        self.state.err("expected alias identifier after 'as'");
+        ret .Some(ParseErrorKind.InvalidIdentifier);
+      }
+      fit alias_tok.unwrap().data {
+        .Sval(s) -> { alias = s; }
+        _ -> {}
+      }
+      has_alias = true;
+    }
+
+    let serr = self.state.expect_sym(';');
+    if serr.is_some() {
+      ret serr;
+    }
+
+    ImportNode imp_node_data;
+    imp_node_data.path = path;
+    imp_node_data.alias = alias;
+    imp_node_data.has_alias = has_alias;
+
+    Node node = node_new(NodeKind.Import(imp_node_data));
+    fit imp_tok {
+      .Some(t) -> {
+        node.pos = t.pos;
+        node.has_pos = true;
+      }
+      .None -> {}
+    }
+    self.state.nodes.push(node);
+    ret .None;
+  }
+
+  // Parses one top-level item: `imp`, `pub`/`async fun`/`fun`, a bare-
+  // datatype-keyword global variable (`num x = 5;`), or -- for everything
   // `parse_statement` already understands (`let`, `ret`, `assert`,
   // `if`/`elif`/`else`, `for`, `fit`, a `{ ... }` block, or a bare
   // expression statement) -- delegates there directly.
   // 
   // Deliberately simplified from the original for this slice: no
-  // `imp`/`enum`/`compound`/`quirk`/`impl`/`test`/`defer`/`asm`/`await`/
-  // `nil`/`allow`/`expect`/`panic`/`break`/`continue` declarations --
-  // each is its own substantial parsing slice (`enum`/`compound`/`quirk`/
-  // `impl` especially), deferred to future work; a clean "not yet
-  // supported" error is reported instead of a misparse. Also no bare
+  // `enum`/`compound`/`quirk`/`impl`/`test`/`defer`/`asm`/`await`/`nil`/
+  // `allow`/`expect`/`panic`/`break`/`continue` declarations -- each is
+  // its own substantial parsing slice (`enum`/`compound`/`quirk`/`impl`
+  // especially), deferred to future work; a clean "not yet supported"
+  // error is reported instead of a misparse. Also no bare
   // `Identifier name;` top-level declaration (public OR private) --
   // needs the same forward-lookahead machinery the original uses to
   // disambiguate a type name from an expression, already documented as
@@ -3162,6 +3291,10 @@ impl Parser {
       fit t.data {
         .Sval(s) -> { kw = s; }
         _ -> {}
+      }
+
+      if equals(kw, "imp") {
+        ret self.parse_import();
       }
 
       if equals(kw, "pub") {
@@ -3257,10 +3390,11 @@ impl Parser {
   // a `Name{...}` compound initializer forward-reference a `compound`/
   // `enum`/`quirk` declared later in the file, and compound-init parsing
   // itself isn't ported yet either. No cross-file `global_symbols`
-  // registration (`register_global_node_symbol`) -- that's for resolving
-  // references across `imp`-ed modules, and `imp` isn't ported yet;
-  // within a single file, top-level `let`/variable declarations already
-  // resolve via the same scope-entity mechanism as any other declaration,
+  // registration (`register_global_node_symbol`,
+  // `preload_import_global_symbols`) -- `parse_import` parses `imp`
+  // syntax into an `Import` node but doesn't resolve it (see its own doc
+  // comment); within a single file, top-level `let`/variable declarations
+  // already resolve via the same scope-entity mechanism as any other declaration,
   // and forward/out-of-order function calls are already tolerated by
   // `parse_single_token_to_node`'s identifier check (see its own doc
   // comment).
@@ -4966,6 +5100,67 @@ test "parse stops cleanly at end of input" {
   assert st.nodes.len == 0, "expected no top-level nodes";
 }
 
+test "parse_import parses a simple dotted path with no alias" {
+  ParseState st = _state_from("imp std.io;");
+  Parser p = parser_new(&st);
+  assert p.parse_import().is_none(), "expected 'imp std.io;' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Import(impn) -> {
+      assert equals(impn.path, "std.io"), "expected path 'std.io'";
+      assert !impn.has_alias, "expected no alias";
+    }
+    _ -> { panic("expected an Import node"); }
+  }
+}
+
+test "parse_import parses an alias" {
+  ParseState st = _state_from("imp std.io as io;");
+  Parser p = parser_new(&st);
+  assert p.parse_import().is_none(), "expected 'imp std.io as io;' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Import(impn) -> {
+      assert equals(impn.path, "std.io"), "expected path 'std.io'";
+      assert impn.has_alias, "expected an alias";
+      assert equals(impn.alias, "io"), "expected alias 'io'";
+    }
+    _ -> { panic("expected an Import node"); }
+  }
+}
+
+test "parse_import parses leading '..' parent-traversal segments" {
+  ParseState st = _state_from("imp ..lexer.token;");
+  Parser p = parser_new(&st);
+  assert p.parse_import().is_none(), "expected 'imp ..lexer.token;' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Import(impn) -> {
+      assert equals(impn.path, "..lexer.token"), "expected path '..lexer.token'";
+    }
+    _ -> { panic("expected an Import node"); }
+  }
+}
+
+test "parse_import rejects an odd number of leading dots" {
+  ParseState st = _state_from("imp .lexer.token;");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_import();
+  assert err.is_some(), "expected an error for an odd number of leading dots";
+}
+
+test "parse parses an import at the top level" {
+  ParseState st = _state_from("imp std.vec; fun main() num { ret 0; }");
+  Parser p = parser_new(&st);
+  assert p.parse().is_none(), "expected the whole file to parse";
+  assert st.nodes.len == 2, "expected 2 top-level nodes";
+  fit st.nodes.get(0).kind {
+    .Import(impn) -> { assert equals(impn.path, "std.vec"), "expected path 'std.vec'"; }
+    _ -> { panic("expected an Import node"); }
+  }
+}
+
 test "parse_for_statement parses an infinite loop with no condition" {
   Vec<str> names;
   names.init(0);
@@ -5260,6 +5455,23 @@ fun _scope_entity_name(Node* node) str {
     .Variable(v) -> { ret v.name; }
     _ -> { ret ""; }
   }
+}
+
+// True if `t` is an operator token consisting entirely of `.` characters
+// (`.`, `..`, or `...` -- the only all-dot operator tokens the lexer can
+// produce). Used by `parse_import` to detect path-segment separators and
+// leading `..` parent-directory markers, as opposed to any other
+// operator.
+fun _is_dot_run_operator(Token t) bin {
+  if t.type != TokenType.Operator {
+    ret false;
+  }
+  str s = "";
+  fit t.data {
+    .Sval(sv) -> { s = sv; }
+    _ -> { ret false; }
+  }
+  ret equals(s, ".") || equals(s, "..") || equals(s, "...");
 }
 
 // True if `name` looks like a C preprocessor macro constant
