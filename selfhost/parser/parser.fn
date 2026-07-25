@@ -732,6 +732,17 @@ pub compound Parser {
   // True while parsing a `fit` arm CONDITION, where pattern bindings like
   // `Enum.Variant(x, y)` introduce new identifiers not yet in scope.
   bin in_fit_condition;
+
+  // True for the ENTIRE duration of parsing a `fit` statement (its subject
+  // expression, every arm's condition, and every arm's body) -- stops the
+  // general expression loop from swallowing a following `->` as a (bogus)
+  // binary operator, since `->` is only ever the fit-arm delimiter, never
+  // a real expression operator. Without this, `fit x { 1 -> { a; } ...`
+  // over-consumes: after parsing `1`, `parse_expressionable`'s loop sees
+  // `->` next and, with nothing telling it otherwise, treats it as a
+  // binary-operator continuation and keeps parsing rightward through the
+  // arm's whole body.
+  bin in_fit_statement;
 }
 
 // Creates a new `Parser` over the given shared parse state.
@@ -745,6 +756,7 @@ pub fun parser_new(ParseState* state) Parser {
   p.has_current_function = false;
   p.expr_depth = 0;
   p.in_fit_condition = false;
+  p.in_fit_statement = false;
   ret p;
 }
 
@@ -1165,6 +1177,13 @@ impl Parser {
           ret self.parse_single_token_to_node();
         }
         if t.type == TokenType.Operator {
+          // `->` is only ever the fit-arm delimiter, never a real
+          // expression operator -- while inside a fit statement, treat it
+          // as "nothing more to parse here" rather than a binary
+          // continuation. See `Parser.in_fit_statement`'s doc comment.
+          if self.in_fit_statement && token_is_operator(t, "->") {
+            ret .None;
+          }
           ret self.parse_expression();
         }
         ret .None;
@@ -2442,12 +2461,245 @@ impl Parser {
     ret .None;
   }
 
+  // Parses one `pattern -> { body }` fit arm, pushing the finished branch
+  // onto `out_branches`. `_` (the wildcard default) has no condition and
+  // must be the last arm -- signaled back to the caller via
+  // `out_has_default` so its loop stops. Every other arm's pattern is a
+  // plain expression via `parse_expressionable_root`, EXCEPT a leading `.`
+  // (bare enum-variant shorthand, `.Variant`), which bypasses that in
+  // favor of directly building the `.`-Expression and reordering it --
+  // mirroring the ORIGINAL's identical bypass, and needed because a bare
+  // `.Variant` isn't itself a complete expression the general parser
+  // recognizes outside of this direct construction (see
+  // `parse_normal_expression`'s own `.` handling, which additionally
+  // picks up a trailing `(payload)` call -- deliberately NOT done here,
+  // since a payload in a fit pattern means DESTRUCTURING, not ported this
+  // slice; see this function's own deferral note below).
+  // 
+  // Deliberately simplified from the original for this slice: no
+  // data-carrying-enum DESTRUCTURING pattern (`Shape.Circle(r)` /
+  // `.Circle(r)`, binding `r` in the arm body) -- needs
+  // `try_parse_fit_destructure`/`collect_fit_binding_names` and a
+  // per-arm binding scope, deferred to a future slice. Every `FitBranch`
+  // produced here has empty `bindings`.
+  _parse_fit_arm(Vec<FitBranch>* out_branches, bin* out_has_default) Option<ParseErrorKind> {
+    Node arm_condition = node_new(NodeKind.Blank);
+    bin is_dot_shorthand = false;
+    Pos op_pos;
+    fit self.state.token_peek_next() {
+      .Some(t) -> {
+        op_pos = t.pos;
+        if t.type == TokenType.Operator {
+          str op = "";
+          fit t.data {
+            .Sval(s) -> { op = s; }
+            _ -> {}
+          }
+          is_dot_shorthand = equals(op, ".");
+        }
+      }
+      .None -> {}
+    }
+
+    if is_dot_shorthand {
+      self.state.token_next(); // consume '.'
+      let ierr = self.parse_single_token_to_node();
+      if ierr.is_some() {
+        ret ierr;
+      }
+      let maybe_right = self.state.node_pop();
+      if maybe_right.is_none() {
+        self.state.err("expected identifier after '.' in fit pattern");
+        ret .Some(ParseErrorKind.InvalidExpression);
+      }
+      Node node_right = maybe_right.unwrap();
+      node_right.flags.inside_expression = true;
+
+      Node blank_left = node_new(NodeKind.Blank);
+      blank_left.pos = op_pos;
+      blank_left.has_pos = true;
+      blank_left.flags.inside_expression = true;
+
+      self.make_expression_node(&blank_left, &node_right, ".", op_pos);
+      fit self.state.node_pop() {
+        .Some(built) -> {
+          arm_condition = built;
+          self.parse_reorder_expression(&arm_condition);
+        }
+        .None -> {
+          self.state.err("expected fit branch condition expression");
+          ret .Some(ParseErrorKind.InvalidExpression);
+        }
+      }
+    } else {
+      let cerr = self.parse_expressionable_root();
+      if cerr.is_some() {
+        ret cerr;
+      }
+      let maybe_cond = self.state.node_pop();
+      if maybe_cond.is_none() {
+        self.state.err("expected fit branch condition expression");
+        ret .Some(ParseErrorKind.InvalidExpression);
+      }
+      arm_condition = maybe_cond.unwrap();
+    }
+
+    bin is_assignment = false;
+    fit arm_condition.kind {
+      .Expression(e) -> {
+        if equals(e.op, "=") {
+          is_assignment = true;
+        }
+      }
+      _ -> {}
+    }
+    if is_assignment {
+      self.state.err("expected expression, got assignment");
+      ret .Some(ParseErrorKind.InvalidExpression);
+    }
+
+    bin is_wildcard = false;
+    fit arm_condition.kind {
+      .Identifier(s) -> {
+        if equals(s, "_") {
+          is_wildcard = true;
+        }
+      }
+      _ -> {}
+    }
+
+    FitBranch branch = fit_branch_new();
+    if !is_wildcard {
+      Node* cond_ptr = malloc(sizeof(Node));
+      *cond_ptr = arm_condition;
+      branch.condition = cond_ptr;
+      branch.has_condition = true;
+    }
+
+    let arerr = self.state.expect_op("->");
+    if arerr.is_some() {
+      ret arerr;
+    }
+    let berr = self.parse_body();
+    if berr.is_some() {
+      ret berr;
+    }
+    let maybe_body = self.state.node_pop();
+    if maybe_body.is_none() {
+      self.state.err("expected fit branch body");
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+    Node* body = malloc(sizeof(Node));
+    *body = maybe_body.unwrap();
+    branch.body = body;
+
+    out_branches.push(branch);
+    if is_wildcard {
+      *out_has_default = true;
+    }
+
+    if self.state.next_token_is_operator(",") {
+      self.state.token_next();
+    }
+    ret .None;
+  }
+
+  // Parses a fit statement's body: `{ arm , arm , ... }`. Stops early
+  // (without requiring `}` to immediately follow) once a wildcard `_`
+  // default arm has been parsed -- matching the original, which treats
+  // `_` as necessarily the last arm.
+  pub parse_fit_body(Node* condition, Pos fit_pos, bin has_fit_pos) Option<ParseErrorKind> {
+    let lbrace_err = self.state.expect_sym('{');
+    if lbrace_err.is_some() {
+      ret lbrace_err;
+    }
+
+    Vec<FitBranch> branches;
+    branches.init(0);
+    bin has_default_branch = false;
+
+    for !self.state.next_token_is_symbol('}') {
+      let aerr = self._parse_fit_arm(&branches, &has_default_branch);
+      if aerr.is_some() {
+        ret aerr;
+      }
+      if has_default_branch {
+        break;
+      }
+    }
+
+    let rbrace_err = self.state.expect_sym('}');
+    if rbrace_err.is_some() {
+      ret rbrace_err;
+    }
+
+    FitStmtNode fitn = fit_stmt_node_new();
+    fitn.exp = condition;
+    fitn.branches = branches;
+    fitn.has_default_branch = has_default_branch;
+
+    Node node = node_new(NodeKind.StatementFit(fitn));
+    if has_fit_pos {
+      node.pos = fit_pos;
+      node.has_pos = true;
+    }
+    self.create_node(&node);
+    ret .None;
+  }
+
+  // Parses `fit <condition> { arm , ... }`.
+  // 
+  // Note the ordering: `in_fit_statement` is set true BEFORE parsing the
+  // subject expression too, not just the arms below -- the original
+  // threads the same history flag through the whole statement, and a
+  // subject like `fit x -> ...` (a stray `->` right after the subject,
+  // a malformed-but-plausible typo) should stop there rather than
+  // swallowing into the arm list. Left set on an early-error return,
+  // matching this file's established convention (see
+  // `parse_body_multiple_statements`'s doc comment): a parse error
+  // aborts the whole parse anyway, so there's nothing to unwind for.
+  pub parse_fit_statement() Option<ParseErrorKind> {
+    let fit_tok = self.state.token_peek_next();
+    let kwerr = self.state.expect_keyword("fit");
+    if kwerr.is_some() {
+      ret kwerr;
+    }
+
+    let prev_in_fit_statement = self.in_fit_statement;
+    self.in_fit_statement = true;
+
+    let cerr = self.parse_expressionable_root();
+    if cerr.is_some() {
+      ret cerr;
+    }
+    let maybe_cond = self.state.node_pop();
+    if maybe_cond.is_none() {
+      self.state.err("expected fit condition");
+      ret .Some(ParseErrorKind.InvalidExpression);
+    }
+    Node* condition = malloc(sizeof(Node));
+    *condition = maybe_cond.unwrap();
+
+    bin has_pos = false;
+    Pos pos;
+    fit fit_tok {
+      .Some(t) -> {
+        pos = t.pos;
+        has_pos = true;
+      }
+      .None -> {}
+    }
+    let berr = self.parse_fit_body(condition, pos, has_pos);
+    self.in_fit_statement = prev_in_fit_statement;
+    ret berr;
+  }
+
   // Parses one statement: a `{ ... }` nested body, a `let` declaration, a
-  // `ret`/`assert`/`if`/`elif`/`else`/`for` statement, or an expression
-  // statement terminated by `;`.
+  // `ret`/`assert`/`if`/`elif`/`else`/`for`/`fit` statement, or an
+  // expression statement terminated by `;`.
   // 
   // Deliberately simplified from the original for this slice: no keyword
-  // dispatch beyond those (`for`/`fit`/`compound`/... each need their own
+  // dispatch beyond those (`compound`/`quirk`/... each need their own
   // parsing infrastructure not ported yet -- an unsupported keyword
   // reports a clean "not yet supported" error rather than silently
   // misparsing), no `fork`-statement contextual-keyword handling, and no
@@ -2487,6 +2739,9 @@ impl Parser {
       }
       if equals(kw, "for") {
         ret self.parse_for_statement();
+      }
+      if equals(kw, "fit") {
+        ret self.parse_fit_statement();
       }
       let msg = format("keyword '{str}' is not yet supported in statement position", kw);
       defer free(msg);
@@ -4121,6 +4376,101 @@ test "parse_statement dispatches 'for' to parse_for_statement" {
   fit top.kind {
     .StatementFor(fk) -> {}
     _ -> { panic("expected a StatementFor node"); }
+  }
+}
+
+test "parse_fit_statement parses literal patterns with a default branch" {
+  Vec<str> names;
+  names.init(0);
+  names.push("x");
+  names.push("a");
+  names.push("b");
+  ParseState st = _state_with_declared("fit x { 1 -> { a; } _ -> { b; } }", names);
+  Parser p = parser_new(&st);
+  assert p.parse_fit_statement().is_none(), "expected the fit statement to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementFit(f) -> {
+      assert f.branches.len == 2, "expected 2 branches";
+      assert f.has_default_branch, "expected a default branch";
+      fit f.exp.kind {
+        .Identifier(s) -> { assert equals(s, "x"), "expected fit condition 'x'"; }
+        _ -> { panic("expected Identifier 'x' as the fit condition"); }
+      }
+      let first = f.branches.get(0);
+      assert first.has_condition, "expected the first branch to have a condition";
+      fit first.condition.kind {
+        .Number(_) -> {}
+        _ -> { panic("expected a Number condition for the first branch"); }
+      }
+      let last = f.branches.get(1);
+      assert !last.has_condition, "expected the default branch to have no condition";
+    }
+    _ -> { panic("expected a StatementFit node"); }
+  }
+}
+
+test "parse_fit_statement parses bare enum-variant shorthand patterns" {
+  Vec<str> names;
+  names.init(0);
+  names.push("x");
+  names.push("a");
+  names.push("b");
+  ParseState st = _state_with_declared("fit x { .A -> { a; } .B -> { b; } }", names);
+  Parser p = parser_new(&st);
+  assert p.parse_fit_statement().is_none(), "expected the fit statement to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementFit(f) -> {
+      assert f.branches.len == 2, "expected 2 branches";
+      assert !f.has_default_branch, "expected no default branch";
+      let first = f.branches.get(0);
+      assert first.has_condition, "expected the first branch to have a condition";
+      fit first.condition.kind {
+        .Expression(e) -> {
+          assert equals(e.op, "."), "expected op '.'";
+          fit e.left.kind {
+            .Blank -> {}
+            _ -> { panic("expected a Blank left side (no explicit enum name)"); }
+          }
+          fit e.right.kind {
+            .Identifier(s) -> { assert equals(s, "A"), "expected variant name 'A'"; }
+            _ -> { panic("expected Identifier 'A'"); }
+          }
+        }
+        _ -> { panic("expected an Expression node for the '.' shorthand pattern"); }
+      }
+    }
+    _ -> { panic("expected a StatementFit node"); }
+  }
+}
+
+test "parse_fit_statement rejects an assignment used as a branch pattern" {
+  Vec<str> names;
+  names.init(0);
+  names.push("x");
+  names.push("a");
+  ParseState st = _state_with_declared("fit x { a = 1 -> { } }", names);
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_fit_statement();
+  assert err.is_some(), "expected an error for an assignment used as a fit pattern";
+}
+
+test "parse_statement dispatches 'fit' to parse_fit_statement" {
+  Vec<str> names;
+  names.init(0);
+  names.push("x");
+  names.push("a");
+  ParseState st = _state_with_declared("fit x { _ -> { a; } }", names);
+  Parser p = parser_new(&st);
+  assert p.parse_statement().is_none(), "expected parse_statement to dispatch 'fit'";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementFit(f) -> {
+      assert f.has_default_branch, "expected the default branch to be recorded";
+    }
+    _ -> { panic("expected a StatementFit node"); }
   }
 }
 
