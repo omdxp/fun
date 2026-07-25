@@ -14582,6 +14582,51 @@ pub const TranspileProcess = struct {
             .Expression => {
                 if (node.node_variant == null) return 0;
                 const exp = node.node_variant.?.exp;
+                // A method-call RESULT used as the base of a further `.` access
+                // (`vec.get(i).field` where `get` returns `T*`, e.g. any
+                // `Vec<T*>.get`): resolve the callee method's declared return
+                // pointer depth so the outer field access picks `->` correctly.
+                // Only handles a plain `recv.method(...)` callee shape (not a
+                // bare function call or a further-chained call), matching the
+                // narrowest case actually needed today; anything else falls
+                // through to the `.`-op case below (or returns 0).
+                if (mem.eql(u8, exp.op, "()")) {
+                    const callee = exp.left orelse return 0;
+                    if (callee.type != .Expression or callee.node_variant == null or !mem.eql(u8, callee.node_variant.?.exp.op, ".")) return 0;
+                    const dot = callee.node_variant.?.exp;
+                    const recv = dot.left orelse return 0;
+                    const member = dot.right orelse return 0;
+                    if (member.type != .Identifier or member.data == null) return 0;
+                    const recv_type = self.expr_resolved_compound_type_name(recv.*) orelse return 0;
+                    const recv_canon = self.canonical_compound_name(recv_type);
+                    const base = if (mem.indexOf(u8, recv_canon, "__")) |idx| recv_canon[0..idx] else recv_canon;
+                    const hit = self.find_any_impl_method_node(base, member.data.?.sval.items) orelse return 0;
+                    if (hit.method_node.node_variant == null) return 0;
+                    const rt = hit.method_node.node_variant.?.function.rtype orelse return 0;
+
+                    // The method's return type may be (or embed) the impl's own
+                    // type param written bare (`pub get(num i) T` on `impl Vec<T>`):
+                    // its REAL pointer depth on a concrete receiver (`Vec<DataType*>`)
+                    // is the template's own depth plus whatever depth the matching
+                    // generic arg itself carries (e.g. `T` at depth 0 substituted
+                    // with `DataType*` at depth 1 -> depth 1 overall).
+                    if (self.impl_type_params(hit.impl_node)) |params| {
+                        if ((self.dtype_from_mangled_type(recv_canon) catch null)) |recv_dt| {
+                            if (recv_dt.generic_args) |gargs_vec| {
+                                const gargs = gargs_vec.items();
+                                if (gargs.len == params.count) {
+                                    for (params.items(), 0..) |p, i| {
+                                        if (mem.eql(u8, p.items, rt.type_str.items)) {
+                                            return rt.pointer_depth + gargs[i].pointer_depth;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    return rt.pointer_depth;
+                }
                 // Indexing `arr[i]`. The element's pointer depth depends on whether
                 // the base is a true array or a pointer used as an array:
                 //   - `T*[]` (is_array, pointer_depth=1): the `[]` consumes the array

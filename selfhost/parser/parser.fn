@@ -25,8 +25,18 @@
 // invocation is a short-lived process, so nothing here frees per-node
 // memory either, matching the same "let the OS reclaim on exit" choice
 // already made throughout `stdlib`'s own C bindings usage.
+// 
+// Known compiler gap worked around throughout this file (and worth fixing
+// upstream separately): chaining a further `.field` access directly onto a
+// `Vec<T*>.get(...)` call (`vec.get(i).field`) can emit `.` instead of `->`
+// for the outer access and fail to compile, because the codegen path that
+// picks `.`/`->` doesn't fully resolve a generic method call's monomorphized
+// return type through the receiver's type args in every shape. Binding the
+// call result to a `let` first (`let x = vec.get(i); x.field`) always works
+// and reads at least as clearly, so that's the convention used here.
 
 imp parse_state;
+imp datatype_defs;
 imp ..ast.ast;
 imp ..lexer.token;
 imp ..lexer.lexer;
@@ -209,6 +219,132 @@ impl ParseState {
     ret consumed;
   }
 
+  // True if the next significant token is an `Operator` with text `op`,
+  // without consuming it.
+  pub next_token_is_operator(str op) bin {
+    fit self.token_peek_next() {
+      .Some(t) -> { ret token_is_operator(t, op); }
+      .None -> { ret false; }
+    }
+  }
+
+  // True if the next significant token is the `Keyword` `keyword`, without
+  // consuming it.
+  pub next_token_is_keyword(str keyword) bin {
+    fit self.token_peek_next() {
+      .Some(t) -> { ret token_is_keyword(t, keyword); }
+      .None -> { ret false; }
+    }
+  }
+
+  // True if the next significant token is the `Symbol` `c`, without
+  // consuming it.
+  pub next_token_is_symbol(chr c) bin {
+    fit self.token_peek_next() {
+      .Some(t) -> { ret token_is_symbol(t, c); }
+      .None -> { ret false; }
+    }
+  }
+
+  // True if the next significant token opens a generic-argument list: a
+  // `<` (as an `Operator`, the common case, or a lexed `Symbol` in the rare
+  // context where it wasn't combined into a longer operator).
+  pub next_token_is_angle_open() bin {
+    fit self.token_peek_next() {
+      .Some(t) -> {
+        fit t.type {
+          .Operator -> {
+            fit t.data {
+              .Sval(s) -> { ret len(s) > 0 && s[0] == '<'; }
+              _ -> { ret false; }
+            }
+          }
+          .Symbol -> {
+            fit t.data {
+              .Cval(c) -> { ret c == '<'; }
+              _ -> { ret false; }
+            }
+          }
+          _ -> { ret false; }
+        }
+      }
+      .None -> { ret false; }
+    }
+  }
+
+  // Splits a lexed `>>` token in place into two adjacent `>` tokens, if the
+  // next significant token is one. Needed so nested generics (`Vec<Vec<num>>`)
+  // parse correctly: the lexer has no way to know `>>` here is two closing
+  // angle brackets rather than the right-shift operator, since that
+  // depends on the surrounding PARSE context, not just the characters.
+  pub split_angle_closer_token_if_needed() {
+    fit self.tokens_peek_no_increment() {
+      .Some(t) -> {
+        if t.type != TokenType.Operator {
+          ret;
+        }
+        bin is_shr = false;
+        fit t.data {
+          .Sval(s) -> { is_shr = equals(s, ">>"); }
+          _ -> {}
+        }
+        if !is_shr {
+          ret;
+        }
+        Token first = t;
+        first.data = TokenData.Sval(">");
+        self.tokens.set(self.pindex, first);
+        Token second = t;
+        second.data = TokenData.Sval(">");
+        self.tokens.insert(self.pindex + 1, second);
+      }
+      .None -> {}
+    }
+  }
+
+  // Splits a lexed `<<` token in place into two adjacent `<` tokens, if the
+  // next significant token is one. The opening-bracket counterpart to
+  // `split_angle_closer_token_if_needed`, needed for the same reason when a
+  // generic-argument list itself starts right after another `<`
+  // (`Map<str, Vec<<T>>` style contexts do not arise from ordinary source,
+  // but a `<<` can appear immediately before a nested generic's own opener
+  // when the outer angle bracket was itself just split from a longer run).
+  pub split_angle_opener_token_if_needed() {
+    fit self.tokens_peek_no_increment() {
+      .Some(t) -> {
+        if t.type != TokenType.Operator {
+          ret;
+        }
+        bin is_shl = false;
+        fit t.data {
+          .Sval(s) -> { is_shl = equals(s, "<<"); }
+          _ -> {}
+        }
+        if !is_shl {
+          ret;
+        }
+        Token first = t;
+        first.data = TokenData.Sval("<");
+        self.tokens.set(self.pindex, first);
+        Token second = t;
+        second.data = TokenData.Sval("<");
+        self.tokens.insert(self.pindex + 1, second);
+      }
+      .None -> {}
+    }
+  }
+
+  // Counts and consumes a run of `*` pointer-depth markers after a type
+  // name (`num**` -> depth 2).
+  pub parse_get_pointer_depth() num {
+    num depth = 0;
+    for self.next_token_is_operator("*") {
+      depth = depth + 1;
+      self.token_next();
+    }
+    ret depth;
+  }
+
   // Expects the next significant token to be the symbol `c`. Reports and
   // returns an error if it is anything else.
   pub expect_sym(chr c) Option<ParseErrorKind> {
@@ -315,6 +451,150 @@ impl ParseState {
   // at (not including) `stop_scope`.
   pub last_scope_entity_stop_at(Scope* stop_scope) ScopeEntity* {
     ret self.scope_current.last_entity_from_scope_stop_at(stop_scope);
+  }
+
+  // Parses a bracketed generic-argument list (`<T, U>`) into `dt.generic_args`,
+  // if the next significant token opens one. A no-op (not an error) when it
+  // doesn't, since a type name may simply not be generic.
+  // 
+  // Deferred from this slice: an array-typed argument (`Vec<num[]>`) --
+  // needs `parse_array_brackets`, which needs the expression parser (array
+  // sizes are arbitrary expressions), a much later slice. A generic arg
+  // that starts with `[` currently falls through to `parse_datatype`
+  // reporting `InvalidDataType`, which is the same outcome as any other
+  // not-yet-supported syntax in this partial port.
+  pub parse_generic_type_args(DataType* dt) Option<ParseErrorKind> {
+    self.split_angle_opener_token_if_needed();
+    if !self.next_token_is_angle_open() {
+      ret .None;
+    }
+    self.token_next();
+
+    Vec<DataType*> args;
+    args.init(0);
+
+    for true {
+      DataType* adt = malloc(sizeof(DataType));
+      *adt = dtype_new();
+      let err = self.parse_datatype(adt);
+      if err.is_some() {
+        ret err;
+      }
+      args.push(adt);
+
+      if self.next_token_is_operator(",") {
+        self.token_next();
+        continue;
+      }
+      break;
+    }
+
+    self.split_angle_closer_token_if_needed();
+    if self.next_token_is_operator(">") {
+      let err = self.expect_op(">");
+      if err.is_some() {
+        ret err;
+      }
+    } else {
+      let err = self.expect_sym('>');
+      if err.is_some() {
+        ret err;
+      }
+    }
+    dt.generic_args = args;
+    ret .None;
+  }
+
+  // Parses a type annotation into `dt`: a builtin scalar keyword, a
+  // user-defined/identifier-based name (optionally alias-qualified,
+  // `mod.Type`), its generic arguments if any, then a trailing run of `*`
+  // pointer-depth markers.
+  // 
+  // Deferred from this slice: the `fun(T1, T2) R` function-type parameter
+  // form (needs its own arg-list/return-type recursion) and array-bracket
+  // suffixes (need the expression parser for array-size expressions) --
+  // both are separate later slices, matching the original's own
+  // `parse_fn_type_datatype`/`parse_array_brackets` split.
+  pub parse_datatype(DataType* dt) Option<ParseErrorKind> {
+    let tok = self.token_next();
+    if tok.is_none() {
+      self.err("expected datatype, got end of input");
+      ret .Some(ParseErrorKind.InvalidDataType);
+    }
+    let dt_token = tok.unwrap();
+    if dt_token.type != TokenType.Keyword && dt_token.type != TokenType.Identifier {
+      self.err("expected datatype");
+      ret .Some(ParseErrorKind.InvalidDataType);
+    }
+
+    str name = "";
+    fit dt_token.data {
+      .Sval(s) -> { name = s; }
+      _ -> {}
+    }
+
+    // Builtins use `dt.kind`; user-defined types keep `.Unknown` and rely
+    // on `type_str`.
+    if dt_token.type == TokenType.Keyword {
+      if !keyword_is_datatype(name) {
+        self.err(format("unexpected keyword '{str}' in datatype position", name));
+        ret .Some(ParseErrorKind.InvalidDataType);
+      }
+      dt.kind = get_datatype_type(name);
+      if dt.kind == DataTypeType.Unknown {
+        self.err("unknown datatype");
+        ret .Some(ParseErrorKind.InvalidDataType);
+      }
+    } else {
+      // Identifier-based types (e.g. C typedefs like `size_t`, or a
+      // user compound/enum) are allowed. A small set of common C typedef
+      // names get tagged with a numeric semantic type so arithmetic/
+      // comparisons typecheck, while still emitting the original
+      // identifier in C via `type_str`.
+      let builtin_kind = get_datatype_type(name);
+      if builtin_kind != DataTypeType.Unknown {
+        dt.kind = builtin_kind;
+      } else {
+        fit get_c_typedef_alias_datatype_type(name) {
+          .Some(k) -> { dt.kind = k; }
+          .None -> { dt.kind = .Unknown; }
+        }
+      }
+    }
+    dt.type_str = name;
+
+    // Qualified user-defined types via module alias (`imp mod as m; m.Type`).
+    // Mangled internally as `a__b` to match symbol/type naming.
+    if dt_token.type == TokenType.Identifier {
+      for self.next_token_is_operator(".") || self.next_token_is_symbol('.') {
+        self.token_next();
+        let seg = self.token_next();
+        if seg.is_none() || seg.unwrap().type != TokenType.Identifier {
+          self.err("expected identifier after '.' in qualified datatype");
+          ret .Some(ParseErrorKind.InvalidDataType);
+        }
+        str seg_name = "";
+        fit seg.unwrap().data {
+          .Sval(s) -> { seg_name = s; }
+          _ -> {}
+        }
+        dt.kind = .Unknown;
+        dt.type_str = format("{str}__{str}", dt.type_str, seg_name);
+      }
+    }
+
+    let gerr = self.parse_generic_type_args(dt);
+    if gerr.is_some() {
+      ret gerr;
+    }
+
+    let ptr_depth = self.parse_get_pointer_depth();
+    if ptr_depth > 0 {
+      dt.flags.is_pointer = true;
+      dt.pointer_depth = ptr_depth;
+    }
+
+    ret .None;
   }
 }
 
@@ -606,6 +886,102 @@ test "new_scope_entity derives its name from the node kind" {
   Node blank_node = node_new(NodeKind.Blank);
   ScopeEntity* blank_entity = p.new_scope_entity(&blank_node);
   assert equals(blank_entity.name, ""), "expected empty name for a non-nameable node kind";
+}
+
+test "parse_datatype reads a builtin scalar keyword" {
+  ParseState st = _state_from("num");
+  DataType dt = dtype_new();
+  assert st.parse_datatype(&dt).is_none(), "expected num to parse";
+  assert dt.kind == DataTypeType.Num, "expected kind Num";
+  assert equals(dt.type_str, "num"), "expected type_str 'num'";
+  assert dt.pointer_depth == 0, "expected no pointer depth";
+}
+
+test "parse_datatype reads trailing pointer-depth markers" {
+  ParseState st = _state_from("num**");
+  DataType dt = dtype_new();
+  assert st.parse_datatype(&dt).is_none(), "expected num** to parse";
+  assert dt.kind == DataTypeType.Num, "expected kind Num";
+  assert dt.flags.is_pointer, "expected is_pointer flag set";
+  assert dt.pointer_depth == 2, "expected pointer depth 2";
+}
+
+test "parse_datatype reads a user-defined identifier type" {
+  ParseState st = _state_from("MyCompound");
+  DataType dt = dtype_new();
+  assert st.parse_datatype(&dt).is_none(), "expected MyCompound to parse";
+  assert dt.kind == DataTypeType.Unknown, "user types stay Unknown";
+  assert equals(dt.type_str, "MyCompound"), "expected type_str 'MyCompound'";
+}
+
+test "parse_datatype recognizes a known C typedef alias" {
+  ParseState st = _state_from("size_t");
+  DataType dt = dtype_new();
+  assert st.parse_datatype(&dt).is_none(), "expected size_t to parse";
+  assert dt.kind == DataTypeType.Num, "size_t should be tagged numeric";
+  assert equals(dt.type_str, "size_t"), "expected the original identifier preserved in type_str";
+}
+
+test "parse_datatype reads a qualified module-alias type" {
+  ParseState st = _state_from("m.Type");
+  DataType dt = dtype_new();
+  assert st.parse_datatype(&dt).is_none(), "expected m.Type to parse";
+  assert equals(dt.type_str, "m__Type"), "expected qualified name mangled as m__Type";
+}
+
+test "parse_datatype reports an error on end of input" {
+  ParseState st = _state_from("");
+  st.emit_stderr = false;
+  DataType dt = dtype_new();
+  let err = st.parse_datatype(&dt);
+  assert err.is_some(), "expected an error";
+  fit err.unwrap() {
+    .InvalidDataType -> {}
+    _ -> { panic("expected InvalidDataType"); }
+  }
+}
+
+test "parse_generic_type_args reads a single generic argument" {
+  ParseState st = _state_from("Vec<num>");
+  DataType dt = dtype_new();
+  assert st.parse_datatype(&dt).is_none(), "expected Vec<num> to parse";
+  assert equals(dt.type_str, "Vec"), "expected base type_str 'Vec'";
+  assert dt.generic_args.len == 1, "expected 1 generic arg";
+  let arg0 = dt.generic_args.get(0);
+  assert arg0.kind == DataTypeType.Num, "expected generic arg Num";
+}
+
+test "parse_generic_type_args reads multiple comma-separated arguments" {
+  ParseState st = _state_from("Map<str, num>");
+  DataType dt = dtype_new();
+  assert st.parse_datatype(&dt).is_none(), "expected Map<str, num> to parse";
+  assert dt.generic_args.len == 2, "expected 2 generic args";
+  let arg0 = dt.generic_args.get(0);
+  let arg1 = dt.generic_args.get(1);
+  assert arg0.kind == DataTypeType.Str, "expected first arg Str";
+  assert arg1.kind == DataTypeType.Num, "expected second arg Num";
+}
+
+test "parse_generic_type_args splits a lexed '>>' for nested generics" {
+  ParseState st = _state_from("Vec<Vec<num>>");
+  DataType dt = dtype_new();
+  assert st.parse_datatype(&dt).is_none(), "expected Vec<Vec<num>> to parse";
+  assert equals(dt.type_str, "Vec"), "expected outer type_str 'Vec'";
+  assert dt.generic_args.len == 1, "expected 1 outer generic arg";
+  let inner = dt.generic_args.get(0);
+  assert equals(inner.type_str, "Vec"), "expected inner type_str 'Vec'";
+  assert inner.generic_args.len == 1, "expected 1 inner generic arg";
+  let innermost = inner.generic_args.get(0);
+  assert innermost.kind == DataTypeType.Num, "expected innermost arg Num";
+}
+
+test "parse_generic_type_args pointer-typed generic argument" {
+  ParseState st = _state_from("Vec<Node*>");
+  DataType dt = dtype_new();
+  assert st.parse_datatype(&dt).is_none(), "expected Vec<Node*> to parse";
+  let inner = dt.generic_args.get(0);
+  assert equals(inner.type_str, "Node"), "expected inner type_str 'Node'";
+  assert inner.pointer_depth == 1, "expected inner pointer depth 1";
 }
 
 // The lookup name a new scope entity for `node` should carry; empty for a
