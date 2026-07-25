@@ -140,6 +140,29 @@ pub fun left_has_priority(str op_left, str op_right) bin {
   ret left.rank <= right.rank;
 }
 
+// True if `op` is one of the supported PREFIX unary operators: negation,
+// unary plus, logical/bitwise not, pointer indirection, address-of, or
+// pre-increment/decrement.
+pub fun is_unary_operator(str op) bin {
+  fit op {
+    "-", "+", "!", "~", "*", "&", "++", "--" -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
+// True if `op` is the pointer-indirection operator (`*p`). A narrower
+// check than `is_unary_operator` -- indirection needs its own parsing
+// path (`parse_for_indirection_unary`) since a following run of `*`s is a
+// POINTER-DEPTH count, not a chain of separate unary operators.
+pub fun is_indirection_operator(str op) bin {
+  ret equals(op, "*");
+}
+
+// True if `op` is a LEFT-operanded (postfix) unary operator: `x++`/`x--`.
+pub fun is_left_operanded_unary_operator(str op) bin {
+  ret equals(op, "++") || equals(op, "--");
+}
+
 test "op_precedence_for ranks multiplication tighter than addition" {
   let mul = op_precedence_for("*");
   let add = op_precedence_for("+");
@@ -186,4 +209,24 @@ test "left_has_priority never yields for a right-associative left operator" {
   // leftward against a DIFFERENT operator either, regardless of the
   // other operator's own rank.
   assert !left_has_priority("=", "+"), "right-associative left operator should never keep priority";
+}
+
+test "is_unary_operator recognizes the supported prefix operators" {
+  assert is_unary_operator("-"), "'-' should be a unary operator";
+  assert is_unary_operator("!"), "'!' should be a unary operator";
+  assert is_unary_operator("*"), "'*' should be a unary operator";
+  assert is_unary_operator("++"), "'++' should be a unary operator";
+  assert !is_unary_operator("+="), "'+=' should not be a unary operator";
+  assert !is_unary_operator("=="), "'==' should not be a unary operator";
+}
+
+test "is_indirection_operator only matches '*'" {
+  assert is_indirection_operator("*"), "'*' should be the indirection operator";
+  assert !is_indirection_operator("&"), "'&' should not be the indirection operator";
+}
+
+test "is_left_operanded_unary_operator only matches ++/--" {
+  assert is_left_operanded_unary_operator("++"), "'++' should be left-operanded";
+  assert is_left_operanded_unary_operator("--"), "'--' should be left-operanded";
+  assert !is_left_operanded_unary_operator("-"), "'-' should not be left-operanded";
 }
