@@ -2407,7 +2407,13 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                     if (fitArmInlineClose(toks, idx, source, line_starts, state.allocator, currentColumn(state.out))) |close_i| {
                         inline_arm_close = close_i;
                         try state.out.append('{');
-                        try state.out.append(' ');
+                        // An EMPTY inline body (`{}`, close immediately follows
+                        // open) stays compact -- don't pre-emptively add the
+                        // "{ content }" padding space when there's no content.
+                        // The matching close-brace handler has its own guard
+                        // for this, but that only prevents a SECOND space; the
+                        // one written here happens first and unconditionally.
+                        if (close_i != idx + 1) try state.out.append(' ');
                         state.at_line_start.* = false;
                         state.prev_token.* = null;
                         continue;

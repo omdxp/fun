@@ -417,6 +417,11 @@ pub const LspServer = struct {
     debug_enabled: bool = false,
     debug_imports: bool = false,
     debug_definitions: bool = false,
+    /// Diagnostic aid: the LSP method currently being handled in `run()`'s
+    /// dispatch loop, so import-resolution debug logs can show WHAT actually
+    /// triggered them (e.g. is a burst coming from `textDocument/hover` on
+    /// mouse movement, or something less obviously tied to user action).
+    current_request_method: []const u8 = "",
     did_log_stdlib_root_resolution: bool = false,
     /// Recursion guard for the query-time type engine: `guessVariableType` may
     /// re-infer a binding's initializer expression, which can recurse back into
@@ -823,6 +828,7 @@ pub const LspServer = struct {
             const method_val = obj.get("method") orelse null;
             const id_val = obj.get("id") orelse null;
             const method = if (method_val != null and method_val.? == .string) method_val.?.string else "";
+            self.current_request_method = method;
 
             // Never let a single bad request/notification kill the server.
             // VS Code formatting+save can trigger unusual edit shapes; we prefer to log and keep going.
@@ -10806,7 +10812,7 @@ pub const LspServer = struct {
         const spec = std.mem.trim(u8, raw_import, " \t\r\n\"");
         if (spec.len == 0) return null;
 
-        if (self.debug_imports) self.dbg(true, "imports", "resolveImportUri current_uri={s} raw='{s}' spec='{s}'", .{ current_uri, raw_import, spec });
+        if (self.debug_imports) self.dbg(true, "imports", "resolveImportUri via='{s}' current_uri={s} raw='{s}' spec='{s}'", .{ self.current_request_method, current_uri, raw_import, spec });
 
         const current_path = uriToPath(self.allocator, current_uri) catch return null;
         defer self.allocator.free(current_path);

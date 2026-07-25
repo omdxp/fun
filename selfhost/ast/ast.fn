@@ -170,6 +170,11 @@ pub enum WarningControlAction {
   Expect,
 }
 
+// Kept as a free function (rather than ONLY the `From<str>` quirk impl
+// below) because callers that validate a warning-control directive from
+// SOURCE (`allow unknown_id;`) need to detect and report an invalid id as a
+// real compile error -- `From<T>`'s `from(T value)` is void/best-effort by
+// contract (see std.quirks), which can't express that failure.
 pub fun warning_id_from_string(str name) Option<WarningId> {
   fit name {
     "return_local_ptr" -> { ret .Some(.ReturnLocalPtr); }
@@ -187,6 +192,20 @@ pub fun warning_id_from_string(str name) Option<WarningId> {
     "integer_literal_out_of_range" -> { ret .Some(.IntegerLiteralOutOfRange); }
     "channel_capacity_overflow" -> { ret .Some(.ChannelCapacityOverflow); }
     _ -> { ret .None; }
+  }
+}
+
+// `id.from(str)` mutates `*self` in place on a recognized name, matching
+// `From<T>`'s documented best-effort contract (leaves `self` unchanged on
+// an unrecognized one) -- built on the fallible free function above rather
+// than duplicating the string table.
+impl WarningId as From<str> {
+  pub from(str value) {
+    let parsed = warning_id_from_string(value);
+    fit parsed {
+      .Some(id) -> { *self = id; }
+      .None -> {}
+    }
   }
 }
 
