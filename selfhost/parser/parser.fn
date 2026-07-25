@@ -62,6 +62,13 @@ pub enum ParseErrorKind {
   InvalidOperand,
   InvalidStatement,
   InvalidString,
+  // Note: in the original this specific member actually comes from
+  // `LexError`, not `ParseError` (its `ParseError || TranspileError ||
+  // LexError` union just makes it usable from parser code too) -- folded
+  // into this single enum along with everything else regardless of which
+  // original error set it came from, since this port doesn't replicate
+  // that three-way split.
+  InvalidExpression,
 }
 
 impl ParseState {
@@ -496,6 +503,22 @@ impl ParseState {
   // at (not including) `stop_scope`.
   pub last_scope_entity_stop_at(Scope* stop_scope) ScopeEntity* {
     ret self.scope_current.last_entity_from_scope_stop_at(stop_scope);
+  }
+
+  // Pops and returns the last node pushed onto the output node list, or
+  // `.None` if it's empty. Expression/statement parsing composes larger
+  // nodes by popping their already-parsed children back off this list, the
+  // same node-stack discipline the original uses throughout.
+  pub node_pop() Option<Node> {
+    if self.nodes.len == 0 {
+      ret .None;
+    }
+    ret .Some(self.nodes.pop());
+  }
+
+  // Returns the last node WITHOUT popping it, or `.None` if empty.
+  pub node_peek_last() Option<Node> {
+    ret self.nodes.last();
   }
 
   // Parses a bracketed generic-argument list (`<T, U>`) into `dt.generic_args`,
@@ -1056,6 +1079,297 @@ impl Parser {
       }
       _ -> {}
     }
+  }
+
+  // The last node on the output list, if it's still a valid expression
+  // operand (a literal/identifier/unary/nested-expression -- not, say, a
+  // just-finished statement). `.None` when the list is empty or the last
+  // node isn't operand-shaped. Used to tell "an operator here continues a
+  // left operand already on the stack" (a binary operator) from "an
+  // operator here STARTS a new operand" (a prefix/unary position).
+  pub node_peek_expressionable() Option<Node> {
+    fit self.state.node_peek_last() {
+      .Some(n) -> {
+        if node_is_expressionable(n) {
+          ret .Some(n);
+        }
+        ret .None;
+      }
+      .None -> { ret .None; }
+    }
+  }
+
+  // Parses a single "expressionable" token into a node and pushes it:
+  // literals, identifiers, and strings go through `parse_single_token_to_node`;
+  // an operator token is handed to `parse_expression` (grouping or a binary
+  // continuation). Any other token kind (a keyword, a structural symbol, a
+  // newline/comment) is not an error here -- it just means there's nothing
+  // (more) to parse at this position, signaled by leaving the output list
+  // unchanged (see `parse_expressionable`, which loops on exactly that).
+  // 
+  // Deliberately simplified from the original for this slice: no unary
+  // operators (`-x`, `!x`, `*p`, `&x`, `++x`), no channel operators (`<-`),
+  // no enum-variant-shorthand dot-expressions (`.Variant`), no keyword
+  // operands (`nil`, `panic(...)`, `await`, `sizeof`). Each is a
+  // self-contained follow-up slice once this core binary-expression loop
+  // is solid.
+  pub parse_expressionable_single() Option<ParseErrorKind> {
+    fit self.state.token_peek_next() {
+      .Some(t) -> {
+        // A `fit` arm's comma-separated multi-pattern list only supports
+        // string-literal patterns today, not bare enum-variant shorthand
+        // (confirmed directly: `.A, .B -> {}` fails to parse where `"a",
+        // "b" -> {}` works fine) -- a real language gap, but an unrelated
+        // one (lives in the fit-statement grammar, not ported/touched by
+        // this slice), so this uses an if/elif chain instead rather than
+        // detouring to fix it now.
+        if t.type == TokenType.Number || t.type == TokenType.Boolean || t.type == TokenType.Identifier || t.type == TokenType.String {
+          ret self.parse_single_token_to_node();
+        }
+        if t.type == TokenType.Operator {
+          ret self.parse_expression();
+        }
+        ret .None;
+      }
+      .None -> { ret .None; }
+    }
+  }
+
+  // Repeatedly parses expressionable tokens until a call makes no further
+  // progress (the output list stops growing) or an error occurs.
+  pub parse_expressionable() Option<ParseErrorKind> {
+    for true {
+      num before = self.state.nodes.len;
+      let err = self.parse_expressionable_single();
+      if err.is_some() {
+        ret err;
+      }
+      if self.state.nodes.len == before {
+        ret .None;
+      }
+    }
+  }
+
+  // Like `parse_expressionable`, but requires at least one node to have
+  // been produced -- the entry point for a position that MUST be an
+  // expression (an initializer, a condition, ...), as opposed to a
+  // position where an expression is merely optional.
+  pub parse_expressionable_root() Option<ParseErrorKind> {
+    num before = self.state.nodes.len;
+    let err = self.parse_expressionable();
+    if err.is_some() {
+      ret err;
+    }
+    if self.state.nodes.len == before {
+      self.state.err("expected expression");
+      ret .Some(ParseErrorKind.InvalidExpression);
+    }
+    ret .None;
+  }
+
+  // If the next token is an operator, parses another full expressionable
+  // continuation (used after a primary/postfix form to pick up whatever
+  // binary operator follows, e.g. after closing a parenthesized group).
+  pub parse_additional_expression() Option<ParseErrorKind> {
+    fit self.state.token_peek_next() {
+      .Some(t) -> {
+        if t.type == TokenType.Operator {
+          ret self.parse_expressionable();
+        }
+        ret .None;
+      }
+      .None -> { ret .None; }
+    }
+  }
+
+  // Parses a parenthesized group `(...)`. If a value was already sitting on
+  // the output list right before the `(` (e.g. an already-parsed callee
+  // identifier), it's popped and combined with the parenthesized contents
+  // into a `()`-op call `Expression` node -- this is how function/method
+  // calls are represented: `Expression{ left = callee, right =
+  // ExpressionParenthesis{ ... }, op = "()" }`. Otherwise the parenthesized
+  // contents are pushed as a plain `ExpressionParenthesis` grouping node.
+  // Either way, finishes by picking up any further operator continuation
+  // via `parse_additional_expression`.
+  pub parse_for_parenthesis() Option<ParseErrorKind> {
+    let lparen_err = self.state.expect_op("(");
+    if lparen_err.is_some() {
+      ret lparen_err;
+    }
+
+    Node left_node = node_new(NodeKind.Blank);
+    bin has_left_node = false;
+    fit self.state.node_peek_last() {
+      .Some(n) -> {
+        if node_is_value_type(n) {
+          left_node = n;
+          has_left_node = true;
+          self.state.node_pop();
+        }
+      }
+      .None -> {}
+    }
+
+    Node exp_node = node_new(NodeKind.Blank);
+    if !self.state.next_token_is_symbol(')') {
+      let err = self.parse_expressionable_root();
+      if err.is_some() {
+        ret err;
+      }
+      fit self.state.node_pop() {
+        .Some(n) -> { exp_node = n; }
+        .None -> {}
+      }
+    }
+
+    let rparen_err = self.state.expect_sym(')');
+    if rparen_err.is_some() {
+      ret rparen_err;
+    }
+
+    Node* exp = malloc(sizeof(Node));
+    *exp = exp_node;
+    Node paren_node = node_new(NodeKind.ExpressionParenthesis(exp));
+    self.create_node(&paren_node);
+
+    if has_left_node {
+      fit self.state.node_pop() {
+        .Some(popped_paren) -> {
+          Node* left = malloc(sizeof(Node));
+          *left = left_node;
+          Node* right = malloc(sizeof(Node));
+          *right = popped_paren;
+
+          ExprNode call_e;
+          call_e.left = left;
+          call_e.has_left = true;
+          call_e.right = right;
+          call_e.has_right = true;
+          call_e.op = "()";
+          Node call_node = node_new(NodeKind.Expression(call_e));
+          self.create_node(&call_node);
+        }
+        .None -> {}
+      }
+    }
+
+    ret self.parse_additional_expression();
+  }
+
+  // Dispatches on the next token to the right expression-shape parser: `(`
+  // starts a parenthesized group/call, anything else is a binary-operator
+  // continuation via `parse_normal_expression`.
+  // 
+  // Deliberately simplified from the original for this slice: no `,`
+  // (comma-expression) or `[` (bracket/array-literal) dispatch yet.
+  pub parse_expression() Option<ParseErrorKind> {
+    fit self.state.token_peek_next() {
+      .Some(t) -> {
+        bin is_lparen = false;
+        fit t.data {
+          .Sval(s) -> { is_lparen = equals(s, "("); }
+          _ -> {}
+        }
+        if is_lparen {
+          ret self.parse_for_parenthesis();
+        }
+        ret self.parse_normal_expression();
+      }
+      .None -> { ret .None; }
+    }
+  }
+
+  // Parses a binary-operator continuation: consumes the operator, parses
+  // its right-hand operand, combines it with the left operand already on
+  // the output list into an `Expression` node via `make_expression_node`,
+  // then fixes precedence via `parse_reorder_expression`.
+  // 
+  // Deliberately simplified from the original for this slice: requires a
+  // left operand to already be on the stack (no prefix/unary operators, no
+  // channel `<-`, no enum-variant-shorthand `.Variant` yet -- each needs
+  // infrastructure this slice doesn't have), and the right operand must be
+  // a parenthesized group or another `parse_expressionable` continuation
+  // (no unary RHS).
+  pub parse_normal_expression() Option<ParseErrorKind> {
+    let tok = self.state.token_peek_next();
+    if tok.is_none() {
+      self.state.err("expected operator in expression");
+      ret .Some(ParseErrorKind.InvalidExpression);
+    }
+    let t = tok.unwrap();
+    str op = "";
+    fit t.data {
+      .Sval(s) -> { op = s; }
+      _ -> {}
+    }
+    let op_pos = t.pos;
+
+    let maybe_left = self.node_peek_expressionable();
+    if maybe_left.is_none() {
+      let msg = format("expected left operand for '{str}' operator", op);
+      defer free(msg);
+      self.state.err(msg);
+      ret .Some(ParseErrorKind.InvalidOperand);
+    }
+    Node node_left = maybe_left.unwrap();
+
+    self.state.token_next();
+    self.state.node_pop();
+
+    let tok2 = self.state.token_peek_next();
+    if tok2.is_none() {
+      let msg = format("expected expressionable for '{str}' operator", op);
+      defer free(msg);
+      self.state.err(msg);
+      ret .Some(ParseErrorKind.InvalidOperand);
+    }
+    let t2 = tok2.unwrap();
+    if t2.type == TokenType.Operator {
+      bin is_lparen = false;
+      fit t2.data {
+        .Sval(s2) -> { is_lparen = equals(s2, "("); }
+        _ -> {}
+      }
+      if is_lparen {
+        let perr = self.parse_for_parenthesis();
+        if perr.is_some() {
+          ret perr;
+        }
+      } else {
+        let msg = format("expected expressionable for '{str}' operator", op);
+        defer free(msg);
+        self.state.err(msg);
+        ret .Some(ParseErrorKind.InvalidOperand);
+      }
+    } else {
+      let err = self.parse_expressionable();
+      if err.is_some() {
+        ret err;
+      }
+    }
+
+    let maybe_right = self.state.node_pop();
+    if maybe_right.is_none() {
+      let msg = format("expected expressionable for '{str}' operator", op);
+      defer free(msg);
+      self.state.err(msg);
+      ret .Some(ParseErrorKind.InvalidOperand);
+    }
+    Node node_right = maybe_right.unwrap();
+
+    self.make_expression_node(&node_left, &node_right, op, op_pos);
+    fit self.state.node_pop() {
+      .Some(built) -> {
+        Node exp_node = built;
+        self.parse_reorder_expression(&exp_node);
+        self.state.nodes.push(exp_node);
+      }
+      .None -> {
+        self.state.err("expected expression node");
+        ret .Some(ParseErrorKind.InvalidExpression);
+      }
+    }
+    ret .None;
   }
 
   // Builds a new scope entity for `node`, deriving its lookup name from the
@@ -1746,6 +2060,211 @@ test "parse_node_move_right_left_to_left rotates a call/comma-shaped pair" {
     }
     _ -> { panic("expected an Expression node"); }
   }
+}
+
+// Sets up a ParseState with a root/current scope and one declared entity
+// per name in `names`, so `parse_single_token_to_node`'s identifier
+// validation accepts them as ordinary values. Used by the end-to-end
+// expression-parsing tests below.
+fun _state_with_declared(str src, Vec<str> names) ParseState {
+  ParseState st = _state_from(src);
+  Scope* root = malloc(sizeof(Scope));
+  *root = scope_new();
+  st.scope_root = root;
+  st.has_scope_root = true;
+  st.scope_current = root;
+  st.has_scope_current = true;
+  num i = 0;
+  for i < names.len {
+    ScopeEntity* e = malloc(sizeof(ScopeEntity));
+    *e = scope_entity_new(names.get(i));
+    st.push_scope_entity(e);
+    i = i + 1;
+  }
+  ret st;
+}
+
+test "parse_expressionable_root parses a simple binary expression" {
+  Vec<str> names;
+  names.init(0);
+  names.push("a");
+  names.push("b");
+  ParseState st = _state_with_declared("a + b", names);
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected 'a + b' to parse";
+  // `node_pop` really removes elements (a genuine stack, not a persistent
+  // array with a logical top pointer): `a` and `b` are consumed when
+  // combined into the Expression, so only the final combined node remains.
+  assert st.nodes.len == 1, "expected only the final Expression node to remain";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Expression(e) -> {
+      assert equals(e.op, "+"), "expected op '+'";
+      fit e.left.kind {
+        .Identifier(s) -> { assert equals(s, "a"), "expected left 'a'"; }
+        _ -> { panic("expected Identifier 'a'"); }
+      }
+      fit e.right.kind {
+        .Identifier(s) -> { assert equals(s, "b"), "expected right 'b'"; }
+        _ -> { panic("expected Identifier 'b'"); }
+      }
+    }
+    _ -> { panic("expected an Expression node"); }
+  }
+}
+
+test "parse_expressionable_root respects operator precedence (a * b + c)" {
+  Vec<str> names;
+  names.init(0);
+  names.push("a");
+  names.push("b");
+  names.push("c");
+  ParseState st = _state_with_declared("a * b + c", names);
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected 'a * b + c' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  // Expect ((a * b) + c).
+  fit top.kind {
+    .Expression(e) -> {
+      assert equals(e.op, "+"), "expected the outer op to be '+'";
+      fit e.right.kind {
+        .Identifier(s) -> { assert equals(s, "c"), "expected the outer right to be 'c'"; }
+        _ -> { panic("expected Identifier 'c'"); }
+      }
+      fit e.left.kind {
+        .Expression(le) -> {
+          assert equals(le.op, "*"), "expected the left child's op to be '*'";
+        }
+        _ -> { panic("expected the left child to be an Expression"); }
+      }
+    }
+    _ -> { panic("expected an Expression node"); }
+  }
+}
+
+test "parse_expressionable_root respects operator precedence (a + b * c)" {
+  Vec<str> names;
+  names.init(0);
+  names.push("a");
+  names.push("b");
+  names.push("c");
+  ParseState st = _state_with_declared("a + b * c", names);
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected 'a + b * c' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  // Expect (a + (b * c)) -- already correct, no rotation needed.
+  fit top.kind {
+    .Expression(e) -> {
+      assert equals(e.op, "+"), "expected the outer op to be '+'";
+      fit e.left.kind {
+        .Identifier(s) -> { assert equals(s, "a"), "expected the outer left to be 'a'"; }
+        _ -> { panic("expected Identifier 'a'"); }
+      }
+      fit e.right.kind {
+        .Expression(re) -> {
+          assert equals(re.op, "*"), "expected the right child's op to be '*'";
+        }
+        _ -> { panic("expected the right child to be an Expression"); }
+      }
+    }
+    _ -> { panic("expected an Expression node"); }
+  }
+}
+
+test "parse_expressionable_root parses a parenthesized group" {
+  Vec<str> names;
+  names.init(0);
+  names.push("a");
+  names.push("b");
+  names.push("c");
+  ParseState st = _state_with_declared("(a + b) * c", names);
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected '(a + b) * c' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Expression(e) -> {
+      assert equals(e.op, "*"), "expected the outer op to be '*'";
+      fit e.right.kind {
+        .Identifier(s) -> { assert equals(s, "c"), "expected the outer right to be 'c'"; }
+        _ -> { panic("expected Identifier 'c'"); }
+      }
+      fit e.left.kind {
+        .ExpressionParenthesis(inner) -> {
+          fit inner.kind {
+            .Expression(ie) -> {
+              assert equals(ie.op, "+"), "expected the parenthesized op to be '+'";
+            }
+            _ -> { panic("expected the parenthesized contents to be an Expression"); }
+          }
+        }
+        _ -> { panic("expected the outer left to be an ExpressionParenthesis"); }
+      }
+    }
+    _ -> { panic("expected an Expression node"); }
+  }
+}
+
+test "parse_expressionable_root parses a zero-arg call" {
+  Vec<str> names;
+  names.init(0);
+  names.push("foo");
+  ParseState st = _state_with_declared("foo()", names);
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected 'foo()' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Expression(e) -> {
+      assert equals(e.op, "()"), "expected op '()'";
+      fit e.left.kind {
+        .Identifier(s) -> { assert equals(s, "foo"), "expected callee 'foo'"; }
+        _ -> { panic("expected Identifier 'foo'"); }
+      }
+      fit e.right.kind {
+        .ExpressionParenthesis(inner) -> {
+          fit inner.kind {
+            .Blank -> {}
+            _ -> { panic("expected a Blank node for the empty arg list"); }
+          }
+        }
+        _ -> { panic("expected an ExpressionParenthesis for the arg list"); }
+      }
+    }
+    _ -> { panic("expected an Expression node"); }
+  }
+}
+
+test "parse_expressionable_root parses a one-arg call" {
+  Vec<str> names;
+  names.init(0);
+  names.push("foo");
+  names.push("x");
+  ParseState st = _state_with_declared("foo(x)", names);
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected 'foo(x)' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Expression(e) -> {
+      assert equals(e.op, "()"), "expected op '()'";
+      fit e.right.kind {
+        .ExpressionParenthesis(inner) -> {
+          fit inner.kind {
+            .Identifier(s) -> { assert equals(s, "x"), "expected the arg to be 'x'"; }
+            _ -> { panic("expected the arg list contents to be Identifier 'x'"); }
+          }
+        }
+        _ -> { panic("expected an ExpressionParenthesis for the arg list"); }
+      }
+    }
+    _ -> { panic("expected an Expression node"); }
+  }
+}
+
+test "parse_expressionable_root reports an error with no operand at all" {
+  ParseState st = _state_from(";");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_expressionable_root();
+  assert err.is_some(), "expected an error for an empty expression position";
 }
 
 // The lookup name a new scope entity for `node` should carry; empty for a
