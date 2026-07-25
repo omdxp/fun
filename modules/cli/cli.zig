@@ -851,6 +851,21 @@ fn isPointerTypeStarContext(toks: []const token.Token, idx: usize, prev: token.T
     // Return type pointers: `...) Type* {` or `...) Type*;`
     if (next.type == .Symbol and (next.data.cval == '{' or next.data.cval == ';')) return true;
 
+    // Generic argument pointer as the LAST type argument: `Vec<Type*>`
+    // (closing `>`, no name follows the star). Deliberately narrow --
+    // unlike a following identifier/`;`/`)`, a following `,` here would be
+    // ambiguous with real multiplication followed by a call argument
+    // (`foo(a * b, c)`), so that shape is left alone.
+    if (next.type == .Operator and std.mem.eql(u8, next.data.sval.items, ">")) return true;
+    if (next.type == .Symbol and next.data.cval == '>') return true;
+
+    // Unnamed pointer type immediately closing a parenthesized list, e.g. an
+    // enum data-carrying variant's payload (`StatementFork(Node*)`) or a
+    // function-type parameter (`fun(Node*) R`). Unambiguous: a real
+    // multiplication can never be immediately followed by `)` (it always
+    // needs a right operand first), so this can only be a bare pointer type.
+    if (next.type == .Symbol and next.data.cval == ')') return true;
+
     // Declaration/field/param pointers: `Type* name` (name then delimiter)
     if (next.type == .Identifier) {
         const after_name_idx = nextSignificantIndex(toks, next_idx + 1) orelse return false;

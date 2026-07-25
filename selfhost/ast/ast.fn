@@ -1,0 +1,707 @@
+// AST node types for the self-hosted Fun compiler.
+// 
+// Design decisions (each a deliberate divergence from a straightforward
+// line-for-line port, documented per the project's self-hosting
+// conventions -- see selfhost/lexer/ for the earlier precedents this
+// follows):
+// 
+// - `DataType` (and its supporting types) live in THIS file rather than a
+// separate module. The original has a genuine mutual dependency: a
+// DataType's array-size-expression field needs `Node`, and `Node`'s
+// variable/function/field declarations need `DataType`. The language
+// disallows circular imports between files (confirmed directly), so the
+// two must be co-located -- not a workaround, just where the natural
+// boundary actually falls here.
+// - A single FLAT `NodeKind` enum replaces the original's two-level
+// `NodeType` (a plain discriminant) + nested `node_variant` union (whose
+// OWN inner `statement` union groups several node kinds together purely
+// for source organization). The outer variant tag already fully
+// discriminates every node shape, so the extra nesting carries no extra
+// information here; a flat data-carrying enum is more idiomatic and
+// equally expressive.
+// - Each node kind's data lives in its own dedicated `compound` (e.g.
+// `FunctionNode`, `IfStmtNode`) rather than long positional payload
+// lists -- a data-carrying enum variant can hold any number of
+// positional fields, but seven-plus positional fields of mixed types is
+// unreadable and error-prone at every construction site.
+// - Optional child nodes are plain `Node*` fields compared against `nil`
+// (confirmed working, matching the established stdlib/lexer idiom), not
+// `Option<Node*>` -- `Option<T>` is reserved for genuine value-semantic
+// optionality elsewhere in this codebase; pointer nullability already
+// has `nil` for exactly this.
+// - Optional VECTOR fields (e.g. a function's generic type params, present
+// only for `fun f<T>`) use a `bin has_X` flag alongside an always-`.init(0)`-ed
+// `Vec<T>` value field, rather than a heap-allocated `Vec<T>*` -- confirmed
+// that a freshly-declared compound's `Vec<T>` field reads GARBAGE length
+// (not zero) until `.init()` runs, so every node-payload constructor
+// below explicitly initializes every Vec field to keep this safe; callers
+// MUST go through these constructors rather than declaring bare node
+// payload compounds.
+// - `VariableList`, `StatementCase`, `StatementDefault` (present in the
+// original's NodeType enum) are dropped entirely -- confirmed via
+// grepping the whole codebase that nothing ever constructs them.
+// - `StatementAsm`/inline-assembly nodes are deferred, matching the
+// lexer's own already-documented deferral of `asm` raw-body lexing: the
+// self-hosted compiler's own source has no need for inline assembly.
+// - `data: ?token.TokenData` (the original's separate slot used only for
+// literal nodes -- Number/Identifier/String/Character/Boolean) is
+// dropped in favor of each of those NodeKind variants carrying its
+// literal value directly, reusing `token.TokenData` for Number (which
+// already distinguishes integer vs decimal via its Num/Dec variants).
+
+imp ..lexer.token;
+imp std.vec;
+imp std.string;
+imp std.option;
+imp std.quirks;
+
+// ===== Data types =====
+
+pub compound DataTypeFlags {
+  bin is_pointer;
+  bin is_literal;
+  bin is_array;
+}
+
+pub enum DataTypeType {
+  Void,
+  Raw,
+  Chr,
+  Str,
+  Dec,
+  Num,
+  Bin,
+  Unknown,
+}
+
+// A function-type signature attached to a DataType's `fn_sig` (for a
+// function-type PARAMETER, `fun(T1, T2) R name` -- see DataType.fn_sig).
+pub compound FnTypeSig {
+  Vec<DataType*> params;
+  DataType* rtype;
+}
+
+pub fun fn_type_sig_new() FnTypeSig {
+  FnTypeSig s;
+  s.params.init(0);
+  ret s;
+}
+
+pub compound DataType {
+  DataTypeFlags flags;
+  DataTypeType kind;
+  str type_str;
+  num pointer_depth;
+  // Array-size expressions (`num[COMPUTED_SIZE]`); empty when not an
+  // array or when brackets have no inner expression (`num[]`).
+  Vec<Node*> array_brackets;
+  bin is_array;
+  num array_depth;
+  // Generic instantiation arguments (`Vec<num>` -> [num]); empty for a
+  // non-generic type.
+  Vec<DataType*> generic_args;
+  FnTypeSig* fn_sig;
+  bin has_fn_sig;
+}
+
+// Every DataType construction site must go through this constructor (see
+// the file-level design note on Vec-init discipline).
+pub fun dtype_new() DataType {
+  DataType dt;
+  dt.flags = .{is_pointer = false, is_literal = false, is_array = false};
+  dt.kind = .Unknown;
+  dt.type_str = "";
+  dt.pointer_depth = 0;
+  dt.array_brackets.init(0);
+  dt.is_array = false;
+  dt.array_depth = 0;
+  dt.generic_args.init(0);
+  dt.fn_sig = nil;
+  dt.has_fn_sig = false;
+  ret dt;
+}
+
+// ===== Node envelope =====
+
+pub compound NodeFlags {
+  bin inside_expression;
+  bin has_variable_combined;
+  bin is_public;
+  bin is_used;
+}
+
+pub fun node_flags_new() NodeFlags {
+  NodeFlags f;
+  f.inside_expression = false;
+  f.has_variable_combined = false;
+  f.is_public = false;
+  f.is_used = false;
+  ret f;
+}
+
+pub compound BindedNode {
+  Node* owner;
+  bin has_owner;
+  Node* function;
+  bin has_function;
+}
+
+// ===== Warning diagnostics =====
+
+pub enum WarningId {
+  ReturnLocalPtr,
+  FitNonExhaustive,
+  FitUnreachableBranch,
+  UnreachableCode,
+  AssertConstant,
+  UnusedVariable,
+  UnusedImport,
+  UnusedFunction,
+  UnusedCompound,
+  MissingReturn,
+  BlockingForkDeadlock,
+  SharedMutableCaptureRace,
+  IntegerLiteralOutOfRange,
+  ChannelCapacityOverflow,
+}
+
+pub enum WarningControlAction {
+  Allow,
+  Expect,
+}
+
+pub fun warning_id_from_string(str name) Option<WarningId> {
+  fit name {
+    "return_local_ptr" -> { ret .Some(.ReturnLocalPtr); }
+    "fit_non_exhaustive" -> { ret .Some(.FitNonExhaustive); }
+    "fit_unreachable_branch" -> { ret .Some(.FitUnreachableBranch); }
+    "unreachable_code" -> { ret .Some(.UnreachableCode); }
+    "assert_constant" -> { ret .Some(.AssertConstant); }
+    "unused_variable" -> { ret .Some(.UnusedVariable); }
+    "unused_import" -> { ret .Some(.UnusedImport); }
+    "unused_function" -> { ret .Some(.UnusedFunction); }
+    "unused_compound" -> { ret .Some(.UnusedCompound); }
+    "missing_return" -> { ret .Some(.MissingReturn); }
+    "blocking_fork_deadlock" -> { ret .Some(.BlockingForkDeadlock); }
+    "shared_mutable_capture_race" -> { ret .Some(.SharedMutableCaptureRace); }
+    "integer_literal_out_of_range" -> { ret .Some(.IntegerLiteralOutOfRange); }
+    "channel_capacity_overflow" -> { ret .Some(.ChannelCapacityOverflow); }
+    _ -> { ret .None; }
+  }
+}
+
+// `id.to()` instead of a free function -- WarningId -> str is exactly the
+// shape std.quirks' `To<T>` conversion quirk is for.
+impl WarningId as To<str> {
+  pub to() str {
+    fit *self {
+      .ReturnLocalPtr -> { ret "return_local_ptr"; }
+      .FitNonExhaustive -> { ret "fit_non_exhaustive"; }
+      .FitUnreachableBranch -> { ret "fit_unreachable_branch"; }
+      .UnreachableCode -> { ret "unreachable_code"; }
+      .AssertConstant -> { ret "assert_constant"; }
+      .UnusedVariable -> { ret "unused_variable"; }
+      .UnusedImport -> { ret "unused_import"; }
+      .UnusedFunction -> { ret "unused_function"; }
+      .UnusedCompound -> { ret "unused_compound"; }
+      .MissingReturn -> { ret "missing_return"; }
+      .BlockingForkDeadlock -> { ret "blocking_fork_deadlock"; }
+      .SharedMutableCaptureRace -> { ret "shared_mutable_capture_race"; }
+      .IntegerLiteralOutOfRange -> { ret "integer_literal_out_of_range"; }
+      .ChannelCapacityOverflow -> { ret "channel_capacity_overflow"; }
+    }
+  }
+}
+
+// ===== Per-node-kind payload types =====
+// 
+// Each compound below is the payload of exactly one `NodeKind` variant
+// (named identically, minus the `Node`/`Kind` suffix noise). Every one
+// that owns a `Vec<T>` field gets a paired `_new()` constructor; callers
+// MUST use it instead of a bare declaration (see the file-level note).
+
+pub compound ExprNode {
+  Node* left;
+  bin has_left;
+  Node* right;
+  bin has_right;
+  str op;
+}
+
+pub compound UnaryNode {
+  bin is_left_operanded_unary;
+  str op;
+  Node* operand;
+  bin has_indirection;
+  num indirection_depth;
+}
+
+pub compound TenaryNode {
+  Node* cond;
+  Node* then_val;
+  Node* else_val;
+}
+
+pub compound CompoundInitField {
+  str name;
+  Node* value;
+}
+
+pub compound CompoundInitNode {
+  DataType* init_dtype;
+  bin has_dtype;
+  Vec<CompoundInitField> fields;
+}
+
+pub fun compound_init_node_new() CompoundInitNode {
+  CompoundInitNode n;
+  n.init_dtype = nil;
+  n.has_dtype = false;
+  n.fields.init(0);
+  ret n;
+}
+
+pub compound VariableNode {
+  DataType* var_type;
+  str name;
+  Node* val;
+  bin has_val;
+}
+
+pub compound BodyNode {
+  Vec<Node*> statements;
+}
+
+pub fun body_node_new() BodyNode {
+  BodyNode b;
+  b.statements.init(0);
+  ret b;
+}
+
+pub compound FunctionNode {
+  DataType* rtype;
+  bin has_rtype;
+  str name;
+  bin has_name;
+  // Generic type parameter names (`fun f<T>` -> ["T"]).
+  Vec<str> type_params;
+  bin has_type_params;
+  // Forced concrete type combinations from constrained type params
+  // (`fun f<T: num | str>` -> [["num"], ["str"]]), parallel to type_params.
+  Vec<Vec<str>> type_param_forced_insts;
+  bin has_type_param_forced_insts;
+  Vec<Node*> args;
+  bin has_args;
+  bin is_async;
+  bin is_variadic;
+  Node* body;
+  bin has_body;
+}
+
+pub fun function_node_new() FunctionNode {
+  FunctionNode f;
+  f.rtype = nil;
+  f.has_rtype = false;
+  f.name = "";
+  f.has_name = false;
+  f.type_params.init(0);
+  f.has_type_params = false;
+  f.type_param_forced_insts.init(0);
+  f.has_type_param_forced_insts = false;
+  f.args.init(0);
+  f.has_args = false;
+  f.is_async = false;
+  f.is_variadic = false;
+  f.body = nil;
+  f.has_body = false;
+  ret f;
+}
+
+// Shared by StatementIf and StatementElseIf (identical shape).
+pub compound IfStmtNode {
+  Node* condition;
+  Node* body;
+}
+
+pub compound ForCondNode {
+  // `for { ... }` (infinite) when absent; `for cond { ... }` otherwise.
+  Node* condition;
+  bin has_condition;
+  Node* body;
+}
+
+pub compound ForRangeNode {
+  str index_name;
+  Node* range_expr;
+  Node* body;
+}
+
+pub compound ForIterNode {
+  str index_name;
+  bin has_index_name;
+  str item_name;
+  Node* iterable;
+  Node* body;
+}
+
+pub enum ForKind {
+  Cond(ForCondNode),
+  Range(ForRangeNode),
+  Iter(ForIterNode),
+}
+
+pub compound AssertNode {
+  Node* condition;
+  Node* message;
+  bin has_message;
+}
+
+pub compound WarningCtrlNode {
+  WarningControlAction action;
+  WarningId id;
+  str reason;
+}
+
+pub compound FitBranch {
+  Node* condition;
+  bin has_condition;
+  Node* body;
+  // Positional binding names for a data-carrying-enum destructuring arm
+  // (`Shape.Circle(r)` binds ["r"]). Empty for a non-destructuring arm.
+  Vec<str> bindings;
+  bin has_bindings;
+}
+
+pub fun fit_branch_new() FitBranch {
+  FitBranch b;
+  b.condition = nil;
+  b.has_condition = false;
+  b.body = nil;
+  b.bindings.init(0);
+  b.has_bindings = false;
+  ret b;
+}
+
+pub compound FitStmtNode {
+  Node* exp;
+  Vec<FitBranch> branches;
+  bin has_default_branch;
+}
+
+pub fun fit_stmt_node_new() FitStmtNode {
+  FitStmtNode f;
+  f.exp = nil;
+  f.branches.init(0);
+  f.has_default_branch = false;
+  ret f;
+}
+
+pub compound ImportNode {
+  str path;
+  str alias;
+  bin has_alias;
+}
+
+pub compound CompoundField {
+  str name;
+  DataType* dtype;
+}
+
+pub compound CompoundNode {
+  str name;
+  Vec<CompoundField> fields;
+  Vec<str> type_params;
+  bin has_type_params;
+  Vec<Vec<str>> type_param_forced_insts;
+  bin has_type_param_forced_insts;
+}
+
+pub fun compound_node_new() CompoundNode {
+  CompoundNode c;
+  c.name = "";
+  c.fields.init(0);
+  c.type_params.init(0);
+  c.has_type_params = false;
+  c.type_param_forced_insts.init(0);
+  c.has_type_param_forced_insts = false;
+  ret c;
+}
+
+pub compound QuirkArg {
+  str name;
+  DataType* dtype;
+}
+
+pub compound QuirkMethodSig {
+  str name;
+  DataType* rtype;
+  Vec<QuirkArg> args;
+  bin is_async;
+}
+
+pub fun quirk_method_sig_new() QuirkMethodSig {
+  QuirkMethodSig m;
+  m.name = "";
+  m.rtype = nil;
+  m.args.init(0);
+  m.is_async = false;
+  ret m;
+}
+
+pub compound QuirkNode {
+  str name;
+  Vec<QuirkMethodSig> methods;
+  // True for a generic quirk (`quirk Iterator<T> { ... }`): static dispatch
+  // only, no monomorphic vtable/quirk-object struct (an unbound type param
+  // can't be represented in a single C signature) unless a CONCRETE
+  // instantiation is used as a type annotation.
+  bin is_generic;
+  Vec<str> type_params;
+  bin has_type_params;
+}
+
+pub fun quirk_node_new() QuirkNode {
+  QuirkNode q;
+  q.name = "";
+  q.methods.init(0);
+  q.is_generic = false;
+  q.type_params.init(0);
+  q.has_type_params = false;
+  ret q;
+}
+
+pub compound EnumVariant {
+  str name;
+  // Explicit integer value (`Variant = 3;`); auto-increments from 0
+  // following C enum rules when absent.
+  num value;
+  bin has_value;
+  // Positional payload types for a data-carrying variant (`Circle(num)` ->
+  // [num]); absent for a plain C-style enumerator. An enum is a tagged
+  // union iff ANY of its variants has a payload.
+  Vec<DataType*> payload;
+  bin has_payload;
+}
+
+pub fun enum_variant_new() EnumVariant {
+  EnumVariant v;
+  v.name = "";
+  v.value = 0;
+  v.has_value = false;
+  v.payload.init(0);
+  v.has_payload = false;
+  ret v;
+}
+
+pub compound EnumDeclNode {
+  str name;
+  Vec<EnumVariant> variants;
+  // Generic type parameters (`Option<T>` -> ["T"], `Result<T, E>` -> ["T",
+  // "E"]); variant payloads may reference these, monomorphized per concrete
+  // instantiation like generic compounds.
+  Vec<str> type_params;
+  bin has_type_params;
+}
+
+pub fun enum_decl_node_new() EnumDeclNode {
+  EnumDeclNode e;
+  e.name = "";
+  e.variants.init(0);
+  e.type_params.init(0);
+  e.has_type_params = false;
+  ret e;
+}
+
+pub compound ImplNode {
+  str type_name;
+  Vec<str> type_params;
+  bin has_type_params;
+  Vec<Vec<str>> type_param_forced_insts;
+  bin has_type_param_forced_insts;
+  // Bare quirk name (`Iterator`, `To`, ...), even when the `as` clause names
+  // a concrete instantiation (`as Iterator<num>`). Absent for a plain impl
+  // block (`impl Type { ... }`).
+  str quirk_name;
+  bin has_quirk_name;
+  // Set when the `as` clause names a CONCRETE instantiation of a generic
+  // quirk whose argument is not the enclosing impl's own type param (`as
+  // To<num>`) -- the mangled name (`To__num`) of that distinct quirk
+  // identity, registered alongside `quirk_name` above.
+  str quirk_concrete_instantiation;
+  bin has_quirk_concrete_instantiation;
+  Vec<Node*> methods;
+}
+
+pub fun impl_node_new() ImplNode {
+  ImplNode i;
+  i.type_name = "";
+  i.type_params.init(0);
+  i.has_type_params = false;
+  i.type_param_forced_insts.init(0);
+  i.has_type_param_forced_insts = false;
+  i.quirk_name = "";
+  i.has_quirk_name = false;
+  i.quirk_concrete_instantiation = "";
+  i.has_quirk_concrete_instantiation = false;
+  i.methods.init(0);
+  ret i;
+}
+
+pub compound TestDeclNode {
+  str name;
+  Node* body;
+}
+
+// ===== The node kind itself =====
+// 
+// A single flat data-carrying enum -- see the file-level design note for
+// why this replaces the original's two-level NodeType+node_variant shape.
+pub enum NodeKind {
+  Expression(ExprNode),
+  ExpressionParenthesis(Node*),
+  // Reuses TokenData's Num/Dec variants, which already distinguish
+  // integer vs decimal literals -- exactly what a Number node needs.
+  Number(TokenData),
+  Identifier(str),
+  String(str),
+  Character(chr),
+  Boolean(bin),
+  // The `nil` literal (a null pointer/string sentinel; emits C NULL).
+  Nil,
+  // A `panic(msg)` expression: unifies with WHATEVER type is expected at
+  // its use site (like `nil` does for pointers). Never actually produces a
+  // value: prints the message and aborts.
+  Panic(Node*),
+  Variable(VariableNode),
+  Function(FunctionNode),
+  Body(BodyNode),
+  // Absent (nil) for a bare `ret;`.
+  StatementReturn(Node*),
+  StatementDefer(Node*),
+  StatementIf(IfStmtNode),
+  StatementElseIf(IfStmtNode),
+  StatementElse(BodyNode),
+  StatementFor(ForKind),
+  StatementBreak,
+  StatementContinue,
+  StatementAssert(AssertNode),
+  StatementWarningControl(WarningCtrlNode),
+  StatementFit(FitStmtNode),
+  // Fire-and-forget virtual-thread spawn (`fork worker(&wg, i);`).
+  StatementFork(Node*),
+  Unary(UnaryNode),
+  Tenary(TenaryNode),
+  Bracket(Node*),
+  // `Type{...}` or `.{...}`.
+  CompoundInit(CompoundInitNode),
+  Import(ImportNode),
+  Compound(CompoundNode),
+  Quirk(QuirkNode),
+  Enum(EnumDeclNode),
+  Impl(ImplNode),
+  // `test "name" { ... }` (top-level only). Skipped entirely by an
+  // ordinary compile; only emitted/run in `fun test` mode.
+  Test(TestDeclNode),
+  Blank,
+}
+
+pub compound Node {
+  NodeKind kind;
+  Pos pos;
+  bin has_pos;
+  NodeFlags flags;
+  BindedNode* binded;
+  bin has_binded;
+}
+
+pub fun node_new(NodeKind kind) Node {
+  Node n;
+  n.kind = kind;
+  n.has_pos = false;
+  n.flags = node_flags_new();
+  n.binded = nil;
+  n.has_binded = false;
+  ret n;
+}
+
+// ===== Predicates =====
+// Ported directly from the original's node_is_* helpers.
+
+pub fun node_is_expression_or_parenthesis(Node n) bin {
+  fit n.kind {
+    .Expression(e) -> { ret true; }
+    .ExpressionParenthesis(inner) -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
+pub fun node_is_value_type(Node n) bin {
+  if node_is_expression_or_parenthesis(n) {
+    ret true;
+  }
+  fit n.kind {
+    .Identifier(s) -> { ret true; }
+    .Number(d) -> { ret true; }
+    .Unary(u) -> { ret true; }
+    .Tenary(t) -> { ret true; }
+    .String(s) -> { ret true; }
+    .Character(c) -> { ret true; }
+    .CompoundInit(ci) -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
+pub fun node_is_expressionable(Node n) bin {
+  fit n.kind {
+    .Expression(e) -> { ret true; }
+    .ExpressionParenthesis(inner) -> { ret true; }
+    .Unary(u) -> { ret true; }
+    .Identifier(s) -> { ret true; }
+    .Number(d) -> { ret true; }
+    .String(s) -> { ret true; }
+    .Character(c) -> { ret true; }
+    .Boolean(b) -> { ret true; }
+    // `nil` is a primary value literal: it can be the operand of a binary
+    // operator (`x != nil && y`), so it counts as expressionable.
+    .Nil -> { ret true; }
+    .CompoundInit(ci) -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
+pub fun node_is_array(Node n) bin {
+  fit n.kind {
+    .Expression(e) -> { ret is_array_operator(e.op); }
+    _ -> { ret false; }
+  }
+}
+
+pub fun node_is_assignment(Node n) bin {
+  fit n.kind {
+    .Expression(e) -> {
+      ret equals(e.op, "=") || equals(e.op, "+=") || equals(e.op, "-=") || equals(e.op, "*=") || equals(
+        e.op,
+        "/="
+      ) || equals(e.op, "%=") || equals(e.op, "&=") || equals(e.op, "|=") || equals(e.op, "^=") || equals(
+        e.op,
+        "<<="
+      ) || equals(e.op, ">>=");
+    }
+    _ -> { ret false; }
+  }
+}
+
+pub fun node_is_expression(Node n, str op) bin {
+  fit n.kind {
+    .Expression(e) -> { ret equals(e.op, op); }
+    _ -> { ret false; }
+  }
+}
+
+// A minimal array-operator check (`[]`), matching the original's
+// `utils.is_array_operator`. That helper checks more operator SHAPES in
+// the original (used by the parser/lexer for tokenizing); only the `[]`
+// index-expression form is relevant to AST-level array-ness here.
+fun is_array_operator(str op) bin {
+  ret equals(op, "[]");
+}
