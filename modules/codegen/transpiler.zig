@@ -3548,7 +3548,26 @@ pub const TranspileProcess = struct {
         };
         errdefer self.backing_allocator.destroy(import_proc);
 
-        import_proc.* = try TranspileProcess.init_with_stdlib_dir(self.backing_allocator, canon, "temp.c", .{ .outf = false }, self.stdlib_dir);
+        // Inherit ONLY the parent's test/warning-visibility mode (test_mode,
+        // emit_unused_warnings) so e.g. `fun test entry.fn` also type-checks and emits
+        // `test` blocks declared in an IMPORTED module, not just the entry file's own --
+        // `typecheck_module`'s `.Test`-node handling is gated on exactly these two
+        // fields. Without this, a child process always got `test_mode = false`
+        // regardless of the parent, so an imported module's `test` block was parsed but
+        // never type-checked -- yet codegen still tried to emit it, embedding the
+        // unresolved `__let_infer__` placeholder for any `let` binding whose type only
+        // typecheck ever resolves.
+        //
+        // Deliberately NOT a wholesale `self.flags` copy: `preload_imports`/
+        // `preload_std_imports`/`emit_stderr`/etc. are parse-strategy/output flags the
+        // ROOT process sets for its own reasons (e.g. the test harness disables import
+        // preloading to avoid redundant filesystem probing) that must NOT cascade to
+        // children -- doing so broke transitive import processing for std.channel/
+        // std.net (children stopped preloading their OWN nested imports).
+        var child_flags = TranspileProcessFlags{ .outf = false };
+        child_flags.test_mode = self.flags.test_mode;
+        child_flags.emit_unused_warnings = self.flags.emit_unused_warnings;
+        import_proc.* = try TranspileProcess.init_with_stdlib_dir(self.backing_allocator, canon, "temp.c", child_flags, self.stdlib_dir);
         import_proc.parent = self;
         import_proc.is_importing = true;
         if (import_alias) |alias| {
@@ -8608,8 +8627,13 @@ pub const TranspileProcess = struct {
                         return call_rtype;
                     }
 
-                    // Generic function call inference.
-                    if (callee_name != null) {
+                    // Generic function call inference. Only applies to a bare/aliased
+                    // function-name call -- a call already resolved as a method
+                    // (`plain_method_sig`/`method_sig`) must not be re-resolved against
+                    // an unrelated generic free function that happens to share the
+                    // method's bare name (`callee_name` is set to the method name too,
+                    // purely for diagnostics/async-validation further down).
+                    if (callee_name != null and method_sig == null and plain_method_sig == null) {
                         const fn_node = self.find_function_node(callee_name.?) orelse null;
                         if (fn_node != null and fn_node.?.node_variant != null and fn_node.?.node_variant.?.function.type_params != null) {
                             const fnv = &fn_node.?.node_variant.?.function;
@@ -19458,16 +19482,34 @@ pub const TranspileProcess = struct {
                                 }
 
                                 // Plain impl method call on compounds: `x.method(...)`.
+                                // `fbase` is usually a plain identifier (`x.field.method()`),
+                                // but a receiver reached through a longer chain of field
+                                // accesses (`a.b.field.method()`, e.g. `self.active_table.symbols.push(s)`)
+                                // has `fbase` itself be a `.`-Expression. Resolve its owner
+                                // type name via `expr_named_type_from_scope`, which already
+                                // recurses through arbitrary-depth `.` chains (used elsewhere
+                                // for chained-method return-type resolution) -- without this,
+                                // only a SINGLE field hop before the method call was ever
+                                // recognized as a method call at all; anything deeper fell
+                                // through every case below and got emitted as a literal,
+                                // uncompilable `.method(...)` (C has no member functions).
                                 if (recv.?.type == .Expression and recv.?.node_variant != null and mem.eql(u8, recv.?.node_variant.?.exp.op, ".")) {
                                     const fexp = recv.?.node_variant.?.exp;
                                     const fbase = fexp.left orelse null;
                                     const fmember = fexp.right orelse null;
-                                    if (fbase != null and fmember != null and fbase.?.type == .Identifier and fbase.?.data != null and fmember.?.type == .Identifier and fmember.?.data != null) {
-                                        const base_name = fbase.?.data.?.sval.items;
+                                    const base_owner_type_name: ?[]const u8 = blk: {
+                                        const fb = fbase orelse break :blk null;
+                                        if (fb.type == .Identifier and fb.data != null) {
+                                            const base_dt = self.identifier_declared_dtype(fb.data.?.sval.items) orelse break :blk null;
+                                            if (base_dt.type != .Unknown or self.is_quirk_name(base_dt.type_str.items) or (base_dt.pointer_depth != 0 and base_dt.pointer_depth != 1)) break :blk null;
+                                            break :blk base_dt.type_str.items;
+                                        }
+                                        break :blk self.expr_named_type_from_scope(fb.*);
+                                    };
+                                    if (fmember != null and fmember.?.type == .Identifier and fmember.?.data != null and base_owner_type_name != null) {
                                         const field_name = fmember.?.data.?.sval.items;
-                                        const base_dt = self.identifier_declared_dtype(base_name) orelse null;
-                                        if (base_dt != null and base_dt.?.type == .Unknown and !self.is_quirk_name(base_dt.?.type_str.items) and (base_dt.?.pointer_depth == 0 or base_dt.?.pointer_depth == 1)) {
-                                            if (self.lookup_compound_field(base_dt.?.type_str.items, field_name)) |fdt| {
+                                        {
+                                            if (self.lookup_compound_field(base_owner_type_name.?, field_name)) |fdt| {
                                                 const field_type = type_from_dtype(fdt);
                                                 if (field_type.name != null and !self.is_quirk_name(field_type.name.?)) {
                                                     var type_name = field_type.name.?;
@@ -22141,7 +22183,26 @@ pub const TranspileProcess = struct {
         };
         errdefer self.backing_allocator.destroy(import_proc);
 
-        import_proc.* = try TranspileProcess.init_with_stdlib_dir(self.backing_allocator, canon, "temp.c", .{ .outf = false }, self.stdlib_dir);
+        // Inherit ONLY the parent's test/warning-visibility mode (test_mode,
+        // emit_unused_warnings) so e.g. `fun test entry.fn` also type-checks and emits
+        // `test` blocks declared in an IMPORTED module, not just the entry file's own --
+        // `typecheck_module`'s `.Test`-node handling is gated on exactly these two
+        // fields. Without this, a child process always got `test_mode = false`
+        // regardless of the parent, so an imported module's `test` block was parsed but
+        // never type-checked -- yet codegen still tried to emit it, embedding the
+        // unresolved `__let_infer__` placeholder for any `let` binding whose type only
+        // typecheck ever resolves.
+        //
+        // Deliberately NOT a wholesale `self.flags` copy: `preload_imports`/
+        // `preload_std_imports`/`emit_stderr`/etc. are parse-strategy/output flags the
+        // ROOT process sets for its own reasons (e.g. the test harness disables import
+        // preloading to avoid redundant filesystem probing) that must NOT cascade to
+        // children -- doing so broke transitive import processing for std.channel/
+        // std.net (children stopped preloading their OWN nested imports).
+        var child_flags = TranspileProcessFlags{ .outf = false };
+        child_flags.test_mode = self.flags.test_mode;
+        child_flags.emit_unused_warnings = self.flags.emit_unused_warnings;
+        import_proc.* = try TranspileProcess.init_with_stdlib_dir(self.backing_allocator, canon, "temp.c", child_flags, self.stdlib_dir);
 
         if (import_alias) |alias| {
             import_proc.import_alias = import_proc.allocator.dupe(u8, alias) catch return TranspileError.MemoryAllocationFailed;

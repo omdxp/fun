@@ -1,0 +1,102 @@
+// Parser-relevant compile state for the self-hosted Fun compiler.
+// 
+// The original implementation threads parsing, typecheck, and codegen
+// through ONE shared `TranspileProcess` struct (see
+// modules/codegen/transpiler.zig) for lifetime/arena-reuse convenience, even
+// though the parser itself only reads/writes a modest slice of it: the token
+// stream and cursor, output node storage, scope/symbol tracking, the
+// cross-module duplicate-symbol registry, and the current diagnostic
+// position. Fun has no manual-arena concept exposed to user code, so there's
+// no reason to replicate the whole struct up front -- `ParseState` holds
+// exactly what parsing itself needs. Typecheck/codegen-only concerns
+// (generic instantiation tracking, emission guards, indent level, ...) get
+// their own state container once codegen is ported.
+
+imp ..ast.ast;
+imp ..lexer.token;
+imp ..semantics.scope;
+imp ..semantics.symbol;
+imp std.vec;
+imp std.map;
+imp std.string;
+
+// Tracks a public symbol's declaring file, to detect cross-module name
+// collisions. Only public symbols are ever recorded (see
+// `parse_state_register_symbol` in parser.fn).
+pub compound GlobalSymbolInfo {
+  str symbol_name;
+  str file_path;
+  bin is_function;
+  bin is_public;
+}
+
+// All state a parse of a single file needs, from raw tokens down to the
+// scope/symbol tables built up as declarations are parsed.
+pub compound ParseState {
+  // Token stream and read cursor. `pindex` is the index of the next token a
+  // peek/advance will return.
+  Vec<Token> tokens;
+  num pindex;
+
+  // The most recently peeked/advanced-to token, used by `err` to attach a
+  // precise source span to a diagnostic.
+  Token current_token;
+  bin has_current_token;
+
+  // Diagnostic position used when no `current_token` is available yet (e.g.
+  // before the first token is read).
+  Pos pos;
+
+  // Output AST node storage. Append-only; nodes reference each other via
+  // `Node*` pointers obtained at construction time, never by index into this.
+  Vec<Node> nodes;
+
+  str input_file_path;
+  str input_source;
+
+  // Scope tracking.
+  Scope* scope_root;
+  bin has_scope_root;
+  Scope* scope_current;
+  bin has_scope_current;
+
+  // The symbol table currently receiving new declarations, plus every table
+  // created so far during this parse (one per module/import, mirroring the
+  // original).
+  SymbolTable* active_table;
+  bin has_active_table;
+  Vec<SymbolTable*> tables;
+
+  // Cross-module duplicate-symbol detection (see `register_symbol`).
+  Map<str, GlobalSymbolInfo> global_symbols;
+
+  // Gates `err()`'s stderr output; set false by tests that expect a clean
+  // parse failure without polluting test output.
+  bin emit_stderr;
+}
+
+pub fun parse_state_new(str input_file_path, str input_source) ParseState {
+  ParseState p;
+  p.tokens.init(0);
+  p.pindex = 0;
+  p.has_current_token = false;
+  p.pos.line = 1;
+  p.pos.col = 1;
+  p.pos.start_col = 1;
+  p.pos.end_col = 1;
+  p.pos.end_line = 1;
+  p.pos.filename = input_file_path;
+  p.nodes.init(0);
+  p.input_file_path = input_file_path;
+  p.input_source = input_source;
+  p.scope_root = nil;
+  p.has_scope_root = false;
+  p.scope_current = nil;
+  p.has_scope_current = false;
+  p.active_table = nil;
+  p.has_active_table = false;
+  p.tables.init(0);
+  p.global_symbols.init(8);
+  p.emit_stderr = true;
+  ret p;
+}

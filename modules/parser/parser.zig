@@ -2954,7 +2954,20 @@ pub const ParseProcess = struct {
                 // misread (b is not a declared type).
                 const is_forward_compound = self.is_forward_declared_type(t.?.data.sval.items);
 
-                if (!is_value_in_scope and (is_known_compound or is_known_imported or is_forward_compound) and looks_like_compound_init(self, t.?)) {
+                // An identifier immediately following `.` (`EnumType.Symbol`) is always a
+                // qualified member/variant reference, never a compound-initializer target
+                // -- `EnumType.Variant{...}` is not valid syntax; compound literals are
+                // only ever written unqualified. Without this, a qualified enum-variant
+                // reference like `TokenType.Symbol` gets misread as `Symbol{...}` whenever
+                // some UNRELATED compound elsewhere in the program also happens to be
+                // named `Symbol`. Mirrors the identical `after_member_access` check used
+                // just below for the pointer-vs-multiply declaration heuristic.
+                const compound_init_after_member_access = blk_ama: {
+                    const prev = self.token_peek_prev_stream_n(0) orelse break :blk_ama false;
+                    break :blk_ama prev.type == .Operator and mem.eql(u8, prev.data.sval.items, ".");
+                };
+
+                if (!compound_init_after_member_access and !is_value_in_scope and (is_known_compound or is_known_imported or is_forward_compound) and looks_like_compound_init(self, t.?)) {
                     const dt = self.transpile_proc.allocator.create(dtype.DataType) catch {
                         return ParseError.MemoryAllocationFailed;
                     };

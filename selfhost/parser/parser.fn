@@ -1,0 +1,620 @@
+// The self-hosted Fun compiler's parser: turns a token stream into an AST.
+// Ported from the previous implementation's parser module.
+// 
+// This is an early, partial slice of the port: token-cursor navigation,
+// diagnostic reporting, and node/scope-entity construction -- the layer
+// every actual statement/expression parsing function builds on. The
+// statement and expression parsing functions themselves (the bulk of the
+// original's ~6,600 lines) are ported incrementally in later sessions; see
+// `parse_state.fn` for why the parser gets its own minimal state container
+// instead of reusing the full original `TranspileProcess`.
+// 
+// Deliberately deferred from this slice (documented rather than silently
+// dropped):
+// - The O(1) significant-token lookahead cache (`sig_indices`/
+// `phys_to_rank` in the original) -- `token_peek_n` here always does the
+// linear scan the original falls back to when the cache is stale. Safe:
+// the original's own comment confirms the linear path is always correct,
+// just slower; revisit only if parse time on large files becomes a
+// problem.
+// - `forward_type_names` pre-scan (forward-declared-type detection for the
+// compound-initializer disambiguator) -- not needed until the statement
+// parser reaches that disambiguation, so it is deferred to that slice.
+// - `deinit_node`/`deinit_root_scope` (manual arena cleanup) -- the
+// original frees an arena once per whole compile; a self-hosted `fun`
+// invocation is a short-lived process, so nothing here frees per-node
+// memory either, matching the same "let the OS reclaim on exit" choice
+// already made throughout `stdlib`'s own C bindings usage.
+
+imp parse_state;
+imp ..ast.ast;
+imp ..lexer.token;
+imp ..lexer.lexer;
+imp ..semantics.scope;
+imp ..semantics.symbol;
+imp std.vec;
+imp std.string;
+imp std.option;
+imp std.io;
+imp std.c.io;
+imp std.c.mem;
+
+// Errors the parser can report. Mirrors the original's `ParseError` set
+// (its `TranspileError`/`LexError` members are not included here since
+// those belong to modules not yet ported).
+pub enum ParseErrorKind {
+  InvalidSymbol,
+  InvalidKeyword,
+  InvalidDataType,
+  InvalidToken,
+  InvalidIdentifier,
+  InvalidOperand,
+  InvalidStatement,
+  InvalidString,
+}
+
+impl ParseState {
+  // Logs a diagnostic with the current position in the token stream.
+  // 
+  // Params:
+  // - msg: the already-formatted diagnostic message (build it with
+  // `std.io.format` before calling, since Fun's varargs sugar is meant
+  // for `{placeholder}`-style formatting, not passthrough to `fprintf`)
+  pub err(str msg) {
+    if !self.emit_stderr {
+      ret;
+    }
+    let out = stderr_stream();
+    fprintf(out, "%s", "\n[Error]\n");
+    fprintf(out, "%s", msg);
+    if self.has_current_token {
+      let ct = self.current_token;
+      num end_line = ct.pos.end_line;
+      if end_line == 0 {
+        end_line = ct.pos.line;
+      }
+      if end_line == ct.pos.line {
+        let loc = format(
+          "\nLocation: {str}:{num}:{num}-{num}\n",
+          ct.pos.filename,
+          ct.pos.line,
+          ct.pos.start_col,
+          ct.pos.end_col
+        );
+        defer free(loc);
+        fprintf(out, "%s", loc);
+      } else {
+        let loc = format(
+          "\nLocation: {str}:{num}:{num}-{num}:{num}\n",
+          ct.pos.filename,
+          ct.pos.line,
+          ct.pos.start_col,
+          end_line,
+          ct.pos.end_col
+        );
+        defer free(loc);
+        fprintf(out, "%s", loc);
+      }
+    } else {
+      let loc = format(
+        "\nLocation: {str}:{num}:{num}\n",
+        self.pos.filename,
+        self.pos.line,
+        self.pos.col
+      );
+      defer free(loc);
+      fprintf(out, "%s", loc);
+    }
+  }
+
+  // Returns the token at the cursor without advancing, or `.None` past the
+  // end of the stream.
+  pub tokens_peek_no_increment() Option<Token> {
+    ret self.tokens.at(self.pindex);
+  }
+
+  // Returns the token at the cursor and advances past it. Returns `.None`
+  // (cursor unchanged) past the end of the stream.
+  pub tokens_peek() Option<Token> {
+    fit self.tokens_peek_no_increment() {
+      .Some(t) -> {
+        self.pindex = self.pindex + 1;
+        ret .Some(t);
+      }
+      .None -> { ret .None; }
+    }
+  }
+
+  // Un-reads the most recently peeked token (moves the cursor back by one).
+  pub tokens_pop_last_peek() {
+    if self.pindex > 0 {
+      self.pindex = self.pindex - 1;
+    }
+  }
+
+  // Advances the cursor past any run of newline/comment/`\` tokens.
+  pub skip_nl_or_comment() {
+    for {
+      fit self.tokens_peek_no_increment() {
+        .Some(t) -> {
+          if !token_is_nl_or_comment_or_newline_separator(t) {
+            ret;
+          }
+          self.tokens_peek();
+        }
+        .None -> { ret; }
+      }
+    }
+  }
+
+  // Peeks at the next significant (non newline/comment) token without
+  // consuming it. Updates `current_token` as a side effect, matching the
+  // original -- diagnostics reported right after a peek still point at the
+  // right place.
+  pub token_peek_next() Option<Token> {
+    self.skip_nl_or_comment();
+    let pk = self.tokens_peek_no_increment();
+    fit pk {
+      .Some(t) -> {
+        self.current_token = t;
+        self.has_current_token = true;
+      }
+      .None -> { self.has_current_token = false; }
+    }
+    ret pk;
+  }
+
+  // Peeks at the n-th significant token at or after the cursor without
+  // consuming anything (`n = 0` is equivalent to `token_peek_next`, minus
+  // the `current_token` side effect).
+  pub token_peek_n(num n) Option<Token> {
+    num idx = self.pindex;
+    num seen = 0;
+    for {
+      fit self.tokens_at(idx) {
+        .Some(t) -> {
+          if !token_is_nl_or_comment_or_newline_separator(t) {
+            if seen == n {
+              ret .Some(t);
+            }
+            seen = seen + 1;
+          }
+          idx = idx + 1;
+        }
+        .None -> { ret .None; }
+      }
+    }
+  }
+
+  pub tokens_at(num idx) Option<Token> {
+    ret self.tokens.at(idx);
+  }
+
+  // Consumes and returns the next significant token, recording it as both
+  // the current diagnostic position and `current_token`.
+  pub token_next() Option<Token> {
+    self.skip_nl_or_comment();
+    fit self.tokens_peek_no_increment() {
+      .Some(t) -> { self.pos = t.pos; }
+      .None -> {}
+    }
+    let consumed = self.tokens_peek();
+    fit consumed {
+      .Some(t) -> {
+        self.current_token = t;
+        self.has_current_token = true;
+      }
+      .None -> { self.has_current_token = false; }
+    }
+    ret consumed;
+  }
+
+  // Expects the next significant token to be the symbol `c`. Reports and
+  // returns an error if it is anything else.
+  pub expect_sym(chr c) Option<ParseErrorKind> {
+    bin matched = false;
+    fit self.token_next() {
+      .Some(t) -> {
+        if t.type == TokenType.Symbol {
+          fit t.data {
+            .Cval(v) -> { matched = v == c; }
+            _ -> {}
+          }
+        }
+      }
+      .None -> {}
+    }
+    if matched {
+      ret .None;
+    }
+    let msg = format("expected symbol '{chr}'", c);
+    defer free(msg);
+    self.err(msg);
+    ret .Some(ParseErrorKind.InvalidSymbol);
+  }
+
+  // Expects the next significant token to be the operator `op`. Reports and
+  // returns an error if it is anything else.
+  pub expect_op(str op) Option<ParseErrorKind> {
+    bin matched = false;
+    fit self.token_next() {
+      .Some(t) -> { matched = token_is_operator(t, op); }
+      .None -> {}
+    }
+    if matched {
+      ret .None;
+    }
+    let msg = format("expected operator '{str}'", op);
+    defer free(msg);
+    self.err(msg);
+    ret .Some(ParseErrorKind.InvalidOperand);
+  }
+
+  // Expects the next significant token to be the keyword `keyword`. Reports
+  // and returns an error if it is anything else.
+  pub expect_keyword(str keyword) Option<ParseErrorKind> {
+    bin matched = false;
+    fit self.token_next() {
+      .Some(t) -> { matched = token_is_keyword(t, keyword); }
+      .None -> {}
+    }
+    if matched {
+      ret .None;
+    }
+    let msg = format("expected keyword '{str}'", keyword);
+    defer free(msg);
+    self.err(msg);
+    ret .Some(ParseErrorKind.InvalidKeyword);
+  }
+
+  // Retrieves a symbol by name from the active symbol table.
+  pub get_symbol(str name) Option<Symbol> {
+    if !self.has_active_table {
+      ret .None;
+    }
+    num i = 0;
+    let tbl = self.active_table;
+    for i < tbl.symbols.len {
+      let s = tbl.symbols.get(i);
+      if equals(s.name, name) {
+        ret .Some(s);
+      }
+      i = i + 1;
+    }
+    ret .None;
+  }
+
+  // Adds `s` to the active symbol table.
+  pub push_symbol(Symbol s) {
+    self.active_table.symbols.push(s);
+  }
+
+  // Registers a scope entity in the current scope.
+  pub push_scope_entity(ScopeEntity* entity) {
+    self.scope_current.entities.push(entity);
+  }
+
+  // Looks up a scope entity by name, starting at the current scope and
+  // walking up to (but not including) the global/root scope.
+  pub get_scope_entity(str name) ScopeEntity* {
+    let s = self.scope_current;
+    for s != nil {
+      let found = s.get_entity_by_name(name);
+      if found != nil {
+        ret found;
+      }
+      if !s.has_parent {
+        ret nil;
+      }
+      s = s.parent;
+    }
+    ret nil;
+  }
+
+  // Walks up the current scope chain for the last-declared entity, stopping
+  // at (not including) `stop_scope`.
+  pub last_scope_entity_stop_at(Scope* stop_scope) ScopeEntity* {
+    ret self.scope_current.last_entity_from_scope_stop_at(stop_scope);
+  }
+}
+
+// The parser's OWN state, layered on top of the shared `ParseState`: a
+// pointer back to that shared state plus the handful of fields that are
+// genuinely parser-local (current body/function context for `binded`
+// stamping, expression-recursion depth, `fit`-condition tracking). Mirrors
+// the original's `ParseProcess` holding a `*TranspileProcess` plus its own
+// small field set.
+pub compound Parser {
+  ParseState* state;
+
+  // The most recently consumed significant token.
+  Token last_token;
+  bin has_last_token;
+
+  // The body/function node currently being parsed, used to stamp newly
+  // created nodes' `binded` context (see `create_node`).
+  Node* current_body;
+  bin has_current_body;
+  Node* current_function;
+  bin has_current_function;
+
+  // Current native-recursion depth of the recursive-descent expression
+  // parser. See the original's `max_parse_expr_depth` note: guards against
+  // stack-overflow crashes on pathological input.
+  num expr_depth;
+
+  // True while parsing a `fit` arm CONDITION, where pattern bindings like
+  // `Enum.Variant(x, y)` introduce new identifiers not yet in scope.
+  bin in_fit_condition;
+}
+
+// Creates a new `Parser` over the given shared parse state.
+pub fun parser_new(ParseState* state) Parser {
+  Parser p;
+  p.state = state;
+  p.has_last_token = false;
+  p.current_body = nil;
+  p.has_current_body = false;
+  p.current_function = nil;
+  p.has_current_function = false;
+  p.expr_depth = 0;
+  p.in_fit_condition = false;
+  ret p;
+}
+
+impl Parser {
+  // Creates and registers a new node in the parse state's node list,
+  // stamping its `binded` owner/function context from whatever body/
+  // function is currently being parsed.
+  pub create_node(Node* n) {
+    BindedNode* binded = nil;
+    bin is_bound = false;
+
+    if self.has_current_body {
+      Node* owner = malloc(sizeof(Node));
+      *owner = *self.current_body;
+      owner.has_binded = false;
+      owner.binded = nil;
+      binded = malloc(sizeof(BindedNode));
+      binded.owner = owner;
+      binded.has_owner = true;
+      binded.function = nil;
+      binded.has_function = false;
+      is_bound = true;
+    }
+
+    if self.has_current_function {
+      Node* function = malloc(sizeof(Node));
+      *function = *self.current_function;
+      function.has_binded = false;
+      function.binded = nil;
+      if !is_bound {
+        binded = malloc(sizeof(BindedNode));
+        binded.owner = nil;
+        binded.has_owner = false;
+      }
+      binded.function = function;
+      binded.has_function = true;
+      is_bound = true;
+    }
+
+    if is_bound {
+      n.binded = binded;
+      n.has_binded = true;
+    } else {
+      n.binded = nil;
+      n.has_binded = false;
+    }
+
+    self.state.nodes.push(*n);
+  }
+
+  // Builds a new scope entity for `node`, deriving its lookup name from the
+  // node's kind (identifiers/functions/variables are nameable; anything
+  // else gets an empty name and is never found by `get_scope_entity`).
+  pub new_scope_entity(Node* node) ScopeEntity* {
+    ScopeEntity* entity = malloc(sizeof(ScopeEntity));
+    *entity = scope_entity_new(_scope_entity_name(node));
+    entity.node = node;
+    entity.has_node = true;
+    ret entity;
+  }
+
+  // The last-declared entity in the current scope chain, stopping at (not
+  // including) the root/global scope.
+  pub scope_last_entity_stop_global_scope() ScopeEntity* {
+    ret self.state.last_scope_entity_stop_at(self.state.scope_root);
+  }
+}
+
+// ===== Test helpers =====
+
+fun _state_from(str src) ParseState {
+  ParseState st = parse_state_new("test.fn", src);
+  st.tokens = tokenize(src, "test.fn").unwrap();
+  // Tests exercise expected-failure paths too; keep stdout clean.
+  st.emit_stderr = false;
+  ret st;
+}
+
+test "token cursor advances past whitespace/newlines and reports EOF" {
+  ParseState st = _state_from("let\nx");
+  let first = st.token_next();
+  assert first.is_some(), "expected a first token";
+  assert token_is_keyword(first.unwrap(), "let"), "first token should be keyword 'let'";
+
+  let second = st.token_next();
+  assert second.is_some(), "expected a second token";
+  fit second.unwrap().data {
+    .Sval(s) -> { assert equals(s, "x"), "second token should be identifier 'x'"; }
+    _ -> { panic("second token should carry Sval"); }
+  }
+
+  let third = st.token_next();
+  assert third.is_none(), "expected end of stream after 2 tokens";
+}
+
+test "token_peek_next does not consume, token_peek_n looks further ahead" {
+  ParseState st = _state_from("a b c");
+
+  let peeked = st.token_peek_next();
+  assert peeked.is_some(), "expected a peeked token";
+  fit peeked.unwrap().data {
+    .Sval(s) -> { assert equals(s, "a"), "peek should see 'a' without consuming it"; }
+    _ -> { panic("expected Sval"); }
+  }
+
+  // Peeking again returns the SAME token (not consumed).
+  let peeked_again = st.token_peek_next();
+  fit peeked_again.unwrap().data {
+    .Sval(s) -> { assert equals(s, "a"), "second peek should still see 'a'"; }
+    _ -> { panic("expected Sval"); }
+  }
+
+  // n=1 looks one significant token further ahead without consuming anything.
+  let ahead = st.token_peek_n(1);
+  fit ahead.unwrap().data {
+    .Sval(s) -> { assert equals(s, "b"), "token_peek_n(1) should see 'b'"; }
+    _ -> { panic("expected Sval"); }
+  }
+
+  // Cursor is still at 'a': a real consume gets 'a', then 'b'.
+  fit st.token_next().unwrap().data {
+    .Sval(s) -> { assert equals(s, "a"), "first consume should still be 'a'"; }
+    _ -> { panic("expected Sval"); }
+  }
+  fit st.token_next().unwrap().data {
+    .Sval(s) -> { assert equals(s, "b"), "second consume should be 'b'"; }
+    _ -> { panic("expected Sval"); }
+  }
+}
+
+test "expect_sym/expect_op/expect_keyword succeed on a match" {
+  // `(` lexes as an Operator (see lexdefs.fn's `op_treated_as_one`), not a
+  // Symbol -- only the small set of structural delimiters (`{ } ; ) ]`) are
+  // Symbol tokens, so `)` is used here to exercise `expect_sym`.
+  ParseState st = _state_from(") + let");
+  assert st.expect_sym(')').is_none(), "expected ')' to match";
+  assert st.expect_op("+").is_none(), "expected '+' to match";
+  assert st.expect_keyword("let").is_none(), "expected 'let' to match";
+}
+
+test "expect_sym/expect_op/expect_keyword report a typed error on mismatch" {
+  ParseState st = _state_from("let");
+  let err_sym = st.expect_sym(')');
+  assert err_sym.is_some(), "expected a mismatch error";
+  fit err_sym.unwrap() {
+    .InvalidSymbol -> {}
+    _ -> { panic("expected InvalidSymbol"); }
+  }
+
+  ParseState st2 = _state_from("let");
+  let err_op = st2.expect_op("+");
+  assert err_op.is_some(), "expected a mismatch error";
+  fit err_op.unwrap() {
+    .InvalidOperand -> {}
+    _ -> { panic("expected InvalidOperand"); }
+  }
+
+  ParseState st3 = _state_from("(");
+  let err_kw = st3.expect_keyword("let");
+  assert err_kw.is_some(), "expected a mismatch error";
+  fit err_kw.unwrap() {
+    .InvalidKeyword -> {}
+    _ -> { panic("expected InvalidKeyword"); }
+  }
+}
+
+test "push_symbol/get_symbol round-trip through the active table" {
+  ParseState st = _state_from("");
+  SymbolTable table = symbol_table_new("test");
+  st.active_table = &table;
+  st.has_active_table = true;
+
+  assert st.get_symbol("x").is_none(), "expected no symbol before registration";
+
+  Symbol s = symbol_new("x");
+  st.push_symbol(s);
+
+  let found = st.get_symbol("x");
+  assert found.is_some(), "expected to find the registered symbol";
+  assert equals(found.unwrap().name, "x"), "found symbol should be named 'x'";
+}
+
+test "push_scope_entity/get_scope_entity walk the scope chain" {
+  ParseState st = _state_from("");
+  Scope root = scope_new();
+  Scope child = scope_new();
+  child.parent = &root;
+  child.has_parent = true;
+  st.scope_root = &root;
+  st.has_scope_root = true;
+  st.scope_current = &child;
+  st.has_scope_current = true;
+
+  assert st.get_scope_entity("x") == nil, "expected no entity before registration";
+
+  ScopeEntity* e = malloc(sizeof(ScopeEntity));
+  * e =scope_entity_new("x");
+  st.push_scope_entity(e);
+
+  let found = st.get_scope_entity("x");
+  assert found != nil, "expected to find the registered entity";
+  assert equals(found.name, "x"), "found entity should be named 'x'";
+  assert st.get_scope_entity("missing") == nil, "unregistered name should not be found";
+}
+
+test "create_node stamps binded owner/function context" {
+  ParseState st = _state_from("");
+  Parser p = parser_new(&st);
+
+  Node body_node = node_new(NodeKind.Blank);
+  Node fn_node = node_new(NodeKind.Blank);
+  p.current_body = &body_node;
+  p.has_current_body = true;
+  p.current_function = &fn_node;
+  p.has_current_function = true;
+
+  Node n = node_new(NodeKind.Blank);
+  p.create_node(&n);
+
+  assert n.has_binded, "expected create_node to stamp binded context";
+  assert n.binded.has_owner, "expected binded.owner to be set from current_body";
+  assert n.binded.has_function, "expected binded.function to be set from current_function";
+  assert st.nodes.len == 1, "expected the node to be pushed into state.nodes";
+}
+
+test "create_node leaves binded unset with no active body/function" {
+  ParseState st = _state_from("");
+  Parser p = parser_new(&st);
+
+  Node n = node_new(NodeKind.Blank);
+  p.create_node(&n);
+
+  assert !n.has_binded, "expected no binded context outside any body/function";
+  assert st.nodes.len == 1, "expected the node to be pushed into state.nodes";
+}
+
+test "new_scope_entity derives its name from the node kind" {
+  ParseState st = _state_from("");
+  Parser p = parser_new(&st);
+
+  Node id_node = node_new(NodeKind.Identifier("foo"));
+  ScopeEntity* e = p.new_scope_entity(&id_node);
+  assert equals(e.name, "foo"), "expected entity name derived from Identifier payload";
+
+  Node blank_node = node_new(NodeKind.Blank);
+  ScopeEntity* blank_entity = p.new_scope_entity(&blank_node);
+  assert equals(blank_entity.name, ""), "expected empty name for a non-nameable node kind";
+}
+
+// The lookup name a new scope entity for `node` should carry; empty for a
+// node kind that never introduces a nameable binding.
+fun _scope_entity_name(Node* node) str {
+  fit node.kind {
+    .Identifier(s) -> { ret s; }
+    .Function(f) -> { ret f.name; }
+    .Variable(v) -> { ret v.name; }
+    _ -> { ret ""; }
+  }
+}
