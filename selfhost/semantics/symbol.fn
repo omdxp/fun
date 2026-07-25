@@ -1,0 +1,59 @@
+// Symbol table entries for the self-hosted Fun compiler.
+// 
+// Ported from the original semantics module's symbol tracking. The
+// original's `Symbol.data` is an UNTAGGED union, externally discriminated by
+// a separate `Symbol.type: SymbolType` field (a hand-rolled tagged union,
+// since Zig has no direct equivalent of Fun's data-carrying enums). Folded
+// here into a single `SymbolKind` data-carrying enum instead -- eliminates
+// the possibility of `type`/`data` disagreeing (e.g. `type = .Node` but
+// `data` unset), which the original's shape allowed structurally.
+
+imp ..ast.ast;
+imp std.vec;
+imp std.option;
+
+// What a Symbol refers to: a real AST declaration, an opaque native
+// (std.c.*-bound) function, or an as-yet-unresolved placeholder.
+pub enum SymbolKind {
+  NodeSym(Node),
+  NativeFunctionSym(raw*),
+  Unknown,
+}
+
+// A named entry in a SymbolTable.
+pub compound Symbol {
+  SymbolKind kind;
+  str name;
+  SymbolTable* symbol_table;
+  bin has_symbol_table;
+}
+
+pub fun symbol_new(str name) Symbol {
+  Symbol s;
+  s.kind = .Unknown;
+  s.name = name;
+  s.symbol_table = nil;
+  s.has_symbol_table = false;
+  ret s;
+}
+
+// Maps names to symbols within one module/scope.
+pub compound SymbolTable {
+  Vec<Symbol> symbols;
+  str name;
+}
+
+pub fun symbol_table_new(str name) SymbolTable {
+  SymbolTable t;
+  t.symbols.init(0);
+  t.name = name;
+  ret t;
+}
+
+// Returns the underlying AST node if `s` refers to one, else `.None`.
+pub fun get_node_symbol(Symbol s) Option<Node> {
+  fit s.kind {
+    .NodeSym(n) -> { ret .Some(n); }
+    _ -> { ret .None; }
+  }
+}

@@ -11,6 +11,7 @@
 // lexer) is where those get recognized. Porting that is the parser's job,
 // not this module's.
 
+// True if `s` is a reserved word.
 pub fun is_keyword(str s) bin {
   fit s {
     "imp", "pub", "fun", "as", "enum", "compound", "quirk", "impl", "let", "defer", "asm", "volatile", "arch", "void", "raw", "num", "dec", "str", "bin", "chr", "if", "elif", "else", "true", "false", "nil", "fit", "ret", "for", "async", "await", "break", "continue", "allow", "expect", "assert", "panic", "test" -> {
@@ -20,6 +21,7 @@ pub fun is_keyword(str s) bin {
   }
 }
 
+// True if `s` is `true` or `false`.
 pub fun is_boolean_keyword(str s) bin {
   fit s {
     "true", "false" -> { ret true; }

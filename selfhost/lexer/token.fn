@@ -50,6 +50,7 @@ pub compound Pos {
   str filename;
 }
 
+// A single lexical token: its kind, value, and source span.
 pub compound Token {
   TokenType type;
   TokenData data;

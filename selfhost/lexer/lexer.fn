@@ -30,6 +30,8 @@ imp std.result;
 imp token;
 imp lexdefs;
 
+// Lexing state for one source file: a cursor into `src` plus the running
+// line/col position and every token emitted so far.
 pub compound Lexer {
   str src;
   num len;
@@ -45,6 +47,8 @@ pub compound Lexer {
   Vec<Token> tokens;
 }
 
+// Creates a Lexer positioned at the start of `src` (a whole file's
+// contents, already read into memory).
 pub fun lexer_new(str src, str filename) Lexer {
   Lexer l;
   l.src = src;
@@ -57,10 +61,12 @@ pub fun lexer_new(str src, str filename) Lexer {
   ret l;
 }
 
+// True if `c` can start an identifier (a letter or underscore).
 fun _is_ident_start(chr c) bin {
   ret is_alpha(c) || c == '_';
 }
 
+// True if `c` can continue an identifier after its first character.
 fun _is_ident_char(chr c) bin {
   ret is_alnum(c) || c == '_';
 }
@@ -108,6 +114,8 @@ fun token_zero() Token {
   ret t;
 }
 
+// True for any character except a newline/carriage-return/NUL -- used to
+// read a line comment up to (not including) its terminator.
 fun _not_newline(chr c) bin {
   ret c != '\n' && c != '\r' && c != 0;
 }
@@ -126,6 +134,9 @@ impl Lexer {
     ret p;
   }
 
+  // Fills in the END of a token's span (the START was already captured by
+  // `_start_pos`) using the lexer's CURRENT position, once the token's text
+  // has been fully consumed.
   _finish_pos(Pos* p) {
     p.end_line = self.line;
     p.end_col = self.col;
@@ -142,6 +153,9 @@ impl Lexer {
     ret self.src[self.pos];
   }
 
+  // Peek ONE character past the current position (for two-character
+  // lookahead, e.g. distinguishing `//` from a single `/`). Returns NUL at
+  // or past EOF.
   _peek2() chr {
     if self.pos + 1 >= self.len {
       ret 0;
@@ -149,6 +163,8 @@ impl Lexer {
     ret self.src[self.pos + 1];
   }
 
+  // Consumes and returns the current character, advancing the cursor and
+  // updating line/col.
   _advance() chr {
     let c = self._peek();
     self.pos = self.pos + 1;
@@ -185,6 +201,8 @@ impl Lexer {
     ret b.build();
   }
 
+  // Reads a `// ...` line comment, from just after the `//` to (not
+  // including) the newline.
   _read_comment_line() Token {
     let start = self._start_pos();
     let text = self._read_while(_not_newline);
@@ -198,6 +216,8 @@ impl Lexer {
     ret t;
   }
 
+  // Reads a `/* ... */` block comment, from just after the opening `/*` to
+  // (not including) the closing `*/`. Errors if EOF is reached first.
   _read_comment_block() Result<Token> {
     let start = self._start_pos();
     let b = string_builder_init(16);
@@ -222,6 +242,8 @@ impl Lexer {
     ret ok(t);
   }
 
+  // Reads an identifier and classifies it as a boolean literal, a reserved
+  // keyword, or a plain identifier.
   _read_identifier_or_keyword() Token {
     let start = self._start_pos();
     let text = self._read_while(_is_ident_char);
@@ -262,6 +284,8 @@ impl Lexer {
     ret b.build();
   }
 
+  // Like `_read_digits`, but for hexadecimal digits (`0`-`9`, `a`-`f`,
+  // `A`-`F`, and `_` separators).
   _read_hex_digits() str {
     let b = string_builder_init(16);
     for {
@@ -313,6 +337,10 @@ impl Lexer {
     buf.append(self._read_digits());
   }
 
+  // Parses the fully-assembled digit text of an ordinary (non-hex,
+  // non-binary) number literal into a Number token, routing to a decimal or
+  // integer parse depending on whether a `.`/exponent is present, and
+  // consuming an optional `L`/`f` suffix (accepted but not tracked).
   _finish_number_from_string(str number_str) Result<Token> {
     let has_dot = contains(number_str, ".");
     let has_exp = contains(number_str, "e") || contains(number_str, "E");
@@ -396,6 +424,9 @@ impl Lexer {
     ret ok(out);
   }
 
+  // Reads a `0x...` hex literal's digits (called right after popping the
+  // preceding bare `0` token and consuming the `x`) and returns the parsed
+  // Number token.
   _read_number_hex() Token {
     let start = self._start_pos();
     self._advance(); // 'x'
@@ -411,6 +442,7 @@ impl Lexer {
     ret t;
   }
 
+  // Like `_read_number_hex`, but for a `0b...` binary literal.
   _read_number_binary() Token {
     let start = self._start_pos();
     self._advance(); // 'b'
@@ -518,6 +550,8 @@ impl Lexer {
     ret ok(t);
   }
 
+  // Reads a single structural symbol character (`{`, `}`, `;`, `)`, `]`) as
+  // its own token.
   _read_symbol() Token {
     let start = self._start_pos();
     let c = self._advance();
@@ -622,6 +656,9 @@ impl Lexer {
     }
   }
 
+  // Removes the just-checked bare-zero token from `self.tokens` before
+  // replacing it with the real hex/binary literal (see the hex/binary
+  // dispatch in `_next_inner`).
   _pop_last_token() {
     self.tokens.pop();
   }
@@ -636,11 +673,15 @@ impl Lexer {
     let opt = r.unwrap();
     fit opt {
       .Some(t) -> { self.tokens.push(t); }
-      .None -> { }
+      .None -> {}
     }
     ret ok(opt);
   }
 
+  // Does the actual dispatch work for `next()`: inspects the current
+  // character and routes to the matching reader. Split out from `next()`
+  // so the whitespace-skip branch can recurse without double-recording the
+  // eventual token onto `self.tokens`.
   _next_inner() Result<Option<Token>> {
     if self.pos >= self.len {
       ret ok(.None);
@@ -768,7 +809,7 @@ pub fun tokenize(str src, str filename) Result<Vec<Token>> {
     }
     let opt = r.unwrap();
     fit opt {
-      .Some(t) -> { }
+      .Some(t) -> {}
       .None -> { break; }
     }
   }

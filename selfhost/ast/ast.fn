@@ -57,12 +57,15 @@ imp std.quirks;
 
 // ===== Data types =====
 
+// Boolean characteristics of a DataType.
 pub compound DataTypeFlags {
   bin is_pointer;
   bin is_literal;
   bin is_array;
 }
 
+// The builtin scalar kind of a DataType (a named/user-defined type has
+// `.Unknown` here and its real name in `DataType.type_str` instead).
 pub enum DataTypeType {
   Void,
   Raw,
@@ -87,6 +90,8 @@ pub fun fn_type_sig_new() FnTypeSig {
   ret s;
 }
 
+// A type annotation as written/inferred: a builtin scalar, a named
+// user-defined type, a pointer/array of one, or a generic instantiation.
 pub compound DataType {
   DataTypeFlags flags;
   DataTypeType kind;
@@ -123,6 +128,7 @@ pub fun dtype_new() DataType {
 
 // ===== Node envelope =====
 
+// Boolean characteristics of a Node, tracked during parsing/typecheck.
 pub compound NodeFlags {
   bin inside_expression;
   bin has_variable_combined;
@@ -139,6 +145,9 @@ pub fun node_flags_new() NodeFlags {
   ret f;
 }
 
+// Links a node back to its owning declaration/enclosing function, used by
+// semantic checks that need to walk from a reference back to context (e.g.
+// visibility checks, "which function is this return statement inside").
 pub compound BindedNode {
   Node* owner;
   bin has_owner;
@@ -148,6 +157,8 @@ pub compound BindedNode {
 
 // ===== Warning diagnostics =====
 
+// Stable identifier for a compiler warning category, used by diagnostics and
+// by `allow`/`expect` warning-control statements.
 pub enum WarningId {
   ReturnLocalPtr,
   FitNonExhaustive,
@@ -165,6 +176,8 @@ pub enum WarningId {
   ChannelCapacityOverflow,
 }
 
+// Which way a `WarningCtrlNode` controls its target warning: `allow` silences
+// it, `expect` requires it to actually fire (else THAT is itself an error).
 pub enum WarningControlAction {
   Allow,
   Expect,
@@ -239,6 +252,9 @@ impl WarningId as To<str> {
 // that owns a `Vec<T>` field gets a paired `_new()` constructor; callers
 // MUST use it instead of a bare declaration (see the file-level note).
 
+// A binary (or, with `right` absent, unary-ish) operator expression, e.g.
+// `a + b`, `a = b`, member access `a.b`, or a call `callee(args)` (`op` is
+// `"()"` for a call, with `right` holding the flattened comma-joined args).
 pub compound ExprNode {
   Node* left;
   bin has_left;
@@ -247,6 +263,7 @@ pub compound ExprNode {
   str op;
 }
 
+// A prefix (`-x`, `!x`, `*p`, `&x`) or postfix (`x++`) unary operator.
 pub compound UnaryNode {
   bin is_left_operanded_unary;
   str op;
@@ -255,17 +272,22 @@ pub compound UnaryNode {
   num indirection_depth;
 }
 
+// A ternary conditional expression: `cond ? then_val : else_val`.
 pub compound TenaryNode {
   Node* cond;
   Node* then_val;
   Node* else_val;
 }
 
+// One `name = value` pair inside a compound initializer (`Type{ name =
+// value, ... }`).
 pub compound CompoundInitField {
   str name;
   Node* value;
 }
 
+// A compound-literal initializer: `Type{...}` (dtype present) or `.{...}`
+// (dtype inferred from context).
 pub compound CompoundInitNode {
   DataType* init_dtype;
   bin has_dtype;
@@ -280,6 +302,9 @@ pub fun compound_init_node_new() CompoundInitNode {
   ret n;
 }
 
+// A variable declaration: `Type name;` or `Type name = val;` (`let name =
+// val;` too -- `var_type` carries the "infer from val" placeholder until
+// typecheck resolves it).
 pub compound VariableNode {
   DataType* var_type;
   str name;
@@ -287,6 +312,7 @@ pub compound VariableNode {
   bin has_val;
 }
 
+// A `{ ... }` block: an ordered list of statements.
 pub compound BodyNode {
   Vec<Node*> statements;
 }
@@ -297,6 +323,8 @@ pub fun body_node_new() BodyNode {
   ret b;
 }
 
+// A function declaration: `fun name(args) rtype { body }` (a bodyless one,
+// `has_body = false`, is a binding/prototype -- see `std.c.*`).
 pub compound FunctionNode {
   DataType* rtype;
   bin has_rtype;
@@ -349,12 +377,15 @@ pub compound ForCondNode {
   Node* body;
 }
 
+// `for i : start..end { ... }`: iterate `index_name` over an integer range.
 pub compound ForRangeNode {
   str index_name;
   Node* range_expr;
   Node* body;
 }
 
+// `for item : arr { ... }` or `for i, item :: arr { ... }`: iterate over an
+// array/Vec/Iterator-implementing value, optionally tracking an index.
 pub compound ForIterNode {
   str index_name;
   bin has_index_name;
@@ -363,24 +394,28 @@ pub compound ForIterNode {
   Node* body;
 }
 
+// Which of the three `for` loop shapes a StatementFor node is.
 pub enum ForKind {
   Cond(ForCondNode),
   Range(ForRangeNode),
   Iter(ForIterNode),
 }
 
+// `assert cond;` or `assert cond, "message";`.
 pub compound AssertNode {
   Node* condition;
   Node* message;
   bin has_message;
 }
 
+// `allow warning_id;` or `expect warning_id;` (see WarningControlAction).
 pub compound WarningCtrlNode {
   WarningControlAction action;
   WarningId id;
   str reason;
 }
 
+// One `pattern -> { body }` arm of a `fit` statement.
 pub compound FitBranch {
   Node* condition;
   bin has_condition;
@@ -401,6 +436,7 @@ pub fun fit_branch_new() FitBranch {
   ret b;
 }
 
+// `fit expr { branches }`: pattern-match dispatch over `exp`.
 pub compound FitStmtNode {
   Node* exp;
   Vec<FitBranch> branches;
@@ -415,17 +451,21 @@ pub fun fit_stmt_node_new() FitStmtNode {
   ret f;
 }
 
+// `imp path;` or `imp path as alias;`.
 pub compound ImportNode {
   str path;
   str alias;
   bin has_alias;
 }
 
+// One `name` : `dtype` field of a compound type declaration.
 pub compound CompoundField {
   str name;
   DataType* dtype;
 }
 
+// A `compound Name { fields }` declaration (a struct-like user-defined
+// type).
 pub compound CompoundNode {
   str name;
   Vec<CompoundField> fields;
@@ -446,11 +486,15 @@ pub fun compound_node_new() CompoundNode {
   ret c;
 }
 
+// One named, typed parameter of a quirk method signature.
 pub compound QuirkArg {
   str name;
   DataType* dtype;
 }
 
+// One required method signature inside a `quirk Name { ... }` declaration
+// (no body -- quirks only declare a contract; `impl Type as Name` supplies
+// the implementation).
 pub compound QuirkMethodSig {
   str name;
   DataType* rtype;
@@ -467,6 +511,7 @@ pub fun quirk_method_sig_new() QuirkMethodSig {
   ret m;
 }
 
+// A `quirk Name { methods }` declaration (a structural interface).
 pub compound QuirkNode {
   str name;
   Vec<QuirkMethodSig> methods;
@@ -489,6 +534,8 @@ pub fun quirk_node_new() QuirkNode {
   ret q;
 }
 
+// One variant of an `enum Name { variants }` declaration -- a plain
+// enumerator, or a data-carrying (tagged union) one if `has_payload`.
 pub compound EnumVariant {
   str name;
   // Explicit integer value (`Variant = 3;`); auto-increments from 0
@@ -512,6 +559,7 @@ pub fun enum_variant_new() EnumVariant {
   ret v;
 }
 
+// An `enum Name { variants }` declaration.
 pub compound EnumDeclNode {
   str name;
   Vec<EnumVariant> variants;
@@ -531,6 +579,8 @@ pub fun enum_decl_node_new() EnumDeclNode {
   ret e;
 }
 
+// An `impl Type { methods }` (plain) or `impl Type as Quirk { methods }`
+// (quirk-implementing) block.
 pub compound ImplNode {
   str type_name;
   Vec<str> type_params;
@@ -566,6 +616,7 @@ pub fun impl_node_new() ImplNode {
   ret i;
 }
 
+// A `test "name" { body }` declaration (see NodeKind.Test).
 pub compound TestDeclNode {
   str name;
   Node* body;
@@ -624,6 +675,9 @@ pub enum NodeKind {
   Blank,
 }
 
+// A single AST node: the tagged payload (`kind`) plus source position and
+// bookkeeping shared by every node shape (see the file-level design note on
+// why this envelope+payload split replaces the original's flatter struct).
 pub compound Node {
   NodeKind kind;
   Pos pos;
