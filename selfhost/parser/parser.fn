@@ -2330,8 +2330,78 @@ impl Parser {
     ret .None;
   }
 
+  // Parses a `for` loop: `for { ... }` (infinite, no condition) or
+  // `for <condition> { ... }`.
+  // 
+  // Deliberately simplified from the original for this slice: only the
+  // `ForKind.Cond` shape is supported. The range form (`for i : start..end
+  // { ... }`) and iterator form (`for item : arr { ... }` / `for i, item ::
+  // arr { ... }`) need their own disambiguation lookahead (legacy `:`/`::`
+  // syntax vs. a condition that happens to start with an identifier) and
+  // synthetic on-stack loop-variable scope entities, deferred to a future
+  // slice. A `for` written in either of those forms currently fails to
+  // parse as a condition expression instead (a clean error, not a
+  // misparse) since `:`/`::` aren't valid inside one.
+  pub parse_for_statement() Option<ParseErrorKind> {
+    let for_tok = self.state.token_peek_next();
+    let kwerr = self.state.expect_keyword("for");
+    if kwerr.is_some() {
+      ret kwerr;
+    }
+    if !self.has_current_function {
+      self.state.err("for statement outside of function");
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+
+    bin has_cond = false;
+    Node* cond_ptr = nil;
+
+    if !self.state.next_token_is_symbol('{') {
+      let cerr = self.parse_expressionable_root();
+      if cerr.is_some() {
+        ret cerr;
+      }
+      let maybe_cond = self.state.node_pop();
+      if maybe_cond.is_none() {
+        self.state.err("expected for condition");
+        ret .Some(ParseErrorKind.InvalidExpression);
+      }
+      cond_ptr = malloc(sizeof(Node));
+      *cond_ptr = maybe_cond.unwrap();
+      has_cond = true;
+    }
+
+    let berr = self.parse_body();
+    if berr.is_some() {
+      ret berr;
+    }
+    let maybe_body = self.state.node_pop();
+    if maybe_body.is_none() {
+      self.state.err("expected for body");
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+    Node* body = malloc(sizeof(Node));
+    *body = maybe_body.unwrap();
+
+    ForCondNode fc;
+    fc.condition = cond_ptr;
+    fc.has_condition = has_cond;
+    fc.body = body;
+
+    Node node = node_new(NodeKind.StatementFor(ForKind.Cond(fc)));
+    fit for_tok {
+      .Some(t) -> {
+        node.pos = t.pos;
+        node.has_pos = true;
+      }
+      .None -> {}
+    }
+    self.create_node(&node);
+    ret .None;
+  }
+
   // Parses one statement: a `{ ... }` nested body, a `let` declaration, a
-  // `ret`/`assert`/`if`/`elif`/`else` statement, or an expression
+  // `ret`/`assert`/`if`/`elif`/`else`/`for` statement, or an expression
   // statement terminated by `;`.
   // 
   // Deliberately simplified from the original for this slice: no keyword
@@ -2372,6 +2442,9 @@ impl Parser {
       }
       if equals(kw, "else") {
         ret self.parse_else_statement();
+      }
+      if equals(kw, "for") {
+        ret self.parse_for_statement();
       }
       let msg = format("keyword '{str}' is not yet supported in statement position", kw);
       defer free(msg);
@@ -3862,6 +3935,91 @@ test "parse_function requires an identifier after 'fun'" {
   Parser p = parser_new(&st);
   let err = p.parse_function(false, false);
   assert err.is_some(), "expected an error for a missing function name";
+}
+
+test "parse_for_statement parses an infinite loop with no condition" {
+  Vec<str> names;
+  names.init(0);
+  names.push("a");
+  ParseState st = _state_with_declared("for { a; }", names);
+  Parser p = parser_new(&st);
+  Node fn_stub = node_new(NodeKind.Blank);
+  p.current_function = &fn_stub;
+  p.has_current_function = true;
+
+  assert p.parse_for_statement().is_none(), "expected 'for { a; }' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementFor(fk) -> {
+      fit fk {
+        .Cond(fc) -> {
+          assert !fc.has_condition, "expected no condition for an infinite loop";
+          fit fc.body.kind {
+            .Body(bn) -> { assert bn.statements.len == 1, "expected 1 statement in the body"; }
+            _ -> { panic("expected a Body node"); }
+          }
+        }
+        _ -> { panic("expected ForKind.Cond"); }
+      }
+    }
+    _ -> { panic("expected a StatementFor node"); }
+  }
+}
+
+test "parse_for_statement parses a condition loop" {
+  Vec<str> names;
+  names.init(0);
+  names.push("i");
+  names.push("n");
+  ParseState st = _state_with_declared("for i < n { i; }", names);
+  Parser p = parser_new(&st);
+  Node fn_stub = node_new(NodeKind.Blank);
+  p.current_function = &fn_stub;
+  p.has_current_function = true;
+
+  assert p.parse_for_statement().is_none(), "expected 'for i < n { i; }' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementFor(fk) -> {
+      fit fk {
+        .Cond(fc) -> {
+          assert fc.has_condition, "expected a condition";
+          fit fc.condition.kind {
+            .Expression(e) -> { assert equals(e.op, "<"), "expected condition op '<'"; }
+            _ -> { panic("expected an Expression condition"); }
+          }
+        }
+        _ -> { panic("expected ForKind.Cond"); }
+      }
+    }
+    _ -> { panic("expected a StatementFor node"); }
+  }
+}
+
+test "parse_for_statement rejects use outside of a function" {
+  ParseState st = _state_from("for { }");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_for_statement();
+  assert err.is_some(), "expected an error for 'for' outside a function";
+}
+
+test "parse_statement dispatches 'for' to parse_for_statement" {
+  Vec<str> names;
+  names.init(0);
+  names.push("a");
+  ParseState st = _state_with_declared("for { a; }", names);
+  Parser p = parser_new(&st);
+  Node fn_stub = node_new(NodeKind.Blank);
+  p.current_function = &fn_stub;
+  p.has_current_function = true;
+
+  assert p.parse_statement().is_none(), "expected parse_statement to dispatch 'for'";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementFor(fk) -> {}
+    _ -> { panic("expected a StatementFor node"); }
+  }
 }
 
 // The lookup name a new scope entity for `node` should carry; empty for a
