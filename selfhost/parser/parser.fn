@@ -521,6 +521,44 @@ impl ParseState {
     ret self.nodes.last();
   }
 
+  // Establishes the root/global scope. Called once, before parsing the
+  // first top-level declaration.
+  pub init_root_scope() {
+    Scope* root = malloc(sizeof(Scope));
+    *root = scope_new();
+    self.scope_root = root;
+    self.has_scope_root = true;
+    self.scope_current = root;
+    self.has_scope_current = true;
+  }
+
+  // Pushes a new child scope (e.g. entering a function/block body), parented
+  // to whatever scope was current.
+  pub new_scope() {
+    Scope* nc = malloc(sizeof(Scope));
+    *nc = scope_new();
+    if self.has_scope_current {
+      nc.parent = self.scope_current;
+      nc.has_parent = true;
+    }
+    self.scope_current = nc;
+    self.has_scope_current = true;
+  }
+
+  // Pops back to the enclosing scope (e.g. leaving a function/block body).
+  // A no-op past the root scope.
+  pub finish_scope() {
+    if !self.has_scope_current {
+      ret;
+    }
+    let cur = self.scope_current;
+    if cur.has_parent {
+      self.scope_current = cur.parent;
+    } else {
+      self.has_scope_current = false;
+    }
+  }
+
   // Parses a bracketed generic-argument list (`<T, U>`) into `dt.generic_args`,
   // if the next significant token opens one. A no-op (not an error) when it
   // doesn't, since a type name may simply not be generic.
@@ -1526,6 +1564,238 @@ impl Parser {
   pub scope_last_entity_stop_global_scope() ScopeEntity* {
     ret self.state.last_scope_entity_stop_at(self.state.scope_root);
   }
+
+  // Pushes a placeholder `Body` node (its `.statements` filled in once
+  // parsing finishes) via `create_node`, so it picks up `binded` context
+  // from whatever body/function currently encloses it.
+  pub make_body_node() {
+    Node body_node = node_new(NodeKind.Blank);
+    self.create_node(&body_node);
+  }
+
+  // Parses a `{ ... }` block's statements into a `Body` node: creates the
+  // body node, tracks it as `current_body` (so nested node construction
+  // stamps `binded.owner` correctly) while parsing each statement in a
+  // loop until the closing `}`, then restores the previous `current_body`.
+  // 
+  // Deliberately simplified from the original for this slice: no
+  // `if`/`elif`/`else` chaining validation (nothing produces those node
+  // kinds yet) and no "function declared as a statement" rejection
+  // (`parse_statement` doesn't dispatch to `parse_function` yet either).
+  // On a parse error mid-body, `current_body` is left as whatever it was
+  // at the point of failure rather than unwound -- acceptable since a
+  // parse error aborts the whole parse anyway.
+  pub parse_body_multiple_statements() Option<ParseErrorKind> {
+    Vec<Node*> stmts;
+    stmts.init(0);
+
+    self.make_body_node();
+    let popped = self.state.node_pop();
+    if popped.is_none() {
+      self.state.err("expected body node");
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+    Node* bnode_ptr = malloc(sizeof(Node));
+    *bnode_ptr = popped.unwrap();
+
+    let prev_body = self.current_body;
+    let prev_has_body = self.has_current_body;
+    self.current_body = bnode_ptr;
+    self.has_current_body = true;
+
+    let lbrace_err = self.state.expect_sym('{');
+    if lbrace_err.is_some() {
+      ret lbrace_err;
+    }
+
+    for true {
+      let peeked = self.state.token_peek_next();
+      if peeked.is_none() {
+        self.state.err("unexpected end of file (expected '}' to close body)");
+        ret .Some(ParseErrorKind.InvalidStatement);
+      }
+      if token_is_symbol(peeked.unwrap(), '}') {
+        break;
+      }
+      let serr = self.parse_statement();
+      if serr.is_some() {
+        ret serr;
+      }
+      let maybe_stmt = self.state.node_pop();
+      if maybe_stmt.is_none() {
+        self.state.err("expected statement");
+        ret .Some(ParseErrorKind.InvalidStatement);
+      }
+      Node* stmt = malloc(sizeof(Node));
+      *stmt = maybe_stmt.unwrap();
+      stmts.push(stmt);
+    }
+
+    let rbrace_err = self.state.expect_sym('}');
+    if rbrace_err.is_some() {
+      ret rbrace_err;
+    }
+
+    self.current_body = prev_body;
+    self.has_current_body = prev_has_body;
+
+    BodyNode bn;
+    bn.statements = stmts;
+    bnode_ptr.kind = NodeKind.Body(bn);
+    self.state.nodes.push(*bnode_ptr);
+    ret .None;
+  }
+
+  // Parses a `{ ... }` block, wrapping it in its own child scope so
+  // declarations inside it don't leak into the enclosing one.
+  pub parse_body() Option<ParseErrorKind> {
+    self.state.new_scope();
+    let err = self.parse_body_multiple_statements();
+    self.state.finish_scope();
+    ret err;
+  }
+
+  // Parses a variable declaration's NAME and optional `= initializer`
+  // (the type `dt` is already parsed by the caller): registers a scope
+  // entity so later references resolve, and rejects re-declaring a name
+  // already visible in the current scope chain -- unconditionally, unlike
+  // the original, which only checked this in the has-initializer branch;
+  // an uninitialized redeclaration is just as much a bug and this port
+  // doesn't see a reason to let it through.
+  // 
+  // Deliberately simplified from the original for this slice: no `T[]
+  // name;` array-bracket form yet (needs `parse_array_brackets`, deferred
+  // along with the rest of array support).
+  pub parse_variable(DataType* dt, bin is_public, bin require_initializer) Option<ParseErrorKind> {
+    let tok = self.state.token_next();
+    if tok.is_none() {
+      self.state.err("expected identifier");
+      ret .Some(ParseErrorKind.InvalidIdentifier);
+    }
+    let ident_tok = tok.unwrap();
+    if ident_tok.type != TokenType.Identifier {
+      self.state.err("expected identifier");
+      ret .Some(ParseErrorKind.InvalidIdentifier);
+    }
+    str name = "";
+    fit ident_tok.data {
+      .Sval(s) -> { name = s; }
+      _ -> {}
+    }
+
+    if self.state.get_scope_entity(name) != nil {
+      let msg = format("variable '{str}' already declared", name);
+      defer free(msg);
+      self.state.err(msg);
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+
+    bin has_value = self.state.next_token_is_operator("=");
+    if !has_value && require_initializer {
+      self.state.err("'let' declarations require an initializer");
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+
+    VariableNode v;
+    v.var_type = dt;
+    v.name = name;
+    v.has_val = false;
+
+    if has_value {
+      self.state.token_next();
+      let verr = self.parse_expressionable_root();
+      if verr.is_some() {
+        ret verr;
+      }
+      let maybe_val = self.state.node_pop();
+      if maybe_val.is_none() {
+        self.state.err("expected initializer expression");
+        ret .Some(ParseErrorKind.InvalidStatement);
+      }
+      Node* val = malloc(sizeof(Node));
+      *val = maybe_val.unwrap();
+      v.val = val;
+      v.has_val = true;
+    }
+
+    Node node = node_new(NodeKind.Variable(v));
+    node.pos = ident_tok.pos;
+    node.has_pos = true;
+    node.flags.is_public = is_public;
+
+    Node* node_ptr = malloc(sizeof(Node));
+    *node_ptr = node;
+    ScopeEntity* entity = self.new_scope_entity(node_ptr);
+
+    self.create_node(node_ptr);
+    self.state.push_scope_entity(entity);
+    ret .None;
+  }
+
+  // Parses `let NAME = value;`: the declared type is the `__let_infer__`
+  // sentinel (real type inference happens at typecheck time, not ported
+  // yet), and an initializer is mandatory.
+  pub parse_let_declaration(bin is_public) Option<ParseErrorKind> {
+    let kw_err = self.state.expect_keyword("let");
+    if kw_err.is_some() {
+      ret kw_err;
+    }
+
+    DataType* dt = malloc(sizeof(DataType));
+    *dt = dtype_new();
+    dt.type_str = "__let_infer__";
+
+    let verr = self.parse_variable(dt, is_public, true);
+    if verr.is_some() {
+      ret verr;
+    }
+    ret self.state.expect_sym(';');
+  }
+
+  // Parses one statement: a `{ ... }` nested body, a `let` declaration, or
+  // an expression statement terminated by `;`.
+  // 
+  // Deliberately simplified from the original for this slice: no keyword
+  // dispatch beyond `let` (`if`/`for`/`fit`/`ret`/`assert`/`compound`/...
+  // each need their own parsing infrastructure not ported yet -- an
+  // unsupported keyword reports a clean "not yet supported" error rather
+  // than silently misparsing), no `fork`-statement contextual-keyword
+  // handling, and no user-defined-type declaration detection (`Point p;`
+  // -- needs the same lookahead machinery as the keyword dispatch above,
+  // deferred with it).
+  pub parse_statement() Option<ParseErrorKind> {
+    let tok = self.state.token_peek_next();
+    if tok.is_none() {
+      self.state.err("unexpected end of file");
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+    let t = tok.unwrap();
+
+    if t.type == TokenType.Keyword {
+      str kw = "";
+      fit t.data {
+        .Sval(s) -> { kw = s; }
+        _ -> {}
+      }
+      if equals(kw, "let") {
+        ret self.parse_let_declaration(false);
+      }
+      let msg = format("keyword '{str}' is not yet supported in statement position", kw);
+      defer free(msg);
+      self.state.err(msg);
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+
+    if token_is_symbol(t, '{') {
+      ret self.parse_body();
+    }
+
+    let eerr = self.parse_expressionable_root();
+    if eerr.is_some() {
+      ret eerr;
+    }
+    ret self.state.expect_sym(';');
+  }
 }
 
 // ===== Test helpers =====
@@ -2505,6 +2775,123 @@ test "parse_expressionable_root parses a unary operand followed by a binary cont
       }
     }
     _ -> { panic("expected a Unary node"); }
+  }
+}
+
+test "parse_body parses a sequence of expression statements" {
+  Vec<str> names;
+  names.init(0);
+  names.push("a");
+  names.push("b");
+  ParseState st = _state_with_declared("{ a; b; }", names);
+  Parser p = parser_new(&st);
+  assert p.parse_body().is_none(), "expected '{ a; b; }' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Body(b) -> {
+      assert b.statements.len == 2, "expected 2 statements";
+      let s0 = b.statements.get(0);
+      let s1 = b.statements.get(1);
+      fit s0.kind {
+        .Identifier(s) -> { assert equals(s, "a"), "expected first statement 'a'"; }
+        _ -> { panic("expected Identifier 'a'"); }
+      }
+      fit s1.kind {
+        .Identifier(s) -> { assert equals(s, "b"), "expected second statement 'b'"; }
+        _ -> { panic("expected Identifier 'b'"); }
+      }
+    }
+    _ -> { panic("expected a Body node"); }
+  }
+}
+
+test "parse_body parses a let declaration" {
+  ParseState st = _state_from("{ let x = 1; }");
+  Parser p = parser_new(&st);
+  assert p.parse_body().is_none(), "expected '{ let x = 1; }' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Body(b) -> {
+      assert b.statements.len == 1, "expected 1 statement";
+      let s0 = b.statements.get(0);
+      fit s0.kind {
+        .Variable(v) -> {
+          assert equals(v.name, "x"), "expected variable name 'x'";
+          assert v.has_val, "expected an initializer";
+          assert equals(v.var_type.type_str, "__let_infer__"), "expected the __let_infer__ sentinel type";
+          fit v.val.kind {
+            .Number(d) -> {
+              fit d {
+                .Num(n) -> { assert n == 1, "expected initializer 1"; }
+                _ -> { panic("expected Num"); }
+              }
+            }
+            _ -> { panic("expected a Number initializer"); }
+          }
+        }
+        _ -> { panic("expected a Variable statement"); }
+      }
+    }
+    _ -> { panic("expected a Body node"); }
+  }
+}
+
+test "parse_body parses a nested body" {
+  Vec<str> names;
+  names.init(0);
+  names.push("a");
+  ParseState st = _state_with_declared("{ { a; } }", names);
+  Parser p = parser_new(&st);
+  assert p.parse_body().is_none(), "expected '{ { a; } }' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Body(outer) -> {
+      assert outer.statements.len == 1, "expected 1 outer statement";
+      let inner_stmt = outer.statements.get(0);
+      fit inner_stmt.kind {
+        .Body(inner) -> {
+          assert inner.statements.len == 1, "expected 1 inner statement";
+          let inner_s0 = inner.statements.get(0);
+          fit inner_s0.kind {
+            .Identifier(s) -> { assert equals(s, "a"), "expected inner statement 'a'"; }
+            _ -> { panic("expected Identifier 'a'"); }
+          }
+        }
+        _ -> { panic("expected the inner statement to be a Body node"); }
+      }
+      // The nested body's `binded.owner` should point back to the outer body.
+      assert inner_stmt.has_binded, "expected the nested body to have binded context";
+      assert inner_stmt.binded.has_owner, "expected the nested body's binded.owner to be set";
+    }
+    _ -> { panic("expected a Body node"); }
+  }
+}
+
+test "parse_body rejects a duplicate let declaration in the same scope" {
+  ParseState st = _state_from("{ let x = 1; let x = 2; }");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_body();
+  assert err.is_some(), "expected a duplicate declaration error";
+}
+
+test "parse_let_declaration requires an initializer" {
+  ParseState st = _state_from("let x;");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_let_declaration(false);
+  assert err.is_some(), "expected an error for a let declaration with no initializer";
+}
+
+test "parse_statement reports a clean error for an unsupported keyword" {
+  ParseState st = _state_from("if a { }");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_statement();
+  assert err.is_some(), "expected an error for an unsupported keyword in statement position";
+  fit err.unwrap() {
+    .InvalidStatement -> {}
+    _ -> { panic("expected InvalidStatement"); }
   }
 }
 
