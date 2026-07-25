@@ -685,11 +685,20 @@ impl ParseState {
   // doesn't, since a type name may simply not be generic.
   // 
   // Deferred from this slice: an array-typed argument (`Vec<num[]>`) --
-  // needs `parse_array_brackets`, which needs the expression parser (array
-  // sizes are arbitrary expressions), a much later slice. A generic arg
-  // that starts with `[` currently falls through to `parse_datatype`
-  // reporting `InvalidDataType`, which is the same outcome as any other
-  // not-yet-supported syntax in this partial port.
+  // needs `parse_array_brackets`, which needs the expression parser.
+  // Structurally out of reach from HERE specifically: this function lives
+  // on `ParseState` (pure token/datatype machinery, no expression
+  // parsing), while `parse_array_brackets` is a `Parser` method (it calls
+  // `parse_expressionable_root` for array-size expressions) -- confirmed
+  // directly (`self.parse_array_brackets(adt)` from here fails to
+  // typecheck: "type 'ParseState' has no method 'parse_array_brackets'").
+  // Closing this would mean moving `parse_datatype`/`parse_generic_type_args`
+  // to the `Parser` layer (touching every one of their many call sites
+  // across this file), not just adding one function -- correctly out of
+  // scope for the array-bracket slice that closed every OTHER site. A
+  // generic arg that starts with `[` currently falls through to
+  // `parse_datatype` reporting `InvalidDataType`, the same clean-error
+  // outcome as any other not-yet-supported syntax in this port.
   pub parse_generic_type_args(DataType* dt) Option<ParseErrorKind> {
     self.split_angle_opener_token_if_needed();
     if !self.next_token_is_angle_open() {
