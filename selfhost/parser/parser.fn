@@ -3696,19 +3696,193 @@ impl Parser {
     ret .None;
   }
 
-  // Parses one top-level item: `imp`, `test`, `compound`, `enum`,
-  // `pub`/`async fun`/`fun`, a bare-datatype-keyword global variable
-  // (`num x = 5;`), or -- for everything `parse_statement` already
-  // understands (`let`, `ret`, `assert`, `if`/`elif`/`else`, `for`,
-  // `fit`, `defer`, `break`, `continue`, a `{ ... }` block, or a bare
-  // expression statement) -- delegates there directly.
+  // Parses `quirk Name { method sigs }` (optionally generic, `quirk
+  // Name<T> { ... }`): a structural interface -- method SIGNATURES only,
+  // no bodies (`impl Type as Name { ... }` supplies those). Registers
+  // the quirk's name as a symbol via `push_symbol`, same as
+  // `parse_compound`/`parse_enum`.
   // 
   // Deliberately simplified from the original for this slice: no
-  // `quirk`/`impl`/`asm`/`await`/`nil`/`allow`/`expect`/`panic`
-  // declarations -- `quirk`/`impl` are each their own substantial
-  // parsing slice (interface declarations and their implementations),
-  // deferred to future work; a clean "not yet supported" error is
-  // reported instead of a misparse. Also no bare
+  // array-bracket arg/return types -- same deferral as everywhere else
+  // in this port (see `parse_datatype`'s doc comment). Also reuses the
+  // constraint-aware `parse_type_params_with_constraints` for the
+  // quirk's own type parameters rather than the constraint-less
+  // `parse_generic_type_params`, the same documented widening as
+  // `parse_enum`'s.
+  pub parse_quirk(bin is_public) Option<ParseErrorKind> {
+    let kwerr = self.state.expect_keyword("quirk");
+    if kwerr.is_some() {
+      ret kwerr;
+    }
+
+    let name_tok = self.state.token_next();
+    if name_tok.is_none() || name_tok.unwrap().type != TokenType.Identifier {
+      self.state.err("expected identifier after 'quirk'");
+      ret .Some(ParseErrorKind.InvalidIdentifier);
+    }
+    str name = "";
+    fit name_tok.unwrap().data {
+      .Sval(s) -> { name = s; }
+      _ -> {}
+    }
+
+    Vec<str> type_params;
+    type_params.init(0);
+    Vec<Vec<str>> unused_forced_insts;
+    unused_forced_insts.init(0);
+    let tperr = self.state.parse_type_params_with_constraints(&type_params, &unused_forced_insts);
+    if tperr.is_some() {
+      ret tperr;
+    }
+    bin is_generic = type_params.len > 0;
+
+    let lberr = self.state.expect_sym('{');
+    if lberr.is_some() {
+      ret lberr;
+    }
+
+    Vec<QuirkMethodSig> methods;
+    methods.init(0);
+
+    for !self.state.next_token_is_symbol('}') {
+      bin method_is_async = false;
+      if self.state.next_token_is_keyword("async") {
+        self.state.token_next();
+        method_is_async = true;
+      }
+
+      let mname_tok = self.state.token_next();
+      if mname_tok.is_none() || mname_tok.unwrap().type != TokenType.Identifier {
+        self.state.err("expected method name");
+        ret .Some(ParseErrorKind.InvalidIdentifier);
+      }
+      str mname = "";
+      fit mname_tok.unwrap().data {
+        .Sval(s) -> { mname = s; }
+        _ -> {}
+      }
+
+      let lperr = self.state.expect_op("(");
+      if lperr.is_some() {
+        ret lperr;
+      }
+
+      Vec<QuirkArg> margs;
+      margs.init(0);
+      for !self.state.next_token_is_symbol(')') {
+        DataType* adt = malloc(sizeof(DataType));
+        *adt = dtype_new();
+        let aderr = self.state.parse_datatype(adt);
+        if aderr.is_some() {
+          ret aderr;
+        }
+
+        let aname_tok = self.state.token_next();
+        if aname_tok.is_none() || aname_tok.unwrap().type != TokenType.Identifier {
+          self.state.err("expected argument name");
+          ret .Some(ParseErrorKind.InvalidIdentifier);
+        }
+        str aname = "";
+        fit aname_tok.unwrap().data {
+          .Sval(s) -> { aname = s; }
+          _ -> {}
+        }
+
+        QuirkArg qa;
+        qa.name = aname;
+        qa.dtype = adt;
+        margs.push(qa);
+
+        if !self.state.next_token_is_operator(",") {
+          break;
+        }
+        self.state.token_next();
+      }
+      let rperr = self.state.expect_sym(')');
+      if rperr.is_some() {
+        ret rperr;
+      }
+
+      DataType* rtype = malloc(sizeof(DataType));
+      *rtype = dtype_new();
+      bin has_explicit_rtype = false;
+      fit self.state.token_peek_next() {
+        .Some(rt) -> {
+          bin looks_like_type = false;
+          if rt.type == TokenType.Identifier {
+            looks_like_type = true;
+          }
+          if rt.type == TokenType.Keyword {
+            fit rt.data {
+              .Sval(s) -> { looks_like_type = keyword_is_datatype(s); }
+              _ -> {}
+            }
+          }
+          if looks_like_type {
+            let rderr = self.state.parse_datatype(rtype);
+            if rderr.is_some() {
+              ret rderr;
+            }
+            has_explicit_rtype = true;
+          }
+        }
+        .None -> {}
+      }
+      if !has_explicit_rtype {
+        rtype.kind = DataTypeType.Void;
+        rtype.type_str = "void";
+      }
+
+      let serr = self.state.expect_sym(';');
+      if serr.is_some() {
+        ret serr;
+      }
+
+      QuirkMethodSig ms = quirk_method_sig_new();
+      ms.name = mname;
+      ms.rtype = rtype;
+      ms.args = margs;
+      ms.is_async = method_is_async;
+      methods.push(ms);
+    }
+
+    let rberr = self.state.expect_sym('}');
+    if rberr.is_some() {
+      ret rberr;
+    }
+
+    QuirkNode qn = quirk_node_new();
+    qn.name = name;
+    qn.methods = methods;
+    qn.is_generic = is_generic;
+    qn.type_params = type_params;
+    qn.has_type_params = type_params.len > 0;
+
+    Node node = node_new(NodeKind.Quirk(qn));
+    node.pos = name_tok.unwrap().pos;
+    node.has_pos = true;
+    node.flags.is_public = is_public;
+
+    Symbol sym = symbol_new(name);
+    sym.kind = SymbolKind.NodeSym(node);
+    self.state.push_symbol(sym);
+
+    self.state.nodes.push(node);
+    ret .None;
+  }
+
+  // Parses one top-level item: `imp`, `test`, `compound`, `enum`,
+  // `quirk`, `pub`/`async fun`/`fun`, a bare-datatype-keyword global
+  // variable (`num x = 5;`), or -- for everything `parse_statement`
+  // already understands (`let`, `ret`, `assert`, `if`/`elif`/`else`,
+  // `for`, `fit`, `defer`, `break`, `continue`, a `{ ... }` block, or a
+  // bare expression statement) -- delegates there directly.
+  // 
+  // Deliberately simplified from the original for this slice: no
+  // `impl`/`asm`/`await`/`nil`/`allow`/`expect`/`panic` declarations --
+  // `impl` (implementing a quirk/adding methods to a type) is its own
+  // substantial parsing slice, deferred to future work; a clean "not yet
+  // supported" error is reported instead of a misparse. Also no bare
   // `Identifier name;` top-level declaration (public OR private) --
   // needs the same forward-lookahead machinery the original uses to
   // disambiguate a type name from an expression, already documented as
@@ -3754,6 +3928,10 @@ impl Parser {
         ret self.parse_enum(false);
       }
 
+      if equals(kw, "quirk") {
+        ret self.parse_quirk(false);
+      }
+
       if equals(kw, "pub") {
         self.state.token_next(); // consume 'pub'
         let next_tok = self.state.token_peek_next();
@@ -3780,6 +3958,9 @@ impl Parser {
           }
           if equals(nkw, "enum") {
             ret self.parse_enum(true);
+          }
+          if equals(nkw, "quirk") {
+            ret self.parse_quirk(true);
           }
           if equals(nkw, "async") {
             self.state.token_next(); // consume 'async'
@@ -5541,7 +5722,7 @@ test "parse parses top-level variable declarations (bare and public)" {
 }
 
 test "parse_top_level_declaration reports a clean error for an unsupported top-level keyword" {
-  ParseState st = _state_from("quirk Greeter { fun greet(); }");
+  ParseState st = _state_from("impl Greeter { greet() { } }");
   st.emit_stderr = false;
   Parser p = parser_new(&st);
   let err = p.parse_top_level_declaration();
@@ -5549,7 +5730,7 @@ test "parse_top_level_declaration reports a clean error for an unsupported top-l
 }
 
 test "parse_top_level_declaration reports a clean error for an unsupported 'pub' target" {
-  ParseState st = _state_from("pub quirk Greeter { fun greet(); }");
+  ParseState st = _state_from("pub impl Greeter { greet() { } }");
   st.emit_stderr = false;
   Parser p = parser_new(&st);
   let err = p.parse_top_level_declaration();
@@ -6081,6 +6262,85 @@ test "parse_top_level_declaration dispatches 'compound' and 'enum'" {
   fit st.nodes.get(1).kind {
     .Enum(e) -> { assert equals(e.name, "Color"), "expected enum name 'Color'"; }
     _ -> { panic("expected an Enum node"); }
+  }
+}
+
+test "parse_quirk parses method signatures with args and return types" {
+  ParseState st = _state_from("quirk Sized { len() num; is_empty() bin; }");
+  Parser p = parser_new(&st);
+  assert p.parse_quirk(true).is_none(), "expected the quirk to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Quirk(q) -> {
+      assert equals(q.name, "Sized"), "expected quirk name 'Sized'";
+      assert top.flags.is_public, "expected the quirk to be public";
+      assert !q.is_generic, "expected a non-generic quirk";
+      assert q.methods.len == 2, "expected 2 method signatures";
+      let m0 = q.methods.get(0);
+      assert equals(m0.name, "len"), "expected first method 'len'";
+      assert equals(m0.rtype.type_str, "num"), "expected 'len' to return 'num'";
+      assert m0.args.len == 0, "expected 'len' to take no args";
+      let m1 = q.methods.get(1);
+      assert equals(m1.name, "is_empty"), "expected second method 'is_empty'";
+      assert equals(m1.rtype.type_str, "bin"), "expected 'is_empty' to return 'bin'";
+    }
+    _ -> { panic("expected a Quirk node"); }
+  }
+}
+
+test "parse_quirk parses a method argument and defaults an omitted return type to void" {
+  ParseState st = _state_from("quirk Writer { write(str s); }");
+  Parser p = parser_new(&st);
+  assert p.parse_quirk(false).is_none(), "expected the quirk to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Quirk(q) -> {
+      let m0 = q.methods.get(0);
+      assert m0.args.len == 1, "expected 1 arg";
+      let a0 = m0.args.get(0);
+      assert equals(a0.name, "s"), "expected arg name 's'";
+      assert equals(a0.dtype.type_str, "str"), "expected arg type 'str'";
+      fit m0.rtype.kind {
+        .Void -> {}
+        _ -> { panic("expected an omitted return type to default to void"); }
+      }
+    }
+    _ -> { panic("expected a Quirk node"); }
+  }
+}
+
+test "parse_quirk parses an async method and generic type parameters" {
+  ParseState st = _state_from("quirk Iterator<T> { async next() Option<T>; }");
+  Parser p = parser_new(&st);
+  assert p.parse_quirk(false).is_none(), "expected the generic quirk to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Quirk(q) -> {
+      assert q.is_generic, "expected a generic quirk";
+      assert q.has_type_params, "expected type params";
+      assert equals(q.type_params.get(0), "T"), "expected type param 'T'";
+      let m0 = q.methods.get(0);
+      assert m0.is_async, "expected 'next' to be async";
+    }
+    _ -> { panic("expected a Quirk node"); }
+  }
+}
+
+test "parse_quirk registers the quirk name as a symbol" {
+  ParseState st = _state_from("quirk Sized { len() num; }");
+  Parser p = parser_new(&st);
+  assert p.parse_quirk(false).is_none(), "expected the quirk to parse";
+  assert st.get_symbol("Sized").is_some(), "expected 'Sized' to be registered as a symbol";
+}
+
+test "parse_top_level_declaration dispatches 'quirk'" {
+  ParseState st = _state_from("quirk Sized { len() num; }");
+  Parser p = parser_new(&st);
+  assert p.parse_top_level_declaration().is_none(), "expected 'quirk' to dispatch";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Quirk(q) -> { assert equals(q.name, "Sized"), "expected quirk name 'Sized'"; }
+    _ -> { panic("expected a Quirk node"); }
   }
 }
 
