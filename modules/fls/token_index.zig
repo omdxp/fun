@@ -916,7 +916,8 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
     // This includes:
     // - `fun name(...) { ... }`
     // - `impl Type { method(...) { ... } }`
-    const PendingBodyKind = enum { none, fun_decl, impl_method };
+    // - `test "name" { ... }`
+    const PendingBodyKind = enum { none, fun_decl, impl_method, test_decl };
 
     var pending_body: PendingBodyKind = .none;
     var pending_params = ArrayList(ParamLite).init(allocator);
@@ -2874,6 +2875,20 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
             in_body = false;
             body_range = null;
             locals_type_map.clearRetainingCapacity();
+        }
+
+        if (isKeyword(t, "test")) {
+            // `test "name" { ... }` has no params/return type to capture --
+            // just mark the upcoming `{` as starting a function-ish body so
+            // its locals get indexed the same way a function body's would.
+            // Without this, EVERY declaration inside a test block (locals,
+            // fit-arm bindings, etc.) was invisible to hover/completion,
+            // since this token-based scanner (not the AST-based one, which
+            // is off by default) is what actually builds the symbol table
+            // in the common case.
+            resetPendingBody(&pending_body, &pending_params, &pending_impl_owner, &pending_is_variadic);
+            pending_body = .test_decl;
+            continue;
         }
 
         if (isKeyword(t, "fun")) {
