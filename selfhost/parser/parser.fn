@@ -3413,19 +3413,302 @@ impl Parser {
     ret .None;
   }
 
-  // Parses one top-level item: `imp`, `test`, `pub`/`async fun`/`fun`, a
-  // bare-datatype-keyword global variable (`num x = 5;`), or -- for
-  // everything `parse_statement` already understands (`let`, `ret`,
-  // `assert`, `if`/`elif`/`else`, `for`, `fit`, `defer`, `break`,
-  // `continue`, a `{ ... }` block, or a bare expression statement) --
-  // delegates there directly.
+  // Parses `compound Name { field decls }` (optionally generic, `compound
+  // Name<T> { ... }`): a struct-like user-defined type. Fields share a
+  // datatype across a comma-separated name list (`dec x, y;`). Registers
+  // the compound's name as a symbol via `push_symbol` so it can be used
+  // as a datatype identifier elsewhere (e.g. `Name x;`, or `Name{ ... }`
+  // compound-init once THAT'S ported).
   // 
   // Deliberately simplified from the original for this slice: no
-  // `enum`/`compound`/`quirk`/`impl`/`asm`/`await`/`nil`/`allow`/
-  // `expect`/`panic` declarations -- each is its own substantial parsing
-  // slice (`enum`/`compound`/`quirk`/`impl` especially), deferred to
-  // future work; a clean "not yet supported" error is reported instead
-  // of a misparse. Also no bare
+  // array-bracket field types (`num arr[10];`) -- needs
+  // `parse_array_brackets`, the same deferral as everywhere else in this
+  // port (see `parse_datatype`'s doc comment). A field written with one
+  // gets a clean "expected field name" error (the `[` isn't consumed by
+  // anything, so the next token isn't an identifier either) rather than
+  // a misparse.
+  pub parse_compound(bin is_public) Option<ParseErrorKind> {
+    let kwerr = self.state.expect_keyword("compound");
+    if kwerr.is_some() {
+      ret kwerr;
+    }
+
+    let name_tok = self.state.token_next();
+    if name_tok.is_none() || name_tok.unwrap().type != TokenType.Identifier {
+      self.state.err("expected identifier after 'compound'");
+      ret .Some(ParseErrorKind.InvalidIdentifier);
+    }
+    str name = "";
+    fit name_tok.unwrap().data {
+      .Sval(s) -> { name = s; }
+      _ -> {}
+    }
+
+    Vec<str> type_params;
+    type_params.init(0);
+    Vec<Vec<str>> type_param_forced_insts;
+    type_param_forced_insts.init(0);
+    let tperr = self.state.parse_type_params_with_constraints(
+      &type_params,
+      &type_param_forced_insts
+    );
+    if tperr.is_some() {
+      ret tperr;
+    }
+
+    let lberr = self.state.expect_sym('{');
+    if lberr.is_some() {
+      ret lberr;
+    }
+
+    Vec<CompoundField> fields;
+    fields.init(0);
+
+    for !self.state.next_token_is_symbol('}') {
+      DataType* dt = malloc(sizeof(DataType));
+      *dt = dtype_new();
+      let derr = self.state.parse_datatype(dt);
+      if derr.is_some() {
+        ret derr;
+      }
+
+      for true {
+        let field_tok = self.state.token_next();
+        if field_tok.is_none() || field_tok.unwrap().type != TokenType.Identifier {
+          self.state.err("expected field name");
+          ret .Some(ParseErrorKind.InvalidIdentifier);
+        }
+        str fname = "";
+        fit field_tok.unwrap().data {
+          .Sval(s) -> { fname = s; }
+          _ -> {}
+        }
+
+        DataType* field_dt = malloc(sizeof(DataType));
+        *field_dt = *dt;
+
+        CompoundField cf;
+        cf.name = fname;
+        cf.dtype = field_dt;
+        fields.push(cf);
+
+        if !self.state.next_token_is_operator(",") {
+          break;
+        }
+        self.state.token_next();
+      }
+
+      let serr = self.state.expect_sym(';');
+      if serr.is_some() {
+        ret serr;
+      }
+    }
+
+    let rberr = self.state.expect_sym('}');
+    if rberr.is_some() {
+      ret rberr;
+    }
+
+    CompoundNode cn = compound_node_new();
+    cn.name = name;
+    cn.fields = fields;
+    cn.type_params = type_params;
+    cn.has_type_params = type_params.len > 0;
+    cn.type_param_forced_insts = type_param_forced_insts;
+    cn.has_type_param_forced_insts = type_param_forced_insts.len > 0;
+
+    Node node = node_new(NodeKind.Compound(cn));
+    node.pos = name_tok.unwrap().pos;
+    node.has_pos = true;
+    node.flags.is_public = is_public;
+
+    Symbol sym = symbol_new(name);
+    sym.kind = SymbolKind.NodeSym(node);
+    self.state.push_symbol(sym);
+
+    self.state.nodes.push(node);
+    ret .None;
+  }
+
+  // Parses `enum Name { variants }` (optionally generic, `enum Name<T> {
+  // ... }`): a plain C-style enum, or a tagged union if any variant has a
+  // data-carrying payload (`Circle(num)`). Variants are separated by `,`
+  // (preferred) or `;` (legacy); a trailing separator before `}` is
+  // allowed. Registers the enum's name as a symbol via `push_symbol`,
+  // same as `parse_compound`.
+  // 
+  // Deliberately simplified from the original for this slice: no
+  // array-bracket payload element types -- same deferral as
+  // `parse_compound`'s fields. Also reuses the constraint-AWARE
+  // `parse_type_params_with_constraints` for `enum`'s type parameters
+  // rather than porting a separate constraint-less
+  // `parse_generic_type_params` -- the original's enum path doesn't
+  // support `T: a | b` constraints at all, so this is slightly more
+  // permissive than the original (an enum written with constraint syntax
+  // parses here where the original would error); not worth a whole
+  // near-duplicate function just to preserve that rejection.
+  pub parse_enum(bin is_public) Option<ParseErrorKind> {
+    let kwerr = self.state.expect_keyword("enum");
+    if kwerr.is_some() {
+      ret kwerr;
+    }
+
+    let name_tok = self.state.token_next();
+    if name_tok.is_none() || name_tok.unwrap().type != TokenType.Identifier {
+      self.state.err("expected identifier after 'enum'");
+      ret .Some(ParseErrorKind.InvalidIdentifier);
+    }
+    str name = "";
+    fit name_tok.unwrap().data {
+      .Sval(s) -> { name = s; }
+      _ -> {}
+    }
+
+    Vec<str> type_params;
+    type_params.init(0);
+    Vec<Vec<str>> unused_forced_insts;
+    unused_forced_insts.init(0);
+    let tperr = self.state.parse_type_params_with_constraints(&type_params, &unused_forced_insts);
+    if tperr.is_some() {
+      ret tperr;
+    }
+
+    let lberr = self.state.expect_sym('{');
+    if lberr.is_some() {
+      ret lberr;
+    }
+
+    Vec<EnumVariant> variants;
+    variants.init(0);
+
+    for !self.state.next_token_is_symbol('}') {
+      let vtok = self.state.token_next();
+      if vtok.is_none() || vtok.unwrap().type != TokenType.Identifier {
+        self.state.err("expected enum variant name");
+        ret .Some(ParseErrorKind.InvalidIdentifier);
+      }
+      str vname = "";
+      fit vtok.unwrap().data {
+        .Sval(s) -> { vname = s; }
+        _ -> {}
+      }
+
+      EnumVariant variant = enum_variant_new();
+      variant.name = vname;
+
+      // Optional positional payload for a data-carrying variant:
+      // `Circle(num)`, `Rect(num, num)`.
+      if self.state.next_token_is_operator("(") {
+        self.state.token_next(); // consume '('
+        Vec<DataType*> ptypes;
+        ptypes.init(0);
+        for !self.state.next_token_is_symbol(')') {
+          DataType* pdt = malloc(sizeof(DataType));
+          *pdt = dtype_new();
+          let pderr = self.state.parse_datatype(pdt);
+          if pderr.is_some() {
+            ret pderr;
+          }
+          ptypes.push(pdt);
+          if !self.state.next_token_is_operator(",") {
+            break;
+          }
+          self.state.token_next();
+        }
+        let rperr = self.state.expect_sym(')');
+        if rperr.is_some() {
+          ret rperr;
+        }
+        if ptypes.len == 0 {
+          self.state.err("enum variant payload '()' must list at least one type");
+          ret .Some(ParseErrorKind.InvalidToken);
+        }
+        variant.payload = ptypes;
+        variant.has_payload = true;
+      }
+
+      // Optional explicit integer value: `A = 3`, `A = -1`.
+      if self.state.next_token_is_operator("=") {
+        self.state.token_next(); // consume '='
+        bin negate = false;
+        if self.state.next_token_is_operator("-") {
+          self.state.token_next();
+          negate = true;
+        }
+        let ntok = self.state.token_next();
+        if ntok.is_none() || ntok.unwrap().type != TokenType.Number {
+          self.state.err("expected integer literal after '='");
+          ret .Some(ParseErrorKind.InvalidToken);
+        }
+        num v = 0;
+        bin got_num = false;
+        fit ntok.unwrap().data {
+          .Num(n) -> {
+            v = n;
+            got_num = true;
+          }
+          _ -> {}
+        }
+        if !got_num {
+          self.state.err("enum variant value must be an integer literal");
+          ret .Some(ParseErrorKind.InvalidToken);
+        }
+        if negate {
+          v = -v;
+        }
+        variant.value = v;
+        variant.has_value = true;
+      }
+
+      if self.state.next_token_is_operator(",") {
+        self.state.token_next();
+      } elif self.state.next_token_is_symbol(';') {
+        self.state.token_next();
+      } elif !self.state.next_token_is_symbol('}') {
+        self.state.err("expected ',' or ';' after enum variant");
+        ret .Some(ParseErrorKind.InvalidToken);
+      }
+
+      variants.push(variant);
+    }
+
+    let rberr = self.state.expect_sym('}');
+    if rberr.is_some() {
+      ret rberr;
+    }
+
+    EnumDeclNode en = enum_decl_node_new();
+    en.name = name;
+    en.variants = variants;
+    en.type_params = type_params;
+    en.has_type_params = type_params.len > 0;
+
+    Node node = node_new(NodeKind.Enum(en));
+    node.pos = name_tok.unwrap().pos;
+    node.has_pos = true;
+    node.flags.is_public = is_public;
+
+    Symbol sym = symbol_new(name);
+    sym.kind = SymbolKind.NodeSym(node);
+    self.state.push_symbol(sym);
+
+    self.state.nodes.push(node);
+    ret .None;
+  }
+
+  // Parses one top-level item: `imp`, `test`, `compound`, `enum`,
+  // `pub`/`async fun`/`fun`, a bare-datatype-keyword global variable
+  // (`num x = 5;`), or -- for everything `parse_statement` already
+  // understands (`let`, `ret`, `assert`, `if`/`elif`/`else`, `for`,
+  // `fit`, `defer`, `break`, `continue`, a `{ ... }` block, or a bare
+  // expression statement) -- delegates there directly.
+  // 
+  // Deliberately simplified from the original for this slice: no
+  // `quirk`/`impl`/`asm`/`await`/`nil`/`allow`/`expect`/`panic`
+  // declarations -- `quirk`/`impl` are each their own substantial
+  // parsing slice (interface declarations and their implementations),
+  // deferred to future work; a clean "not yet supported" error is
+  // reported instead of a misparse. Also no bare
   // `Identifier name;` top-level declaration (public OR private) --
   // needs the same forward-lookahead machinery the original uses to
   // disambiguate a type name from an expression, already documented as
@@ -3463,6 +3746,14 @@ impl Parser {
         ret self.parse_test_declaration();
       }
 
+      if equals(kw, "compound") {
+        ret self.parse_compound(false);
+      }
+
+      if equals(kw, "enum") {
+        ret self.parse_enum(false);
+      }
+
       if equals(kw, "pub") {
         self.state.token_next(); // consume 'pub'
         let next_tok = self.state.token_peek_next();
@@ -3483,6 +3774,12 @@ impl Parser {
           }
           if equals(nkw, "let") {
             ret self.parse_let_declaration(true);
+          }
+          if equals(nkw, "compound") {
+            ret self.parse_compound(true);
+          }
+          if equals(nkw, "enum") {
+            ret self.parse_enum(true);
           }
           if equals(nkw, "async") {
             self.state.token_next(); // consume 'async'
@@ -5244,7 +5541,7 @@ test "parse parses top-level variable declarations (bare and public)" {
 }
 
 test "parse_top_level_declaration reports a clean error for an unsupported top-level keyword" {
-  ParseState st = _state_from("enum Color { Red, Green }");
+  ParseState st = _state_from("quirk Greeter { fun greet(); }");
   st.emit_stderr = false;
   Parser p = parser_new(&st);
   let err = p.parse_top_level_declaration();
@@ -5252,7 +5549,7 @@ test "parse_top_level_declaration reports a clean error for an unsupported top-l
 }
 
 test "parse_top_level_declaration reports a clean error for an unsupported 'pub' target" {
-  ParseState st = _state_from("pub enum Color { Red, Green }");
+  ParseState st = _state_from("pub quirk Greeter { fun greet(); }");
   st.emit_stderr = false;
   Parser p = parser_new(&st);
   let err = p.parse_top_level_declaration();
@@ -5643,6 +5940,147 @@ test "parse_top_level_declaration dispatches 'test'" {
   fit top.kind {
     .Test(td) -> { assert equals(td.name, "noop"), "expected test name 'noop'"; }
     _ -> { panic("expected a Test node"); }
+  }
+}
+
+test "parse_compound parses fields, including a shared-type multi-name declaration" {
+  ParseState st = _state_from("compound Point { num x, y; str label; }");
+  Parser p = parser_new(&st);
+  assert p.parse_compound(true).is_none(), "expected the compound to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Compound(c) -> {
+      assert equals(c.name, "Point"), "expected compound name 'Point'";
+      assert top.flags.is_public, "expected the compound to be public";
+      assert c.fields.len == 3, "expected 3 fields (x, y, label)";
+      let f0 = c.fields.get(0);
+      let f1 = c.fields.get(1);
+      let f2 = c.fields.get(2);
+      assert equals(f0.name, "x"), "expected first field 'x'";
+      assert equals(f0.dtype.type_str, "num"), "expected 'x' to be 'num'";
+      assert equals(f1.name, "y"), "expected second field 'y'";
+      assert equals(f1.dtype.type_str, "num"), "expected 'y' to be 'num'";
+      assert equals(f2.name, "label"), "expected third field 'label'";
+      assert equals(f2.dtype.type_str, "str"), "expected 'label' to be 'str'";
+    }
+    _ -> { panic("expected a Compound node"); }
+  }
+}
+
+test "parse_compound parses generic type parameters with constraints" {
+  ParseState st = _state_from("compound Box<T: num | dec> { T val; }");
+  Parser p = parser_new(&st);
+  assert p.parse_compound(false).is_none(), "expected the generic compound to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Compound(c) -> {
+      assert c.has_type_params, "expected type params";
+      assert equals(c.type_params.get(0), "T"), "expected type param 'T'";
+      assert c.has_type_param_forced_insts, "expected forced instantiations";
+      assert c.type_param_forced_insts.len == 2, "expected 2 forced instantiations";
+    }
+    _ -> { panic("expected a Compound node"); }
+  }
+}
+
+test "parse_compound registers the compound name as a symbol" {
+  ParseState st = _state_from("compound Point { num x; }");
+  Parser p = parser_new(&st);
+  assert p.parse_compound(false).is_none(), "expected the compound to parse";
+  assert st.get_symbol("Point").is_some(), "expected 'Point' to be registered as a symbol";
+}
+
+test "parse_enum parses plain C-style variants" {
+  ParseState st = _state_from("enum Color { Red, Green, Blue }");
+  Parser p = parser_new(&st);
+  assert p.parse_enum(true).is_none(), "expected the enum to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Enum(e) -> {
+      assert equals(e.name, "Color"), "expected enum name 'Color'";
+      assert top.flags.is_public, "expected the enum to be public";
+      assert e.variants.len == 3, "expected 3 variants";
+      let v0 = e.variants.get(0);
+      assert equals(v0.name, "Red"), "expected first variant 'Red'";
+      assert !v0.has_payload, "expected 'Red' to have no payload";
+      assert !v0.has_value, "expected 'Red' to have no explicit value";
+    }
+    _ -> { panic("expected an Enum node"); }
+  }
+}
+
+test "parse_enum parses data-carrying variant payloads" {
+  ParseState st = _state_from("enum Shape { Circle(num), Rect(num, num), Point }");
+  Parser p = parser_new(&st);
+  assert p.parse_enum(false).is_none(), "expected the enum to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Enum(e) -> {
+      assert e.variants.len == 3, "expected 3 variants";
+      let circle = e.variants.get(0);
+      assert circle.has_payload, "expected 'Circle' to have a payload";
+      assert circle.payload.len == 1, "expected 'Circle' to have 1 payload type";
+      let rect = e.variants.get(1);
+      assert rect.has_payload, "expected 'Rect' to have a payload";
+      assert rect.payload.len == 2, "expected 'Rect' to have 2 payload types";
+      let point = e.variants.get(2);
+      assert !point.has_payload, "expected 'Point' to have no payload";
+    }
+    _ -> { panic("expected an Enum node"); }
+  }
+}
+
+test "parse_enum parses explicit (including negative) variant values" {
+  ParseState st = _state_from("enum Status { Ok = 0, Err = -1 }");
+  Parser p = parser_new(&st);
+  assert p.parse_enum(false).is_none(), "expected the enum to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Enum(e) -> {
+      let ok = e.variants.get(0);
+      assert ok.has_value, "expected 'Ok' to have an explicit value";
+      assert ok.value == 0, "expected 'Ok' == 0";
+      let err = e.variants.get(1);
+      assert err.has_value, "expected 'Err' to have an explicit value";
+      assert err.value == -1, "expected 'Err' == -1";
+    }
+    _ -> { panic("expected an Enum node"); }
+  }
+}
+
+test "parse_enum parses generic type parameters" {
+  ParseState st = _state_from("enum Option<T> { Some(T), None }");
+  Parser p = parser_new(&st);
+  assert p.parse_enum(false).is_none(), "expected the generic enum to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Enum(e) -> {
+      assert e.has_type_params, "expected type params";
+      assert equals(e.type_params.get(0), "T"), "expected type param 'T'";
+    }
+    _ -> { panic("expected an Enum node"); }
+  }
+}
+
+test "parse_enum registers the enum name as a symbol" {
+  ParseState st = _state_from("enum Color { Red }");
+  Parser p = parser_new(&st);
+  assert p.parse_enum(false).is_none(), "expected the enum to parse";
+  assert st.get_symbol("Color").is_some(), "expected 'Color' to be registered as a symbol";
+}
+
+test "parse_top_level_declaration dispatches 'compound' and 'enum'" {
+  ParseState st = _state_from("compound Point { num x; } enum Color { Red }");
+  Parser p = parser_new(&st);
+  assert p.parse_top_level_declaration().is_none(), "expected 'compound' to dispatch";
+  assert p.parse_top_level_declaration().is_none(), "expected 'enum' to dispatch";
+  fit st.nodes.get(0).kind {
+    .Compound(c) -> { assert equals(c.name, "Point"), "expected compound name 'Point'"; }
+    _ -> { panic("expected a Compound node"); }
+  }
+  fit st.nodes.get(1).kind {
+    .Enum(e) -> { assert equals(e.name, "Color"), "expected enum name 'Color'"; }
+    _ -> { panic("expected an Enum node"); }
   }
 }
 

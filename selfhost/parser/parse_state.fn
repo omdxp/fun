@@ -19,6 +19,7 @@ imp ..semantics.symbol;
 imp std.vec;
 imp std.map;
 imp std.string;
+imp std.c.mem;
 
 // Tracks a public symbol's declaring file, to detect cross-module name
 // collisions. Only public symbols are ever recorded (see
@@ -93,9 +94,17 @@ pub fun parse_state_new(str input_file_path, str input_source) ParseState {
   p.has_scope_root = false;
   p.scope_current = nil;
   p.has_scope_current = false;
-  p.active_table = nil;
-  p.has_active_table = false;
+  // The file's own top-level symbol table, active from construction --
+  // matches the original's `TranspileProcess` constructor, which sets
+  // `symbols.active_table` up front rather than lazily. `push_symbol`
+  // (called by declaration parsers like `parse_compound`) assumes an
+  // active table always exists, with no nil check of its own.
   p.tables.init(0);
+  SymbolTable* initial_table = malloc(sizeof(SymbolTable));
+  *initial_table = symbol_table_new(input_file_path);
+  p.active_table = initial_table;
+  p.has_active_table = true;
+  p.tables.push(initial_table);
   p.global_symbols.init(8);
   p.emit_stderr = true;
   ret p;
