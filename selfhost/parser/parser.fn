@@ -959,6 +959,16 @@ pub compound Parser {
   // binary-operator continuation and keeps parsing rightward through the
   // arm's whole body.
   bin in_fit_statement;
+
+  // True while parsing a bounded operand (`await expr`, `fork call`, a
+  // channel receive `<-ch`) that must stop at the first BINARY operator
+  // rather than continuing to consume rightward: `await f(x) + 1` is
+  // `(await f(x)) + 1`, not `await (f(x) + 1)`. Postfix continuations
+  // (`(`, `[`, `.`) still continue the primary -- only checked once a
+  // primary already exists on the stack (see `parse_expressionable_single`),
+  // so the FIRST token of the bounded operand is never itself mistaken
+  // for "stop here".
+  bin stop_at_binary_op;
 }
 
 // Creates a new `Parser` over the given shared parse state.
@@ -973,6 +983,7 @@ pub fun parser_new(ParseState* state) Parser {
   p.expr_depth = 0;
   p.in_fit_condition = false;
   p.in_fit_statement = false;
+  p.stop_at_binary_op = false;
   ret p;
 }
 
@@ -1191,6 +1202,35 @@ impl Parser {
     self.create_node(&node);
   }
 
+  // Desugars a channel operation into a method call and pushes it via
+  // `create_node`: `<-ch` -> `ch.recv()` (`has_arg = false`, the call
+  // argument becomes a `Blank`), `ch <- v` -> `ch.send(v)` (`has_arg =
+  // true`). Builds `(recv.method)(arg)` the same way `.Variant(payload)`
+  // shorthand does (a `.` dot-expression wrapped in a `()` call), since
+  // that's exactly the AST shape a method call already is.
+  _push_channel_method_call(Node* recv, str method_name, Node* arg, bin has_arg, Pos op_pos) {
+    Node method_ident = node_new(NodeKind.Identifier(method_name));
+    method_ident.pos = op_pos;
+    method_ident.has_pos = true;
+    method_ident.flags.inside_expression = true;
+
+    self.make_expression_node(recv, &method_ident, ".", op_pos);
+    Node dot = node_new(NodeKind.Blank);
+    fit self.state.node_pop() {
+      .Some(built) -> { dot = built; }
+      .None -> { ret; }
+    }
+
+    Node call_arg = node_new(NodeKind.Blank);
+    if has_arg {
+      call_arg = *arg;
+    }
+    call_arg.pos = op_pos;
+    call_arg.has_pos = true;
+
+    self.make_expression_node(&dot, &call_arg, "()", op_pos);
+  }
+
   // Rewrites `node = (a op1 (b op2 c))` in place to `((a op1 b) op2 c)`: a
   // left tree rotation used by `parse_reorder_expression` to fix precedence
   // when `op1` should bind tighter than (or equal to) `op2`, but the
@@ -1373,12 +1413,16 @@ impl Parser {
   // (more) to parse at this position, signaled by leaving the output list
   // unchanged (see `parse_expressionable`, which loops on exactly that).
   // 
-  // Deliberately simplified from the original for this slice: no channel
-  // operators (`<-`), no keyword operands (`nil`, `panic(...)`, `await`,
-  // `sizeof`). Each is a self-contained follow-up slice once this core
-  // binary-expression loop is solid. (Prefix/postfix unary operators and
-  // enum-variant shorthand, `.Variant`/`.Variant(payload)`, ARE supported --
-  // routed through `parse_expression`/`parse_normal_expression` below.)
+  // Deliberately simplified from the original for this slice: no
+  // `sizeof(Type)` keyword operand. Each remaining gap is its own
+  // self-contained follow-up slice. (Prefix/postfix unary operators,
+  // enum-variant shorthand, channel receive/send (`<-`), and the `nil`/
+  // `panic(...)`/`await` keyword operands ARE supported -- routed
+  // through `parse_expression`/`parse_normal_expression` below, or
+  // handled directly here for the keyword operands, matching the
+  // original's own rationale: handling them here rather than only in
+  // statement position lets a following binary operator bind to them as
+  // an operand, e.g. `x != nil && y`.)
   pub parse_expressionable_single() Option<ParseErrorKind> {
     fit self.state.token_peek_next() {
       .Some(t) -> {
@@ -1400,7 +1444,41 @@ impl Parser {
           if self.in_fit_statement && token_is_operator(t, "->") {
             ret .None;
           }
+          // For a bounded operand (`await`/`fork`/channel receive): once
+          // a primary has been parsed, a following BINARY operator ends
+          // it, so `await f(x) + 1` parses as `(await f(x)) + 1`. Postfix
+          // continuations (`(`, `[`, `.`) and the `<-` receive prefix are
+          // NOT binary-only, so they still continue the primary. See
+          // `Parser.stop_at_binary_op`'s doc comment.
+          if self.stop_at_binary_op && is_binary_only_operator(t) && self.node_peek_expressionable().is_some() {
+            ret .None;
+          }
           ret self.parse_expression();
+        }
+        if t.type == TokenType.Keyword {
+          str kw = "";
+          fit t.data {
+            .Sval(s) -> { kw = s; }
+            _ -> {}
+          }
+          // `nil`/`panic(...)`/`await` as PRIMARY expression operands --
+          // so they compose with surrounding operators/contexts (e.g.
+          // `x != nil && y`, `let y = panic("msg");`, `let z = await
+          // f();`), not just as their own bare statement.
+          if equals(kw, "nil") {
+            self.state.token_next(); // consume 'nil'
+            Node node = node_new(NodeKind.Nil);
+            node.pos = t.pos;
+            node.has_pos = true;
+            self.create_node(&node);
+            ret .None;
+          }
+          if equals(kw, "panic") {
+            ret self.parse_panic_expr();
+          }
+          if equals(kw, "await") {
+            ret self.parse_await_operand();
+          }
         }
         ret .None;
       }
@@ -1749,6 +1827,33 @@ impl Parser {
         }
         ret self.parse_additional_expression();
       }
+      // Prefix channel receive: `<-ch` -> `ch.recv()`. The operand parse
+      // is bounded (`stop_at_binary_op`) so a following binary op ends
+      // it: `<-ch + 1` is `(<-ch) + 1`.
+      if equals(op, "<-") {
+        self.state.token_next(); // consume '<-'
+        num before = self.state.nodes.len;
+        let prev_stop = self.stop_at_binary_op;
+        self.stop_at_binary_op = true;
+        let cherr = self.parse_expressionable();
+        self.stop_at_binary_op = prev_stop;
+        if cherr.is_some() {
+          ret cherr;
+        }
+        if self.state.nodes.len == before {
+          self.state.err("expected a channel after '<-'");
+          ret .Some(ParseErrorKind.InvalidExpression);
+        }
+        let maybe_ch = self.state.node_pop();
+        if maybe_ch.is_none() {
+          self.state.err("expected a channel after '<-'");
+          ret .Some(ParseErrorKind.InvalidExpression);
+        }
+        Node ch_node = maybe_ch.unwrap();
+        Node no_arg = node_new(NodeKind.Blank);
+        self._push_channel_method_call(&ch_node, "recv", &no_arg, false, op_pos);
+        ret .None;
+      }
       if is_unary_operator(op) {
         ret self.parse_for_unary();
       }
@@ -1779,14 +1884,28 @@ impl Parser {
     let t2 = tok2.unwrap();
     if t2.type == TokenType.Operator {
       bin is_lparen = false;
+      bin is_dot_or_recv = false;
       fit t2.data {
-        .Sval(s2) -> { is_lparen = equals(s2, "("); }
+        .Sval(s2) -> {
+          is_lparen = equals(s2, "(");
+          is_dot_or_recv = equals(s2, ".") || equals(s2, "<-");
+        }
         _ -> {}
       }
       if is_lparen {
         let perr = self.parse_for_parenthesis();
         if perr.is_some() {
           ret perr;
+        }
+      } elif is_dot_or_recv {
+        // Allow enum-variant shorthand (`.Variant`) and a prefix channel
+        // receive (`<-ch`) as a valid RHS operand after a binary
+        // operator (`sum + <-ch`, `x == .Variant`): `parse_normal_expression`
+        // sees no left operand here and routes to the `.`/`<-` prefix
+        // handler above.
+        let rerr = self.parse_normal_expression();
+        if rerr.is_some() {
+          ret rerr;
         }
       } else {
         let msg = format("expected expressionable for '{str}' operator", op);
@@ -1809,6 +1928,14 @@ impl Parser {
       ret .Some(ParseErrorKind.InvalidOperand);
     }
     Node node_right = maybe_right.unwrap();
+
+    // Binary channel send: `ch <- v` -> `ch.send(v)`. The RHS was already
+    // parsed as a full sub-expression above, so `a <- b + c` desugars to
+    // `a.send(b + c)`.
+    if equals(op, "<-") {
+      self._push_channel_method_call(&node_left, "send", &node_right, true, op_pos);
+      ret .None;
+    }
 
     self.make_expression_node(&node_left, &node_right, op, op_pos);
     fit self.state.node_pop() {
@@ -3432,6 +3559,160 @@ impl Parser {
     ret self.state.expect_sym(';');
   }
 
+  // Parses a `panic("msg")` EXPRESSION (leaves a `Panic` node on the node
+  // stack; does NOT consume a trailing `;` -- callers in statement
+  // position do that themselves, matching how other expression-
+  // statements work).
+  pub parse_panic_expr() Option<ParseErrorKind> {
+    let panic_tok = self.state.token_next(); // consume 'panic'
+    let lperr = self.state.expect_op("(");
+    if lperr.is_some() {
+      ret lperr;
+    }
+    let eerr = self.parse_expressionable_root();
+    if eerr.is_some() {
+      ret eerr;
+    }
+    let maybe_msg = self.state.node_pop();
+    if maybe_msg.is_none() {
+      self.state.err("expected message expression after 'panic('");
+      ret .Some(ParseErrorKind.InvalidExpression);
+    }
+    let rperr = self.state.expect_sym(')');
+    if rperr.is_some() {
+      ret rperr;
+    }
+    Node* msg = malloc(sizeof(Node));
+    *msg = maybe_msg.unwrap();
+
+    Node node = node_new(NodeKind.Panic(msg));
+    fit panic_tok {
+      .Some(t) -> {
+        node.pos = t.pos;
+        node.has_pos = true;
+      }
+      .None -> {}
+    }
+    self.create_node(&node);
+    ret .None;
+  }
+
+  // Parses `await <expr>` as a bounded expression OPERAND, lowered as a
+  // `Unary` node with `op = "await"` (leaves it on the node stack; does
+  // NOT consume a trailing `;` -- statement-position callers do that
+  // themselves). The operand parse is bounded via `stop_at_binary_op` so
+  // `await f(x) + 1` parses as `(await f(x)) + 1`.
+  pub parse_await_operand() Option<ParseErrorKind> {
+    let await_tok = self.state.token_next(); // consume 'await'
+    if !self.has_current_function {
+      self.state.err("await statement outside of function");
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+    let next_tok = self.state.token_peek_next();
+    if next_tok.is_none() {
+      self.state.err("expected expression after 'await'");
+      ret .Some(ParseErrorKind.InvalidExpression);
+    }
+    if token_is_symbol(next_tok.unwrap(), ';') {
+      self.state.err("expected expression after 'await'");
+      ret .Some(ParseErrorKind.InvalidExpression);
+    }
+
+    num before = self.state.nodes.len;
+    let prev_stop = self.stop_at_binary_op;
+    self.stop_at_binary_op = true;
+    let eerr = self.parse_expressionable();
+    self.stop_at_binary_op = prev_stop;
+    if eerr.is_some() {
+      ret eerr;
+    }
+    if self.state.nodes.len == before {
+      self.state.err("expected expression after 'await'");
+      ret .Some(ParseErrorKind.InvalidExpression);
+    }
+
+    let maybe_operand = self.state.node_pop();
+    if maybe_operand.is_none() {
+      self.state.err("expected expression after 'await'");
+      ret .Some(ParseErrorKind.InvalidExpression);
+    }
+    Node* operand = malloc(sizeof(Node));
+    *operand = maybe_operand.unwrap();
+
+    UnaryNode un;
+    un.is_left_operanded_unary = false;
+    un.op = "await";
+    un.operand = operand;
+    un.has_indirection = false;
+    un.indirection_depth = 0;
+
+    Node node = node_new(NodeKind.Unary(un));
+    fit await_tok {
+      .Some(t) -> {
+        node.pos = t.pos;
+        node.has_pos = true;
+      }
+      .None -> {}
+    }
+    self.create_node(&node);
+    ret .None;
+  }
+
+  // Parses `fork <call>;` -- a fire-and-forget virtual-thread spawn.
+  // The operand is parsed as a bounded expression (same
+  // `stop_at_binary_op` mechanism as `await`, so `fork f(x)` doesn't
+  // swallow a following unrelated statement); whether it's actually a
+  // `()` call is validated at codegen, not here (mirroring `await`'s own
+  // deferred validation).
+  pub parse_fork_statement() Option<ParseErrorKind> {
+    let fork_tok = self.state.token_next(); // consume 'fork'
+    if !self.has_current_function {
+      self.state.err("fork statement outside of function");
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+    let next_tok = self.state.token_peek_next();
+    if next_tok.is_none() {
+      self.state.err("expected a function call after 'fork'");
+      ret .Some(ParseErrorKind.InvalidExpression);
+    }
+    if token_is_symbol(next_tok.unwrap(), ';') {
+      self.state.err("expected a function call after 'fork'");
+      ret .Some(ParseErrorKind.InvalidExpression);
+    }
+
+    num before = self.state.nodes.len;
+    let prev_stop = self.stop_at_binary_op;
+    self.stop_at_binary_op = true;
+    let eerr = self.parse_expressionable();
+    self.stop_at_binary_op = prev_stop;
+    if eerr.is_some() {
+      ret eerr;
+    }
+    if self.state.nodes.len == before {
+      self.state.err("expected a function call after 'fork'");
+      ret .Some(ParseErrorKind.InvalidExpression);
+    }
+
+    let maybe_call = self.state.node_pop();
+    if maybe_call.is_none() {
+      self.state.err("expected a function call after 'fork'");
+      ret .Some(ParseErrorKind.InvalidExpression);
+    }
+    Node* expr = malloc(sizeof(Node));
+    *expr = maybe_call.unwrap();
+
+    Node node = node_new(NodeKind.StatementFork(expr));
+    fit fork_tok {
+      .Some(t) -> {
+        node.pos = t.pos;
+        node.has_pos = true;
+      }
+      .None -> {}
+    }
+    self.create_node(&node);
+    ret self.state.expect_sym(';');
+  }
+
   // Parses `defer { ... }` (a block) or `defer expr;` (a single
   // expression) -- both run at scope exit, codegen handles the actual
   // ordering/semantics; the parser only records which.
@@ -3554,17 +3835,101 @@ impl Parser {
     ret .None;
   }
 
+  // True for the warning ids that may be controlled at module scope (no
+  // enclosing function) -- everything else needs a function to actually
+  // check inside.
+  _warning_control_is_valid_in_module_scope(WarningId id) bin {
+    fit id {
+      .UnusedVariable -> { ret true; }
+      .UnusedImport -> { ret true; }
+      .UnusedFunction -> { ret true; }
+      .UnusedCompound -> { ret true; }
+      _ -> { ret false; }
+    }
+  }
+
+  // Parses `allow <warning_id>, "reason";` or `expect <warning_id>,
+  // "reason";`.
+  pub parse_warning_control(WarningControlAction action) Option<ParseErrorKind> {
+    let ctrl_tok = self.state.token_peek_next();
+    self.state.token_next(); // consume 'allow'/'expect'
+
+    let id_tok = self.state.token_next();
+    if id_tok.is_none() || id_tok.unwrap().type != TokenType.Identifier {
+      self.state.err("expected warning id after 'allow'/'expect'");
+      ret .Some(ParseErrorKind.InvalidIdentifier);
+    }
+    str id_name = "";
+    fit id_tok.unwrap().data {
+      .Sval(s) -> { id_name = s; }
+      _ -> {}
+    }
+    let maybe_id = warning_id_from_string(id_name);
+    if maybe_id.is_none() {
+      let msg = format(
+        "unknown warning id '{str}' (expected one of: return_local_ptr, fit_non_exhaustive, fit_unreachable_branch, unreachable_code, assert_constant, unused_variable, unused_import, unused_function, unused_compound, missing_return, blocking_fork_deadlock, shared_mutable_capture_race, integer_literal_out_of_range, channel_capacity_overflow)",
+        id_name
+      );
+      defer free(msg);
+      self.state.err(msg);
+      ret .Some(ParseErrorKind.InvalidIdentifier);
+    }
+    WarningId warning_id = maybe_id.unwrap();
+
+    if !self.has_current_function && !self._warning_control_is_valid_in_module_scope(warning_id) {
+      self.state.err("this warning id is only valid inside functions; only unused_variable, unused_import, unused_function, and unused_compound may be controlled at module scope");
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+
+    let commaerr = self.state.expect_op(",");
+    if commaerr.is_some() {
+      ret commaerr;
+    }
+
+    let reason_tok = self.state.token_next();
+    if reason_tok.is_none() || reason_tok.unwrap().type != TokenType.String {
+      self.state.err("expected string reason after warning id");
+      ret .Some(ParseErrorKind.InvalidString);
+    }
+    str reason = "";
+    fit reason_tok.unwrap().data {
+      .Sval(s) -> { reason = s; }
+      _ -> {}
+    }
+
+    WarningCtrlNode wc;
+    wc.action = action;
+    wc.id = warning_id;
+    wc.reason = reason;
+
+    Node node = node_new(NodeKind.StatementWarningControl(wc));
+    fit ctrl_tok {
+      .Some(t) -> {
+        node.pos = t.pos;
+        node.has_pos = true;
+      }
+      .None -> {}
+    }
+    self.create_node(&node);
+    ret self.state.expect_sym(';');
+  }
+
   // Parses one statement: a `{ ... }` nested body, a `let` declaration, a
   // `ret`/`assert`/`if`/`elif`/`else`/`for`/`fit`/`defer`/`break`/
-  // `continue` statement, or an expression statement terminated by `;`.
+  // `continue`/`allow`/`expect` statement, `fork <call>;` (a CONTEXTUAL
+  // keyword -- reserved only when NOT immediately followed by `(`, since
+  // `fork` can also be an ordinary identifier, e.g. a `std.c.process`
+  // binding for the POSIX `fork()` syscall), `nil`/`panic(...)`/`await`
+  // as expression-statements, or a bare expression statement terminated
+  // by `;`.
   // 
   // Deliberately simplified from the original for this slice: no keyword
   // dispatch beyond those (`compound`/`quirk`/... each need their own
   // parsing infrastructure not ported yet -- an unsupported keyword
   // reports a clean "not yet supported" error rather than silently
-  // misparsing), no `fork`-statement contextual-keyword handling, and no
-  // user-defined-type declaration detection (`Point p;` -- needs the same
-  // lookahead machinery as the keyword dispatch above, deferred with it).
+  // misparsing), no user-defined-type declaration detection (`Point p;`
+  // -- needs the same lookahead machinery as the keyword dispatch above,
+  // deferred with it).
   pub parse_statement() Option<ParseErrorKind> {
     let tok = self.state.token_peek_next();
     if tok.is_none() {
@@ -3612,10 +3977,38 @@ impl Parser {
       if equals(kw, "continue") {
         ret self.parse_continue_statement();
       }
+      if equals(kw, "allow") {
+        ret self.parse_warning_control(WarningControlAction.Allow);
+      }
+      if equals(kw, "expect") {
+        ret self.parse_warning_control(WarningControlAction.Expect);
+      }
+      if equals(kw, "nil") || equals(kw, "panic") || equals(kw, "await") {
+        let eerr = self.parse_expressionable_root();
+        if eerr.is_some() {
+          ret eerr;
+        }
+        ret self.state.expect_sym(';');
+      }
       let msg = format("keyword '{str}' is not yet supported in statement position", kw);
       defer free(msg);
       self.state.err(msg);
       ret .Some(ParseErrorKind.InvalidStatement);
+    }
+
+    if t.type == TokenType.Identifier {
+      str name = "";
+      fit t.data {
+        .Sval(s) -> { name = s; }
+        _ -> {}
+      }
+      if equals(name, "fork") {
+        let after = self.state.token_peek_n(1);
+        bin calls_fork_itself = after.is_some() && token_is_operator(after.unwrap(), "(");
+        if !calls_fork_itself {
+          ret self.parse_fork_statement();
+        }
+      }
     }
 
     if token_is_symbol(t, '{') {
@@ -7007,6 +7400,270 @@ test "parse_statement dispatches 'defer'/'break'/'continue'" {
   fit st.nodes.get(1).kind {
     .StatementContinue -> {}
     _ -> { panic("expected a StatementContinue node"); }
+  }
+}
+
+test "parse_expressionable_root parses 'nil' as a primary operand" {
+  ParseState st = _state_from("nil");
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected 'nil' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Nil -> {}
+    _ -> { panic("expected a Nil node"); }
+  }
+}
+
+test "parse_expressionable_root composes 'nil' with a following binary operator" {
+  Vec<str> names;
+  names.init(0);
+  names.push("x");
+  ParseState st = _state_with_declared("x != nil", names);
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected 'x != nil' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Expression(e) -> {
+      assert equals(e.op, "!="), "expected op '!='";
+      fit e.right.kind {
+        .Nil -> {}
+        _ -> { panic("expected the RHS to be a Nil node"); }
+      }
+    }
+    _ -> { panic("expected an Expression node"); }
+  }
+}
+
+test "parse_panic_expr parses a panic expression" {
+  ParseState st = _state_from("panic(\"boom\")");
+  Parser p = parser_new(&st);
+  assert p.parse_panic_expr().is_none(), "expected 'panic(\"boom\")' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Panic(msg) -> {
+      fit msg.kind {
+        .String(s) -> { assert equals(s, "boom"), "expected message 'boom'"; }
+        _ -> { panic("expected a String message"); }
+      }
+    }
+    _ -> { panic("expected a Panic node"); }
+  }
+}
+
+test "parse_statement dispatches a standalone 'panic(...)' statement" {
+  ParseState st = _state_from("panic(\"boom\");");
+  Parser p = parser_new(&st);
+  assert p.parse_statement().is_none(), "expected 'panic(\"boom\");' to parse as a statement";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Panic(_) -> {}
+    _ -> { panic("expected a Panic node"); }
+  }
+}
+
+test "parse_await_operand parses an awaited call, bounded at a following binary operator" {
+  Vec<str> names;
+  names.init(0);
+  names.push("f");
+  ParseState st = _state_with_declared("await f() + 1", names);
+  Parser p = parser_new(&st);
+  Node fn_stub = node_new(NodeKind.Blank);
+  p.current_function = &fn_stub;
+  p.has_current_function = true;
+
+  assert p.parse_await_operand().is_none(), "expected 'await f()' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Unary(u) -> {
+      assert equals(u.op, "await"), "expected op 'await'";
+      fit u.operand.kind {
+        .Expression(e) -> {
+          assert equals(e.op, "()"), "expected the awaited operand to be a call, not 'f() + 1'";
+        }
+        _ -> { panic("expected an Expression call as the operand"); }
+      }
+    }
+    _ -> { panic("expected a Unary node"); }
+  }
+  // The '+ 1' was NOT consumed -- still sitting in the token stream.
+  assert p.state.next_token_is_operator("+"), "expected '+' to remain unconsumed after the bounded await operand";
+}
+
+test "parse_await_operand rejects use outside of a function" {
+  Vec<str> names;
+  names.init(0);
+  names.push("f");
+  ParseState st = _state_with_declared("await f()", names);
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_await_operand();
+  assert err.is_some(), "expected an error for 'await' outside a function";
+}
+
+test "parse_fork_statement parses a fire-and-forget spawn" {
+  Vec<str> names;
+  names.init(0);
+  names.push("worker");
+  ParseState st = _state_with_declared("fork worker();", names);
+  Parser p = parser_new(&st);
+  Node fn_stub = node_new(NodeKind.Blank);
+  p.current_function = &fn_stub;
+  p.has_current_function = true;
+
+  assert p.parse_fork_statement().is_none(), "expected 'fork worker();' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementFork(expr) -> {
+      fit expr.kind {
+        .Expression(e) -> {
+          assert equals(e.op, "()"), "expected the forked expr to be a call";
+        }
+        _ -> { panic("expected an Expression call"); }
+      }
+    }
+    _ -> { panic("expected a StatementFork node"); }
+  }
+}
+
+test "parse_statement disambiguates the 'fork' statement from calling a function named 'fork'" {
+  ParseState st = _state_from("fork();");
+  Parser p = parser_new(&st);
+  assert p.parse_statement().is_none(), "expected 'fork();' (calling 'fork' itself) to parse as an ordinary call statement";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Expression(e) -> {
+      assert equals(e.op, "()"), "expected a call expression";
+      fit e.left.kind {
+        .Identifier(s) -> {
+          assert equals(s, "fork"), "expected the callee to be identifier 'fork'";
+        }
+        _ -> { panic("expected Identifier 'fork'"); }
+      }
+    }
+    _ -> { panic("expected an Expression node, not a StatementFork"); }
+  }
+}
+
+test "parse_normal_expression desugars a channel receive to '.recv()'" {
+  Vec<str> names;
+  names.init(0);
+  names.push("ch");
+  ParseState st = _state_with_declared("<-ch", names);
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected '<-ch' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Expression(call) -> {
+      assert equals(call.op, "()"), "expected a call expression";
+      fit call.left.kind {
+        .Expression(dot) -> {
+          assert equals(dot.op, "."), "expected the callee to be a '.' member-access expression";
+          fit dot.left.kind {
+            .Identifier(s) -> { assert equals(s, "ch"), "expected receiver 'ch'"; }
+            _ -> { panic("expected Identifier 'ch'"); }
+          }
+          fit dot.right.kind {
+            .Identifier(s) -> { assert equals(s, "recv"), "expected method 'recv'"; }
+            _ -> { panic("expected Identifier 'recv'"); }
+          }
+        }
+        _ -> { panic("expected the callee to be an Expression"); }
+      }
+    }
+    _ -> { panic("expected an Expression node"); }
+  }
+}
+
+test "parse_normal_expression desugars a channel send to '.send(v)'" {
+  Vec<str> names;
+  names.init(0);
+  names.push("ch");
+  names.push("v");
+  ParseState st = _state_with_declared("ch <- v", names);
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected 'ch <- v' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Expression(call) -> {
+      assert equals(call.op, "()"), "expected a call expression";
+      fit call.left.kind {
+        .Expression(dot) -> {
+          assert equals(dot.op, "."), "expected the callee to be a '.' member-access expression";
+          fit dot.right.kind {
+            .Identifier(s) -> { assert equals(s, "send"), "expected method 'send'"; }
+            _ -> { panic("expected Identifier 'send'"); }
+          }
+        }
+        _ -> { panic("expected the callee to be an Expression"); }
+      }
+      fit call.right.kind {
+        .Identifier(s) -> { assert equals(s, "v"), "expected the send value 'v'"; }
+        _ -> { panic("expected Identifier 'v' as the call argument"); }
+      }
+    }
+    _ -> { panic("expected an Expression node"); }
+  }
+}
+
+test "parse_warning_control parses 'allow ..., \"reason\";' at module scope" {
+  ParseState st = _state_from("allow unused_variable, \"kept for clarity\";");
+  Parser p = parser_new(&st);
+  assert p.parse_warning_control(WarningControlAction.Allow).is_none(), "expected the warning control statement to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementWarningControl(wc) -> {
+      assert wc.action == WarningControlAction.Allow, "expected action Allow";
+      assert wc.id == WarningId.UnusedVariable, "expected id UnusedVariable";
+      assert equals(wc.reason, "kept for clarity"), "expected the reason string";
+    }
+    _ -> { panic("expected a StatementWarningControl node"); }
+  }
+}
+
+test "parse_warning_control rejects a function-only warning id at module scope" {
+  ParseState st = _state_from("allow return_local_ptr, \"reason\";");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_warning_control(WarningControlAction.Allow);
+  assert err.is_some(), "expected an error for a function-only warning id at module scope";
+}
+
+test "parse_warning_control parses 'expect ...' inside a function" {
+  ParseState st = _state_from("expect fit_non_exhaustive, \"reason\";");
+  Parser p = parser_new(&st);
+  Node fn_stub = node_new(NodeKind.Blank);
+  p.current_function = &fn_stub;
+  p.has_current_function = true;
+
+  assert p.parse_warning_control(WarningControlAction.Expect).is_none(), "expected the warning control statement to parse inside a function";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementWarningControl(wc) -> {
+      assert wc.action == WarningControlAction.Expect, "expected action Expect";
+      assert wc.id == WarningId.FitNonExhaustive, "expected id FitNonExhaustive";
+    }
+    _ -> { panic("expected a StatementWarningControl node"); }
+  }
+}
+
+test "parse_warning_control rejects an unknown warning id" {
+  ParseState st = _state_from("allow not_a_real_id, \"reason\";");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_warning_control(WarningControlAction.Allow);
+  assert err.is_some(), "expected an error for an unknown warning id";
+}
+
+test "parse_statement dispatches 'allow' and 'expect'" {
+  ParseState st = _state_from("allow unused_import, \"a\"; allow unused_function, \"b\";");
+  Parser p = parser_new(&st);
+  assert p.parse_statement().is_none(), "expected the first 'allow' to dispatch";
+  assert p.parse_statement().is_none(), "expected the second 'allow' to dispatch";
+  fit st.nodes.get(0).kind {
+    .StatementWarningControl(wc) -> {
+      assert wc.id == WarningId.UnusedImport, "expected id UnusedImport";
+    }
+    _ -> { panic("expected a StatementWarningControl node"); }
   }
 }
 
