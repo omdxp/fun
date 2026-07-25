@@ -1,25 +1,46 @@
 // The self-hosted Fun compiler's parser: turns a token stream into an AST.
-// Ported from the previous implementation's parser module.
+// Ported from the previous implementation's parser module, incrementally
+// across many sessions; see `parse_state.fn` for why the parser gets its
+// own minimal state container instead of reusing the full original
+// `TranspileProcess`.
 // 
-// This is an early, partial slice of the port: token-cursor navigation,
-// diagnostic reporting, and node/scope-entity construction -- the layer
-// every actual statement/expression parsing function builds on. The
-// statement and expression parsing functions themselves (the bulk of the
-// original's ~6,600 lines) are ported incrementally in later sessions; see
-// `parse_state.fn` for why the parser gets its own minimal state container
-// instead of reusing the full original `TranspileProcess`.
+// Coverage as of this writing: the full expression grammar (precedence/
+// associativity, unary/postfix operators, calls, array indexing/literals,
+// enum-variant shorthand, compound-literal initializers -- named and the
+// `.{...}` type-inferred form, channel receive/send, `nil`/`panic`/`await`
+// as operands), every statement form (`let`, `ret`, `assert`, `if`/`elif`/
+// `else`, all three `for` shapes, `fit` including data-carrying-enum
+// destructuring patterns, `defer`/`break`/`continue`/`fork`, `allow`/
+// `expect` warning control), every top-level declaration form (`imp`,
+// `test`, `compound`, `enum`, `quirk`, `impl`, `fun`), and a top-level
+// `parse()` loop tying them into a whole parseable file.
 // 
-// Deliberately deferred from this slice (documented rather than silently
-// dropped):
+// Deliberately still deferred (documented rather than silently dropped):
+// - `asm`/inline-assembly -- a prior, separate architectural decision
+// (see `selfhost/ast/ast.fn`'s own file-level note): the self-hosted
+// compiler's own source has no need for inline assembly, and the lexer
+// already defers raw asm-body lexing to match.
+// - Cross-file `imp` resolution (`preload_import_global_symbols`) --
+// `parse_import` parses the syntax into an AST node but doesn't resolve
+// it; that's real filesystem/module-resolution work, a separate
+// subsystem (see `parse_import`'s own doc comment).
+// - The `forward_type_names` pre-scan and cross-file lookup a compound-
+// literal's `Type{...}` detection would otherwise need for a type
+// declared LATER in the file or imported from elsewhere -- narrower
+// coverage than the original for now (see `is_known_compound_symbol`'s
+// doc comment); a same-file, already-declared-above compound works.
+// - Array-typed generic arguments (`Vec<num[]>`) -- structurally out of
+// reach from `parse_generic_type_args` specifically, which lives on
+// `ParseState` (no expression-parsing capability), while array brackets
+// need the `Parser`-layer `parse_array_brackets` (see
+// `parse_generic_type_args`'s own doc comment for the confirmed
+// typecheck error and what closing it would actually require).
 // - The O(1) significant-token lookahead cache (`sig_indices`/
 // `phys_to_rank` in the original) -- `token_peek_n` here always does the
 // linear scan the original falls back to when the cache is stale. Safe:
 // the original's own comment confirms the linear path is always correct,
 // just slower; revisit only if parse time on large files becomes a
 // problem.
-// - `forward_type_names` pre-scan (forward-declared-type detection for the
-// compound-initializer disambiguator) -- not needed until the statement
-// parser reaches that disambiguation, so it is deferred to that slice.
 // - `deinit_node`/`deinit_root_scope` (manual arena cleanup) -- the
 // original frees an arena once per whole compile; a self-hosted `fun`
 // invocation is a short-lived process, so nothing here frees per-node
@@ -3033,14 +3054,8 @@ impl Parser {
   // only ever valid at the TOP LEVEL (the original enforces this via a
   // check in `parse_body_multiple_statements` rejecting a `.Function`
   // statement result, not ported in this slice's simplified body parser --
-  // see its doc comment). `parse_function` is meant to be called from a
-  // top-level parse loop, which doesn't exist yet either; callable and
-  // tested standalone until that loop is ported.
-  // 
-  // Deliberately simplified from the original for this slice: no array-
-  // bracket return type (`T[]`) -- needs `parse_array_brackets`, deferred
-  // along with every other array-bracket use (see `parse_datatype`'s doc
-  // comment).
+  // see its doc comment). Called from `parse_top_level_declaration`
+  // instead, which IS wired into the top-level `parse()` loop.
   pub parse_function(bin is_public, bin is_async) Option<ParseErrorKind> {
     self.state.new_scope();
 
@@ -4292,13 +4307,18 @@ impl Parser {
   // as expression-statements, or a bare expression statement terminated
   // by `;`.
   // 
-  // Deliberately simplified from the original for this slice: no keyword
-  // dispatch beyond those (`compound`/`quirk`/... each need their own
-  // parsing infrastructure not ported yet -- an unsupported keyword
-  // reports a clean "not yet supported" error rather than silently
-  // misparsing), no user-defined-type declaration detection (`Point p;`
-  // -- needs the same lookahead machinery as the keyword dispatch above,
-  // deferred with it).
+  // `compound`/`enum`/`quirk`/`impl`/`imp`/`test`/`fun` are intentionally
+  // NOT dispatched here -- those are top-level-only declarations in this
+  // language (matching the original), handled by
+  // `parse_top_level_declaration` instead, not a gap in this function.
+  // 
+  // Deliberately simplified from the original for this slice: `asm` is a
+  // separate, deliberate architectural deferral (see this file's own
+  // top-level doc comment); an unsupported keyword reports a clean "not
+  // yet supported" error rather than silently misparsing. Also no user-
+  // defined-type declaration detection (`Point p;`) -- needs the same
+  // forward-lookahead machinery already documented as deferred in
+  // `parse_body_multiple_statements`'s doc comment.
   pub parse_statement() Option<ParseErrorKind> {
     let tok = self.state.token_peek_next();
     if tok.is_none() {
@@ -5423,14 +5443,14 @@ impl Parser {
   // `quirk`, `impl`, `pub`/`async fun`/`fun`, a bare-datatype-keyword
   // global variable (`num x = 5;`), or -- for everything
   // `parse_statement` already understands (`let`, `ret`, `assert`,
-  // `if`/`elif`/`else`, `for`, `fit`, `defer`, `break`, `continue`, a
-  // `{ ... }` block, or a bare expression statement) -- delegates there
-  // directly.
+  // `if`/`elif`/`else`, `for`, `fit`, `defer`, `break`, `continue`,
+  // `allow`/`expect`, `nil`/`panic(...)`/`await`, a `{ ... }` block, or a
+  // bare expression statement) -- delegates there directly.
   // 
-  // Deliberately simplified from the original for this slice: no
-  // `asm`/`await`/`nil`/`allow`/`expect`/`panic` declarations -- a clean
-  // "not yet supported" error is reported instead of a misparse. Also no
-  // bare
+  // Deliberately simplified from the original for this slice: no `asm`
+  // declaration (a prior, separate architectural decision -- see this
+  // file's own top-level doc comment) -- a clean "not yet supported"
+  // error is reported instead of a misparse. Also no bare
   // `Identifier name;` top-level declaration (public OR private) --
   // needs the same forward-lookahead machinery the original uses to
   // disambiguate a type name from an expression, already documented as
