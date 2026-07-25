@@ -2138,6 +2138,198 @@ impl Parser {
     ret .None;
   }
 
+  // Parses a function argument (`<type> <name>`, optionally `= default`):
+  // the type, then delegates to `parse_variable` for the name/default.
+  _parse_full_variable() Option<ParseErrorKind> {
+    DataType* dt = malloc(sizeof(DataType));
+    *dt = dtype_new();
+    let derr = self.state.parse_datatype(dt);
+    if derr.is_some() {
+      ret derr;
+    }
+    ret self.parse_variable(dt, false, false);
+  }
+
+  // Parses a comma-separated argument list up to (not including) the
+  // closing `)`, appending each argument node to `out_args`.
+  // 
+  // Deliberately simplified from the original for this slice: no `...`
+  // variadic-argument support (needs its own synthetic `vargs: Vec`
+  // handling, deferred).
+  _parse_function_args(Vec<Node*>* out_args) Option<ParseErrorKind> {
+    for !self.state.next_token_is_symbol(')') {
+      let verr = self._parse_full_variable();
+      if verr.is_some() {
+        ret verr;
+      }
+      let maybe_arg = self.state.node_pop();
+      if maybe_arg.is_none() {
+        self.state.err("expected argument");
+        ret .Some(ParseErrorKind.InvalidIdentifier);
+      }
+      Node* arg = malloc(sizeof(Node));
+      *arg = maybe_arg.unwrap();
+      out_args.push(arg);
+
+      if !self.state.next_token_is_operator(",") {
+        break;
+      }
+      self.state.token_next();
+    }
+    ret .None;
+  }
+
+  // Parses a function declaration: `fun NAME(args) [rtype] { body }` or,
+  // with no body, `fun NAME(args) [rtype];` (a bare signature -- how every
+  // `std.c.*` binding is written). Registers its own child scope for the
+  // argument list and body, and tracks itself as `current_function` while
+  // parsing so nested node construction stamps `binded.function` correctly.
+  // 
+  // NOT wired into `parse_statement`'s dispatch: a function declaration is
+  // only ever valid at the TOP LEVEL (the original enforces this via a
+  // check in `parse_body_multiple_statements` rejecting a `.Function`
+  // statement result, not ported in this slice's simplified body parser --
+  // see its doc comment). `parse_function` is meant to be called from a
+  // top-level parse loop, which doesn't exist yet either; callable and
+  // tested standalone until that loop is ported.
+  // 
+  // Deliberately simplified from the original for this slice: no generic
+  // type parameters (`fun f<T>`), no variadic arguments, and no array-
+  // bracket return type (`T[]`) -- each needs infrastructure not ported
+  // yet, matching the same deferrals as `parse_datatype`/`parse_variable`.
+  pub parse_function(bin is_public, bin is_async) Option<ParseErrorKind> {
+    self.state.new_scope();
+
+    self.state.token_next(); // skip 'fun'
+
+    let tok = self.state.token_next();
+    if tok.is_none() {
+      self.state.err("expected identifier after 'fun'");
+      ret .Some(ParseErrorKind.InvalidIdentifier);
+    }
+    let ident_tok = tok.unwrap();
+    if ident_tok.type != TokenType.Identifier {
+      self.state.err("expected identifier after 'fun'");
+      ret .Some(ParseErrorKind.InvalidIdentifier);
+    }
+    str fname = "";
+    fit ident_tok.data {
+      .Sval(s) -> { fname = s; }
+      _ -> {}
+    }
+
+    FunctionNode fnv = function_node_new();
+    fnv.name = fname;
+    fnv.has_name = true;
+    fnv.is_async = is_async;
+
+    Node fn_node = node_new(NodeKind.Function(fnv));
+    fn_node.pos = ident_tok.pos;
+    fn_node.has_pos = true;
+    fn_node.flags.is_public = is_public;
+
+    Node* fn_node_ptr = malloc(sizeof(Node));
+    *fn_node_ptr = fn_node;
+    self.current_function = fn_node_ptr;
+    self.has_current_function = true;
+
+    let operr = self.state.expect_op("(");
+    if operr.is_some() {
+      ret operr;
+    }
+    Vec<Node*> args;
+    args.init(0);
+    let aerr = self._parse_function_args(&args);
+    if aerr.is_some() {
+      ret aerr;
+    }
+    let cperr = self.state.expect_sym(')');
+    if cperr.is_some() {
+      ret cperr;
+    }
+
+    fit fn_node_ptr.kind {
+      .Function(cur) -> {
+        cur.args = args;
+        cur.has_args = true;
+        fn_node_ptr.kind = NodeKind.Function(cur);
+      }
+      _ -> {}
+    }
+
+    DataType* rtype = malloc(sizeof(DataType));
+    bin has_explicit_rtype = false;
+    fit self.state.token_peek_next() {
+      .Some(rt) -> {
+        bin looks_like_type = false;
+        if rt.type == TokenType.Identifier {
+          looks_like_type = true;
+        }
+        if rt.type == TokenType.Keyword {
+          fit rt.data {
+            .Sval(s) -> { looks_like_type = keyword_is_datatype(s); }
+            _ -> {}
+          }
+        }
+        if looks_like_type {
+          *rtype = dtype_new();
+          let rerr = self.state.parse_datatype(rtype);
+          if rerr.is_some() {
+            ret rerr;
+          }
+          has_explicit_rtype = true;
+        }
+      }
+      .None -> {}
+    }
+    if !has_explicit_rtype {
+      *rtype = dtype_new();
+      rtype.kind = DataTypeType.Void;
+      rtype.type_str = "void";
+    }
+
+    fit fn_node_ptr.kind {
+      .Function(cur2) -> {
+        cur2.rtype = rtype;
+        cur2.has_rtype = true;
+        fn_node_ptr.kind = NodeKind.Function(cur2);
+      }
+      _ -> {}
+    }
+
+    if self.state.next_token_is_symbol('{') {
+      let berr = self.parse_body();
+      if berr.is_some() {
+        ret berr;
+      }
+      let maybe_body = self.state.node_pop();
+      if maybe_body.is_none() {
+        self.state.err("expected function body");
+        ret .Some(ParseErrorKind.InvalidStatement);
+      }
+      Node* body = malloc(sizeof(Node));
+      *body = maybe_body.unwrap();
+      fit fn_node_ptr.kind {
+        .Function(cur3) -> {
+          cur3.body = body;
+          cur3.has_body = true;
+          fn_node_ptr.kind = NodeKind.Function(cur3);
+        }
+        _ -> {}
+      }
+    } else {
+      let serr = self.state.expect_sym(';');
+      if serr.is_some() {
+        ret serr;
+      }
+    }
+
+    self.has_current_function = false;
+    self.state.nodes.push(*fn_node_ptr);
+    self.state.finish_scope();
+    ret .None;
+  }
+
   // Parses one statement: a `{ ... }` nested body, a `let` declaration, a
   // `ret`/`assert`/`if`/`elif`/`else` statement, or an expression
   // statement terminated by `;`.
@@ -3593,6 +3785,83 @@ test "parse_else_statement parses a block body" {
     }
     _ -> { panic("expected a StatementElse node"); }
   }
+}
+
+test "parse_function parses args, an explicit return type, and a body" {
+  ParseState st = _state_from("fun add(num a, num b) num { ret a + b; }");
+  Parser p = parser_new(&st);
+  assert p.parse_function(true, false).is_none(), "expected the function to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Function(f) -> {
+      assert equals(f.name, "add"), "expected function name 'add'";
+      assert top.flags.is_public, "expected the function to be public";
+      assert f.args.len == 2, "expected 2 args";
+      let a0 = f.args.get(0);
+      let a1 = f.args.get(1);
+      fit a0.kind {
+        .Variable(v) -> { assert equals(v.name, "a"), "expected first arg 'a'"; }
+        _ -> { panic("expected a Variable arg"); }
+      }
+      fit a1.kind {
+        .Variable(v) -> { assert equals(v.name, "b"), "expected second arg 'b'"; }
+        _ -> { panic("expected a Variable arg"); }
+      }
+      assert f.has_rtype, "expected an rtype";
+      assert equals(f.rtype.type_str, "num"), "expected rtype 'num'";
+      assert f.has_body, "expected a body";
+      fit f.body.kind {
+        .Body(bn) -> { assert bn.statements.len == 1, "expected 1 statement in the body"; }
+        _ -> { panic("expected a Body node"); }
+      }
+    }
+    _ -> { panic("expected a Function node"); }
+  }
+}
+
+test "parse_function defaults to a void return type with no args" {
+  ParseState st = _state_from("fun greet() { }");
+  Parser p = parser_new(&st);
+  assert p.parse_function(false, false).is_none(), "expected the function to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Function(f) -> {
+      assert equals(f.name, "greet"), "expected function name 'greet'";
+      assert !top.flags.is_public, "expected the function to be private";
+      assert f.args.len == 0, "expected no args";
+      assert f.has_rtype, "expected an rtype";
+      assert equals(f.rtype.type_str, "void"), "expected the default rtype 'void'";
+      fit f.rtype.kind {
+        .Void -> {}
+        _ -> { panic("expected DataTypeType.Void"); }
+      }
+    }
+    _ -> { panic("expected a Function node"); }
+  }
+}
+
+test "parse_function parses a bodyless declaration (C-binding style)" {
+  ParseState st = _state_from("fun malloc(num size) raw*;");
+  Parser p = parser_new(&st);
+  assert p.parse_function(true, false).is_none(), "expected the bodyless declaration to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Function(f) -> {
+      assert equals(f.name, "malloc"), "expected function name 'malloc'";
+      assert !f.has_body, "expected no body";
+      assert equals(f.rtype.type_str, "raw"), "expected rtype 'raw'";
+      assert f.rtype.pointer_depth == 1, "expected rtype pointer depth 1";
+    }
+    _ -> { panic("expected a Function node"); }
+  }
+}
+
+test "parse_function requires an identifier after 'fun'" {
+  ParseState st = _state_from("fun () { }");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_function(false, false);
+  assert err.is_some(), "expected an error for a missing function name";
 }
 
 // The lookup name a new scope entity for `node` should carry; empty for a
