@@ -823,6 +823,98 @@ impl ParseState {
 
     ret .None;
   }
+
+  // True if the `<...>` starting at the cursor looks like a type
+  // PARAMETER list (`<T>`, `<T, U>`, `<T: a | b>`) rather than concrete
+  // generic ARGUMENTS (`<num>`, `<Vec<str>>`) -- pure lookahead, consumes
+  // nothing. Used by `parse_impl` to distinguish `impl Vec<T> { ... }`
+  // (T is a NEW type param the impl introduces) from `impl Vec<num> {
+  // ... }` (a concrete monomorphizing impl for an already-generic type).
+  // Every segment must be a bare identifier (optionally with `: constraint
+  // | constraint` bounds) all the way to the closing `>`/`>>` -- anything
+  // else (a datatype keyword, a nested `<`, ...) means it's argument
+  // syntax instead.
+  pub impl_generic_args_are_params() bin {
+    num off = 0;
+    let first_opt = self.token_peek_n(off);
+    if first_opt.is_none() {
+      ret false;
+    }
+    let first = first_opt.unwrap();
+    if !(token_is_operator(first, "<") || token_is_symbol(first, '<')) {
+      ret false;
+    }
+    off = off + 1;
+
+    bin saw_any = false;
+    for true {
+      let tok_opt = self.token_peek_n(off);
+      if tok_opt.is_none() {
+        ret false;
+      }
+      if tok_opt.unwrap().type != TokenType.Identifier {
+        ret false;
+      }
+      saw_any = true;
+      off = off + 1;
+
+      let next_opt = self.token_peek_n(off);
+      if next_opt.is_none() {
+        ret false;
+      }
+      let nt = next_opt.unwrap();
+
+      if token_is_operator(nt, ":") {
+        off = off + 1;
+        for true {
+          let ct_opt = self.token_peek_n(off);
+          if ct_opt.is_none() {
+            ret false;
+          }
+          let ct = ct_opt.unwrap();
+          if ct.type == TokenType.Keyword || ct.type == TokenType.Identifier {
+            off = off + 1;
+          } else {
+            ret false;
+          }
+          let sep_opt = self.token_peek_n(off);
+          if sep_opt.is_none() {
+            ret false;
+          }
+          if token_is_operator(sep_opt.unwrap(), "|") {
+            off = off + 1;
+            continue;
+          }
+          break;
+        }
+        let after_opt = self.token_peek_n(off);
+        if after_opt.is_none() {
+          ret false;
+        }
+        let after = after_opt.unwrap();
+        if token_is_operator(after, ",") {
+          off = off + 1;
+          continue;
+        }
+        if token_is_operator(after, ">") || token_is_operator(after, ">>") || token_is_symbol(
+          after,
+          '>'
+        ) {
+          ret saw_any;
+        }
+        ret false;
+      }
+
+      if token_is_operator(nt, ",") {
+        off = off + 1;
+        continue;
+      }
+      if token_is_operator(nt, ">") || token_is_operator(nt, ">>") || token_is_symbol(nt, '>') {
+        ret saw_any;
+      }
+      ret false;
+    }
+  }
 }
 
 // The parser's OWN state, layered on top of the shared `ParseState`: a
@@ -3871,18 +3963,429 @@ impl Parser {
     ret .None;
   }
 
-  // Parses one top-level item: `imp`, `test`, `compound`, `enum`,
-  // `quirk`, `pub`/`async fun`/`fun`, a bare-datatype-keyword global
-  // variable (`num x = 5;`), or -- for everything `parse_statement`
-  // already understands (`let`, `ret`, `assert`, `if`/`elif`/`else`,
-  // `for`, `fit`, `defer`, `break`, `continue`, a `{ ... }` block, or a
-  // bare expression statement) -- delegates there directly.
+  // Parses `impl Type { methods }` (plain) or `impl Type as Quirk {
+  // methods }` (quirk-implementing), including the generic forms `impl
+  // Type<T> { ... }` (T is a NEW type param the impl introduces,
+  // disambiguated from a CONCRETE monomorphizing impl like `impl
+  // Type<num> { ... }` via `impl_generic_args_are_params`'s lookahead)
+  // and `impl Type<T> as Quirk<T> { ... }` (a SYMBOLIC quirk binding --
+  // the quirk's arg is the impl's own type param -- vs. `as Quirk<num>`,
+  // a CONCRETE, distinctly-mangled quirk identity).
+  // 
+  // Each method compiles to a regular top-level function with a
+  // generated, mangled name (`<Type>__<method>`, or
+  // `<Type>__<Quirk>__<method>` for a quirk impl) and an implicit `<Type>*
+  // self` first argument, reusing the exact same statement/body-parsing
+  // infrastructure as `parse_function` (a real `current_function`/scope
+  // context, so `if`/`for`/`ret`/`defer`/etc. all work in a method body).
+  // A method may also declare its OWN generic type parameter(s) in
+  // addition to the impl's (`impl Box<T> { pub map<U>(U x) U { ... } }`).
   // 
   // Deliberately simplified from the original for this slice: no
-  // `impl`/`asm`/`await`/`nil`/`allow`/`expect`/`panic` declarations --
-  // `impl` (implementing a quirk/adding methods to a type) is its own
-  // substantial parsing slice, deferred to future work; a clean "not yet
-  // supported" error is reported instead of a misparse. Also no bare
+  // array-bracket arg/return types -- same deferral as everywhere else
+  // in this port. Also, unlike the original, an impl method's arg list
+  // is parsed via the shared `_parse_function_args` (which also accepts
+  // a trailing `...` variadic marker) rather than a near-duplicate
+  // variadic-less loop; the original doesn't look for `...` in an impl
+  // method's arg list at all, so this is a minor, documented widening
+  // (a `...` there is silently accepted and dropped here, where the
+  // original would report a clean datatype-parse error) not worth a
+  // whole separate function to avoid.
+  pub parse_impl(bin is_public) Option<ParseErrorKind> {
+    let kwerr = self.state.expect_keyword("impl");
+    if kwerr.is_some() {
+      ret kwerr;
+    }
+    let type_tok = self.state.token_next();
+    if type_tok.is_none() || type_tok.unwrap().type != TokenType.Identifier {
+      self.state.err("expected type name after 'impl'");
+      ret .Some(ParseErrorKind.InvalidIdentifier);
+    }
+    str base_type_name = "";
+    fit type_tok.unwrap().data {
+      .Sval(s) -> { base_type_name = s; }
+      _ -> {}
+    }
+
+    Vec<str> type_params;
+    type_params.init(0);
+    Vec<Vec<str>> type_param_forced_insts;
+    type_param_forced_insts.init(0);
+    str type_name = base_type_name;
+
+    if self.state.next_token_is_angle_open() {
+      if self.state.impl_generic_args_are_params() {
+        let tperr = self.state.parse_type_params_with_constraints(
+          &type_params,
+          &type_param_forced_insts
+        );
+        if tperr.is_some() {
+          ret tperr;
+        }
+      } else {
+        DataType* concrete_dt = malloc(sizeof(DataType));
+        *concrete_dt = dtype_new();
+        concrete_dt.type_str = base_type_name;
+        let gaerr = self.state.parse_generic_type_args(concrete_dt);
+        if gaerr.is_some() {
+          ret gaerr;
+        }
+        type_name = _mangled_dtype_name(concrete_dt);
+      }
+    } else {
+      let tperr = self.state.parse_type_params_with_constraints(
+        &type_params,
+        &type_param_forced_insts
+      );
+      if tperr.is_some() {
+        ret tperr;
+      }
+    }
+    bin has_type_params = type_params.len > 0;
+    bin has_type_param_forced_insts = type_param_forced_insts.len > 0;
+
+    let peek_after_type = self.state.token_peek_next();
+
+    str quirk_name = "";
+    bin has_quirk_name = false;
+    str quirk_concrete_instantiation = "";
+    bin has_quirk_concrete_instantiation = false;
+
+    if peek_after_type.is_some() && token_is_keyword(peek_after_type.unwrap(), "as") {
+      self.state.token_next(); // consume 'as'
+      let quirk_tok = self.state.token_next();
+      if quirk_tok.is_none() || quirk_tok.unwrap().type != TokenType.Identifier {
+        self.state.err("expected quirk name after 'as'");
+        ret .Some(ParseErrorKind.InvalidIdentifier);
+      }
+      str qname = "";
+      fit quirk_tok.unwrap().data {
+        .Sval(s) -> { qname = s; }
+        _ -> {}
+      }
+      quirk_name = qname;
+      has_quirk_name = true;
+
+      // A generic quirk binding is either SYMBOLIC (the arg IS the
+      // enclosing impl's own type param -- resolved later by the impl's
+      // own generic-instantiation machinery, method mangling keys off
+      // just the base quirk name) or CONCRETE (a fixed instantiation
+      // that's effectively a distinct quirk identity, mangled the same
+      // way a generic compound/enum instantiation is).
+      if self.state.next_token_is_angle_open() {
+        DataType* quirk_dt = malloc(sizeof(DataType));
+        *quirk_dt = dtype_new();
+        quirk_dt.type_str = qname;
+        let qgaerr = self.state.parse_generic_type_args(quirk_dt);
+        if qgaerr.is_some() {
+          ret qgaerr;
+        }
+        bin is_symbolic = _dtype_references_any_param(quirk_dt, type_params);
+        if !is_symbolic {
+          quirk_concrete_instantiation = _mangled_dtype_name(quirk_dt);
+          has_quirk_concrete_instantiation = true;
+        }
+      }
+    } elif peek_after_type.is_some() && peek_after_type.unwrap().type == TokenType.Identifier {
+      self.state.err("expected 'as' before quirk name in impl header");
+      ret .Some(ParseErrorKind.InvalidIdentifier);
+    } elif peek_after_type.is_none() || !token_is_symbol(peek_after_type.unwrap(), '{') {
+      self.state.err("expected 'as <Quirk>' or '{' after type name");
+      ret .Some(ParseErrorKind.InvalidIdentifier);
+    }
+
+    let lberr = self.state.expect_sym('{');
+    if lberr.is_some() {
+      ret lberr;
+    }
+
+    Vec<Node*> methods;
+    methods.init(0);
+
+    for !self.state.next_token_is_symbol('}') {
+      let merr = self._parse_impl_method(
+        is_public,
+        type_name,
+        type_params,
+        quirk_name,
+        has_quirk_name,
+        &methods
+      );
+      if merr.is_some() {
+        ret merr;
+      }
+    }
+
+    let rberr = self.state.expect_sym('}');
+    if rberr.is_some() {
+      ret rberr;
+    }
+
+    ImplNode impln = impl_node_new();
+    impln.type_name = type_name;
+    impln.type_params = type_params;
+    impln.has_type_params = has_type_params;
+    impln.type_param_forced_insts = type_param_forced_insts;
+    impln.has_type_param_forced_insts = has_type_param_forced_insts;
+    impln.quirk_name = quirk_name;
+    impln.has_quirk_name = has_quirk_name;
+    impln.quirk_concrete_instantiation = quirk_concrete_instantiation;
+    impln.has_quirk_concrete_instantiation = has_quirk_concrete_instantiation;
+    impln.methods = methods;
+
+    Node node = node_new(NodeKind.Impl(impln));
+    node.pos = type_tok.unwrap().pos;
+    node.has_pos = true;
+    node.flags.is_public = is_public;
+
+    self.state.nodes.push(node);
+    ret .None;
+  }
+
+  // Parses one impl method (`[pub] [async] name(args) [rtype] { body }`
+  // or `... ;` for a bodyless one) and appends its generated `Function`
+  // node to `out_methods`. Split out of `parse_impl` for readability --
+  // see that function's own doc comment for the generated-name/implicit-
+  // `self` scheme this implements.
+  _parse_impl_method(
+    bin impl_is_public,
+    str type_name,
+    Vec<str> type_params,
+    str quirk_name,
+    bin has_quirk_name,
+    Vec<Node*>* out_methods
+  ) Option<ParseErrorKind> {
+    bin method_is_public = impl_is_public;
+    bin method_is_async = false;
+
+    for true {
+      let peek = self.state.token_peek_next();
+      if peek.is_none() || peek.unwrap().type != TokenType.Keyword {
+        break;
+      }
+      let pk = peek.unwrap();
+      if token_is_keyword(pk, "pub") {
+        self.state.token_next();
+        method_is_public = true;
+        continue;
+      }
+      if token_is_keyword(pk, "async") {
+        self.state.token_next();
+        method_is_async = true;
+        continue;
+      }
+      break;
+    }
+
+    let mname_tok = self.state.token_next();
+    if mname_tok.is_none() || mname_tok.unwrap().type != TokenType.Identifier {
+      self.state.err("expected method name in impl");
+      ret .Some(ParseErrorKind.InvalidIdentifier);
+    }
+    str mname = "";
+    fit mname_tok.unwrap().data {
+      .Sval(s) -> { mname = s; }
+      _ -> {}
+    }
+
+    str gen_name = "";
+    if has_quirk_name {
+      gen_name = format("{str}__{str}__{str}", type_name, quirk_name, mname);
+    } else {
+      gen_name = format("{str}__{str}", type_name, mname);
+    }
+
+    FunctionNode fnv = function_node_new();
+    fnv.name = gen_name;
+    fnv.has_name = true;
+    fnv.is_async = method_is_async;
+
+    Node fn_node = node_new(NodeKind.Function(fnv));
+    fn_node.pos = mname_tok.unwrap().pos;
+    fn_node.has_pos = true;
+    fn_node.flags.is_public = method_is_public;
+
+    Node* fn_node_ptr = malloc(sizeof(Node));
+    *fn_node_ptr = fn_node;
+
+    let prev_fn = self.current_function;
+    let prev_has_fn = self.has_current_function;
+    self.current_function = fn_node_ptr;
+    self.has_current_function = true;
+
+    self.state.new_scope();
+
+    Vec<str> method_type_params;
+    method_type_params.init(0);
+    Vec<Vec<str>> method_type_param_forced_insts;
+    method_type_param_forced_insts.init(0);
+    let mtperr = self.state.parse_type_params_with_constraints(
+      &method_type_params,
+      &method_type_param_forced_insts
+    );
+    if mtperr.is_some() {
+      ret mtperr;
+    }
+    fit fn_node_ptr.kind {
+      .Function(curmtp) -> {
+        curmtp.type_params = method_type_params;
+        curmtp.has_type_params = method_type_params.len > 0;
+        curmtp.type_param_forced_insts = method_type_param_forced_insts;
+        curmtp.has_type_param_forced_insts = method_type_param_forced_insts.len > 0;
+        fn_node_ptr.kind = NodeKind.Function(curmtp);
+      }
+      _ -> {}
+    }
+
+    let lperr = self.state.expect_op("(");
+    if lperr.is_some() {
+      ret lperr;
+    }
+
+    // Implicit `<Type>* self` first arg. When the impl itself is
+    // generic, `self`'s type carries the SAME type params as generic
+    // arguments (`Box<T>* self`), so references to `self`'s fields
+    // inside the method resolve against the impl's own params.
+    DataType* self_dt = malloc(sizeof(DataType));
+    *self_dt = dtype_new();
+    self_dt.pointer_depth = 1;
+    self_dt.flags.is_pointer = true;
+    self_dt.type_str = type_name;
+    if type_params.len > 0 {
+      Vec<DataType*> self_gargs;
+      self_gargs.init(0);
+      for tp : type_params {
+        DataType* ga = malloc(sizeof(DataType));
+        *ga = dtype_new();
+        ga.type_str = tp;
+        self_gargs.push(ga);
+      }
+      self_dt.generic_args = self_gargs;
+    }
+
+    VariableNode selfv;
+    selfv.var_type = self_dt;
+    selfv.name = "self";
+    selfv.has_val = false;
+
+    Node self_node = node_new(NodeKind.Variable(selfv));
+    self_node.pos = mname_tok.unwrap().pos;
+    self_node.has_pos = true;
+
+    Node* self_node_ptr = malloc(sizeof(Node));
+    *self_node_ptr = self_node;
+    ScopeEntity* self_entity = self.new_scope_entity(self_node_ptr);
+    self.state.push_scope_entity(self_entity);
+
+    Vec<Node*> margs;
+    margs.init(0);
+    margs.push(self_node_ptr);
+
+    bin method_is_variadic = false;
+    let aerr = self._parse_function_args(&margs, &method_is_variadic);
+    if aerr.is_some() {
+      ret aerr;
+    }
+    let rperr = self.state.expect_sym(')');
+    if rperr.is_some() {
+      ret rperr;
+    }
+
+    fit fn_node_ptr.kind {
+      .Function(curargs) -> {
+        curargs.args = margs;
+        curargs.has_args = true;
+        fn_node_ptr.kind = NodeKind.Function(curargs);
+      }
+      _ -> {}
+    }
+
+    DataType* rtype = malloc(sizeof(DataType));
+    bin has_explicit_rtype = false;
+    fit self.state.token_peek_next() {
+      .Some(rt) -> {
+        bin looks_like_type = false;
+        if rt.type == TokenType.Identifier {
+          looks_like_type = true;
+        }
+        if rt.type == TokenType.Keyword {
+          fit rt.data {
+            .Sval(s) -> { looks_like_type = keyword_is_datatype(s); }
+            _ -> {}
+          }
+        }
+        if looks_like_type {
+          *rtype = dtype_new();
+          let rderr = self.state.parse_datatype(rtype);
+          if rderr.is_some() {
+            ret rderr;
+          }
+          has_explicit_rtype = true;
+        }
+      }
+      .None -> {}
+    }
+    if !has_explicit_rtype {
+      *rtype = dtype_new();
+      rtype.kind = DataTypeType.Void;
+      rtype.type_str = "void";
+    }
+    fit fn_node_ptr.kind {
+      .Function(currt) -> {
+        currt.rtype = rtype;
+        currt.has_rtype = true;
+        fn_node_ptr.kind = NodeKind.Function(currt);
+      }
+      _ -> {}
+    }
+
+    if self.state.next_token_is_symbol('{') {
+      let berr = self.parse_body();
+      if berr.is_some() {
+        ret berr;
+      }
+      let maybe_body = self.state.node_pop();
+      if maybe_body.is_none() {
+        self.state.err("expected method body");
+        ret .Some(ParseErrorKind.InvalidStatement);
+      }
+      Node* body = malloc(sizeof(Node));
+      *body = maybe_body.unwrap();
+      fit fn_node_ptr.kind {
+        .Function(curbody) -> {
+          curbody.body = body;
+          curbody.has_body = true;
+          fn_node_ptr.kind = NodeKind.Function(curbody);
+        }
+        _ -> {}
+      }
+    } else {
+      let serr = self.state.expect_sym(';');
+      if serr.is_some() {
+        ret serr;
+      }
+    }
+
+    self.current_function = prev_fn;
+    self.has_current_function = prev_has_fn;
+    self.state.finish_scope();
+
+    out_methods.push(fn_node_ptr);
+    ret .None;
+  }
+
+  // Parses one top-level item: `imp`, `test`, `compound`, `enum`,
+  // `quirk`, `impl`, `pub`/`async fun`/`fun`, a bare-datatype-keyword
+  // global variable (`num x = 5;`), or -- for everything
+  // `parse_statement` already understands (`let`, `ret`, `assert`,
+  // `if`/`elif`/`else`, `for`, `fit`, `defer`, `break`, `continue`, a
+  // `{ ... }` block, or a bare expression statement) -- delegates there
+  // directly.
+  // 
+  // Deliberately simplified from the original for this slice: no
+  // `asm`/`await`/`nil`/`allow`/`expect`/`panic` declarations -- a clean
+  // "not yet supported" error is reported instead of a misparse. Also no
+  // bare
   // `Identifier name;` top-level declaration (public OR private) --
   // needs the same forward-lookahead machinery the original uses to
   // disambiguate a type name from an expression, already documented as
@@ -3932,6 +4435,10 @@ impl Parser {
         ret self.parse_quirk(false);
       }
 
+      if equals(kw, "impl") {
+        ret self.parse_impl(false);
+      }
+
       if equals(kw, "pub") {
         self.state.token_next(); // consume 'pub'
         let next_tok = self.state.token_peek_next();
@@ -3961,6 +4468,9 @@ impl Parser {
           }
           if equals(nkw, "quirk") {
             ret self.parse_quirk(true);
+          }
+          if equals(nkw, "impl") {
+            ret self.parse_impl(true);
           }
           if equals(nkw, "async") {
             self.state.token_next(); // consume 'async'
@@ -5722,7 +6232,7 @@ test "parse parses top-level variable declarations (bare and public)" {
 }
 
 test "parse_top_level_declaration reports a clean error for an unsupported top-level keyword" {
-  ParseState st = _state_from("impl Greeter { greet() { } }");
+  ParseState st = _state_from("asm { }");
   st.emit_stderr = false;
   Parser p = parser_new(&st);
   let err = p.parse_top_level_declaration();
@@ -5730,7 +6240,7 @@ test "parse_top_level_declaration reports a clean error for an unsupported top-l
 }
 
 test "parse_top_level_declaration reports a clean error for an unsupported 'pub' target" {
-  ParseState st = _state_from("pub impl Greeter { greet() { } }");
+  ParseState st = _state_from("pub asm { }");
   st.emit_stderr = false;
   Parser p = parser_new(&st);
   let err = p.parse_top_level_declaration();
@@ -6344,6 +6854,177 @@ test "parse_top_level_declaration dispatches 'quirk'" {
   }
 }
 
+test "parse_impl parses a plain (non-quirk) impl with a method body" {
+  ParseState st = _state_from("impl Point { getx() num { ret self.x; } }");
+  Parser p = parser_new(&st);
+  assert p.parse_impl(true).is_none(), "expected the plain impl to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Impl(i) -> {
+      assert equals(i.type_name, "Point"), "expected type name 'Point'";
+      assert top.flags.is_public, "expected the impl to be public";
+      assert !i.has_quirk_name, "expected no quirk name for a plain impl";
+      assert i.methods.len == 1, "expected 1 method";
+      let m0 = i.methods.get(0);
+      fit m0.kind {
+        .Function(f) -> {
+          assert equals(f.name, "Point__getx"), "expected generated name 'Point__getx'";
+          assert f.args.len == 1, "expected 1 arg (implicit self)";
+          let a0 = f.args.get(0);
+          fit a0.kind {
+            .Variable(v) -> {
+              assert equals(v.name, "self"), "expected implicit arg 'self'";
+              assert equals(v.var_type.type_str, "Point"), "expected self type 'Point'";
+              assert v.var_type.pointer_depth == 1, "expected self to be a pointer";
+            }
+            _ -> { panic("expected a Variable arg"); }
+          }
+          assert f.has_body, "expected a body";
+        }
+        _ -> { panic("expected a Function node"); }
+      }
+    }
+    _ -> { panic("expected an Impl node"); }
+  }
+}
+
+test "parse_impl parses a symbolic generic quirk binding" {
+  ParseState st = _state_from("impl VecIter<T> as Iterator<T> { next() Option<T> { ret .None; } }");
+  Parser p = parser_new(&st);
+  assert p.parse_impl(false).is_none(), "expected the generic quirk impl to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Impl(i) -> {
+      assert equals(i.type_name, "VecIter"), "expected type name 'VecIter' (not mangled -- T is a param)";
+      assert i.has_type_params, "expected type params";
+      assert equals(i.type_params.get(0), "T"), "expected type param 'T'";
+      assert i.has_quirk_name, "expected a quirk name";
+      assert equals(i.quirk_name, "Iterator"), "expected quirk name 'Iterator'";
+      assert !i.has_quirk_concrete_instantiation, "expected a SYMBOLIC binding (T is the impl's own param), not concrete";
+      let m0 = i.methods.get(0);
+      fit m0.kind {
+        .Function(f) -> {
+          assert equals(f.name, "VecIter__Iterator__next"), "expected generated name 'VecIter__Iterator__next'";
+        }
+        _ -> { panic("expected a Function node"); }
+      }
+    }
+    _ -> { panic("expected an Impl node"); }
+  }
+}
+
+test "parse_impl parses a concrete generic quirk instantiation" {
+  ParseState st = _state_from("impl Point as To<num> { convert() num { ret 0; } }");
+  Parser p = parser_new(&st);
+  assert p.parse_impl(false).is_none(), "expected the concrete quirk impl to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Impl(i) -> {
+      assert equals(i.type_name, "Point"), "expected type name 'Point'";
+      assert !i.has_type_params, "expected no type params (Point itself isn't generic)";
+      assert i.has_quirk_name, "expected a quirk name";
+      assert equals(i.quirk_name, "To"), "expected quirk name 'To'";
+      assert i.has_quirk_concrete_instantiation, "expected a CONCRETE instantiation (num isn't a param)";
+      assert equals(i.quirk_concrete_instantiation, "To__num"), "expected mangled name 'To__num'";
+    }
+    _ -> { panic("expected an Impl node"); }
+  }
+}
+
+test "parse_impl parses a concrete monomorphizing impl on an already-generic type" {
+  ParseState st = _state_from("impl Vec<num> { sum() num { ret 0; } }");
+  Parser p = parser_new(&st);
+  assert p.parse_impl(false).is_none(), "expected the concrete monomorphizing impl to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Impl(i) -> {
+      // `<num>` is a datatype keyword, not an identifier -- concrete
+      // generic ARGS, not new type PARAMS, so the type name is mangled.
+      assert equals(i.type_name, "Vec__num"), "expected mangled type name 'Vec__num'";
+      assert !i.has_type_params, "expected no type params for a concrete monomorphizing impl";
+      let m0 = i.methods.get(0);
+      fit m0.kind {
+        .Function(f) -> {
+          assert equals(f.name, "Vec__num__sum"), "expected generated name 'Vec__num__sum'";
+        }
+        _ -> { panic("expected a Function node"); }
+      }
+    }
+    _ -> { panic("expected an Impl node"); }
+  }
+}
+
+test "parse_impl parses a bodyless method declaration" {
+  ParseState st = _state_from("impl Foo { bar(); }");
+  Parser p = parser_new(&st);
+  assert p.parse_impl(false).is_none(), "expected the impl to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Impl(i) -> {
+      let m0 = i.methods.get(0);
+      fit m0.kind {
+        .Function(f) -> {
+          assert !f.has_body, "expected no body";
+          fit f.rtype.kind {
+            .Void -> {}
+            _ -> { panic("expected an omitted return type to default to void"); }
+          }
+        }
+        _ -> { panic("expected a Function node"); }
+      }
+    }
+    _ -> { panic("expected an Impl node"); }
+  }
+}
+
+test "parse_impl parses pub/async method modifiers and a method's own generic type param" {
+  ParseState st = _state_from("impl Box<T> { pub async map<U>(U x) U { ret x; } }");
+  Parser p = parser_new(&st);
+  assert p.parse_impl(false).is_none(), "expected the impl to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Impl(i) -> {
+      let m0 = i.methods.get(0);
+      fit m0.kind {
+        .Function(f) -> {
+          assert f.is_async, "expected 'map' to be async";
+          assert m0.flags.is_public, "expected 'map' to be public";
+          assert f.has_type_params, "expected the method's own type param";
+          assert equals(f.type_params.get(0), "U"), "expected method type param 'U'";
+          // The implicit self arg plus the explicit 'x' arg.
+          assert f.args.len == 2, "expected 2 args (self, x)";
+          let a1 = f.args.get(1);
+          fit a1.kind {
+            .Variable(v) -> { assert equals(v.name, "x"), "expected explicit arg 'x'"; }
+            _ -> { panic("expected a Variable arg"); }
+          }
+        }
+        _ -> { panic("expected a Function node"); }
+      }
+    }
+    _ -> { panic("expected an Impl node"); }
+  }
+}
+
+test "parse_impl rejects an identifier after the type name with no 'as'" {
+  ParseState st = _state_from("impl Point Quirk { }");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_impl(false);
+  assert err.is_some(), "expected an error for a missing 'as' before the quirk name";
+}
+
+test "parse_top_level_declaration dispatches 'impl'" {
+  ParseState st = _state_from("impl Point { getx() num { ret 0; } }");
+  Parser p = parser_new(&st);
+  assert p.parse_top_level_declaration().is_none(), "expected 'impl' to dispatch";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Impl(i) -> { assert equals(i.type_name, "Point"), "expected type name 'Point'"; }
+    _ -> { panic("expected an Impl node"); }
+  }
+}
+
 test "parse_fit_statement parses literal patterns with a default branch" {
   Vec<str> names;
   names.init(0);
@@ -6465,6 +7146,53 @@ fun _is_dot_run_operator(Token t) bin {
     _ -> { ret false; }
   }
   ret equals(s, ".") || equals(s, "..") || equals(s, "...");
+}
+
+// Builds the mangled, flat name for `dt` used to key generic
+// instantiations and concrete quirk-binding identities (`Vec<num>` ->
+// `Vec__num`, `Box<Node*>` -> `Box__Node_ptr1`) -- mirrors codegen's
+// identical mangling scheme so both agree on the same name.
+fun _mangled_dtype_name(DataType* dt) str {
+  ret _mangled_dtype_name_depth(dt, 0);
+}
+
+fun _mangled_dtype_name_depth(DataType* dt, num depth) str {
+  str result = dt.type_str;
+  // A generic ARG's pointer depth is part of its mangled identity
+  // (`Box<Node>` and `Box<Node*>` are distinct instantiations) -- but
+  // only at nested (arg) depth, never the outer/top-level name.
+  if depth > 0 && dt.pointer_depth > 0 {
+    result = format("{str}_ptr{num}", result, dt.pointer_depth);
+  }
+  Vec<DataType*> gargs = dt.generic_args;
+  for ga : gargs {
+    result = format("{str}__{str}", result, _mangled_dtype_name_depth(ga, depth + 1));
+  }
+  ret result;
+}
+
+// True if `dt` (or any of its nested generic args) references one of
+// `params` by bare name -- distinguishes a SYMBOLIC quirk binding
+// (`impl VecIter<T> as Iterator<T>`, where the quirk's arg IS the
+// enclosing impl's own type param, handled by the impl's existing
+// generic-instantiation machinery) from a CONCRETE one (`impl Point as
+// To<num>`, a distinct quirk identity that needs its own mangled name to
+// dispatch correctly).
+fun _dtype_references_any_param(DataType* dt, Vec<str> params) bin {
+  if dt.kind == DataTypeType.Unknown && len(dt.type_str) > 0 {
+    for p : params {
+      if equals(p, dt.type_str) {
+        ret true;
+      }
+    }
+  }
+  Vec<DataType*> gargs = dt.generic_args;
+  for ga : gargs {
+    if _dtype_references_any_param(ga, params) {
+      ret true;
+    }
+  }
+  ret false;
 }
 
 // True if `name` looks like a C preprocessor macro constant
