@@ -3057,9 +3057,161 @@ impl Parser {
     ret berr;
   }
 
+  // Parses `break;`.
+  pub parse_break_statement() Option<ParseErrorKind> {
+    let tok = self.state.token_next(); // consume 'break'
+    Node node = node_new(NodeKind.StatementBreak);
+    fit tok {
+      .Some(t) -> {
+        node.pos = t.pos;
+        node.has_pos = true;
+      }
+      .None -> {}
+    }
+    self.create_node(&node);
+    ret self.state.expect_sym(';');
+  }
+
+  // Parses `continue;`.
+  pub parse_continue_statement() Option<ParseErrorKind> {
+    let tok = self.state.token_next(); // consume 'continue'
+    Node node = node_new(NodeKind.StatementContinue);
+    fit tok {
+      .Some(t) -> {
+        node.pos = t.pos;
+        node.has_pos = true;
+      }
+      .None -> {}
+    }
+    self.create_node(&node);
+    ret self.state.expect_sym(';');
+  }
+
+  // Parses `defer { ... }` (a block) or `defer expr;` (a single
+  // expression) -- both run at scope exit, codegen handles the actual
+  // ordering/semantics; the parser only records which.
+  pub parse_defer_statement() Option<ParseErrorKind> {
+    let defer_tok = self.state.token_peek_next();
+    if !self.has_current_function {
+      self.state.err("defer statement outside of function");
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+    self.state.token_next(); // consume 'defer'
+
+    let next_tok = self.state.token_peek_next();
+    if next_tok.is_none() {
+      self.state.err("expected expression or body after 'defer'");
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+
+    Node* body;
+    if token_is_symbol(next_tok.unwrap(), '{') {
+      let berr = self.parse_body();
+      if berr.is_some() {
+        ret berr;
+      }
+      let maybe_body = self.state.node_pop();
+      if maybe_body.is_none() {
+        self.state.err("expected body after 'defer'");
+        ret .Some(ParseErrorKind.InvalidStatement);
+      }
+      body = malloc(sizeof(Node));
+      *body = maybe_body.unwrap();
+    } else {
+      let eerr = self.parse_expressionable_root();
+      if eerr.is_some() {
+        ret eerr;
+      }
+      let maybe_expr = self.state.node_pop();
+      if maybe_expr.is_none() {
+        self.state.err("expected expression after 'defer'");
+        ret .Some(ParseErrorKind.InvalidStatement);
+      }
+      body = malloc(sizeof(Node));
+      *body = maybe_expr.unwrap();
+      let serr = self.state.expect_sym(';');
+      if serr.is_some() {
+        ret serr;
+      }
+    }
+
+    Node node = node_new(NodeKind.StatementDefer(body));
+    fit defer_tok {
+      .Some(t) -> {
+        node.pos = t.pos;
+        node.has_pos = true;
+      }
+      .None -> {}
+    }
+    self.create_node(&node);
+    ret .None;
+  }
+
+  // Parses `test "name" { ... }`. Top-level only -- enforced simply by
+  // never wiring `test` into `parse_statement`'s own dispatch (only
+  // `parse_top_level_declaration` calls this), matching the original's
+  // `is_global_scope` check without needing an equivalent flag. Reuses
+  // ordinary statement parsing for the body via a synthetic (nameless,
+  // argument-less) function context -- the same "act as if inside a
+  // function" stand-in the original uses -- so `if`/`for`/`ret`/`defer`/
+  // etc. (which check `has_current_function`) work the same inside a
+  // test body as inside a real one.
+  pub parse_test_declaration() Option<ParseErrorKind> {
+    let test_tok = self.state.token_next(); // consume 'test'
+
+    let name_tok = self.state.token_next();
+    if name_tok.is_none() || name_tok.unwrap().type != TokenType.String {
+      self.state.err("expected a string name after 'test'");
+      ret .Some(ParseErrorKind.InvalidString);
+    }
+    str name = "";
+    fit name_tok.unwrap().data {
+      .Sval(s) -> { name = s; }
+      _ -> {}
+    }
+
+    self.state.new_scope();
+
+    let prev_fn = self.current_function;
+    let prev_has_fn = self.has_current_function;
+    Node fn_stub = node_new(NodeKind.Function(function_node_new()));
+    self.current_function = &fn_stub;
+    self.has_current_function = true;
+
+    let berr = self.parse_body();
+    self.current_function = prev_fn;
+    self.has_current_function = prev_has_fn;
+    self.state.finish_scope();
+    if berr.is_some() {
+      ret berr;
+    }
+    let maybe_body = self.state.node_pop();
+    if maybe_body.is_none() {
+      self.state.err("expected test body");
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+    Node* body = malloc(sizeof(Node));
+    *body = maybe_body.unwrap();
+
+    TestDeclNode td;
+    td.name = name;
+    td.body = body;
+
+    Node node = node_new(NodeKind.Test(td));
+    fit test_tok {
+      .Some(t) -> {
+        node.pos = t.pos;
+        node.has_pos = true;
+      }
+      .None -> {}
+    }
+    self.state.nodes.push(node);
+    ret .None;
+  }
+
   // Parses one statement: a `{ ... }` nested body, a `let` declaration, a
-  // `ret`/`assert`/`if`/`elif`/`else`/`for`/`fit` statement, or an
-  // expression statement terminated by `;`.
+  // `ret`/`assert`/`if`/`elif`/`else`/`for`/`fit`/`defer`/`break`/
+  // `continue` statement, or an expression statement terminated by `;`.
   // 
   // Deliberately simplified from the original for this slice: no keyword
   // dispatch beyond those (`compound`/`quirk`/... each need their own
@@ -3105,6 +3257,15 @@ impl Parser {
       }
       if equals(kw, "fit") {
         ret self.parse_fit_statement();
+      }
+      if equals(kw, "defer") {
+        ret self.parse_defer_statement();
+      }
+      if equals(kw, "break") {
+        ret self.parse_break_statement();
+      }
+      if equals(kw, "continue") {
+        ret self.parse_continue_statement();
       }
       let msg = format("keyword '{str}' is not yet supported in statement position", kw);
       defer free(msg);
@@ -3252,18 +3413,19 @@ impl Parser {
     ret .None;
   }
 
-  // Parses one top-level item: `imp`, `pub`/`async fun`/`fun`, a bare-
-  // datatype-keyword global variable (`num x = 5;`), or -- for everything
-  // `parse_statement` already understands (`let`, `ret`, `assert`,
-  // `if`/`elif`/`else`, `for`, `fit`, a `{ ... }` block, or a bare
-  // expression statement) -- delegates there directly.
+  // Parses one top-level item: `imp`, `test`, `pub`/`async fun`/`fun`, a
+  // bare-datatype-keyword global variable (`num x = 5;`), or -- for
+  // everything `parse_statement` already understands (`let`, `ret`,
+  // `assert`, `if`/`elif`/`else`, `for`, `fit`, `defer`, `break`,
+  // `continue`, a `{ ... }` block, or a bare expression statement) --
+  // delegates there directly.
   // 
   // Deliberately simplified from the original for this slice: no
-  // `enum`/`compound`/`quirk`/`impl`/`test`/`defer`/`asm`/`await`/`nil`/
-  // `allow`/`expect`/`panic`/`break`/`continue` declarations -- each is
-  // its own substantial parsing slice (`enum`/`compound`/`quirk`/`impl`
-  // especially), deferred to future work; a clean "not yet supported"
-  // error is reported instead of a misparse. Also no bare
+  // `enum`/`compound`/`quirk`/`impl`/`asm`/`await`/`nil`/`allow`/
+  // `expect`/`panic` declarations -- each is its own substantial parsing
+  // slice (`enum`/`compound`/`quirk`/`impl` especially), deferred to
+  // future work; a clean "not yet supported" error is reported instead
+  // of a misparse. Also no bare
   // `Identifier name;` top-level declaration (public OR private) --
   // needs the same forward-lookahead machinery the original uses to
   // disambiguate a type name from an expression, already documented as
@@ -3295,6 +3457,10 @@ impl Parser {
 
       if equals(kw, "imp") {
         ret self.parse_import();
+      }
+
+      if equals(kw, "test") {
+        ret self.parse_test_declaration();
       }
 
       if equals(kw, "pub") {
@@ -5348,6 +5514,135 @@ test "parse_statement dispatches 'for' to parse_for_statement" {
   fit top.kind {
     .StatementFor(fk) -> {}
     _ -> { panic("expected a StatementFor node"); }
+  }
+}
+
+test "parse_break_statement parses 'break;'" {
+  ParseState st = _state_from("break;");
+  Parser p = parser_new(&st);
+  assert p.parse_break_statement().is_none(), "expected 'break;' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementBreak -> {}
+    _ -> { panic("expected a StatementBreak node"); }
+  }
+}
+
+test "parse_continue_statement parses 'continue;'" {
+  ParseState st = _state_from("continue;");
+  Parser p = parser_new(&st);
+  assert p.parse_continue_statement().is_none(), "expected 'continue;' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementContinue -> {}
+    _ -> { panic("expected a StatementContinue node"); }
+  }
+}
+
+test "parse_defer_statement parses a deferred expression" {
+  Vec<str> names;
+  names.init(0);
+  names.push("cleanup");
+  ParseState st = _state_with_declared("defer cleanup();", names);
+  Parser p = parser_new(&st);
+  Node fn_stub = node_new(NodeKind.Blank);
+  p.current_function = &fn_stub;
+  p.has_current_function = true;
+
+  assert p.parse_defer_statement().is_none(), "expected 'defer cleanup();' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementDefer(body) -> {
+      fit body.kind {
+        .Expression(e) -> { assert equals(e.op, "()"), "expected a call expression"; }
+        _ -> { panic("expected an Expression node"); }
+      }
+    }
+    _ -> { panic("expected a StatementDefer node"); }
+  }
+}
+
+test "parse_defer_statement parses a deferred block" {
+  Vec<str> names;
+  names.init(0);
+  names.push("a");
+  ParseState st = _state_with_declared("defer { a; }", names);
+  Parser p = parser_new(&st);
+  Node fn_stub = node_new(NodeKind.Blank);
+  p.current_function = &fn_stub;
+  p.has_current_function = true;
+
+  assert p.parse_defer_statement().is_none(), "expected 'defer { a; }' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementDefer(body) -> {
+      fit body.kind {
+        .Body(bn) -> {
+          assert bn.statements.len == 1, "expected 1 statement in the deferred body";
+        }
+        _ -> { panic("expected a Body node"); }
+      }
+    }
+    _ -> { panic("expected a StatementDefer node"); }
+  }
+}
+
+test "parse_defer_statement rejects use outside of a function" {
+  ParseState st = _state_from("defer 1;");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_defer_statement();
+  assert err.is_some(), "expected an error for 'defer' outside a function";
+}
+
+test "parse_statement dispatches 'defer'/'break'/'continue'" {
+  ParseState st = _state_from("break; continue;");
+  Parser p = parser_new(&st);
+  assert p.parse_statement().is_none(), "expected parse_statement to dispatch 'break'";
+  assert p.parse_statement().is_none(), "expected parse_statement to dispatch 'continue'";
+  fit st.nodes.get(0).kind {
+    .StatementBreak -> {}
+    _ -> { panic("expected a StatementBreak node"); }
+  }
+  fit st.nodes.get(1).kind {
+    .StatementContinue -> {}
+    _ -> { panic("expected a StatementContinue node"); }
+  }
+}
+
+test "parse_test_declaration parses a named test body" {
+  ParseState st = _state_from("test \"adds two numbers\" { assert 1 + 1 == 2; }");
+  Parser p = parser_new(&st);
+  assert p.parse_test_declaration().is_none(), "expected the test declaration to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Test(td) -> {
+      assert equals(td.name, "adds two numbers"), "expected test name 'adds two numbers'";
+      fit td.body.kind {
+        .Body(bn) -> { assert bn.statements.len == 1, "expected 1 statement in the test body"; }
+        _ -> { panic("expected a Body node"); }
+      }
+    }
+    _ -> { panic("expected a Test node"); }
+  }
+}
+
+test "parse_test_declaration requires a string name" {
+  ParseState st = _state_from("test foo { }");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_test_declaration();
+  assert err.is_some(), "expected an error for a non-string test name";
+}
+
+test "parse_top_level_declaration dispatches 'test'" {
+  ParseState st = _state_from("test \"noop\" { }");
+  Parser p = parser_new(&st);
+  assert p.parse_top_level_declaration().is_none(), "expected parse_top_level_declaration to dispatch 'test'";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Test(td) -> { assert equals(td.name, "noop"), "expected test name 'noop'"; }
+    _ -> { panic("expected a Test node"); }
   }
 }
 
