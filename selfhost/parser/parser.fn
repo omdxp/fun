@@ -735,13 +735,16 @@ impl ParseState {
   // Parses a type annotation into `dt`: a builtin scalar keyword, a
   // user-defined/identifier-based name (optionally alias-qualified,
   // `mod.Type`), its generic arguments if any, then a trailing run of `*`
-  // pointer-depth markers.
+  // pointer-depth markers. Trailing array-bracket suffixes (`num[5]`,
+  // `str[]`) are a separate function, `parse_array_brackets` -- matching
+  // the original's own `parse_datatype`/`parse_array_brackets` split --
+  // called explicitly by each site that allows one (`parse_variable`,
+  // compound fields, enum payloads, quirk/function/impl-method
+  // arg/return types), not from within this function itself.
   // 
-  // Deferred from this slice: the `fun(T1, T2) R` function-type parameter
-  // form (needs its own arg-list/return-type recursion) and array-bracket
-  // suffixes (need the expression parser for array-size expressions) --
-  // both are separate later slices, matching the original's own
-  // `parse_fn_type_datatype`/`parse_array_brackets` split.
+  // Deferred from this slice: the `fun(T1, T2) R` function-type
+  // parameter form -- needs its own arg-list/return-type recursion,
+  // matching the original's own `parse_fn_type_datatype` split.
   pub parse_datatype(DataType* dt) Option<ParseErrorKind> {
     let tok = self.token_next();
     if tok.is_none() {
@@ -1929,6 +1932,68 @@ impl Parser {
     ret err;
   }
 
+  // Parses a run of `[expr]`/`[]` array-bracket suffixes onto `dt`, right
+  // after its base type name (`num[5]`, `str[]`, `num[N][N]` for multi-
+  // dimensional): sets `dt.is_array`/`dt.array_depth`, and records each
+  // bracket's inner size expression (absent for a bare `[]`) as a
+  // `Bracket` node in `dt.array_brackets`. Typecheck/codegen compute the
+  // concrete size later; parsing only records what was written.
+  pub parse_array_brackets(DataType* dt) Option<ParseErrorKind> {
+    Vec<Node*> brackets;
+    brackets.init(0);
+    num depth = 0;
+
+    for self.state.next_token_is_operator("[") {
+      let lbracket_tok = self.state.token_peek_next();
+      let lberr = self.state.expect_op("[");
+      if lberr.is_some() {
+        ret lberr;
+      }
+      dt.is_array = true;
+      dt.flags.is_array = true;
+      depth = depth + 1;
+
+      if self.state.next_token_is_symbol(']') {
+        self.state.token_next();
+        continue;
+      }
+
+      let eerr = self.parse_expressionable_root();
+      if eerr.is_some() {
+        ret eerr;
+      }
+      let rberr = self.state.expect_sym(']');
+      if rberr.is_some() {
+        ret rberr;
+      }
+      let maybe_exp = self.state.node_pop();
+      if maybe_exp.is_none() {
+        self.state.err("expected array size expression");
+        ret .Some(ParseErrorKind.InvalidExpression);
+      }
+      Node* exp = malloc(sizeof(Node));
+      *exp = maybe_exp.unwrap();
+
+      Node bracket_node = node_new(NodeKind.Bracket(exp));
+      fit lbracket_tok {
+        .Some(t) -> {
+          bracket_node.pos = t.pos;
+          bracket_node.has_pos = true;
+        }
+        .None -> {}
+      }
+      Node* bracket_ptr = malloc(sizeof(Node));
+      *bracket_ptr = bracket_node;
+      brackets.push(bracket_ptr);
+    }
+
+    dt.array_depth = depth;
+    if brackets.len > 0 {
+      dt.array_brackets = brackets;
+    }
+    ret .None;
+  }
+
   // Parses a variable declaration's NAME and optional `= initializer`
   // (the type `dt` is already parsed by the caller): registers a scope
   // entity so later references resolve, and rejects re-declaring a name
@@ -1937,10 +2002,15 @@ impl Parser {
   // an uninitialized redeclaration is just as much a bug and this port
   // doesn't see a reason to let it through.
   // 
-  // Deliberately simplified from the original for this slice: no `T[]
-  // name;` array-bracket form yet (needs `parse_array_brackets`, deferred
-  // along with the rest of array support).
+  // Handles the `T[] name;` array-bracket form (the brackets appear
+  // right after the base type, BEFORE the name) via `parse_array_brackets`.
   pub parse_variable(DataType* dt, bin is_public, bin require_initializer) Option<ParseErrorKind> {
+    if self.state.next_token_is_operator("[") {
+      let aberr = self.parse_array_brackets(dt);
+      if aberr.is_some() {
+        ret aberr;
+      }
+    }
     let tok = self.state.token_next();
     if tok.is_none() {
       self.state.err("expected identifier");
@@ -2604,6 +2674,12 @@ impl Parser {
           let rerr = self.state.parse_datatype(rtype);
           if rerr.is_some() {
             ret rerr;
+          }
+          if self.state.next_token_is_operator("[") {
+            let raberr = self.parse_array_brackets(rtype);
+            if raberr.is_some() {
+              ret raberr;
+            }
           }
           has_explicit_rtype = true;
         }
@@ -3507,18 +3583,12 @@ impl Parser {
 
   // Parses `compound Name { field decls }` (optionally generic, `compound
   // Name<T> { ... }`): a struct-like user-defined type. Fields share a
-  // datatype across a comma-separated name list (`dec x, y;`). Registers
-  // the compound's name as a symbol via `push_symbol` so it can be used
-  // as a datatype identifier elsewhere (e.g. `Name x;`, or `Name{ ... }`
-  // compound-init once THAT'S ported).
-  // 
-  // Deliberately simplified from the original for this slice: no
-  // array-bracket field types (`num arr[10];`) -- needs
-  // `parse_array_brackets`, the same deferral as everywhere else in this
-  // port (see `parse_datatype`'s doc comment). A field written with one
-  // gets a clean "expected field name" error (the `[` isn't consumed by
-  // anything, so the next token isn't an identifier either) rather than
-  // a misparse.
+  // datatype across a comma-separated name list (`dec x, y;`), though
+  // only the FIRST field in such a list may be an array type -- deep-
+  // cloning the size-expression AST per extra name isn't supported,
+  // matching the original. Registers the compound's name as a symbol via
+  // `push_symbol` so it can be used as a datatype identifier elsewhere
+  // (e.g. `Name x;`, or `Name{ ... }` compound-init once THAT'S ported).
   pub parse_compound(bin is_public) Option<ParseErrorKind> {
     let kwerr = self.state.expect_keyword("compound");
     if kwerr.is_some() {
@@ -3563,7 +3633,14 @@ impl Parser {
       if derr.is_some() {
         ret derr;
       }
+      if self.state.next_token_is_operator("[") {
+        let aberr = self.parse_array_brackets(dt);
+        if aberr.is_some() {
+          ret aberr;
+        }
+      }
 
+      num field_count = 0;
       for true {
         let field_tok = self.state.token_next();
         if field_tok.is_none() || field_tok.unwrap().type != TokenType.Identifier {
@@ -3576,6 +3653,14 @@ impl Parser {
           _ -> {}
         }
 
+        // Only the first field in a combined multi-name list may be an
+        // array type -- deep-cloning the size-expression AST per extra
+        // name isn't supported, matching the original.
+        if field_count > 0 && dt.is_array {
+          self.state.err("array fields cannot be declared in a combined list; declare them separately");
+          ret .Some(ParseErrorKind.InvalidDataType);
+        }
+
         DataType* field_dt = malloc(sizeof(DataType));
         *field_dt = *dt;
 
@@ -3583,6 +3668,7 @@ impl Parser {
         cf.name = fname;
         cf.dtype = field_dt;
         fields.push(cf);
+        field_count = field_count + 1;
 
         if !self.state.next_token_is_operator(",") {
           break;
@@ -3629,10 +3715,9 @@ impl Parser {
   // allowed. Registers the enum's name as a symbol via `push_symbol`,
   // same as `parse_compound`.
   // 
-  // Deliberately simplified from the original for this slice: no
-  // array-bracket payload element types -- same deferral as
-  // `parse_compound`'s fields. Also reuses the constraint-AWARE
-  // `parse_type_params_with_constraints` for `enum`'s type parameters
+  // Deliberately simplified from the original for this slice: reuses the
+  // constraint-AWARE `parse_type_params_with_constraints` for `enum`'s
+  // type parameters
   // rather than porting a separate constraint-less
   // `parse_generic_type_params` -- the original's enum path doesn't
   // support `T: a | b` constraints at all, so this is slightly more
@@ -3700,6 +3785,12 @@ impl Parser {
           let pderr = self.state.parse_datatype(pdt);
           if pderr.is_some() {
             ret pderr;
+          }
+          if self.state.next_token_is_operator("[") {
+            let paberr = self.parse_array_brackets(pdt);
+            if paberr.is_some() {
+              ret paberr;
+            }
           }
           ptypes.push(pdt);
           if !self.state.next_token_is_operator(",") {
@@ -3794,9 +3885,7 @@ impl Parser {
   // the quirk's name as a symbol via `push_symbol`, same as
   // `parse_compound`/`parse_enum`.
   // 
-  // Deliberately simplified from the original for this slice: no
-  // array-bracket arg/return types -- same deferral as everywhere else
-  // in this port (see `parse_datatype`'s doc comment). Also reuses the
+  // Deliberately simplified from the original for this slice: reuses the
   // constraint-aware `parse_type_params_with_constraints` for the
   // quirk's own type parameters rather than the constraint-less
   // `parse_generic_type_params`, the same documented widening as
@@ -3868,6 +3957,12 @@ impl Parser {
         if aderr.is_some() {
           ret aderr;
         }
+        if self.state.next_token_is_operator("[") {
+          let qaberr = self.parse_array_brackets(adt);
+          if qaberr.is_some() {
+            ret qaberr;
+          }
+        }
 
         let aname_tok = self.state.token_next();
         if aname_tok.is_none() || aname_tok.unwrap().type != TokenType.Identifier {
@@ -3914,6 +4009,12 @@ impl Parser {
             let rderr = self.state.parse_datatype(rtype);
             if rderr.is_some() {
               ret rderr;
+            }
+            if self.state.next_token_is_operator("[") {
+              let qrtaberr = self.parse_array_brackets(rtype);
+              if qrtaberr.is_some() {
+                ret qrtaberr;
+              }
             }
             has_explicit_rtype = true;
           }
@@ -3981,16 +4082,15 @@ impl Parser {
   // A method may also declare its OWN generic type parameter(s) in
   // addition to the impl's (`impl Box<T> { pub map<U>(U x) U { ... } }`).
   // 
-  // Deliberately simplified from the original for this slice: no
-  // array-bracket arg/return types -- same deferral as everywhere else
-  // in this port. Also, unlike the original, an impl method's arg list
-  // is parsed via the shared `_parse_function_args` (which also accepts
-  // a trailing `...` variadic marker) rather than a near-duplicate
-  // variadic-less loop; the original doesn't look for `...` in an impl
-  // method's arg list at all, so this is a minor, documented widening
-  // (a `...` there is silently accepted and dropped here, where the
-  // original would report a clean datatype-parse error) not worth a
-  // whole separate function to avoid.
+  // Deliberately simplified from the original for this slice: unlike
+  // the original, an impl method's arg list is parsed via the shared
+  // `_parse_function_args` (which also accepts a trailing `...`
+  // variadic marker) rather than a near-duplicate variadic-less loop;
+  // the original doesn't look for `...` in an impl method's arg list at
+  // all, so this is a minor, documented widening (a `...` there is
+  // silently accepted and dropped here, where the original would report
+  // a clean datatype-parse error) not worth a whole separate function
+  // to avoid.
   pub parse_impl(bin is_public) Option<ParseErrorKind> {
     let kwerr = self.state.expect_keyword("impl");
     if kwerr.is_some() {
@@ -4319,6 +4419,12 @@ impl Parser {
           let rderr = self.state.parse_datatype(rtype);
           if rderr.is_some() {
             ret rderr;
+          }
+          if self.state.next_token_is_operator("[") {
+            let imaberr = self.parse_array_brackets(rtype);
+            if imaberr.is_some() {
+              ret imaberr;
+            }
           }
           has_explicit_rtype = true;
         }
@@ -6053,6 +6159,135 @@ test "parse_function parses args, an explicit return type, and a body" {
       }
     }
     _ -> { panic("expected a Function node"); }
+  }
+}
+
+test "parse_array_brackets parses a bare '[]' and a sized '[5]'" {
+  ParseState st = _state_from("[][5]");
+  Parser p = parser_new(&st);
+  DataType* dt = malloc(sizeof(DataType));
+  * dt =dtype_new();
+  assert p.parse_array_brackets(dt).is_none(), "expected '[][5]' to parse";
+  assert dt.is_array, "expected is_array";
+  assert dt.array_depth == 2, "expected array depth 2";
+  // Only the '[5]' bracket is recorded -- the bare '[]' has no size
+  // expression to keep.
+  assert dt.array_brackets.len == 1, "expected 1 recorded bracket";
+  let b0 = dt.array_brackets.get(0);
+  fit b0.kind {
+    .Bracket(inner) -> {
+      fit inner.kind {
+        .Number(_) -> {}
+        _ -> { panic("expected a Number size expression"); }
+      }
+    }
+    _ -> { panic("expected a Bracket node"); }
+  }
+}
+
+test "parse_function parses an array-typed argument and return type" {
+  ParseState st = _state_from("fun sum(num[] arr) num[] { ret arr; }");
+  Parser p = parser_new(&st);
+  assert p.parse_function(false, false).is_none(), "expected the function to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Function(f) -> {
+      let a0 = f.args.get(0);
+      fit a0.kind {
+        .Variable(v) -> {
+          assert v.var_type.is_array, "expected the arg type to be an array";
+          assert equals(v.var_type.type_str, "num"), "expected element type 'num'";
+        }
+        _ -> { panic("expected a Variable arg"); }
+      }
+      assert f.rtype.is_array, "expected the return type to be an array";
+    }
+    _ -> { panic("expected a Function node"); }
+  }
+}
+
+test "parse_compound parses an array-typed field" {
+  ParseState st = _state_from("compound Buffer { num[16] data; }");
+  Parser p = parser_new(&st);
+  assert p.parse_compound(false).is_none(), "expected the compound to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Compound(c) -> {
+      let f0 = c.fields.get(0);
+      assert f0.dtype.is_array, "expected the field type to be an array";
+      assert f0.dtype.array_depth == 1, "expected array depth 1";
+    }
+    _ -> { panic("expected a Compound node"); }
+  }
+}
+
+test "parse_compound rejects an array field in a combined multi-name list" {
+  ParseState st = _state_from("compound Buffer { num[16] data, other; }");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_compound(false);
+  assert err.is_some(), "expected an error for an array field combined with another name";
+}
+
+test "parse_enum parses an array-typed variant payload element" {
+  ParseState st = _state_from("enum Shape { Grid(num[]) }");
+  Parser p = parser_new(&st);
+  assert p.parse_enum(false).is_none(), "expected the enum to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Enum(e) -> {
+      let v0 = e.variants.get(0);
+      let pt0 = v0.payload.get(0);
+      assert pt0.is_array, "expected the payload element type to be an array";
+    }
+    _ -> { panic("expected an Enum node"); }
+  }
+}
+
+test "parse_quirk parses an array-typed arg and return type" {
+  ParseState st = _state_from("quirk Sized { fill(num[] buf) num[]; }");
+  Parser p = parser_new(&st);
+  assert p.parse_quirk(false).is_none(), "expected the quirk to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Quirk(q) -> {
+      let m0 = q.methods.get(0);
+      let a0 = m0.args.get(0);
+      assert a0.dtype.is_array, "expected the arg type to be an array";
+      assert m0.rtype.is_array, "expected the return type to be an array";
+    }
+    _ -> { panic("expected a Quirk node"); }
+  }
+}
+
+test "parse_impl parses an array-typed method return type" {
+  ParseState st = _state_from("impl Buffer { data() num[] { ret self.data; } }");
+  Parser p = parser_new(&st);
+  assert p.parse_impl(false).is_none(), "expected the impl to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Impl(i) -> {
+      let m0 = i.methods.get(0);
+      fit m0.kind {
+        .Function(f) -> { assert f.rtype.is_array, "expected the return type to be an array"; }
+        _ -> { panic("expected a Function node"); }
+      }
+    }
+    _ -> { panic("expected an Impl node"); }
+  }
+}
+
+test "parse parses a top-level array-typed variable" {
+  ParseState st = _state_from("num[4] counters;");
+  Parser p = parser_new(&st);
+  assert p.parse().is_none(), "expected the file to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Variable(v) -> {
+      assert equals(v.name, "counters"), "expected variable name 'counters'";
+      assert v.var_type.is_array, "expected the variable type to be an array";
+    }
+    _ -> { panic("expected a Variable node"); }
   }
 }
 
