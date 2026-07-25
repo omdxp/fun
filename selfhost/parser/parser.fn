@@ -1880,17 +1880,275 @@ impl Parser {
     ret self.state.expect_sym(';');
   }
 
+  // Parses an `if`/`elif` CONDITION and leaves it on top of the node
+  // stack: a leading `(...)` is stripped explicitly (rather than left to
+  // the general expression parser -- `parse_for_parenthesis` unconditionally
+  // tells its caller "there may be more to parse", which is wrong for a
+  // bare parenthesized condition immediately followed by an unrelated
+  // single-statement body), then any further binary-operator continuation
+  // is picked up via the general expression loop.
+  // 
+  // This exact logic has a documented history: an earlier version of it
+  // (in the Zig source this is ported from) dropped the re-wrap step
+  // below, silently miscompiling `(a || b) && c` as `a || b && c` --
+  // codegen never auto-parenthesizes sub-expressions, and C parses the
+  // un-grouped form as `a || (b && c)`, a different result. Ported here
+  // with extra care given that history: when the condition DID start with
+  // an explicit `(` and a binary operator follows, the parsed condition is
+  // re-wrapped in an `ExpressionParenthesis` before continuing, so the
+  // grouping survives into codegen.
+  _parse_if_or_elif_condition() Option<ParseErrorKind> {
+    bin had_leading_paren = false;
+    Node cond = node_new(NodeKind.Blank);
+
+    if self.state.next_token_is_operator("(") {
+      had_leading_paren = true;
+      let operr = self.state.expect_op("(");
+      if operr.is_some() {
+        ret operr;
+      }
+      let eerr = self.parse_expressionable_root();
+      if eerr.is_some() {
+        ret eerr;
+      }
+      let maybe_cond = self.state.node_pop();
+      if maybe_cond.is_none() {
+        self.state.err("expected condition");
+        ret .Some(ParseErrorKind.InvalidExpression);
+      }
+      cond = maybe_cond.unwrap();
+      let cerr = self.state.expect_sym(')');
+      if cerr.is_some() {
+        ret cerr;
+      }
+    } else {
+      let eerr = self.parse_expressionable_root();
+      if eerr.is_some() {
+        ret eerr;
+      }
+      let maybe_cond = self.state.node_pop();
+      if maybe_cond.is_none() {
+        self.state.err("expected condition");
+        ret .Some(ParseErrorKind.InvalidExpression);
+      }
+      cond = maybe_cond.unwrap();
+    }
+
+    fit self.state.token_peek_next() {
+      .Some(nt) -> {
+        if is_binary_only_operator(nt) {
+          if had_leading_paren {
+            Node* inner = malloc(sizeof(Node));
+            *inner = cond;
+            Node wrapped = node_new(NodeKind.ExpressionParenthesis(inner));
+            wrapped.pos = inner.pos;
+            wrapped.has_pos = inner.has_pos;
+            cond = wrapped;
+          }
+          self.state.nodes.push(cond);
+          let cerr2 = self.parse_expressionable();
+          if cerr2.is_some() {
+            ret cerr2;
+          }
+          let maybe_cond2 = self.state.node_pop();
+          if maybe_cond2.is_none() {
+            self.state.err("expected condition");
+            ret .Some(ParseErrorKind.InvalidExpression);
+          }
+          cond = maybe_cond2.unwrap();
+        }
+      }
+      .None -> {}
+    }
+
+    bin is_assignment = false;
+    fit cond.kind {
+      .Expression(e) -> {
+        if equals(e.op, "=") {
+          is_assignment = true;
+        }
+      }
+      _ -> {}
+    }
+    if is_assignment {
+      self.state.err("expected expression, got assignment");
+      ret .Some(ParseErrorKind.InvalidExpression);
+    }
+
+    self.state.nodes.push(cond);
+    ret .None;
+  }
+
+  // Parses an if/elif/else BODY -- a `{ ... }` block, or a single
+  // statement -- leaving the resulting node on top of the node stack.
+  _parse_if_body() Option<ParseErrorKind> {
+    if self.state.next_token_is_symbol('{') {
+      ret self.parse_body();
+    }
+    ret self.parse_statement();
+  }
+
+  // Parses `if <condition> <body>`.
+  pub parse_if_statement() Option<ParseErrorKind> {
+    let if_tok = self.state.token_peek_next();
+    let kwerr = self.state.expect_keyword("if");
+    if kwerr.is_some() {
+      ret kwerr;
+    }
+    if !self.has_current_function {
+      self.state.err("if statement outside of function");
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+
+    let cerr = self._parse_if_or_elif_condition();
+    if cerr.is_some() {
+      ret cerr;
+    }
+    let maybe_cond = self.state.node_pop();
+    if maybe_cond.is_none() {
+      self.state.err("expected if condition");
+      ret .Some(ParseErrorKind.InvalidExpression);
+    }
+    Node* condition = malloc(sizeof(Node));
+    *condition = maybe_cond.unwrap();
+
+    let berr = self._parse_if_body();
+    if berr.is_some() {
+      ret berr;
+    }
+    let maybe_body = self.state.node_pop();
+    if maybe_body.is_none() {
+      self.state.err("expected if body");
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+    Node* body = malloc(sizeof(Node));
+    *body = maybe_body.unwrap();
+
+    IfStmtNode ifn;
+    ifn.condition = condition;
+    ifn.body = body;
+
+    Node node = node_new(NodeKind.StatementIf(ifn));
+    fit if_tok {
+      .Some(t) -> {
+        node.pos = t.pos;
+        node.has_pos = true;
+      }
+      .None -> {}
+    }
+    self.create_node(&node);
+    ret .None;
+  }
+
+  // Parses `elif <condition> <body>`. A no-op (not an error) if the next
+  // token isn't `elif` -- callers probe with this the same way the
+  // original does.
+  // 
+  // Deliberately simplified from the original for this slice: no
+  // if/elif/else CHAINING validation (`parse_body_multiple_statements`
+  // doesn't check that an elif/else actually follows an if/elif in this
+  // port), so a stray `elif` with no preceding `if` is accepted rather
+  // than rejected. Revisit once that validation is ported.
+  pub parse_elif_statement() Option<ParseErrorKind> {
+    if !self.state.next_token_is_keyword("elif") {
+      ret .None;
+    }
+    let elif_tok = self.state.token_peek_next();
+    if !self.has_current_function {
+      self.state.err("elif statement outside of function");
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+    self.state.token_next();
+
+    let cerr = self._parse_if_or_elif_condition();
+    if cerr.is_some() {
+      ret cerr;
+    }
+    let maybe_cond = self.state.node_pop();
+    if maybe_cond.is_none() {
+      self.state.err("expected elif condition");
+      ret .Some(ParseErrorKind.InvalidExpression);
+    }
+    Node* condition = malloc(sizeof(Node));
+    *condition = maybe_cond.unwrap();
+
+    let berr = self._parse_if_body();
+    if berr.is_some() {
+      ret berr;
+    }
+    let maybe_body = self.state.node_pop();
+    if maybe_body.is_none() {
+      self.state.err("expected elif body");
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+    Node* body = malloc(sizeof(Node));
+    *body = maybe_body.unwrap();
+
+    IfStmtNode ifn;
+    ifn.condition = condition;
+    ifn.body = body;
+
+    Node node = node_new(NodeKind.StatementElseIf(ifn));
+    fit elif_tok {
+      .Some(t) -> {
+        node.pos = t.pos;
+        node.has_pos = true;
+      }
+      .None -> {}
+    }
+    self.create_node(&node);
+    ret .None;
+  }
+
+  // Parses `else <body>`. A no-op (not an error) if the next token isn't
+  // `else`, matching `parse_elif_statement`. Same chaining-validation
+  // simplification as above.
+  pub parse_else_statement() Option<ParseErrorKind> {
+    if !self.state.next_token_is_keyword("else") {
+      ret .None;
+    }
+    let else_tok = self.state.token_peek_next();
+    if !self.has_current_function {
+      self.state.err("else statement outside of function");
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+    self.state.token_next();
+
+    let berr = self._parse_if_body();
+    if berr.is_some() {
+      ret berr;
+    }
+    let maybe_body = self.state.node_pop();
+    if maybe_body.is_none() {
+      self.state.err("expected else body");
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+    Node* body = malloc(sizeof(Node));
+    *body = maybe_body.unwrap();
+
+    Node node = node_new(NodeKind.StatementElse(body));
+    fit else_tok {
+      .Some(t) -> {
+        node.pos = t.pos;
+        node.has_pos = true;
+      }
+      .None -> {}
+    }
+    self.create_node(&node);
+    ret .None;
+  }
+
   // Parses one statement: a `{ ... }` nested body, a `let` declaration, a
-  // `ret`/`assert` statement, or an expression statement terminated by `;`.
+  // `ret`/`assert`/`if`/`elif`/`else` statement, or an expression
+  // statement terminated by `;`.
   // 
   // Deliberately simplified from the original for this slice: no keyword
-  // dispatch beyond `let`/`ret`/`assert` (`if`/`for`/`fit`/`compound`/...
-  // each need their own parsing infrastructure not ported yet -- an
-  // unsupported keyword reports a clean "not yet supported" error rather
-  // than silently misparsing), no `fork`-statement contextual-keyword
-  // handling, and no user-defined-type declaration detection (`Point p;`
-  // -- needs the same lookahead machinery as the keyword dispatch above,
-  // deferred with it).
+  // dispatch beyond those (`for`/`fit`/`compound`/... each need their own
+  // parsing infrastructure not ported yet -- an unsupported keyword
+  // reports a clean "not yet supported" error rather than silently
+  // misparsing), no `fork`-statement contextual-keyword handling, and no
+  // user-defined-type declaration detection (`Point p;` -- needs the same
+  // lookahead machinery as the keyword dispatch above, deferred with it).
   pub parse_statement() Option<ParseErrorKind> {
     let tok = self.state.token_peek_next();
     if tok.is_none() {
@@ -1913,6 +2171,15 @@ impl Parser {
       }
       if equals(kw, "assert") {
         ret self.parse_assert();
+      }
+      if equals(kw, "if") {
+        ret self.parse_if_statement();
+      }
+      if equals(kw, "elif") {
+        ret self.parse_elif_statement();
+      }
+      if equals(kw, "else") {
+        ret self.parse_else_statement();
       }
       let msg = format("keyword '{str}' is not yet supported in statement position", kw);
       defer free(msg);
@@ -3134,6 +3401,197 @@ test "parse_body parses a body mixing let, ret, and assert statements" {
       }
     }
     _ -> { panic("expected a Body node"); }
+  }
+}
+
+test "parse_if_statement parses a simple condition and block body" {
+  Vec<str> names;
+  names.init(0);
+  names.push("a");
+  names.push("b");
+  ParseState st = _state_with_declared("if a { b; }", names);
+  Parser p = parser_new(&st);
+  Node fn_stub = node_new(NodeKind.Blank);
+  p.current_function = &fn_stub;
+  p.has_current_function = true;
+
+  assert p.parse_if_statement().is_none(), "expected 'if a { b; }' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementIf(ifn) -> {
+      fit ifn.condition.kind {
+        .Identifier(s) -> { assert equals(s, "a"), "expected condition 'a'"; }
+        _ -> { panic("expected Identifier 'a'"); }
+      }
+      fit ifn.body.kind {
+        .Body(bn) -> { assert bn.statements.len == 1, "expected 1 statement in the body"; }
+        _ -> { panic("expected a Body node"); }
+      }
+    }
+    _ -> { panic("expected a StatementIf node"); }
+  }
+}
+
+test "parse_if_statement parses a single-statement body without braces" {
+  Vec<str> names;
+  names.init(0);
+  names.push("a");
+  names.push("b");
+  ParseState st = _state_with_declared("if a ret b;", names);
+  Parser p = parser_new(&st);
+  Node fn_stub = node_new(NodeKind.Blank);
+  p.current_function = &fn_stub;
+  p.has_current_function = true;
+
+  assert p.parse_if_statement().is_none(), "expected 'if a ret b;' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementIf(ifn) -> {
+      fit ifn.body.kind {
+        .StatementReturn(exp) -> {}
+        _ -> { panic("expected a StatementReturn body (no braces)"); }
+      }
+    }
+    _ -> { panic("expected a StatementIf node"); }
+  }
+}
+
+test "parse_if_statement rejects use outside of a function" {
+  ParseState st = _state_from("if a { }");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_if_statement();
+  assert err.is_some(), "expected an error for 'if' outside a function";
+}
+
+test "parse_if_statement rejects an assignment used as the condition" {
+  Vec<str> names;
+  names.init(0);
+  names.push("a");
+  names.push("b");
+  ParseState st = _state_with_declared("if a = b { }", names);
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  Node fn_stub = node_new(NodeKind.Blank);
+  p.current_function = &fn_stub;
+  p.has_current_function = true;
+
+  let err = p.parse_if_statement();
+  assert err.is_some(), "expected an error for an assignment used as a condition";
+}
+
+test "parse_if_statement preserves explicit grouping through a following binary operator" {
+  // The historically miscompiled shape: `(a || b) && c` must stay grouped
+  // as `((a || b)) && c` -- codegen never auto-parenthesizes, so losing
+  // the explicit parens here would silently change what the condition
+  // means (`||` binds looser than `&&`).
+  Vec<str> names;
+  names.init(0);
+  names.push("a");
+  names.push("b");
+  names.push("c");
+  ParseState st = _state_with_declared("if (a || b) && c { }", names);
+  Parser p = parser_new(&st);
+  Node fn_stub = node_new(NodeKind.Blank);
+  p.current_function = &fn_stub;
+  p.has_current_function = true;
+
+  assert p.parse_if_statement().is_none(), "expected 'if (a || b) && c { }' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementIf(ifn) -> {
+      fit ifn.condition.kind {
+        .Expression(e) -> {
+          assert equals(e.op, "&&"), "expected the outer condition op to be '&&'";
+          fit e.right.kind {
+            .Identifier(s) -> { assert equals(s, "c"), "expected the outer right to be 'c'"; }
+            _ -> { panic("expected Identifier 'c'"); }
+          }
+          fit e.left.kind {
+            .ExpressionParenthesis(inner) -> {
+              fit inner.kind {
+                .Expression(ie) -> {
+                  assert equals(ie.op, "||"), "expected the grouped inner op to be '||'";
+                  fit ie.left.kind {
+                    .Identifier(s) -> { assert equals(s, "a"), "expected inner left 'a'"; }
+                    _ -> { panic("expected Identifier 'a'"); }
+                  }
+                  fit ie.right.kind {
+                    .Identifier(s) -> { assert equals(s, "b"), "expected inner right 'b'"; }
+                    _ -> { panic("expected Identifier 'b'"); }
+                  }
+                }
+                _ -> { panic("expected the grouped contents to be an Expression"); }
+              }
+            }
+            _ -> { panic("expected the outer left to stay an ExpressionParenthesis"); }
+          }
+        }
+        _ -> { panic("expected an Expression condition"); }
+      }
+    }
+    _ -> { panic("expected a StatementIf node"); }
+  }
+}
+
+test "parse_elif_statement is a no-op when the next token isn't elif" {
+  ParseState st = _state_from("ret;");
+  Parser p = parser_new(&st);
+  assert p.parse_elif_statement().is_none(), "expected a no-op (not an error) for a non-elif token";
+  assert st.nodes.len == 0, "expected no node to be pushed";
+}
+
+test "parse_elif_statement parses a condition and block body" {
+  Vec<str> names;
+  names.init(0);
+  names.push("a");
+  names.push("b");
+  ParseState st = _state_with_declared("elif a { b; }", names);
+  Parser p = parser_new(&st);
+  Node fn_stub = node_new(NodeKind.Blank);
+  p.current_function = &fn_stub;
+  p.has_current_function = true;
+
+  assert p.parse_elif_statement().is_none(), "expected 'elif a { b; }' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementElseIf(ifn) -> {
+      fit ifn.condition.kind {
+        .Identifier(s) -> { assert equals(s, "a"), "expected condition 'a'"; }
+        _ -> { panic("expected Identifier 'a'"); }
+      }
+    }
+    _ -> { panic("expected a StatementElseIf node"); }
+  }
+}
+
+test "parse_else_statement is a no-op when the next token isn't else" {
+  ParseState st = _state_from("ret;");
+  Parser p = parser_new(&st);
+  assert p.parse_else_statement().is_none(), "expected a no-op (not an error) for a non-else token";
+  assert st.nodes.len == 0, "expected no node to be pushed";
+}
+
+test "parse_else_statement parses a block body" {
+  Vec<str> names;
+  names.init(0);
+  names.push("b");
+  ParseState st = _state_with_declared("else { b; }", names);
+  Parser p = parser_new(&st);
+  Node fn_stub = node_new(NodeKind.Blank);
+  p.current_function = &fn_stub;
+  p.has_current_function = true;
+
+  assert p.parse_else_statement().is_none(), "expected 'else { b; }' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementElse(body) -> {
+      fit body.kind {
+        .Body(bn) -> { assert bn.statements.len == 1, "expected 1 statement in the else body"; }
+        _ -> { panic("expected a Body node"); }
+      }
+    }
+    _ -> { panic("expected a StatementElse node"); }
   }
 }
 

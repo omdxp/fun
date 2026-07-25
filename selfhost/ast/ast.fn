@@ -650,7 +650,10 @@ pub enum NodeKind {
   StatementDefer(Node*),
   StatementIf(IfStmtNode),
   StatementElseIf(IfStmtNode),
-  StatementElse(BodyNode),
+  // The body of an `else` -- a `Node*` (not specifically a `BodyNode`)
+  // since, like if/elif, it can be either a `{ ... }` block or a single
+  // statement (`else ret 0;`).
+  StatementElse(Node*),
   StatementFor(ForKind),
   StatementBreak,
   StatementContinue,

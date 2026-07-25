@@ -16,6 +16,7 @@
 // group INDEX exactly, since that index is what `left_has_priority` compares.
 
 imp std.string;
+imp ..lexer.token;
 
 // Which direction a chain of same-precedence operators groups: `a op b op
 // c` reads as `(a op b) op c` for LeftToRight, `a op (b op c)` for
@@ -163,6 +164,28 @@ pub fun is_left_operanded_unary_operator(str op) bin {
   ret equals(op, "++") || equals(op, "--");
 }
 
+// True if `t` is an `Operator` token that, appearing AFTER a complete
+// primary expression, is a binary/infix operator -- i.e. it would combine
+// the primary with a following operand rather than continue it. Postfix-
+// continuation operators (`.`, `[`, `(`) return false (they extend the
+// primary instead). Used to decide whether a just-parsed condition
+// (`if`/`elif`) needs to keep parsing a following binary operator, e.g.
+// the `&&` in `if (a || b) && c`.
+pub fun is_binary_only_operator(Token t) bin {
+  if t.type != TokenType.Operator {
+    ret false;
+  }
+  str op = "";
+  fit t.data {
+    .Sval(s) -> { op = s; }
+    _ -> { ret false; }
+  }
+  if equals(op, ".") || equals(op, "(") || equals(op, "[") {
+    ret false;
+  }
+  ret true;
+}
+
 test "op_precedence_for ranks multiplication tighter than addition" {
   let mul = op_precedence_for("*");
   let add = op_precedence_for("+");
@@ -229,4 +252,26 @@ test "is_left_operanded_unary_operator only matches ++/--" {
   assert is_left_operanded_unary_operator("++"), "'++' should be left-operanded";
   assert is_left_operanded_unary_operator("--"), "'--' should be left-operanded";
   assert !is_left_operanded_unary_operator("-"), "'-' should not be left-operanded";
+}
+
+test "is_binary_only_operator recognizes infix operators, rejects postfix continuations" {
+  Token and_tok;
+  and_tok.type = TokenType.Operator;
+  and_tok.data = TokenData.Sval("&&");
+  assert is_binary_only_operator(and_tok), "'&&' should be a binary-only operator";
+
+  Token dot_tok;
+  dot_tok.type = TokenType.Operator;
+  dot_tok.data = TokenData.Sval(".");
+  assert !is_binary_only_operator(dot_tok), "'.' should not be binary-only (postfix continuation)";
+
+  Token lparen_tok;
+  lparen_tok.type = TokenType.Operator;
+  lparen_tok.data = TokenData.Sval("(");
+  assert !is_binary_only_operator(lparen_tok), "'(' should not be binary-only (postfix continuation)";
+
+  Token ident_tok;
+  ident_tok.type = TokenType.Identifier;
+  ident_tok.data = TokenData.Sval("x");
+  assert !is_binary_only_operator(ident_tok), "a non-operator token should not be binary-only";
 }
