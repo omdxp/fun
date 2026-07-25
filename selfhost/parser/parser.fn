@@ -927,6 +927,94 @@ impl ParseState {
       ret false;
     }
   }
+
+  // Returns the `token_peek_n` offset of the token right after a
+  // `<...>` generic-argument list starting at `off`, if the token at
+  // `off` is `<`; otherwise returns `off` unchanged (nothing to skip).
+  // Pure lookahead, consumes nothing. Used to look PAST a possibly-
+  // generic type name (`Box<num>`) to see what follows it, e.g. whether
+  // a compound-literal `{` comes next.
+  pub skip_generic_args_tokens(num off) num {
+    let first_opt = self.token_peek_n(off);
+    if first_opt.is_none() || !token_is_operator(first_opt.unwrap(), "<") {
+      ret off;
+    }
+    num cur = off;
+    num depth = 0;
+    for true {
+      let tok_opt = self.token_peek_n(cur);
+      if tok_opt.is_none() {
+        ret cur;
+      }
+      let tok = tok_opt.unwrap();
+      if token_is_operator(tok, "<") {
+        depth = depth + 1;
+        cur = cur + 1;
+        continue;
+      }
+      if token_is_operator(tok, ">") {
+        depth = depth - 1;
+        cur = cur + 1;
+        if depth == 0 {
+          ret cur;
+        }
+        continue;
+      }
+      if token_is_operator(tok, ">>") {
+        depth = depth - 2;
+        cur = cur + 1;
+        if depth <= 0 {
+          ret cur;
+        }
+        continue;
+      }
+      cur = cur + 1;
+    }
+  }
+
+  // True if the identifier at the cursor (position 0) is immediately
+  // followed by `{` -- once any generic-argument list (`<...>`) between
+  // them is skipped over -- the shape of a compound-literal initializer
+  // (`Point{...}`, `Box<num>{...}`).
+  pub looks_like_compound_init() bin {
+    num off = self.skip_generic_args_tokens(1);
+    let next_opt = self.token_peek_n(off);
+    if next_opt.is_none() {
+      ret false;
+    }
+    ret token_is_symbol(next_opt.unwrap(), '{');
+  }
+
+  // True if the identifier at the cursor is a known symbol resolving to
+  // a `Compound` declaration -- one of the conditions gating whether
+  // `Name{...}`/`Name<T>{...}` should be parsed as a compound-literal
+  // initializer rather than left as a plain identifier reference.
+  // 
+  // Deliberately narrower than the original: only checks symbols already
+  // registered in THIS file up to the current parse position (via
+  // `get_symbol`) -- not a compound declared LATER in the same file (the
+  // original's `is_forward_declared_type` pre-scan, deferred along with
+  // `forward_type_names` per this file's own top-level doc comment) nor
+  // one imported from another module (`is_known_imported`, deferred
+  // along with cross-file import resolution -- see `parse_import`'s doc
+  // comment). Covers the common "declare, then use" case; a forward or
+  // cross-file reference falls through to being read as a plain
+  // identifier instead, the same clean-but-incomplete outcome as any
+  // other not-yet-supported shape in this port.
+  pub is_known_compound_symbol(str name) bin {
+    let maybe_sym = self.get_symbol(name);
+    if maybe_sym.is_none() {
+      ret false;
+    }
+    let maybe_node = get_node_symbol(maybe_sym.unwrap());
+    if maybe_node.is_none() {
+      ret false;
+    }
+    fit maybe_node.unwrap().kind {
+      .Compound(c) -> { ret true; }
+      _ -> { ret false; }
+    }
+  }
 }
 
 // The parser's OWN state, layered on top of the shared `ParseState`: a
@@ -978,6 +1066,18 @@ pub compound Parser {
   // so the FIRST token of the bounded operand is never itself mistaken
   // for "stop here".
   bin stop_at_binary_op;
+
+  // True while parsing a value expression that must stop at a TOP-LEVEL
+  // comma rather than treating it as the (very low precedence) comma
+  // operator: a compound-literal field's value (`Point{ x = 1, y = 2 }`
+  // -- without this, `x`'s value expression greedily consumes `1, y = 2`
+  // as one big comma-Expression). Unlike `stop_at_binary_op`, this stops
+  // at a comma unconditionally, not only once a primary already exists --
+  // a bare leading comma is never valid here regardless. Commas nested
+  // inside a further `(...)`/`[...]` are NOT affected (parenthesis/bracket
+  // parsing doesn't propagate this flag into its own inner expressions),
+  // so `x = f(a, b)` still parses its call args fully.
+  bin stop_at_comma;
 }
 
 // Creates a new `Parser` over the given shared parse state.
@@ -993,6 +1093,7 @@ pub fun parser_new(ParseState* state) Parser {
   p.in_fit_condition = false;
   p.in_fit_statement = false;
   p.stop_at_binary_op = false;
+  p.stop_at_comma = false;
   ret p;
 }
 
@@ -1240,6 +1341,101 @@ impl Parser {
     self.make_expression_node(&dot, &call_arg, "()", op_pos);
   }
 
+  // Parses a compound-literal initializer body `{ field = value, ... }`
+  // and pushes a `CompoundInit` node: `Type{...}` when `has_dt` is true
+  // (`dt` already parsed by the caller), or the type-inferred shorthand
+  // `.{...}` when it's false (`dt` is unused). `pos`/`has_pos` is the
+  // node's own position -- the caller's choice (`Type`'s own token for
+  // the named form, the `.` token for the shorthand), falling back to
+  // the `{` token's position when the caller doesn't have one.
+  pub parse_compound_init(DataType* dt, bin has_dt, Pos pos, bin has_pos) Option<ParseErrorKind> {
+    let lbrace_tok = self.state.token_peek_next();
+    let lberr = self.state.expect_sym('{');
+    if lberr.is_some() {
+      ret lberr;
+    }
+
+    Vec<CompoundInitField> fields;
+    fields.init(0);
+
+    for !self.state.next_token_is_symbol('}') {
+      let field_tok = self.state.token_next();
+      if field_tok.is_none() || field_tok.unwrap().type != TokenType.Identifier {
+        self.state.err("expected field name in compound initializer");
+        ret .Some(ParseErrorKind.InvalidIdentifier);
+      }
+      str fname = "";
+      fit field_tok.unwrap().data {
+        .Sval(s) -> { fname = s; }
+        _ -> {}
+      }
+
+      let eqerr = self.state.expect_op("=");
+      if eqerr.is_some() {
+        ret eqerr;
+      }
+
+      // Stop the value expression at a TOP-LEVEL comma so it terminates
+      // at this field's own separator rather than greedily consuming the
+      // next field (`x = 1, y = 2` must not become `x = (1, y = 2)` via
+      // the comma operator). See `Parser.stop_at_comma`'s doc comment.
+      let prev_stop_comma = self.stop_at_comma;
+      self.stop_at_comma = true;
+      let verr = self.parse_expressionable_root();
+      self.stop_at_comma = prev_stop_comma;
+      if verr.is_some() {
+        ret verr;
+      }
+      let maybe_val = self.state.node_pop();
+      if maybe_val.is_none() {
+        self.state.err("expected field value in compound initializer");
+        ret .Some(ParseErrorKind.InvalidExpression);
+      }
+      Node* val = malloc(sizeof(Node));
+      *val = maybe_val.unwrap();
+
+      CompoundInitField f;
+      f.name = fname;
+      f.value = val;
+      fields.push(f);
+
+      if self.state.next_token_is_operator(",") {
+        self.state.token_next();
+        if self.state.next_token_is_symbol('}') {
+          break;
+        }
+        continue;
+      }
+      break;
+    }
+
+    let rberr = self.state.expect_sym('}');
+    if rberr.is_some() {
+      ret rberr;
+    }
+
+    CompoundInitNode ci = compound_init_node_new();
+    ci.init_dtype = dt;
+    ci.has_dtype = has_dt;
+    ci.fields = fields;
+
+    Node node = node_new(NodeKind.CompoundInit(ci));
+    if has_pos {
+      node.pos = pos;
+      node.has_pos = true;
+    } else {
+      fit lbrace_tok {
+        .Some(t) -> {
+          node.pos = t.pos;
+          node.has_pos = true;
+        }
+        .None -> {}
+      }
+    }
+    self.state.nodes.push(node);
+    ret .None;
+  }
+
   // Rewrites `node = (a op1 (b op2 c))` in place to `((a op1 b) op2 c)`: a
   // left tree rotation used by `parse_reorder_expression` to fix precedence
   // when `op1` should bind tighter than (or equal to) `op2`, but the
@@ -1422,9 +1618,13 @@ impl Parser {
   // (more) to parse at this position, signaled by leaving the output list
   // unchanged (see `parse_expressionable`, which loops on exactly that).
   // 
-  // Deliberately simplified from the original for this slice: no
-  // `sizeof(Type)` keyword operand. Each remaining gap is its own
-  // self-contained follow-up slice. (Prefix/postfix unary operators,
+  // `sizeof(Type)` needs no special handling here at all: 'sizeof' isn't
+  // a keyword in this language (confirmed absent from the lexer's
+  // keyword list) -- it's just an ordinary call whose callee happens to
+  // be named 'sizeof', already handled by the plain Identifier path
+  // below (the only wrinkle, letting the type-name argument through the
+  // unknown-identifier check, is handled in `parse_single_token_to_node`
+  // via `is_sizeof_type_operand`). (Prefix/postfix unary operators,
   // enum-variant shorthand, channel receive/send (`<-`), and the `nil`/
   // `panic(...)`/`await` keyword operands ARE supported -- routed
   // through `parse_expression`/`parse_normal_expression` below, or
@@ -1442,10 +1642,48 @@ impl Parser {
         // one (lives in the fit-statement grammar, not ported/touched by
         // this slice), so this uses an if/elif chain instead rather than
         // detouring to fix it now.
-        if t.type == TokenType.Number || t.type == TokenType.Boolean || t.type == TokenType.Identifier || t.type == TokenType.String {
+        if t.type == TokenType.Number || t.type == TokenType.Boolean || t.type == TokenType.String {
+          ret self.parse_single_token_to_node();
+        }
+        if t.type == TokenType.Identifier {
+          // Named compound-literal initializer: `Point{...}`/`Box<num>{...}`.
+          // Gated on the identifier already resolving to a known
+          // `Compound` symbol (see `is_known_compound_symbol`'s own doc
+          // comment for what that narrower-than-the-original check does
+          // and doesn't cover) and NOT being a plain value already in
+          // scope (a local variable named the same as a compound would
+          // otherwise be misread) or immediately following `.` (a
+          // qualified reference like `TokenType.Symbol` is never a
+          // compound-init target).
+          str name = "";
+          fit t.data {
+            .Sval(s) -> { name = s; }
+            _ -> {}
+          }
+          bin after_member_access = false;
+          fit self.state.token_peek_prev_stream_n(0) {
+            .Some(p) -> { after_member_access = token_is_operator(p, "."); }
+            .None -> {}
+          }
+          bin is_value_in_scope = self.state.get_scope_entity(name) != nil;
+          if !after_member_access && !is_value_in_scope && self.state.is_known_compound_symbol(name) && self.state.looks_like_compound_init() {
+            DataType* dt = malloc(sizeof(DataType));
+            *dt = dtype_new();
+            let dterr = self.state.parse_datatype(dt);
+            if dterr.is_some() {
+              ret dterr;
+            }
+            ret self.parse_compound_init(dt, true, t.pos, true);
+          }
           ret self.parse_single_token_to_node();
         }
         if t.type == TokenType.Operator {
+          // A top-level comma stops a bounded value expression (a
+          // compound-literal field's value) rather than being treated as
+          // the comma operator. See `Parser.stop_at_comma`'s doc comment.
+          if self.stop_at_comma && token_is_operator(t, ",") {
+            ret .None;
+          }
           // `->` is only ever the fit-arm delimiter, never a real
           // expression operator -- while inside a fit statement, treat it
           // as "nothing more to parse here" rather than a binary
@@ -1572,7 +1810,19 @@ impl Parser {
 
     Node exp_node = node_new(NodeKind.Blank);
     if !self.state.next_token_is_symbol(')') {
+      // A parenthesized sub-expression is a fresh context: an inner
+      // binary operator or comma is never bounded by an ENCLOSING
+      // `await <call>` operand or compound-init field value -- clear
+      // both flags so e.g. `await (a + b)` and `f(a, b)` (a call
+      // argument list, itself built from real comma-Expression nodes)
+      // parse fully, then restore whatever the caller had.
+      let prev_stop_binary = self.stop_at_binary_op;
+      let prev_stop_comma = self.stop_at_comma;
+      self.stop_at_binary_op = false;
+      self.stop_at_comma = false;
       let err = self.parse_expressionable_root();
+      self.stop_at_binary_op = prev_stop_binary;
+      self.stop_at_comma = prev_stop_comma;
       if err.is_some() {
         ret err;
       }
@@ -1608,6 +1858,76 @@ impl Parser {
           call_e.op = "()";
           Node call_node = node_new(NodeKind.Expression(call_e));
           self.create_node(&call_node);
+        }
+        .None -> {}
+      }
+    }
+
+    ret self.parse_additional_expression();
+  }
+
+  // Parses `[...]`: array INDEXING when a valid expressionable left
+  // operand already exists (`arr[i]` -> `Expression{ left = arr, right =
+  // Bracket(i), op = "[]" }`), or an array LITERAL otherwise (just the
+  // bare `Bracket` node, e.g. `[1, 2, 3]`).
+  pub parse_for_bracket() Option<ParseErrorKind> {
+    Node left_node = node_new(NodeKind.Blank);
+    bin has_left_node = false;
+    fit self.node_peek_expressionable() {
+      .Some(n) -> {
+        left_node = n;
+        has_left_node = true;
+        self.state.node_pop();
+      }
+      .None -> {}
+    }
+
+    let lbracket_tok = self.state.token_peek_next();
+    let lberr = self.state.expect_op("[");
+    if lberr.is_some() {
+      ret lberr;
+    }
+
+    // Inside `[...]`, a comma separates array ELEMENTS -- not the
+    // enclosing context's terminator, and an inner binary operator isn't
+    // bounded by an enclosing `await`/`fork` operand either. Clear both
+    // (e.g. a compound-init field value `Row{ cols = [1, 2, 3] }`) so a
+    // multi-element array literal parses fully instead of stopping at
+    // the first comma.
+    let prev_stop_comma = self.stop_at_comma;
+    let prev_stop_binary = self.stop_at_binary_op;
+    self.stop_at_comma = false;
+    self.stop_at_binary_op = false;
+    let eerr = self.parse_expressionable_root();
+    self.stop_at_comma = prev_stop_comma;
+    self.stop_at_binary_op = prev_stop_binary;
+    if eerr.is_some() {
+      ret eerr;
+    }
+
+    let rberr = self.state.expect_sym(']');
+    if rberr.is_some() {
+      ret rberr;
+    }
+
+    let maybe_inner = self.state.node_pop();
+    if maybe_inner.is_none() {
+      self.state.err("expected an expression inside '[...]'");
+      ret .Some(ParseErrorKind.InvalidExpression);
+    }
+    Node* inner = malloc(sizeof(Node));
+    *inner = maybe_inner.unwrap();
+
+    Node bracket_node = node_new(NodeKind.Bracket(inner));
+    let lb = lbracket_tok.unwrap();
+    bracket_node.pos = lb.pos;
+    bracket_node.has_pos = true;
+    self.create_node(&bracket_node);
+
+    if has_left_node {
+      fit self.state.node_pop() {
+        .Some(popped_bracket) -> {
+          self.make_expression_node(&left_node, &popped_bracket, "[]", lb.pos);
         }
         .None -> {}
       }
@@ -1729,7 +2049,7 @@ impl Parser {
 
   // Wraps an already-parsed LEFT operand in a postfix `Unary` node
   // (`x++`/`x--`) instead of treating the operator as a binary continuation.
-  pub parse_for_left_operanded_unary(Node* node_left, str unary_op, Pos op_pos) {
+  pub parse_for_left_operanded_unary(Node* node_left, str unary_op, Pos op_pos) Option<ParseErrorKind> {
     UnaryNode u;
     u.is_left_operanded_unary = true;
     u.op = unary_op;
@@ -1741,24 +2061,42 @@ impl Parser {
     unode.pos = op_pos;
     unode.has_pos = true;
     self.create_node(&unode);
+
+    // `node_left` was already popped by the caller before dispatching
+    // here, so this call's own net effect on the node stack is "pop one,
+    // push one" -- zero net growth. Without explicitly continuing via
+    // `parse_additional_expression`, the OUTER `parse_expressionable`
+    // loop (which gates continued looping on net stack growth) would
+    // wrongly conclude nothing happened and stop, silently dropping a
+    // following operator (`x++ + 1` would never see the `+ 1`). Mirrors
+    // the identical fix already needed by `parse_for_parenthesis`/
+    // `parse_for_bracket` for the same reason.
+    ret self.parse_additional_expression();
   }
 
-  // Dispatches on the next token to the right expression-shape parser: `(`
-  // starts a parenthesized group/call, anything else is a binary-operator
-  // continuation via `parse_normal_expression`.
-  // 
-  // Deliberately simplified from the original for this slice: no `,`
-  // (comma-expression) or `[` (bracket/array-literal) dispatch yet.
+  // Dispatches on the next token to the right expression-shape parser:
+  // `(` starts a parenthesized group/call, `[` starts an array literal
+  // or indexing (`parse_for_bracket`), anything else -- including `,`,
+  // which is just an ordinary (very low precedence) binary operator via
+  // this same general machinery, rather than a dedicated comma-expression
+  // parser -- is a binary-operator continuation via `parse_normal_expression`.
   pub parse_expression() Option<ParseErrorKind> {
     fit self.state.token_peek_next() {
       .Some(t) -> {
         bin is_lparen = false;
+        bin is_lbracket = false;
         fit t.data {
-          .Sval(s) -> { is_lparen = equals(s, "("); }
+          .Sval(s) -> {
+            is_lparen = equals(s, "(");
+            is_lbracket = equals(s, "[");
+          }
           _ -> {}
         }
         if is_lparen {
           ret self.parse_for_parenthesis();
+        }
+        if is_lbracket {
+          ret self.parse_for_bracket();
         }
         ret self.parse_normal_expression();
       }
@@ -1773,11 +2111,9 @@ impl Parser {
   // output list into an `Expression` node via `make_expression_node`, then
   // fixes precedence via `parse_reorder_expression`.
   // 
-  // Deliberately simplified from the original for this slice: no channel
-  // `<-` prefix form, and no `.{...}` compound-init shorthand yet (needs
-  // `parse_compound_init`, not ported). A binary RHS must be a
-  // parenthesized group or another `parse_expressionable` continuation (no
-  // unary RHS, e.g. `a + -b` isn't supported yet).
+  // Deliberately simplified from the original for this slice: a binary
+  // RHS must be a parenthesized group or another `parse_expressionable`
+  // continuation (no unary RHS, e.g. `a + -b` isn't supported yet).
   pub parse_normal_expression() Option<ParseErrorKind> {
     let tok = self.state.token_peek_next();
     if tok.is_none() {
@@ -1794,6 +2130,20 @@ impl Parser {
 
     let maybe_left = self.node_peek_expressionable();
     if maybe_left.is_none() {
+      // Type-inferred compound-literal shorthand: `.{ field = value, ... }`
+      // (the type is inferred from context, e.g. the declared type of a
+      // `let`/assignment/return position -- not resolved by the parser).
+      bin next_is_lbrace = false;
+      fit self.state.token_peek_n(1) {
+        .Some(nt) -> { next_is_lbrace = token_is_symbol(nt, '{'); }
+        .None -> {}
+      }
+      if equals(op, ".") && next_is_lbrace {
+        self.state.token_next(); // consume '.'
+        DataType* no_dt = malloc(sizeof(DataType));
+        *no_dt = dtype_new();
+        ret self.parse_compound_init(no_dt, false, op_pos, true);
+      }
       // Enum-variant shorthand (`.Variant`, `.Variant(payload)`): parsed as
       // a `.` dot-expression with a BLANK left side, so later passes can
       // resolve it using the expected enum type from context. A following
@@ -1879,8 +2229,7 @@ impl Parser {
     if is_left_operanded_unary_operator(op) {
       Node* left_ptr = malloc(sizeof(Node));
       *left_ptr = node_left;
-      self.parse_for_left_operanded_unary(left_ptr, op, op_pos);
-      ret .None;
+      ret self.parse_for_left_operanded_unary(left_ptr, op, op_pos);
     }
 
     let tok2 = self.state.token_peek_next();
@@ -1893,10 +2242,12 @@ impl Parser {
     let t2 = tok2.unwrap();
     if t2.type == TokenType.Operator {
       bin is_lparen = false;
+      bin is_lbracket = false;
       bin is_dot_or_recv = false;
       fit t2.data {
         .Sval(s2) -> {
           is_lparen = equals(s2, "(");
+          is_lbracket = equals(s2, "[");
           is_dot_or_recv = equals(s2, ".") || equals(s2, "<-");
         }
         _ -> {}
@@ -1905,6 +2256,15 @@ impl Parser {
         let perr = self.parse_for_parenthesis();
         if perr.is_some() {
           ret perr;
+        }
+      } elif is_lbracket {
+        // An array literal as a binary RHS (`sum + [1, 2, 3]`): no left
+        // operand exists on the stack here (already popped into
+        // `node_left` above), so `parse_for_bracket` reads this as a
+        // literal, not an index.
+        let berr = self.parse_for_bracket();
+        if berr.is_some() {
+          ret berr;
         }
       } elif is_dot_or_recv {
         // Allow enum-variant shorthand (`.Variant`) and a prefix channel
@@ -6122,6 +6482,177 @@ test "parse_expressionable_root parses a one-arg call" {
   }
 }
 
+test "parse_expressionable_root parses 'sizeof(Type)' as an ordinary call" {
+  // 'sizeof' isn't a keyword in this language at all (confirmed: absent
+  // from lexdefs.fn's keyword list) -- 'sizeof(Point)' is just an
+  // ordinary call whose callee happens to be named 'sizeof'. The only
+  // thing that needs special handling is letting 'Point' (an
+  // undeclared, forward-referenced, or purely-a-type name) through the
+  // unknown-identifier check as the call argument -- already ported via
+  // `is_sizeof_type_operand` in `parse_single_token_to_node`.
+  ParseState st = _state_from("sizeof(Point)");
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected 'sizeof(Point)' to parse even though 'Point' is never declared";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Expression(e) -> {
+      assert equals(e.op, "()"), "expected op '()'";
+      fit e.left.kind {
+        .Identifier(s) -> { assert equals(s, "sizeof"), "expected callee 'sizeof'"; }
+        _ -> { panic("expected Identifier 'sizeof'"); }
+      }
+    }
+    _ -> { panic("expected an Expression node"); }
+  }
+}
+
+test "parse_expressionable_root parses array indexing" {
+  Vec<str> names;
+  names.init(0);
+  names.push("arr");
+  names.push("i");
+  ParseState st = _state_with_declared("arr[i]", names);
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected 'arr[i]' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Expression(e) -> {
+      assert equals(e.op, "[]"), "expected op '[]'";
+      fit e.left.kind {
+        .Identifier(s) -> { assert equals(s, "arr"), "expected receiver 'arr'"; }
+        _ -> { panic("expected Identifier 'arr'"); }
+      }
+      fit e.right.kind {
+        .Bracket(inner) -> {
+          fit inner.kind {
+            .Identifier(s) -> { assert equals(s, "i"), "expected index 'i'"; }
+            _ -> { panic("expected Identifier 'i' inside the bracket"); }
+          }
+        }
+        _ -> { panic("expected a Bracket node"); }
+      }
+    }
+    _ -> { panic("expected an Expression node"); }
+  }
+}
+
+test "parse_expressionable_root parses an array literal (no left operand)" {
+  ParseState st = _state_from("[1, 2, 3]");
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected '[1, 2, 3]' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Bracket(inner) -> {
+      // Only the FIRST element is asserted on the shape (the comma chain
+      // is a real Expression tree, same as call args); mainly confirming
+      // this parses at all as a bare Bracket, not misread as indexing.
+      fit inner.kind {
+        .Expression(e) -> { assert equals(e.op, ","), "expected the elements joined by ','"; }
+        _ -> { panic("expected a comma-Expression for multiple elements"); }
+      }
+    }
+    _ -> { panic("expected a Bracket node"); }
+  }
+}
+
+test "parse_expressionable_root parses chained indexing after a call" {
+  Vec<str> names;
+  names.init(0);
+  names.push("get_arr");
+  ParseState st = _state_with_declared("get_arr()[0]", names);
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected 'get_arr()[0]' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Expression(e) -> {
+      assert equals(e.op, "[]"), "expected the outer op to be '[]'";
+      fit e.left.kind {
+        .Expression(call) -> {
+          assert equals(call.op, "()"), "expected the receiver to be a call";
+        }
+        _ -> { panic("expected an Expression call as the receiver"); }
+      }
+    }
+    _ -> { panic("expected an Expression node"); }
+  }
+}
+
+test "parse_expressionable_root parses an indexed array element as an assignment target" {
+  Vec<str> names;
+  names.init(0);
+  names.push("arr");
+  names.push("i");
+  names.push("v");
+  ParseState st = _state_with_declared("arr[i] = v", names);
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected 'arr[i] = v' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Expression(e) -> {
+      assert equals(e.op, "="), "expected the outer op to be '='";
+      fit e.left.kind {
+        .Expression(idx) -> {
+          assert equals(idx.op, "[]"), "expected the assignment target to be 'arr[i]'";
+        }
+        _ -> { panic("expected an Expression '[]' as the assignment target"); }
+      }
+    }
+    _ -> { panic("expected an Expression node"); }
+  }
+}
+
+test "parse_expressionable_root parses a named compound-literal initializer" {
+  ParseState st = _state_from("compound Point { num x; num y; } Point{ x = 1, y = 2 }");
+  Parser p = parser_new(&st);
+  assert p.parse_top_level_declaration().is_none(), "expected the compound declaration to parse";
+  assert p.parse_expressionable_root().is_none(), "expected 'Point{ x = 1, y = 2 }' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .CompoundInit(ci) -> {
+      assert ci.has_dtype, "expected an explicit dtype";
+      assert equals(ci.init_dtype.type_str, "Point"), "expected dtype 'Point'";
+      assert ci.fields.len == 2, "expected 2 fields";
+      let f0 = ci.fields.get(0);
+      assert equals(f0.name, "x"), "expected field 'x'";
+      fit f0.value.kind {
+        .Number(_) -> {}
+        _ -> { panic("expected a Number value for field 'x'"); }
+      }
+      let f1 = ci.fields.get(1);
+      assert equals(f1.name, "y"), "expected field 'y'";
+    }
+    _ -> { panic("expected a CompoundInit node"); }
+  }
+}
+
+test "parse_expressionable_root parses the type-inferred compound-literal shorthand '.{...}'" {
+  ParseState st = _state_from(".{ x = 1, y = 2 }");
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected '.{ x = 1, y = 2 }' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .CompoundInit(ci) -> {
+      assert !ci.has_dtype, "expected no explicit dtype for the '.{...}' shorthand";
+      assert ci.fields.len == 2, "expected 2 fields";
+    }
+    _ -> { panic("expected a CompoundInit node"); }
+  }
+}
+
+test "parse_expressionable_root leaves a plain compound-type identifier alone with no following '{'" {
+  ParseState st = _state_from("compound Point { num x; } Point");
+  Parser p = parser_new(&st);
+  assert p.parse_top_level_declaration().is_none(), "expected the compound declaration to parse";
+  assert p.parse_expressionable_root().is_none(), "expected a bare 'Point' reference (no '{') to parse as a plain identifier";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Identifier(s) -> {
+      assert equals(s, "Point"), "expected a plain Identifier 'Point', not a CompoundInit";
+    }
+    _ -> { panic("expected an Identifier node"); }
+  }
+}
+
 test "parse_expressionable_root reports an error with no operand at all" {
   ParseState st = _state_from(";");
   st.emit_stderr = false;
@@ -6192,6 +6723,35 @@ test "parse_expressionable_root parses a postfix unary expression" {
       }
     }
     _ -> { panic("expected a Unary node"); }
+  }
+}
+
+test "parse_expressionable_root parses a postfix unary followed by a binary continuation" {
+  // `parse_for_left_operanded_unary` pops its operand off the node stack
+  // before pushing the finished Unary node -- net zero growth from the
+  // outer parse_expressionable loop's point of view. Without explicitly
+  // continuing via parse_additional_expression at the end of that
+  // function, `a++ + 1` would silently drop the `+ 1` (confirmed: this
+  // was a real bug, caught by exactly this test, fixed alongside the
+  // identical issue in the newly-added parse_for_bracket).
+  Vec<str> names;
+  names.init(0);
+  names.push("a");
+  ParseState st = _state_with_declared("a++ + 1", names);
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected 'a++ + 1' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Expression(e) -> {
+      assert equals(e.op, "+"), "expected the outer op to be '+'";
+      fit e.left.kind {
+        .Unary(u) -> {
+          assert equals(u.op, "++"), "expected the left side to be the postfix '++' unary";
+        }
+        _ -> { panic("expected a Unary node on the left"); }
+      }
+    }
+    _ -> { panic("expected an Expression node -- the '+ 1' must not be silently dropped"); }
   }
 }
 
