@@ -1145,12 +1145,12 @@ impl Parser {
   // (more) to parse at this position, signaled by leaving the output list
   // unchanged (see `parse_expressionable`, which loops on exactly that).
   // 
-  // Deliberately simplified from the original for this slice: no unary
-  // operators (`-x`, `!x`, `*p`, `&x`, `++x`), no channel operators (`<-`),
-  // no enum-variant-shorthand dot-expressions (`.Variant`), no keyword
-  // operands (`nil`, `panic(...)`, `await`, `sizeof`). Each is a
-  // self-contained follow-up slice once this core binary-expression loop
-  // is solid.
+  // Deliberately simplified from the original for this slice: no channel
+  // operators (`<-`), no keyword operands (`nil`, `panic(...)`, `await`,
+  // `sizeof`). Each is a self-contained follow-up slice once this core
+  // binary-expression loop is solid. (Prefix/postfix unary operators and
+  // enum-variant shorthand, `.Variant`/`.Variant(payload)`, ARE supported --
+  // routed through `parse_expression`/`parse_normal_expression` below.)
   pub parse_expressionable_single() Option<ParseErrorKind> {
     fit self.state.token_peek_next() {
       .Some(t) -> {
@@ -1452,8 +1452,8 @@ impl Parser {
   // fixes precedence via `parse_reorder_expression`.
   // 
   // Deliberately simplified from the original for this slice: no channel
-  // `<-` or enum-variant-shorthand `.Variant` prefix forms yet (each needs
-  // infrastructure this slice doesn't have), and a binary RHS must be a
+  // `<-` prefix form, and no `.{...}` compound-init shorthand yet (needs
+  // `parse_compound_init`, not ported). A binary RHS must be a
   // parenthesized group or another `parse_expressionable` continuation (no
   // unary RHS, e.g. `a + -b` isn't supported yet).
   pub parse_normal_expression() Option<ParseErrorKind> {
@@ -1472,6 +1472,48 @@ impl Parser {
 
     let maybe_left = self.node_peek_expressionable();
     if maybe_left.is_none() {
+      // Enum-variant shorthand (`.Variant`, `.Variant(payload)`): parsed as
+      // a `.` dot-expression with a BLANK left side, so later passes can
+      // resolve it using the expected enum type from context. A following
+      // `(...)` (a payload) is picked up afterward by the general postfix
+      // continuation, same as any other primary.
+      if equals(op, ".") {
+        self.state.token_next(); // consume '.'
+        let idtok = self.state.token_next();
+        if idtok.is_none() || idtok.unwrap().type != TokenType.Identifier {
+          self.state.err("expected identifier after '.'");
+          ret .Some(ParseErrorKind.InvalidIdentifier);
+        }
+        let idt = idtok.unwrap();
+        str variant_name = "";
+        fit idt.data {
+          .Sval(s) -> { variant_name = s; }
+          _ -> {}
+        }
+        Node right = node_new(NodeKind.Identifier(variant_name));
+        right.pos = idt.pos;
+        right.has_pos = true;
+        right.flags.inside_expression = true;
+
+        Node left = node_new(NodeKind.Blank);
+        left.pos = op_pos;
+        left.has_pos = true;
+        left.flags.inside_expression = true;
+
+        self.make_expression_node(&left, &right, ".", op_pos);
+        fit self.state.node_pop() {
+          .Some(built) -> {
+            Node shorthand = built;
+            self.parse_reorder_expression(&shorthand);
+            self.state.nodes.push(shorthand);
+          }
+          .None -> {
+            self.state.err("expected expression node");
+            ret .Some(ParseErrorKind.InvalidExpression);
+          }
+        }
+        ret self.parse_additional_expression();
+      }
       if is_unary_operator(op) {
         ret self.parse_for_unary();
       }
@@ -3441,6 +3483,66 @@ test "parse_expressionable_root parses a unary operand followed by a binary cont
       }
     }
     _ -> { panic("expected a Unary node"); }
+  }
+}
+
+test "parse_expressionable_root parses a bare enum-variant shorthand" {
+  ParseState st = _state_from(".None");
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected '.None' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Expression(e) -> {
+      assert equals(e.op, "."), "expected op '.'";
+      fit e.left.kind {
+        .Blank -> {}
+        _ -> { panic("expected a Blank left side (no explicit enum name)"); }
+      }
+      fit e.right.kind {
+        .Identifier(s) -> { assert equals(s, "None"), "expected variant name 'None'"; }
+        _ -> { panic("expected Identifier 'None'"); }
+      }
+    }
+    _ -> { panic("expected an Expression node"); }
+  }
+}
+
+test "parse_expressionable_root parses an enum-variant shorthand with a payload" {
+  Vec<str> names;
+  names.init(0);
+  names.push("x");
+  ParseState st = _state_with_declared(".Some(x)", names);
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected '.Some(x)' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Expression(call) -> {
+      assert equals(call.op, "()"), "expected op '()'";
+      fit call.left.kind {
+        .Expression(dot) -> {
+          assert equals(dot.op, "."), "expected the callee to be a '.' shorthand expression";
+          fit dot.left.kind {
+            .Blank -> {}
+            _ -> { panic("expected a Blank left side (no explicit enum name)"); }
+          }
+          fit dot.right.kind {
+            .Identifier(s) -> { assert equals(s, "Some"), "expected variant name 'Some'"; }
+            _ -> { panic("expected Identifier 'Some'"); }
+          }
+        }
+        _ -> { panic("expected the callee to be an Expression"); }
+      }
+      fit call.right.kind {
+        .ExpressionParenthesis(inner) -> {
+          fit inner.kind {
+            .Identifier(s) -> { assert equals(s, "x"), "expected the payload arg to be 'x'"; }
+            _ -> { panic("expected the payload arg to be Identifier 'x'"); }
+          }
+        }
+        _ -> { panic("expected an ExpressionParenthesis for the payload"); }
+      }
+    }
+    _ -> { panic("expected an Expression node"); }
   }
 }
 
