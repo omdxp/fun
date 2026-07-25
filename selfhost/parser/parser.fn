@@ -37,6 +37,7 @@
 
 imp parse_state;
 imp datatype_defs;
+imp expressionable_defs;
 imp ..ast.ast;
 imp ..lexer.token;
 imp ..lexer.lexer;
@@ -873,6 +874,190 @@ impl Parser {
     ret .None;
   }
 
+  // Builds a binary `Expression` node (`left_node op right_node`) and
+  // pushes it via `create_node`. Copies both operands onto the heap so the
+  // new node owns stable pointers to them, matching every other
+  // node-construction site in this file.
+  // 
+  // Simplified from the original: takes a required `op_pos` rather than
+  // the original's three-way `op_pos orelse left.pos orelse right.pos`
+  // fallback, since nothing ported so far ever calls this without a real
+  // operator token position. Revisit if a future caller needs the fallback.
+  pub make_expression_node(Node* left_node, Node* right_node, str op, Pos op_pos) {
+    Node* left = malloc(sizeof(Node));
+    *left = *left_node;
+    Node* right = malloc(sizeof(Node));
+    *right = *right_node;
+
+    ExprNode e;
+    e.left = left;
+    e.has_left = true;
+    e.right = right;
+    e.has_right = true;
+    e.op = op;
+
+    Node node = node_new(NodeKind.Expression(e));
+    node.pos = op_pos;
+    node.has_pos = true;
+    self.create_node(&node);
+  }
+
+  // Rewrites `node = (a op1 (b op2 c))` in place to `((a op1 b) op2 c)`: a
+  // left tree rotation used by `parse_reorder_expression` to fix precedence
+  // when `op1` should bind tighter than (or equal to) `op2`, but the
+  // parser's naive left-to-right build produced the right-heavy shape
+  // instead. A no-op when the right child isn't itself an `Expression`
+  // (nothing to rotate) or either side is missing.
+  // 
+  // Structurally identical to `parse_node_move_right_left_to_left` below --
+  // the original has the two as separate functions (one additionally frees
+  // the detached old right-node shell, which this port doesn't need since
+  // nothing here manually frees memory; see the file-level note), called
+  // from `parse_reorder_expression`'s two different trigger conditions.
+  // Kept as two functions to mirror the original's structure/call sites.
+  pub parse_node_shift_children_left(Node* node) {
+    fit node.kind {
+      .Expression(exp) -> {
+        if !exp.has_right || !exp.has_left {
+          ret;
+        }
+        fit exp.right.kind {
+          .Expression(right_exp) -> {
+            if !right_exp.has_left || !right_exp.has_right {
+              ret;
+            }
+            ExprNode new_left_e;
+            new_left_e.left = exp.left;
+            new_left_e.has_left = true;
+            new_left_e.right = right_exp.left;
+            new_left_e.has_right = true;
+            new_left_e.op = exp.op;
+
+            Node* new_left = malloc(sizeof(Node));
+            *new_left = node_new(NodeKind.Expression(new_left_e));
+            new_left.pos = node.pos;
+            new_left.has_pos = true;
+
+            exp.left = new_left;
+            exp.right = right_exp.right;
+            exp.op = right_exp.op;
+            node.kind = NodeKind.Expression(exp);
+          }
+          _ -> {}
+        }
+      }
+      _ -> {}
+    }
+  }
+
+  // The same `(a op1 (b op2 c))` -> `((a op1 b) op2 c)` rotation as
+  // `parse_node_shift_children_left`, used by `parse_reorder_expression`'s
+  // OTHER trigger condition (an array-index/call/index left operand paired
+  // with an assignment/comma right operand). See that function's doc
+  // comment for why this is a separate function despite the identical body.
+  pub parse_node_move_right_left_to_left(Node* node) {
+    fit node.kind {
+      .Expression(exp) -> {
+        if !exp.has_right || !exp.has_left {
+          ret;
+        }
+        fit exp.right.kind {
+          .Expression(right_exp) -> {
+            if !right_exp.has_left || !right_exp.has_right {
+              ret;
+            }
+            ExprNode completed_e;
+            completed_e.left = exp.left;
+            completed_e.has_left = true;
+            completed_e.right = right_exp.left;
+            completed_e.has_right = true;
+            completed_e.op = exp.op;
+
+            Node* completed = malloc(sizeof(Node));
+            *completed = node_new(NodeKind.Expression(completed_e));
+            completed.pos = node.pos;
+            completed.has_pos = true;
+
+            exp.left = completed;
+            exp.right = right_exp.right;
+            exp.op = right_exp.op;
+            node.kind = NodeKind.Expression(exp);
+          }
+          _ -> {}
+        }
+      }
+      _ -> {}
+    }
+  }
+
+  // Recursively reorders `node` (and its descendants) for correct operator
+  // precedence, after the naive left-to-right expression build. Two
+  // independent fixups:
+  // 
+  // 1. If the right child is itself an `Expression` and the OUTER operator
+  // has priority over the right child's operator (binds tighter, or equal
+  // with left-to-right associativity), rotate left via
+  // `parse_node_shift_children_left` and recurse into both new children --
+  // a single rotation may not be enough for a longer chain (`a + b * c * d`
+  // needs two).
+  // 2. Independently (not exclusive with the above): if the left operand
+  // looks like an array index paired with an assignment on the right
+  // (`arr[i] = v` shaped oddly by the naive build), or a call/index operand
+  // paired with a comma-expression on the right (multi-arg call/index
+  // arguments), apply `parse_node_move_right_left_to_left` to fix that
+  // specific shape.
+  pub parse_reorder_expression(Node* node) {
+    fit node.kind {
+      .Expression(exp) -> {
+        if !exp.has_left || !exp.has_right {
+          ret;
+        }
+
+        bin left_is_expr = _is_expression_kind(exp.left);
+        bin right_is_expr = _is_expression_kind(exp.right);
+        if !left_is_expr && !right_is_expr {
+          ret;
+        }
+
+        if right_is_expr {
+          fit exp.right.kind {
+            .Expression(right_exp) -> {
+              if left_has_priority(exp.op, right_exp.op) {
+                self.parse_node_shift_children_left(node);
+                fit node.kind {
+                  .Expression(rotated) -> {
+                    self.parse_reorder_expression(rotated.left);
+                    self.parse_reorder_expression(rotated.right);
+                  }
+                  _ -> {}
+                }
+              }
+            }
+            _ -> {}
+          }
+        }
+
+        // Re-read node.kind: the rotation above (if it ran) mutated it.
+        fit node.kind {
+          .Expression(exp2) -> {
+            bin left_is_array = node_is_array(*exp2.left);
+            bin right_is_assign = node_is_assignment(*exp2.right);
+            bin left_is_call_or_index = node_is_expression(*exp2.left, "()") || node_is_expression(
+              *exp2.left,
+              "[]"
+            );
+            bin right_is_comma = node_is_expression(*exp2.right, ",");
+            if (left_is_array && right_is_assign) || (left_is_call_or_index && right_is_comma) {
+              self.parse_node_move_right_left_to_left(node);
+            }
+          }
+          _ -> {}
+        }
+      }
+      _ -> {}
+    }
+  }
+
   // Builds a new scope entity for `node`, deriving its lookup name from the
   // node's kind (identifiers/functions/variables are nameable; anything
   // else gets an empty name and is never found by `get_scope_entity`).
@@ -1288,6 +1473,281 @@ test "parse_single_token_to_node reports an error for an unknown plain identifie
   }
 }
 
+test "make_expression_node builds a binary Expression node from two operands" {
+  ParseState st = _state_from("");
+  Parser p = parser_new(&st);
+  Node a = node_new(NodeKind.Identifier("a"));
+  Node b = node_new(NodeKind.Identifier("b"));
+  Pos p0;
+  p0.line = 1;
+  p.make_expression_node(&a, &b, "+", p0);
+
+  assert st.nodes.len == 1, "expected exactly 1 pushed node";
+  let n = st.nodes.get(0);
+  fit n.kind {
+    .Expression(e) -> {
+      assert equals(e.op, "+"), "expected op '+'";
+      assert e.has_left && e.has_right, "expected both operands set";
+      fit e.left.kind {
+        .Identifier(s) -> { assert equals(s, "a"), "expected left 'a'"; }
+        _ -> { panic("expected Identifier 'a'"); }
+      }
+      fit e.right.kind {
+        .Identifier(s) -> { assert equals(s, "b"), "expected right 'b'"; }
+        _ -> { panic("expected Identifier 'b'"); }
+      }
+    }
+    _ -> { panic("expected an Expression node"); }
+  }
+}
+
+test "parse_reorder_expression rotates a right-heavy naive parse when the outer operator binds tighter" {
+  // Simulates the naive left-to-right parse of `a * b + c`, which (since
+  // the RHS parse is greedy and swallows the rest of the expression
+  // regardless of precedence) builds the right-heavy `(a * (b + c))`
+  // instead of the precedence-correct `((a * b) + c)`.
+  Node a = node_new(NodeKind.Identifier("a"));
+  Node b = node_new(NodeKind.Identifier("b"));
+  Node c = node_new(NodeKind.Identifier("c"));
+
+  ExprNode inner_e;
+  inner_e.left = &b;
+  inner_e.has_left = true;
+  inner_e.right = &c;
+  inner_e.has_right = true;
+  inner_e.op = "+";
+  Node inner = node_new(NodeKind.Expression(inner_e));
+
+  ExprNode outer_e;
+  outer_e.left = &a;
+  outer_e.has_left = true;
+  outer_e.right = &inner;
+  outer_e.has_right = true;
+  outer_e.op = "*";
+  Node outer = node_new(NodeKind.Expression(outer_e));
+
+  ParseState st = _state_from("");
+  Parser p = parser_new(&st);
+  p.parse_reorder_expression(&outer);
+
+  // Expect ((a * b) + c).
+  fit outer.kind {
+    .Expression(e) -> {
+      assert equals(e.op, "+"), "expected the outer op to become '+' after rotation";
+      fit e.left.kind {
+        .Expression(le) -> {
+          assert equals(le.op, "*"), "expected the new left child's op to stay '*'";
+          fit le.left.kind {
+            .Identifier(s) -> { assert equals(s, "a"), "expected left-left 'a'"; }
+            _ -> { panic("expected Identifier 'a'"); }
+          }
+          fit le.right.kind {
+            .Identifier(s) -> { assert equals(s, "b"), "expected left-right 'b'"; }
+            _ -> { panic("expected Identifier 'b'"); }
+          }
+        }
+        _ -> { panic("expected the new left child to be an Expression"); }
+      }
+      fit e.right.kind {
+        .Identifier(s) -> { assert equals(s, "c"), "expected the outer right to stay 'c'"; }
+        _ -> { panic("expected Identifier 'c'"); }
+      }
+    }
+    _ -> { panic("expected an Expression node"); }
+  }
+}
+
+test "parse_reorder_expression leaves an already-correct right-heavy shape untouched" {
+  // Simulates the naive parse of `a + b * c`: `(a + (b * c))`, which is
+  // ALREADY the precedence-correct shape ('*' binds tighter than '+'), so
+  // no rotation should happen.
+  Node a = node_new(NodeKind.Identifier("a"));
+  Node b = node_new(NodeKind.Identifier("b"));
+  Node c = node_new(NodeKind.Identifier("c"));
+
+  ExprNode inner_e;
+  inner_e.left = &b;
+  inner_e.has_left = true;
+  inner_e.right = &c;
+  inner_e.has_right = true;
+  inner_e.op = "*";
+  Node inner = node_new(NodeKind.Expression(inner_e));
+
+  ExprNode outer_e;
+  outer_e.left = &a;
+  outer_e.has_left = true;
+  outer_e.right = &inner;
+  outer_e.has_right = true;
+  outer_e.op = "+";
+  Node outer = node_new(NodeKind.Expression(outer_e));
+
+  ParseState st = _state_from("");
+  Parser p = parser_new(&st);
+  p.parse_reorder_expression(&outer);
+
+  fit outer.kind {
+    .Expression(e) -> {
+      assert equals(e.op, "+"), "expected the outer op to stay '+'";
+      fit e.right.kind {
+        .Expression(re) -> {
+          assert equals(re.op, "*"), "expected the right child to stay '(b * c)'";
+        }
+        _ -> { panic("expected the right child to remain an Expression"); }
+      }
+    }
+    _ -> { panic("expected an Expression node"); }
+  }
+}
+
+test "parse_reorder_expression rotates a chain needing two rotations" {
+  // Mirrors how the real parser actually builds `a * b * c * d`: the RHS of
+  // each operator is parsed (and reordered) FIRST, recursively, so by the
+  // time an outer node is built its right child is already a fully
+  // reordered sub-expression -- `parse_reorder_expression` is called
+  // incrementally, bottom-up, once per level, never on a raw multi-level
+  // right-recursive chain built in one shot. (An earlier version of this
+  // test built the whole `(a * (b * (c * d)))` chain upfront and called
+  // `parse_reorder_expression` on it exactly once, which under-rotates --
+  // that single-shot shape can't actually arise from the real incremental
+  // algorithm, so it isn't a real bug, just an unrealistic test input.)
+  Node a = node_new(NodeKind.Identifier("a"));
+  Node b = node_new(NodeKind.Identifier("b"));
+  Node c = node_new(NodeKind.Identifier("c"));
+  Node d = node_new(NodeKind.Identifier("d"));
+
+  ParseState st = _state_from("");
+  Parser p = parser_new(&st);
+
+  // Innermost first: (c * d).
+  ExprNode e_cd;
+  e_cd.left = &c;
+  e_cd.has_left = true;
+  e_cd.right = &d;
+  e_cd.has_right = true;
+  e_cd.op = "*";
+  Node cd = node_new(NodeKind.Expression(e_cd));
+  p.parse_reorder_expression(&cd);
+
+  // Then (b * (c * d)) -> rotates to ((b * c) * d).
+  ExprNode e_bcd;
+  e_bcd.left = &b;
+  e_bcd.has_left = true;
+  e_bcd.right = &cd;
+  e_bcd.has_right = true;
+  e_bcd.op = "*";
+  Node bcd = node_new(NodeKind.Expression(e_bcd));
+  p.parse_reorder_expression(&bcd);
+
+  // Then (a * ((b * c) * d)) -> rotates to (((a * b) * c) * d).
+  ExprNode e_top;
+  e_top.left = &a;
+  e_top.has_left = true;
+  e_top.right = &bcd;
+  e_top.has_right = true;
+  e_top.op = "*";
+  Node n1 = node_new(NodeKind.Expression(e_top));
+  p.parse_reorder_expression(&n1);
+
+  // Expect (((a * b) * c) * d): top op '*', right = d, left = ((a*b)*c).
+  fit n1.kind {
+    .Expression(top) -> {
+      fit top.right.kind {
+        .Identifier(s) -> { assert equals(s, "d"), "expected the outermost right to be 'd'"; }
+        _ -> { panic("expected Identifier 'd'"); }
+      }
+      fit top.left.kind {
+        .Expression(mid) -> {
+          fit mid.right.kind {
+            .Identifier(s) -> { assert equals(s, "c"), "expected the middle right to be 'c'"; }
+            _ -> { panic("expected Identifier 'c'"); }
+          }
+          fit mid.left.kind {
+            .Expression(inner) -> {
+              fit inner.left.kind {
+                .Identifier(s) -> {
+                  assert equals(s, "a"), "expected the innermost left to be 'a'";
+                }
+                _ -> { panic("expected Identifier 'a'"); }
+              }
+              fit inner.right.kind {
+                .Identifier(s) -> {
+                  assert equals(s, "b"), "expected the innermost right to be 'b'";
+                }
+                _ -> { panic("expected Identifier 'b'"); }
+              }
+            }
+            _ -> { panic("expected the innermost left to be an Expression"); }
+          }
+        }
+        _ -> { panic("expected the middle left to be an Expression"); }
+      }
+    }
+    _ -> { panic("expected an Expression node"); }
+  }
+}
+
+test "parse_node_move_right_left_to_left rotates a call/comma-shaped pair" {
+  Node callee = node_new(NodeKind.Identifier("foo"));
+  Node blank = node_new(NodeKind.Blank);
+  ExprNode call_e;
+  call_e.left = &callee;
+  call_e.has_left = true;
+  call_e.right = &blank;
+  call_e.has_right = true;
+  call_e.op = "()";
+  Node call_node = node_new(NodeKind.Expression(call_e));
+
+  Node x = node_new(NodeKind.Identifier("x"));
+  Node y = node_new(NodeKind.Identifier("y"));
+  ExprNode comma_e;
+  comma_e.left = &x;
+  comma_e.has_left = true;
+  comma_e.right = &y;
+  comma_e.has_right = true;
+  comma_e.op = ",";
+  Node comma_node = node_new(NodeKind.Expression(comma_e));
+
+  // The rotation carries the TOP node's own op onto the new left child
+  // (mirroring `parse_node_shift_children_left`'s identical behavior), not
+  // `call_node`'s -- so `top`'s own op must be "()" for the new left
+  // child to end up "()"-shaped too, matching a real call/index-args fold.
+  ExprNode top_e;
+  top_e.left = &call_node;
+  top_e.has_left = true;
+  top_e.right = &comma_node;
+  top_e.has_right = true;
+  top_e.op = "()";
+  Node top = node_new(NodeKind.Expression(top_e));
+
+  ParseState st = _state_from("");
+  Parser p = parser_new(&st);
+  p.parse_node_move_right_left_to_left(&top);
+
+  // Expect: left = (foo() x) [op "()"], right = y, top op = ",".
+  fit top.kind {
+    .Expression(e) -> {
+      assert equals(e.op, ","), "expected the top op to become ','";
+      fit e.right.kind {
+        .Identifier(s) -> { assert equals(s, "y"), "expected the top right to be 'y'"; }
+        _ -> { panic("expected Identifier 'y'"); }
+      }
+      fit e.left.kind {
+        .Expression(le) -> {
+          assert equals(le.op, "()"), "expected the new left op to stay '()'";
+          fit le.right.kind {
+            .Identifier(s) -> {
+              assert equals(s, "x"), "expected the new left's right to be 'x'";
+            }
+            _ -> { panic("expected Identifier 'x'"); }
+          }
+        }
+        _ -> { panic("expected the new left to be an Expression"); }
+      }
+    }
+    _ -> { panic("expected an Expression node"); }
+  }
+}
+
 // The lookup name a new scope entity for `node` should carry; empty for a
 // node kind that never introduces a nameable binding.
 fun _scope_entity_name(Node* node) str {
@@ -1325,4 +1785,15 @@ fun _is_c_macro_ident(str name) bin {
     i = i + 1;
   }
   ret true;
+}
+
+// True if `n`'s kind is `Expression` (a binary op node) -- used by the
+// precedence-reordering functions to decide whether a child needs further
+// rotation, as opposed to being an already-primary operand (a literal,
+// identifier, or grouped sub-expression).
+fun _is_expression_kind(Node* n) bin {
+  fit n.kind {
+    .Expression(e) -> { ret true; }
+    _ -> { ret false; }
+  }
 }
