@@ -2992,87 +2992,232 @@ impl Parser {
     ret .None;
   }
 
+  // Tries to parse a data-carrying-enum DESTRUCTURING fit pattern at the
+  // cursor: `Enum.Variant(a, b)` or shorthand `.Variant(a, b)`. On a
+  // match, consumes those tokens, sets `*out_condition` to the variant-
+  // path `.` expression (`Enum.Variant`, or `<blank>.Variant` for
+  // shorthand), fills `*out_bindings` with the positional binding
+  // identifiers, and sets `*out_matched` true. On no match, consumes
+  // NOTHING and leaves `*out_matched` false -- the caller parses
+  // normally. Detection requires the trailing `(` so a plain
+  // `Enum.Variant`/`.Variant` arm (no payload binding) still goes
+  // through the ordinary (non-destructuring) path.
+  _try_parse_fit_destructure(bin* out_matched, Node* out_condition, Vec<str>* out_bindings) Option<ParseErrorKind> {
+    *out_matched = false;
+    let p0_opt = self.state.token_peek_n(0);
+    let p1_opt = self.state.token_peek_n(1);
+    if p0_opt.is_none() || p1_opt.is_none() {
+      ret .None;
+    }
+    let p0 = p0_opt.unwrap();
+    let p1 = p1_opt.unwrap();
+
+    bin is_shorthand = token_is_operator(p0, ".") && p1.type == TokenType.Identifier;
+    bin is_qualified = false;
+    if !is_shorthand {
+      is_qualified = p0.type == TokenType.Identifier && token_is_operator(p1, ".");
+    }
+    if !is_shorthand && !is_qualified {
+      ret .None;
+    }
+
+    Token variant_tok;
+    bin found_lparen = false;
+    if is_shorthand {
+      let p2_opt = self.state.token_peek_n(2);
+      if p2_opt.is_some() && token_is_operator(p2_opt.unwrap(), "(") {
+        variant_tok = p1;
+        found_lparen = true;
+      }
+    } else {
+      let p2_opt = self.state.token_peek_n(2);
+      if p2_opt.is_some() && p2_opt.unwrap().type == TokenType.Identifier {
+        let p3_opt = self.state.token_peek_n(3);
+        if p3_opt.is_some() && token_is_operator(p3_opt.unwrap(), "(") {
+          variant_tok = p2_opt.unwrap();
+          found_lparen = true;
+        }
+      }
+    }
+    if !found_lparen {
+      ret .None;
+    }
+
+    // Commit: consume the path tokens.
+    Node left = node_new(NodeKind.Blank);
+    if is_shorthand {
+      self.state.token_next(); // '.'
+      self.state.token_next(); // Variant
+      left.pos = variant_tok.pos;
+      left.has_pos = true;
+    } else {
+      str enum_name = "";
+      fit p0.data {
+        .Sval(s) -> { enum_name = s; }
+        _ -> {}
+      }
+      left = node_new(NodeKind.Identifier(enum_name));
+      left.pos = p0.pos;
+      left.has_pos = true;
+      self.state.token_next(); // Enum
+      self.state.token_next(); // '.'
+      self.state.token_next(); // Variant
+    }
+    left.flags.inside_expression = true;
+
+    str variant_name = "";
+    fit variant_tok.data {
+      .Sval(s) -> { variant_name = s; }
+      _ -> {}
+    }
+    Node right = node_new(NodeKind.Identifier(variant_name));
+    right.pos = variant_tok.pos;
+    right.has_pos = true;
+    right.flags.inside_expression = true;
+
+    let lperr = self.state.expect_op("(");
+    if lperr.is_some() {
+      ret lperr;
+    }
+
+    Vec<str> binds;
+    binds.init(0);
+    for !self.state.next_token_is_symbol(')') {
+      let bt = self.state.token_next();
+      if bt.is_none() || bt.unwrap().type != TokenType.Identifier {
+        self.state.err("expected binding name in fit destructuring pattern");
+        ret .Some(ParseErrorKind.InvalidIdentifier);
+      }
+      str bname = "";
+      fit bt.unwrap().data {
+        .Sval(s) -> { bname = s; }
+        _ -> {}
+      }
+      binds.push(bname);
+      if !self.state.next_token_is_operator(",") {
+        break;
+      }
+      self.state.token_next();
+    }
+    let rperr = self.state.expect_sym(')');
+    if rperr.is_some() {
+      ret rperr;
+    }
+    if binds.len == 0 {
+      self.state.err("fit destructuring pattern '()' must bind at least one field");
+      ret .Some(ParseErrorKind.InvalidToken);
+    }
+
+    self.make_expression_node(&left, &right, ".", variant_tok.pos);
+    fit self.state.node_pop() {
+      .Some(built) -> { *out_condition = built; }
+      .None -> {
+        self.state.err("failed to build fit destructuring variant path");
+        ret .Some(ParseErrorKind.InvalidExpression);
+      }
+    }
+    *out_bindings = binds;
+    *out_matched = true;
+    ret .None;
+  }
+
   // Parses one `pattern -> { body }` fit arm, pushing the finished branch
   // onto `out_branches`. `_` (the wildcard default) has no condition and
   // must be the last arm -- signaled back to the caller via
-  // `out_has_default` so its loop stops. Every other arm's pattern is a
-  // plain expression via `parse_expressionable_root`, EXCEPT a leading `.`
-  // (bare enum-variant shorthand, `.Variant`), which bypasses that in
-  // favor of directly building the `.`-Expression and reordering it --
-  // mirroring the ORIGINAL's identical bypass, and needed because a bare
-  // `.Variant` isn't itself a complete expression the general parser
-  // recognizes outside of this direct construction (see
-  // `parse_normal_expression`'s own `.` handling, which additionally
-  // picks up a trailing `(payload)` call -- deliberately NOT done here,
-  // since a payload in a fit pattern means DESTRUCTURING, not ported this
-  // slice; see this function's own deferral note below).
+  // `out_has_default` so its loop stops.
   // 
-  // Deliberately simplified from the original for this slice: no
-  // data-carrying-enum DESTRUCTURING pattern (`Shape.Circle(r)` /
-  // `.Circle(r)`, binding `r` in the arm body) -- needs
-  // `try_parse_fit_destructure`/`collect_fit_binding_names` and a
-  // per-arm binding scope, deferred to a future slice. Every `FitBranch`
-  // produced here has empty `bindings`.
+  // Three pattern shapes, tried in order: (1) a data-carrying-enum
+  // DESTRUCTURING pattern (`Shape.Circle(r)` / `.Circle(r)`) via
+  // `_try_parse_fit_destructure` -- its positional binding names are
+  // registered in a scope opened just for the arm body (closed after),
+  // so the body can reference them; (2) a bare `.Variant` shorthand
+  // (no payload) via the same direct-construction bypass
+  // `parse_normal_expression`'s own `.` handling uses, needed because a
+  // bare `.Variant` isn't itself a complete expression the general
+  // parser recognizes outside of this direct construction; (3) an
+  // ordinary expression pattern (literals, identifiers, ...) via
+  // `parse_expressionable_root`.
   _parse_fit_arm(Vec<FitBranch>* out_branches, bin* out_has_default) Option<ParseErrorKind> {
     Node arm_condition = node_new(NodeKind.Blank);
-    bin is_dot_shorthand = false;
-    Pos op_pos;
-    fit self.state.token_peek_next() {
-      .Some(t) -> {
-        op_pos = t.pos;
-        if t.type == TokenType.Operator {
-          str op = "";
-          fit t.data {
-            .Sval(s) -> { op = s; }
-            _ -> {}
-          }
-          is_dot_shorthand = equals(op, ".");
-        }
-      }
-      .None -> {}
+    Vec<str> bindings;
+    bindings.init(0);
+
+    bin destructure_matched = false;
+    Node destructure_condition = node_new(NodeKind.Blank);
+    Vec<str> destructure_bindings;
+    destructure_bindings.init(0);
+    let dxerr = self._try_parse_fit_destructure(
+      &destructure_matched,
+      &destructure_condition,
+      &destructure_bindings
+    );
+    if dxerr.is_some() {
+      ret dxerr;
     }
 
-    if is_dot_shorthand {
-      self.state.token_next(); // consume '.'
-      let ierr = self.parse_single_token_to_node();
-      if ierr.is_some() {
-        ret ierr;
-      }
-      let maybe_right = self.state.node_pop();
-      if maybe_right.is_none() {
-        self.state.err("expected identifier after '.' in fit pattern");
-        ret .Some(ParseErrorKind.InvalidExpression);
-      }
-      Node node_right = maybe_right.unwrap();
-      node_right.flags.inside_expression = true;
-
-      Node blank_left = node_new(NodeKind.Blank);
-      blank_left.pos = op_pos;
-      blank_left.has_pos = true;
-      blank_left.flags.inside_expression = true;
-
-      self.make_expression_node(&blank_left, &node_right, ".", op_pos);
-      fit self.state.node_pop() {
-        .Some(built) -> {
-          arm_condition = built;
-          self.parse_reorder_expression(&arm_condition);
+    if destructure_matched {
+      arm_condition = destructure_condition;
+      bindings = destructure_bindings;
+    } else {
+      bin is_dot_shorthand = false;
+      Pos op_pos;
+      fit self.state.token_peek_next() {
+        .Some(t) -> {
+          op_pos = t.pos;
+          if t.type == TokenType.Operator {
+            str op = "";
+            fit t.data {
+              .Sval(s) -> { op = s; }
+              _ -> {}
+            }
+            is_dot_shorthand = equals(op, ".");
+          }
         }
-        .None -> {
+        .None -> {}
+      }
+
+      if is_dot_shorthand {
+        self.state.token_next(); // consume '.'
+        let ierr = self.parse_single_token_to_node();
+        if ierr.is_some() {
+          ret ierr;
+        }
+        let maybe_right = self.state.node_pop();
+        if maybe_right.is_none() {
+          self.state.err("expected identifier after '.' in fit pattern");
+          ret .Some(ParseErrorKind.InvalidExpression);
+        }
+        Node node_right = maybe_right.unwrap();
+        node_right.flags.inside_expression = true;
+
+        Node blank_left = node_new(NodeKind.Blank);
+        blank_left.pos = op_pos;
+        blank_left.has_pos = true;
+        blank_left.flags.inside_expression = true;
+
+        self.make_expression_node(&blank_left, &node_right, ".", op_pos);
+        fit self.state.node_pop() {
+          .Some(built) -> {
+            arm_condition = built;
+            self.parse_reorder_expression(&arm_condition);
+          }
+          .None -> {
+            self.state.err("expected fit branch condition expression");
+            ret .Some(ParseErrorKind.InvalidExpression);
+          }
+        }
+      } else {
+        let cerr = self.parse_expressionable_root();
+        if cerr.is_some() {
+          ret cerr;
+        }
+        let maybe_cond = self.state.node_pop();
+        if maybe_cond.is_none() {
           self.state.err("expected fit branch condition expression");
           ret .Some(ParseErrorKind.InvalidExpression);
         }
+        arm_condition = maybe_cond.unwrap();
       }
-    } else {
-      let cerr = self.parse_expressionable_root();
-      if cerr.is_some() {
-        ret cerr;
-      }
-      let maybe_cond = self.state.node_pop();
-      if maybe_cond.is_none() {
-        self.state.err("expected fit branch condition expression");
-        ret .Some(ParseErrorKind.InvalidExpression);
-      }
-      arm_condition = maybe_cond.unwrap();
     }
 
     bin is_assignment = false;
@@ -3106,12 +3251,44 @@ impl Parser {
       branch.condition = cond_ptr;
       branch.has_condition = true;
     }
+    bin has_bindings = bindings.len > 0;
+    if has_bindings {
+      branch.bindings = bindings;
+      branch.has_bindings = true;
+    }
 
     let arerr = self.state.expect_op("->");
     if arerr.is_some() {
       ret arerr;
     }
+    // Register destructuring binding names in a scope so the arm body can
+    // reference them at parse time. Opened here and closed after the
+    // body is parsed, so bindings don't leak to sibling arms or past the
+    // fit. Each binding is a plain (Unknown-typed) scope entity, same as
+    // a variadic function's synthetic `vargs` -- typecheck resolves the
+    // real payload type later.
+    if has_bindings {
+      self.state.new_scope();
+      for bname : bindings {
+        DataType* bdt = malloc(sizeof(DataType));
+        *bdt = dtype_new();
+
+        VariableNode bv;
+        bv.var_type = bdt;
+        bv.name = bname;
+        bv.has_val = false;
+
+        Node bvar = node_new(NodeKind.Variable(bv));
+        Node* bvar_ptr = malloc(sizeof(Node));
+        *bvar_ptr = bvar;
+        ScopeEntity* bentity = self.new_scope_entity(bvar_ptr);
+        self.state.push_scope_entity(bentity);
+      }
+    }
     let berr = self.parse_body();
+    if has_bindings {
+      self.state.finish_scope();
+    }
     if berr.is_some() {
       ret berr;
     }
@@ -7324,6 +7501,112 @@ test "parse_fit_statement parses bare enum-variant shorthand patterns" {
     }
     _ -> { panic("expected a StatementFit node"); }
   }
+}
+
+test "parse_fit_statement parses a shorthand destructuring pattern, binding names in the arm body" {
+  Vec<str> names;
+  names.init(0);
+  names.push("x");
+  ParseState st = _state_with_declared("fit x { .Circle(r) -> { r; } }", names);
+  Parser p = parser_new(&st);
+  assert p.parse_fit_statement().is_none(), "expected the destructuring fit statement to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementFit(f) -> {
+      assert f.branches.len == 1, "expected 1 branch";
+      let first = f.branches.get(0);
+      assert first.has_condition, "expected a condition";
+      assert first.has_bindings, "expected bindings";
+      assert first.bindings.len == 1, "expected 1 binding";
+      assert equals(first.bindings.get(0), "r"), "expected binding 'r'";
+      fit first.condition.kind {
+        .Expression(e) -> {
+          assert equals(e.op, "."), "expected op '.'";
+          fit e.left.kind {
+            .Blank -> {}
+            _ -> { panic("expected a Blank left side (shorthand -- no explicit enum name)"); }
+          }
+          fit e.right.kind {
+            .Identifier(s) -> { assert equals(s, "Circle"), "expected variant name 'Circle'"; }
+            _ -> { panic("expected Identifier 'Circle'"); }
+          }
+        }
+        _ -> { panic("expected an Expression node for the destructuring pattern"); }
+      }
+      fit first.body.kind {
+        .Body(bn) -> {
+          assert bn.statements.len == 1, "expected 1 statement in the body (referencing 'r')";
+        }
+        _ -> { panic("expected a Body node"); }
+      }
+    }
+    _ -> { panic("expected a StatementFit node"); }
+  }
+}
+
+test "parse_fit_statement parses a qualified destructuring pattern with multiple bindings" {
+  Vec<str> names;
+  names.init(0);
+  names.push("x");
+  ParseState st = _state_with_declared("fit x { Shape.Rect(w, h) -> { w; h; } }", names);
+  Parser p = parser_new(&st);
+  assert p.parse_fit_statement().is_none(), "expected the qualified destructuring fit statement to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementFit(f) -> {
+      let first = f.branches.get(0);
+      assert first.bindings.len == 2, "expected 2 bindings";
+      assert equals(first.bindings.get(0), "w"), "expected binding 'w'";
+      assert equals(first.bindings.get(1), "h"), "expected binding 'h'";
+      fit first.condition.kind {
+        .Expression(e) -> {
+          fit e.left.kind {
+            .Identifier(s) -> { assert equals(s, "Shape"), "expected enum name 'Shape'"; }
+            _ -> { panic("expected Identifier 'Shape' (qualified -- explicit enum name)"); }
+          }
+          fit e.right.kind {
+            .Identifier(s) -> { assert equals(s, "Rect"), "expected variant name 'Rect'"; }
+            _ -> { panic("expected Identifier 'Rect'"); }
+          }
+        }
+        _ -> { panic("expected an Expression node for the destructuring pattern"); }
+      }
+    }
+    _ -> { panic("expected a StatementFit node"); }
+  }
+}
+
+test "parse_fit_statement's destructuring bindings don't leak into a sibling arm" {
+  Vec<str> names;
+  names.init(0);
+  names.push("x");
+  ParseState st = _state_with_declared("fit x { .Circle(r) -> { r; } .Square -> { r; } }", names);
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_fit_statement();
+  assert err.is_some(), "expected an error: 'r' should not be visible outside the arm that bound it";
+}
+
+test "parse_fit_statement rejects an empty destructuring pattern '()'" {
+  Vec<str> names;
+  names.init(0);
+  names.push("x");
+  ParseState st = _state_with_declared("fit x { .Circle() -> { } }", names);
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_fit_statement();
+  assert err.is_some(), "expected an error for a destructuring pattern binding zero fields";
+}
+
+test "parse_fit_statement rejects a non-identifier destructuring binding" {
+  Vec<str> names;
+  names.init(0);
+  names.push("x");
+  ParseState st = _state_with_declared("fit x { .Circle(1) -> { } }", names);
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_fit_statement();
+  assert err.is_some(), "expected an error for a non-identifier binding name";
 }
 
 test "parse_fit_statement rejects an assignment used as a branch pattern" {
