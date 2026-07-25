@@ -8767,13 +8767,26 @@ pub const LspServer = struct {
         }
         self.collectDirectImportUris(&import_uris, current_uri, idx) catch return null;
 
-        for (import_uris.items) |iu| {
+        return self.findAnyGlobalDefinitionInGivenImports(current_uri, name, import_uris.items);
+    }
+
+    /// Same search as `findAnyGlobalDefinitionInDirectImports`, but against an
+    /// ALREADY-RESOLVED import URI list instead of re-resolving `current_uri`'s
+    /// `imp` statements from scratch. Exists so a caller that needs this lookup
+    /// repeatedly for the SAME file within one request (e.g. `handleInlayHint`,
+    /// once per call-site token) can resolve the import list once up front via
+    /// `collectDirectImportUris` and reuse it, instead of re-walking every `imp`
+    /// statement's path resolution on every lookup -- that re-resolution (real
+    /// filesystem candidate-path work, not just a lookup) was previously the
+    /// dominant source of `[fls:imports]` log volume during inlay-hint requests
+    /// on a file with many call sites.
+    fn findAnyGlobalDefinitionInGivenImports(self: *LspServer, current_uri: []const u8, name: []const u8, import_uris: []const []const u8) ?GlobalDefHit {
+        for (import_uris) |iu| {
             self.ensureDocIndexedFromDisk(iu) catch {};
             const imported = self.docs.get(iu) orelse continue;
             const didx = imported.index orelse continue;
             if (findAnyGlobalDefinition(didx.symbols, name)) |s| {
                 if (!self.isSymbolVisibleFromUri(current_uri, imported.uri, s)) continue;
-                // Note: `iu` is freed by our defer; return the stable doc-owned URI.
                 return .{ .uri = imported.uri, .sym = s };
             }
         }
@@ -10070,6 +10083,33 @@ pub const LspServer = struct {
         return null;
     }
 
+    /// Same as `calleeSignatureDetail`, but takes an already-resolved import URI
+    /// list (see `findAnyGlobalDefinitionInGivenImports`) instead of re-resolving
+    /// `uri`'s imports on every call. `handleInlayHint` resolves the list once
+    /// per request and calls this in its per-call-site loop instead.
+    fn calleeSignatureDetailCached(self: *LspServer, uri: []const u8, idx: *const Index, callee_i: usize, import_uris: []const []const u8) ?[]const u8 {
+        const callee = idx.tokens[callee_i];
+        if (callee.kind != .identifier) return null;
+        const name = callee.text;
+        const at = callee.range.start;
+
+        if (callee_i >= 2 and isDotToken(idx.tokens[callee_i - 1]) and idx.tokens[callee_i - 2].kind == .identifier) {
+            if (self.resolveTypeOfChainUpTo(idx, uri, at, callee_i - 2)) |recv_type| {
+                if (self.findMemberByContainer(uri, recv_type, name, .method)) |hit| {
+                    return hit.sym.detail;
+                }
+            }
+        }
+
+        if (findBestDefinition(idx.symbols, name, at)) |d| {
+            if (d.kind == .function or d.kind == .method) return d.detail;
+        }
+        if (self.findAnyGlobalDefinitionInGivenImports(uri, name, import_uris)) |hit| {
+            if (hit.sym.kind == .function or hit.sym.kind == .method) return hit.sym.detail;
+        }
+        return null;
+    }
+
     /// Parameter-name inlay hints (gopls/rust-analyzer style): renders the
     /// parameter name before each argument at a call site, e.g. `f(x: 1, y: 2)`.
     /// Only emits hints within the client-requested range and only when the
@@ -10109,6 +10149,18 @@ pub const LspServer = struct {
         var hints = ArrayList(InlayHint).init(self.allocator);
         defer hints.deinit();
 
+        // Resolve the direct-import URI list ONCE for the whole request, instead
+        // of once per call-site token below (`calleeSignatureDetail` used to
+        // re-walk and re-resolve every `imp` statement's path for EACH unresolved
+        // callee it hit -- on a file with many call sites, that meant re-doing
+        // the same filesystem candidate-path work dozens of times per keystroke).
+        var import_uris = ArrayList([]u8).init(self.allocator);
+        defer {
+            for (import_uris.items) |u| self.allocator.free(u);
+            import_uris.deinit();
+        }
+        self.collectDirectImportUris(&import_uris, uri, idx) catch {};
+
         const toks = idx.tokens;
         var i: usize = 0;
         while (i + 1 < toks.len) : (i += 1) {
@@ -10120,7 +10172,7 @@ pub const LspServer = struct {
             // already written, so inlay hints there are noise.
             if (callParenIsDeclaration(toks, i, i + 1)) continue;
 
-            const detail = self.calleeSignatureDetail(uri, idx, i) orelse continue;
+            const detail = self.calleeSignatureDetailCached(uri, idx, i, import_uris.items) orelse continue;
             var params_list = self.parseParamsFromSignatureLabel(detail) catch continue;
             defer {
                 for (params_list.items) |p| self.allocator.free(p.label);
