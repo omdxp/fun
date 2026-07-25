@@ -2391,18 +2391,164 @@ impl Parser {
     ret .None;
   }
 
-  // Parses a `for` loop: `for { ... }` (infinite, no condition) or
-  // `for <condition> { ... }`.
+  // Parses the legacy loop-variable forms, once `parse_for_statement` has
+  // determined (via lookahead) that's what follows `for`: `for i :
+  // start..end { ... }` (range -- `ForKind.Range`) or `for item : arr {
+  // ... }` / `for i, item :: arr { ... }` (iterator -- `ForKind.Iter`,
+  // `i,`/index tracking is optional). The loop variable(s) are registered
+  // as on-stack scope entities (no backing declaration `Node`, matching
+  // the original -- they're synthesized by codegen, not declared by the
+  // user) in a new scope opened before the body so it can reference them,
+  // closed after.
   // 
-  // Deliberately simplified from the original for this slice: only the
-  // `ForKind.Cond` shape is supported. The range form (`for i : start..end
-  // { ... }`) and iterator form (`for item : arr { ... }` / `for i, item ::
-  // arr { ... }`) need their own disambiguation lookahead (legacy `:`/`::`
-  // syntax vs. a condition that happens to start with an identifier) and
-  // synthetic on-stack loop-variable scope entities, deferred to a future
-  // slice. A `for` written in either of those forms currently fails to
-  // parse as a condition expression instead (a clean error, not a
-  // misparse) since `:`/`::` aren't valid inside one.
+  // On the one hard error here (range form used with the `i, item ::`
+  // syntax, which only iterator loops support), the scope opened just
+  // above is deliberately left unfinished -- matching this file's
+  // established convention for parse errors (see
+  // `parse_body_multiple_statements`'s doc comment): a parse error aborts
+  // the whole parse anyway, so there's nothing to unwind for.
+  _parse_for_range_or_iter(Option<Token> for_tok) Option<ParseErrorKind> {
+    let first = self.state.token_next();
+    if first.is_none() || first.unwrap().type != TokenType.Identifier {
+      self.state.err("expected identifier after 'for'");
+      ret .Some(ParseErrorKind.InvalidIdentifier);
+    }
+    str index_name = "";
+    bin has_index_name = false;
+    str item_name = "";
+    fit first.unwrap().data {
+      .Sval(s) -> { item_name = s; }
+      _ -> {}
+    }
+    bin used_double_colon = false;
+
+    if self.state.next_token_is_operator(",") {
+      index_name = item_name;
+      has_index_name = true;
+      self.state.token_next(); // skip ','
+      let second = self.state.token_next();
+      if second.is_none() || second.unwrap().type != TokenType.Identifier {
+        self.state.err("expected identifier after ',' in for loop");
+        ret .Some(ParseErrorKind.InvalidIdentifier);
+      }
+      fit second.unwrap().data {
+        .Sval(s) -> { item_name = s; }
+        _ -> {}
+      }
+      let dcerr = self.state.expect_op("::");
+      if dcerr.is_some() {
+        ret dcerr;
+      }
+      used_double_colon = true;
+    } else {
+      let cerr = self.state.expect_op(":");
+      if cerr.is_some() {
+        ret cerr;
+      }
+    }
+
+    let ierr = self.parse_expressionable_root();
+    if ierr.is_some() {
+      ret ierr;
+    }
+    let maybe_iterable = self.state.node_pop();
+    if maybe_iterable.is_none() {
+      self.state.err("expected for iterable/range expression");
+      ret .Some(ParseErrorKind.InvalidExpression);
+    }
+    Node iterable_node = maybe_iterable.unwrap();
+
+    bin is_range = false;
+    fit iterable_node.kind {
+      .Expression(e) -> {
+        if equals(e.op, "..") {
+          is_range = true;
+        }
+      }
+      _ -> {}
+    }
+
+    self.state.new_scope();
+
+    if is_range {
+      if used_double_colon {
+        self.state.err("range for loop does not support 'i, item ::' form");
+        ret .Some(ParseErrorKind.InvalidStatement);
+      }
+      ScopeEntity item_entity = scope_entity_new(item_name);
+      item_entity.on_stack = true;
+      ScopeEntity* item_entity_ptr = malloc(sizeof(ScopeEntity));
+      *item_entity_ptr = item_entity;
+      self.state.push_scope_entity(item_entity_ptr);
+    } else {
+      if has_index_name {
+        ScopeEntity index_entity = scope_entity_new(index_name);
+        index_entity.on_stack = true;
+        ScopeEntity* index_entity_ptr = malloc(sizeof(ScopeEntity));
+        *index_entity_ptr = index_entity;
+        self.state.push_scope_entity(index_entity_ptr);
+      }
+      ScopeEntity item_entity = scope_entity_new(item_name);
+      item_entity.on_stack = true;
+      ScopeEntity* item_entity_ptr = malloc(sizeof(ScopeEntity));
+      *item_entity_ptr = item_entity;
+      self.state.push_scope_entity(item_entity_ptr);
+    }
+
+    let berr = self.parse_body_multiple_statements();
+    self.state.finish_scope();
+    if berr.is_some() {
+      ret berr;
+    }
+    let maybe_body = self.state.node_pop();
+    if maybe_body.is_none() {
+      self.state.err("expected for body");
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+    Node* body = malloc(sizeof(Node));
+    *body = maybe_body.unwrap();
+
+    Node node = node_new(NodeKind.Blank);
+    if is_range {
+      Node* range_ptr = malloc(sizeof(Node));
+      *range_ptr = iterable_node;
+      ForRangeNode fr;
+      fr.index_name = item_name;
+      fr.range_expr = range_ptr;
+      fr.body = body;
+      node.kind = NodeKind.StatementFor(ForKind.Range(fr));
+    } else {
+      Node* iterable_ptr = malloc(sizeof(Node));
+      *iterable_ptr = iterable_node;
+      ForIterNode fi;
+      fi.index_name = index_name;
+      fi.has_index_name = has_index_name;
+      fi.item_name = item_name;
+      fi.iterable = iterable_ptr;
+      fi.body = body;
+      node.kind = NodeKind.StatementFor(ForKind.Iter(fi));
+    }
+    fit for_tok {
+      .Some(t) -> {
+        node.pos = t.pos;
+        node.has_pos = true;
+      }
+      .None -> {}
+    }
+    self.create_node(&node);
+    ret .None;
+  }
+
+  // Parses a `for` loop: `for { ... }` (infinite), `for <condition> {
+  // ... }`, `for i : start..end { ... }` (range), or `for item : arr {
+  // ... }` / `for i, item :: arr { ... }` (iterator).
+  // 
+  // The legacy range/iterator forms are distinguished from a condition
+  // loop that happens to start with an identifier (`for x != 0 { ... }`)
+  // by a 1-token lookahead: only `for IDENT :` or `for IDENT ,` are the
+  // legacy forms (a bare condition never starts with `,`, and `:` isn't a
+  // valid expression-continuation operator either), matching the
+  // original's identical disambiguation.
   pub parse_for_statement() Option<ParseErrorKind> {
     let for_tok = self.state.token_peek_next();
     let kwerr = self.state.expect_keyword("for");
@@ -2414,23 +2560,65 @@ impl Parser {
       ret .Some(ParseErrorKind.InvalidStatement);
     }
 
-    bin has_cond = false;
-    Node* cond_ptr = nil;
+    if self.state.next_token_is_symbol('{') {
+      let berr = self.parse_body();
+      if berr.is_some() {
+        ret berr;
+      }
+      let maybe_body = self.state.node_pop();
+      if maybe_body.is_none() {
+        self.state.err("expected for body");
+        ret .Some(ParseErrorKind.InvalidStatement);
+      }
+      Node* body = malloc(sizeof(Node));
+      *body = maybe_body.unwrap();
 
-    if !self.state.next_token_is_symbol('{') {
-      let cerr = self.parse_expressionable_root();
-      if cerr.is_some() {
-        ret cerr;
+      ForCondNode fc;
+      fc.condition = nil;
+      fc.has_condition = false;
+      fc.body = body;
+
+      Node node = node_new(NodeKind.StatementFor(ForKind.Cond(fc)));
+      fit for_tok {
+        .Some(t) -> {
+          node.pos = t.pos;
+          node.has_pos = true;
+        }
+        .None -> {}
       }
-      let maybe_cond = self.state.node_pop();
-      if maybe_cond.is_none() {
-        self.state.err("expected for condition");
-        ret .Some(ParseErrorKind.InvalidExpression);
-      }
-      cond_ptr = malloc(sizeof(Node));
-      *cond_ptr = maybe_cond.unwrap();
-      has_cond = true;
+      self.create_node(&node);
+      ret .None;
     }
+
+    bin is_legacy = false;
+    fit self.state.token_peek_next() {
+      .Some(nt) -> {
+        if nt.type == TokenType.Identifier {
+          fit self.state.token_peek_n(1) {
+            .Some(after) -> {
+              is_legacy = token_is_operator(after, ",") || token_is_operator(after, ":");
+            }
+            .None -> {}
+          }
+        }
+      }
+      .None -> {}
+    }
+    if is_legacy {
+      ret self._parse_for_range_or_iter(for_tok);
+    }
+
+    let cerr = self.parse_expressionable_root();
+    if cerr.is_some() {
+      ret cerr;
+    }
+    let maybe_cond = self.state.node_pop();
+    if maybe_cond.is_none() {
+      self.state.err("expected for condition");
+      ret .Some(ParseErrorKind.InvalidExpression);
+    }
+    Node* cond_ptr = malloc(sizeof(Node));
+    *cond_ptr = maybe_cond.unwrap();
 
     let berr = self.parse_body();
     if berr.is_some() {
@@ -2446,7 +2634,7 @@ impl Parser {
 
     ForCondNode fc;
     fc.condition = cond_ptr;
-    fc.has_condition = has_cond;
+    fc.has_condition = true;
     fc.body = body;
 
     Node node = node_new(NodeKind.StatementFor(ForKind.Cond(fc)));
@@ -4351,6 +4539,111 @@ test "parse_for_statement parses a condition loop" {
     }
     _ -> { panic("expected a StatementFor node"); }
   }
+}
+
+test "parse_for_statement parses a range loop" {
+  Vec<str> names;
+  names.init(0);
+  names.push("n");
+  ParseState st = _state_with_declared("for i : 0..n { i; }", names);
+  Parser p = parser_new(&st);
+  Node fn_stub = node_new(NodeKind.Blank);
+  p.current_function = &fn_stub;
+  p.has_current_function = true;
+
+  assert p.parse_for_statement().is_none(), "expected 'for i : 0..n { i; }' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementFor(fk) -> {
+      fit fk {
+        .Range(fr) -> {
+          assert equals(fr.index_name, "i"), "expected index name 'i'";
+          fit fr.range_expr.kind {
+            .Expression(e) -> { assert equals(e.op, ".."), "expected range op '..'"; }
+            _ -> { panic("expected an Expression range"); }
+          }
+          fit fr.body.kind {
+            .Body(bn) -> { assert bn.statements.len == 1, "expected 1 statement in the body"; }
+            _ -> { panic("expected a Body node"); }
+          }
+        }
+        _ -> { panic("expected ForKind.Range"); }
+      }
+    }
+    _ -> { panic("expected a StatementFor node"); }
+  }
+}
+
+test "parse_for_statement parses an iterator loop with no index" {
+  Vec<str> names;
+  names.init(0);
+  names.push("arr");
+  ParseState st = _state_with_declared("for item : arr { item; }", names);
+  Parser p = parser_new(&st);
+  Node fn_stub = node_new(NodeKind.Blank);
+  p.current_function = &fn_stub;
+  p.has_current_function = true;
+
+  assert p.parse_for_statement().is_none(), "expected 'for item : arr { item; }' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementFor(fk) -> {
+      fit fk {
+        .Iter(fi) -> {
+          assert !fi.has_index_name, "expected no index name";
+          assert equals(fi.item_name, "item"), "expected item name 'item'";
+          fit fi.iterable.kind {
+            .Identifier(s) -> { assert equals(s, "arr"), "expected iterable 'arr'"; }
+            _ -> { panic("expected Identifier 'arr'"); }
+          }
+        }
+        _ -> { panic("expected ForKind.Iter"); }
+      }
+    }
+    _ -> { panic("expected a StatementFor node"); }
+  }
+}
+
+test "parse_for_statement parses an iterator loop with an index" {
+  Vec<str> names;
+  names.init(0);
+  names.push("arr");
+  ParseState st = _state_with_declared("for i, item :: arr { i; item; }", names);
+  Parser p = parser_new(&st);
+  Node fn_stub = node_new(NodeKind.Blank);
+  p.current_function = &fn_stub;
+  p.has_current_function = true;
+
+  assert p.parse_for_statement().is_none(), "expected 'for i, item :: arr { i; item; }' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .StatementFor(fk) -> {
+      fit fk {
+        .Iter(fi) -> {
+          assert fi.has_index_name, "expected an index name";
+          assert equals(fi.index_name, "i"), "expected index name 'i'";
+          assert equals(fi.item_name, "item"), "expected item name 'item'";
+        }
+        _ -> { panic("expected ForKind.Iter"); }
+      }
+    }
+    _ -> { panic("expected a StatementFor node"); }
+  }
+}
+
+test "parse_for_statement rejects a range loop written with the 'i, item ::' form" {
+  Vec<str> names;
+  names.init(0);
+  names.push("n");
+  ParseState st = _state_with_declared("for i, item :: 0..n { }", names);
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  Node fn_stub = node_new(NodeKind.Blank);
+  p.current_function = &fn_stub;
+  p.has_current_function = true;
+
+  let err = p.parse_for_statement();
+  assert err.is_some(), "expected an error for a range loop using the iterator ',' '::' syntax";
 }
 
 test "parse_for_statement rejects use outside of a function" {
