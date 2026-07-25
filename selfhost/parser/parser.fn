@@ -3122,6 +3122,162 @@ impl Parser {
     }
     ret self.state.expect_sym(';');
   }
+
+  // Parses one top-level item: `pub`/`async fun`/`fun`, a bare-datatype-
+  // keyword global variable (`num x = 5;`), or -- for everything
+  // `parse_statement` already understands (`let`, `ret`, `assert`,
+  // `if`/`elif`/`else`, `for`, `fit`, a `{ ... }` block, or a bare
+  // expression statement) -- delegates there directly.
+  // 
+  // Deliberately simplified from the original for this slice: no
+  // `imp`/`enum`/`compound`/`quirk`/`impl`/`test`/`defer`/`asm`/`await`/
+  // `nil`/`allow`/`expect`/`panic`/`break`/`continue` declarations --
+  // each is its own substantial parsing slice (`enum`/`compound`/`quirk`/
+  // `impl` especially), deferred to future work; a clean "not yet
+  // supported" error is reported instead of a misparse. Also no bare
+  // `Identifier name;` top-level declaration (public OR private) --
+  // needs the same forward-lookahead machinery the original uses to
+  // disambiguate a type name from an expression, already documented as
+  // deferred in `parse_body_multiple_statements`'s doc comment; `pub`
+  // followed by a plain identifier reports the same clean error as any
+  // other not-yet-supported `pub` target rather than being silently
+  // misparsed as an expression.
+  // 
+  // Also unlike the original: a bare top-level expression (no leading
+  // keyword) DOES require a trailing `;` here, via delegating to
+  // `parse_statement` -- more consistent with every other statement
+  // position than replicating the original's asymmetry (its top-level
+  // `next()` skips the `;` requirement for a bare expression but nothing
+  // else does).
+  pub parse_top_level_declaration() Option<ParseErrorKind> {
+    let tok = self.state.token_peek_next();
+    if tok.is_none() {
+      self.state.err("unexpected end of file");
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+    let t = tok.unwrap();
+
+    if t.type == TokenType.Keyword {
+      str kw = "";
+      fit t.data {
+        .Sval(s) -> { kw = s; }
+        _ -> {}
+      }
+
+      if equals(kw, "pub") {
+        self.state.token_next(); // consume 'pub'
+        let next_tok = self.state.token_peek_next();
+        if next_tok.is_none() {
+          self.state.err("expected a declaration after 'pub'");
+          ret .Some(ParseErrorKind.InvalidStatement);
+        }
+        let nt = next_tok.unwrap();
+        str nkw = "";
+        bin nt_is_keyword = nt.type == TokenType.Keyword;
+        if nt_is_keyword {
+          fit nt.data {
+            .Sval(s) -> { nkw = s; }
+            _ -> {}
+          }
+          if keyword_is_datatype(nkw) {
+            ret self._parse_top_level_variable(true);
+          }
+          if equals(nkw, "let") {
+            ret self.parse_let_declaration(true);
+          }
+          if equals(nkw, "async") {
+            self.state.token_next(); // consume 'async'
+            let fun_tok = self.state.token_peek_next();
+            if fun_tok.is_none() || !token_is_keyword(fun_tok.unwrap(), "fun") {
+              self.state.err("expected 'fun' after 'async'");
+              ret .Some(ParseErrorKind.InvalidKeyword);
+            }
+            ret self.parse_function(true, true);
+          }
+          if equals(nkw, "fun") {
+            ret self.parse_function(true, false);
+          }
+        }
+        if nt_is_keyword {
+          let msg = format("keyword '{str}' is not yet supported after 'pub'", nkw);
+          defer free(msg);
+          self.state.err(msg);
+        } else {
+          self.state.err("expected a declaration after 'pub'");
+        }
+        ret .Some(ParseErrorKind.InvalidKeyword);
+      }
+
+      if equals(kw, "async") {
+        self.state.token_next(); // consume 'async'
+        let fun_tok = self.state.token_peek_next();
+        if fun_tok.is_none() || !token_is_keyword(fun_tok.unwrap(), "fun") {
+          self.state.err("expected 'fun' after 'async'");
+          ret .Some(ParseErrorKind.InvalidKeyword);
+        }
+        ret self.parse_function(false, true);
+      }
+
+      if equals(kw, "fun") {
+        ret self.parse_function(false, false);
+      }
+
+      if keyword_is_datatype(kw) {
+        ret self._parse_top_level_variable(false);
+      }
+    }
+
+    ret self.parse_statement();
+  }
+
+  // `<datatype> name [= val];` at the top level (public or private).
+  _parse_top_level_variable(bin is_public) Option<ParseErrorKind> {
+    DataType* dt = malloc(sizeof(DataType));
+    *dt = dtype_new();
+    let derr = self.state.parse_datatype(dt);
+    if derr.is_some() {
+      ret derr;
+    }
+    let verr = self.parse_variable(dt, is_public, false);
+    if verr.is_some() {
+      ret verr;
+    }
+    ret self.state.expect_sym(';');
+  }
+
+  // Repeatedly parses top-level items until the token stream is
+  // exhausted or a parse error occurs. Opens the file's root scope
+  // first (closed by nothing -- matching `parse_body_multiple_statements`'s
+  // established convention of not unwinding parser state on error, and a
+  // successful parse has no reason to close the root scope since nothing
+  // outlives it).
+  // 
+  // Deliberately simplified from the original for this slice: no forward
+  // type-name pre-scan (`prescan_forward_type_names`) -- it exists to let
+  // a `Name{...}` compound initializer forward-reference a `compound`/
+  // `enum`/`quirk` declared later in the file, and compound-init parsing
+  // itself isn't ported yet either. No cross-file `global_symbols`
+  // registration (`register_global_node_symbol`) -- that's for resolving
+  // references across `imp`-ed modules, and `imp` isn't ported yet;
+  // within a single file, top-level `let`/variable declarations already
+  // resolve via the same scope-entity mechanism as any other declaration,
+  // and forward/out-of-order function calls are already tolerated by
+  // `parse_single_token_to_node`'s identifier check (see its own doc
+  // comment).
+  pub parse() Option<ParseErrorKind> {
+    self.state.init_root_scope();
+    for true {
+      let peeked = self.state.token_peek_next();
+      if peeked.is_none() {
+        break;
+      }
+      let err = self.parse_top_level_declaration();
+      if err.is_some() {
+        ret err;
+      }
+    }
+    ret .None;
+  }
 }
 
 // ===== Test helpers =====
@@ -4725,6 +4881,89 @@ test "parse_function parses a bodyless variadic C-binding declaration" {
     }
     _ -> { panic("expected a Function node"); }
   }
+}
+
+test "parse parses multiple top-level function declarations" {
+  ParseState st = _state_from("fun add(num a, num b) num { ret a + b; } fun main() num { ret 0; }");
+  Parser p = parser_new(&st);
+  assert p.parse().is_none(), "expected the whole file to parse";
+  assert st.nodes.len == 2, "expected 2 top-level nodes";
+  fit st.nodes.get(0).kind {
+    .Function(f) -> {
+      assert equals(f.name, "add"), "expected the first function to be 'add'";
+    }
+    _ -> { panic("expected a Function node"); }
+  }
+  fit st.nodes.get(1).kind {
+    .Function(f) -> {
+      assert equals(f.name, "main"), "expected the second function to be 'main'";
+    }
+    _ -> { panic("expected a Function node"); }
+  }
+}
+
+test "parse parses a public function and an async function" {
+  ParseState st = _state_from("pub fun greet() { } async fun work() { }");
+  Parser p = parser_new(&st);
+  assert p.parse().is_none(), "expected the whole file to parse";
+  assert st.nodes.len == 2, "expected 2 top-level nodes";
+  fit st.nodes.get(0).kind {
+    .Function(f) -> {
+      assert equals(f.name, "greet"), "expected the first function to be 'greet'";
+      assert st.nodes.get(0).flags.is_public, "expected 'greet' to be public";
+    }
+    _ -> { panic("expected a Function node"); }
+  }
+  fit st.nodes.get(1).kind {
+    .Function(f) -> {
+      assert equals(f.name, "work"), "expected the second function to be 'work'";
+      assert f.is_async, "expected 'work' to be async";
+    }
+    _ -> { panic("expected a Function node"); }
+  }
+}
+
+test "parse parses top-level variable declarations (bare and public)" {
+  ParseState st = _state_from("num counter = 0; pub str greeting = \"hi\";");
+  Parser p = parser_new(&st);
+  assert p.parse().is_none(), "expected the whole file to parse";
+  assert st.nodes.len == 2, "expected 2 top-level nodes";
+  fit st.nodes.get(0).kind {
+    .Variable(v) -> {
+      assert equals(v.name, "counter"), "expected the first variable to be 'counter'";
+    }
+    _ -> { panic("expected a Variable node"); }
+  }
+  fit st.nodes.get(1).kind {
+    .Variable(v) -> {
+      assert equals(v.name, "greeting"), "expected the second variable to be 'greeting'";
+      assert st.nodes.get(1).flags.is_public, "expected 'greeting' to be public";
+    }
+    _ -> { panic("expected a Variable node"); }
+  }
+}
+
+test "parse_top_level_declaration reports a clean error for an unsupported top-level keyword" {
+  ParseState st = _state_from("enum Color { Red, Green }");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_top_level_declaration();
+  assert err.is_some(), "expected an error for an unsupported top-level keyword";
+}
+
+test "parse_top_level_declaration reports a clean error for an unsupported 'pub' target" {
+  ParseState st = _state_from("pub enum Color { Red, Green }");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_top_level_declaration();
+  assert err.is_some(), "expected an error for an unsupported keyword after 'pub'";
+}
+
+test "parse stops cleanly at end of input" {
+  ParseState st = _state_from("");
+  Parser p = parser_new(&st);
+  assert p.parse().is_none(), "expected an empty file to parse with no nodes";
+  assert st.nodes.len == 0, "expected no top-level nodes";
 }
 
 test "parse_for_statement parses an infinite loop with no condition" {
