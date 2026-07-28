@@ -431,6 +431,11 @@ pub const TranspileProcess = struct {
     /// Call-site overrides for await lowering (resolved callee + receiver strategy).
     await_call_overrides: std.StringHashMap(AwaitCallOverride),
 
+    /// Per-for-statement overrides for `for item : <iterable>` element typing
+    /// over a Vec (see `ForIterInfo`'s own doc comment), keyed by position
+    /// like the other override maps above.
+    for_iter_overrides: std.StringHashMap(ForIterInfo),
+
     /// Import chain to detect circular dependencies
     import_chain: ArrayList([]const u8),
 
@@ -2207,6 +2212,36 @@ pub const TranspileProcess = struct {
         var buf: [512]u8 = undefined;
         const key = call_pos_key_buf(p, &buf) orelse return null;
         return self.await_call_overrides.get(key);
+    }
+
+    fn record_for_iter_override(self: *Self, node: ast.Node, info: ForIterInfo) TranspileError!void {
+        const p = node.pos orelse return;
+        const key = try self.call_pos_key_alloc(p);
+        // Stored on the ROOT process, same reasoning as generic_call_overrides:
+        // a `for` loop inside an IMPORTED module is typechecked under a child
+        // process but its body may be emitted via a different process (the
+        // parent, when a caller's body is copied/inlined for cross-module
+        // emission) -- reading from the root makes the override visible
+        // regardless of which process ends up emitting it. Confirmed this
+        // matters directly: without it, a `for x : recv.field` loop inside an
+        // imported module's function failed to find its own just-recorded
+        // override at emission time and hit the "no array identifier" error.
+        const root = self.get_root();
+        const gop = root.for_iter_overrides.getOrPut(key) catch {
+            self.allocator.free(key);
+            return TranspileError.MemoryAllocationFailed;
+        };
+        if (gop.found_existing) {
+            self.allocator.free(key);
+        }
+        gop.value_ptr.* = info;
+    }
+
+    fn lookup_for_iter_override(self: *Self, node: ast.Node) ?ForIterInfo {
+        const p = node.pos orelse return null;
+        var buf: [512]u8 = undefined;
+        const key = call_pos_key_buf(p, &buf) orelse return null;
+        return self.get_root().for_iter_overrides.get(key);
     }
 
     const PrintFmtArgKind = enum {
@@ -4189,6 +4224,7 @@ pub const TranspileProcess = struct {
             .generic_call_overrides = std.StringHashMap([]const u8).init(a),
             .enum_ctor_overrides = std.StringHashMap([]const u8).init(a),
             .await_call_overrides = std.StringHashMap(AwaitCallOverride).init(a),
+            .for_iter_overrides = std.StringHashMap(ForIterInfo).init(a),
             .input_file_path = input_file_path,
             .input_source = input_source,
             .stdlib_dir = discovered_stdlib_dir,
@@ -4652,6 +4688,18 @@ pub const TranspileProcess = struct {
         callee_name: []const u8,
         receiver_expr: ?*ast.Node = null,
         receiver_pass_by_ref: bool = false,
+    };
+
+    /// Resolved element-typing info for a `for item : <iterable>` loop over
+    /// a Vec, recorded once during typecheck (which already infers arbitrary
+    /// expressions fine via `infer_expr_type`) and read back during codegen
+    /// via `lookup_for_iter_override` -- so the emission path isn't limited
+    /// to re-deriving this from a bare identifier's scope entity the way the
+    /// raw-C-array fast path still has to (that path's `sizeof`-based length
+    /// computation is inherently identifier-only; this override is what
+    /// lets the SEPARATE Vec fast path support any expression instead).
+    const ForIterInfo = struct {
+        vec_item_dt: ?*dtype.DataType = null,
     };
 
     const AwaitCallOverride = struct {
@@ -9594,6 +9642,17 @@ pub const TranspileProcess = struct {
                                 self.report_type_error(stmt, "for-iter with an index ('i, item') requires an array, a Vec, or a Map", .{});
                                 return TranspileError.TypeMismatch;
                             }
+                            // Record the resolved Vec item type for codegen's fast path
+                            // (see ForIterInfo's doc comment) -- resolved here from the
+                            // iterable's inferred type, which `infer_expr_type` already
+                            // handles for any expression (an identifier, a field access,
+                            // a call, ...), not just a bare identifier. Codegen no longer
+                            // has to re-derive this via a name-only scope-entity lookup,
+                            // which is what previously limited the Vec fast path to
+                            // identifier iterables only.
+                            if (vec_item_dt) |item_dt| {
+                                try self.record_for_iter_override(stmt, .{ .vec_item_dt = item_dt });
+                            }
                             try env.push();
                             defer env.pop();
                             if (map_kv) |kv| {
@@ -12553,6 +12612,10 @@ pub const TranspileProcess = struct {
 
         // Same ownership model as generic_call_overrides.
         self.await_call_overrides.deinit();
+
+        // Values are plain optional pointers (no owned strings); keys follow
+        // the same arena-allocated ownership model as generic_call_overrides.
+        self.for_iter_overrides.deinit();
 
         // Release all arena allocations back to the backing allocator.
         self.arena.deinit();
@@ -19145,6 +19208,74 @@ pub const TranspileProcess = struct {
         }
     }
 
+    /// Emits the indexed-loop body for `for item : <arr_name>` over a Vec
+    /// (`arr_name.len`/`arr_name.data[idx]`), given the already-resolved item
+    /// type `vec_item_dt`. `arr_name` may name the iterable directly (the
+    /// common case) or a temp variable a caller bound it to first (for an
+    /// iterable that isn't a bare identifier -- see the `.iter` call site's
+    /// own comment for why that's needed). Assumes the caller has already
+    /// positioned the cursor at the start of a fresh, indented line.
+    fn emit_vec_iter_fast_path(self: *Self, fi: anytype, arr_name: []const u8, vec_item_dt: *dtype.DataType) TranspileError!void {
+        const idx_name = fi.index_name orelse "__fun_i";
+
+        try self.write("for (int64_t ");
+        try self.write(idx_name);
+        try self.write(" = 0; ");
+        try self.write(idx_name);
+        try self.write(" < ");
+        try self.write(arr_name);
+        try self.write(".len; ");
+        try self.write(idx_name);
+        try self.write("++) {");
+        self.indent();
+
+        try self.push_defer_scope(.loop);
+        defer self.pop_defer_scope();
+
+        _ = try self.new_scope();
+        defer self.finish_scope();
+
+        try self.write_indent();
+        try self.write("__auto_type ");
+        try self.write(fi.item_name);
+        try self.write(" = ");
+        try self.write(arr_name);
+        try self.write(".data[");
+        try self.write(idx_name);
+        try self.write("];\n");
+
+        const item_dt = try self.clone_dtype(vec_item_dt);
+        const item_node = self.allocator.create(ast.Node) catch return TranspileError.MemoryAllocationFailed;
+        var item_name_buf = ArrayList(u8).init(self.allocator);
+        item_name_buf.appendSlice(fi.item_name) catch return TranspileError.MemoryAllocationFailed;
+        item_node.* = .{
+            .type = .Variable,
+            .node_variant = .{ .variable = .{
+                .type = item_dt,
+                .name = item_name_buf,
+                .val = null,
+            } },
+        };
+
+        const item_ent = self.allocator.create(scope.ScopeEntity) catch return TranspileError.MemoryAllocationFailed;
+        item_ent.* = .{
+            .flags = .{ .on_stack = false },
+            .node = item_node,
+            .name = fi.item_name,
+        };
+        try self.push_scope_entity(item_ent);
+        self.owned_scope_entities.append(item_ent) catch return TranspileError.MemoryAllocationFailed;
+
+        try self.transpile_block_contents(fi.body);
+        if (!self.block_ends_with_scope_terminator(fi.body)) {
+            try self.emit_current_scope_defers();
+        }
+
+        self.dedent();
+        try self.write_indent();
+        try self.write("}");
+    }
+
     fn transpile_node(self: *Self, node: ast.Node) TranspileError!void {
         if (self.recursion_depth >= max_expr_recursion_depth) {
             self.report_error(node, "expression nests too deeply for the compiler to emit (limit {d})", .{max_expr_recursion_depth});
@@ -21273,10 +21404,36 @@ pub const TranspileProcess = struct {
                                 if (try self.emit_iter_protocol_for(fi)) {
                                     break :iter_blk;
                                 }
-                                // We only support iterating array identifiers for now.
+                                // A Vec-typed iterable that ISN'T a bare identifier (a
+                                // field access, a call, ...): the raw-array fast path
+                                // below needs a real identifier (its length comes from
+                                // a `sizeof`-based trick that only works on a genuine
+                                // C array variable), but the Vec fast path only needs
+                                // `.len`/`.data[idx]`, which work identically on any
+                                // Vec-typed value. Resolved via typecheck's override
+                                // (see `ForIterInfo`'s doc comment) instead of a scope-
+                                // entity lookup by name, since there's no name here.
+                                // The iterable is evaluated ONCE into a temp so a
+                                // side-effecting expression (a call) isn't re-evaluated
+                                // for both the length check and the element access.
                                 if (fi.iterable.type != .Identifier) {
-                                    self.err("for-each loops currently require an array identifier", .{});
-                                    return TranspileError.UnsupportedNodeType;
+                                    const over = self.lookup_for_iter_override(node) orelse {
+                                        self.err("for-each loops currently require an array identifier (a Vec-typed expression is also supported)", .{});
+                                        return TranspileError.UnsupportedNodeType;
+                                    };
+                                    const vec_item_dt = over.vec_item_dt orelse {
+                                        self.err("for-each loops over a raw array currently require an array identifier", .{});
+                                        return TranspileError.UnsupportedNodeType;
+                                    };
+                                    const tmp_name = try self.next_tmp_name("iter");
+                                    try self.write("__auto_type ");
+                                    try self.write(tmp_name);
+                                    try self.write(" = ");
+                                    try self.transpile_node(fi.iterable.*);
+                                    try self.write(";\n");
+                                    try self.write_indent();
+                                    try self.emit_vec_iter_fast_path(fi, tmp_name, vec_item_dt);
+                                    break :iter_blk;
                                 }
                                 const arr_name = fi.iterable.data.?.sval.items;
 
@@ -21307,62 +21464,7 @@ pub const TranspileProcess = struct {
                                 }
 
                                 if (vec_item_dt != null) {
-                                    try self.write("for (int64_t ");
-                                    try self.write(idx_name);
-                                    try self.write(" = 0; ");
-                                    try self.write(idx_name);
-                                    try self.write(" < ");
-                                    try self.write(arr_name);
-                                    try self.write(".len; ");
-                                    try self.write(idx_name);
-                                    try self.write("++) {");
-                                    self.indent();
-
-                                    try self.push_defer_scope(.loop);
-                                    defer self.pop_defer_scope();
-
-                                    _ = try self.new_scope();
-                                    defer self.finish_scope();
-
-                                    try self.write_indent();
-                                    try self.write("__auto_type ");
-                                    try self.write(fi.item_name);
-                                    try self.write(" = ");
-                                    try self.write(arr_name);
-                                    try self.write(".data[");
-                                    try self.write(idx_name);
-                                    try self.write("];\n");
-
-                                    const item_dt = try self.clone_dtype(vec_item_dt.?);
-                                    const item_node = self.allocator.create(ast.Node) catch return TranspileError.MemoryAllocationFailed;
-                                    var item_name_buf = ArrayList(u8).init(self.allocator);
-                                    item_name_buf.appendSlice(fi.item_name) catch return TranspileError.MemoryAllocationFailed;
-                                    item_node.* = .{
-                                        .type = .Variable,
-                                        .node_variant = .{ .variable = .{
-                                            .type = item_dt,
-                                            .name = item_name_buf,
-                                            .val = null,
-                                        } },
-                                    };
-
-                                    const item_ent = self.allocator.create(scope.ScopeEntity) catch return TranspileError.MemoryAllocationFailed;
-                                    item_ent.* = .{
-                                        .flags = .{ .on_stack = false },
-                                        .node = item_node,
-                                        .name = fi.item_name,
-                                    };
-                                    try self.push_scope_entity(item_ent);
-                                    self.owned_scope_entities.append(item_ent) catch return TranspileError.MemoryAllocationFailed;
-
-                                    try self.transpile_block_contents(fi.body);
-                                    if (!self.block_ends_with_scope_terminator(fi.body)) {
-                                        try self.emit_current_scope_defers();
-                                    }
-
-                                    self.dedent();
-                                    try self.write_indent();
-                                    try self.write("}");
+                                    try self.emit_vec_iter_fast_path(fi, arr_name, vec_item_dt.?);
                                 } else {
                                     // The length expression root and offset:
                                     // - For regular arrays: root=arr_name, offset=0

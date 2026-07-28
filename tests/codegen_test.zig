@@ -5427,6 +5427,96 @@ test "local array of compound stays in function body (not hoisted to file scope)
     try std.testing.expectEqualStrings("sum=6\n", stdout);
 }
 
+test "for-each over a non-identifier Vec expression (field access, call, imported module)" {
+    const allocator = std.testing.allocator;
+    const mod_path = "codegen_for_iter_vec_expr_mod.fn";
+    const main_path = "codegen_for_iter_vec_expr_main.fn";
+    const c_path = "codegen_for_iter_vec_expr_main.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_for_iter_vec_expr_main.exe" else "codegen_for_iter_vec_expr_main";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, mod_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, main_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: `for item : <expr>` only supported a bare identifier
+    // iterable ("for-each loops currently require an array identifier"),
+    // even when <expr> is Vec-typed (Vec's `.len`/`.data[idx]` fast path
+    // works identically on any Vec-typed value, unlike the raw-array
+    // fast path, which genuinely needs an identifier for its
+    // sizeof-based length trick). Also regresses the cross-module case
+    // specifically: the fix's resolved-type override must be stored on
+    // the ROOT TranspileProcess (matching generic_call_overrides), since
+    // a for-loop inside an IMPORTED module's function is typechecked
+    // under a child process but its body is emitted through a different
+    // one -- storing on `self` instead loses the override entirely.
+    {
+        const mod_file = try std.Io.Dir.cwd().createFile(std.testing.io, mod_path, .{ .read = true });
+        defer mod_file.close(std.testing.io);
+        try mod_file.writeStreamingAll(
+            std.testing.io,
+            "imp std.vec;\n" ++
+                "pub compound Holder {\n" ++
+                "  Vec<num> items;\n" ++
+                "}\n" ++
+                "pub fun make_holder() Holder {\n" ++
+                "  Holder h;\n" ++
+                "  h.items.init(0);\n" ++
+                "  h.items.push(1);\n" ++
+                "  h.items.push(2);\n" ++
+                "  h.items.push(3);\n" ++
+                "  ret h;\n" ++
+                "}\n" ++
+                "pub fun sum_items(Holder* h) num {\n" ++
+                "  num total = 0;\n" ++
+                // Field access -- not a bare identifier.
+                "  for x : h.items {\n" ++
+                "    total = total + x;\n" ++
+                "  }\n" ++
+                "  ret total;\n" ++
+                "}\n" ++
+                "pub fun make_items() Vec<num> {\n" ++
+                "  Vec<num> v;\n" ++
+                "  v.init(0);\n" ++
+                "  v.push(10);\n" ++
+                "  v.push(20);\n" ++
+                "  v.push(30);\n" ++
+                "  ret v;\n" ++
+                "}\n" ++
+                "pub fun sum_call_result() num {\n" ++
+                "  num total = 0;\n" ++
+                // Call result -- not a bare identifier, evaluated once.
+                "  for x : make_items() {\n" ++
+                "    total = total + x;\n" ++
+                "  }\n" ++
+                "  ret total;\n" ++
+                "}\n",
+        );
+    }
+
+    const input =
+        "imp codegen_for_iter_vec_expr_mod as m;\n" ++
+        "imp std.c.io;\n" ++
+        "fun main() num {\n" ++
+        "  m.Holder h = m.make_holder();\n" ++
+        "  num a = m.sum_items(&h);\n" ++
+        "  num b = m.sum_call_result();\n" ++
+        "  printf(\"a=%lld b=%lld\\n\", a, b);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, main_path, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("a=6 b=60\n", stdout);
+}
+
 test "local T[] initialized from a pointer emits a C pointer, not an array" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_array_from_ptr.fn";
