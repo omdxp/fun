@@ -14,26 +14,38 @@
 // sibling AST statements -- see `emit_if_chain`'s doc comment), `for`
 // (condition/infinite form as a C `while`, integer-range form as a C
 // counted `for` -- see `emit_for_cond`/`emit_for_range`; the iterator
-// form, `for item : arr { ... }`, is deferred alongside `.` below since it
-// needs member access to call into `Vec`/`Iterator`), bare expression
-// statements (an assignment, a call for its side effect, `x++;` -- these
-// have no dedicated `StatementExpression` AST wrapper, they're a plain
-// `.Expression`/`.Unary` node straight in the statement list), and a
-// top-level function declaration with any number of parameters (still no
-// generics/variadics). Verified end to end: the self-hosted lexer ->
-// self-hosted parser -> this codegen, on programs using variables,
-// comparisons, if-elif-else, assignment statements, both `for` loop forms
-// above, and multi-arg function calls, produces C that compiles and runs
-// with the correct exit code.
+// form, `for item : arr { ... }`, is still deferred -- see below), bare
+// expression statements (an assignment, a call for its side effect,
+// `x++;` -- these have no dedicated `StatementExpression` AST wrapper,
+// they're a plain `.Expression`/`.Unary` node straight in the statement
+// list), a non-generic `compound Name { fields }` declaration as a C
+// struct (see `emit_compound`), single-level `ident.field` member access
+// deciding `.`/`->` from the receiver's DECLARED pointer-ness (a
+// deliberately narrow, non-inference-based heuristic -- see
+// `emit_field_access`'s doc comment for exactly what it can't handle),
+// and a top-level function declaration with any number of parameters
+// (still no generics/variadics). Verified end to end: the self-hosted
+// lexer -> self-hosted parser -> this codegen, on programs using
+// variables, comparisons, if-elif-else, assignment statements, both `for`
+// loop forms above, multi-arg function calls, and a compound with field
+// reads/writes, produces C that compiles and runs with the correct exit
+// code.
 // 
 // Deliberately deferred from this slice (documented rather than silently
 // dropped):
-// - `[]` (indexing), `.` (member access) -- the latter needs `.`/`->`
-// disambiguation based on pointer-ness, so it also blocks method calls
-// (`recv.method(...)`, a callee that ISN'T a plain identifier), calls
-// through an aliased/imported module, and the iterator form of `for`.
-// - `fit`, and every declaration kind besides a plain function
-// (`compound`/`enum`/`quirk`/`impl`).
+// - Chained field access (`a.b.c`), `self`/method calls (`recv.method(...)`
+// where the callee isn't a plain identifier), calls/access through an
+// aliased/imported module, and `EnumName.Variant` constant access -- all
+// four share the `Identifier . Identifier` AST shape with plain field
+// access, and `emit_field_access` deliberately refuses to guess at any of
+// them (see its own doc comment). Each needs real infrastructure this
+// slice doesn't have yet: a compound-field-type registry, enum/import
+// support, and (for `self`) `impl` support.
+// - `[]` (indexing), and the iterator form of `for`, which needs `.` to
+// call into `Vec`/`Iterator`.
+// - `fit`, and every declaration kind besides a plain function/non-generic
+// compound (`enum`/`quirk`/`impl`, and a GENERIC compound's monomorphized
+// specializations).
 // - Type INFERENCE: a function's return type and every literal's type are
 // already fully explicit at this stage (an omitted `let` type, or a
 // function relying on inferred generics, isn't reachable yet), so no
@@ -70,12 +82,32 @@ pub enum CodegenErrorKind {
 
 pub compound Codegen {
   CodegenState* state;
+  // A best-effort, function-local (reset at the start of every
+  // `emit_function`, see its own doc comment) record of which local names
+  // (parameters and `Variable` declarations seen so far, in source order)
+  // are pointer-typed -- just enough to decide `.`/`->` for a plain
+  // `ident.field` access without a real type-inference engine. See
+  // `emit_field_access`'s doc comment for what this deliberately can't
+  // handle yet.
+  Vec<str> local_names;
+  Vec<bin> local_is_pointer;
 }
 
 pub fun codegen_new(CodegenState* state) Codegen {
   Codegen g;
   g.state = state;
+  g.local_names.init(0);
+  g.local_is_pointer.init(0);
   ret g;
+}
+
+// True when `dt` is a pointer of any depth -- mirrors `write_type`'s own
+// `ptr_depth`/`flags.is_pointer` check.
+fun dtype_is_pointer(DataType dt) bin {
+  if dt.pointer_depth > 0 {
+    ret true;
+  }
+  ret dt.flags.is_pointer;
 }
 
 impl Codegen {
@@ -101,6 +133,30 @@ impl Codegen {
       self.state.write("*");
       i = i + 1;
     }
+  }
+
+  // Records that local `name` is (or isn't) a pointer, for later
+  // `ident.field` `.`/`->` decisions. See the `Codegen.local_names`/
+  // `local_is_pointer` field doc comment for the scope of this tracking.
+  record_local(str name, bin is_pointer) {
+    self.local_names.push(name);
+    self.local_is_pointer.push(is_pointer);
+  }
+
+  // Looks up whether `name` was recorded as a pointer local. `.None` means
+  // `name` isn't a known local at all (e.g. it's a type name in an enum-
+  // variant-constant or module-alias access, or a not-yet-supported
+  // `self`) -- the caller must treat that as "can't handle this", not
+  // "assume value type".
+  lookup_local_is_pointer(str name) Option<bin> {
+    num i = 0;
+    for i < self.local_names.len {
+      if equals(self.local_names.get(i), name) {
+        ret .Some(self.local_is_pointer.get(i));
+      }
+      i = i + 1;
+    }
+    ret .None;
   }
 
   // Writes a single-quoted C character literal for `c`, escaping the
@@ -207,20 +263,21 @@ impl Codegen {
         ret .None;
       }
       .Expression(e) -> {
-        // `[]` (indexing), `.` (member access), and a bare `,` (comma
-        // reached directly, i.e. NOT as part of a call's argument list --
-        // see `emit_call`/`flatten_call_args`) each need their own
-        // dedicated handling -- member access needs `.`/`->`
-        // disambiguation based on pointer-ness, and none of that exists
-        // yet. `()` (calls) IS handled, but only for a plain-identifier
-        // callee (see `emit_call`'s own doc comment). Every OTHER binary
-        // operator (arithmetic/comparison/logical/bitwise/assignment)
-        // already has an identical C spelling and a plain `(left op
-        // right)` emission is correct as-is.
+        // `[]` (indexing) and a bare `,` (reached directly, i.e. NOT as
+        // part of a call's argument list -- see `emit_call`/
+        // `flatten_call_args`) don't have dedicated handling yet. `()`
+        // (calls) and `.` (member access, single-level only -- see
+        // `emit_field_access`'s doc comment) ARE handled. Every OTHER
+        // binary operator (arithmetic/comparison/logical/bitwise/
+        // assignment) already has an identical C spelling and a plain
+        // `(left op right)` emission is correct as-is.
         if equals(e.op, "()") {
           ret self.emit_call(e);
         }
-        if equals(e.op, "[]") || equals(e.op, ".") || equals(e.op, ",") {
+        if equals(e.op, ".") {
+          ret self.emit_field_access(e);
+        }
+        if equals(e.op, "[]") || equals(e.op, ",") {
           ret .Some(CodegenErrorKind.UnsupportedNode);
         }
         if !e.has_left || !e.has_right {
@@ -313,6 +370,52 @@ impl Codegen {
     ret .None;
   }
 
+  // Emits `recv.field` as C `recv.field` or `recv->field`, deciding
+  // `.`/`->` from `recv`'s DECLARED pointer-ness (`lookup_local_is_pointer`
+  // -- no type inference, just the same "already fully explicit" model
+  // this whole file uses elsewhere).
+  // 
+  // Deliberately narrow for this slice: `recv` must be a plain identifier
+  // that's a KNOWN local (a function parameter or a `Variable` declaration
+  // already emitted earlier in this same function -- see `record_local`).
+  // This is a conservative choice, not just a missing feature: the exact
+  // same AST shape (`Identifier . Identifier`) is ALSO how `EnumName.
+  // Variant` (an enum-variant constant) and `alias.symbol` (a module-
+  // aliased access) parse, and neither is reachable yet (no enum/import
+  // support in codegen). Silently guessing "not a pointer, use `.`" for
+  // those would emit plausible-looking but WRONG C (e.g. treating an enum
+  // name as a struct value) -- so an unrecognized receiver is rejected
+  // rather than guessed. Chained access (`a.b.c`) is also deferred: it
+  // needs the FIELD's own declared type (not just a local's), which needs
+  // a compound-field-type registry that doesn't exist yet either.
+  emit_field_access(ExprNode e) Option<CodegenErrorKind> {
+    if !e.has_left || !e.has_right {
+      ret .Some(CodegenErrorKind.InvalidNode);
+    }
+    str recv_name = "";
+    fit e.left.kind {
+      .Identifier(name) -> { recv_name = name; }
+      _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+    }
+    str field_name = "";
+    fit e.right.kind {
+      .Identifier(name) -> { field_name = name; }
+      _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+    }
+    let found = self.lookup_local_is_pointer(recv_name);
+    if found.is_none() {
+      ret .Some(CodegenErrorKind.UnsupportedNode);
+    }
+    self.state.write(recv_name);
+    if found.unwrap() {
+      self.state.write("->");
+    } else {
+      self.state.write(".");
+    }
+    self.state.write(field_name);
+    ret .None;
+  }
+
   // Emits one statement, followed by its own trailing newline (statements
   // are the unit `emit_statements` iterates, so each ends its own line).
   // `StatementIf`/`StatementElseIf`/`StatementElse` are deliberately NOT
@@ -349,6 +452,7 @@ impl Codegen {
           }
         }
         self.state.write(";\n");
+        self.record_local(v.name, dtype_is_pointer(*v.var_type));
         ret .None;
       }
       .StatementFor(fk) -> {
@@ -580,13 +684,15 @@ impl Codegen {
   }
 
   // Emits one function parameter (a `Variable` node with no initializer)
-  // as `<type> <name>`.
+  // as `<type> <name>`, and records it as a local for `.`/`->` decisions
+  // (see `Codegen.local_names`'s doc comment).
   emit_function_param(Node param) Option<CodegenErrorKind> {
     fit param.kind {
       .Variable(v) -> {
         self.write_type(*v.var_type);
         self.state.write(" ");
         self.state.write(v.name);
+        self.record_local(v.name, dtype_is_pointer(*v.var_type));
         ret .None;
       }
       _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
@@ -601,6 +707,13 @@ impl Codegen {
   pub emit_function(Node node) Option<CodegenErrorKind> {
     fit node.kind {
       .Function(f) -> {
+        // Fresh per function -- see `Codegen.local_names`'s doc comment;
+        // this is deliberately NOT scoped to nested blocks (an inner `{
+        // }` shadowing an outer local of the same name would get this
+        // wrong), which is fine for now since nothing this slice's tests
+        // exercise shadows a local.
+        self.local_names.init(0);
+        self.local_is_pointer.init(0);
         if !f.has_rtype {
           ret .Some(CodegenErrorKind.InvalidNode);
         }
@@ -639,6 +752,44 @@ impl Codegen {
     }
   }
 
+  // Emits a non-generic `compound Name { fields }` declaration as a C
+  // struct typedef: `typedef struct Name { <type> <field>; ... } Name;`.
+  // 
+  // Deliberately simplified from the original for this slice: a generic
+  // compound (`has_type_params`) is silently skipped rather than emitted
+  // (matching the original's own rule that a generic TEMPLATE is never
+  // emitted directly, only its concrete monomorphized specializations --
+  // monomorphization itself is a separate, larger deferred item). No
+  // forward declaration and no dependency-ordering pass for by-value
+  // nested compounds either (the original topologically sorts these) --
+  // this assumes source order already satisfies it, same as a plain
+  // sequential C struct-after-struct listing would require. No array-
+  // typed fields (`T[3]`/`T[]`) -- only scalar/pointer field types.
+  emit_compound(Node node) Option<CodegenErrorKind> {
+    fit node.kind {
+      .Compound(c) -> {
+        if c.has_type_params {
+          ret .None;
+        }
+        self.state.write("typedef struct ");
+        self.state.write(c.name);
+        self.state.write(" {\n");
+        for f : c.fields {
+          self.state.write("  ");
+          self.write_type(*f.dtype);
+          self.state.write(" ");
+          self.state.write(f.name);
+          self.state.write(";\n");
+        }
+        self.state.write("} ");
+        self.state.write(c.name);
+        self.state.write(";\n\n");
+        ret .None;
+      }
+      _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
+    }
+  }
+
   // Writes the fixed set of C headers the original always includes
   // (before any conditional ones gated on stdlib usage, threads, sockets,
   // etc. -- none of which are reachable yet since imports aren't ported).
@@ -651,11 +802,26 @@ impl Codegen {
     self.state.write("#include <string.h>\n");
   }
 
-  // Transpiles every top-level `Function` node in `nodes` (anything else
-  // is skipped -- not an error, since a whole-file parse can contain
-  // declarations not reachable yet, like `imp`).
+  // Transpiles every top-level `Compound`/`Function` node in `nodes`
+  // (anything else is skipped -- not an error, since a whole-file parse
+  // can contain declarations not reachable yet, like `imp`). Compounds are
+  // emitted in a first pass, all before any function, so a function can
+  // reference any of them regardless of source order -- see
+  // `emit_compound`'s doc comment for what that first pass deliberately
+  // doesn't handle yet (dependency ordering between compounds themselves).
   pub transpile(Vec<Node> nodes) Option<CodegenErrorKind> {
     self.write_prelude();
+    for n : nodes {
+      fit n.kind {
+        .Compound(c) -> {
+          let cerr = self.emit_compound(n);
+          if cerr.is_some() {
+            ret cerr;
+          }
+        }
+        _ -> {}
+      }
+    }
     for n : nodes {
       fit n.kind {
         .Function(f) -> {
@@ -803,7 +969,7 @@ test "emit_expr emits a binary expression" {
   assert equals(st.out.build(), "(a + b)"), "expected '(a + b)'";
 }
 
-test "emit_expr rejects an index/member-access/comma expression (not yet supported)" {
+test "emit_expr rejects an index/comma expression (not yet supported)" {
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
   Node* left = malloc(sizeof(Node));
@@ -1236,6 +1402,109 @@ test "emit_statement emits a range for as a counted C for loop" {
 
   assert g.emit_statement(n).is_none(), "expected the for-range to emit";
   assert equals(st.out.build(), "for (int64_t i = 0; i < n; i++) {\n    return;\n}\n"), "expected a counted C for loop";
+}
+
+test "emit_expr emits '.' field access on a known value-typed local" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  g.record_local("p", false);
+
+  Node* recv = malloc(sizeof(Node));
+  *recv = node_new(NodeKind.Identifier("p"));
+  Node* field = malloc(sizeof(Node));
+  *field = node_new(NodeKind.Identifier("x"));
+  ExprNode e;
+  e.left = recv;
+  e.has_left = true;
+  e.right = field;
+  e.has_right = true;
+  e.op = ".";
+  Node n = node_new(NodeKind.Expression(e));
+
+  assert g.emit_expr(n).is_none(), "expected the field access to emit";
+  assert equals(st.out.build(), "p.x"), "expected 'p.x'";
+}
+
+test "emit_expr emits '->' field access on a known pointer-typed local" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  g.record_local("p", true);
+
+  Node* recv = malloc(sizeof(Node));
+  *recv = node_new(NodeKind.Identifier("p"));
+  Node* field = malloc(sizeof(Node));
+  *field = node_new(NodeKind.Identifier("x"));
+  ExprNode e;
+  e.left = recv;
+  e.has_left = true;
+  e.right = field;
+  e.has_right = true;
+  e.op = ".";
+  Node n = node_new(NodeKind.Expression(e));
+
+  assert g.emit_expr(n).is_none(), "expected the field access to emit";
+  assert equals(st.out.build(), "p->x"), "expected 'p->x'";
+}
+
+test "emit_expr rejects '.' access on a receiver that isn't a known local" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  Node* recv = malloc(sizeof(Node));
+  *recv = node_new(NodeKind.Identifier("SomeEnum"));
+  Node* field = malloc(sizeof(Node));
+  *field = node_new(NodeKind.Identifier("Variant"));
+  ExprNode e;
+  e.left = recv;
+  e.has_left = true;
+  e.right = field;
+  e.has_right = true;
+  e.op = ".";
+  Node n = node_new(NodeKind.Expression(e));
+
+  assert g.emit_expr(n).is_some(), "expected an unrecognized receiver to be rejected rather than guessed";
+}
+
+test "emit_compound emits a non-generic compound as a C struct typedef" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  DataType* dt_x = malloc(sizeof(DataType));
+  *dt_x = dtype_new();
+  dt_x.type_str = "num";
+  CompoundField fx;
+  fx.name = "x";
+  fx.dtype = dt_x;
+
+  DataType* dt_y = malloc(sizeof(DataType));
+  *dt_y = dtype_new();
+  dt_y.type_str = "num";
+  CompoundField fy;
+  fy.name = "y";
+  fy.dtype = dt_y;
+
+  CompoundNode c = compound_node_new();
+  c.name = "Point";
+  c.fields.push(fx);
+  c.fields.push(fy);
+
+  Node n = node_new(NodeKind.Compound(c));
+  assert g.emit_compound(n).is_none(), "expected the compound to emit";
+  assert equals(st.out.build(), "typedef struct Point {\n  int64_t x;\n  int64_t y;\n} Point;\n\n"), "expected a C struct typedef with both fields";
+}
+
+test "emit_compound skips a generic compound (monomorphization not yet supported)" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  CompoundNode c = compound_node_new();
+  c.name = "Box";
+  c.type_params.push("T");
+  c.has_type_params = true;
+
+  Node n = node_new(NodeKind.Compound(c));
+  assert g.emit_compound(n).is_none(), "expected a generic compound to be silently skipped";
+  assert equals(st.out.build(), ""), "expected nothing emitted for a generic compound";
 }
 
 test "emit_statement emits a bare assignment expression as a statement" {
