@@ -30,9 +30,13 @@
 // any other function), a method call `recv.method(...)` resolved
 // statically to `Type__method(<self-arg>, ...)` from the receiver's
 // known local type (see `emit_method_call`'s doc comment), `fit subject {
-// patterns -> { body } ... }` over a plain-identifier subject with
-// literal patterns as a C `if`/`else if`/`else` chain (see `emit_fit`'s
-// doc comment), a non-generic `enum Name { variants }` declaration --
+// patterns -> { body } ... }` over a plain-identifier subject -- either a
+// literal-pattern chain, or a tagged-union enum-variant pattern (bare
+// `.Variant`/`.Variant(x)`, resolved against the SUBJECT's own declared
+// local type, or qualified `EnumName.Variant`/`EnumName.Variant(x)`),
+// destructuring any positional bindings out of the payload -- as a C
+// `if`/`else if`/`else` chain (see `emit_fit`/`emit_fit_enum_branch`'s
+// doc comments), a non-generic `enum Name { variants }` declaration --
 // either a plain C enum, or, when any variant carries a payload, the
 // original's own discriminant-enum-plus-tagged-struct/union layout (see
 // `emit_enum`/`emit_tagged_union_enum`'s doc comments) -- together with
@@ -48,28 +52,30 @@
 // field reads/writes, a plain impl method called both directly and
 // through `self`, a `fit` over a `num` subject with a comma-chained
 // pattern and a default arm, a plain enum whose variant constants are
-// compared and returned, and a tagged-union enum constructed both with a
-// payload and payload-less (as a function's return value, assigned to a
-// local), produces C that compiles and runs with the correct exit code.
+// compared and returned, and a tagged-union enum constructed two ways
+// (a payload, and payload-less) and destructured back out through a
+// `fit` with a bare-shorthand binding pattern and a bare no-payload
+// variant match, produces C that compiles and runs with the correct
+// exit code.
 // 
 // Deliberately deferred from this slice (documented rather than silently
 // dropped):
 // - Chained field access (`a.b.c`, including reading a tagged union's own
-// `.payload.Variant._N` fields back out), and calls/access through an
-// aliased/imported module -- both share the `Identifier . Identifier`
-// AST shape with plain field access and qualified enum-variant access,
-// and `emit_field_access` deliberately refuses to guess at either of
-// them (see its own doc comment). Each needs real infrastructure this
-// slice doesn't have yet: a compound-field-type registry, and import
-// support respectively.
-// - A BARE enum-variant shorthand (`.Some(x)`, `.None`, no `EnumName.`
-// qualifier) -- resolving which enum it refers to needs type inference
-// from the expected type (a function's declared return type, a
-// variable's declared type, ...), which doesn't exist yet; only the
-// explicitly-qualified form is supported this slice. A `fit` branch
-// matching a bare enum-variant shorthand or destructuring pattern is
-// deferred for the same reason (plus needing the tag comparison/payload-
-// binding machinery on top).
+// `.payload.Variant._N` fields back out WITHOUT going through a `fit`
+// destructuring pattern), and calls/access through an aliased/imported
+// module -- both share the `Identifier . Identifier` AST shape with
+// plain field access and qualified enum-variant access, and
+// `emit_field_access` deliberately refuses to guess at either of them
+// (see its own doc comment). Each needs real infrastructure this slice
+// doesn't have yet: a compound-field-type registry, and import support
+// respectively.
+// - A BARE enum-variant shorthand used as an ORDINARY EXPRESSION
+// (`ret .Some(x);`, `Option<num> x = .None;`, no `EnumName.` qualifier
+// and not inside a `fit` pattern, where the SUBJECT's own declared type
+// stands in for the missing qualifier) -- resolving which enum it refers
+// to there needs a real expected-type mechanism (a function's declared
+// return type, a variable's declared type, ...) this codegen doesn't
+// have yet.
 // - A GENERIC enum (`enum Option<T> { ... }`) -- monomorphization is a
 // separate, larger deferred item, same as generic compounds/impls.
 // - Quirk-implementing impls (`impl Type as Quirk { ... }`) -- their
@@ -927,12 +933,75 @@ impl Codegen {
     ret .None;
   }
 
+  // Emits one `fit` branch that matches a tagged-union enum variant
+  // (bare shorthand `.Variant`/`.Variant(x)`, or qualified
+  // `EnumName.Variant`/`EnumName.Variant(x)`, with or without
+  // destructuring bindings) as `subj.tag == EnumName_Variant { ... }`,
+  // chained with a leading `if`/`else if` per `wrote_branch` matching
+  // the literal-chain path's own convention in `emit_fit`. Each
+  // positional binding name gets its own `__auto_type name =
+  // subj.payload.Variant._N;` declaration first (matching
+  // `emit_for_iter`'s own reason for `__auto_type`: this codegen has no
+  // way to know the payload field's declared Fun type here either).
+  emit_fit_enum_branch(
+    str subj_name,
+    str enum_name,
+    str variant_name,
+    FitBranch br,
+    bin wrote_branch
+  ) Option<CodegenErrorKind> {
+    if wrote_branch {
+      self.state.write(" else if (");
+    } else {
+      self.state.write("if (");
+    }
+    self.state.write(subj_name);
+    self.state.write(".tag == ");
+    self.state.write(enum_name);
+    self.state.write("_");
+    self.state.write(variant_name);
+    self.state.write(") {\n");
+    self.state.indent_level = self.state.indent_level + 1;
+    if br.has_bindings {
+      num bi = 0;
+      for bname : br.bindings {
+        self.state.write_indent();
+        self.state.write("__auto_type ");
+        self.state.write(bname);
+        self.state.write(" = ");
+        self.state.write(subj_name);
+        self.state.write(".payload.");
+        self.state.write(variant_name);
+        self.state.write("._");
+        self.state.write(format_num(bi));
+        self.state.write(";\n");
+        bi = bi + 1;
+      }
+    }
+    let berr = self.emit_body(*br.body);
+    if berr.is_some() {
+      ret berr;
+    }
+    self.state.indent_level = self.state.indent_level - 1;
+    self.state.write_indent();
+    self.state.write("}");
+    ret .None;
+  }
+
   // Emits `fit subject { patterns -> { body } ... }` as a chain of C
-  // `if`/`else if`/`else` blocks comparing `subject` against each
-  // branch's literal pattern(s) -- mirrors the original's own `str`/
-  // `dec` "if/else-if chain" lowering, but applied UNIFORMLY here (no
-  // `switch` path for an integral/enum subject, since this codegen has
-  // no type inference to pick a subject-wide strategy). A `str` pattern
+  // `if`/`else if`/`else` blocks. Two pattern kinds are recognized, tried
+  // in order for each branch: (1) a tagged-union enum-variant pattern
+  // (bare or qualified, destructuring or not -- see
+  // `emit_fit_enum_branch`'s doc comment) whenever the branch's
+  // condition has the `Identifier . Identifier` (qualified) or `Blank .
+  // Identifier` (bare shorthand) shape AND names a known enum/variant --
+  // a BARE shorthand's enum name comes from the SUBJECT's own declared
+  // local type, the same "already fully explicit, no real inference"
+  // trick used throughout this file; (2) otherwise, a literal pattern
+  // compared against `subject` directly -- mirrors the original's own
+  // `str`/`dec` "if/else-if chain" lowering, but applied UNIFORMLY here
+  // (no `switch` path for an integral subject, since this codegen has no
+  // type inference to pick a subject-wide strategy). A `str` pattern
   // label compares via `strcmp(...) == 0`; every other literal kind
   // compares via `==` -- decided PER LABEL from that label's own literal
   // kind, not once for the whole subject.
@@ -942,34 +1011,83 @@ impl Codegen {
   // temp variable -- safe only because reading a plain identifier twice
   // has no side effects (a call subject would need a temp var, and this
   // codegen has no type to declare one with anyway). A comma-chained
-  // pattern (`1, 2 -> ...`) matches any of its values (OR-ed
+  // LITERAL pattern (`1, 2 -> ...`) matches any of its values (OR-ed
   // comparisons); reuses `flatten_call_args` directly for that, since
   // it's the exact same comma-flattening a call's argument list needs.
-  // Bare enum-variant shorthand/destructuring patterns (`.Some(x) ->
-  // ...`) aren't reachable yet (no enum support) -- such a branch's
-  // condition naturally fails with `UnsupportedNode` rather than
-  // emitting wrong C, since it isn't a literal `emit_expr` can compare
-  // an identifier against. Explicit destructuring bindings
-  // (`has_bindings`) are rejected outright for the same reason.
+  // A destructuring/enum-variant pattern whose enum/variant ISN'T
+  // recognized (an unknown bare shorthand with no resolvable subject
+  // type, say) is rejected outright rather than falling through to the
+  // literal path, which could never validly compare against it anyway.
   emit_fit(FitStmtNode f) Option<CodegenErrorKind> {
     str subj_name = "";
     fit f.exp.kind {
       .Identifier(name) -> { subj_name = name; }
       _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
     }
+    let subj_type = self.lookup_local_type_name(subj_name);
 
     bin wrote_branch = false;
     Node* default_body = nil;
     bin has_default = false;
 
     for br : f.branches {
-      if br.has_bindings && br.bindings.len > 0 {
-        ret .Some(CodegenErrorKind.UnsupportedNode);
-      }
       if !br.has_condition {
+        if br.has_bindings && br.bindings.len > 0 {
+          ret .Some(CodegenErrorKind.UnsupportedNode);
+        }
         default_body = br.body;
         has_default = true;
         continue;
+      }
+
+      bin handled_as_enum = false;
+      fit br.condition.kind {
+        .Expression(dot_e) -> {
+          if equals(dot_e.op, ".") && dot_e.has_left && dot_e.has_right {
+            str enum_name = "";
+            bin have_enum_name = false;
+            fit dot_e.left.kind {
+              .Identifier(en) -> {
+                enum_name = en;
+                have_enum_name = true;
+              }
+              .Blank -> {
+                if subj_type.is_some() {
+                  enum_name = subj_type.unwrap();
+                  have_enum_name = true;
+                }
+              }
+              _ -> {}
+            }
+            str variant_name = "";
+            fit dot_e.right.kind {
+              .Identifier(vn) -> { variant_name = vn; }
+              _ -> {}
+            }
+            if have_enum_name && self.enum_has_variant(enum_name, variant_name) {
+              let eerr = self.emit_fit_enum_branch(
+                subj_name,
+                enum_name,
+                variant_name,
+                br,
+                wrote_branch
+              );
+              if eerr.is_some() {
+                ret eerr;
+              }
+              handled_as_enum = true;
+              wrote_branch = true;
+            }
+          }
+        }
+        _ -> {}
+      }
+      if handled_as_enum {
+        continue;
+      }
+
+      if br.has_bindings && br.bindings.len > 0 {
+        ret .Some(CodegenErrorKind.UnsupportedNode);
       }
 
       if wrote_branch {
@@ -1198,6 +1316,7 @@ impl Codegen {
         // exercise shadows a local.
         self.local_names.init(0);
         self.local_is_pointer.init(0);
+        self.local_type_name.init(0);
         if !f.has_rtype {
           ret .Some(CodegenErrorKind.InvalidNode);
         }
@@ -2290,7 +2409,11 @@ test "emit_statement rejects a fit over a subject that isn't a plain identifier"
   assert g.emit_statement(n).is_some(), "expected a non-identifier fit subject to be rejected rather than hoisted into a temp";
 }
 
-test "emit_statement rejects a fit branch with a destructuring binding" {
+test "emit_statement rejects a conditionless fit branch that carries bindings" {
+  // Not reachable from real parsed source (a `_` default arm never has
+  // destructuring bindings), but exercised directly as a defensive
+  // invariant check: `has_bindings` must not be treated as a normal
+  // default arm just because `has_condition` is false.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
@@ -2312,7 +2435,157 @@ test "emit_statement rejects a fit branch with a destructuring binding" {
   f.branches.push(br);
 
   Node n = node_new(NodeKind.StatementFit(f));
-  assert g.emit_statement(n).is_some(), "expected a destructuring fit branch to be rejected (no enum support yet)";
+  assert g.emit_statement(n).is_some(), "expected a conditionless branch with bindings to be rejected";
+}
+
+test "emit_statement emits a fit destructuring a bare enum-variant shorthand pattern" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  g.record_local("o", "Opt", false);
+
+  Vec<str> variants;
+  variants.init(0);
+  variants.push("Some");
+  variants.push("None");
+  g.record_enum("Opt", variants, true);
+
+  Node* subj = malloc(sizeof(Node));
+  *subj = node_new(NodeKind.Identifier("o"));
+
+  // `.Some(r) -> { ret r; }` -- bare shorthand: left is Blank, resolved
+  // against the subject's own recorded local type ("Opt").
+  Node* blank = malloc(sizeof(Node));
+  *blank = node_new(NodeKind.Blank);
+  Node* variant_ident = malloc(sizeof(Node));
+  *variant_ident = node_new(NodeKind.Identifier("Some"));
+  ExprNode dot;
+  dot.left = blank;
+  dot.has_left = true;
+  dot.right = variant_ident;
+  dot.has_right = true;
+  dot.op = ".";
+  Node* cond = malloc(sizeof(Node));
+  *cond = node_new(NodeKind.Expression(dot));
+
+  Node* ret_r = malloc(sizeof(Node));
+  *ret_r = node_new(NodeKind.StatementReturn(nil));
+  Vec<Node*> stmts;
+  stmts.init(0);
+  stmts.push(ret_r);
+  BodyNode bn;
+  bn.statements = stmts;
+  Node* body = malloc(sizeof(Node));
+  *body = node_new(NodeKind.Body(bn));
+
+  FitBranch br = fit_branch_new();
+  br.condition = cond;
+  br.has_condition = true;
+  br.body = body;
+  br.bindings.push("r");
+  br.has_bindings = true;
+
+  FitStmtNode f = fit_stmt_node_new();
+  f.exp = subj;
+  f.branches.push(br);
+
+  Node n = node_new(NodeKind.StatementFit(f));
+  assert g.emit_statement(n).is_none(), "expected the bare-shorthand destructuring fit to emit";
+  assert equals(
+    st.out.build(),
+    "if (o.tag == Opt_Some) {\n    __auto_type r = o.payload.Some._0;\n    return;\n}\n"
+  ), "expected a tag check plus a payload-field binding";
+}
+
+test "emit_statement emits a fit matching a qualified payload-less variant" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  g.record_local("o", "Opt", false);
+
+  Vec<str> variants;
+  variants.init(0);
+  variants.push("Some");
+  variants.push("None");
+  g.record_enum("Opt", variants, true);
+
+  Node* subj = malloc(sizeof(Node));
+  *subj = node_new(NodeKind.Identifier("o"));
+
+  // `Opt.None -> { ret; }` -- qualified, no bindings.
+  Node* enum_ident = malloc(sizeof(Node));
+  *enum_ident = node_new(NodeKind.Identifier("Opt"));
+  Node* variant_ident = malloc(sizeof(Node));
+  *variant_ident = node_new(NodeKind.Identifier("None"));
+  ExprNode dot;
+  dot.left = enum_ident;
+  dot.has_left = true;
+  dot.right = variant_ident;
+  dot.has_right = true;
+  dot.op = ".";
+  Node* cond = malloc(sizeof(Node));
+  *cond = node_new(NodeKind.Expression(dot));
+
+  Node* ret_stmt = malloc(sizeof(Node));
+  *ret_stmt = node_new(NodeKind.StatementReturn(nil));
+  Vec<Node*> stmts;
+  stmts.init(0);
+  stmts.push(ret_stmt);
+  BodyNode bn;
+  bn.statements = stmts;
+  Node* body = malloc(sizeof(Node));
+  *body = node_new(NodeKind.Body(bn));
+
+  FitBranch br = fit_branch_new();
+  br.condition = cond;
+  br.has_condition = true;
+  br.body = body;
+
+  FitStmtNode f = fit_stmt_node_new();
+  f.exp = subj;
+  f.branches.push(br);
+
+  Node n = node_new(NodeKind.StatementFit(f));
+  assert g.emit_statement(n).is_none(), "expected the qualified variant-match fit to emit";
+  assert equals(st.out.build(), "if (o.tag == Opt_None) {\n    return;\n}\n"), "expected a plain tag check, no bindings";
+}
+
+test "emit_statement rejects a fit destructuring pattern for an unrecognized enum" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  Node* subj = malloc(sizeof(Node));
+  *subj = node_new(NodeKind.Identifier("o"));
+
+  Node* enum_ident = malloc(sizeof(Node));
+  *enum_ident = node_new(NodeKind.Identifier("SomeUnknownEnum"));
+  Node* variant_ident = malloc(sizeof(Node));
+  *variant_ident = node_new(NodeKind.Identifier("Whatever"));
+  ExprNode dot;
+  dot.left = enum_ident;
+  dot.has_left = true;
+  dot.right = variant_ident;
+  dot.has_right = true;
+  dot.op = ".";
+  Node* cond = malloc(sizeof(Node));
+  *cond = node_new(NodeKind.Expression(dot));
+
+  BodyNode bn;
+  bn.statements.init(0);
+  Node* body = malloc(sizeof(Node));
+  *body = node_new(NodeKind.Body(bn));
+
+  FitBranch br = fit_branch_new();
+  br.condition = cond;
+  br.has_condition = true;
+  br.body = body;
+  br.bindings.push("x");
+  br.has_bindings = true;
+
+  FitStmtNode f = fit_stmt_node_new();
+  f.exp = subj;
+  f.branches.push(br);
+
+  Node n = node_new(NodeKind.StatementFit(f));
+  assert g.emit_statement(n).is_some(), "expected an unrecognized enum/variant to be rejected rather than guessed";
 }
 
 test "emit_expr emits '.' field access on a known value-typed local" {
@@ -2812,4 +3085,139 @@ test "transpile emits the prelude followed by every top-level function" {
   let out = st.out.build();
   assert contains(out, "#include <stdint.h>"), "expected the prelude to be present";
   assert contains(out, "int64_t main(void) {"), "expected the function definition to be present";
+}
+
+test "emit_function resets the locals table's type-name column between functions" {
+  // Regression test: `emit_function` reset `local_names`/
+  // `local_is_pointer` between functions but NOT `local_type_name`, so
+  // it kept accumulating across every function `transpile` emits while
+  // the other two columns emptied out -- the next function's OWN
+  // params then read back a STALE type name at their own (now
+  // misaligned) index instead of their real one. Silent for
+  // `lookup_local_is_pointer`-only callers (`emit_field_access`), but
+  // wrong for anything reading the type name -- exactly what a
+  // bare-shorthand `fit` pattern needs to resolve which enum it's
+  // matching.
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  Vec<str> variants;
+  variants.init(0);
+  variants.push("Some");
+  variants.push("None");
+  g.record_enum("Opt", variants, true);
+
+  FunctionNode fa = function_node_new();
+  fa.name = "fn_a";
+  fa.has_name = true;
+  DataType* fa_rtype = malloc(sizeof(DataType));
+  *fa_rtype = dtype_new();
+  fa_rtype.type_str = "num";
+  fa.rtype = fa_rtype;
+  fa.has_rtype = true;
+  DataType* x_dt = malloc(sizeof(DataType));
+  *x_dt = dtype_new();
+  x_dt.type_str = "num";
+  VariableNode xv;
+  xv.var_type = x_dt;
+  xv.name = "x";
+  xv.has_val = false;
+  Node* x_param = malloc(sizeof(Node));
+  *x_param = node_new(NodeKind.Variable(xv));
+  Vec<Node*> fa_params;
+  fa_params.init(0);
+  fa_params.push(x_param);
+  fa.args = fa_params;
+  fa.has_args = true;
+  Node* x_ident = malloc(sizeof(Node));
+  *x_ident = node_new(NodeKind.Identifier("x"));
+  Node* fa_ret = malloc(sizeof(Node));
+  *fa_ret = node_new(NodeKind.StatementReturn(x_ident));
+  Vec<Node*> fa_stmts;
+  fa_stmts.init(0);
+  fa_stmts.push(fa_ret);
+  BodyNode fa_bn;
+  fa_bn.statements = fa_stmts;
+  Node* fa_body = malloc(sizeof(Node));
+  *fa_body = node_new(NodeKind.Body(fa_bn));
+  fa.body = fa_body;
+  fa.has_body = true;
+  Node fa_node = node_new(NodeKind.Function(fa));
+
+  assert g.emit_function(fa_node).is_none(), "expected fn_a to emit";
+
+  FunctionNode fb = function_node_new();
+  fb.name = "fn_b";
+  fb.has_name = true;
+  DataType* fb_rtype = malloc(sizeof(DataType));
+  *fb_rtype = dtype_new();
+  fb_rtype.type_str = "num";
+  fb.rtype = fb_rtype;
+  fb.has_rtype = true;
+  DataType* o_dt = malloc(sizeof(DataType));
+  *o_dt = dtype_new();
+  o_dt.type_str = "Opt";
+  VariableNode ov;
+  ov.var_type = o_dt;
+  ov.name = "o";
+  ov.has_val = false;
+  Node* o_param = malloc(sizeof(Node));
+  *o_param = node_new(NodeKind.Variable(ov));
+  Vec<Node*> fb_params;
+  fb_params.init(0);
+  fb_params.push(o_param);
+  fb.args = fb_params;
+  fb.has_args = true;
+
+  Node* blank = malloc(sizeof(Node));
+  *blank = node_new(NodeKind.Blank);
+  Node* some_ident = malloc(sizeof(Node));
+  *some_ident = node_new(NodeKind.Identifier("Some"));
+  ExprNode dot;
+  dot.left = blank;
+  dot.has_left = true;
+  dot.right = some_ident;
+  dot.has_right = true;
+  dot.op = ".";
+  Node* cond = malloc(sizeof(Node));
+  *cond = node_new(NodeKind.Expression(dot));
+
+  Node* ret_v = malloc(sizeof(Node));
+  *ret_v = node_new(NodeKind.StatementReturn(nil));
+  Vec<Node*> some_stmts;
+  some_stmts.init(0);
+  some_stmts.push(ret_v);
+  BodyNode some_bn;
+  some_bn.statements = some_stmts;
+  Node* some_body = malloc(sizeof(Node));
+  *some_body = node_new(NodeKind.Body(some_bn));
+
+  FitBranch br = fit_branch_new();
+  br.condition = cond;
+  br.has_condition = true;
+  br.body = some_body;
+  br.bindings.push("v");
+  br.has_bindings = true;
+
+  FitStmtNode fit_n = fit_stmt_node_new();
+  Node* o_ident = malloc(sizeof(Node));
+  *o_ident = node_new(NodeKind.Identifier("o"));
+  fit_n.exp = o_ident;
+  fit_n.branches.push(br);
+
+  Node* fit_stmt = malloc(sizeof(Node));
+  *fit_stmt = node_new(NodeKind.StatementFit(fit_n));
+  Vec<Node*> fb_stmts;
+  fb_stmts.init(0);
+  fb_stmts.push(fit_stmt);
+  BodyNode fb_bn;
+  fb_bn.statements = fb_stmts;
+  Node* fb_body = malloc(sizeof(Node));
+  *fb_body = node_new(NodeKind.Body(fb_bn));
+  fb.body = fb_body;
+  fb.has_body = true;
+  Node fb_node = node_new(NodeKind.Function(fb));
+
+  assert g.emit_function(fb_node).is_none(), "expected fn_b to emit, resolving 'o' as Opt not a stale leaked type";
+  assert contains(st.out.build(), "o.tag == Opt_Some"), "expected the bare-shorthand pattern to resolve against Opt, not a leaked type name";
 }
