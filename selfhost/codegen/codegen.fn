@@ -2,19 +2,25 @@
 // Ported from the previous implementation's `modules/codegen/transpiler.zig`,
 // incrementally, the same way `selfhost/parser` was.
 // 
-// This is an early, first slice: literal expressions (number/decimal/
-// string/character/boolean), `ret` statements, and a plain (no args, no
-// generics, no imports) top-level function declaration -- just enough
-// to transpile a trivial whole program (`fun main() num { ret 0; }`
-// -shaped code) end to end and prove the pipeline (state, C emission,
-// prelude) works before building up the rest incrementally, the same
-// order the parser itself was built in (simplest expressions first).
+// Coverage so far: literal expressions (number/decimal/string/character/
+// boolean), identifiers, unary operators (prefix, pointer-indirection
+// depth, postfix `++`/`--`), binary operators (arithmetic/comparison/
+// logical/bitwise/assignment -- but not yet `()`/`[]`/`.`/`,`, each of
+// which needs its own dedicated handling), variable declarations
+// (explicit type only, no `let` inference yet), `ret` statements,
+// `if`/`elif`/`else` (chained correctly into one C construct even though
+// they're three independent sibling AST statements -- see
+// `emit_if_chain`'s doc comment), and a plain (no args, no generics, no
+// imports) top-level function declaration. Verified end to end: the
+// self-hosted lexer -> self-hosted parser -> this codegen, on a program
+// with variables/comparisons/if-elif-else, produces C that compiles and
+// runs with the correct exit code.
 // 
 // Deliberately deferred from this slice (documented rather than silently
 // dropped):
-// - Every other statement/expression kind (`if`/`for`/`fit`/calls/binary
-// operators/...), and every declaration kind besides a plain function
-// (`compound`/`enum`/`quirk`/`impl`).
+// - `for`/`fit`, calls/indexing/member-access/comma expressions, and
+// every declaration kind besides a plain function (`compound`/`enum`/
+// `quirk`/`impl`).
 // - Type INFERENCE: a function's return type and every literal's type are
 // already fully explicit at this stage (an omitted `let` type, or a
 // function relying on inferred generics, isn't reachable yet), so no
@@ -151,12 +157,83 @@ impl Codegen {
         }
         ret .None;
       }
+      .Identifier(name) -> {
+        self.state.write(name);
+        ret .None;
+      }
+      .Unary(u) -> {
+        self.state.write("(");
+        if u.is_left_operanded_unary {
+          // Postfix: `x++`/`x--`.
+          let oerr = self.emit_expr(*u.operand);
+          if oerr.is_some() {
+            ret oerr;
+          }
+          self.state.write(u.op);
+        } elif u.has_indirection {
+          // Pointer indirection (`*p`, `**pp`, ...): a run of `*`s for the
+          // depth, not the single `u.op` (always "*" here anyway).
+          num i = 0;
+          for i < u.indirection_depth {
+            self.state.write("*");
+            i = i + 1;
+          }
+          let oerr2 = self.emit_expr(*u.operand);
+          if oerr2.is_some() {
+            ret oerr2;
+          }
+        } else {
+          // Prefix (`-x`, `!x`, `~x`, `&x`).
+          self.state.write(u.op);
+          let oerr3 = self.emit_expr(*u.operand);
+          if oerr3.is_some() {
+            ret oerr3;
+          }
+        }
+        self.state.write(")");
+        ret .None;
+      }
+      .Expression(e) -> {
+        // `()` (calls), `[]` (indexing), `.` (member access), and `,`
+        // (comma) each need their own dedicated handling -- calls need
+        // callee/argument-list resolution, member access needs `.`/`->`
+        // disambiguation based on pointer-ness, and none of that exists
+        // yet. Every OTHER binary operator (arithmetic/comparison/
+        // logical/bitwise/assignment) already has an identical C spelling
+        // and a plain `(left op right)` emission is correct as-is.
+        if equals(e.op, "()") || equals(e.op, "[]") || equals(e.op, ".") || equals(e.op, ",") {
+          ret .Some(CodegenErrorKind.UnsupportedNode);
+        }
+        if !e.has_left || !e.has_right {
+          ret .Some(CodegenErrorKind.InvalidNode);
+        }
+        self.state.write("(");
+        let lerr = self.emit_expr(*e.left);
+        if lerr.is_some() {
+          ret lerr;
+        }
+        self.state.write(" ");
+        self.state.write(e.op);
+        self.state.write(" ");
+        let rerr = self.emit_expr(*e.right);
+        if rerr.is_some() {
+          ret rerr;
+        }
+        self.state.write(")");
+        ret .None;
+      }
       _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
     }
   }
 
   // Emits one statement, followed by its own trailing newline (statements
-  // are the unit `emit_body` iterates, so each ends its own line).
+  // are the unit `emit_statements` iterates, so each ends its own line).
+  // `StatementIf`/`StatementElseIf`/`StatementElse` are deliberately NOT
+  // handled here -- they're only ever valid chained together, which needs
+  // sibling lookahead only `emit_statements` (its caller) has; reaching
+  // this function directly (an if/elif/else with no chain context) is a
+  // bug in the caller, so it's an explicit error rather than emitting a
+  // lone, invalid C `if`/`else if`/`else` fragment.
   pub emit_statement(Node node) Option<CodegenErrorKind> {
     fit node.kind {
       .StatementReturn(exp) -> {
@@ -172,23 +249,145 @@ impl Codegen {
         self.state.write(";\n");
         ret .None;
       }
+      .Variable(v) -> {
+        self.state.write_indent();
+        self.write_type(*v.var_type);
+        self.state.write(" ");
+        self.state.write(v.name);
+        if v.has_val {
+          self.state.write(" = ");
+          let verr = self.emit_expr(*v.val);
+          if verr.is_some() {
+            ret verr;
+          }
+        }
+        self.state.write(";\n");
+        ret .None;
+      }
       _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
     }
   }
 
-  // Emits every statement in `body` (a `Body` node), one per line.
-  emit_body(Node body) Option<CodegenErrorKind> {
-    fit body.kind {
-      .Body(bn) -> {
-        for stmt : bn.statements {
-          let serr = self.emit_statement(*stmt);
-          if serr.is_some() {
-            ret serr;
-          }
+  // Emits an `if (cond) { ... }` block, WITHOUT the trailing newline (the
+  // caller -- either `emit_statements` chaining a following elif/else, or
+  // this same function recursing for one) decides what comes next).
+  emit_if_block(Node* condition, Node* body) Option<CodegenErrorKind> {
+    self.state.write("if (");
+    let cerr = self.emit_expr(*condition);
+    if cerr.is_some() {
+      ret cerr;
+    }
+    self.state.write(") {\n");
+    self.state.indent_level = self.state.indent_level + 1;
+    let berr = self.emit_body(*body);
+    if berr.is_some() {
+      ret berr;
+    }
+    self.state.indent_level = self.state.indent_level - 1;
+    self.state.write_indent();
+    self.state.write("}");
+    ret .None;
+  }
+
+  // Emits `stmts[start_i]` (a `StatementIf`) chained with every
+  // immediately-following `StatementElseIf`/`StatementElse` sibling as a
+  // single C `if (...) { } else if (...) { } else { }` construct, and
+  // returns the index just past the whole chain.
+  // 
+  // `if`/`elif`/`else` are parsed as three INDEPENDENT sibling statement
+  // kinds, not a nested tree (see `StatementIf`/`StatementElseIf`/
+  // `StatementElse`'s own doc comments in ast.fn) -- so chaining them into
+  // one C construct needs this adjacency lookahead over the statement
+  // list, mirroring the original's `current_statement_type`/
+  // `next_statement_type` tracking for the same purpose.
+  emit_if_chain(Vec<Node*> stmts, num start_i, num* out_next_i) Option<CodegenErrorKind> {
+    Node* if_stmt = stmts.get(start_i);
+    fit if_stmt.kind {
+      .StatementIf(ifn) -> {
+        let ferr = self.emit_if_block(ifn.condition, ifn.body);
+        if ferr.is_some() {
+          ret ferr;
         }
-        ret .None;
       }
       _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
+    }
+
+    num i = start_i + 1;
+    for i < stmts.len {
+      Node* next = stmts.get(i);
+      bin chained = false;
+      fit next.kind {
+        .StatementElseIf(ein) -> {
+          self.state.write(" else ");
+          let eerr = self.emit_if_block(ein.condition, ein.body);
+          if eerr.is_some() {
+            ret eerr;
+          }
+          chained = true;
+        }
+        .StatementElse(ebody) -> {
+          self.state.write(" else {\n");
+          self.state.indent_level = self.state.indent_level + 1;
+          let elerr = self.emit_body(*ebody);
+          if elerr.is_some() {
+            ret elerr;
+          }
+          self.state.indent_level = self.state.indent_level - 1;
+          self.state.write_indent();
+          self.state.write("}");
+          chained = true;
+        }
+        _ -> {}
+      }
+      if !chained {
+        break;
+      }
+      i = i + 1;
+    }
+    self.state.write("\n");
+    *out_next_i = i;
+    ret .None;
+  }
+
+  // Emits `stmts` in order, one statement per line, chaining any
+  // `StatementIf`/`StatementElseIf`/`StatementElse` run into a single C
+  // if/else-if/else construct via `emit_if_chain`.
+  emit_statements(Vec<Node*> stmts) Option<CodegenErrorKind> {
+    num i = 0;
+    for i < stmts.len {
+      Node* stmt = stmts.get(i);
+      bin is_if = false;
+      fit stmt.kind {
+        .StatementIf(ifn) -> { is_if = true; }
+        _ -> {}
+      }
+      if is_if {
+        self.state.write_indent();
+        num next_i = i;
+        let cherr = self.emit_if_chain(stmts, i, &next_i);
+        if cherr.is_some() {
+          ret cherr;
+        }
+        i = next_i;
+        continue;
+      }
+      let serr = self.emit_statement(*stmt);
+      if serr.is_some() {
+        ret serr;
+      }
+      i = i + 1;
+    }
+    ret .None;
+  }
+
+  // Emits `body`: every statement in order when it's a `Body` block, or
+  // just the one statement when it's a single braceless statement (an
+  // `if`/`for`/... body doesn't require `{ }` when it's a single
+  // statement -- see `_parse_if_body`'s doc comment in the parser).
+  emit_body(Node body) Option<CodegenErrorKind> {
+    fit body.kind {
+      .Body(bn) -> { ret self.emit_statements(bn.statements); }
+      _ -> { ret self.emit_statement(body); }
     }
   }
 
@@ -307,6 +506,238 @@ test "emit_expr escapes a character literal" {
   Node n = node_new(NodeKind.Character('\n'));
   assert g.emit_expr(n).is_none(), "expected the character to emit";
   assert equals(st.out.build(), "'\\n'"), "expected an escaped newline character literal";
+}
+
+test "emit_expr emits an identifier" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  Node n = node_new(NodeKind.Identifier("x"));
+  assert g.emit_expr(n).is_none(), "expected the identifier to emit";
+  assert equals(st.out.build(), "x"), "expected 'x'";
+}
+
+test "emit_expr emits a prefix unary expression" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  UnaryNode u;
+  u.is_left_operanded_unary = false;
+  u.op = "-";
+  Node* operand = malloc(sizeof(Node));
+  * operand =node_new(NodeKind.Identifier("x"));
+  u.operand = operand;
+  u.has_indirection = false;
+  u.indirection_depth = 0;
+  Node n = node_new(NodeKind.Unary(u));
+  assert g.emit_expr(n).is_none(), "expected the unary to emit";
+  assert equals(st.out.build(), "(-x)"), "expected '(-x)'";
+}
+
+test "emit_expr emits pointer indirection as a run of stars" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  UnaryNode u;
+  u.is_left_operanded_unary = false;
+  u.op = "*";
+  Node* operand = malloc(sizeof(Node));
+  * operand =node_new(NodeKind.Identifier("p"));
+  u.operand = operand;
+  u.has_indirection = true;
+  u.indirection_depth = 2;
+  Node n = node_new(NodeKind.Unary(u));
+  assert g.emit_expr(n).is_none(), "expected the unary to emit";
+  assert equals(st.out.build(), "(**p)"), "expected '(**p)'";
+}
+
+test "emit_expr emits a postfix unary expression" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  UnaryNode u;
+  u.is_left_operanded_unary = true;
+  u.op = "++";
+  Node* operand = malloc(sizeof(Node));
+  * operand =node_new(NodeKind.Identifier("x"));
+  u.operand = operand;
+  u.has_indirection = false;
+  u.indirection_depth = 0;
+  Node n = node_new(NodeKind.Unary(u));
+  assert g.emit_expr(n).is_none(), "expected the unary to emit";
+  assert equals(st.out.build(), "(x++)"), "expected '(x++)'";
+}
+
+test "emit_expr emits a binary expression" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  Node* left = malloc(sizeof(Node));
+  * left =node_new(NodeKind.Identifier("a"));
+  Node* right = malloc(sizeof(Node));
+  * right =node_new(NodeKind.Identifier("b"));
+  ExprNode e;
+  e.left = left;
+  e.has_left = true;
+  e.right = right;
+  e.has_right = true;
+  e.op = "+";
+  Node n = node_new(NodeKind.Expression(e));
+  assert g.emit_expr(n).is_none(), "expected the expression to emit";
+  assert equals(st.out.build(), "(a + b)"), "expected '(a + b)'";
+}
+
+test "emit_expr rejects a call/index/member-access/comma expression (not yet supported)" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  Node* left = malloc(sizeof(Node));
+  * left =node_new(NodeKind.Identifier("a"));
+  Node* right = malloc(sizeof(Node));
+  * right =node_new(NodeKind.Identifier("b"));
+  ExprNode e;
+  e.left = left;
+  e.has_left = true;
+  e.right = right;
+  e.has_right = true;
+  e.op = "()";
+  Node n = node_new(NodeKind.Expression(e));
+  assert g.emit_expr(n).is_some(), "expected a call expression to be rejected this slice";
+}
+
+test "emit_statement emits a variable declaration with an initializer" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  DataType* dt = malloc(sizeof(DataType));
+  * dt =dtype_new();
+  dt.type_str = "num";
+  Node* val = malloc(sizeof(Node));
+  * val =node_new(NodeKind.Number(TokenData.Num(5)));
+  VariableNode v;
+  v.var_type = dt;
+  v.name = "x";
+  v.val = val;
+  v.has_val = true;
+  Node n = node_new(NodeKind.Variable(v));
+  assert g.emit_statement(n).is_none(), "expected the variable declaration to emit";
+  assert equals(st.out.build(), "int64_t x = 5;\n"), "expected 'int64_t x = 5;\\n'";
+}
+
+test "emit_statement emits an uninitialized variable declaration" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  DataType* dt = malloc(sizeof(DataType));
+  * dt =dtype_new();
+  dt.type_str = "bin";
+  VariableNode v;
+  v.var_type = dt;
+  v.name = "done";
+  v.val = nil;
+  v.has_val = false;
+  Node n = node_new(NodeKind.Variable(v));
+  assert g.emit_statement(n).is_none(), "expected the variable declaration to emit";
+  assert equals(st.out.build(), "bool done;\n"), "expected 'bool done;\\n'";
+}
+
+test "emit_body emits a plain if statement with no elif/else" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  Node* cond = malloc(sizeof(Node));
+  * cond =node_new(NodeKind.Identifier("ok"));
+  Node* ret_stmt = malloc(sizeof(Node));
+  * ret_stmt =node_new(NodeKind.StatementReturn(nil));
+  Vec<Node*> if_stmts;
+  if_stmts.init(0);
+  if_stmts.push(ret_stmt);
+  BodyNode if_body_n;
+  if_body_n.statements = if_stmts;
+  Node* if_body = malloc(sizeof(Node));
+  * if_body =node_new(NodeKind.Body(if_body_n));
+
+  IfStmtNode ifn;
+  ifn.condition = cond;
+  ifn.body = if_body;
+  Node* if_stmt = malloc(sizeof(Node));
+  * if_stmt =node_new(NodeKind.StatementIf(ifn));
+
+  Vec<Node*> stmts;
+  stmts.init(0);
+  stmts.push(if_stmt);
+  BodyNode bn;
+  bn.statements = stmts;
+  Node body = node_new(NodeKind.Body(bn));
+
+  assert g.emit_body(body).is_none(), "expected the if statement to emit";
+  assert equals(st.out.build(), "if (ok) {\n    return;\n}\n"), "expected a plain if block";
+}
+
+test "emit_body chains StatementIf/StatementElseIf/StatementElse into one if/else-if/else" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  // if a { ret 1; } elif b { ret 2; } else { ret 3; }
+  Node* cond_a = malloc(sizeof(Node));
+  * cond_a =node_new(NodeKind.Identifier("a"));
+  Node* val1 = malloc(sizeof(Node));
+  * val1 =node_new(NodeKind.Number(TokenData.Num(1)));
+  Node* ret1 = malloc(sizeof(Node));
+  * ret1 =node_new(NodeKind.StatementReturn(val1));
+  Vec<Node*> if_stmts;
+  if_stmts.init(0);
+  if_stmts.push(ret1);
+  BodyNode if_body_n;
+  if_body_n.statements = if_stmts;
+  Node* if_body = malloc(sizeof(Node));
+  * if_body =node_new(NodeKind.Body(if_body_n));
+  IfStmtNode ifn;
+  ifn.condition = cond_a;
+  ifn.body = if_body;
+  Node* if_stmt = malloc(sizeof(Node));
+  * if_stmt =node_new(NodeKind.StatementIf(ifn));
+
+  Node* cond_b = malloc(sizeof(Node));
+  * cond_b =node_new(NodeKind.Identifier("b"));
+  Node* val2 = malloc(sizeof(Node));
+  * val2 =node_new(NodeKind.Number(TokenData.Num(2)));
+  Node* ret2 = malloc(sizeof(Node));
+  * ret2 =node_new(NodeKind.StatementReturn(val2));
+  Vec<Node*> elif_stmts;
+  elif_stmts.init(0);
+  elif_stmts.push(ret2);
+  BodyNode elif_body_n;
+  elif_body_n.statements = elif_stmts;
+  Node* elif_body = malloc(sizeof(Node));
+  * elif_body =node_new(NodeKind.Body(elif_body_n));
+  IfStmtNode ein;
+  ein.condition = cond_b;
+  ein.body = elif_body;
+  Node* elif_stmt = malloc(sizeof(Node));
+  * elif_stmt =node_new(NodeKind.StatementElseIf(ein));
+
+  Node* val3 = malloc(sizeof(Node));
+  * val3 =node_new(NodeKind.Number(TokenData.Num(3)));
+  Node* ret3 = malloc(sizeof(Node));
+  * ret3 =node_new(NodeKind.StatementReturn(val3));
+  Vec<Node*> else_stmts;
+  else_stmts.init(0);
+  else_stmts.push(ret3);
+  BodyNode else_body_n;
+  else_body_n.statements = else_stmts;
+  Node* else_body = malloc(sizeof(Node));
+  * else_body =node_new(NodeKind.Body(else_body_n));
+  Node* else_stmt = malloc(sizeof(Node));
+  * else_stmt =node_new(NodeKind.StatementElse(else_body));
+
+  Vec<Node*> stmts;
+  stmts.init(0);
+  stmts.push(if_stmt);
+  stmts.push(elif_stmt);
+  stmts.push(else_stmt);
+  BodyNode bn;
+  bn.statements = stmts;
+  Node body = node_new(NodeKind.Body(bn));
+
+  assert g.emit_body(body).is_none(), "expected the if/elif/else chain to emit";
+  let out = st.out.build();
+  assert equals(
+    out,
+    "if (a) {\n    return 1;\n} else if (b) {\n    return 2;\n} else {\n    return 3;\n}\n"
+  ), "expected a single chained if/else-if/else C construct";
 }
 
 test "emit_statement emits a bare 'ret;' as 'return;'" {
