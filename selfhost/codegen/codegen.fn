@@ -5,22 +5,27 @@
 // Coverage so far: literal expressions (number/decimal/string/character/
 // boolean), identifiers, unary operators (prefix, pointer-indirection
 // depth, postfix `++`/`--`), binary operators (arithmetic/comparison/
-// logical/bitwise/assignment -- but not yet `()`/`[]`/`.`/`,`, each of
-// which needs its own dedicated handling), variable declarations
-// (explicit type only, no `let` inference yet), `ret` statements,
-// `if`/`elif`/`else` (chained correctly into one C construct even though
-// they're three independent sibling AST statements -- see
-// `emit_if_chain`'s doc comment), and a plain (no args, no generics, no
-// imports) top-level function declaration. Verified end to end: the
-// self-hosted lexer -> self-hosted parser -> this codegen, on a program
-// with variables/comparisons/if-elif-else, produces C that compiles and
-// runs with the correct exit code.
+// logical/bitwise/assignment -- every one shares an identical C
+// spelling), calls with a plain-identifier callee (any argument count,
+// flattening the parser's comma-chained argument-list representation --
+// see `flatten_call_args`), variable declarations (explicit type only,
+// no `let` inference yet), `ret` statements, `if`/`elif`/`else` (chained
+// correctly into one C construct even though they're three independent
+// sibling AST statements -- see `emit_if_chain`'s doc comment), and a
+// top-level function declaration with any number of parameters (still
+// no generics/variadics). Verified end to end: the self-hosted lexer ->
+// self-hosted parser -> this codegen, on programs using variables,
+// comparisons, if-elif-else, and multi-arg function calls, produces C
+// that compiles and runs with the correct exit code.
 // 
 // Deliberately deferred from this slice (documented rather than silently
 // dropped):
-// - `for`/`fit`, calls/indexing/member-access/comma expressions, and
-// every declaration kind besides a plain function (`compound`/`enum`/
-// `quirk`/`impl`).
+// - `[]` (indexing), `.` (member access) -- the latter needs `.`/`->`
+// disambiguation based on pointer-ness, so it also blocks method calls
+// (`recv.method(...)`, a callee that ISN'T a plain identifier) and calls
+// through an aliased/imported module.
+// - `for`/`fit`, and every declaration kind besides a plain function
+// (`compound`/`enum`/`quirk`/`impl`).
 // - Type INFERENCE: a function's return type and every literal's type are
 // already fully explicit at this stage (an omitted `let` type, or a
 // function relying on inferred generics, isn't reachable yet), so no
@@ -194,14 +199,20 @@ impl Codegen {
         ret .None;
       }
       .Expression(e) -> {
-        // `()` (calls), `[]` (indexing), `.` (member access), and `,`
-        // (comma) each need their own dedicated handling -- calls need
-        // callee/argument-list resolution, member access needs `.`/`->`
+        // `[]` (indexing), `.` (member access), and a bare `,` (comma
+        // reached directly, i.e. NOT as part of a call's argument list --
+        // see `emit_call`/`flatten_call_args`) each need their own
+        // dedicated handling -- member access needs `.`/`->`
         // disambiguation based on pointer-ness, and none of that exists
-        // yet. Every OTHER binary operator (arithmetic/comparison/
-        // logical/bitwise/assignment) already has an identical C spelling
-        // and a plain `(left op right)` emission is correct as-is.
-        if equals(e.op, "()") || equals(e.op, "[]") || equals(e.op, ".") || equals(e.op, ",") {
+        // yet. `()` (calls) IS handled, but only for a plain-identifier
+        // callee (see `emit_call`'s own doc comment). Every OTHER binary
+        // operator (arithmetic/comparison/logical/bitwise/assignment)
+        // already has an identical C spelling and a plain `(left op
+        // right)` emission is correct as-is.
+        if equals(e.op, "()") {
+          ret self.emit_call(e);
+        }
+        if equals(e.op, "[]") || equals(e.op, ".") || equals(e.op, ",") {
           ret .Some(CodegenErrorKind.UnsupportedNode);
         }
         if !e.has_left || !e.has_right {
@@ -224,6 +235,74 @@ impl Codegen {
       }
       _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
     }
+  }
+
+  // Recursively flattens a call's argument-list node (the right side of
+  // an `Expression{ op = "()" }`, always an `ExpressionParenthesis`
+  // wrapping either `.Blank` for zero args, a single expression for one
+  // arg, or a left-associative `,`-chained `Expression` tree for several
+  // -- see `parse_for_parenthesis`'s doc comment) into individual
+  // argument nodes, appended in left-to-right source order.
+  flatten_call_args(Node* node, Vec<Node*>* out) {
+    fit node.kind {
+      .ExpressionParenthesis(inner) -> { self.flatten_call_args(inner, out); }
+      .Blank -> {}
+      .Expression(e) -> {
+        if equals(e.op, ",") {
+          if e.has_left {
+            self.flatten_call_args(e.left, out);
+          }
+          if e.has_right {
+            self.flatten_call_args(e.right, out);
+          }
+        } else {
+          out.push(node);
+        }
+      }
+      _ -> { out.push(node); }
+    }
+  }
+
+  // Emits a call `callee(arg1, arg2, ...)`.
+  // 
+  // Deliberately simplified from the original for this slice: the callee
+  // must be a plain identifier (an ordinary free-function call) -- a
+  // method call (`recv.method(...)`, callee is itself a `.`-Expression)
+  // or a call through another call's result (`f()()`) isn't reachable
+  // yet, since `.` member access isn't emitted yet either (see
+  // `emit_expr`'s own doc comment). No name resolution/mangling either
+  // (aliasing, generics, overload-by-arity) -- the callee's Fun name and
+  // its C name are assumed identical, true for every plain function this
+  // slice can otherwise construct.
+  emit_call(ExprNode e) Option<CodegenErrorKind> {
+    if !e.has_left || !e.has_right {
+      ret .Some(CodegenErrorKind.InvalidNode);
+    }
+    str callee_name = "";
+    fit e.left.kind {
+      .Identifier(name) -> { callee_name = name; }
+      _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+    }
+    self.state.write(callee_name);
+    self.state.write("(");
+
+    Vec<Node*> args;
+    args.init(0);
+    self.flatten_call_args(e.right, &args);
+
+    bin first = true;
+    for arg : args {
+      if !first {
+        self.state.write(", ");
+      }
+      first = false;
+      let aerr = self.emit_expr(*arg);
+      if aerr.is_some() {
+        ret aerr;
+      }
+    }
+    self.state.write(")");
+    ret .None;
   }
 
   // Emits one statement, followed by its own trailing newline (statements
@@ -391,8 +470,25 @@ impl Codegen {
     }
   }
 
-  // Emits a plain (no args, no generics) top-level function declaration
-  // as a C function definition: `<rtype> <name>(void) { <body> }`.
+  // Emits one function parameter (a `Variable` node with no initializer)
+  // as `<type> <name>`.
+  emit_function_param(Node param) Option<CodegenErrorKind> {
+    fit param.kind {
+      .Variable(v) -> {
+        self.write_type(*v.var_type);
+        self.state.write(" ");
+        self.state.write(v.name);
+        ret .None;
+      }
+      _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
+    }
+  }
+
+  // Emits a plain (no generics, no variadics) top-level function
+  // declaration as a C function definition: `<rtype> <name>(<args>) {
+  // <body> }` (or `(void)` for a zero-arg function, matching C
+  // convention -- an empty `()` in C means "unspecified arguments", not
+  // "no arguments").
   pub emit_function(Node node) Option<CodegenErrorKind> {
     fit node.kind {
       .Function(f) -> {
@@ -402,7 +498,23 @@ impl Codegen {
         self.write_type(*f.rtype);
         self.state.write(" ");
         self.state.write(f.name);
-        self.state.write("(void) {\n");
+        self.state.write("(");
+        if f.has_args && f.args.len > 0 {
+          bin first = true;
+          for arg : f.args {
+            if !first {
+              self.state.write(", ");
+            }
+            first = false;
+            let aerr = self.emit_function_param(*arg);
+            if aerr.is_some() {
+              ret aerr;
+            }
+          }
+        } else {
+          self.state.write("void");
+        }
+        self.state.write(") {\n");
         self.state.indent_level = self.state.indent_level + 1;
         if f.has_body {
           let berr = self.emit_body(*f.body);
@@ -523,7 +635,7 @@ test "emit_expr emits a prefix unary expression" {
   u.is_left_operanded_unary = false;
   u.op = "-";
   Node* operand = malloc(sizeof(Node));
-  * operand =node_new(NodeKind.Identifier("x"));
+  *operand = node_new(NodeKind.Identifier("x"));
   u.operand = operand;
   u.has_indirection = false;
   u.indirection_depth = 0;
@@ -539,7 +651,7 @@ test "emit_expr emits pointer indirection as a run of stars" {
   u.is_left_operanded_unary = false;
   u.op = "*";
   Node* operand = malloc(sizeof(Node));
-  * operand =node_new(NodeKind.Identifier("p"));
+  *operand = node_new(NodeKind.Identifier("p"));
   u.operand = operand;
   u.has_indirection = true;
   u.indirection_depth = 2;
@@ -555,7 +667,7 @@ test "emit_expr emits a postfix unary expression" {
   u.is_left_operanded_unary = true;
   u.op = "++";
   Node* operand = malloc(sizeof(Node));
-  * operand =node_new(NodeKind.Identifier("x"));
+  *operand = node_new(NodeKind.Identifier("x"));
   u.operand = operand;
   u.has_indirection = false;
   u.indirection_depth = 0;
@@ -568,9 +680,9 @@ test "emit_expr emits a binary expression" {
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
   Node* left = malloc(sizeof(Node));
-  * left =node_new(NodeKind.Identifier("a"));
+  *left = node_new(NodeKind.Identifier("a"));
   Node* right = malloc(sizeof(Node));
-  * right =node_new(NodeKind.Identifier("b"));
+  *right = node_new(NodeKind.Identifier("b"));
   ExprNode e;
   e.left = left;
   e.has_left = true;
@@ -582,31 +694,102 @@ test "emit_expr emits a binary expression" {
   assert equals(st.out.build(), "(a + b)"), "expected '(a + b)'";
 }
 
-test "emit_expr rejects a call/index/member-access/comma expression (not yet supported)" {
+test "emit_expr rejects an index/member-access/comma expression (not yet supported)" {
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
   Node* left = malloc(sizeof(Node));
-  * left =node_new(NodeKind.Identifier("a"));
+  *left = node_new(NodeKind.Identifier("a"));
   Node* right = malloc(sizeof(Node));
-  * right =node_new(NodeKind.Identifier("b"));
+  *right = node_new(NodeKind.Identifier("b"));
   ExprNode e;
   e.left = left;
   e.has_left = true;
   e.right = right;
   e.has_right = true;
+  e.op = "[]";
+  Node n = node_new(NodeKind.Expression(e));
+  assert g.emit_expr(n).is_some(), "expected an index expression to be rejected this slice";
+}
+
+test "emit_expr emits a zero-arg call" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  Node* callee = malloc(sizeof(Node));
+  *callee = node_new(NodeKind.Identifier("foo"));
+  Node* blank = malloc(sizeof(Node));
+  *blank = node_new(NodeKind.Blank);
+  Node* args = malloc(sizeof(Node));
+  *args = node_new(NodeKind.ExpressionParenthesis(blank));
+  ExprNode e;
+  e.left = callee;
+  e.has_left = true;
+  e.right = args;
+  e.has_right = true;
   e.op = "()";
   Node n = node_new(NodeKind.Expression(e));
-  assert g.emit_expr(n).is_some(), "expected a call expression to be rejected this slice";
+  assert g.emit_expr(n).is_none(), "expected the call to emit";
+  assert equals(st.out.build(), "foo()"), "expected 'foo()'";
+}
+
+test "emit_expr emits a multi-arg call, flattening the comma-chained argument list" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  Node* callee = malloc(sizeof(Node));
+  *callee = node_new(NodeKind.Identifier("foo"));
+
+  Node* arg_a = malloc(sizeof(Node));
+  *arg_a = node_new(NodeKind.Identifier("a"));
+  Node* arg_b = malloc(sizeof(Node));
+  *arg_b = node_new(NodeKind.Identifier("b"));
+  ExprNode comma;
+  comma.left = arg_a;
+  comma.has_left = true;
+  comma.right = arg_b;
+  comma.has_right = true;
+  comma.op = ",";
+  Node* comma_node = malloc(sizeof(Node));
+  *comma_node = node_new(NodeKind.Expression(comma));
+  Node* args = malloc(sizeof(Node));
+  *args = node_new(NodeKind.ExpressionParenthesis(comma_node));
+
+  ExprNode e;
+  e.left = callee;
+  e.has_left = true;
+  e.right = args;
+  e.has_right = true;
+  e.op = "()";
+  Node n = node_new(NodeKind.Expression(e));
+  assert g.emit_expr(n).is_none(), "expected the call to emit";
+  assert equals(st.out.build(), "foo(a, b)"), "expected 'foo(a, b)'";
+}
+
+test "emit_expr rejects a call whose callee isn't a plain identifier (not yet supported)" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  Node* callee = malloc(sizeof(Node));
+  *callee = node_new(NodeKind.Number(TokenData.Num(1)));
+  Node* blank = malloc(sizeof(Node));
+  *blank = node_new(NodeKind.Blank);
+  Node* args = malloc(sizeof(Node));
+  *args = node_new(NodeKind.ExpressionParenthesis(blank));
+  ExprNode e;
+  e.left = callee;
+  e.has_left = true;
+  e.right = args;
+  e.has_right = true;
+  e.op = "()";
+  Node n = node_new(NodeKind.Expression(e));
+  assert g.emit_expr(n).is_some(), "expected a non-identifier callee to be rejected this slice";
 }
 
 test "emit_statement emits a variable declaration with an initializer" {
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
   DataType* dt = malloc(sizeof(DataType));
-  * dt =dtype_new();
+  *dt = dtype_new();
   dt.type_str = "num";
   Node* val = malloc(sizeof(Node));
-  * val =node_new(NodeKind.Number(TokenData.Num(5)));
+  *val = node_new(NodeKind.Number(TokenData.Num(5)));
   VariableNode v;
   v.var_type = dt;
   v.name = "x";
@@ -621,7 +804,7 @@ test "emit_statement emits an uninitialized variable declaration" {
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
   DataType* dt = malloc(sizeof(DataType));
-  * dt =dtype_new();
+  *dt = dtype_new();
   dt.type_str = "bin";
   VariableNode v;
   v.var_type = dt;
@@ -638,22 +821,22 @@ test "emit_body emits a plain if statement with no elif/else" {
   Codegen g = codegen_new(&st);
 
   Node* cond = malloc(sizeof(Node));
-  * cond =node_new(NodeKind.Identifier("ok"));
+  *cond = node_new(NodeKind.Identifier("ok"));
   Node* ret_stmt = malloc(sizeof(Node));
-  * ret_stmt =node_new(NodeKind.StatementReturn(nil));
+  *ret_stmt = node_new(NodeKind.StatementReturn(nil));
   Vec<Node*> if_stmts;
   if_stmts.init(0);
   if_stmts.push(ret_stmt);
   BodyNode if_body_n;
   if_body_n.statements = if_stmts;
   Node* if_body = malloc(sizeof(Node));
-  * if_body =node_new(NodeKind.Body(if_body_n));
+  *if_body = node_new(NodeKind.Body(if_body_n));
 
   IfStmtNode ifn;
   ifn.condition = cond;
   ifn.body = if_body;
   Node* if_stmt = malloc(sizeof(Node));
-  * if_stmt =node_new(NodeKind.StatementIf(ifn));
+  *if_stmt = node_new(NodeKind.StatementIf(ifn));
 
   Vec<Node*> stmts;
   stmts.init(0);
@@ -672,56 +855,56 @@ test "emit_body chains StatementIf/StatementElseIf/StatementElse into one if/els
 
   // if a { ret 1; } elif b { ret 2; } else { ret 3; }
   Node* cond_a = malloc(sizeof(Node));
-  * cond_a =node_new(NodeKind.Identifier("a"));
+  *cond_a = node_new(NodeKind.Identifier("a"));
   Node* val1 = malloc(sizeof(Node));
-  * val1 =node_new(NodeKind.Number(TokenData.Num(1)));
+  *val1 = node_new(NodeKind.Number(TokenData.Num(1)));
   Node* ret1 = malloc(sizeof(Node));
-  * ret1 =node_new(NodeKind.StatementReturn(val1));
+  *ret1 = node_new(NodeKind.StatementReturn(val1));
   Vec<Node*> if_stmts;
   if_stmts.init(0);
   if_stmts.push(ret1);
   BodyNode if_body_n;
   if_body_n.statements = if_stmts;
   Node* if_body = malloc(sizeof(Node));
-  * if_body =node_new(NodeKind.Body(if_body_n));
+  *if_body = node_new(NodeKind.Body(if_body_n));
   IfStmtNode ifn;
   ifn.condition = cond_a;
   ifn.body = if_body;
   Node* if_stmt = malloc(sizeof(Node));
-  * if_stmt =node_new(NodeKind.StatementIf(ifn));
+  *if_stmt = node_new(NodeKind.StatementIf(ifn));
 
   Node* cond_b = malloc(sizeof(Node));
-  * cond_b =node_new(NodeKind.Identifier("b"));
+  *cond_b = node_new(NodeKind.Identifier("b"));
   Node* val2 = malloc(sizeof(Node));
-  * val2 =node_new(NodeKind.Number(TokenData.Num(2)));
+  *val2 = node_new(NodeKind.Number(TokenData.Num(2)));
   Node* ret2 = malloc(sizeof(Node));
-  * ret2 =node_new(NodeKind.StatementReturn(val2));
+  *ret2 = node_new(NodeKind.StatementReturn(val2));
   Vec<Node*> elif_stmts;
   elif_stmts.init(0);
   elif_stmts.push(ret2);
   BodyNode elif_body_n;
   elif_body_n.statements = elif_stmts;
   Node* elif_body = malloc(sizeof(Node));
-  * elif_body =node_new(NodeKind.Body(elif_body_n));
+  *elif_body = node_new(NodeKind.Body(elif_body_n));
   IfStmtNode ein;
   ein.condition = cond_b;
   ein.body = elif_body;
   Node* elif_stmt = malloc(sizeof(Node));
-  * elif_stmt =node_new(NodeKind.StatementElseIf(ein));
+  *elif_stmt = node_new(NodeKind.StatementElseIf(ein));
 
   Node* val3 = malloc(sizeof(Node));
-  * val3 =node_new(NodeKind.Number(TokenData.Num(3)));
+  *val3 = node_new(NodeKind.Number(TokenData.Num(3)));
   Node* ret3 = malloc(sizeof(Node));
-  * ret3 =node_new(NodeKind.StatementReturn(val3));
+  *ret3 = node_new(NodeKind.StatementReturn(val3));
   Vec<Node*> else_stmts;
   else_stmts.init(0);
   else_stmts.push(ret3);
   BodyNode else_body_n;
   else_body_n.statements = else_stmts;
   Node* else_body = malloc(sizeof(Node));
-  * else_body =node_new(NodeKind.Body(else_body_n));
+  *else_body = node_new(NodeKind.Body(else_body_n));
   Node* else_stmt = malloc(sizeof(Node));
-  * else_stmt =node_new(NodeKind.StatementElse(else_body));
+  *else_stmt = node_new(NodeKind.StatementElse(else_body));
 
   Vec<Node*> stmts;
   stmts.init(0);
@@ -752,7 +935,7 @@ test "emit_statement emits 'ret <value>;' with the value expression" {
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
   Node* val = malloc(sizeof(Node));
-  * val =node_new(NodeKind.Number(TokenData.Num(7)));
+  *val = node_new(NodeKind.Number(TokenData.Num(7)));
   Node n = node_new(NodeKind.StatementReturn(val));
   assert g.emit_statement(n).is_none(), "expected the return to emit";
   assert equals(st.out.build(), "return 7;\n"), "expected 'return 7;\\n'";
@@ -766,28 +949,97 @@ test "emit_function emits a plain no-arg function definition with indentation" {
   fnv.name = "main";
   fnv.has_name = true;
   DataType* rtype = malloc(sizeof(DataType));
-  * rtype =dtype_new();
+  *rtype = dtype_new();
   rtype.type_str = "num";
   fnv.rtype = rtype;
   fnv.has_rtype = true;
 
   Node* val = malloc(sizeof(Node));
-  * val =node_new(NodeKind.Number(TokenData.Num(0)));
+  *val = node_new(NodeKind.Number(TokenData.Num(0)));
   Node* ret_stmt = malloc(sizeof(Node));
-  * ret_stmt =node_new(NodeKind.StatementReturn(val));
+  *ret_stmt = node_new(NodeKind.StatementReturn(val));
   Vec<Node*> stmts;
   stmts.init(0);
   stmts.push(ret_stmt);
   BodyNode bn;
   bn.statements = stmts;
   Node* body = malloc(sizeof(Node));
-  * body =node_new(NodeKind.Body(bn));
+  *body = node_new(NodeKind.Body(bn));
   fnv.body = body;
   fnv.has_body = true;
 
   Node fn_node = node_new(NodeKind.Function(fnv));
   assert g.emit_function(fn_node).is_none(), "expected the function to emit";
   assert equals(st.out.build(), "int64_t main(void) {\n    return 0;\n}\n"), "expected a complete C function definition";
+}
+
+test "emit_function emits parameters, and a call to it" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  FunctionNode fnv = function_node_new();
+  fnv.name = "add";
+  fnv.has_name = true;
+  DataType* rtype = malloc(sizeof(DataType));
+  *rtype = dtype_new();
+  rtype.type_str = "num";
+  fnv.rtype = rtype;
+  fnv.has_rtype = true;
+
+  DataType* dt_a = malloc(sizeof(DataType));
+  *dt_a = dtype_new();
+  dt_a.type_str = "num";
+  VariableNode va;
+  va.var_type = dt_a;
+  va.name = "a";
+  va.has_val = false;
+  Node* param_a = malloc(sizeof(Node));
+  *param_a = node_new(NodeKind.Variable(va));
+
+  DataType* dt_b = malloc(sizeof(DataType));
+  *dt_b = dtype_new();
+  dt_b.type_str = "num";
+  VariableNode vb;
+  vb.var_type = dt_b;
+  vb.name = "b";
+  vb.has_val = false;
+  Node* param_b = malloc(sizeof(Node));
+  *param_b = node_new(NodeKind.Variable(vb));
+
+  Vec<Node*> params;
+  params.init(0);
+  params.push(param_a);
+  params.push(param_b);
+  fnv.args = params;
+  fnv.has_args = true;
+
+  Node* lhs = malloc(sizeof(Node));
+  *lhs = node_new(NodeKind.Identifier("a"));
+  Node* rhs = malloc(sizeof(Node));
+  *rhs = node_new(NodeKind.Identifier("b"));
+  ExprNode sum;
+  sum.left = lhs;
+  sum.has_left = true;
+  sum.right = rhs;
+  sum.has_right = true;
+  sum.op = "+";
+  Node* sum_node = malloc(sizeof(Node));
+  *sum_node = node_new(NodeKind.Expression(sum));
+  Node* ret_stmt = malloc(sizeof(Node));
+  *ret_stmt = node_new(NodeKind.StatementReturn(sum_node));
+  Vec<Node*> stmts;
+  stmts.init(0);
+  stmts.push(ret_stmt);
+  BodyNode bn;
+  bn.statements = stmts;
+  Node* body = malloc(sizeof(Node));
+  *body = node_new(NodeKind.Body(bn));
+  fnv.body = body;
+  fnv.has_body = true;
+
+  Node fn_node = node_new(NodeKind.Function(fnv));
+  assert g.emit_function(fn_node).is_none(), "expected the function to emit";
+  assert equals(st.out.build(), "int64_t add(int64_t a, int64_t b) {\n    return (a + b);\n}\n"), "expected a two-param C function definition";
 }
 
 test "transpile emits the prelude followed by every top-level function" {
@@ -798,21 +1050,21 @@ test "transpile emits the prelude followed by every top-level function" {
   fnv.name = "main";
   fnv.has_name = true;
   DataType* rtype = malloc(sizeof(DataType));
-  * rtype =dtype_new();
+  *rtype = dtype_new();
   rtype.type_str = "num";
   fnv.rtype = rtype;
   fnv.has_rtype = true;
   Node* val = malloc(sizeof(Node));
-  * val =node_new(NodeKind.Number(TokenData.Num(0)));
+  *val = node_new(NodeKind.Number(TokenData.Num(0)));
   Node* ret_stmt = malloc(sizeof(Node));
-  * ret_stmt =node_new(NodeKind.StatementReturn(val));
+  *ret_stmt = node_new(NodeKind.StatementReturn(val));
   Vec<Node*> stmts;
   stmts.init(0);
   stmts.push(ret_stmt);
   BodyNode bn;
   bn.statements = stmts;
   Node* body = malloc(sizeof(Node));
-  * body =node_new(NodeKind.Body(bn));
+  *body = node_new(NodeKind.Body(bn));
   fnv.body = body;
   fnv.has_body = true;
   Node fn_node = node_new(NodeKind.Function(fnv));
