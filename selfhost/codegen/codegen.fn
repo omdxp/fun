@@ -32,25 +32,39 @@
 // known local type (see `emit_method_call`'s doc comment), `fit subject {
 // patterns -> { body } ... }` over a plain-identifier subject with
 // literal patterns as a C `if`/`else if`/`else` chain (see `emit_fit`'s
-// doc comment), and a top-level function declaration with any number of
-// parameters (still no generics/variadics). Verified end to end: the
-// self-hosted lexer -> self-hosted parser -> this codegen, on programs
-// using variables, comparisons, if-elif-else, assignment statements, all
-// three `for` loop forms above, multi-arg function calls, a compound
-// with field reads/writes, a plain impl method called both directly and
-// through `self`, and a `fit` over a `num` subject with a comma-chained
-// pattern and a default arm, produces C that compiles and runs with the
-// correct exit code.
+// doc comment), a non-generic, non-tagged-union `enum Name { variants }`
+// declaration as a C enum (see `emit_enum`) together with a QUALIFIED
+// enum-variant-constant access (`EnumName.Variant`, recognized in
+// `emit_field_access` -- see its own doc comment), and a top-level
+// function declaration with any number of parameters (still no
+// generics/variadics). Verified end to end: the self-hosted lexer ->
+// self-hosted parser -> this codegen, on programs using variables,
+// comparisons, if-elif-else, assignment statements, all three `for` loop
+// forms above, multi-arg function calls, a compound with field
+// reads/writes, a plain impl method called both directly and through
+// `self`, a `fit` over a `num` subject with a comma-chained pattern and a
+// default arm, and a plain enum whose variant constants are compared and
+// returned, produces C that compiles and runs with the correct exit code.
 // 
 // Deliberately deferred from this slice (documented rather than silently
 // dropped):
-// - Chained field access (`a.b.c`), calls/access through an
-// aliased/imported module, and `EnumName.Variant` constant access --
-// all three share the `Identifier . Identifier` AST shape with plain
-// field access, and `emit_field_access` deliberately refuses to guess at
-// any of them (see its own doc comment). Each needs real infrastructure
-// this slice doesn't have yet: a compound-field-type registry, and
-// enum/import support respectively.
+// - Chained field access (`a.b.c`), and calls/access through an
+// aliased/imported module -- both share the `Identifier . Identifier`
+// AST shape with plain field access and qualified enum-variant access,
+// and `emit_field_access` deliberately refuses to guess at either of
+// them (see its own doc comment). Each needs real infrastructure this
+// slice doesn't have yet: a compound-field-type registry, and import
+// support respectively.
+// - A BARE enum-variant shorthand (`.Some(x)`, `.None`, no `EnumName.`
+// qualifier) -- resolving which enum it refers to needs type inference
+// from the expected type (a function's declared return type, a
+// variable's declared type, ...), which doesn't exist yet; only the
+// explicitly-qualified form is supported this slice.
+// - A TAGGED-UNION (payload-carrying) enum, and a GENERIC enum -- see
+// `emit_enum`'s doc comment. A tagged-union enum also blocks a `fit`
+// branch matching a bare enum-variant shorthand or destructuring
+// pattern, which needs the tag/union machinery a payload-carrying enum
+// would provide.
 // - Quirk-implementing impls (`impl Type as Quirk { ... }`) -- their
 // methods are dispatched dynamically through a vtable in the original,
 // a separate, larger deferred item; a plain impl's methods are resolved
@@ -60,13 +74,11 @@
 // value dispatched through `.next()`) -- see `emit_for_iter`'s doc
 // comment; `[]` (indexing).
 // - A `fit` subject that isn't a plain identifier (needs a temp variable
-// AND a type to declare it with -- see `emit_fit`'s doc comment), and a
-// `fit` branch matching a bare enum-variant shorthand or destructuring
-// pattern (no enum support yet either).
+// AND a type to declare it with -- see `emit_fit`'s doc comment).
 // - Every declaration kind besides a plain function/non-generic
-// compound/non-quirk-non-generic impl (`enum`/`quirk`, a GENERIC
-// compound's monomorphized specializations, and a generic or
-// quirk-implementing impl's methods).
+// compound/non-tagged-union-non-generic enum/non-quirk-non-generic impl
+// (`quirk`, a GENERIC compound's monomorphized specializations, and a
+// generic or quirk-implementing impl's methods).
 // - Type INFERENCE: a function's return type and every literal's type are
 // already fully explicit at this stage (an omitted `let` type, or a
 // function relying on inferred generics, isn't reachable yet), so no
@@ -114,6 +126,15 @@ pub compound Codegen {
   Vec<str> local_names;
   Vec<bin> local_is_pointer;
   Vec<str> local_type_name;
+  // Whole-program record of every plain (non-generic, non-tagged-union)
+  // enum's name and its variants' names, populated by `transpile`'s own
+  // first pass over top-level `Enum` nodes -- lets `emit_expr` recognize
+  // a qualified enum-variant-constant access (`EnumName.Variant`) and
+  // emit its mangled C constant name, without a real type-inference
+  // engine (see `emit_expr`'s own dispatch for `.` and `emit_enum`'s doc
+  // comment for what's deliberately not registered here).
+  Vec<str> enum_names;
+  Vec<Vec<str>> enum_variant_names;
 }
 
 pub fun codegen_new(CodegenState* state) Codegen {
@@ -122,6 +143,8 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.local_names.init(0);
   g.local_is_pointer.init(0);
   g.local_type_name.init(0);
+  g.enum_names.init(0);
+  g.enum_variant_names.init(0);
   ret g;
 }
 
@@ -198,6 +221,37 @@ impl Codegen {
       i = i + 1;
     }
     ret .None;
+  }
+
+  // Records `name` as a known plain enum with the given variant names,
+  // for later `EnumName.Variant` constant-access recognition. See the
+  // `Codegen.enum_names`/`enum_variant_names` field doc comment.
+  record_enum(str name, Vec<str> variant_names) {
+    self.enum_names.push(name);
+    self.enum_variant_names.push(variant_names);
+  }
+
+  // True if `enum_name` was recorded as a known enum with a variant
+  // named `variant_name`. False for an unrecognized enum name OR a
+  // recognized enum with no such variant -- either way, the caller must
+  // treat that as "not a qualified enum-variant access", not guess.
+  enum_has_variant(str enum_name, str variant_name) bin {
+    num i = 0;
+    for i < self.enum_names.len {
+      if equals(self.enum_names.get(i), enum_name) {
+        let variants = self.enum_variant_names.get(i);
+        num j = 0;
+        for j < variants.len {
+          if equals(variants.get(j), variant_name) {
+            ret true;
+          }
+          j = j + 1;
+        }
+        ret false;
+      }
+      i = i + 1;
+    }
+    ret false;
   }
 
   // Writes a single-quoted C character literal for `c`, escaping the
@@ -470,7 +524,9 @@ impl Codegen {
       ret .Some(CodegenErrorKind.UnsupportedNode);
     }
 
-    self.state.write(format("{str}__{str}", type_found.unwrap(), method_name));
+    self.state.write(type_found.unwrap());
+    self.state.write("__");
+    self.state.write(method_name);
     self.state.write("(");
     if ptr_found.unwrap() {
       self.state.write(recv_name);
@@ -497,21 +553,28 @@ impl Codegen {
   // Emits `recv.field` as C `recv.field` or `recv->field`, deciding
   // `.`/`->` from `recv`'s DECLARED pointer-ness (`lookup_local_is_pointer`
   // -- no type inference, just the same "already fully explicit" model
-  // this whole file uses elsewhere).
+  // this whole file uses elsewhere). Also recognizes a QUALIFIED
+  // enum-variant-constant access (`EnumName.Variant`, checked first --
+  // see `enum_has_variant`) and emits its mangled C constant
+  // (`EnumName_Variant`, single underscore, matching `emit_enum`'s own
+  // naming) instead of treating `EnumName` as a receiver.
   // 
   // Deliberately narrow for this slice: `recv` must be a plain identifier
-  // that's a KNOWN local (a function parameter or a `Variable` declaration
-  // already emitted earlier in this same function -- see `record_local`).
-  // This is a conservative choice, not just a missing feature: the exact
-  // same AST shape (`Identifier . Identifier`) is ALSO how `EnumName.
-  // Variant` (an enum-variant constant) and `alias.symbol` (a module-
-  // aliased access) parse, and neither is reachable yet (no enum/import
-  // support in codegen). Silently guessing "not a pointer, use `.`" for
-  // those would emit plausible-looking but WRONG C (e.g. treating an enum
-  // name as a struct value) -- so an unrecognized receiver is rejected
-  // rather than guessed. Chained access (`a.b.c`) is also deferred: it
-  // needs the FIELD's own declared type (not just a local's), which needs
-  // a compound-field-type registry that doesn't exist yet either.
+  // that's either a known enum name (for the qualified-variant case) or a
+  // KNOWN local (a function parameter or a `Variable` declaration already
+  // emitted earlier in this same function -- see `record_local`, for the
+  // field-access case). This is a conservative choice, not just a missing
+  // feature: the exact same AST shape (`Identifier . Identifier`) is ALSO
+  // how a BARE enum-variant shorthand's qualified form and `alias.symbol`
+  // (a module-aliased access) parse, and neither is reachable yet (bare
+  // shorthand needs type inference from the expected type; module aliases
+  // need import support). Silently guessing "not a pointer, use `.`" for
+  // an unrecognized receiver would emit plausible-looking but WRONG C
+  // (e.g. treating an unregistered enum name as a struct value) -- so it's
+  // rejected rather than guessed. Chained access (`a.b.c`) is also
+  // deferred: it needs the FIELD's own declared type (not just a local's),
+  // which needs a compound-field-type registry that doesn't exist yet
+  // either.
   emit_field_access(ExprNode e) Option<CodegenErrorKind> {
     if !e.has_left || !e.has_right {
       ret .Some(CodegenErrorKind.InvalidNode);
@@ -525,6 +588,12 @@ impl Codegen {
     fit e.right.kind {
       .Identifier(name) -> { field_name = name; }
       _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+    }
+    if self.enum_has_variant(recv_name, field_name) {
+      self.state.write(recv_name);
+      self.state.write("_");
+      self.state.write(field_name);
+      ret .None;
     }
     let found = self.lookup_local_is_pointer(recv_name);
     if found.is_none() {
@@ -1061,6 +1130,67 @@ impl Codegen {
     }
   }
 
+  // Emits a non-generic, non-tagged-union (no variant has a payload)
+  // `enum Name { variants }` declaration as a C enum typedef: `typedef
+  // enum Name { Name_Variant1, Name_Variant2 = <val>, ... } Name;` --
+  // single underscore between the enum name and each variant, matching
+  // the original and distinct from the double-underscore `Type__method`
+  // impl-method mangling. Also registers the enum (`record_enum`) so a
+  // later `EnumName.Variant` qualified access resolves to the right
+  // constant -- see `emit_field_access`'s doc comment.
+  // 
+  // Deliberately simplified from the original for this slice: a
+  // TAGGED-UNION enum (any variant with a payload, `has_payload`) is
+  // silently skipped -- that lowers to a `struct { tag; union; }` in the
+  // original, a separate, larger deferred item (this also blocks bare
+  // enum-variant-shorthand patterns like `.Some(x)`, since those need a
+  // payload-carrying enum's tag/union machinery, not just a constant). A
+  // GENERIC enum (`has_type_params`) is skipped too, same reasoning as
+  // `emit_compound`'s generic-template skip -- monomorphization is
+  // separate.
+  emit_enum(Node node) Option<CodegenErrorKind> {
+    fit node.kind {
+      .Enum(e) -> {
+        if e.has_type_params {
+          ret .None;
+        }
+        bin is_tagged_union = false;
+        for v : e.variants {
+          if v.has_payload && v.payload.len > 0 {
+            is_tagged_union = true;
+          }
+        }
+        if is_tagged_union {
+          ret .None;
+        }
+
+        Vec<str> variant_names;
+        variant_names.init(0);
+        self.state.write("typedef enum ");
+        self.state.write(e.name);
+        self.state.write(" {\n");
+        for v : e.variants {
+          self.state.write("  ");
+          self.state.write(e.name);
+          self.state.write("_");
+          self.state.write(v.name);
+          if v.has_value {
+            self.state.write(" = ");
+            self.state.write(format_num(v.value));
+          }
+          self.state.write(",\n");
+          variant_names.push(v.name);
+        }
+        self.state.write("} ");
+        self.state.write(e.name);
+        self.state.write(";\n\n");
+        self.record_enum(e.name, variant_names);
+        ret .None;
+      }
+      _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
+    }
+  }
+
   // Emits a non-generic `compound Name { fields }` declaration as a C
   // struct typedef: `typedef struct Name { <type> <field>; ... } Name;`.
   // 
@@ -1145,19 +1275,31 @@ impl Codegen {
     self.state.write("#include <string.h>\n");
   }
 
-  // Transpiles every top-level `Compound`/`Impl`/`Function` node in
-  // `nodes` (anything else is skipped -- not an error, since a whole-file
-  // parse can contain declarations not reachable yet, like `imp`).
-  // Compounds are emitted in a first pass, all before any
-  // impl-method/function, so those can reference any of them regardless
-  // of source order -- see `emit_compound`'s doc comment for what that
-  // first pass deliberately doesn't handle yet (dependency ordering
-  // between compounds themselves). Impl methods are emitted in a second
+  // Transpiles every top-level `Enum`/`Compound`/`Impl`/`Function` node
+  // in `nodes` (anything else is skipped -- not an error, since a
+  // whole-file parse can contain declarations not reachable yet, like
+  // `imp`). Enums are emitted first (registering their names/variants as
+  // a side effect -- see `emit_enum`'s doc comment), then compounds, all
+  // before any impl-method/function, so those can reference any of them
+  // regardless of source order -- see `emit_compound`'s doc comment for
+  // what that pass deliberately doesn't handle yet (dependency ordering
+  // between compounds themselves). Impl methods are emitted in a third
   // pass (each becomes an ordinary C function, see `emit_impl`), before
-  // plain top-level functions in a third, so a plain function calling a
+  // plain top-level functions in a fourth, so a plain function calling a
   // method doesn't need a forward declaration.
   pub transpile(Vec<Node> nodes) Option<CodegenErrorKind> {
     self.write_prelude();
+    for n : nodes {
+      fit n.kind {
+        .Enum(e) -> {
+          let eerr = self.emit_enum(n);
+          if eerr.is_some() {
+            ret eerr;
+          }
+        }
+        _ -> {}
+      }
+    }
     for n : nodes {
       fit n.kind {
         .Compound(c) -> {
@@ -2068,6 +2210,91 @@ test "emit_expr rejects '.' access on a receiver that isn't a known local" {
   Node n = node_new(NodeKind.Expression(e));
 
   assert g.emit_expr(n).is_some(), "expected an unrecognized receiver to be rejected rather than guessed";
+}
+
+test "emit_enum emits a plain enum as a C enum typedef, auto and explicit values" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  EnumVariant va = enum_variant_new();
+  va.name = "Red";
+  EnumVariant vb = enum_variant_new();
+  vb.name = "Green";
+  vb.value = 5;
+  vb.has_value = true;
+
+  EnumDeclNode e = enum_decl_node_new();
+  e.name = "Color";
+  e.variants.push(va);
+  e.variants.push(vb);
+
+  Node n = node_new(NodeKind.Enum(e));
+  assert g.emit_enum(n).is_none(), "expected the enum to emit";
+  assert equals(
+    st.out.build(),
+    "typedef enum Color {\n  Color_Red,\n  Color_Green = 5,\n} Color;\n\n"
+  ), "expected a C enum typedef with an auto and an explicit variant value";
+}
+
+test "emit_enum skips a tagged-union (payload-carrying) enum" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  DataType* payload_dt = malloc(sizeof(DataType));
+  *payload_dt = dtype_new();
+  payload_dt.type_str = "num";
+  EnumVariant v = enum_variant_new();
+  v.name = "Some";
+  v.payload.push(payload_dt);
+  v.has_payload = true;
+
+  EnumDeclNode e = enum_decl_node_new();
+  e.name = "Option";
+  e.variants.push(v);
+
+  Node n = node_new(NodeKind.Enum(e));
+  assert g.emit_enum(n).is_none(), "expected a tagged-union enum to be silently skipped";
+  assert equals(st.out.build(), ""), "expected nothing emitted for a tagged-union enum";
+}
+
+test "emit_enum skips a generic enum (monomorphization not yet supported)" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  EnumDeclNode e = enum_decl_node_new();
+  e.name = "Box";
+  e.type_params.push("T");
+  e.has_type_params = true;
+
+  Node n = node_new(NodeKind.Enum(e));
+  assert g.emit_enum(n).is_none(), "expected a generic enum to be silently skipped";
+  assert equals(st.out.build(), ""), "expected nothing emitted for a generic enum";
+}
+
+test "emit_expr emits a qualified enum-variant-constant access" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  Vec<str> variants;
+  variants.init(0);
+  variants.push("Red");
+  variants.push("Green");
+  g.record_enum("Color", variants);
+
+  Node* recv = malloc(sizeof(Node));
+  *recv = node_new(NodeKind.Identifier("Color"));
+  Node* variant = malloc(sizeof(Node));
+  *variant = node_new(NodeKind.Identifier("Green"));
+  ExprNode e;
+  e.left = recv;
+  e.has_left = true;
+  e.right = variant;
+  e.has_right = true;
+  e.op = ".";
+  Node n = node_new(NodeKind.Expression(e));
+
+  assert g.emit_expr(n).is_none(), "expected the enum-variant access to emit";
+  assert equals(st.out.build(), "Color_Green"), "expected 'Color_Green'";
 }
 
 test "emit_compound emits a non-generic compound as a C struct typedef" {
