@@ -4298,14 +4298,15 @@ impl Parser {
     ret self.state.expect_sym(';');
   }
 
-  // Parses one statement: a `{ ... }` nested body, a `let` declaration, a
-  // `ret`/`assert`/`if`/`elif`/`else`/`for`/`fit`/`defer`/`break`/
-  // `continue`/`allow`/`expect` statement, `fork <call>;` (a CONTEXTUAL
-  // keyword -- reserved only when NOT immediately followed by `(`, since
-  // `fork` can also be an ordinary identifier, e.g. a `std.c.process`
-  // binding for the POSIX `fork()` syscall), `nil`/`panic(...)`/`await`
-  // as expression-statements, or a bare expression statement terminated
-  // by `;`.
+  // Parses one statement: a `{ ... }` nested body, a bare-datatype-keyword
+  // variable declaration (`num x = 5;`, no leading `let`) or a `let`
+  // declaration, a `ret`/`assert`/`if`/`elif`/`else`/`for`/`fit`/`defer`/
+  // `break`/`continue`/`allow`/`expect` statement, `fork <call>;` (a
+  // CONTEXTUAL keyword -- reserved only when NOT immediately followed by
+  // `(`, since `fork` can also be an ordinary identifier, e.g. a
+  // `std.c.process` binding for the POSIX `fork()` syscall), `nil`/
+  // `panic(...)`/`await` as expression-statements, or a bare expression
+  // statement terminated by `;`.
   // 
   // `compound`/`enum`/`quirk`/`impl`/`imp`/`test`/`fun` are intentionally
   // NOT dispatched here -- those are top-level-only declarations in this
@@ -4332,6 +4333,9 @@ impl Parser {
       fit t.data {
         .Sval(s) -> { kw = s; }
         _ -> {}
+      }
+      if keyword_is_datatype(kw) {
+        ret self._parse_bare_type_variable_declaration(false);
       }
       if equals(kw, "let") {
         ret self.parse_let_declaration(false);
@@ -5520,7 +5524,7 @@ impl Parser {
             _ -> {}
           }
           if keyword_is_datatype(nkw) {
-            ret self._parse_top_level_variable(true);
+            ret self._parse_bare_type_variable_declaration(true);
           }
           if equals(nkw, "let") {
             ret self.parse_let_declaration(true);
@@ -5575,15 +5579,19 @@ impl Parser {
       }
 
       if keyword_is_datatype(kw) {
-        ret self._parse_top_level_variable(false);
+        ret self._parse_bare_type_variable_declaration(false);
       }
     }
 
     ret self.parse_statement();
   }
 
-  // `<datatype> name [= val];` at the top level (public or private).
-  _parse_top_level_variable(bin is_public) Option<ParseErrorKind> {
+  // `<datatype> name [= val];` -- an explicit-type variable declaration
+  // with no leading `let`. Shared by `parse_statement` (inside a function
+  // body, always private) and `parse_top_level_declaration` (`pub`/bare
+  // at file scope), matching the original's single `parse_keyword`
+  // checking `keyword_is_datatype` first at BOTH scopes.
+  _parse_bare_type_variable_declaration(bin is_public) Option<ParseErrorKind> {
     DataType* dt = malloc(sizeof(DataType));
     *dt = dtype_new();
     let derr = self.state.parse_datatype(dt);
@@ -6928,6 +6936,43 @@ test "parse_body parses a let declaration" {
       }
     }
     _ -> { panic("expected a Body node"); }
+  }
+}
+
+test "parse_body parses a bare-datatype-keyword variable declaration (no 'let')" {
+  ParseState st = _state_from("{ num x = 5; }");
+  Parser p = parser_new(&st);
+  assert p.parse_body().is_none(), "expected '{ num x = 5; }' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Body(b) -> {
+      assert b.statements.len == 1, "expected 1 statement";
+      let s0 = b.statements.get(0);
+      fit s0.kind {
+        .Variable(v) -> {
+          assert equals(v.name, "x"), "expected variable name 'x'";
+          assert v.has_val, "expected an initializer";
+          assert equals(v.var_type.type_str, "num"), "expected an explicit 'num' type, not the __let_infer__ sentinel";
+        }
+        _ -> { panic("expected a Variable statement"); }
+      }
+    }
+    _ -> { panic("expected a Body node"); }
+  }
+}
+
+test "parse_statement dispatches a bare-datatype-keyword declaration" {
+  Vec<str> names;
+  names.init(0);
+  ParseState st = _state_with_declared("bin done = false;", names);
+  Parser p = parser_new(&st);
+  assert p.parse_statement().is_none(), "expected 'bin done = false;' to parse as a statement";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Variable(v) -> {
+      assert equals(v.var_type.type_str, "bin"), "expected an explicit 'bin' type";
+    }
+    _ -> { panic("expected a Variable statement"); }
   }
 }
 
