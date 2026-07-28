@@ -29,14 +29,18 @@
 // node -- see `emit_impl`'s doc comment -- so it's emitted exactly like
 // any other function), a method call `recv.method(...)` resolved
 // statically to `Type__method(<self-arg>, ...)` from the receiver's
-// known local type (see `emit_method_call`'s doc comment), and a
-// top-level function declaration with any number of parameters (still no
-// generics/variadics). Verified end to end: the self-hosted lexer ->
-// self-hosted parser -> this codegen, on programs using variables,
-// comparisons, if-elif-else, assignment statements, all three `for` loop
-// forms above, multi-arg function calls, a compound with field
-// reads/writes, and a plain impl method called both directly and through
-// `self`, produces C that compiles and runs with the correct exit code.
+// known local type (see `emit_method_call`'s doc comment), `fit subject {
+// patterns -> { body } ... }` over a plain-identifier subject with
+// literal patterns as a C `if`/`else if`/`else` chain (see `emit_fit`'s
+// doc comment), and a top-level function declaration with any number of
+// parameters (still no generics/variadics). Verified end to end: the
+// self-hosted lexer -> self-hosted parser -> this codegen, on programs
+// using variables, comparisons, if-elif-else, assignment statements, all
+// three `for` loop forms above, multi-arg function calls, a compound
+// with field reads/writes, a plain impl method called both directly and
+// through `self`, and a `fit` over a `num` subject with a comma-chained
+// pattern and a default arm, produces C that compiles and runs with the
+// correct exit code.
 // 
 // Deliberately deferred from this slice (documented rather than silently
 // dropped):
@@ -55,7 +59,11 @@
 // local (an array literal, or a general `Iterator`-implementing quirk
 // value dispatched through `.next()`) -- see `emit_for_iter`'s doc
 // comment; `[]` (indexing).
-// - `fit`, and every declaration kind besides a plain function/non-generic
+// - A `fit` subject that isn't a plain identifier (needs a temp variable
+// AND a type to declare it with -- see `emit_fit`'s doc comment), and a
+// `fit` branch matching a bare enum-variant shorthand or destructuring
+// pattern (no enum support yet either).
+// - Every declaration kind besides a plain function/non-generic
 // compound/non-quirk-non-generic impl (`enum`/`quirk`, a GENERIC
 // compound's monomorphized specializations, and a generic or
 // quirk-implementing impl's methods).
@@ -405,6 +413,7 @@ impl Codegen {
 
     Vec<Node*> args;
     args.init(0);
+    defer args.free();
     self.flatten_call_args(e.right, &args);
 
     bin first = true;
@@ -472,6 +481,7 @@ impl Codegen {
 
     Vec<Node*> args;
     args.init(0);
+    defer args.free();
     self.flatten_call_args(args_node, &args);
     for arg : args {
       self.state.write(", ");
@@ -576,6 +586,10 @@ impl Codegen {
           .Range(fr) -> { ret self.emit_for_range(fr); }
           .Iter(fi) -> { ret self.emit_for_iter(fi); }
         }
+      }
+      .StatementFit(f) -> {
+        self.state.write_indent();
+        ret self.emit_fit(f);
       }
       // A bare expression used as a statement (an assignment, a call for
       // its side effect, `x++;`, ...) parses as a plain `.Expression`/
@@ -735,6 +749,123 @@ impl Codegen {
     self.state.indent_level = self.state.indent_level - 1;
     self.state.write_indent();
     self.state.write("}\n");
+    ret .None;
+  }
+
+  // Emits `fit subject { patterns -> { body } ... }` as a chain of C
+  // `if`/`else if`/`else` blocks comparing `subject` against each
+  // branch's literal pattern(s) -- mirrors the original's own `str`/
+  // `dec` "if/else-if chain" lowering, but applied UNIFORMLY here (no
+  // `switch` path for an integral/enum subject, since this codegen has
+  // no type inference to pick a subject-wide strategy). A `str` pattern
+  // label compares via `strcmp(...) == 0`; every other literal kind
+  // compares via `==` -- decided PER LABEL from that label's own literal
+  // kind, not once for the whole subject.
+  // 
+  // Deliberately narrow for this slice: the subject must be a plain
+  // identifier, re-evaluated once per branch instead of hoisted into a
+  // temp variable -- safe only because reading a plain identifier twice
+  // has no side effects (a call subject would need a temp var, and this
+  // codegen has no type to declare one with anyway). A comma-chained
+  // pattern (`1, 2 -> ...`) matches any of its values (OR-ed
+  // comparisons); reuses `flatten_call_args` directly for that, since
+  // it's the exact same comma-flattening a call's argument list needs.
+  // Bare enum-variant shorthand/destructuring patterns (`.Some(x) ->
+  // ...`) aren't reachable yet (no enum support) -- such a branch's
+  // condition naturally fails with `UnsupportedNode` rather than
+  // emitting wrong C, since it isn't a literal `emit_expr` can compare
+  // an identifier against. Explicit destructuring bindings
+  // (`has_bindings`) are rejected outright for the same reason.
+  emit_fit(FitStmtNode f) Option<CodegenErrorKind> {
+    str subj_name = "";
+    fit f.exp.kind {
+      .Identifier(name) -> { subj_name = name; }
+      _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+    }
+
+    bin wrote_branch = false;
+    Node* default_body = nil;
+    bin has_default = false;
+
+    for br : f.branches {
+      if br.has_bindings && br.bindings.len > 0 {
+        ret .Some(CodegenErrorKind.UnsupportedNode);
+      }
+      if !br.has_condition {
+        default_body = br.body;
+        has_default = true;
+        continue;
+      }
+
+      if wrote_branch {
+        self.state.write(" else if (");
+      } else {
+        self.state.write("if (");
+      }
+
+      Vec<Node*> labels;
+      labels.init(0);
+      defer labels.free();
+      self.flatten_call_args(br.condition, &labels);
+
+      bin first_label = true;
+      for lbl : labels {
+        if !first_label {
+          self.state.write(" || ");
+        }
+        first_label = false;
+        bin is_str_label = false;
+        fit lbl.kind {
+          .String(_) -> { is_str_label = true; }
+          _ -> {}
+        }
+        if is_str_label {
+          self.state.write("strcmp(");
+          self.state.write(subj_name);
+          self.state.write(", ");
+          let lerr = self.emit_expr(*lbl);
+          if lerr.is_some() {
+            ret lerr;
+          }
+          self.state.write(") == 0");
+        } else {
+          self.state.write(subj_name);
+          self.state.write(" == ");
+          let lerr2 = self.emit_expr(*lbl);
+          if lerr2.is_some() {
+            ret lerr2;
+          }
+        }
+      }
+
+      self.state.write(") {\n");
+      self.state.indent_level = self.state.indent_level + 1;
+      let berr = self.emit_body(*br.body);
+      if berr.is_some() {
+        ret berr;
+      }
+      self.state.indent_level = self.state.indent_level - 1;
+      self.state.write_indent();
+      self.state.write("}");
+      wrote_branch = true;
+    }
+
+    if has_default {
+      if wrote_branch {
+        self.state.write(" else {\n");
+      } else {
+        self.state.write("{\n");
+      }
+      self.state.indent_level = self.state.indent_level + 1;
+      let dberr = self.emit_body(*default_body);
+      if dberr.is_some() {
+        ret dberr;
+      }
+      self.state.indent_level = self.state.indent_level - 1;
+      self.state.write_indent();
+      self.state.write("}");
+    }
+    self.state.write("\n");
     ret .None;
   }
 
@@ -1730,6 +1861,152 @@ test "emit_statement rejects an iterator for over a receiver that isn't a known 
   Node n = node_new(NodeKind.StatementFor(ForKind.Iter(fi)));
 
   assert g.emit_statement(n).is_some(), "expected an unrecognized iterable to be rejected rather than guessed";
+}
+
+test "emit_statement emits a fit over a num subject with a comma-chained pattern and a default arm" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  Node* subj = malloc(sizeof(Node));
+  *subj = node_new(NodeKind.Identifier("x"));
+
+  Node* lbl1 = malloc(sizeof(Node));
+  *lbl1 = node_new(NodeKind.Number(TokenData.Num(1)));
+  Node* lbl2 = malloc(sizeof(Node));
+  *lbl2 = node_new(NodeKind.Number(TokenData.Num(2)));
+  ExprNode comma;
+  comma.left = lbl1;
+  comma.has_left = true;
+  comma.right = lbl2;
+  comma.has_right = true;
+  comma.op = ",";
+  Node* comma_node = malloc(sizeof(Node));
+  *comma_node = node_new(NodeKind.Expression(comma));
+
+  Node* ret_a = malloc(sizeof(Node));
+  *ret_a = node_new(NodeKind.StatementReturn(nil));
+  Vec<Node*> a_stmts;
+  a_stmts.init(0);
+  a_stmts.push(ret_a);
+  BodyNode a_bn;
+  a_bn.statements = a_stmts;
+  Node* a_body = malloc(sizeof(Node));
+  *a_body = node_new(NodeKind.Body(a_bn));
+
+  FitBranch br_a = fit_branch_new();
+  br_a.condition = comma_node;
+  br_a.has_condition = true;
+  br_a.body = a_body;
+
+  Node* val9 = malloc(sizeof(Node));
+  *val9 = node_new(NodeKind.Number(TokenData.Num(9)));
+  Node* ret_default = malloc(sizeof(Node));
+  *ret_default = node_new(NodeKind.StatementReturn(val9));
+  Vec<Node*> d_stmts;
+  d_stmts.init(0);
+  d_stmts.push(ret_default);
+  BodyNode d_bn;
+  d_bn.statements = d_stmts;
+  Node* d_body = malloc(sizeof(Node));
+  *d_body = node_new(NodeKind.Body(d_bn));
+
+  FitBranch br_default = fit_branch_new();
+  br_default.body = d_body;
+
+  FitStmtNode f = fit_stmt_node_new();
+  f.exp = subj;
+  f.branches.push(br_a);
+  f.branches.push(br_default);
+  f.has_default_branch = true;
+
+  Node n = node_new(NodeKind.StatementFit(f));
+  assert g.emit_statement(n).is_none(), "expected the fit statement to emit";
+  assert equals(
+    st.out.build(),
+    "if (x == 1 || x == 2) {\n    return;\n} else {\n    return 9;\n}\n"
+  ), "expected an if/else chain with an OR-ed comma pattern";
+}
+
+test "emit_statement emits a fit over a str subject using strcmp" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  Node* subj = malloc(sizeof(Node));
+  *subj = node_new(NodeKind.Identifier("s"));
+  Node* lbl = malloc(sizeof(Node));
+  *lbl = node_new(NodeKind.String("hi"));
+
+  Node* ret_stmt = malloc(sizeof(Node));
+  *ret_stmt = node_new(NodeKind.StatementReturn(nil));
+  Vec<Node*> stmts;
+  stmts.init(0);
+  stmts.push(ret_stmt);
+  BodyNode bn;
+  bn.statements = stmts;
+  Node* body = malloc(sizeof(Node));
+  *body = node_new(NodeKind.Body(bn));
+
+  FitBranch br = fit_branch_new();
+  br.condition = lbl;
+  br.has_condition = true;
+  br.body = body;
+
+  FitStmtNode f = fit_stmt_node_new();
+  f.exp = subj;
+  f.branches.push(br);
+
+  Node n = node_new(NodeKind.StatementFit(f));
+  assert g.emit_statement(n).is_none(), "expected the fit statement to emit";
+  assert equals(st.out.build(), "if (strcmp(s, \"hi\") == 0) {\n    return;\n}\n"), "expected an strcmp comparison for a str pattern";
+}
+
+test "emit_statement rejects a fit over a subject that isn't a plain identifier" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  Node* left = malloc(sizeof(Node));
+  *left = node_new(NodeKind.Identifier("a"));
+  Node* right = malloc(sizeof(Node));
+  *right = node_new(NodeKind.Identifier("b"));
+  ExprNode call_e;
+  call_e.left = left;
+  call_e.has_left = true;
+  call_e.right = right;
+  call_e.has_right = true;
+  call_e.op = "()";
+  Node* subj = malloc(sizeof(Node));
+  *subj = node_new(NodeKind.Expression(call_e));
+
+  FitStmtNode f = fit_stmt_node_new();
+  f.exp = subj;
+
+  Node n = node_new(NodeKind.StatementFit(f));
+  assert g.emit_statement(n).is_some(), "expected a non-identifier fit subject to be rejected rather than hoisted into a temp";
+}
+
+test "emit_statement rejects a fit branch with a destructuring binding" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  Node* subj = malloc(sizeof(Node));
+  *subj = node_new(NodeKind.Identifier("x"));
+
+  BodyNode bn;
+  bn.statements.init(0);
+  Node* body = malloc(sizeof(Node));
+  *body = node_new(NodeKind.Body(bn));
+
+  FitBranch br = fit_branch_new();
+  br.body = body;
+  br.bindings.push("r");
+  br.has_bindings = true;
+
+  FitStmtNode f = fit_stmt_node_new();
+  f.exp = subj;
+  f.branches.push(br);
+
+  Node n = node_new(NodeKind.StatementFit(f));
+  assert g.emit_statement(n).is_some(), "expected a destructuring fit branch to be rejected (no enum support yet)";
 }
 
 test "emit_expr emits '.' field access on a known value-typed local" {
