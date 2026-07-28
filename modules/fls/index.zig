@@ -1082,7 +1082,9 @@ test "fls index: constrained impl keeps self owner type" {
         if (s.container_fn_range == null) continue;
         found_self = true;
         try std.testing.expect(s.value_type != null);
-        try std.testing.expect(std.mem.eql(u8, s.value_type.?, "Vec<T:num|dec>"));
+        // `self` is always an implicit pointer to the receiver (codegen emits
+        // `<Type>* self`), so the indexed type must carry the pointer suffix.
+        try std.testing.expect(std.mem.eql(u8, s.value_type.?, "Vec<T:num|dec>*"));
         break;
     }
 

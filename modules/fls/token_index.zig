@@ -621,6 +621,89 @@ pub fn buildSignatureFromTokens(
             }
             return i;
         }
+
+        // Renders a parameter default's expression tokens (from just after the `=`
+        // up to but not including the terminating top-level comma/`)`) the way the
+        // original source spells it, e.g. `1`, `"hi"`, `true`, or `min(a, b)`. A
+        // depth counter over `(`/`[` (mirroring the parser's own `stop_at_comma`
+        // rule — see parser.zig's `parse_variable`) keeps a nested call's/array's
+        // own commas from being mistaken for the next parameter's separator.
+        // Number/String/Boolean tokens don't retain their source spelling (the
+        // lexer stores a parsed value instead), so those are re-spelled from their
+        // literal value rather than copied verbatim.
+        fn appendDefaultValueSuffix(out_buf: *ArrayList(u8), all_tokens: []const token.Token, start_i: usize, limit_i: usize) !usize {
+            var default_depth: i64 = 0;
+            var need_space_before_ident = false;
+            var i = start_i;
+            while (i < limit_i) : (i += 1) {
+                const t = all_tokens[i];
+                if (t.type == .NewLine or t.type == .Comment) continue;
+
+                if (default_depth == 0 and (isPunctChar(t, ',') or isSymbolChar(t, ','))) break;
+
+                if (isPunctChar(t, '(') or isSymbolChar(t, '(') or isPunctChar(t, '[') or isSymbolChar(t, '[')) {
+                    default_depth += 1;
+                }
+                if (isPunctChar(t, ')') or isSymbolChar(t, ')') or isPunctChar(t, ']') or isSymbolChar(t, ']')) {
+                    if (default_depth > 0) default_depth -= 1;
+                }
+
+                if (isPunctChar(t, ',') or isSymbolChar(t, ',')) {
+                    // A nested comma inside the default's own call/array.
+                    try out_buf.appendSlice(", ");
+                    need_space_before_ident = false;
+                    continue;
+                }
+
+                switch (t.type) {
+                    .String => {
+                        if (need_space_before_ident) try out_buf.append(' ');
+                        try out_buf.append('"');
+                        try out_buf.appendSlice(tokenString(t));
+                        try out_buf.append('"');
+                        need_space_before_ident = true;
+                    },
+                    .Boolean => {
+                        if (need_space_before_ident) try out_buf.append(' ');
+                        try out_buf.appendSlice(if (t.data.bval) "true" else "false");
+                        need_space_before_ident = true;
+                    },
+                    .Number => {
+                        if (need_space_before_ident) try out_buf.append(' ');
+                        switch (t.data) {
+                            .cval => |c| {
+                                try out_buf.append('\'');
+                                try out_buf.append(c);
+                                try out_buf.append('\'');
+                            },
+                            .llnum => |v| try out_buf.print("{d}", .{v}),
+                            .inum => |v| try out_buf.print("{d}", .{v}),
+                            .lnum => |v| try out_buf.print("{d}", .{v}),
+                            .dnum => |v| try out_buf.print("{d}", .{v}),
+                            else => {},
+                        }
+                        need_space_before_ident = true;
+                    },
+                    .Symbol => {
+                        if (t.data == .cval) try out_buf.append(t.data.cval);
+                        need_space_before_ident = false;
+                    },
+                    .Operator => {
+                        try out_buf.appendSlice(tokenString(t));
+                        need_space_before_ident = false;
+                    },
+                    else => { // Identifier, Keyword
+                        const s = tokenString(t);
+                        if (s.len != 0) {
+                            if (need_space_before_ident) try out_buf.append(' ');
+                            try out_buf.appendSlice(s);
+                            need_space_before_ident = true;
+                        }
+                    },
+                }
+            }
+            return i;
+        }
     };
 
     // Parse params as `Type[*...] name` pairs.
@@ -669,6 +752,17 @@ pub fn buildSignatureFromTokens(
         first = false;
         try buf.print("{s} {s}", .{ ptype_buf.items, pname });
         pi = pname_i + 1;
+
+        // A defaulted parameter (`num times = 1`): render `= <expr>` after the
+        // name, the way the original source declares it, instead of silently
+        // dropping the default (the loop above would otherwise just skip over
+        // its tokens looking for the next `Type name` pair).
+        if (nextNonTrivialToken(tokens, pi)) |eq_i| {
+            if (eq_i < rparen_i.? and isPunctChar(tokens[eq_i], '=')) {
+                try buf.appendSlice(" = ");
+                pi = try parsed.appendDefaultValueSuffix(&buf, tokens, eq_i + 1, rparen_i.?);
+            }
+        }
     }
 
     try buf.append(')');
@@ -2800,9 +2894,14 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
             body_symbol_start = out.items.len;
             locals_type_map.clearRetainingCapacity();
 
-            // Add implicit `self` inside impl method bodies.
+            // Add implicit `self` inside impl method bodies. `self` is always a
+            // pointer to the receiver compound (codegen emits `<Type>* self` as
+            // the implicit first argument), so its hover type must carry the
+            // `*` suffix just like any other pointer-typed parameter.
             if (pending_body == .impl_method) {
                 if (pending_impl_owner) |owner| {
+                    const self_type = try std.fmt.allocPrint(allocator, "{s}*", .{owner});
+                    const self_detail = try std.fmt.allocPrint(allocator, "{s}* self", .{owner});
                     try out.append(.{
                         .name = try allocator.dupe(u8, "self"),
                         .kind = .variable,
@@ -2810,10 +2909,10 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                         .selection_range = br,
                         .container_fn_range = body_range.?,
                         .container_type = null,
-                        .value_type = try allocator.dupe(u8, owner),
-                        .detail = try allocator.dupe(u8, owner),
+                        .value_type = self_type,
+                        .detail = self_detail,
                     });
-                    putType(&locals_type_map, "self", owner, allocator);
+                    putType(&locals_type_map, "self", self_type, allocator);
                 }
             }
 

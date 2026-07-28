@@ -4975,7 +4975,35 @@ pub const LspServer = struct {
         return null;
     }
 
+    /// Whether `t` looks like the anchor token for a `.Variant` dot-shorthand
+    /// (either a bare `.` symbol, or a single identifier token whose text
+    /// starts with `.` -- some tokenizer states emit `.Variant` as one token).
+    fn isDotShorthandAnchorToken(t: TokenLite) bool {
+        if (isDotToken(t)) return true;
+        return t.kind == .identifier and t.text.len > 1 and t.text[0] == '.';
+    }
+
+    /// Resolves the expected enum type for a `.Variant` dot-shorthand whose
+    /// anchor token is at or near `tok_i`. Callers locate `tok_i` via generic
+    /// token-position helpers (`findTokenIndexAt` / `findLastTokenIndexBeforeOrAt`),
+    /// which resolve a cursor sitting exactly on a token boundary to the NEXT
+    /// token (ranges are start-inclusive/end-exclusive) -- e.g. for `takes(.)`
+    /// with the cursor between `.` and `)`, those helpers return the `)` token,
+    /// not the `.` the user just typed after. When the token at `tok_i` isn't a
+    /// plausible dot-shorthand anchor, retry against the PRECEDING token before
+    /// giving up, since that's almost always the actual anchor in that boundary
+    /// case. Without this retry, expected-type resolution silently fails and
+    /// completion falls back to dumping every enum in scope (see the "Fallback:
+    /// offer members of all enums in scope" branch in handleCompletion).
     fn guessEnumTypeForDotShorthand(self: *LspServer, uri: []const u8, idx: *const Index, tok_i: usize) ?[]const u8 {
+        if (self.guessEnumTypeForDotShorthandAt(uri, idx, tok_i)) |r| return r;
+        if (tok_i > 0 and !isDotShorthandAnchorToken(idx.tokens[tok_i]) and isDotShorthandAnchorToken(idx.tokens[tok_i - 1])) {
+            return self.guessEnumTypeForDotShorthandAt(uri, idx, tok_i - 1);
+        }
+        return null;
+    }
+
+    fn guessEnumTypeForDotShorthandAt(self: *LspServer, uri: []const u8, idx: *const Index, tok_i: usize) ?[]const u8 {
         var dot_i_opt: ?usize = null;
         if (idx.tokens[tok_i].kind == .identifier) {
             // Some tokenizers may emit `.Variant` as a single identifier token (text starts with '.')

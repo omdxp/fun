@@ -3283,6 +3283,58 @@ test "fls e2e: locals inside a test block are indexed for hover" {
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: hover on `self` inside an impl method shows a pointer type" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "compound User {\n" ++
+        "  num id;\n" ++
+        "}\n\n" ++
+        "impl User {\n" ++
+        "  get_id() num {\n" ++
+        "    ret self.id;\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-self-hover.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // `self` is always an implicit pointer to the receiver compound (the
+    // codegen emits `<Type>* self` as the first argument), so hovering over
+    // it must render the pointer star just like an explicit `User* u` param.
+    const self_pos = try findPosition(doc_text, "ret self.id", 0);
+    const hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, self_pos.line, self_pos.col + @as(i64, @intCast("ret ".len)) },
+    );
+    defer allocator.free(hover_params);
+    const hover_id = try lsp.request("textDocument/hover", hover_params);
+    // This hover is the only request the test issues, so (unlike most other
+    // hover tests here, which warm up the workspace index via an earlier
+    // completion/definition call first) it alone pays the full first-request
+    // workspace-indexing cost; give it more headroom than the usual 15000ms.
+    var hover_res = try lsp.waitResponse(hover_id, 45000);
+    defer hover_res.deinit();
+    const hover_val = try jsonResultFromResponseObj(hover_res.parsed.value.object);
+    try expectHoverContains(allocator, hover_val, "User* self");
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: for range loop locals support" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
@@ -6541,6 +6593,74 @@ test "fls e2e: a parameter default does not corrupt inlay hints or completion sn
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: hover on a function with a defaulted parameter shows the default value" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    // `num times = 3` is a parameter DEFAULT. Hovering the function name, at its
+    // own declaration and again at a call site, must render `num times = 3` in
+    // the signature -- the way the original Fun source declares it -- not just
+    // `num times` with the default silently dropped.
+    const doc_text =
+        "fun greet(str name, num times = 3) num {\n" ++
+        "  _ = name;\n" ++
+        "  ret times;\n" ++
+        "}\n\n" ++
+        "fun main() num {\n" ++
+        "  ret greet(\"a\");\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-hover-default-param.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // Hover on the `greet` declaration name.
+    const decl_pos = try findPosition(doc_text, "fun greet(str name, num times = 3) num {\n", 0);
+    const decl_hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, decl_pos.line, decl_pos.col + @as(i64, @intCast("fun ".len)) },
+    );
+    defer allocator.free(decl_hover_params);
+    // 45s (not the usual 15s): unlike other hover tests in this file, this
+    // hover is the FIRST request after opening the doc, so it alone pays the
+    // full first-request workspace-indexing cost against the whole repo
+    // (which has grown substantially during the self-hosting port) rather
+    // than warming up via an earlier completion/definition call.
+    const decl_hover_id = try lsp.request("textDocument/hover", decl_hover_params);
+    var decl_hover_res = try lsp.waitResponse(decl_hover_id, 45000);
+    defer decl_hover_res.deinit();
+    const decl_hover_val = try jsonResultFromResponseObj(decl_hover_res.parsed.value.object);
+    try expectHoverContains(allocator, decl_hover_val, "num times = 3");
+
+    // Hover on the `greet` call site.
+    const call_pos = try findPosition(doc_text, "  ret greet(\"a\");\n", 0);
+    const call_hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, call_pos.line, call_pos.col + @as(i64, @intCast("  ret ".len)) },
+    );
+    defer allocator.free(call_hover_params);
+    const call_hover_id = try lsp.request("textDocument/hover", call_hover_params);
+    var call_hover_res = try lsp.waitResponse(call_hover_id, 15000);
+    defer call_hover_res.deinit();
+    const call_hover_val = try jsonResultFromResponseObj(call_hover_res.parsed.value.object);
+    try expectHoverContains(allocator, call_hover_val, "num times = 3");
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: data-enum fit arm binding has typed hover and member completion" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
@@ -7116,6 +7236,91 @@ test "fls e2e: completion after a call-argument '(' skips statement/type keyword
         try std.testing.expect(labelsContain(labels.items, "num"));
         try std.testing.expect(labelsContain(labels.items, "str"));
     }
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: dot-shorthand completion at a call-arg boundary narrows to the expected param's own enum" {
+    // Regression test for a reported completion bug: with more than one enum in
+    // scope, `.` completion for a specific call-argument position was dumping
+    // EVERY enum's variants (plus, in other contexts, unrelated functions)
+    // instead of narrowing to the ONE enum expected at that argument position.
+    //
+    // Root cause: the cursor for a bare `.` sitting immediately before the
+    // call's closing `)` (e.g. `paint(.Red, .)`) lands exactly on the shared
+    // boundary between the `.` token and the `)` token. Token-range lookups
+    // are start-inclusive/end-exclusive, so they resolved that boundary to the
+    // `)` token, not the `.` just typed. `guessEnumTypeForDotShorthand` then
+    // saw a `)` where it expected a dot-shorthand anchor, bailed out early
+    // (returning null), and completion fell back to its "offer every enum in
+    // scope" fallback path — silently discarding the call's active-parameter
+    // type narrowing that would have selected only `Status`.
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "enum Color {\n" ++
+        "  Red,\n" ++
+        "  Green,\n" ++
+        "  Blue,\n" ++
+        "}\n\n" ++
+        "enum Status {\n" ++
+        "  Ok,\n" ++
+        "  Err,\n" ++
+        "}\n\n" ++
+        "fun helper_unrelated() {\n" ++
+        "  ret;\n" ++
+        "}\n\n" ++
+        "fun paint(Color c, Status s) {\n" ++
+        "  ret;\n" ++
+        "}\n\n" ++
+        "fun main() {\n" ++
+        "  paint(.Red, .);\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-enum-call-arg-narrowing.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // Second-arg completion: `paint(.Red, .)` expects a `Status`. It must
+    // offer ONLY `Ok`/`Err` -- never `Status`'s sibling enum `Color`'s
+    // variants, and never unrelated free functions.
+    const pos = try findPosition(doc_text, "paint(.Red, .)", 0);
+    const params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, pos.line, pos.col + @as(i64, @intCast("paint(.Red, .".len)) },
+    );
+    defer allocator.free(params);
+    // 45s (not the usual 15s): this completion is the FIRST request after
+    // opening the doc, so it alone pays the full first-request workspace-
+    // indexing cost against the whole repo (which has grown substantially
+    // during the self-hosting port) rather than warming up via an earlier
+    // request, as most other tests in this file do.
+    const cid = try lsp.request("textDocument/completion", params);
+    var res = try lsp.waitResponse(cid, 45000);
+    defer res.deinit();
+    const result = try jsonResultFromResponseObj(res.parsed.value.object);
+
+    try expectCompletionHasLabel(allocator, result, "Ok");
+    try expectCompletionHasLabel(allocator, result, "Err");
+    try expectCompletionMissingLabel(allocator, result, "Red");
+    try expectCompletionMissingLabel(allocator, result, "Green");
+    try expectCompletionMissingLabel(allocator, result, "Blue");
+    try expectCompletionMissingLabel(allocator, result, "helper_unrelated");
+    try expectCompletionMissingLabel(allocator, result, "paint");
+    try expectCompletionMissingLabel(allocator, result, "main");
 
     const shutdown_id = try lsp.request("shutdown", "{}");
     var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
