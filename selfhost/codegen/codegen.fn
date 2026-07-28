@@ -11,20 +11,28 @@
 // see `flatten_call_args`), variable declarations (explicit type only,
 // no `let` inference yet), `ret` statements, `if`/`elif`/`else` (chained
 // correctly into one C construct even though they're three independent
-// sibling AST statements -- see `emit_if_chain`'s doc comment), and a
-// top-level function declaration with any number of parameters (still
-// no generics/variadics). Verified end to end: the self-hosted lexer ->
+// sibling AST statements -- see `emit_if_chain`'s doc comment), `for`
+// (condition/infinite form as a C `while`, integer-range form as a C
+// counted `for` -- see `emit_for_cond`/`emit_for_range`; the iterator
+// form, `for item : arr { ... }`, is deferred alongside `.` below since it
+// needs member access to call into `Vec`/`Iterator`), bare expression
+// statements (an assignment, a call for its side effect, `x++;` -- these
+// have no dedicated `StatementExpression` AST wrapper, they're a plain
+// `.Expression`/`.Unary` node straight in the statement list), and a
+// top-level function declaration with any number of parameters (still no
+// generics/variadics). Verified end to end: the self-hosted lexer ->
 // self-hosted parser -> this codegen, on programs using variables,
-// comparisons, if-elif-else, and multi-arg function calls, produces C
-// that compiles and runs with the correct exit code.
+// comparisons, if-elif-else, assignment statements, both `for` loop forms
+// above, and multi-arg function calls, produces C that compiles and runs
+// with the correct exit code.
 // 
 // Deliberately deferred from this slice (documented rather than silently
 // dropped):
 // - `[]` (indexing), `.` (member access) -- the latter needs `.`/`->`
 // disambiguation based on pointer-ness, so it also blocks method calls
-// (`recv.method(...)`, a callee that ISN'T a plain identifier) and calls
-// through an aliased/imported module.
-// - `for`/`fit`, and every declaration kind besides a plain function
+// (`recv.method(...)`, a callee that ISN'T a plain identifier), calls
+// through an aliased/imported module, and the iterator form of `for`.
+// - `fit`, and every declaration kind besides a plain function
 // (`compound`/`enum`/`quirk`/`impl`).
 // - Type INFERENCE: a function's return type and every literal's type are
 // already fully explicit at this stage (an omitted `let` type, or a
@@ -343,7 +351,108 @@ impl Codegen {
         self.state.write(";\n");
         ret .None;
       }
+      .StatementFor(fk) -> {
+        self.state.write_indent();
+        fit fk {
+          .Cond(fc) -> { ret self.emit_for_cond(fc); }
+          .Range(fr) -> { ret self.emit_for_range(fr); }
+          .Iter(_) -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+        }
+      }
+      // A bare expression used as a statement (an assignment, a call for
+      // its side effect, `x++;`, ...) parses as a plain `.Expression`/
+      // `.Unary` node directly in the statement list -- there's no
+      // dedicated `StatementExpression` wrapper (see `parse_statement`'s
+      // fallthrough to `parse_expressionable_root` in the parser). Emit it
+      // as `<expr>;` followed by its own newline, same as every other
+      // statement.
+      .Expression(_) -> {
+        self.state.write_indent();
+        let eerr = self.emit_expr(node);
+        if eerr.is_some() {
+          ret eerr;
+        }
+        self.state.write(";\n");
+        ret .None;
+      }
+      .Unary(_) -> {
+        self.state.write_indent();
+        let uerr = self.emit_expr(node);
+        if uerr.is_some() {
+          ret uerr;
+        }
+        self.state.write(";\n");
+        ret .None;
+      }
       _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+    }
+  }
+
+  // Emits `for { ... }` (infinite) or `for cond { ... }` as the direct C
+  // equivalent: `while (1) { ... }` / `while (cond) { ... }` -- a
+  // conditional `for` has no init/increment clauses of its own, so a
+  // `while` loop is exactly the same construct.
+  emit_for_cond(ForCondNode fc) Option<CodegenErrorKind> {
+    if fc.has_condition {
+      self.state.write("while (");
+      let cerr = self.emit_expr(*fc.condition);
+      if cerr.is_some() {
+        ret cerr;
+      }
+      self.state.write(") {\n");
+    } else {
+      self.state.write("while (1) {\n");
+    }
+    self.state.indent_level = self.state.indent_level + 1;
+    let berr = self.emit_body(*fc.body);
+    if berr.is_some() {
+      ret berr;
+    }
+    self.state.indent_level = self.state.indent_level - 1;
+    self.state.write_indent();
+    self.state.write("}\n");
+    ret .None;
+  }
+
+  // Emits `for i : start..end { ... }` as `for (int64_t i = start; i <
+  // end; i++) { ... }`. `range_expr` is always an `Expression{ op = ".." }`
+  // (start on the left, end on the right) -- see `parse_for_statement`'s
+  // doc comment in the parser for how the range/condition forms are
+  // disambiguated at parse time.
+  emit_for_range(ForRangeNode fr) Option<CodegenErrorKind> {
+    fit fr.range_expr.kind {
+      .Expression(e) -> {
+        if !equals(e.op, "..") || !e.has_left || !e.has_right {
+          ret .Some(CodegenErrorKind.InvalidNode);
+        }
+        self.state.write("for (int64_t ");
+        self.state.write(fr.index_name);
+        self.state.write(" = ");
+        let serr = self.emit_expr(*e.left);
+        if serr.is_some() {
+          ret serr;
+        }
+        self.state.write("; ");
+        self.state.write(fr.index_name);
+        self.state.write(" < ");
+        let eerr = self.emit_expr(*e.right);
+        if eerr.is_some() {
+          ret eerr;
+        }
+        self.state.write("; ");
+        self.state.write(fr.index_name);
+        self.state.write("++) {\n");
+        self.state.indent_level = self.state.indent_level + 1;
+        let berr = self.emit_body(*fr.body);
+        if berr.is_some() {
+          ret berr;
+        }
+        self.state.indent_level = self.state.indent_level - 1;
+        self.state.write_indent();
+        self.state.write("}\n");
+        ret .None;
+      }
+      _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
     }
   }
 
@@ -1040,6 +1149,113 @@ test "emit_function emits parameters, and a call to it" {
   Node fn_node = node_new(NodeKind.Function(fnv));
   assert g.emit_function(fn_node).is_none(), "expected the function to emit";
   assert equals(st.out.build(), "int64_t add(int64_t a, int64_t b) {\n    return (a + b);\n}\n"), "expected a two-param C function definition";
+}
+
+test "emit_statement emits a conditional for as a while loop" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  Node* cond = malloc(sizeof(Node));
+  *cond = node_new(NodeKind.Identifier("ok"));
+  Node* ret_stmt = malloc(sizeof(Node));
+  *ret_stmt = node_new(NodeKind.StatementReturn(nil));
+  Vec<Node*> body_stmts;
+  body_stmts.init(0);
+  body_stmts.push(ret_stmt);
+  BodyNode bn;
+  bn.statements = body_stmts;
+  Node* body = malloc(sizeof(Node));
+  *body = node_new(NodeKind.Body(bn));
+
+  ForCondNode fc;
+  fc.condition = cond;
+  fc.has_condition = true;
+  fc.body = body;
+  Node n = node_new(NodeKind.StatementFor(ForKind.Cond(fc)));
+
+  assert g.emit_statement(n).is_none(), "expected the for-cond to emit";
+  assert equals(st.out.build(), "while (ok) {\n    return;\n}\n"), "expected a while loop";
+}
+
+test "emit_statement emits an infinite for as while (1)" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  Node* ret_stmt = malloc(sizeof(Node));
+  *ret_stmt = node_new(NodeKind.StatementReturn(nil));
+  Vec<Node*> body_stmts;
+  body_stmts.init(0);
+  body_stmts.push(ret_stmt);
+  BodyNode bn;
+  bn.statements = body_stmts;
+  Node* body = malloc(sizeof(Node));
+  *body = node_new(NodeKind.Body(bn));
+
+  ForCondNode fc;
+  fc.condition = nil;
+  fc.has_condition = false;
+  fc.body = body;
+  Node n = node_new(NodeKind.StatementFor(ForKind.Cond(fc)));
+
+  assert g.emit_statement(n).is_none(), "expected the infinite for to emit";
+  assert equals(st.out.build(), "while (1) {\n    return;\n}\n"), "expected 'while (1)'";
+}
+
+test "emit_statement emits a range for as a counted C for loop" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  Node* start = malloc(sizeof(Node));
+  *start = node_new(NodeKind.Number(TokenData.Num(0)));
+  Node* end = malloc(sizeof(Node));
+  *end = node_new(NodeKind.Identifier("n"));
+  ExprNode range;
+  range.left = start;
+  range.has_left = true;
+  range.right = end;
+  range.has_right = true;
+  range.op = "..";
+  Node* range_node = malloc(sizeof(Node));
+  *range_node = node_new(NodeKind.Expression(range));
+
+  Node* ret_stmt = malloc(sizeof(Node));
+  *ret_stmt = node_new(NodeKind.StatementReturn(nil));
+  Vec<Node*> body_stmts;
+  body_stmts.init(0);
+  body_stmts.push(ret_stmt);
+  BodyNode bn;
+  bn.statements = body_stmts;
+  Node* body = malloc(sizeof(Node));
+  *body = node_new(NodeKind.Body(bn));
+
+  ForRangeNode fr;
+  fr.index_name = "i";
+  fr.range_expr = range_node;
+  fr.body = body;
+  Node n = node_new(NodeKind.StatementFor(ForKind.Range(fr)));
+
+  assert g.emit_statement(n).is_none(), "expected the for-range to emit";
+  assert equals(st.out.build(), "for (int64_t i = 0; i < n; i++) {\n    return;\n}\n"), "expected a counted C for loop";
+}
+
+test "emit_statement emits a bare assignment expression as a statement" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  Node* lhs = malloc(sizeof(Node));
+  *lhs = node_new(NodeKind.Identifier("x"));
+  Node* rhs = malloc(sizeof(Node));
+  *rhs = node_new(NodeKind.Number(TokenData.Num(3)));
+  ExprNode assign;
+  assign.left = lhs;
+  assign.has_left = true;
+  assign.right = rhs;
+  assign.has_right = true;
+  assign.op = "=";
+  Node n = node_new(NodeKind.Expression(assign));
+
+  assert g.emit_statement(n).is_none(), "expected the assignment to emit";
+  assert equals(st.out.build(), "(x = 3);\n"), "expected '(x = 3);\\n'";
 }
 
 test "transpile emits the prelude followed by every top-level function" {
