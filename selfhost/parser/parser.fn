@@ -1966,7 +1966,16 @@ impl Parser {
     let star_tok = self.state.token_peek_next();
     let depth = self.state.parse_get_pointer_depth();
 
+    // Bound the operand (`stop_at_binary_op`) so a following binary
+    // operator ends it instead of being swallowed into the operand:
+    // `*buf = 10` must parse as `(*buf) = 10`, not `*(buf = 10)` (which
+    // silently changes what gets assigned). Mirrors the identical
+    // `<-ch + 1` -> `(<-ch) + 1` bounding already done for prefix channel
+    // receive.
+    let prev_stop_binary = self.stop_at_binary_op;
+    self.stop_at_binary_op = true;
     let err = self.parse_expressionable();
+    self.stop_at_binary_op = prev_stop_binary;
     if err.is_some() {
       ret err;
     }
@@ -2014,7 +2023,17 @@ impl Parser {
       _ -> {}
     }
 
+    // Bound the operand the same way `parse_for_indirection_unary` does
+    // (see its own doc comment): `-x = 10` (nonsensical, but structurally
+    // the same shape as `!r.is_err(), "msg"`) must not swallow a
+    // following binary operator OR a top-level comma into the operand --
+    // `is_binary_only_operator` covers both, so a single
+    // `stop_at_binary_op` bound handles it without a separate
+    // `stop_at_comma` toggle.
+    let prev_stop_binary = self.stop_at_binary_op;
+    self.stop_at_binary_op = true;
     let err = self.parse_expressionable();
+    self.stop_at_binary_op = prev_stop_binary;
     if err.is_some() {
       ret err;
     }
@@ -6818,13 +6837,17 @@ test "parse_expressionable_root parses a postfix unary followed by a binary cont
 }
 
 test "parse_expressionable_root parses a unary operand followed by a binary continuation" {
-  // `parse_for_normal_unary` parses its operand via the full greedy
-  // `parse_expressionable` (matching the original faithfully), so a
-  // binary operator right after a unary's primary operand continues
-  // INSIDE the unary, not around it: `-a + b` is `-(a + b)`, not
-  // `(-a) + b`. Prefix unary is a WEAK-binding operator in this grammar
-  // (as parsed today; `assert !r.is_err()` relies on exactly this to let
-  // `!` wrap a whole call result, not just a bare primary).
+  // `parse_for_normal_unary`/`parse_for_indirection_unary` bound their
+  // operand parse with `stop_at_binary_op` (matching the original's
+  // `expression_is_unary`/`is_unary_operand_compatible` restriction to
+  // postfix-only continuations), so prefix unary is TIGHT-binding: `-a +
+  // b` is `(-a) + b`, not `-(a + b)`. This matters beyond precedence
+  // aesthetics -- without this bound, `*buf = 10` parsed as `*(buf =
+  // 10)` (assigning INTO `buf` itself, then dereferencing the result)
+  // instead of `(*buf) = 10` (assigning through the pointer), silently
+  // changing what gets written. A postfix continuation (`.`/`(`/`[`)
+  // still continues the SAME operand rather than ending it, so
+  // `!r.is_err()` still correctly parses as `!(r.is_err())`.
   Vec<str> names;
   names.init(0);
   names.push("a");
@@ -6834,24 +6857,62 @@ test "parse_expressionable_root parses a unary operand followed by a binary cont
   assert p.parse_expressionable_root().is_none(), "expected '-a + b' to parse";
   let top = st.nodes.get(st.nodes.len - 1);
   fit top.kind {
-    .Unary(u) -> {
-      assert equals(u.op, "-"), "expected the outer node to be unary '-'";
-      fit u.operand.kind {
-        .Expression(e) -> {
-          assert equals(e.op, "+"), "expected the unary's operand to be '(a + b)'";
-          fit e.left.kind {
-            .Identifier(s) -> { assert equals(s, "a"), "expected left 'a'"; }
+    .Expression(e) -> {
+      assert equals(e.op, "+"), "expected the outer node to be '(-a) + b'";
+      fit e.left.kind {
+        .Unary(u) -> {
+          assert equals(u.op, "-"), "expected the left side to be unary '-'";
+          fit u.operand.kind {
+            .Identifier(s) -> {
+              assert equals(s, "a"), "expected the unary's operand to be 'a'";
+            }
             _ -> { panic("expected Identifier 'a'"); }
           }
-          fit e.right.kind {
-            .Identifier(s) -> { assert equals(s, "b"), "expected right 'b'"; }
-            _ -> { panic("expected Identifier 'b'"); }
-          }
         }
-        _ -> { panic("expected the unary's operand to be an Expression"); }
+        _ -> { panic("expected the left side to be a Unary node"); }
+      }
+      fit e.right.kind {
+        .Identifier(s) -> { assert equals(s, "b"), "expected right 'b'"; }
+        _ -> { panic("expected Identifier 'b'"); }
       }
     }
-    _ -> { panic("expected a Unary node"); }
+    _ -> { panic("expected an Expression node"); }
+  }
+}
+
+test "parse_expressionable_root parses pointer-indirection assignment without swallowing the assignment into the operand" {
+  // Regression test for the exact bug fixed above, at the indirection
+  // unary (`*p`) specifically: `*buf = 10` must be `(*buf) = 10`
+  // (assign 10 through the pointer), not `*(buf = 10)` (assign 10 to
+  // `buf` itself, then dereference the result).
+  Vec<str> names;
+  names.init(0);
+  names.push("buf");
+  ParseState st = _state_with_declared("*buf = 10", names);
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected '*buf = 10' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Expression(e) -> {
+      assert equals(e.op, "="), "expected the outer node to be an assignment";
+      fit e.left.kind {
+        .Unary(u) -> {
+          assert u.has_indirection, "expected the assignment target to be a pointer indirection";
+          fit u.operand.kind {
+            .Identifier(s) -> {
+              assert equals(s, "buf"), "expected the dereferenced operand to be 'buf'";
+            }
+            _ -> { panic("expected Identifier 'buf'"); }
+          }
+        }
+        _ -> { panic("expected the assignment target to be a Unary node"); }
+      }
+      fit e.right.kind {
+        .Number(_) -> {}
+        _ -> { panic("expected the assigned value to be a Number"); }
+      }
+    }
+    _ -> { panic("expected an Expression node"); }
   }
 }
 
