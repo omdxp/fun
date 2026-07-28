@@ -377,6 +377,19 @@ impl LogRecord {
     let sb = string_builder_init(64);
     let n = self.fields.len();
 
+    // RFC3339 UTC (e.g. "2026-07-28T08:50:11Z"): the conventional
+    // timestamp format for structured/machine-readable logs (unambiguous,
+    // sortable, timezone-explicit, one line) -- unlike the C library's
+    // human/ctime format (`now_human_cstr`), which is locale- and local-
+    // timezone-dependent and includes its own trailing newline, silently
+    // splitting the log line in two. Stack-allocated (not malloc'd): a
+    // logger call happens far too often in a long-running process to heap
+    // -allocate its timestamp on every single call.
+    chr[32] ts_buf;
+    if self.with_timestamp {
+      now().format_utc(ts_buf, 32, "%Y-%m-%dT%H:%M:%SZ");
+    }
+
     fit self.format {
       .Text -> {
         sb.append_char('[');
@@ -384,7 +397,7 @@ impl LogRecord {
         sb.append_char(']');
         if self.with_timestamp {
           sb.append_char(' ');
-          sb.append(now_human_cstr());
+          sb.append(ts_buf);
         }
         if len(self.name) > 0 {
           sb.append(" [");
@@ -411,7 +424,7 @@ impl LogRecord {
         sb.append_char('"');
         if self.with_timestamp {
           sb.append(",\"ts\":\"");
-          json_escape_into(&sb, now_human_cstr());
+          json_escape_into(&sb, ts_buf);
           sb.append_char('"');
         }
         if len(self.name) > 0 {

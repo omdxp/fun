@@ -256,7 +256,7 @@ pub fun now_string(str buf, num buf_len) num {
   if n > 0 {
     ret n;
   }
-  ret snprintf(buf, buf_len, "%d", t.epoch);
+  ret snprintf(buf, buf_len, "%lld", t.epoch);
 }
 
 // Format current time with default format (Result).
@@ -282,7 +282,7 @@ pub fun now_string_utc(str buf, num buf_len) num {
   if n > 0 {
     ret n;
   }
-  ret snprintf(buf, buf_len, "%d", t.epoch);
+  ret snprintf(buf, buf_len, "%lld", t.epoch);
 }
 
 // Format current time with default format (UTC) with Result.

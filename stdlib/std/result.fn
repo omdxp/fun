@@ -20,6 +20,7 @@
 // The error arm carries a full `Error` (kind + code + message + context).
 
 imp std.error;
+imp std.c.string;
 
 // A fallible result: `Ok(value)` on success, `Err(error)` on failure.
 pub enum Result<T> {
@@ -81,6 +82,7 @@ impl Result<T> {
   // A zero-initialized T, used as the empty fallback for `unwrap`.
   zero() T {
     T out;
+    memset(&out, 0, sizeof(T));
     ret out;
   }
 

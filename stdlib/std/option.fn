@@ -25,6 +25,7 @@
 
 imp std.result;
 imp std.error;
+imp std.c.string;
 
 // An optional value: `Some(v)` holds a `T`; `None` holds nothing.
 pub enum Option<T> {
@@ -74,6 +75,7 @@ impl Option<T> {
   // A zero-initialized T, used as the empty fallback for `unwrap`.
   zero() T {
     T out;
+    memset(&out, 0, sizeof(T));
     ret out;
   }
 
