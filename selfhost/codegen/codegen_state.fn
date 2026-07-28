@@ -1,0 +1,52 @@
+// Minimal state for the self-hosted Fun compiler's codegen (C emission):
+// just the growing output buffer and current indentation depth. Mirrors
+// `parse_state.fn`'s "own minimal state container" precedent -- a small,
+// self-contained slice of the original's giant `TranspileProcess`, grown
+// only as later codegen slices actually need more (a type registry,
+// generics-instantiation tracking, scope for type-driven warnings, ...).
+
+imp std.string;
+
+pub compound CodegenState {
+  StringBuilder out;
+  num indent_level;
+}
+
+pub fun codegen_state_new() CodegenState {
+  CodegenState st;
+  st.out = string_builder_init(256);
+  st.indent_level = 0;
+  ret st;
+}
+
+impl CodegenState {
+  // Appends `s` to the output buffer verbatim (no indentation).
+  pub write(str s) {
+    self.out.append(s);
+  }
+
+  // Emits the current indentation (4 spaces per level), matching the
+  // original's fixed 4-space convention.
+  pub write_indent() {
+    num i = 0;
+    for i < self.indent_level {
+      self.out.append("    ");
+      i = i + 1;
+    }
+  }
+}
+
+test "codegen_state_new starts with an empty buffer at indent 0" {
+  CodegenState st = codegen_state_new();
+  assert st.out.len() == 0, "expected an empty output buffer";
+  assert st.indent_level == 0, "expected indent level 0";
+}
+
+test "write appends verbatim, write_indent emits 4 spaces per level" {
+  CodegenState st = codegen_state_new();
+  st.write("int x");
+  st.indent_level = 2;
+  st.write_indent();
+  st.write(";");
+  assert equals(st.out.build(), "int x        ;"), "expected 'int x' + 8 spaces + ';'";
+}

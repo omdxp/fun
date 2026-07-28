@@ -1,0 +1,100 @@
+// Fun-to-C builtin type name mapping and other pure, stateless codegen
+// lookup tables. Split out from codegen.fn the same way datatype_defs.fn
+// splits parser.fn's keyword/type tables -- a pure, self-contained
+// lookup, not codegen STATE.
+
+imp std.string;
+imp std.io;
+imp ..parser.datatype_defs;
+
+// Maps a builtin Fun scalar type name to its C spelling. Sized/dynamic
+// ints (`iN`/`uN`) are handled separately by the caller via
+// `dynamic_int_type_to_c` (checked first -- see `write_type`'s own doc
+// comment) before falling back here. Anything not recognized here
+// (`void`, a user-defined type name, ...) is returned UNCHANGED --
+// matching the original exactly: `void`'s `type_str` is already the
+// literal string "void" and a user type's name is its own valid C name.
+pub fun map_type_to_c(str type_str) str {
+  fit type_str {
+    "num" -> { ret "int64_t"; }
+    "dec" -> { ret "double"; }
+    "f32" -> { ret "float"; }
+    "f64" -> { ret "double"; }
+    "i8" -> { ret "int8_t"; }
+    "i16" -> { ret "int16_t"; }
+    "i32" -> { ret "int32_t"; }
+    "i64" -> { ret "int64_t"; }
+    "u8" -> { ret "uint8_t"; }
+    "u16" -> { ret "uint16_t"; }
+    "u32" -> { ret "uint32_t"; }
+    "u64" -> { ret "uint64_t"; }
+    "str" -> { ret "char*"; }
+    "bin" -> { ret "bool"; }
+    "chr" -> { ret "char"; }
+    "raw" -> { ret "void"; }
+    _ -> { ret type_str; }
+  }
+}
+
+// Returns `dyn`'s C spelling: `int8_t`/`uint8_t`/.../`int64_t`/`uint64_t`
+// for the four standard widths, or C23's `_BitInt(N)` extension for any
+// other width (an arbitrary bit-width int is syntactically accepted by
+// the parser but rare in practice) -- matching the original exactly.
+pub fun dynamic_int_type_to_c(DynamicIntType dyn) str {
+  if dyn.bits == 8 {
+    if dyn.is_signed {
+      ret "int8_t";
+    }
+    ret "uint8_t";
+  }
+  if dyn.bits == 16 {
+    if dyn.is_signed {
+      ret "int16_t";
+    }
+    ret "uint16_t";
+  }
+  if dyn.bits == 32 {
+    if dyn.is_signed {
+      ret "int32_t";
+    }
+    ret "uint32_t";
+  }
+  if dyn.bits == 64 {
+    if dyn.is_signed {
+      ret "int64_t";
+    }
+    ret "uint64_t";
+  }
+  if dyn.is_signed {
+    ret format("_BitInt({num})", dyn.bits);
+  }
+  ret format("unsigned _BitInt({num})", dyn.bits);
+}
+
+test "map_type_to_c maps builtin scalars to their C spellings" {
+  assert equals(map_type_to_c("num"), "int64_t"), "expected 'num' -> 'int64_t'";
+  assert equals(map_type_to_c("dec"), "double"), "expected 'dec' -> 'double'";
+  assert equals(map_type_to_c("str"), "char*"), "expected 'str' -> 'char*'";
+  assert equals(map_type_to_c("bin"), "bool"), "expected 'bin' -> 'bool'";
+  assert equals(map_type_to_c("chr"), "char"), "expected 'chr' -> 'char'";
+  assert equals(map_type_to_c("raw"), "void"), "expected 'raw' -> 'void'";
+}
+
+test "map_type_to_c passes an unrecognized name through unchanged" {
+  assert equals(map_type_to_c("void"), "void"), "expected 'void' to pass through unchanged";
+  assert equals(map_type_to_c("Point"), "Point"), "expected a user-defined type name to pass through unchanged";
+}
+
+test "dynamic_int_type_to_c maps the four standard widths" {
+  assert equals(dynamic_int_type_to_c(DynamicIntType{is_signed = true, bits = 8}), "int8_t"), "expected i8 -> int8_t";
+  assert equals(dynamic_int_type_to_c(DynamicIntType{is_signed = false, bits = 32}), "uint32_t"), "expected u32 -> uint32_t";
+  assert equals(dynamic_int_type_to_c(DynamicIntType{is_signed = true, bits = 64}), "int64_t"), "expected i64 -> int64_t";
+}
+
+test "dynamic_int_type_to_c falls back to _BitInt(N) for a non-standard width" {
+  assert equals(dynamic_int_type_to_c(DynamicIntType{is_signed = true, bits = 24}), "_BitInt(24)"), "expected i24 -> _BitInt(24)";
+  assert equals(
+    dynamic_int_type_to_c(DynamicIntType{is_signed = false, bits = 24}),
+    "unsigned _BitInt(24)"
+  ), "expected u24 -> unsigned _BitInt(24)";
+}

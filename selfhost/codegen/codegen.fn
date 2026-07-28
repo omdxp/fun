@@ -1,0 +1,397 @@
+// The self-hosted Fun compiler's codegen: transpiles an AST into C source.
+// Ported from the previous implementation's `modules/codegen/transpiler.zig`,
+// incrementally, the same way `selfhost/parser` was.
+// 
+// This is an early, first slice: literal expressions (number/decimal/
+// string/character/boolean), `ret` statements, and a plain (no args, no
+// generics, no imports) top-level function declaration -- just enough
+// to transpile a trivial whole program (`fun main() num { ret 0; }`
+// -shaped code) end to end and prove the pipeline (state, C emission,
+// prelude) works before building up the rest incrementally, the same
+// order the parser itself was built in (simplest expressions first).
+// 
+// Deliberately deferred from this slice (documented rather than silently
+// dropped):
+// - Every other statement/expression kind (`if`/`for`/`fit`/calls/binary
+// operators/...), and every declaration kind besides a plain function
+// (`compound`/`enum`/`quirk`/`impl`).
+// - Type INFERENCE: a function's return type and every literal's type are
+// already fully explicit at this stage (an omitted `let` type, or a
+// function relying on inferred generics, isn't reachable yet), so no
+// `infer_expr_type`-equivalent exists yet either.
+// - Multi-file imports, generics monomorphization, quirk/vtable dispatch,
+// async/channels -- each is a substantial slice of its own in the
+// original and will get one here too.
+// - Exotic literal-escaping edge cases the original handles (splitting a
+// string literal around a `\xFF`-then-more-hex-digits run so C doesn't
+// fold extra digits into the escape) -- string content is written back
+// out verbatim otherwise, relying on the lexer already having preserved
+// escape sequences byte-for-byte from source (confirmed: `lexes string
+// literals with escapes preserved verbatim` in the lexer's own test
+// suite), which is valid C escape syntax already.
+// - Decimal literals are emitted in FIXED-point (`format_dec(d, 6)`)
+// rather than the original's scientific-notation (`{e}`) convention --
+// both are valid C floating-point literal syntax representing the same
+// value; the original's choice wasn't semantically required, and fixed-
+// point is simpler to produce with the stdlib helpers already at hand.
+
+imp codegen_state;
+imp typedefs;
+imp ..ast.ast;
+imp ..lexer.token;
+imp ..parser.datatype_defs;
+imp std.string;
+imp std.option;
+imp std.io;
+
+pub enum CodegenErrorKind {
+  UnsupportedNode,
+  InvalidNode,
+}
+
+pub compound Codegen {
+  CodegenState* state;
+}
+
+pub fun codegen_new(CodegenState* state) Codegen {
+  Codegen g;
+  g.state = state;
+  ret g;
+}
+
+impl Codegen {
+  // Writes `dt`'s C spelling: a sized/dynamic int (`iN`/`uN`) via
+  // `dynamic_int_type_to_c`, else the builtin mapping via `map_type_to_c`
+  // (a user-defined type name passes through unchanged, matching the
+  // original), followed by one `*` per pointer-depth level.
+  // 
+  // Deliberately simplified from the original for this slice: no C-
+  // typedef-alias resolution or generic-name mangling for a user-defined
+  // type -- neither is reachable yet (no `compound`/generics support).
+  pub write_type(DataType dt) {
+    fit parse_dynamic_int_datatype(dt.type_str) {
+      .Some(dyn) -> { self.state.write(dynamic_int_type_to_c(dyn)); }
+      .None -> { self.state.write(map_type_to_c(dt.type_str)); }
+    }
+    num ptr_depth = dt.pointer_depth;
+    if ptr_depth == 0 && dt.flags.is_pointer {
+      ptr_depth = 1;
+    }
+    num i = 0;
+    for i < ptr_depth {
+      self.state.write("*");
+      i = i + 1;
+    }
+  }
+
+  // Writes a single-quoted C character literal for `c`, escaping the
+  // same fixed set the original does (backslash/quote/newline/CR/tab/
+  // NUL), and any other non-printable-ASCII byte as `\xHH`.
+  write_char_literal(chr c) {
+    self.state.write("'");
+    if c == '\\' {
+      self.state.write("\\\\");
+    } elif c == '\'' {
+      self.state.write("\\'");
+    } elif c == '\n' {
+      self.state.write("\\n");
+    } elif c == '\r' {
+      self.state.write("\\r");
+    } elif c == '\t' {
+      self.state.write("\\t");
+    } elif c == 0 {
+      self.state.write("\\0");
+    } else {
+      num code = c;
+      if code < 0x20 || code >= 0x7f {
+        self.state.write(format("\\x{num}", code));
+      } else {
+        str buf = malloc(2);
+        buf[0] = c;
+        buf[1] = 0;
+        self.state.write(buf);
+      }
+    }
+    self.state.write("'");
+  }
+
+  // Emits `node` as a C expression. Only literal (primary) expression
+  // kinds are supported this slice -- see this file's own top-level doc
+  // comment for what's deliberately still missing.
+  pub emit_expr(Node node) Option<CodegenErrorKind> {
+    fit node.kind {
+      .Number(data) -> {
+        fit data {
+          .Num(n) -> {
+            self.state.write(format_num(n));
+            ret .None;
+          }
+          .Dec(d) -> {
+            self.state.write(format_dec(d, 6));
+            ret .None;
+          }
+          _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
+        }
+      }
+      .String(s) -> {
+        self.state.write("\"");
+        self.state.write(s);
+        self.state.write("\"");
+        ret .None;
+      }
+      .Character(c) -> {
+        self.write_char_literal(c);
+        ret .None;
+      }
+      .Boolean(b) -> {
+        if b {
+          self.state.write("true");
+        } else {
+          self.state.write("false");
+        }
+        ret .None;
+      }
+      _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+    }
+  }
+
+  // Emits one statement, followed by its own trailing newline (statements
+  // are the unit `emit_body` iterates, so each ends its own line).
+  pub emit_statement(Node node) Option<CodegenErrorKind> {
+    fit node.kind {
+      .StatementReturn(exp) -> {
+        self.state.write_indent();
+        self.state.write("return");
+        if exp != nil {
+          self.state.write(" ");
+          let eerr = self.emit_expr(*exp);
+          if eerr.is_some() {
+            ret eerr;
+          }
+        }
+        self.state.write(";\n");
+        ret .None;
+      }
+      _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+    }
+  }
+
+  // Emits every statement in `body` (a `Body` node), one per line.
+  emit_body(Node body) Option<CodegenErrorKind> {
+    fit body.kind {
+      .Body(bn) -> {
+        for stmt : bn.statements {
+          let serr = self.emit_statement(*stmt);
+          if serr.is_some() {
+            ret serr;
+          }
+        }
+        ret .None;
+      }
+      _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
+    }
+  }
+
+  // Emits a plain (no args, no generics) top-level function declaration
+  // as a C function definition: `<rtype> <name>(void) { <body> }`.
+  pub emit_function(Node node) Option<CodegenErrorKind> {
+    fit node.kind {
+      .Function(f) -> {
+        if !f.has_rtype {
+          ret .Some(CodegenErrorKind.InvalidNode);
+        }
+        self.write_type(*f.rtype);
+        self.state.write(" ");
+        self.state.write(f.name);
+        self.state.write("(void) {\n");
+        self.state.indent_level = self.state.indent_level + 1;
+        if f.has_body {
+          let berr = self.emit_body(*f.body);
+          if berr.is_some() {
+            ret berr;
+          }
+        }
+        self.state.indent_level = self.state.indent_level - 1;
+        self.state.write("}\n");
+        ret .None;
+      }
+      _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
+    }
+  }
+
+  // Writes the fixed set of C headers the original always includes
+  // (before any conditional ones gated on stdlib usage, threads, sockets,
+  // etc. -- none of which are reachable yet since imports aren't ported).
+  pub write_prelude() {
+    self.state.write("#include <stdio.h>\n");
+    self.state.write("#include <stdbool.h>\n");
+    self.state.write("#include <stdint.h>\n");
+    self.state.write("#include <stdarg.h>\n");
+    self.state.write("#include <stdlib.h>\n");
+    self.state.write("#include <string.h>\n");
+  }
+
+  // Transpiles every top-level `Function` node in `nodes` (anything else
+  // is skipped -- not an error, since a whole-file parse can contain
+  // declarations not reachable yet, like `imp`).
+  pub transpile(Vec<Node> nodes) Option<CodegenErrorKind> {
+    self.write_prelude();
+    for n : nodes {
+      fit n.kind {
+        .Function(f) -> {
+          let ferr = self.emit_function(n);
+          if ferr.is_some() {
+            ret ferr;
+          }
+        }
+        _ -> {}
+      }
+    }
+    ret .None;
+  }
+}
+
+test "write_type emits builtin scalar C types with pointer depth" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  DataType dt = dtype_new();
+  dt.type_str = "num";
+  g.write_type(dt);
+  assert equals(st.out.build(), "int64_t"), "expected 'int64_t'";
+
+  CodegenState st2 = codegen_state_new();
+  Codegen g2 = codegen_new(&st2);
+  DataType dt2 = dtype_new();
+  dt2.type_str = "chr";
+  dt2.pointer_depth = 2;
+  g2.write_type(dt2);
+  assert equals(st2.out.build(), "char**"), "expected 'char**'";
+}
+
+test "write_type emits a sized int via dynamic_int_type_to_c" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  DataType dt = dtype_new();
+  dt.type_str = "u32";
+  g.write_type(dt);
+  assert equals(st.out.build(), "uint32_t"), "expected 'uint32_t'";
+}
+
+test "emit_expr emits a number literal" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  Node n = node_new(NodeKind.Number(TokenData.Num(42)));
+  assert g.emit_expr(n).is_none(), "expected the number to emit";
+  assert equals(st.out.build(), "42"), "expected '42'";
+}
+
+test "emit_expr emits a string literal verbatim between quotes" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  Node n = node_new(NodeKind.String("hello"));
+  assert g.emit_expr(n).is_none(), "expected the string to emit";
+  assert equals(st.out.build(), "\"hello\""), "expected a quoted string";
+}
+
+test "emit_expr emits a boolean literal" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  Node n = node_new(NodeKind.Boolean(true));
+  assert g.emit_expr(n).is_none(), "expected the boolean to emit";
+  assert equals(st.out.build(), "true"), "expected 'true'";
+}
+
+test "emit_expr escapes a character literal" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  Node n = node_new(NodeKind.Character('\n'));
+  assert g.emit_expr(n).is_none(), "expected the character to emit";
+  assert equals(st.out.build(), "'\\n'"), "expected an escaped newline character literal";
+}
+
+test "emit_statement emits a bare 'ret;' as 'return;'" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  Node n = node_new(NodeKind.StatementReturn(nil));
+  assert g.emit_statement(n).is_none(), "expected the return to emit";
+  assert equals(st.out.build(), "return;\n"), "expected 'return;\\n'";
+}
+
+test "emit_statement emits 'ret <value>;' with the value expression" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  Node* val = malloc(sizeof(Node));
+  * val =node_new(NodeKind.Number(TokenData.Num(7)));
+  Node n = node_new(NodeKind.StatementReturn(val));
+  assert g.emit_statement(n).is_none(), "expected the return to emit";
+  assert equals(st.out.build(), "return 7;\n"), "expected 'return 7;\\n'";
+}
+
+test "emit_function emits a plain no-arg function definition with indentation" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  FunctionNode fnv = function_node_new();
+  fnv.name = "main";
+  fnv.has_name = true;
+  DataType* rtype = malloc(sizeof(DataType));
+  * rtype =dtype_new();
+  rtype.type_str = "num";
+  fnv.rtype = rtype;
+  fnv.has_rtype = true;
+
+  Node* val = malloc(sizeof(Node));
+  * val =node_new(NodeKind.Number(TokenData.Num(0)));
+  Node* ret_stmt = malloc(sizeof(Node));
+  * ret_stmt =node_new(NodeKind.StatementReturn(val));
+  Vec<Node*> stmts;
+  stmts.init(0);
+  stmts.push(ret_stmt);
+  BodyNode bn;
+  bn.statements = stmts;
+  Node* body = malloc(sizeof(Node));
+  * body =node_new(NodeKind.Body(bn));
+  fnv.body = body;
+  fnv.has_body = true;
+
+  Node fn_node = node_new(NodeKind.Function(fnv));
+  assert g.emit_function(fn_node).is_none(), "expected the function to emit";
+  assert equals(st.out.build(), "int64_t main(void) {\n    return 0;\n}\n"), "expected a complete C function definition";
+}
+
+test "transpile emits the prelude followed by every top-level function" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  FunctionNode fnv = function_node_new();
+  fnv.name = "main";
+  fnv.has_name = true;
+  DataType* rtype = malloc(sizeof(DataType));
+  * rtype =dtype_new();
+  rtype.type_str = "num";
+  fnv.rtype = rtype;
+  fnv.has_rtype = true;
+  Node* val = malloc(sizeof(Node));
+  * val =node_new(NodeKind.Number(TokenData.Num(0)));
+  Node* ret_stmt = malloc(sizeof(Node));
+  * ret_stmt =node_new(NodeKind.StatementReturn(val));
+  Vec<Node*> stmts;
+  stmts.init(0);
+  stmts.push(ret_stmt);
+  BodyNode bn;
+  bn.statements = stmts;
+  Node* body = malloc(sizeof(Node));
+  * body =node_new(NodeKind.Body(bn));
+  fnv.body = body;
+  fnv.has_body = true;
+  Node fn_node = node_new(NodeKind.Function(fnv));
+
+  Vec<Node> nodes;
+  nodes.init(0);
+  nodes.push(fn_node);
+
+  assert g.transpile(nodes).is_none(), "expected the whole file to transpile";
+  let out = st.out.build();
+  assert contains(out, "#include <stdint.h>"), "expected the prelude to be present";
+  assert contains(out, "int64_t main(void) {"), "expected the function definition to be present";
+}
