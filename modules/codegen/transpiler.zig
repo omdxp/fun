@@ -306,6 +306,13 @@ pub const TranspileProcess = struct {
     /// Current indentation level (4 spaces per level).
     indent_level: u32 = 0,
 
+    /// Length of the run of consecutive trailing newlines written so far
+    /// (across possibly many separate `write()` calls -- see `write`'s own
+    /// doc comment). Used to collapse 2+ consecutive blank lines down to
+    /// one wherever several independent emission passes each add their own
+    /// trailing separator at a section boundary.
+    consecutive_newlines: u32 = 0,
+
     /// Generic type substitution during emission.
     type_subst_params: ?*const utils.Vector(ArrayList(u8)) = null,
     type_subst_args: ?[]*dtype.DataType = null,
@@ -13021,6 +13028,38 @@ pub const TranspileProcess = struct {
 
     /// Write to output (either file or buffer)
     pub fn write(self: *Self, bytes: []const u8) TranspileError!void {
+        // Fast path: no newline in this chunk (the overwhelming majority of
+        // calls -- identifiers, punctuation, single tokens) -- just update
+        // the trailing-newline-run counter and pass through unmodified.
+        if (mem.indexOfScalar(u8, bytes, '\n') == null) {
+            if (bytes.len > 0) self.consecutive_newlines = 0;
+            return self.write_raw(bytes);
+        }
+
+        // Slow path: this chunk contains at least one newline. Collapse any
+        // run of 3+ consecutive newlines (2+ blank lines) down to exactly 2
+        // (one blank line), with the run tracked in `consecutive_newlines`
+        // so it collapses correctly even when split across separate
+        // write() calls (one ending "...\n", the next starting "\n\n...").
+        // Purely cosmetic -- C ignores blank lines -- but keeps generated
+        // output readable instead of accumulating long blank-line runs at
+        // section boundaries where several independent emission passes
+        // each add their own trailing separator.
+        var buf = ArrayList(u8).init(self.backing_allocator);
+        defer buf.deinit();
+        for (bytes) |c| {
+            if (c == '\n') {
+                self.consecutive_newlines += 1;
+                if (self.consecutive_newlines > 2) continue;
+            } else {
+                self.consecutive_newlines = 0;
+            }
+            buf.append(c) catch return TranspileError.MemoryAllocationFailed;
+        }
+        return self.write_raw(buf.items);
+    }
+
+    fn write_raw(self: *Self, bytes: []const u8) TranspileError!void {
         if (self.flags.outf) {
             self.ofile.?.writeStreamingAll(self.io, bytes) catch {
                 return TranspileError.FileWriteError;
@@ -18140,6 +18179,29 @@ pub const TranspileProcess = struct {
         return false;
     }
 
+    /// True if there is a REAL (body-having, non-`std.c.*`) Fun function
+    /// definition named `name` anywhere in `proc`'s subtree. Unlike
+    /// `find_function_node` (used for ordinary call-site resolution, where
+    /// "first match in scope/search order" is the intentionally correct
+    /// behavior), this is scoped to exactly the question
+    /// `fun_fn_name_needs_c_shadow_rename` needs answered — so it can't be
+    /// short-circuited by an UNRELATED bodyless `std.c.*` binding of the
+    /// same name being reached first in the tree (see that function's own
+    /// doc comment for a worked example of exactly that happening).
+    fn find_real_fn_definition_in(self: *Self, proc: *Self, name: []const u8) ?*ast.Node {
+        for (proc.nodes.items()) |*n| {
+            if (n.type != .Function or n.node_variant == null) continue;
+            const fnv = n.node_variant.?.function;
+            if (fnv.name == null or !mem.eql(u8, fnv.name.?.items, name)) continue;
+            if (fnv.body == null) continue; // a bodyless std.c.* binding stub, not this
+            return n;
+        }
+        for (proc.children.items) |child| {
+            if (self.find_real_fn_definition_in(child, name)) |found| return found;
+        }
+        return null;
+    }
+
     /// A Fun-defined free function whose name collides with a libc symbol pulled in
     /// by an imported `std.c.*` binding (e.g. `std.log`'s `pub fun log(LogLevel, str)`
     /// vs libc `log` from `<math.h>` via std.math) must be emitted under a
@@ -18148,19 +18210,29 @@ pub const TranspileProcess = struct {
     /// The `std.c.*` binding calls themselves resolve to the RAW libc name and are not
     /// affected (they never route through this — they carry a module alias and go
     /// through `resolve_alias_qualified_symbol_name`).
+    ///
+    /// Uses `find_real_fn_definition_in` (not `find_function_node`) specifically
+    /// because a bare-name search can otherwise resolve to the WRONG same-named
+    /// node: e.g. `imp std.json; imp std.log;` (in that order) transitively
+    /// imports `std.c.math`'s bodyless `log` binding (via std.json -> std.math)
+    /// BEFORE std.log's own real `log` function is ever reached in the import
+    /// tree's depth-first search order. `find_function_node` (first match wins,
+    /// correct for its OTHER callers — genuine call-site resolution) would find
+    /// that bodyless stub first and this function would wrongly conclude "log"
+    /// has no real Fun definition to rename, silently leaving the collision in
+    /// place (confirmed directly: this is exactly how `std.log`'s `log` reached
+    /// codegen unrenamed and collided with libc's `<math.h>` `log(double)`).
     fn fun_fn_name_needs_c_shadow_rename(self: *Self, name: []const u8) bool {
         if (mem.eql(u8, name, "main")) return false;
-        const fn_node = self.find_function_node(name) orelse return false;
-        if (fn_node.node_variant == null) return false;
-        const fnv = fn_node.node_variant.?.function;
-        if (fnv.body == null) return false; // the Fun function must be a real definition
+        const root = self.get_root();
+        const fn_node = self.find_real_fn_definition_in(root, name) orelse return false;
         // If the resolved definition itself lives in a std.c.* module it IS the binding;
         // don't rename it.
         if (fn_node.pos) |pos| {
             if (std.mem.indexOf(u8, pos.filename, "/std/c/") != null) return false;
             if (std.mem.indexOf(u8, pos.filename, "\\std\\c\\") != null) return false;
         }
-        return self.c_binding_symbol_exists_in(self.get_root(), name);
+        return self.c_binding_symbol_exists_in(root, name);
     }
 
     fn write_effective_function_name(self: *Self, node: ast.Node, name: []const u8) TranspileError!void {
@@ -18872,8 +18944,10 @@ pub const TranspileProcess = struct {
         try self.write("\n");
 
         if (!self.is_importing) {
-            try self.write("#include <stdlib.h>\n");
-            try self.write("#include <stdio.h>\n");
+            // stdio.h/stdlib.h are already unconditionally included by
+            // write_std_imports's "core headers" above -- don't re-include
+            // them here (this used to emit a literal duplicate
+            // `#include <stdlib.h>#include <stdio.h>` pair every time).
             // Standard-stream accessors. `stdout`/`stderr`/`stdin` are macros/globals
             // (not callable), and differ per libc (glibc/musl/macOS/MSVCRT resolve
             // them differently — MSVCRT via a function call). Wrapping them in tiny
