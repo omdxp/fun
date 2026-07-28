@@ -44,6 +44,18 @@ pub const LexProcess = struct {
     /// Optional queued token used by raw asm block lexing (typically the closing `}`).
     queued_token: ?token.Token = null,
 
+    /// Set by `token_make_special_number` when it pops and merges a
+    /// preceding bare `0` token into a `0x`/`0b` literal (`read_next_token`
+    /// already consumed and pushed that `0` as its OWN token in an EARLIER
+    /// call, so ITS start position is the only place the literal's true
+    /// start survives). `read_next_token`'s post-dispatch position fixup
+    /// reads this instead of the current call's own (too-late) `start_col`/
+    /// `start_line`, which would otherwise point at the `x`/`b`, not the
+    /// `0` -- confirmed directly: without this, the formatter (which slices
+    /// the ORIGINAL SOURCE by token position to preserve hex/binary
+    /// notation) re-emitted `0x20` as `x20`, an invalid identifier.
+    merged_number_start: ?token.Pos = null,
+
     const Self = @This();
 
     /// Initializes a new instance of `LexProcess`.
@@ -1063,6 +1075,12 @@ pub const LexProcess = struct {
             },
         }
 
+        // The merged literal's TRUE start is the popped `0` token's own start
+        // (this call's own `start_col`/`start_line`, captured by the caller
+        // AFTER that `0` was already consumed, points at `b`/`x` instead).
+        // See `merged_number_start`'s own doc comment.
+        self.merged_number_start = last_token.?.pos;
+
         return t;
     }
 
@@ -1299,9 +1317,20 @@ pub const LexProcess = struct {
         }
 
         if (t != null) {
-            t.?.pos.line = start_line;
-            t.?.pos.col = start_col;
-            t.?.pos.start_col = start_col;
+            if (self.merged_number_start) |mstart| {
+                // A `0x`/`0b` literal whose leading `0` was already consumed
+                // (and pushed as its own token) by an EARLIER call to this
+                // function, then popped and merged here -- use ITS start,
+                // not this call's (which only knows about the `x`/`b`).
+                t.?.pos.line = mstart.line;
+                t.?.pos.col = mstart.col;
+                t.?.pos.start_col = mstart.start_col;
+                self.merged_number_start = null;
+            } else {
+                t.?.pos.line = start_line;
+                t.?.pos.col = start_col;
+                t.?.pos.start_col = start_col;
+            }
             t.?.pos.end_line = self.transpile_proc.pos.line;
             t.?.pos.end_col = self.transpile_proc.pos.col;
             self.update_asm_state(t.?);

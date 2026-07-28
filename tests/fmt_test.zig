@@ -863,6 +863,46 @@ test "-fmt preserves explicit decimal literal spelling broadly" {
     try std.testing.expect(std.mem.indexOf(u8, got, "+ 0.0") != null);
 }
 
+test "-fmt preserves hex and binary literal spelling (does not drop the '0' prefix)" {
+    const allocator = std.testing.allocator;
+
+    // Regression: a `0x`/`0b` literal's leading `0` is lexed as its OWN
+    // token first, then popped and merged into the hex/binary token once
+    // the `x`/`b` is seen. The merged token's position was left pointing at
+    // the `x`/`b` (the position captured when THAT call to the lexer's
+    // token reader started, which has no way to know about the earlier,
+    // already-consumed `0`) instead of the original `0`. The formatter
+    // slices the ORIGINAL SOURCE by token position to preserve numeric
+    // literal notation exactly, so this silently corrupted `0x20`/`0b1010`
+    // into `x20`/`b1010` -- invalid identifiers -- every time `-fmt` ran.
+    const ugly =
+        "fun main() num {\n" ++
+        "\tnum a = 0x20;\n" ++
+        "\tnum b = 0xFF;\n" ++
+        "\tnum c = 0b1010;\n" ++
+        "\tret a + b + c;\n" ++
+        "}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_hex_bin_spell", ugly);
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+    try expectFileParses(allocator, path);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+
+    try std.testing.expect(std.mem.indexOf(u8, got, "0x20") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "0xFF") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "0b1010") != null);
+    // The bug's exact failure mode: the leading '0' silently dropped.
+    try std.testing.expect(std.mem.indexOf(u8, got, "num a = x20") == null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "num c = b1010") == null);
+}
+
 test "-fmt-all has cycle protection" {
     const allocator = std.testing.allocator;
 
