@@ -4299,14 +4299,20 @@ impl Parser {
   }
 
   // Parses one statement: a `{ ... }` nested body, a bare-datatype-keyword
-  // variable declaration (`num x = 5;`, no leading `let`) or a `let`
-  // declaration, a `ret`/`assert`/`if`/`elif`/`else`/`for`/`fit`/`defer`/
-  // `break`/`continue`/`allow`/`expect` statement, `fork <call>;` (a
-  // CONTEXTUAL keyword -- reserved only when NOT immediately followed by
-  // `(`, since `fork` can also be an ordinary identifier, e.g. a
-  // `std.c.process` binding for the POSIX `fork()` syscall), `nil`/
-  // `panic(...)`/`await` as expression-statements, or a bare expression
-  // statement terminated by `;`.
+  // variable declaration (`num x = 5;`, no leading `let`), a bare USER-
+  // TYPE variable declaration (`Point p;`, `Point* p = ...;` -- detected
+  // by a `<Identifier> [* ...] <Identifier>` lookahead guarded by "isn't
+  // already a known scope entity", so `w * h;` an ordinary expression
+  // statement isn't misparsed as a pointer declaration; see the
+  // `TokenType.Identifier` branch below for exactly what's still
+  // deliberately narrower than the original here) or a `let` declaration,
+  // a `ret`/`assert`/`if`/`elif`/`else`/`for`/`fit`/`defer`/`break`/
+  // `continue`/`allow`/`expect` statement, `fork <call>;` (a CONTEXTUAL
+  // keyword -- reserved only when NOT immediately followed by `(`, since
+  // `fork` can also be an ordinary identifier, e.g. a `std.c.process`
+  // binding for the POSIX `fork()` syscall), `nil`/`panic(...)`/`await`
+  // as expression-statements, or a bare expression statement terminated
+  // by `;`.
   // 
   // `compound`/`enum`/`quirk`/`impl`/`imp`/`test`/`fun` are intentionally
   // NOT dispatched here -- those are top-level-only declarations in this
@@ -4316,10 +4322,7 @@ impl Parser {
   // Deliberately simplified from the original for this slice: `asm` is a
   // separate, deliberate architectural deferral (see this file's own
   // top-level doc comment); an unsupported keyword reports a clean "not
-  // yet supported" error rather than silently misparsing. Also no user-
-  // defined-type declaration detection (`Point p;`) -- needs the same
-  // forward-lookahead machinery already documented as deferred in
-  // `parse_body_multiple_statements`'s doc comment.
+  // yet supported" error rather than silently misparsing.
   pub parse_statement() Option<ParseErrorKind> {
     let tok = self.state.token_peek_next();
     if tok.is_none() {
@@ -4400,6 +4403,37 @@ impl Parser {
         bin calls_fork_itself = after.is_some() && token_is_operator(after.unwrap(), "(");
         if !calls_fork_itself {
           ret self.parse_fork_statement();
+        }
+      }
+
+      // User-defined-type bare variable declaration: `Point p;`, `Point p
+      // = ...;`, `Point* p;`. Detected the same way the original does: a
+      // `<Identifier> [* ...] <Identifier>` lookahead, guarded by "isn't
+      // already a known scope entity" so an ordinary expression statement
+      // that happens to start with an identifier and contain a `*` (`w *
+      // h;`) isn't misparsed as a pointer declaration.
+      // 
+      // Deliberately narrower than the original for this slice: no
+      // module-alias-qualified type segments (`alias.Type name;`), no
+      // generic type arguments (`Vec<num> v;`), no array-bracket types
+      // (`T[] xs;`) -- each needs its own extra lookahead and isn't
+      // reachable by anything this slice's tests exercise yet.
+      if self.state.get_scope_entity(name) == nil {
+        num off = 1;
+        for true {
+          let tn = self.state.token_peek_n(off);
+          if tn.is_none() {
+            break;
+          }
+          if token_is_operator(tn.unwrap(), "*") {
+            off = off + 1;
+            continue;
+          }
+          break;
+        }
+        let t1 = self.state.token_peek_n(off);
+        if t1.is_some() && t1.unwrap().type == TokenType.Identifier {
+          ret self._parse_bare_type_variable_declaration(false);
         }
       }
     }
@@ -5769,7 +5803,7 @@ test "push_scope_entity/get_scope_entity walk the scope chain" {
   assert st.get_scope_entity("x") == nil, "expected no entity before registration";
 
   ScopeEntity* e = malloc(sizeof(ScopeEntity));
-  * e =scope_entity_new("x");
+  *e = scope_entity_new("x");
   st.push_scope_entity(e);
 
   let found = st.get_scope_entity("x");
@@ -6000,7 +6034,7 @@ test "parse_single_token_to_node accepts a declared identifier" {
   st.scope_current = &root;
   st.has_scope_current = true;
   ScopeEntity* e = malloc(sizeof(ScopeEntity));
-  * e =scope_entity_new("x");
+  *e = scope_entity_new("x");
   st.push_scope_entity(e);
 
   Parser p = parser_new(&st);
@@ -6976,6 +7010,55 @@ test "parse_statement dispatches a bare-datatype-keyword declaration" {
   }
 }
 
+test "parse_statement parses a bare user-defined-type variable declaration" {
+  Vec<str> names;
+  names.init(0);
+  ParseState st = _state_with_declared("Point p;", names);
+  Parser p = parser_new(&st);
+  assert p.parse_statement().is_none(), "expected 'Point p;' to parse as a statement";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Variable(v) -> {
+      assert equals(v.var_type.type_str, "Point"), "expected a 'Point' type";
+      assert equals(v.name, "p"), "expected the variable name 'p'";
+    }
+    _ -> { panic("expected a Variable statement"); }
+  }
+}
+
+test "parse_statement parses a bare user-defined-type pointer variable declaration" {
+  Vec<str> names;
+  names.init(0);
+  ParseState st = _state_with_declared("Point* p;", names);
+  Parser p = parser_new(&st);
+  assert p.parse_statement().is_none(), "expected 'Point* p;' to parse as a statement";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Variable(v) -> {
+      assert equals(v.var_type.type_str, "Point"), "expected a 'Point' type";
+      assert v.var_type.pointer_depth == 1, "expected pointer depth 1";
+    }
+    _ -> { panic("expected a Variable statement"); }
+  }
+}
+
+test "parse_statement does not misparse 'w * h;' as a pointer declaration when both are known locals" {
+  Vec<str> names;
+  names.init(0);
+  names.push("w");
+  names.push("h");
+  ParseState st = _state_with_declared("w * h;", names);
+  Parser p = parser_new(&st);
+  assert p.parse_statement().is_none(), "expected 'w * h;' to parse as an expression statement";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Expression(e) -> {
+      assert equals(e.op, "*"), "expected a '*' binary expression, not a pointer declaration";
+    }
+    _ -> { panic("expected an Expression statement"); }
+  }
+}
+
 test "parse_body parses a nested body" {
   Vec<str> names;
   names.init(0);
@@ -7370,7 +7453,7 @@ test "parse_array_brackets parses a bare '[]' and a sized '[5]'" {
   ParseState st = _state_from("[][5]");
   Parser p = parser_new(&st);
   DataType* dt = malloc(sizeof(DataType));
-  * dt =dtype_new();
+  *dt = dtype_new();
   assert p.parse_array_brackets(dt).is_none(), "expected '[][5]' to parse";
   assert dt.is_array, "expected is_array";
   assert dt.array_depth == 2, "expected array depth 2";
