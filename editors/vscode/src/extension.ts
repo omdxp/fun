@@ -680,6 +680,18 @@ function createClient(output: vscode.LogOutputChannel): LanguageClient {
     return { reader: child.stdout, writer: child.stdin };
   };
 
+  // Bound how many times `fls` gets auto-restarted after crashing. Without
+  // this, a DETERMINISTIC crash (e.g. one that happens again during the very
+  // next startup indexing pass) restarts forever in a tight loop, pinning a
+  // CPU core until the user force-quits VS Code -- observed for real with a
+  // crash that reproduced on every workspace-index pass. `restartTimestamps`
+  // is a rolling window so a server that's merely flaky (crashes rarely, runs
+  // fine for a long stretch in between) isn't penalized the same as one stuck
+  // in a loop.
+  const restartTimestamps: number[] = [];
+  const maxRestartsInWindow = 5;
+  const restartWindowMs = 3 * 60 * 1000;
+
   const clientOptions: LanguageClientOptions = {
     documentSelector: [
       { scheme: "file", language: "fun" },
@@ -692,6 +704,20 @@ function createClient(output: vscode.LogOutputChannel): LanguageClient {
         return { action: ErrorAction.Continue };
       },
       closed: () => {
+        const now = Date.now();
+        restartTimestamps.push(now);
+        while (
+          restartTimestamps.length > 0 &&
+          now - restartTimestamps[0] > restartWindowMs
+        ) {
+          restartTimestamps.shift();
+        }
+        if (restartTimestamps.length > maxRestartsInWindow) {
+          const msg = `fls crashed ${restartTimestamps.length} times in the last ${Math.round(restartWindowMs / 1000)}s and will not be restarted automatically. Check the "Fun Language Server" output channel, then run "Fun: Restart Language Server" once the cause is fixed.`;
+          output.appendLine(`client: ${msg}`);
+          vscode.window.showErrorMessage(msg);
+          return { action: CloseAction.DoNotRestart, message: msg, handled: true };
+        }
         output.appendLine("client: server closed, restarting...");
         return { action: CloseAction.Restart };
       },

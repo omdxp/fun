@@ -192,6 +192,16 @@ fn fieldNameIndexAfterTypeLite(tokens: []const TokenLite, type_i: usize) ?usize 
 
     if (field_name_i < tokens.len and isLitePunct(tokens[field_name_i], '<')) {
         field_name_i = skipGenericArgsLite(tokens, field_name_i);
+        // `skipGenericArgsLite` returns `tokens.len` itself (not an Option) when
+        // the generic arg list never closes before the token stream ends (an
+        // unclosed `Vec<T` at EOF, or a nested `>>` that a lite/incremental
+        // re-tokenize didn't split correctly) -- every other early-out in this
+        // function treats "ran past the end" as "give up", so this must too.
+        // Without this check, that out-of-bounds index propagated all the way
+        // to `idx.tokens[field_name_i]` in the caller and panicked (observed:
+        // a real crash during workspace-indexing at fls startup, which made fls
+        // crash-loop forever since the client unconditionally restarts it).
+        if (field_name_i >= tokens.len) return null;
     }
 
     while (field_name_i < tokens.len and isLitePunct(tokens[field_name_i], '[')) {

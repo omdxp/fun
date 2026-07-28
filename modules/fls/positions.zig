@@ -266,6 +266,18 @@ pub fn skipGenericArgsLite(tokens: []const TokenLite, start_index: usize) usize 
             depth -= 1;
             if (depth == 0) return nextNonTrivialTokenLite(tokens, i + 1) orelse (i + 1);
         }
+        // A doubly-nested generic's closing brackets (`Vec<Vec<T>>`) lex as a
+        // single `>>` operator token (maximal munch), not two separate `>`
+        // tokens -- the parser has its own equivalent split for this exact
+        // reason. Without handling it here, `depth` never reaches 0 for a
+        // `>>`-closed type and this function runs off the end of the token
+        // stream, returning `tokens.len` to a caller that (previously) trusted
+        // it as a valid index -- an out-of-bounds crash observed for real
+        // during workspace indexing.
+        if ((t.kind == .symbol or t.kind == .operator) and std.mem.eql(u8, t.text, ">>")) {
+            depth -= 2;
+            if (depth <= 0) return nextNonTrivialTokenLite(tokens, i + 1) orelse (i + 1);
+        }
     }
     return i;
 }
