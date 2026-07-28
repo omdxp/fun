@@ -1230,3 +1230,70 @@ test "-fmt spaces/indents a test block body and separates it from a preceding fu
         got,
     );
 }
+
+test "-fmt keeps a pointer-dereference assignment correctly spaced inside a test block" {
+    const allocator = std.testing.allocator;
+
+    // Regression test: a `test { ... }` block's body was wrongly tracked as
+    // a DECLARATION context (grouped with compound/quirk/impl for
+    // `pending_decl_block_open`) rather than an executable-statement
+    // context like a `fun`'s body -- since `test "name" {` has no `fun`
+    // keyword and no `(...)` before its `{`, none of the existing
+    // function-body detection matched it either, so `function_body_depth`
+    // never got incremented inside one. That made `in_decl_only_ctx` true
+    // for every statement in a test body, so a plain dereference-assignment
+    // like `*p = f();` was formatted as if `*p` were a pointer-TYPE
+    // annotation (`Type* name`), mangling it into `* p =f();` -- confirmed
+    // directly: the identical statement inside an ordinary `fun` body
+    // formatted correctly.
+    const ugly =
+        "compound Foo {\n" ++
+        "num x;\n" ++
+        "}\n" ++
+        "fun foo_new() Foo {\n" ++
+        "Foo f;\n" ++
+        "f.x=1;\n" ++
+        "ret f;\n" ++
+        "}\n" ++
+        "test \"repro\" {\n" ++
+        "Foo* p=malloc(sizeof(Foo));\n" ++
+        "*p=foo_new();\n" ++
+        "assert p.x==1,\"expected 1\";\n" ++
+        "}\n";
+
+    const path = try writeTempFnFile(allocator, "fmttestderefassign", ugly);
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+
+    try std.testing.expectEqualStrings(
+        "compound Foo {\n" ++
+            "  num x;\n" ++
+            "}\n" ++
+            "\n" ++
+            "fun foo_new() Foo {\n" ++
+            "  Foo f;\n" ++
+            "  f.x = 1;\n" ++
+            "  ret f;\n" ++
+            "}\n" ++
+            "\n" ++
+            "test \"repro\" {\n" ++
+            "  Foo* p = malloc(sizeof(Foo));\n" ++
+            "  *p = foo_new();\n" ++
+            "  assert p.x == 1, \"expected 1\";\n" ++
+            "}\n",
+        got,
+    );
+
+    // Idempotent: reformatting the already-formatted output must be a no-op.
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+    const got2 = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got2);
+    try std.testing.expectEqualStrings(got, got2);
+}

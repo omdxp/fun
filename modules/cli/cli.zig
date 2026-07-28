@@ -1639,6 +1639,17 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
     var wrap_cond_close_before: ?usize = null;
     var prev_unary_prefix: bool = false;
     var in_fun_signature: bool = false;
+    // A `test "name" { ... }` block's body is ordinary executable statement
+    // code, exactly like a `fun`'s body -- NOT a declaration block like
+    // compound/quirk/impl (which `test` used to be grouped with for
+    // `pending_decl_block_open`). Tracked the same way `in_fun_signature`
+    // is, so the block's `{` sets `function_body_depth` directly instead
+    // of `decl_block_depth`. See `in_decl_only_ctx`'s own use of these two
+    // depths for why this distinction matters: getting it wrong made every
+    // statement inside a `test` block get formatted as if it were a
+    // declaration-context type annotation (e.g. `*p = f();` mangled to
+    // `* p =f();`, confirmed directly).
+    var in_test_signature: bool = false;
     var pending_decl_block_open: bool = false;
     var decl_block_depth: isize = 0;
     var pending_enum_block_open: bool = false;
@@ -1869,7 +1880,10 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
             if (std.mem.eql(u8, kw2, "fun")) {
                 in_fun_signature = true;
             }
-            if (std.mem.eql(u8, kw2, "compound") or std.mem.eql(u8, kw2, "quirk") or std.mem.eql(u8, kw2, "impl") or std.mem.eql(u8, kw2, "test")) {
+            if (std.mem.eql(u8, kw2, "test")) {
+                in_test_signature = true;
+            }
+            if (std.mem.eql(u8, kw2, "compound") or std.mem.eql(u8, kw2, "quirk") or std.mem.eql(u8, kw2, "impl")) {
                 pending_decl_block_open = true;
             }
             if (std.mem.eql(u8, kw2, "enum")) {
@@ -2130,7 +2144,7 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
         const prev_sig_is_lbrace = prev_sig != null and prev_sig.?.type == .Symbol and prev_sig.?.data.cval == '{';
         const paren_before_brace = has_paren_before_brace(toks, idx);
         const is_block_brace = t2.type == .Symbol and t2.data.cval == '{' and
-            (pending_decl_block_open or pending_enum_block_open or in_fun_signature or pending_control_block_open or prev_sig_is_rparen or prev_sig_is_type_after_paren or paren_before_brace or prev_sig_is_arrow or prev_sig_is_comma or prev_sig_is_semicolon or prev_sig_is_lbrace);
+            (pending_decl_block_open or pending_enum_block_open or in_fun_signature or in_test_signature or pending_control_block_open or prev_sig_is_rparen or prev_sig_is_type_after_paren or paren_before_brace or prev_sig_is_arrow or prev_sig_is_comma or prev_sig_is_semicolon or prev_sig_is_lbrace);
 
         // Decide whether to add a space before this token.
         if (state.prev_token.*) |pt2| {
@@ -2431,6 +2445,9 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                     if (pending_control_block_open) pending_control_block_open = false;
                     if (in_fun_signature) {
                         in_fun_signature = false;
+                        function_body_depth += 1;
+                    } else if (in_test_signature) {
+                        in_test_signature = false;
                         function_body_depth += 1;
                     } else if (function_body_depth == 0 and decl_block_depth > 0 and !pending_decl_block_open and !pending_enum_block_open and !pending_control_block_open and (prev_sig_is_rparen or prev_sig_is_type_after_paren or paren_before_brace)) {
                         function_body_depth = 1;
