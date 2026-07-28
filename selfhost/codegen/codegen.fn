@@ -13,9 +13,10 @@
 // correctly into one C construct even though they're three independent
 // sibling AST statements -- see `emit_if_chain`'s doc comment), `for`
 // (condition/infinite form as a C `while`, integer-range form as a C
-// counted `for` -- see `emit_for_cond`/`emit_for_range`; the iterator
-// form, `for item : arr { ... }`, is still deferred -- see below), bare
-// expression statements (an assignment, a call for its side effect,
+// counted `for`, and the `Vec` iterator form -- `for item : arr { ... }`
+// / `for i, item :: arr { ... }` -- as the original's own `.len`/`.data`
+// fast-path loop; see `emit_for_cond`/`emit_for_range`/`emit_for_iter`),
+// bare expression statements (an assignment, a call for its side effect,
 // `x++;` -- these have no dedicated `StatementExpression` AST wrapper,
 // they're a plain `.Expression`/`.Unary` node straight in the statement
 // list), a non-generic `compound Name { fields }` declaration as a C
@@ -32,10 +33,10 @@
 // top-level function declaration with any number of parameters (still no
 // generics/variadics). Verified end to end: the self-hosted lexer ->
 // self-hosted parser -> this codegen, on programs using variables,
-// comparisons, if-elif-else, assignment statements, both `for` loop forms
-// above, multi-arg function calls, a compound with field reads/writes,
-// and a plain impl method called both directly and through `self`,
-// produces C that compiles and runs with the correct exit code.
+// comparisons, if-elif-else, assignment statements, all three `for` loop
+// forms above, multi-arg function calls, a compound with field
+// reads/writes, and a plain impl method called both directly and through
+// `self`, produces C that compiles and runs with the correct exit code.
 // 
 // Deliberately deferred from this slice (documented rather than silently
 // dropped):
@@ -50,8 +51,10 @@
 // methods are dispatched dynamically through a vtable in the original,
 // a separate, larger deferred item; a plain impl's methods are resolved
 // statically instead (see `emit_method_call`'s doc comment).
-// - `[]` (indexing), and the iterator form of `for`, which needs `.` to
-// call into `Vec`/`Iterator`.
+// - The iterator form of `for` over anything other than a known-`Vec`
+// local (an array literal, or a general `Iterator`-implementing quirk
+// value dispatched through `.next()`) -- see `emit_for_iter`'s doc
+// comment; `[]` (indexing).
 // - `fit`, and every declaration kind besides a plain function/non-generic
 // compound/non-quirk-non-generic impl (`enum`/`quirk`, a GENERIC
 // compound's monomorphized specializations, and a generic or
@@ -258,6 +261,19 @@ impl Codegen {
       }
       .Identifier(name) -> {
         self.state.write(name);
+        ret .None;
+      }
+      .ExpressionParenthesis(inner) -> {
+        // An explicit parenthesized sub-expression (`(a + b)`), reached
+        // directly -- not the argument-list wrapper of a call, which
+        // `emit_call`/`flatten_call_args` consume before this dispatch is
+        // ever reached for it.
+        self.state.write("(");
+        let ierr = self.emit_expr(*inner);
+        if ierr.is_some() {
+          ret ierr;
+        }
+        self.state.write(")");
         ret .None;
       }
       .Unary(u) -> {
@@ -558,7 +574,7 @@ impl Codegen {
         fit fk {
           .Cond(fc) -> { ret self.emit_for_cond(fc); }
           .Range(fr) -> { ret self.emit_for_range(fr); }
-          .Iter(_) -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+          .Iter(fi) -> { ret self.emit_for_iter(fi); }
         }
       }
       // A bare expression used as a statement (an assignment, a call for
@@ -656,6 +672,70 @@ impl Codegen {
       }
       _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
     }
+  }
+
+  // Emits `for item : arr { ... }` / `for i, item :: arr { ... }` as the
+  // original's own "Vec fast path": `for (int64_t idx = 0; idx <
+  // arr.len; idx++) { __auto_type item = arr.data[idx]; ... }` -- `idx`
+  // is `fi.index_name` when given, else a synthetic `__fun_i`. Reads
+  // straight from `Vec<T>`'s own `.len`/`.data` fields rather than a
+  // generic `Iterator`-quirk `.next()` dispatch (dynamic quirk dispatch
+  // isn't reachable yet -- see this file's own top-level doc comment).
+  // `__auto_type` (a GNU C extension) lets the C compiler infer `item`'s
+  // type from `arr.data[idx]` -- this codegen never needs to know `T`
+  // itself, matching the original's own choice here.
+  // 
+  // Deliberately narrow for this slice: `arr` must be a plain identifier
+  // that's a known local whose declared type name is EXACTLY "Vec" (an
+  // array literal or a general `Iterator`-implementing quirk value isn't
+  // reachable yet either). `item` is NOT recorded in the locals table --
+  // its declared Fun type is unknown here (that's the whole point of
+  // `__auto_type`), so a later `item.field` inside the body is correctly
+  // rejected by `emit_field_access` rather than guessed at; dereferencing
+  // it (`*item`, common when `T` is itself a pointer) works fine since
+  // that doesn't need a locals lookup at all.
+  emit_for_iter(ForIterNode fi) Option<CodegenErrorKind> {
+    str arr_name = "";
+    fit fi.iterable.kind {
+      .Identifier(name) -> { arr_name = name; }
+      _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+    }
+    let type_found = self.lookup_local_type_name(arr_name);
+    if type_found.is_none() || !equals(type_found.unwrap(), "Vec") {
+      ret .Some(CodegenErrorKind.UnsupportedNode);
+    }
+
+    str idx_name = "__fun_i";
+    if fi.has_index_name {
+      idx_name = fi.index_name;
+    }
+
+    self.state.write("for (int64_t ");
+    self.state.write(idx_name);
+    self.state.write(" = 0; ");
+    self.state.write(idx_name);
+    self.state.write(" < ");
+    self.state.write(arr_name);
+    self.state.write(".len; ");
+    self.state.write(idx_name);
+    self.state.write("++) {\n");
+    self.state.indent_level = self.state.indent_level + 1;
+    self.state.write_indent();
+    self.state.write("__auto_type ");
+    self.state.write(fi.item_name);
+    self.state.write(" = ");
+    self.state.write(arr_name);
+    self.state.write(".data[");
+    self.state.write(idx_name);
+    self.state.write("];\n");
+    let berr = self.emit_body(*fi.body);
+    if berr.is_some() {
+      ret berr;
+    }
+    self.state.indent_level = self.state.indent_level - 1;
+    self.state.write_indent();
+    self.state.write("}\n");
+    ret .None;
   }
 
   // Emits an `if (cond) { ... }` block, WITHOUT the trailing newline (the
@@ -1116,6 +1196,26 @@ test "emit_expr emits a binary expression" {
   assert equals(st.out.build(), "(a + b)"), "expected '(a + b)'";
 }
 
+test "emit_expr emits an explicit parenthesized sub-expression" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  Node* left = malloc(sizeof(Node));
+  *left = node_new(NodeKind.Identifier("a"));
+  Node* right = malloc(sizeof(Node));
+  *right = node_new(NodeKind.Identifier("b"));
+  ExprNode e;
+  e.left = left;
+  e.has_left = true;
+  e.right = right;
+  e.has_right = true;
+  e.op = "+";
+  Node* sum = malloc(sizeof(Node));
+  *sum = node_new(NodeKind.Expression(e));
+  Node n = node_new(NodeKind.ExpressionParenthesis(sum));
+  assert g.emit_expr(n).is_none(), "expected the parenthesized expression to emit";
+  assert equals(st.out.build(), "((a + b))"), "expected '((a + b))'";
+}
+
 test "emit_expr rejects an index/comma expression (not yet supported)" {
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
@@ -1549,6 +1649,87 @@ test "emit_statement emits a range for as a counted C for loop" {
 
   assert g.emit_statement(n).is_none(), "expected the for-range to emit";
   assert equals(st.out.build(), "for (int64_t i = 0; i < n; i++) {\n    return;\n}\n"), "expected a counted C for loop";
+}
+
+test "emit_statement emits a Vec iterator for as the .len/.data fast-path loop" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  g.record_local("items", "Vec", false);
+
+  Node* iterable = malloc(sizeof(Node));
+  *iterable = node_new(NodeKind.Identifier("items"));
+  Node* ret_stmt = malloc(sizeof(Node));
+  *ret_stmt = node_new(NodeKind.StatementReturn(nil));
+  Vec<Node*> body_stmts;
+  body_stmts.init(0);
+  body_stmts.push(ret_stmt);
+  BodyNode bn;
+  bn.statements = body_stmts;
+  Node* body = malloc(sizeof(Node));
+  *body = node_new(NodeKind.Body(bn));
+
+  ForIterNode fi;
+  fi.index_name = "";
+  fi.has_index_name = false;
+  fi.item_name = "item";
+  fi.iterable = iterable;
+  fi.body = body;
+  Node n = node_new(NodeKind.StatementFor(ForKind.Iter(fi)));
+
+  assert g.emit_statement(n).is_none(), "expected the Vec iterator for to emit";
+  assert equals(
+    st.out.build(),
+    "for (int64_t __fun_i = 0; __fun_i < items.len; __fun_i++) {\n    __auto_type item = items.data[__fun_i];\n    return;\n}\n"
+  ), "expected a synthetic index name and the .len/.data fast path";
+}
+
+test "emit_statement emits a Vec iterator for with an explicit index name" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  g.record_local("items", "Vec", false);
+
+  Node* iterable = malloc(sizeof(Node));
+  *iterable = node_new(NodeKind.Identifier("items"));
+  BodyNode bn;
+  bn.statements.init(0);
+  Node* body = malloc(sizeof(Node));
+  *body = node_new(NodeKind.Body(bn));
+
+  ForIterNode fi;
+  fi.index_name = "idx";
+  fi.has_index_name = true;
+  fi.item_name = "item";
+  fi.iterable = iterable;
+  fi.body = body;
+  Node n = node_new(NodeKind.StatementFor(ForKind.Iter(fi)));
+
+  assert g.emit_statement(n).is_none(), "expected the Vec iterator for to emit";
+  assert equals(
+    st.out.build(),
+    "for (int64_t idx = 0; idx < items.len; idx++) {\n    __auto_type item = items.data[idx];\n}\n"
+  ), "expected the given index name used instead of the synthetic default";
+}
+
+test "emit_statement rejects an iterator for over a receiver that isn't a known Vec local" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  Node* iterable = malloc(sizeof(Node));
+  *iterable = node_new(NodeKind.Identifier("items"));
+  BodyNode bn;
+  bn.statements.init(0);
+  Node* body = malloc(sizeof(Node));
+  *body = node_new(NodeKind.Body(bn));
+
+  ForIterNode fi;
+  fi.index_name = "";
+  fi.has_index_name = false;
+  fi.item_name = "item";
+  fi.iterable = iterable;
+  fi.body = body;
+  Node n = node_new(NodeKind.StatementFor(ForKind.Iter(fi)));
+
+  assert g.emit_statement(n).is_some(), "expected an unrecognized iterable to be rejected rather than guessed";
 }
 
 test "emit_expr emits '.' field access on a known value-typed local" {
