@@ -22,30 +22,40 @@
 // struct (see `emit_compound`), single-level `ident.field` member access
 // deciding `.`/`->` from the receiver's DECLARED pointer-ness (a
 // deliberately narrow, non-inference-based heuristic -- see
-// `emit_field_access`'s doc comment for exactly what it can't handle),
-// and a top-level function declaration with any number of parameters
-// (still no generics/variadics). Verified end to end: the self-hosted
-// lexer -> self-hosted parser -> this codegen, on programs using
-// variables, comparisons, if-elif-else, assignment statements, both `for`
-// loop forms above, multi-arg function calls, and a compound with field
-// reads/writes, produces C that compiles and runs with the correct exit
-// code.
+// `emit_field_access`'s doc comment for exactly what it can't handle), a
+// plain (non-quirk, non-generic) `impl Type { methods }` block (each
+// method is ALREADY parsed as a pre-mangled, self-first-arg `Function`
+// node -- see `emit_impl`'s doc comment -- so it's emitted exactly like
+// any other function), a method call `recv.method(...)` resolved
+// statically to `Type__method(<self-arg>, ...)` from the receiver's
+// known local type (see `emit_method_call`'s doc comment), and a
+// top-level function declaration with any number of parameters (still no
+// generics/variadics). Verified end to end: the self-hosted lexer ->
+// self-hosted parser -> this codegen, on programs using variables,
+// comparisons, if-elif-else, assignment statements, both `for` loop forms
+// above, multi-arg function calls, a compound with field reads/writes,
+// and a plain impl method called both directly and through `self`,
+// produces C that compiles and runs with the correct exit code.
 // 
 // Deliberately deferred from this slice (documented rather than silently
 // dropped):
-// - Chained field access (`a.b.c`), `self`/method calls (`recv.method(...)`
-// where the callee isn't a plain identifier), calls/access through an
-// aliased/imported module, and `EnumName.Variant` constant access -- all
-// four share the `Identifier . Identifier` AST shape with plain field
-// access, and `emit_field_access` deliberately refuses to guess at any of
-// them (see its own doc comment). Each needs real infrastructure this
-// slice doesn't have yet: a compound-field-type registry, enum/import
-// support, and (for `self`) `impl` support.
+// - Chained field access (`a.b.c`), calls/access through an
+// aliased/imported module, and `EnumName.Variant` constant access --
+// all three share the `Identifier . Identifier` AST shape with plain
+// field access, and `emit_field_access` deliberately refuses to guess at
+// any of them (see its own doc comment). Each needs real infrastructure
+// this slice doesn't have yet: a compound-field-type registry, and
+// enum/import support respectively.
+// - Quirk-implementing impls (`impl Type as Quirk { ... }`) -- their
+// methods are dispatched dynamically through a vtable in the original,
+// a separate, larger deferred item; a plain impl's methods are resolved
+// statically instead (see `emit_method_call`'s doc comment).
 // - `[]` (indexing), and the iterator form of `for`, which needs `.` to
 // call into `Vec`/`Iterator`.
 // - `fit`, and every declaration kind besides a plain function/non-generic
-// compound (`enum`/`quirk`/`impl`, and a GENERIC compound's monomorphized
-// specializations).
+// compound/non-quirk-non-generic impl (`enum`/`quirk`, a GENERIC
+// compound's monomorphized specializations, and a generic or
+// quirk-implementing impl's methods).
 // - Type INFERENCE: a function's return type and every literal's type are
 // already fully explicit at this stage (an omitted `let` type, or a
 // function relying on inferred generics, isn't reachable yet), so no
@@ -85,12 +95,14 @@ pub compound Codegen {
   // A best-effort, function-local (reset at the start of every
   // `emit_function`, see its own doc comment) record of which local names
   // (parameters and `Variable` declarations seen so far, in source order)
-  // are pointer-typed -- just enough to decide `.`/`->` for a plain
-  // `ident.field` access without a real type-inference engine. See
-  // `emit_field_access`'s doc comment for what this deliberately can't
-  // handle yet.
+  // are pointer-typed, and their declared type name -- just enough to
+  // decide `.`/`->` for a plain `ident.field` access, and to build a
+  // method call's mangled callee name, without a real type-inference
+  // engine. See `emit_field_access`/`emit_method_call`'s doc comments for
+  // what this deliberately can't handle yet.
   Vec<str> local_names;
   Vec<bin> local_is_pointer;
+  Vec<str> local_type_name;
 }
 
 pub fun codegen_new(CodegenState* state) Codegen {
@@ -98,6 +110,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.state = state;
   g.local_names.init(0);
   g.local_is_pointer.init(0);
+  g.local_type_name.init(0);
   ret g;
 }
 
@@ -135,12 +148,14 @@ impl Codegen {
     }
   }
 
-  // Records that local `name` is (or isn't) a pointer, for later
-  // `ident.field` `.`/`->` decisions. See the `Codegen.local_names`/
-  // `local_is_pointer` field doc comment for the scope of this tracking.
-  record_local(str name, bin is_pointer) {
+  // Records that local `name` is (or isn't) a pointer, and its declared
+  // type name, for later `ident.field`/`recv.method(...)` decisions. See
+  // the `Codegen.local_names`/`local_is_pointer`/`local_type_name` field
+  // doc comment for the scope of this tracking.
+  record_local(str name, str type_name, bin is_pointer) {
     self.local_names.push(name);
     self.local_is_pointer.push(is_pointer);
+    self.local_type_name.push(type_name);
   }
 
   // Looks up whether `name` was recorded as a pointer local. `.None` means
@@ -153,6 +168,21 @@ impl Codegen {
     for i < self.local_names.len {
       if equals(self.local_names.get(i), name) {
         ret .Some(self.local_is_pointer.get(i));
+      }
+      i = i + 1;
+    }
+    ret .None;
+  }
+
+  // Looks up `name`'s declared type name (e.g. "Point"), for building a
+  // method call's mangled callee name. See `lookup_local_is_pointer`'s
+  // doc comment -- same scope, same "can't handle this" contract on
+  // `.None`.
+  lookup_local_type_name(str name) Option<str> {
+    num i = 0;
+    for i < self.local_names.len {
+      if equals(self.local_names.get(i), name) {
+        ret .Some(self.local_type_name.get(i));
       }
       i = i + 1;
     }
@@ -328,17 +358,17 @@ impl Codegen {
     }
   }
 
-  // Emits a call `callee(arg1, arg2, ...)`.
+  // Emits a call `callee(arg1, arg2, ...)`: a plain-identifier callee (an
+  // ordinary free-function call) directly, or delegates to
+  // `emit_method_call` when the callee is itself a `.`-Expression
+  // (`recv.method(...)`).
   // 
-  // Deliberately simplified from the original for this slice: the callee
-  // must be a plain identifier (an ordinary free-function call) -- a
-  // method call (`recv.method(...)`, callee is itself a `.`-Expression)
-  // or a call through another call's result (`f()()`) isn't reachable
-  // yet, since `.` member access isn't emitted yet either (see
-  // `emit_expr`'s own doc comment). No name resolution/mangling either
-  // (aliasing, generics, overload-by-arity) -- the callee's Fun name and
-  // its C name are assumed identical, true for every plain function this
-  // slice can otherwise construct.
+  // Deliberately simplified from the original for this slice: a call
+  // through another call's result (`f()()`) isn't reachable yet. No name
+  // resolution/mangling for the free-function case either (aliasing,
+  // generics, overload-by-arity) -- the callee's Fun name and its C name
+  // are assumed identical, true for every plain function this slice can
+  // otherwise construct.
   emit_call(ExprNode e) Option<CodegenErrorKind> {
     if !e.has_left || !e.has_right {
       ret .Some(CodegenErrorKind.InvalidNode);
@@ -346,6 +376,12 @@ impl Codegen {
     str callee_name = "";
     fit e.left.kind {
       .Identifier(name) -> { callee_name = name; }
+      .Expression(recv_e) -> {
+        if equals(recv_e.op, ".") {
+          ret self.emit_method_call(recv_e, e.right);
+        }
+        ret .Some(CodegenErrorKind.UnsupportedNode);
+      }
       _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
     }
     self.state.write(callee_name);
@@ -361,6 +397,68 @@ impl Codegen {
         self.state.write(", ");
       }
       first = false;
+      let aerr = self.emit_expr(*arg);
+      if aerr.is_some() {
+        ret aerr;
+      }
+    }
+    self.state.write(")");
+    ret .None;
+  }
+
+  // Emits a method call `recv.method(arg1, ...)` as C
+  // `TypeName__method(<self-arg>, arg1, ...)`, mirroring the parser's own
+  // implicit-`self`/mangled-name scheme (`_parse_impl_method`'s doc
+  // comment: a plain impl's method `mname` on type `TypeName` is parsed
+  // straight into a `Function` node ALREADY named `TypeName__mname` with
+  // `self` as its first arg -- codegen doesn't invent any mangling of its
+  // own, it just has to reproduce the same recipe at the CALL site). The
+  // self-arg is `recv` directly when `recv` is already a pointer local,
+  // or `&recv` when it's a value local (the callee always expects a
+  // pointer, matching the implicit `self` parameter's type).
+  // 
+  // Deliberately narrow for this slice, same spirit as
+  // `emit_field_access` (whose doc comment explains why an unrecognized
+  // receiver is REJECTED rather than guessed): `recv` must be a plain
+  // identifier that's a KNOWN local, and `method` a plain identifier.
+  // Quirk-dispatched calls (dynamic vtable dispatch) aren't reachable
+  // yet either -- only a plain (non-quirk) impl's method, resolved
+  // statically by the receiver's DECLARED type name.
+  emit_method_call(ExprNode recv_e, Node* args_node) Option<CodegenErrorKind> {
+    if !recv_e.has_left || !recv_e.has_right {
+      ret .Some(CodegenErrorKind.InvalidNode);
+    }
+    str recv_name = "";
+    fit recv_e.left.kind {
+      .Identifier(name) -> { recv_name = name; }
+      _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+    }
+    str method_name = "";
+    fit recv_e.right.kind {
+      .Identifier(name) -> { method_name = name; }
+      _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+    }
+
+    let type_found = self.lookup_local_type_name(recv_name);
+    let ptr_found = self.lookup_local_is_pointer(recv_name);
+    if type_found.is_none() || ptr_found.is_none() {
+      ret .Some(CodegenErrorKind.UnsupportedNode);
+    }
+
+    self.state.write(format("{str}__{str}", type_found.unwrap(), method_name));
+    self.state.write("(");
+    if ptr_found.unwrap() {
+      self.state.write(recv_name);
+    } else {
+      self.state.write("&");
+      self.state.write(recv_name);
+    }
+
+    Vec<Node*> args;
+    args.init(0);
+    self.flatten_call_args(args_node, &args);
+    for arg : args {
+      self.state.write(", ");
       let aerr = self.emit_expr(*arg);
       if aerr.is_some() {
         ret aerr;
@@ -452,7 +550,7 @@ impl Codegen {
           }
         }
         self.state.write(";\n");
-        self.record_local(v.name, dtype_is_pointer(*v.var_type));
+        self.record_local(v.name, v.var_type.type_str, dtype_is_pointer(*v.var_type));
         ret .None;
       }
       .StatementFor(fk) -> {
@@ -692,7 +790,7 @@ impl Codegen {
         self.write_type(*v.var_type);
         self.state.write(" ");
         self.state.write(v.name);
-        self.record_local(v.name, dtype_is_pointer(*v.var_type));
+        self.record_local(v.name, v.var_type.type_str, dtype_is_pointer(*v.var_type));
         ret .None;
       }
       _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
@@ -790,6 +888,40 @@ impl Codegen {
     }
   }
 
+  // Emits every method of a plain (non-quirk, non-generic) `impl Type {
+  // methods }` block as an ordinary top-level C function -- the parser
+  // ALREADY did the work that makes this trivial: each method is parsed
+  // as a `Function` node pre-mangled to `Type__method` with `<Type>*
+  // self` as its real first arg (`_parse_impl_method`'s doc comment in
+  // the parser), so a method is emitted exactly like any other function
+  // via the existing `emit_function` -- no separate self-injection or
+  // name-mangling logic needed here.
+  // 
+  // Deliberately simplified from the original for this slice: a
+  // quirk-implementing impl (`impl Type as Quirk { ... }`, `has_quirk_
+  // name`) is silently skipped -- its methods are still dispatched
+  // dynamically through a vtable in the original, which is a separate,
+  // larger deferred item (see this file's own top-level doc comment). A
+  // generic impl (`has_type_params`) is skipped too, same reasoning as
+  // `emit_compound`'s generic-template skip.
+  emit_impl(Node node) Option<CodegenErrorKind> {
+    fit node.kind {
+      .Impl(i) -> {
+        if i.has_type_params || i.has_quirk_name {
+          ret .None;
+        }
+        for m : i.methods {
+          let merr = self.emit_function(*m);
+          if merr.is_some() {
+            ret merr;
+          }
+        }
+        ret .None;
+      }
+      _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
+    }
+  }
+
   // Writes the fixed set of C headers the original always includes
   // (before any conditional ones gated on stdlib usage, threads, sockets,
   // etc. -- none of which are reachable yet since imports aren't ported).
@@ -802,13 +934,17 @@ impl Codegen {
     self.state.write("#include <string.h>\n");
   }
 
-  // Transpiles every top-level `Compound`/`Function` node in `nodes`
-  // (anything else is skipped -- not an error, since a whole-file parse
-  // can contain declarations not reachable yet, like `imp`). Compounds are
-  // emitted in a first pass, all before any function, so a function can
-  // reference any of them regardless of source order -- see
-  // `emit_compound`'s doc comment for what that first pass deliberately
-  // doesn't handle yet (dependency ordering between compounds themselves).
+  // Transpiles every top-level `Compound`/`Impl`/`Function` node in
+  // `nodes` (anything else is skipped -- not an error, since a whole-file
+  // parse can contain declarations not reachable yet, like `imp`).
+  // Compounds are emitted in a first pass, all before any
+  // impl-method/function, so those can reference any of them regardless
+  // of source order -- see `emit_compound`'s doc comment for what that
+  // first pass deliberately doesn't handle yet (dependency ordering
+  // between compounds themselves). Impl methods are emitted in a second
+  // pass (each becomes an ordinary C function, see `emit_impl`), before
+  // plain top-level functions in a third, so a plain function calling a
+  // method doesn't need a forward declaration.
   pub transpile(Vec<Node> nodes) Option<CodegenErrorKind> {
     self.write_prelude();
     for n : nodes {
@@ -817,6 +953,17 @@ impl Codegen {
           let cerr = self.emit_compound(n);
           if cerr.is_some() {
             ret cerr;
+          }
+        }
+        _ -> {}
+      }
+    }
+    for n : nodes {
+      fit n.kind {
+        .Impl(i) -> {
+          let ierr = self.emit_impl(n);
+          if ierr.is_some() {
+            ret ierr;
           }
         }
         _ -> {}
@@ -1407,7 +1554,7 @@ test "emit_statement emits a range for as a counted C for loop" {
 test "emit_expr emits '.' field access on a known value-typed local" {
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
-  g.record_local("p", false);
+  g.record_local("p", "Point", false);
 
   Node* recv = malloc(sizeof(Node));
   *recv = node_new(NodeKind.Identifier("p"));
@@ -1428,7 +1575,7 @@ test "emit_expr emits '.' field access on a known value-typed local" {
 test "emit_expr emits '->' field access on a known pointer-typed local" {
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
-  g.record_local("p", true);
+  g.record_local("p", "Point", true);
 
   Node* recv = malloc(sizeof(Node));
   *recv = node_new(NodeKind.Identifier("p"));
@@ -1491,6 +1638,187 @@ test "emit_compound emits a non-generic compound as a C struct typedef" {
   Node n = node_new(NodeKind.Compound(c));
   assert g.emit_compound(n).is_none(), "expected the compound to emit";
   assert equals(st.out.build(), "typedef struct Point {\n  int64_t x;\n  int64_t y;\n} Point;\n\n"), "expected a C struct typedef with both fields";
+}
+
+test "emit_expr emits a method call on a value-typed receiver, taking its address" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  g.record_local("p", "Point", false);
+
+  Node* recv = malloc(sizeof(Node));
+  *recv = node_new(NodeKind.Identifier("p"));
+  Node* method = malloc(sizeof(Node));
+  *method = node_new(NodeKind.Identifier("get_x"));
+  ExprNode dot_e;
+  dot_e.left = recv;
+  dot_e.has_left = true;
+  dot_e.right = method;
+  dot_e.has_right = true;
+  dot_e.op = ".";
+  Node* dot_node = malloc(sizeof(Node));
+  *dot_node = node_new(NodeKind.Expression(dot_e));
+
+  Node* blank = malloc(sizeof(Node));
+  *blank = node_new(NodeKind.Blank);
+  Node* args = malloc(sizeof(Node));
+  *args = node_new(NodeKind.ExpressionParenthesis(blank));
+
+  ExprNode call_e;
+  call_e.left = dot_node;
+  call_e.has_left = true;
+  call_e.right = args;
+  call_e.has_right = true;
+  call_e.op = "()";
+  Node n = node_new(NodeKind.Expression(call_e));
+
+  assert g.emit_expr(n).is_none(), "expected the method call to emit";
+  assert equals(st.out.build(), "Point__get_x(&p)"), "expected 'Point__get_x(&p)'";
+}
+
+test "emit_expr emits a method call on a pointer-typed receiver directly, with extra args" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  g.record_local("p", "Point", true);
+
+  Node* recv = malloc(sizeof(Node));
+  *recv = node_new(NodeKind.Identifier("p"));
+  Node* method = malloc(sizeof(Node));
+  *method = node_new(NodeKind.Identifier("set_x"));
+  ExprNode dot_e;
+  dot_e.left = recv;
+  dot_e.has_left = true;
+  dot_e.right = method;
+  dot_e.has_right = true;
+  dot_e.op = ".";
+  Node* dot_node = malloc(sizeof(Node));
+  *dot_node = node_new(NodeKind.Expression(dot_e));
+
+  Node* arg = malloc(sizeof(Node));
+  *arg = node_new(NodeKind.Number(TokenData.Num(5)));
+  Node* args = malloc(sizeof(Node));
+  *args = node_new(NodeKind.ExpressionParenthesis(arg));
+
+  ExprNode call_e;
+  call_e.left = dot_node;
+  call_e.has_left = true;
+  call_e.right = args;
+  call_e.has_right = true;
+  call_e.op = "()";
+  Node n = node_new(NodeKind.Expression(call_e));
+
+  assert g.emit_expr(n).is_none(), "expected the method call to emit";
+  assert equals(st.out.build(), "Point__set_x(p, 5)"), "expected 'Point__set_x(p, 5)'";
+}
+
+test "emit_expr rejects a method call on a receiver that isn't a known local" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  Node* recv = malloc(sizeof(Node));
+  *recv = node_new(NodeKind.Identifier("mod_alias"));
+  Node* method = malloc(sizeof(Node));
+  *method = node_new(NodeKind.Identifier("symbol"));
+  ExprNode dot_e;
+  dot_e.left = recv;
+  dot_e.has_left = true;
+  dot_e.right = method;
+  dot_e.has_right = true;
+  dot_e.op = ".";
+  Node* dot_node = malloc(sizeof(Node));
+  *dot_node = node_new(NodeKind.Expression(dot_e));
+
+  Node* blank = malloc(sizeof(Node));
+  *blank = node_new(NodeKind.Blank);
+  Node* args = malloc(sizeof(Node));
+  *args = node_new(NodeKind.ExpressionParenthesis(blank));
+
+  ExprNode call_e;
+  call_e.left = dot_node;
+  call_e.has_left = true;
+  call_e.right = args;
+  call_e.has_right = true;
+  call_e.op = "()";
+  Node n = node_new(NodeKind.Expression(call_e));
+
+  assert g.emit_expr(n).is_some(), "expected an unrecognized receiver to be rejected rather than guessed";
+}
+
+test "emit_impl emits each method as a mangled top-level C function, with self recorded as a pointer local" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  DataType* self_dt = malloc(sizeof(DataType));
+  *self_dt = dtype_new();
+  self_dt.type_str = "Point";
+  self_dt.pointer_depth = 1;
+  VariableNode selfv;
+  selfv.var_type = self_dt;
+  selfv.name = "self";
+  selfv.has_val = false;
+  Node* self_param = malloc(sizeof(Node));
+  *self_param = node_new(NodeKind.Variable(selfv));
+  Vec<Node*> margs;
+  margs.init(0);
+  margs.push(self_param);
+
+  Node* field_recv = malloc(sizeof(Node));
+  *field_recv = node_new(NodeKind.Identifier("self"));
+  Node* field_name = malloc(sizeof(Node));
+  *field_name = node_new(NodeKind.Identifier("x"));
+  ExprNode field_e;
+  field_e.left = field_recv;
+  field_e.has_left = true;
+  field_e.right = field_name;
+  field_e.has_right = true;
+  field_e.op = ".";
+  Node* field_expr = malloc(sizeof(Node));
+  *field_expr = node_new(NodeKind.Expression(field_e));
+  Node* ret_stmt = malloc(sizeof(Node));
+  *ret_stmt = node_new(NodeKind.StatementReturn(field_expr));
+  Vec<Node*> stmts;
+  stmts.init(0);
+  stmts.push(ret_stmt);
+  BodyNode bn;
+  bn.statements = stmts;
+  Node* body = malloc(sizeof(Node));
+  *body = node_new(NodeKind.Body(bn));
+
+  FunctionNode fnv = function_node_new();
+  fnv.name = "Point__get_x";
+  fnv.has_name = true;
+  DataType* rtype = malloc(sizeof(DataType));
+  *rtype = dtype_new();
+  rtype.type_str = "num";
+  fnv.rtype = rtype;
+  fnv.has_rtype = true;
+  fnv.args = margs;
+  fnv.has_args = true;
+  fnv.body = body;
+  fnv.has_body = true;
+  Node* method_node = malloc(sizeof(Node));
+  *method_node = node_new(NodeKind.Function(fnv));
+
+  ImplNode impln = impl_node_new();
+  impln.type_name = "Point";
+  impln.methods.push(method_node);
+
+  Node impl_node = node_new(NodeKind.Impl(impln));
+  assert g.emit_impl(impl_node).is_none(), "expected the impl to emit";
+  assert equals(st.out.build(), "int64_t Point__get_x(Point* self) {\n    return self->x;\n}\n"), "expected the method emitted as a plain C function reading 'self->x'";
+}
+
+test "emit_impl skips a quirk-implementing impl (dynamic dispatch not yet supported)" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  ImplNode impln = impl_node_new();
+  impln.type_name = "Point";
+  impln.quirk_name = "To";
+  impln.has_quirk_name = true;
+
+  Node impl_node = node_new(NodeKind.Impl(impln));
+  assert g.emit_impl(impl_node).is_none(), "expected a quirk-implementing impl to be silently skipped";
+  assert equals(st.out.build(), ""), "expected nothing emitted for a quirk-implementing impl";
 }
 
 test "emit_compound skips a generic compound (monomorphization not yet supported)" {
