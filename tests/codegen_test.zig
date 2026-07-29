@@ -1593,13 +1593,14 @@ test "aliased sys try_env and log program compiles and runs" {
     defer std.Io.Dir.cwd().deleteFile(std.testing.io, out_path) catch {};
 
     const input =
+        "imp std.error;\n" ++
         "imp std.io as io;\n" ++
         "imp std.log as l;\n" ++
         "imp std.result;\n" ++
         "imp std.sys as sys;\n\n" ++
         "fun main() {\n" ++
         "  let env = sys.try_env(\"PATH\");\n" ++
-        "  Result<str> copy = env;\n" ++
+        "  Result<str, Error> copy = env;\n" ++
         "  str status = \"err\";\n" ++
         "  if copy.is_ok() {\n" ++
         "    status = \"ok\";\n" ++
@@ -8429,6 +8430,55 @@ test "an enum variant payload of a generic-compound type matches its own declare
     const stdout = try runExeWithEnv(allocator, exe_path, &.{});
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("42\n", stdout);
+}
+
+test "sizeof(generic type param) is not resolved against an unrelated global type of the same bare name" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_sizeof_type_param_name_collision.fn";
+    const c_path = "codegen_sizeof_type_param_name_collision.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_sizeof_type_param_name_collision.exe" else "codegen_sizeof_type_param_name_collision";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: `sizeof(X)`'s visibility check ran whenever `X` was
+    // `is_declared` (SOME enum/compound/quirk ANYWHERE in the compiled
+    // program has that bare name) and not a scope value -- but forgot to
+    // ALSO exclude `is_type_param`, unlike the sibling checks just above
+    // it in the same function. `std.result`'s `Result<T, E>.zero_e()`
+    // does `sizeof(E)` on its own bound type parameter `E`; a completely
+    // unrelated top-level type in THIS file that also happens to be
+    // named `E` (a local `enum E { ... }`) made that spuriously fail
+    // visibility against the unrelated global symbol ("type 'E' is
+    // private"), even though nothing private was ever referenced --
+    // reproduced with `imp std.result;` since the failure specifically
+    // needs `E` to be a generic parameter belonging to an IMPORTED
+    // (different-file) generic type, not one declared in this same file.
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.error;\n" ++
+        "imp std.result;\n" ++
+        "enum E { Variant }\n" ++
+        "fun mk() Result<num, Error> {\n" ++
+        "  ret .Ok(7);\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  let r = mk();\n" ++
+        "  printf(\"%lld\\n\", r.unwrap_err().code);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("0\n", stdout);
 }
 
 test "a generic container instantiated with a pointer type argument mangles distinctly (Vec<T*>)" {

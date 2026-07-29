@@ -8149,7 +8149,19 @@ pub const TranspileProcess = struct {
                                 return TranspileError.InvalidSizeof;
                             }
 
-                            if (is_declared and !is_scope_value) {
+                            // A bound generic type parameter (`sizeof(E)` inside
+                            // `impl Result<T, E> { ... }`) must NEVER go through the
+                            // global-visibility check below, even when `is_declared`
+                            // also happens to be true -- `is_declared` only means
+                            // SOME enum/compound/quirk ANYWHERE in the whole compiled
+                            // program shares this bare name (e.g. an unrelated file's
+                            // own top-level `enum E { ... }`), which has nothing to do
+                            // with the CURRENT generic parameter. Without this
+                            // exclusion, `ensure_named_type_visible` checked
+                            // visibility against that unrelated global symbol and
+                            // could spuriously fail with "type 'E' is private" even
+                            // though nothing private was actually being referenced.
+                            if (is_declared and !is_scope_value and !is_type_param) {
                                 try self.ensure_named_type_visible(node, base_name);
                                 // Register the generic instantiation so its struct is emitted.
                                 if (mem.indexOf(u8, type_name, "__") != null) {
