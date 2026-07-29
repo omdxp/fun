@@ -18064,16 +18064,32 @@ pub const TranspileProcess = struct {
             try self.write("\n}\n\n");
         }
 
-        try self.write("int main(void) {\n");
-        try self.print("  int total = {d};\n", .{tests.items.len});
+        // `argv[1]`, when present, filters to just the test(s) whose name
+        // matches EXACTLY -- lets an editor's per-test "Run"/"Debug" CodeLens
+        // (see editors/vscode/src/extension.ts's FunCodeLensProvider) execute
+        // one test instead of the whole file's suite, the same way `go test
+        // -run '^Name$'` does, via the ordinary `fun test file.fn -- "name"`
+        // program-argument passthrough -- no separate CLI flag needed.
+        try self.write("int main(int argc, char** argv) {\n");
+        try self.write("  const char* filter = argc > 1 ? argv[1] : (const char*)0;\n");
+        try self.write("  int total = 0;\n");
         try self.write("  int passed = 0;\n");
         for (tests.items, 0..) |t, i| {
-            try self.write("  printf(\"test: %s ... \", \"");
+            try self.write("  if (!filter || strcmp(filter, \"");
+            try self.write_c_string_literal_body(t.name);
+            try self.write("\") == 0) {\n");
+            try self.write("    total++;\n");
+            try self.write("    printf(\"test: %s ... \", \"");
             try self.write_c_string_literal_body(t.name);
             try self.write("\");\n");
-            try self.print("  __fun_test_{d}();\n", .{i});
-            try self.write("  printf(\"PASS\\n\"); passed++;\n");
+            try self.print("    __fun_test_{d}();\n", .{i});
+            try self.write("    printf(\"PASS\\n\"); passed++;\n");
+            try self.write("  }\n");
         }
+        try self.write("  if (filter && total == 0) {\n");
+        try self.write("    printf(\"no test named \\\"%s\\\" found\\n\", filter);\n");
+        try self.write("    return 1;\n");
+        try self.write("  }\n");
         try self.write("  printf(\"%d/%d tests passed\\n\", passed, total);\n");
         try self.write("  return 0;\n");
         try self.write("}\n");
@@ -18316,6 +18332,27 @@ pub const TranspileProcess = struct {
                 if (arg.type != .Variable or arg.node_variant == null) continue;
                 const v = arg.node_variant.?.variable;
                 try self.write("  ");
+                // A function-TYPE argument (`fun(T1, T2) R name`) needs C's
+                // function-pointer declarator shape, which wraps the field
+                // NAME (`R (*__argN)(T1, T2)`) instead of following a plain
+                // type name — the same special case an ordinary parameter's
+                // `.Variable` transpile_node handling already has (see
+                // there). Calling `write_type` directly here (as this payload
+                // struct used to) can't express that shape at all and wrote
+                // out the fn_sig's own raw, un-lowered type text instead —
+                // invalid as a struct field declaration.
+                if (v.type.fn_sig) |sig| {
+                    try self.write_type(sig.rtype.*);
+                    try self.write(" (*__arg");
+                    try self.print("{d}", .{i});
+                    try self.write(")(");
+                    for (sig.params.items(), 0..) |p, pi| {
+                        if (pi > 0) try self.write(", ");
+                        try self.write_type(p.*);
+                    }
+                    try self.write(");\n");
+                    continue;
+                }
                 try self.write_type(v.type.*);
                 try self.write(" __arg");
                 try self.print("{d}", .{i});

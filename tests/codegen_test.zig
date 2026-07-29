@@ -587,6 +587,47 @@ test "async and await surface transpiles and runs" {
     try std.testing.expectEqualStrings("42", stdout);
 }
 
+test "an async fn with a function-typed parameter compiles and runs" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_async_fn_typed_param.fn";
+    const c_path = "codegen_async_fn_typed_param.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_async_fn_typed_param.exe" else "codegen_async_fn_typed_param";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: the async payload struct generator declared each argument's
+    // field via a plain `write_type(...) __argN;`, which has no way to
+    // express a function-TYPE argument's C function-pointer declarator shape
+    // (`R (*__argN)(T1, T2);`) -- unlike an ORDINARY (non-async) function's
+    // parameter list, which already special-cases this. Any async fn taking
+    // a callback (needed e.g. for a fork-based dispatcher that calls back
+    // into caller-supplied functions) failed to compile at all.
+    const input =
+        "imp std.c.io;\n" ++
+        "async fun combine(fun(num) num f, fun(num) num g, num arg) num {\n" ++
+        "  ret f(arg) + g(arg);\n" ++
+        "}\n" ++
+        "fun double_it(num x) num { ret x * 2; }\n" ++
+        "fun triple_it(num x) num { ret x * 3; }\n" ++
+        "async fun main() {\n" ++
+        "  num out = await combine(double_it, triple_it, 10);\n" ++
+        "  printf(\"%lld\", out);\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("50", stdout);
+}
+
 test "async and await let surface transpiles and runs" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_async_await_let_surface.fn";
