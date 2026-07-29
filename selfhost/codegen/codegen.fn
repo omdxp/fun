@@ -80,9 +80,10 @@
 // payload layout threaded into the compound-field-type registry; the
 // latter needs import support, neither of which exists yet.
 // - A bare enum-variant shorthand anywhere OTHER than directly as a `ret`
-// value or a `Variable` initializer (a call argument, a nested
+// value, a `Variable` initializer, or an assignment's right-hand side
+// (a call argument, a compound-literal field initializer, a nested
 // sub-expression, ...) -- `Codegen.expected_enum_type` is only set
-// around those two specific sites; a real expected-type mechanism
+// around those three specific sites; a real expected-type mechanism
 // threaded through arbitrary expression contexts would be needed for
 // the rest.
 // - A GENERIC enum (`enum Option<T> { ... }`) -- monomorphization is a
@@ -194,13 +195,14 @@ pub compound Codegen {
   // resolve against, standing in for the "expected type from context"
   // this codegen doesn't have a real inference engine for. Empty when
   // nothing in the immediately enclosing statement provides one. Scoped
-  // narrowly by the two sites that set it (`emit_statement`'s
-  // `StatementReturn`/`Variable` cases, saving and restoring the
-  // previous value around just their own value/initializer expression)
-  // rather than left set for a whole function body, so it can't leak
-  // into an unrelated shorthand elsewhere in the same function -- e.g. a
-  // `Variable` declaration's own initializer must resolve against THAT
-  // variable's declared type, not the enclosing function's return type.
+  // narrowly by the three sites that set it (`emit_statement`'s
+  // `StatementReturn`/`Variable` cases, and `emit_expr`'s `=` assignment
+  // case, each saving and restoring the previous value around just their
+  // own value/initializer/right-hand expression) rather than left set
+  // for a whole function body, so it can't leak into an unrelated
+  // shorthand elsewhere in the same function -- e.g. a `Variable`
+  // declaration's own initializer must resolve against THAT variable's
+  // declared type, not the enclosing function's return type.
   str expected_enum_type;
   // Whole-program record of every non-generic compound's name and its
   // fields' declared types, populated by `emit_compound`'s own emission
@@ -543,7 +545,32 @@ impl Codegen {
         self.state.write(" ");
         self.state.write(e.op);
         self.state.write(" ");
+
+        // An assignment's right-hand side (`t.data = .Cval(0);`, an
+        // extremely common shape in this codebase's own real source --
+        // see `Codegen.expected_enum_type`'s doc comment) may itself be a
+        // bare enum-variant shorthand. Resolve the LEFT side's own
+        // declared/resolved type via `resolve_field_chain` (a plain
+        // identifier or a field-access chain both work; `e.left` was
+        // already EMITTED just above, this is a second, non-writing
+        // resolution purely to learn its type) and use it as the
+        // shorthand's expected type for just this right-hand expression.
+        // An unresolvable left side (anything `resolve_field_chain`
+        // rejects) leaves `expected_enum_type` untouched -- if the right
+        // side needs it and it's still empty/stale, it's rejected same
+        // as ever, not guessed.
+        bin is_assign = equals(e.op, "=");
+        str prev_expected = self.expected_enum_type;
+        if is_assign {
+          let lhs_resolved = self.resolve_field_chain(e.left);
+          if lhs_resolved.is_some() {
+            self.expected_enum_type = lhs_resolved.unwrap().type_name;
+          }
+        }
         let rerr = self.emit_expr(*e.right);
+        if is_assign {
+          self.expected_enum_type = prev_expected;
+        }
         if rerr.is_some() {
           ret rerr;
         }
@@ -3809,6 +3836,84 @@ test "emit_statement emits a bare assignment expression as a statement" {
 
   assert g.emit_statement(n).is_none(), "expected the assignment to emit";
   assert equals(st.out.build(), "(x = 3);\n"), "expected '(x = 3);\\n'";
+}
+
+test "emit_statement resolves a bare-shorthand assignment right-hand side against the field's declared type" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  g.record_local("t", "Token", true);
+
+  Vec<str> token_fields;
+  token_fields.init(0);
+  token_fields.push("data");
+  Vec<str> token_field_types;
+  token_field_types.init(0);
+  token_field_types.push("TokenData");
+  Vec<bin> token_field_ptrs;
+  token_field_ptrs.init(0);
+  token_field_ptrs.push(false);
+  g.record_compound("Token", token_fields, token_field_types, token_field_ptrs);
+
+  Vec<str> variants;
+  variants.init(0);
+  variants.push("Cval");
+  variants.push("Num");
+  g.record_enum("TokenData", variants, true);
+
+  // `t.data = .Cval(0);` -- t is a POINTER local (mirroring `t.data`'s
+  // real usage in selfhost/lexer/lexer.fn, where the token being built is
+  // always passed/held by pointer), so the left side itself needs `->`.
+  Node* t_ident = malloc(sizeof(Node));
+  *t_ident = node_new(NodeKind.Identifier("t"));
+  Node* data_ident = malloc(sizeof(Node));
+  *data_ident = node_new(NodeKind.Identifier("data"));
+  ExprNode lhs_dot;
+  lhs_dot.left = t_ident;
+  lhs_dot.has_left = true;
+  lhs_dot.right = data_ident;
+  lhs_dot.has_right = true;
+  lhs_dot.op = ".";
+  Node* lhs = malloc(sizeof(Node));
+  *lhs = node_new(NodeKind.Expression(lhs_dot));
+
+  Node* blank = malloc(sizeof(Node));
+  *blank = node_new(NodeKind.Blank);
+  Node* variant_ident = malloc(sizeof(Node));
+  *variant_ident = node_new(NodeKind.Identifier("Cval"));
+  Node* zero = malloc(sizeof(Node));
+  *zero = node_new(NodeKind.Number(TokenData.Num(0)));
+  Node* zero_args = malloc(sizeof(Node));
+  *zero_args = node_new(NodeKind.ExpressionParenthesis(zero));
+  ExprNode rhs_dot;
+  rhs_dot.left = blank;
+  rhs_dot.has_left = true;
+  rhs_dot.right = variant_ident;
+  rhs_dot.has_right = true;
+  rhs_dot.op = ".";
+  Node* rhs_callee = malloc(sizeof(Node));
+  *rhs_callee = node_new(NodeKind.Expression(rhs_dot));
+  ExprNode rhs_call;
+  rhs_call.left = rhs_callee;
+  rhs_call.has_left = true;
+  rhs_call.right = zero_args;
+  rhs_call.has_right = true;
+  rhs_call.op = "()";
+  Node* rhs = malloc(sizeof(Node));
+  *rhs = node_new(NodeKind.Expression(rhs_call));
+
+  ExprNode assign;
+  assign.left = lhs;
+  assign.has_left = true;
+  assign.right = rhs;
+  assign.has_right = true;
+  assign.op = "=";
+  Node n = node_new(NodeKind.Expression(assign));
+
+  assert g.emit_statement(n).is_none(), "expected the assignment to emit, resolving the shorthand against 'data's declared type";
+  assert equals(
+    st.out.build(),
+    "(t->data = ((TokenData){ .tag = TokenData_Cval, .payload.Cval = { ._0 = (0) } }));\n"
+  ), "expected the bare '.Cval(0)' resolved against TokenData, not rejected";
 }
 
 test "transpile emits the prelude followed by every top-level function" {
