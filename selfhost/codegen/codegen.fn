@@ -42,21 +42,28 @@
 // `emit_enum`/`emit_tagged_union_enum`'s doc comments) -- together with
 // a QUALIFIED enum-variant access (`EnumName.Variant` bare, or
 // `EnumName.Variant(args...)` a payload construction, both recognized
-// without a call needed to disambiguate from a method call -- see
-// `emit_field_access`/`emit_enum_variant_construction`'s doc comments),
-// and a top-level function declaration with any number of parameters
-// (still no generics/variadics). Verified end to end: the self-hosted
-// lexer -> self-hosted parser -> this codegen, on programs using
-// variables, comparisons, if-elif-else, assignment statements, all three
-// `for` loop forms above, multi-arg function calls, a compound with
-// field reads/writes, a plain impl method called both directly and
-// through `self`, a `fit` over a `num` subject with a comma-chained
-// pattern and a default arm, a plain enum whose variant constants are
-// compared and returned, and a tagged-union enum constructed two ways
-// (a payload, and payload-less) and destructured back out through a
-// `fit` with a bare-shorthand binding pattern and a bare no-payload
-// variant match, produces C that compiles and runs with the correct
-// exit code.
+// without a call needed to disambiguate from a method call), OR a BARE
+// enum-variant shorthand (`.Variant`/`.Variant(x)`, no qualifier) in a
+// `ret <shorthand>;` statement or a `Variable` declaration's own
+// initializer -- resolved against the enclosing function's declared
+// return type, or that variable's own declared type, respectively (see
+// `Codegen.expected_enum_type`'s doc comment for this "already fully
+// explicit declared-type, not real inference" mechanism, and
+// `emit_field_access`/`emit_enum_variant_construction`'s doc comments for
+// how it's consumed), and a top-level function declaration with any
+// number of parameters (still no generics/variadics). Verified end to
+// end: the self-hosted lexer -> self-hosted parser -> this codegen, on
+// programs using variables, comparisons, if-elif-else, assignment
+// statements, all three `for` loop forms above, multi-arg function
+// calls, a compound with field reads/writes, a plain impl method called
+// both directly and through `self`, a `fit` over a `num` subject with a
+// comma-chained pattern and a default arm, a plain enum whose variant
+// constants are compared and returned, and a tagged-union enum
+// constructed three ways (qualified, bare-shorthand as a `ret` value,
+// and bare-shorthand as a `Variable` initializer) and destructured back
+// out through a `fit` with a bare-shorthand binding pattern and a bare
+// no-payload variant match, produces C that compiles and runs with the
+// correct exit code.
 // 
 // Deliberately deferred from this slice (documented rather than silently
 // dropped):
@@ -69,13 +76,12 @@
 // (see its own doc comment). Each needs real infrastructure this slice
 // doesn't have yet: a compound-field-type registry, and import support
 // respectively.
-// - A BARE enum-variant shorthand used as an ORDINARY EXPRESSION
-// (`ret .Some(x);`, `Option<num> x = .None;`, no `EnumName.` qualifier
-// and not inside a `fit` pattern, where the SUBJECT's own declared type
-// stands in for the missing qualifier) -- resolving which enum it refers
-// to there needs a real expected-type mechanism (a function's declared
-// return type, a variable's declared type, ...) this codegen doesn't
-// have yet.
+// - A bare enum-variant shorthand anywhere OTHER than directly as a `ret`
+// value or a `Variable` initializer (a call argument, a nested
+// sub-expression, ...) -- `Codegen.expected_enum_type` is only set
+// around those two specific sites; a real expected-type mechanism
+// threaded through arbitrary expression contexts would be needed for
+// the rest.
 // - A GENERIC enum (`enum Option<T> { ... }`) -- monomorphization is a
 // separate, larger deferred item, same as generic compounds/impls.
 // - Quirk-implementing impls (`impl Type as Quirk { ... }`) -- their
@@ -150,6 +156,24 @@ pub compound Codegen {
   Vec<str> enum_names;
   Vec<Vec<str>> enum_variant_names;
   Vec<bin> enum_is_tagged_union;
+  // The CURRENT function's declared return type name, refreshed at the
+  // start of every `emit_function` -- feeds `expected_enum_type` for a
+  // `ret <shorthand>;` statement's own expression (see `emit_statement`'s
+  // `StatementReturn` case).
+  str current_fn_rtype_name;
+  // The enum name a BARE `.Variant`/`.Variant(x)` shorthand (no
+  // `EnumName.` qualifier -- `e.left`/`recv_e.left` is `.Blank`) should
+  // resolve against, standing in for the "expected type from context"
+  // this codegen doesn't have a real inference engine for. Empty when
+  // nothing in the immediately enclosing statement provides one. Scoped
+  // narrowly by the two sites that set it (`emit_statement`'s
+  // `StatementReturn`/`Variable` cases, saving and restoring the
+  // previous value around just their own value/initializer expression)
+  // rather than left set for a whole function body, so it can't leak
+  // into an unrelated shorthand elsewhere in the same function -- e.g. a
+  // `Variable` declaration's own initializer must resolve against THAT
+  // variable's declared type, not the enclosing function's return type.
+  str expected_enum_type;
 }
 
 pub fun codegen_new(CodegenState* state) Codegen {
@@ -161,6 +185,8 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.enum_names.init(0);
   g.enum_variant_names.init(0);
   g.enum_is_tagged_union.init(0);
+  g.current_fn_rtype_name = "";
+  g.expected_enum_type = "";
   ret g;
 }
 
@@ -497,18 +523,35 @@ impl Codegen {
           // variant first. See `emit_enum_variant_construction`'s doc
           // comment for the C this constructs.
           if recv_e.has_left && recv_e.has_right {
+            str enum_name = "";
+            bin have_enum_name = false;
             fit recv_e.left.kind {
-              .Identifier(enum_name) -> {
-                fit recv_e.right.kind {
-                  .Identifier(variant_name) -> {
-                    if self.enum_has_variant(enum_name, variant_name) {
-                      ret self.emit_enum_variant_construction(enum_name, variant_name, e.right);
-                    }
-                  }
-                  _ -> {}
+              .Identifier(name) -> {
+                enum_name = name;
+                have_enum_name = true;
+              }
+              // Bare shorthand (`.Some(x)`, no `EnumName.` qualifier) --
+              // see `Codegen.expected_enum_type`'s doc comment. If it
+              // doesn't resolve to a known enum/variant below, this
+              // falls through to `emit_method_call`, which already
+              // rejects a non-identifier receiver on its own.
+              .Blank -> {
+                if !equals(self.expected_enum_type, "") {
+                  enum_name = self.expected_enum_type;
+                  have_enum_name = true;
                 }
               }
               _ -> {}
+            }
+            if have_enum_name {
+              fit recv_e.right.kind {
+                .Identifier(variant_name) -> {
+                  if self.enum_has_variant(enum_name, variant_name) {
+                    ret self.emit_enum_variant_construction(enum_name, variant_name, e.right);
+                  }
+                }
+                _ -> {}
+              }
             }
           }
           ret self.emit_method_call(recv_e, e.right);
@@ -676,8 +719,17 @@ impl Codegen {
       ret .Some(CodegenErrorKind.InvalidNode);
     }
     str recv_name = "";
+    bin is_bare_shorthand = false;
     fit e.left.kind {
       .Identifier(name) -> { recv_name = name; }
+      .Blank -> {
+        // Bare shorthand (`.Variant`, no `EnumName.` qualifier) -- see
+        // `Codegen.expected_enum_type`'s doc comment. Must NOT fall
+        // through to the plain-field-access path below if this doesn't
+        // pan out (there's no receiver identifier to look up at all).
+        is_bare_shorthand = true;
+        recv_name = self.expected_enum_type;
+      }
       _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
     }
     str field_name = "";
@@ -685,7 +737,7 @@ impl Codegen {
       .Identifier(name) -> { field_name = name; }
       _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
     }
-    if self.enum_has_variant(recv_name, field_name) {
+    if !equals(recv_name, "") && self.enum_has_variant(recv_name, field_name) {
       if self.enum_is_tagged_union_named(recv_name) {
         // A tagged union's payload-less variant used as a bare VALUE
         // (no call) still needs the tag set: `((Enum){ .tag =
@@ -706,6 +758,9 @@ impl Codegen {
         self.state.write(field_name);
       }
       ret .None;
+    }
+    if is_bare_shorthand {
+      ret .Some(CodegenErrorKind.UnsupportedNode);
     }
     let found = self.lookup_local_is_pointer(recv_name);
     if found.is_none() {
@@ -736,7 +791,14 @@ impl Codegen {
         self.state.write("return");
         if exp != nil {
           self.state.write(" ");
+          // See `Codegen.expected_enum_type`'s doc comment: a bare
+          // `.Variant`/`.Variant(x)` shorthand in `ret <shorthand>;`
+          // resolves against the enclosing FUNCTION's own declared
+          // return type.
+          let prev_expected = self.expected_enum_type;
+          self.expected_enum_type = self.current_fn_rtype_name;
           let eerr = self.emit_expr(*exp);
+          self.expected_enum_type = prev_expected;
           if eerr.is_some() {
             ret eerr;
           }
@@ -751,7 +813,14 @@ impl Codegen {
         self.state.write(v.name);
         if v.has_val {
           self.state.write(" = ");
+          // See `Codegen.expected_enum_type`'s doc comment: a bare
+          // shorthand in a `Variable` declaration's own initializer
+          // resolves against THAT variable's declared type, not
+          // whatever the enclosing function returns.
+          let prev_expected = self.expected_enum_type;
+          self.expected_enum_type = v.var_type.type_str;
           let verr = self.emit_expr(*v.val);
+          self.expected_enum_type = prev_expected;
           if verr.is_some() {
             ret verr;
           }
@@ -1320,6 +1389,7 @@ impl Codegen {
         if !f.has_rtype {
           ret .Some(CodegenErrorKind.InvalidNode);
         }
+        self.current_fn_rtype_name = f.rtype.type_str;
         self.write_type(*f.rtype);
         self.state.write(" ");
         self.state.write(f.name);
@@ -2805,6 +2875,181 @@ test "emit_expr emits a tagged-union payload construction as a compound literal"
 
   assert g.emit_expr(n).is_none(), "expected the enum-variant construction to emit";
   assert equals(st.out.build(), "((Option){ .tag = Option_Some, .payload.Some = { ._0 = (5) } })"), "expected a tagged-union compound literal with the payload set";
+}
+
+test "emit_expr emits a bare-shorthand payload construction resolved against expected_enum_type" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  Vec<str> variants;
+  variants.init(0);
+  variants.push("Some");
+  variants.push("None");
+  g.record_enum("Option", variants, true);
+  g.expected_enum_type = "Option";
+
+  Node* callee_left = malloc(sizeof(Node));
+  *callee_left = node_new(NodeKind.Blank);
+  Node* callee_right = malloc(sizeof(Node));
+  *callee_right = node_new(NodeKind.Identifier("Some"));
+  ExprNode dot;
+  dot.left = callee_left;
+  dot.has_left = true;
+  dot.right = callee_right;
+  dot.has_right = true;
+  dot.op = ".";
+  Node* callee = malloc(sizeof(Node));
+  *callee = node_new(NodeKind.Expression(dot));
+
+  Node* arg = malloc(sizeof(Node));
+  *arg = node_new(NodeKind.Number(TokenData.Num(9)));
+  Node* args = malloc(sizeof(Node));
+  *args = node_new(NodeKind.ExpressionParenthesis(arg));
+
+  ExprNode call_e;
+  call_e.left = callee;
+  call_e.has_left = true;
+  call_e.right = args;
+  call_e.has_right = true;
+  call_e.op = "()";
+  Node n = node_new(NodeKind.Expression(call_e));
+
+  assert g.emit_expr(n).is_none(), "expected the bare-shorthand construction to emit";
+  assert equals(st.out.build(), "((Option){ .tag = Option_Some, .payload.Some = { ._0 = (9) } })"), "expected 'Option' resolved from expected_enum_type, not a qualifier";
+}
+
+test "emit_expr emits a bare-shorthand payload-less variant resolved against expected_enum_type" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  Vec<str> variants;
+  variants.init(0);
+  variants.push("Some");
+  variants.push("None");
+  g.record_enum("Option", variants, true);
+  g.expected_enum_type = "Option";
+
+  Node* blank = malloc(sizeof(Node));
+  *blank = node_new(NodeKind.Blank);
+  Node* variant = malloc(sizeof(Node));
+  *variant = node_new(NodeKind.Identifier("None"));
+  ExprNode dot;
+  dot.left = blank;
+  dot.has_left = true;
+  dot.right = variant;
+  dot.has_right = true;
+  dot.op = ".";
+  Node n = node_new(NodeKind.Expression(dot));
+
+  assert g.emit_expr(n).is_none(), "expected the bare-shorthand variant to emit";
+  assert equals(st.out.build(), "((Option){ .tag = Option_None })"), "expected 'Option' resolved from expected_enum_type";
+}
+
+test "emit_expr rejects a bare-shorthand pattern with no expected_enum_type in context" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  Vec<str> variants;
+  variants.init(0);
+  variants.push("Some");
+  variants.push("None");
+  g.record_enum("Option", variants, true);
+  // expected_enum_type deliberately left empty (no ambient context).
+
+  Node* blank = malloc(sizeof(Node));
+  *blank = node_new(NodeKind.Blank);
+  Node* variant = malloc(sizeof(Node));
+  *variant = node_new(NodeKind.Identifier("None"));
+  ExprNode dot;
+  dot.left = blank;
+  dot.has_left = true;
+  dot.right = variant;
+  dot.has_right = true;
+  dot.op = ".";
+  Node n = node_new(NodeKind.Expression(dot));
+
+  assert g.emit_expr(n).is_some(), "expected a bare shorthand with no expected type to be rejected rather than guessed";
+}
+
+test "emit_statement resolves a bare-shorthand 'ret' against the enclosing function's return type" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  Vec<str> variants;
+  variants.init(0);
+  variants.push("Some");
+  variants.push("None");
+  g.record_enum("Option", variants, true);
+
+  FunctionNode fnv = function_node_new();
+  fnv.name = "mk";
+  fnv.has_name = true;
+  DataType* rtype = malloc(sizeof(DataType));
+  *rtype = dtype_new();
+  rtype.type_str = "Option";
+  fnv.rtype = rtype;
+  fnv.has_rtype = true;
+
+  Node* blank = malloc(sizeof(Node));
+  *blank = node_new(NodeKind.Blank);
+  Node* variant_ident = malloc(sizeof(Node));
+  *variant_ident = node_new(NodeKind.Identifier("Some"));
+  ExprNode dot;
+  dot.left = blank;
+  dot.has_left = true;
+  dot.right = variant_ident;
+  dot.has_right = true;
+  dot.op = ".";
+  Node* callee = malloc(sizeof(Node));
+  *callee = node_new(NodeKind.Expression(dot));
+
+  Node* arg = malloc(sizeof(Node));
+  *arg = node_new(NodeKind.Identifier("x"));
+  Node* args = malloc(sizeof(Node));
+  *args = node_new(NodeKind.ExpressionParenthesis(arg));
+
+  ExprNode call_e;
+  call_e.left = callee;
+  call_e.has_left = true;
+  call_e.right = args;
+  call_e.has_right = true;
+  call_e.op = "()";
+  Node* ret_val = malloc(sizeof(Node));
+  *ret_val = node_new(NodeKind.Expression(call_e));
+  Node* ret_stmt = malloc(sizeof(Node));
+  *ret_stmt = node_new(NodeKind.StatementReturn(ret_val));
+
+  DataType* x_dt = malloc(sizeof(DataType));
+  *x_dt = dtype_new();
+  x_dt.type_str = "num";
+  VariableNode xv;
+  xv.var_type = x_dt;
+  xv.name = "x";
+  xv.has_val = false;
+  Node* x_param = malloc(sizeof(Node));
+  *x_param = node_new(NodeKind.Variable(xv));
+  Vec<Node*> params;
+  params.init(0);
+  params.push(x_param);
+  fnv.args = params;
+  fnv.has_args = true;
+
+  Vec<Node*> stmts;
+  stmts.init(0);
+  stmts.push(ret_stmt);
+  BodyNode bn;
+  bn.statements = stmts;
+  Node* body = malloc(sizeof(Node));
+  *body = node_new(NodeKind.Body(bn));
+  fnv.body = body;
+  fnv.has_body = true;
+
+  Node fn_node = node_new(NodeKind.Function(fnv));
+  assert g.emit_function(fn_node).is_none(), "expected the function to emit";
+  assert equals(
+    st.out.build(),
+    "Option mk(int64_t x) {\n    return ((Option){ .tag = Option_Some, .payload.Some = { ._0 = (x) } });\n}\n"
+  ), "expected the bare 'ret .Some(x);' to resolve against the function's own 'Option' return type";
 }
 
 test "emit_compound emits a non-generic compound as a C struct typedef" {
