@@ -31,10 +31,12 @@
 // any other function), a method call `recv.method(...)` resolved
 // statically to `Type__method(<self-arg>, ...)` from the receiver's
 // known local type (see `emit_method_call`'s doc comment), `fit subject {
-// patterns -> { body } ... }` over a plain-identifier subject -- either a
-// literal-pattern chain, or a tagged-union enum-variant pattern (bare
-// `.Variant`/`.Variant(x)`, resolved against the SUBJECT's own declared
-// local type, or qualified `EnumName.Variant`/`EnumName.Variant(x)`),
+// patterns -> { body } ... }` over a plain identifier, a `*name`
+// dereference (`fit *self { ... }`), or a chained field access (`fit
+// t.data { ... }`) subject -- either a literal-pattern chain, or a
+// tagged-union enum-variant pattern (bare `.Variant`/`.Variant(x)`,
+// resolved against the SUBJECT's own declared/resolved type, or
+// qualified `EnumName.Variant`/`EnumName.Variant(x)`),
 // destructuring any positional bindings out of the payload -- as a C
 // `if`/`else if`/`else` chain (see `emit_fit`/`emit_fit_enum_branch`'s
 // doc comments), a non-generic `enum Name { variants }` declaration --
@@ -93,8 +95,10 @@
 // local (an array literal, or a general `Iterator`-implementing quirk
 // value dispatched through `.next()`) -- see `emit_for_iter`'s doc
 // comment; `[]` (indexing).
-// - A `fit` subject that isn't a plain identifier (needs a temp variable
-// AND a type to declare it with -- see `emit_fit`'s doc comment).
+// - A `fit` subject that isn't a plain identifier, a single `*name`
+// dereference, or a chained field access (a CALL subject needs a temp
+// variable AND a type to declare it with -- see `emit_fit`'s doc
+// comment).
 // - Every declaration kind besides a plain function/non-generic
 // compound/non-generic enum/non-quirk-non-generic impl (`quirk`, a
 // GENERIC compound's/enum's monomorphized specializations, and a generic
@@ -140,6 +144,18 @@ pub enum CodegenErrorKind {
 // link without a real type-inference engine. See
 // `emit_receiver_and_resolve_type`'s doc comment.
 compound FieldTypeInfo {
+  str type_name;
+  bin is_pointer;
+}
+
+// Same two facts as `FieldTypeInfo`, plus the RESOLVED C text itself --
+// the pure counterpart of `emit_receiver_and_resolve_type` (which writes
+// text as it resolves, fine for a receiver emitted exactly once inline).
+// `emit_fit`'s subject needs its text computed once but WRITTEN once per
+// branch, so resolution has to happen without touching the output buffer
+// -- see `resolve_field_chain`'s doc comment.
+compound ChainResolution {
+  str text;
   str type_name;
   bin is_pointer;
 }
@@ -848,17 +864,19 @@ impl Codegen {
     ret .None;
   }
 
-  // Emits `recv`'s C text and returns its RESOLVED declared type (name +
-  // pointer-ness), so the caller (`emit_field_access`, possibly
-  // recursing into this same function for a chained receiver) can decide
-  // `.`/`->` for the NEXT link in the chain. `recv` is either a plain
-  // identifier -- a KNOWN local (see `record_local`), resolved directly
-  // -- or itself a `.`-Expression (`a.b` inside `a.b.c`, which this
-  // language's LEFT-associative `.` precedence produces for a chain --
-  // see `op_precedence_for`'s table in `expressionable_defs.fn`),
-  // recursed through this same function to resolve ITS OWN receiver
-  // first, then looking up the resulting type's field via
-  // `lookup_compound_field`.
+  // Resolves `recv`'s C text and declared type (name + pointer-ness)
+  // WITHOUT writing anything to `self.state` -- the pure counterpart to
+  // `emit_receiver_and_resolve_type` below, which delegates to this
+  // function and then writes the resolved text in one shot. Needed
+  // wherever a receiver's text must be computed ONCE but written
+  // MULTIPLE times (e.g. `emit_fit`'s subject, re-emitted per branch).
+  // `recv` is either a plain identifier -- a KNOWN local (see
+  // `record_local`), resolved directly -- or itself a `.`-Expression
+  // (`a.b` inside `a.b.c`, which this language's LEFT-associative `.`
+  // precedence produces for a chain -- see `op_precedence_for`'s table in
+  // `expressionable_defs.fn`), recursed through this same function to
+  // resolve ITS OWN receiver first, then looking up the resulting type's
+  // field via `lookup_compound_field`.
   // 
   // `.None` means `recv` isn't a shape/type this codegen can resolve (an
   // unknown local, an unrecognized compound/field, or anything besides a
@@ -868,7 +886,7 @@ impl Codegen {
   // chain (`a.Some.b` isn't reachable -- those only ever appear as a
   // single-level receiver, handled by `emit_field_access` itself before
   // this function is ever reached for the outermost level).
-  emit_receiver_and_resolve_type(Node* recv) Option<FieldTypeInfo> {
+  resolve_field_chain(Node* recv) Option<ChainResolution> {
     fit recv.kind {
       .Identifier(name) -> {
         let type_found = self.lookup_local_type_name(name);
@@ -876,11 +894,11 @@ impl Codegen {
         if type_found.is_none() || ptr_found.is_none() {
           ret .None;
         }
-        self.state.write(name);
-        FieldTypeInfo info;
-        info.type_name = type_found.unwrap();
-        info.is_pointer = ptr_found.unwrap();
-        ret .Some(info);
+        ChainResolution r;
+        r.text = name;
+        r.type_name = type_found.unwrap();
+        r.is_pointer = ptr_found.unwrap();
+        ret .Some(r);
       }
       .Expression(inner_e) -> {
         if !equals(inner_e.op, ".") || !inner_e.has_left || !inner_e.has_right {
@@ -891,21 +909,48 @@ impl Codegen {
           .Identifier(name) -> { field_name = name; }
           _ -> { ret .None; }
         }
-        let recv_info_opt = self.emit_receiver_and_resolve_type(inner_e.left);
-        if recv_info_opt.is_none() {
+        let recv_r_opt = self.resolve_field_chain(inner_e.left);
+        if recv_r_opt.is_none() {
           ret .None;
         }
-        let recv_info = recv_info_opt.unwrap();
-        if recv_info.is_pointer {
-          self.state.write("->");
-        } else {
-          self.state.write(".");
+        let recv_r = recv_r_opt.unwrap();
+        let field_info_opt = self.lookup_compound_field(recv_r.type_name, field_name);
+        if field_info_opt.is_none() {
+          ret .None;
         }
-        self.state.write(field_name);
-        ret self.lookup_compound_field(recv_info.type_name, field_name);
+        let field_info = field_info_opt.unwrap();
+        StringBuilder sb = string_builder_init(8);
+        sb.append(recv_r.text);
+        if recv_r.is_pointer {
+          sb.append("->");
+        } else {
+          sb.append(".");
+        }
+        sb.append(field_name);
+        ChainResolution r;
+        r.text = sb.build();
+        r.type_name = field_info.type_name;
+        r.is_pointer = field_info.is_pointer;
+        ret .Some(r);
       }
       _ -> { ret .None; }
     }
+  }
+
+  // Emits `recv`'s C text (via `resolve_field_chain`) and returns its
+  // resolved declared type, so the caller (`emit_field_access`) can
+  // decide `.`/`->` for the NEXT link in a chain it's emitting inline.
+  emit_receiver_and_resolve_type(Node* recv) Option<FieldTypeInfo> {
+    let resolved = self.resolve_field_chain(recv);
+    if resolved.is_none() {
+      ret .None;
+    }
+    let r = resolved.unwrap();
+    self.state.write(r.text);
+    FieldTypeInfo info;
+    info.type_name = r.type_name;
+    info.is_pointer = r.is_pointer;
+    ret .Some(info);
   }
 
   // Emits one statement, followed by its own trailing newline (statements
@@ -1137,15 +1182,17 @@ impl Codegen {
   // Emits one `fit` branch that matches a tagged-union enum variant
   // (bare shorthand `.Variant`/`.Variant(x)`, or qualified
   // `EnumName.Variant`/`EnumName.Variant(x)`, with or without
-  // destructuring bindings) as `subj.tag == EnumName_Variant { ... }`,
-  // chained with a leading `if`/`else if` per `wrote_branch` matching
-  // the literal-chain path's own convention in `emit_fit`. Each
+  // destructuring bindings) as `subj.tag == EnumName_Variant { ... }` (or
+  // `subj->tag == ...` when `subj_is_pointer`, e.g. a `fit *self { ... }`
+  // subject), chained with a leading `if`/`else if` per `wrote_branch`
+  // matching the literal-chain path's own convention in `emit_fit`. Each
   // positional binding name gets its own `__auto_type name =
   // subj.payload.Variant._N;` declaration first (matching
   // `emit_for_iter`'s own reason for `__auto_type`: this codegen has no
   // way to know the payload field's declared Fun type here either).
   emit_fit_enum_branch(
     str subj_name,
+    bin subj_is_pointer,
     str enum_name,
     str variant_name,
     FitBranch br,
@@ -1157,7 +1204,12 @@ impl Codegen {
       self.state.write("if (");
     }
     self.state.write(subj_name);
-    self.state.write(".tag == ");
+    if subj_is_pointer {
+      self.state.write("->");
+    } else {
+      self.state.write(".");
+    }
+    self.state.write("tag == ");
     self.state.write(enum_name);
     self.state.write("_");
     self.state.write(variant_name);
@@ -1171,7 +1223,12 @@ impl Codegen {
         self.state.write(bname);
         self.state.write(" = ");
         self.state.write(subj_name);
-        self.state.write(".payload.");
+        if subj_is_pointer {
+          self.state.write("->");
+        } else {
+          self.state.write(".");
+        }
+        self.state.write("payload.");
         self.state.write(variant_name);
         self.state.write("._");
         self.state.write(format_num(bi));
@@ -1208,24 +1265,59 @@ impl Codegen {
   // kind, not once for the whole subject.
   // 
   // Deliberately narrow for this slice: the subject must be a plain
-  // identifier, re-evaluated once per branch instead of hoisted into a
-  // temp variable -- safe only because reading a plain identifier twice
-  // has no side effects (a call subject would need a temp var, and this
-  // codegen has no type to declare one with anyway). A comma-chained
-  // LITERAL pattern (`1, 2 -> ...`) matches any of its values (OR-ed
-  // comparisons); reuses `flatten_call_args` directly for that, since
-  // it's the exact same comma-flattening a call's argument list needs.
-  // A destructuring/enum-variant pattern whose enum/variant ISN'T
-  // recognized (an unknown bare shorthand with no resolvable subject
-  // type, say) is rejected outright rather than falling through to the
-  // literal path, which could never validly compare against it anyway.
+  // identifier, a single `*name` dereference of a pointer local (the
+  // `fit *self { ... }` idiom used throughout this codebase's own real
+  // stdlib), or a chained field access (`fit t.data { ... }`, resolved
+  // via `resolve_field_chain`) -- each re-evaluated once per branch
+  // instead of hoisted into a temp variable, safe only because none of
+  // these three shapes has a side effect when read twice (a CALL subject
+  // would need a temp var, and this codegen has no type to declare one
+  // with anyway, so it's still rejected). A comma-chained LITERAL pattern
+  // (`1, 2 -> ...`) matches any of its values (OR-ed comparisons); reuses
+  // `flatten_call_args` directly for that, since it's the exact same
+  // comma-flattening a call's argument list needs. A destructuring/
+  // enum-variant pattern whose enum/variant ISN'T recognized (an unknown
+  // bare shorthand with no resolvable subject type, say) is rejected
+  // outright rather than falling through to the literal path, which
+  // could never validly compare against it anyway.
   emit_fit(FitStmtNode f) Option<CodegenErrorKind> {
     str subj_name = "";
+    bin subj_is_pointer = false;
+    Option<str> subj_type = .None;
     fit f.exp.kind {
-      .Identifier(name) -> { subj_name = name; }
+      .Identifier(name) -> {
+        subj_name = name;
+        subj_type = self.lookup_local_type_name(name);
+        subj_is_pointer = self.lookup_local_is_pointer(name).unwrap_or(false);
+      }
+      .Unary(u) -> {
+        if u.is_left_operanded_unary || !u.has_indirection || u.indirection_depth != 1 {
+          ret .Some(CodegenErrorKind.UnsupportedNode);
+        }
+        fit u.operand.kind {
+          .Identifier(name) -> {
+            subj_name = name;
+            subj_type = self.lookup_local_type_name(name);
+            subj_is_pointer = true;
+          }
+          _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+        }
+      }
+      .Expression(dot_e) -> {
+        if !equals(dot_e.op, ".") {
+          ret .Some(CodegenErrorKind.UnsupportedNode);
+        }
+        let resolved = self.resolve_field_chain(f.exp);
+        if resolved.is_none() {
+          ret .Some(CodegenErrorKind.UnsupportedNode);
+        }
+        let r = resolved.unwrap();
+        subj_name = r.text;
+        subj_type = .Some(r.type_name);
+        subj_is_pointer = r.is_pointer;
+      }
       _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
     }
-    let subj_type = self.lookup_local_type_name(subj_name);
 
     bin wrote_branch = false;
     Node* default_body = nil;
@@ -1268,6 +1360,7 @@ impl Codegen {
             if have_enum_name && self.enum_has_variant(enum_name, variant_name) {
               let eerr = self.emit_fit_enum_branch(
                 subj_name,
+                subj_is_pointer,
                 enum_name,
                 variant_name,
                 br,
@@ -2598,7 +2691,7 @@ test "emit_statement emits a fit over a str subject using strcmp" {
   assert equals(st.out.build(), "if (strcmp(s, \"hi\") == 0) {\n    return;\n}\n"), "expected an strcmp comparison for a str pattern";
 }
 
-test "emit_statement rejects a fit over a subject that isn't a plain identifier" {
+test "emit_statement rejects a fit over a call subject (no temp-var hoisting)" {
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
@@ -2619,7 +2712,7 @@ test "emit_statement rejects a fit over a subject that isn't a plain identifier"
   f.exp = subj;
 
   Node n = node_new(NodeKind.StatementFit(f));
-  assert g.emit_statement(n).is_some(), "expected a non-identifier fit subject to be rejected rather than hoisted into a temp";
+  assert g.emit_statement(n).is_some(), "expected a call fit subject to be rejected rather than hoisted into a temp";
 }
 
 test "emit_statement rejects a conditionless fit branch that carries bindings" {
@@ -2707,6 +2800,146 @@ test "emit_statement emits a fit destructuring a bare enum-variant shorthand pat
     st.out.build(),
     "if (o.tag == Opt_Some) {\n    __auto_type r = o.payload.Some._0;\n    return;\n}\n"
   ), "expected a tag check plus a payload-field binding";
+}
+
+test "emit_statement emits a fit over a '*self'-dereferenced subject using '->'" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  g.record_local("self", "Opt", true);
+
+  Vec<str> variants;
+  variants.init(0);
+  variants.push("Some");
+  variants.push("None");
+  g.record_enum("Opt", variants, true);
+
+  UnaryNode u;
+  u.is_left_operanded_unary = false;
+  u.op = "*";
+  Node* self_ident = malloc(sizeof(Node));
+  *self_ident = node_new(NodeKind.Identifier("self"));
+  u.operand = self_ident;
+  u.has_indirection = true;
+  u.indirection_depth = 1;
+  Node* subj = malloc(sizeof(Node));
+  *subj = node_new(NodeKind.Unary(u));
+
+  // `.Some(r) -> { ret r; }` -- bare shorthand resolved against "self"'s
+  // recorded local type ("Opt"), same as a plain-identifier subject.
+  Node* blank = malloc(sizeof(Node));
+  *blank = node_new(NodeKind.Blank);
+  Node* variant_ident = malloc(sizeof(Node));
+  *variant_ident = node_new(NodeKind.Identifier("Some"));
+  ExprNode dot;
+  dot.left = blank;
+  dot.has_left = true;
+  dot.right = variant_ident;
+  dot.has_right = true;
+  dot.op = ".";
+  Node* cond = malloc(sizeof(Node));
+  *cond = node_new(NodeKind.Expression(dot));
+
+  Node* ret_r = malloc(sizeof(Node));
+  *ret_r = node_new(NodeKind.StatementReturn(nil));
+  Vec<Node*> stmts;
+  stmts.init(0);
+  stmts.push(ret_r);
+  BodyNode bn;
+  bn.statements = stmts;
+  Node* body = malloc(sizeof(Node));
+  *body = node_new(NodeKind.Body(bn));
+
+  FitBranch br = fit_branch_new();
+  br.condition = cond;
+  br.has_condition = true;
+  br.body = body;
+  br.bindings.push("r");
+  br.has_bindings = true;
+
+  FitStmtNode f = fit_stmt_node_new();
+  f.exp = subj;
+  f.branches.push(br);
+
+  Node n = node_new(NodeKind.StatementFit(f));
+  assert g.emit_statement(n).is_none(), "expected the '*self' fit to emit";
+  assert equals(
+    st.out.build(),
+    "if (self->tag == Opt_Some) {\n    __auto_type r = self->payload.Some._0;\n    return;\n}\n"
+  ), "expected 'self->tag'/'self->payload' (arrow, not dot)";
+}
+
+test "emit_statement emits a fit over a chained field-access subject" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  g.record_local("t", "Wrapper", false);
+
+  Vec<str> wrapper_fields;
+  wrapper_fields.init(0);
+  wrapper_fields.push("data");
+  Vec<str> wrapper_field_types;
+  wrapper_field_types.init(0);
+  wrapper_field_types.push("Opt");
+  Vec<bin> wrapper_field_ptrs;
+  wrapper_field_ptrs.init(0);
+  wrapper_field_ptrs.push(false);
+  g.record_compound("Wrapper", wrapper_fields, wrapper_field_types, wrapper_field_ptrs);
+
+  Vec<str> variants;
+  variants.init(0);
+  variants.push("Some");
+  variants.push("None");
+  g.record_enum("Opt", variants, true);
+
+  Node* t_ident = malloc(sizeof(Node));
+  *t_ident = node_new(NodeKind.Identifier("t"));
+  Node* data_ident = malloc(sizeof(Node));
+  *data_ident = node_new(NodeKind.Identifier("data"));
+  ExprNode subj_dot;
+  subj_dot.left = t_ident;
+  subj_dot.has_left = true;
+  subj_dot.right = data_ident;
+  subj_dot.has_right = true;
+  subj_dot.op = ".";
+  Node* subj = malloc(sizeof(Node));
+  *subj = node_new(NodeKind.Expression(subj_dot));
+
+  // `.None -> { ret; }` -- bare shorthand resolved against the CHAINED
+  // subject's resolved type ("Opt"), not just a plain identifier's.
+  Node* blank = malloc(sizeof(Node));
+  *blank = node_new(NodeKind.Blank);
+  Node* variant_ident = malloc(sizeof(Node));
+  *variant_ident = node_new(NodeKind.Identifier("None"));
+  ExprNode dot;
+  dot.left = blank;
+  dot.has_left = true;
+  dot.right = variant_ident;
+  dot.has_right = true;
+  dot.op = ".";
+  Node* cond = malloc(sizeof(Node));
+  *cond = node_new(NodeKind.Expression(dot));
+
+  Node* ret_stmt = malloc(sizeof(Node));
+  *ret_stmt = node_new(NodeKind.StatementReturn(nil));
+  Vec<Node*> stmts;
+  stmts.init(0);
+  stmts.push(ret_stmt);
+  BodyNode bn;
+  bn.statements = stmts;
+  Node* body = malloc(sizeof(Node));
+  *body = node_new(NodeKind.Body(bn));
+
+  FitBranch br = fit_branch_new();
+  br.condition = cond;
+  br.has_condition = true;
+  br.body = body;
+
+  FitStmtNode f = fit_stmt_node_new();
+  f.exp = subj;
+  f.branches.push(br);
+
+  Node n = node_new(NodeKind.StatementFit(f));
+  assert g.emit_statement(n).is_none(), "expected the chained-subject fit to emit";
+  assert equals(st.out.build(), "if (t.data.tag == Opt_None) {\n    return;\n}\n"), "expected the chain text 't.data' reused as the fit subject";
 }
 
 test "emit_statement emits a fit matching a qualified payload-less variant" {
