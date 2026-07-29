@@ -20,10 +20,11 @@
 // `x++;` -- these have no dedicated `StatementExpression` AST wrapper,
 // they're a plain `.Expression`/`.Unary` node straight in the statement
 // list), a non-generic `compound Name { fields }` declaration as a C
-// struct (see `emit_compound`), single-level `ident.field` member access
-// deciding `.`/`->` from the receiver's DECLARED pointer-ness (a
-// deliberately narrow, non-inference-based heuristic -- see
-// `emit_field_access`'s doc comment for exactly what it can't handle), a
+// struct (see `emit_compound`), `ident.field` member access -- including a
+// CHAINED access (`a.b.c`) -- deciding `.`/`->` at every link from each
+// receiver's DECLARED type (a deliberately narrow, non-inference-based
+// heuristic -- see `emit_field_access`/`emit_receiver_and_resolve_type`'s
+// doc comments for exactly what it can't handle), a
 // plain (non-quirk, non-generic) `impl Type { methods }` block (each
 // method is ALREADY parsed as a pre-mangled, self-first-arg `Function`
 // node -- see `emit_impl`'s doc comment -- so it's emitted exactly like
@@ -67,15 +68,15 @@
 // 
 // Deliberately deferred from this slice (documented rather than silently
 // dropped):
-// - Chained field access (`a.b.c`, including reading a tagged union's own
-// `.payload.Variant._N` fields back out WITHOUT going through a `fit`
-// destructuring pattern), and calls/access through an aliased/imported
-// module -- both share the `Identifier . Identifier` AST shape with
-// plain field access and qualified enum-variant access, and
-// `emit_field_access` deliberately refuses to guess at either of them
-// (see its own doc comment). Each needs real infrastructure this slice
-// doesn't have yet: a compound-field-type registry, and import support
-// respectively.
+// - Reading a tagged union's own `.payload.Variant._N` fields back out
+// WITHOUT going through a `fit` destructuring pattern, and calls/access
+// through an aliased/imported module -- both share the
+// `Identifier . Identifier` AST shape with plain field access and
+// qualified enum-variant access, and `emit_field_access`/
+// `emit_receiver_and_resolve_type` deliberately refuse to guess at either
+// of them (see their own doc comments). The former needs the tagged-union
+// payload layout threaded into the compound-field-type registry; the
+// latter needs import support, neither of which exists yet.
 // - A bare enum-variant shorthand anywhere OTHER than directly as a `ret`
 // value or a `Variable` initializer (a call argument, a nested
 // sub-expression, ...) -- `Codegen.expected_enum_type` is only set
@@ -132,6 +133,17 @@ pub enum CodegenErrorKind {
   InvalidNode,
 }
 
+// A resolved compound field's declared type: its type name and whether
+// it's a pointer -- exactly the same two facts `local_type_name`/
+// `local_is_pointer` track for a LOCAL, but for a COMPOUND FIELD instead,
+// so a chained field access (`a.b.c`) can determine `.`/`->` at each
+// link without a real type-inference engine. See
+// `emit_receiver_and_resolve_type`'s doc comment.
+compound FieldTypeInfo {
+  str type_name;
+  bin is_pointer;
+}
+
 pub compound Codegen {
   CodegenState* state;
   // A best-effort, function-local (reset at the start of every
@@ -174,6 +186,16 @@ pub compound Codegen {
   // `Variable` declaration's own initializer must resolve against THAT
   // variable's declared type, not the enclosing function's return type.
   str expected_enum_type;
+  // Whole-program record of every non-generic compound's name and its
+  // fields' declared types, populated by `emit_compound`'s own emission
+  // pass -- lets a CHAINED field access (`a.b.c`) determine `.`/`->` at
+  // each link by looking up the PREVIOUS link's resolved type's field,
+  // instead of just the outermost receiver's (see
+  // `emit_receiver_and_resolve_type`'s doc comment).
+  Vec<str> compound_names;
+  Vec<Vec<str>> compound_field_names;
+  Vec<Vec<str>> compound_field_type_names;
+  Vec<Vec<bin>> compound_field_is_pointer;
 }
 
 pub fun codegen_new(CodegenState* state) Codegen {
@@ -185,6 +207,10 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.enum_names.init(0);
   g.enum_variant_names.init(0);
   g.enum_is_tagged_union.init(0);
+  g.compound_names.init(0);
+  g.compound_field_names.init(0);
+  g.compound_field_type_names.init(0);
+  g.compound_field_is_pointer.init(0);
   g.current_fn_rtype_name = "";
   g.expected_enum_type = "";
   ret g;
@@ -312,6 +338,48 @@ impl Codegen {
       i = i + 1;
     }
     ret false;
+  }
+
+  // Records `name` as a known compound with the given fields' names and
+  // declared types, for later chained-field-access resolution. See the
+  // `Codegen.compound_names`/etc. field doc comment.
+  record_compound(
+    str name,
+    Vec<str> field_names,
+    Vec<str> field_type_names,
+    Vec<bin> field_is_pointer
+  ) {
+    self.compound_names.push(name);
+    self.compound_field_names.push(field_names);
+    self.compound_field_type_names.push(field_type_names);
+    self.compound_field_is_pointer.push(field_is_pointer);
+  }
+
+  // Looks up `field_name`'s declared type on the known compound
+  // `compound_name`. `.None` means either isn't recognized -- the
+  // caller must treat that as "can't handle this", not guess.
+  lookup_compound_field(str compound_name, str field_name) Option<FieldTypeInfo> {
+    num i = 0;
+    for i < self.compound_names.len {
+      if equals(self.compound_names.get(i), compound_name) {
+        let field_names = self.compound_field_names.get(i);
+        let field_types = self.compound_field_type_names.get(i);
+        let field_ptrs = self.compound_field_is_pointer.get(i);
+        num j = 0;
+        for j < field_names.len {
+          if equals(field_names.get(j), field_name) {
+            FieldTypeInfo info;
+            info.type_name = field_types.get(j);
+            info.is_pointer = field_ptrs.get(j);
+            ret .Some(info);
+          }
+          j = j + 1;
+        }
+        ret .None;
+      }
+      i = i + 1;
+    }
+    ret .None;
   }
 
   // Writes a single-quoted C character literal for `c`, escaping the
@@ -696,49 +764,53 @@ impl Codegen {
   // enum-variant-constant access (`EnumName.Variant`, checked first --
   // see `enum_has_variant`) and emits its mangled C constant
   // (`EnumName_Variant`, single underscore, matching `emit_enum`'s own
-  // naming) instead of treating `EnumName` as a receiver.
+  // naming) instead of treating `EnumName` as a receiver, and a BARE
+  // shorthand (`.Variant`, no qualifier) resolved against
+  // `expected_enum_type`. A CHAINED access (`a.b.c`) recurses through
+  // `emit_receiver_and_resolve_type` to resolve `.`/`->` at every link,
+  // not just the outermost receiver.
   // 
-  // Deliberately narrow for this slice: `recv` must be a plain identifier
-  // that's either a known enum name (for the qualified-variant case) or a
-  // KNOWN local (a function parameter or a `Variable` declaration already
-  // emitted earlier in this same function -- see `record_local`, for the
-  // field-access case). This is a conservative choice, not just a missing
-  // feature: the exact same AST shape (`Identifier . Identifier`) is ALSO
-  // how a BARE enum-variant shorthand's qualified form and `alias.symbol`
-  // (a module-aliased access) parse, and neither is reachable yet (bare
-  // shorthand needs type inference from the expected type; module aliases
-  // need import support). Silently guessing "not a pointer, use `.`" for
-  // an unrecognized receiver would emit plausible-looking but WRONG C
-  // (e.g. treating an unregistered enum name as a struct value) -- so it's
-  // rejected rather than guessed. Chained access (`a.b.c`) is also
-  // deferred: it needs the FIELD's own declared type (not just a local's),
-  // which needs a compound-field-type registry that doesn't exist yet
-  // either.
+  // Deliberately narrow for this slice: the enum-variant paths (qualified
+  // or bare shorthand) only ever apply to a SINGLE-level receiver
+  // (`Identifier`/`Blank`) -- the exact same AST shape also parses
+  // `alias.symbol` (a module-aliased access), which isn't reachable yet
+  // (needs import support), so an unrecognized single-level receiver is
+  // rejected rather than guessed. See `emit_receiver_and_resolve_type`'s
+  // own doc comment for what the chained-access path can't handle yet.
   emit_field_access(ExprNode e) Option<CodegenErrorKind> {
     if !e.has_left || !e.has_right {
       ret .Some(CodegenErrorKind.InvalidNode);
-    }
-    str recv_name = "";
-    bin is_bare_shorthand = false;
-    fit e.left.kind {
-      .Identifier(name) -> { recv_name = name; }
-      .Blank -> {
-        // Bare shorthand (`.Variant`, no `EnumName.` qualifier) -- see
-        // `Codegen.expected_enum_type`'s doc comment. Must NOT fall
-        // through to the plain-field-access path below if this doesn't
-        // pan out (there's no receiver identifier to look up at all).
-        is_bare_shorthand = true;
-        recv_name = self.expected_enum_type;
-      }
-      _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
     }
     str field_name = "";
     fit e.right.kind {
       .Identifier(name) -> { field_name = name; }
       _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
     }
-    if !equals(recv_name, "") && self.enum_has_variant(recv_name, field_name) {
-      if self.enum_is_tagged_union_named(recv_name) {
+
+    str enum_recv_name = "";
+    bin is_bare_shorthand = false;
+    bin left_is_single_level = false;
+    fit e.left.kind {
+      .Identifier(name) -> {
+        enum_recv_name = name;
+        left_is_single_level = true;
+      }
+      .Blank -> {
+        // Bare shorthand (`.Variant`, no `EnumName.` qualifier) -- see
+        // `Codegen.expected_enum_type`'s doc comment. Must NOT fall
+        // through to the chained-access path below if this doesn't pan
+        // out (there's no receiver identifier to look up at all).
+        is_bare_shorthand = true;
+        left_is_single_level = true;
+        enum_recv_name = self.expected_enum_type;
+      }
+      _ -> {}
+    }
+    if left_is_single_level && !equals(enum_recv_name, "") && self.enum_has_variant(
+      enum_recv_name,
+      field_name
+    ) {
+      if self.enum_is_tagged_union_named(enum_recv_name) {
         // A tagged union's payload-less variant used as a bare VALUE
         // (no call) still needs the tag set: `((Enum){ .tag =
         // Enum_Variant })`, not just the bare discriminant constant --
@@ -746,14 +818,14 @@ impl Codegen {
         // constructs. `EnumName_Variant` alone would only be the
         // discriminant, not a complete `Enum`-typed value.
         self.state.write("((");
-        self.state.write(recv_name);
+        self.state.write(enum_recv_name);
         self.state.write("){ .tag = ");
-        self.state.write(recv_name);
+        self.state.write(enum_recv_name);
         self.state.write("_");
         self.state.write(field_name);
         self.state.write(" })");
       } else {
-        self.state.write(recv_name);
+        self.state.write(enum_recv_name);
         self.state.write("_");
         self.state.write(field_name);
       }
@@ -762,18 +834,78 @@ impl Codegen {
     if is_bare_shorthand {
       ret .Some(CodegenErrorKind.UnsupportedNode);
     }
-    let found = self.lookup_local_is_pointer(recv_name);
-    if found.is_none() {
+
+    let recv_info_opt = self.emit_receiver_and_resolve_type(e.left);
+    if recv_info_opt.is_none() {
       ret .Some(CodegenErrorKind.UnsupportedNode);
     }
-    self.state.write(recv_name);
-    if found.unwrap() {
+    if recv_info_opt.unwrap().is_pointer {
       self.state.write("->");
     } else {
       self.state.write(".");
     }
     self.state.write(field_name);
     ret .None;
+  }
+
+  // Emits `recv`'s C text and returns its RESOLVED declared type (name +
+  // pointer-ness), so the caller (`emit_field_access`, possibly
+  // recursing into this same function for a chained receiver) can decide
+  // `.`/`->` for the NEXT link in the chain. `recv` is either a plain
+  // identifier -- a KNOWN local (see `record_local`), resolved directly
+  // -- or itself a `.`-Expression (`a.b` inside `a.b.c`, which this
+  // language's LEFT-associative `.` precedence produces for a chain --
+  // see `op_precedence_for`'s table in `expressionable_defs.fn`),
+  // recursed through this same function to resolve ITS OWN receiver
+  // first, then looking up the resulting type's field via
+  // `lookup_compound_field`.
+  // 
+  // `.None` means `recv` isn't a shape/type this codegen can resolve (an
+  // unknown local, an unrecognized compound/field, or anything besides a
+  // plain identifier or a chained `.`-Expression) -- the caller must
+  // treat that as "can't handle this," not guess. Deliberately narrow for
+  // this slice: no enum-variant or bare-shorthand handling INSIDE a
+  // chain (`a.Some.b` isn't reachable -- those only ever appear as a
+  // single-level receiver, handled by `emit_field_access` itself before
+  // this function is ever reached for the outermost level).
+  emit_receiver_and_resolve_type(Node* recv) Option<FieldTypeInfo> {
+    fit recv.kind {
+      .Identifier(name) -> {
+        let type_found = self.lookup_local_type_name(name);
+        let ptr_found = self.lookup_local_is_pointer(name);
+        if type_found.is_none() || ptr_found.is_none() {
+          ret .None;
+        }
+        self.state.write(name);
+        FieldTypeInfo info;
+        info.type_name = type_found.unwrap();
+        info.is_pointer = ptr_found.unwrap();
+        ret .Some(info);
+      }
+      .Expression(inner_e) -> {
+        if !equals(inner_e.op, ".") || !inner_e.has_left || !inner_e.has_right {
+          ret .None;
+        }
+        str field_name = "";
+        fit inner_e.right.kind {
+          .Identifier(name) -> { field_name = name; }
+          _ -> { ret .None; }
+        }
+        let recv_info_opt = self.emit_receiver_and_resolve_type(inner_e.left);
+        if recv_info_opt.is_none() {
+          ret .None;
+        }
+        let recv_info = recv_info_opt.unwrap();
+        if recv_info.is_pointer {
+          self.state.write("->");
+        } else {
+          self.state.write(".");
+        }
+        self.state.write(field_name);
+        ret self.lookup_compound_field(recv_info.type_name, field_name);
+      }
+      _ -> { ret .None; }
+    }
   }
 
   // Emits one statement, followed by its own trailing newline (statements
@@ -1563,6 +1695,13 @@ impl Codegen {
         if c.has_type_params {
           ret .None;
         }
+        Vec<str> field_names;
+        field_names.init(0);
+        Vec<str> field_type_names;
+        field_type_names.init(0);
+        Vec<bin> field_is_pointer;
+        field_is_pointer.init(0);
+
         self.state.write("typedef struct ");
         self.state.write(c.name);
         self.state.write(" {\n");
@@ -1572,10 +1711,14 @@ impl Codegen {
           self.state.write(" ");
           self.state.write(f.name);
           self.state.write(";\n");
+          field_names.push(f.name);
+          field_type_names.push(f.dtype.type_str);
+          field_is_pointer.push(dtype_is_pointer(*f.dtype));
         }
         self.state.write("} ");
         self.state.write(c.name);
         self.state.write(";\n\n");
+        self.record_compound(c.name, field_names, field_type_names, field_is_pointer);
         ret .None;
       }
       _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
@@ -2717,6 +2860,146 @@ test "emit_expr rejects '.' access on a receiver that isn't a known local" {
   Node n = node_new(NodeKind.Expression(e));
 
   assert g.emit_expr(n).is_some(), "expected an unrecognized receiver to be rejected rather than guessed";
+}
+
+test "emit_expr emits a chained field access through two value-typed links" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  g.record_local("rect", "Rect", false);
+
+  Vec<str> rect_fields;
+  rect_fields.init(0);
+  rect_fields.push("a");
+  Vec<str> rect_field_types;
+  rect_field_types.init(0);
+  rect_field_types.push("Point");
+  Vec<bin> rect_field_ptrs;
+  rect_field_ptrs.init(0);
+  rect_field_ptrs.push(false);
+  g.record_compound("Rect", rect_fields, rect_field_types, rect_field_ptrs);
+
+  Vec<str> point_fields;
+  point_fields.init(0);
+  point_fields.push("x");
+  Vec<str> point_field_types;
+  point_field_types.init(0);
+  point_field_types.push("num");
+  Vec<bin> point_field_ptrs;
+  point_field_ptrs.init(0);
+  point_field_ptrs.push(false);
+  g.record_compound("Point", point_fields, point_field_types, point_field_ptrs);
+
+  Node* rect_ident = malloc(sizeof(Node));
+  *rect_ident = node_new(NodeKind.Identifier("rect"));
+  Node* a_ident = malloc(sizeof(Node));
+  *a_ident = node_new(NodeKind.Identifier("a"));
+  ExprNode inner_dot;
+  inner_dot.left = rect_ident;
+  inner_dot.has_left = true;
+  inner_dot.right = a_ident;
+  inner_dot.has_right = true;
+  inner_dot.op = ".";
+  Node* inner = malloc(sizeof(Node));
+  *inner = node_new(NodeKind.Expression(inner_dot));
+
+  Node* x_ident = malloc(sizeof(Node));
+  *x_ident = node_new(NodeKind.Identifier("x"));
+  ExprNode outer_dot;
+  outer_dot.left = inner;
+  outer_dot.has_left = true;
+  outer_dot.right = x_ident;
+  outer_dot.has_right = true;
+  outer_dot.op = ".";
+  Node n = node_new(NodeKind.Expression(outer_dot));
+
+  assert g.emit_expr(n).is_none(), "expected the chained field access to emit";
+  assert equals(st.out.build(), "rect.a.x"), "expected 'rect.a.x'";
+}
+
+test "emit_expr emits a chained field access mixing pointer and value links" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  g.record_local("rect", "Rect", true);
+
+  Vec<str> rect_fields;
+  rect_fields.init(0);
+  rect_fields.push("a");
+  Vec<str> rect_field_types;
+  rect_field_types.init(0);
+  rect_field_types.push("Point");
+  Vec<bin> rect_field_ptrs;
+  rect_field_ptrs.init(0);
+  rect_field_ptrs.push(false);
+  g.record_compound("Rect", rect_fields, rect_field_types, rect_field_ptrs);
+
+  Vec<str> point_fields;
+  point_fields.init(0);
+  point_fields.push("x");
+  Vec<str> point_field_types;
+  point_field_types.init(0);
+  point_field_types.push("num");
+  Vec<bin> point_field_ptrs;
+  point_field_ptrs.init(0);
+  point_field_ptrs.push(false);
+  g.record_compound("Point", point_fields, point_field_types, point_field_ptrs);
+
+  Node* rect_ident = malloc(sizeof(Node));
+  *rect_ident = node_new(NodeKind.Identifier("rect"));
+  Node* a_ident = malloc(sizeof(Node));
+  *a_ident = node_new(NodeKind.Identifier("a"));
+  ExprNode inner_dot;
+  inner_dot.left = rect_ident;
+  inner_dot.has_left = true;
+  inner_dot.right = a_ident;
+  inner_dot.has_right = true;
+  inner_dot.op = ".";
+  Node* inner = malloc(sizeof(Node));
+  *inner = node_new(NodeKind.Expression(inner_dot));
+
+  Node* x_ident = malloc(sizeof(Node));
+  *x_ident = node_new(NodeKind.Identifier("x"));
+  ExprNode outer_dot;
+  outer_dot.left = inner;
+  outer_dot.has_left = true;
+  outer_dot.right = x_ident;
+  outer_dot.has_right = true;
+  outer_dot.op = ".";
+  Node n = node_new(NodeKind.Expression(outer_dot));
+
+  assert g.emit_expr(n).is_none(), "expected the chained field access to emit";
+  assert equals(st.out.build(), "rect->a.x"), "expected 'rect->a.x' (pointer link then value link)";
+}
+
+test "emit_expr rejects a chained field access through an unrecognized compound" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  g.record_local("rect", "Rect", false);
+  // "Rect" deliberately never registered via record_compound.
+
+  Node* rect_ident = malloc(sizeof(Node));
+  *rect_ident = node_new(NodeKind.Identifier("rect"));
+  Node* a_ident = malloc(sizeof(Node));
+  *a_ident = node_new(NodeKind.Identifier("a"));
+  ExprNode inner_dot;
+  inner_dot.left = rect_ident;
+  inner_dot.has_left = true;
+  inner_dot.right = a_ident;
+  inner_dot.has_right = true;
+  inner_dot.op = ".";
+  Node* inner = malloc(sizeof(Node));
+  *inner = node_new(NodeKind.Expression(inner_dot));
+
+  Node* x_ident = malloc(sizeof(Node));
+  *x_ident = node_new(NodeKind.Identifier("x"));
+  ExprNode outer_dot;
+  outer_dot.left = inner;
+  outer_dot.has_left = true;
+  outer_dot.right = x_ident;
+  outer_dot.has_right = true;
+  outer_dot.op = ".";
+  Node n = node_new(NodeKind.Expression(outer_dot));
+
+  assert g.emit_expr(n).is_some(), "expected an unrecognized compound to be rejected rather than guessed";
 }
 
 test "emit_enum emits a plain enum as a C enum typedef, auto and explicit values" {
