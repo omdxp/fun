@@ -1059,6 +1059,54 @@ test "fls index: compound array fields are indexed" {
     try std.testing.expect(found_data);
 }
 
+test "fls index: compound field with a nested-generic type is not truncated" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // The lexer fuses `Vec<Vec<str>>`'s trailing closer into one `>>`
+    // operator token. Without counting BOTH `>` characters in that one
+    // token, the generic-depth scan never returns to 0, runs off the end
+    // of the field-type region, and silently drops (or corrupts) every
+    // field indexed after the nested one -- this is what "hovering a
+    // field with generic types doesn't show the full generic type"
+    // reduces to. `flags` (after the nested field) must still be indexed
+    // correctly for this regression to actually be caught.
+    const text =
+        "compound Codegen {\n" ++
+        "  Vec<str> names;\n" ++
+        "  Vec<Vec<str>> nested;\n" ++
+        "  Vec<bin> flags;\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found_names = false;
+    var found_nested = false;
+    var found_flags = false;
+    for (idx.symbols) |s| {
+        if (s.kind != .field) continue;
+        if (std.mem.eql(u8, s.name, "names")) {
+            found_names = true;
+            try std.testing.expect(s.value_type != null);
+            try std.testing.expect(std.mem.eql(u8, s.value_type.?, "Vec<str>"));
+        } else if (std.mem.eql(u8, s.name, "nested")) {
+            found_nested = true;
+            try std.testing.expect(s.value_type != null);
+            try std.testing.expect(std.mem.eql(u8, s.value_type.?, "Vec<Vec<str>>"));
+        } else if (std.mem.eql(u8, s.name, "flags")) {
+            found_flags = true;
+            try std.testing.expect(s.value_type != null);
+            try std.testing.expect(std.mem.eql(u8, s.value_type.?, "Vec<bin>"));
+        }
+    }
+
+    try std.testing.expect(found_names);
+    try std.testing.expect(found_nested);
+    try std.testing.expect(found_flags);
+}
+
 test "fls index: constrained impl keeps self owner type" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();

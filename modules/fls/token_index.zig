@@ -219,6 +219,72 @@ pub fn nextNonTrivialToken(tokens: []const token.Token, start_index: usize) ?usi
     return null;
 }
 
+/// If `all_tokens[start_i]` opens a generic argument list (`<`), appends the
+/// whole `<...>` suffix (recursively, comma-separated) to `out_buf` and
+/// returns the index just past its closing `>`. A no-op (returns `start_i`
+/// unchanged) when there's no `<` there at all.
+///
+/// The lexer's maximal-munch tokenizing fuses adjacent closing angle
+/// brackets into ONE multi-char `Operator` token (`Vec<Vec<str>>`'s trailing
+/// closer lexes as a single `>>`, not two `>` tokens) — `close_count` counts
+/// the `>` characters actually present in that one token so nested generics
+/// close at the right depth. Without this, `generic_depth` never returns to
+/// 0 and the scan runs past the declaration into whatever follows (a method
+/// body, or the next field/declaration), corrupting everything after it.
+/// This exact failure mode was originally found (and fixed) only for
+/// function signatures; every other caller below reproduces it independently
+/// on any 2+-level-nested generic type, hence this shared helper.
+pub fn appendGenericSuffix(out_buf: *ArrayList(u8), all_tokens: []const token.Token, start_i: usize) !usize {
+    if (start_i >= all_tokens.len) return start_i;
+    if (!isPunctChar(all_tokens[start_i], '<')) return start_i;
+
+    var generic_depth: i64 = 0;
+    var i = start_i;
+    while (i < all_tokens.len) : (i += 1) {
+        const tk = all_tokens[i];
+        if (tk.type == .NewLine or tk.type == .Comment) continue;
+
+        if (isPunctChar(tk, '<')) {
+            generic_depth += 1;
+            try out_buf.append('<');
+            continue;
+        }
+
+        const close_count = blk: {
+            const ts = tokenString(tk);
+            if (ts.len == 0) break :blk @as(usize, 0);
+            for (ts) |c| {
+                if (c != '>') break :blk @as(usize, 0);
+            }
+            break :blk ts.len;
+        };
+        if (close_count > 0) {
+            var c: usize = 0;
+            while (c < close_count) : (c += 1) {
+                generic_depth -= 1;
+                try out_buf.append('>');
+                if (generic_depth == 0) {
+                    return nextNonTrivialToken(all_tokens, i + 1) orelse (i + 1);
+                }
+            }
+            continue;
+        }
+
+        if (generic_depth <= 0) break;
+
+        if (isPunctChar(tk, ',')) {
+            try out_buf.appendSlice(", ");
+            continue;
+        }
+
+        const ts = tokenString(tk);
+        if (ts.len == 0) continue;
+        try out_buf.appendSlice(ts);
+    }
+
+    return i;
+}
+
 /// Return the cleaned text of a trailing comment that sits on the SAME source line
 /// as the token at `from_i` (e.g. the `,` after an enum variant), or null. Used to
 /// surface `Variant(num), // primitive payload` as the variant's hover doc. The
@@ -530,62 +596,6 @@ pub fn buildSignatureFromTokens(
             return false;
         }
 
-        fn appendGenericSuffix(out_buf: *ArrayList(u8), all_tokens: []const token.Token, start_i: usize) !usize {
-            if (start_i >= all_tokens.len) return start_i;
-            if (!isPunctChar(all_tokens[start_i], '<')) return start_i;
-
-            var generic_depth: i64 = 0;
-            var i = start_i;
-            while (i < all_tokens.len) : (i += 1) {
-                const tk = all_tokens[i];
-                if (tk.type == .NewLine or tk.type == .Comment) continue;
-
-                if (isPunctChar(tk, '<')) {
-                    generic_depth += 1;
-                    try out_buf.append('<');
-                    continue;
-                }
-
-                // A closing `>` — but the lexer may fuse adjacent closers into one
-                // `>>`/`>>>` operator token (e.g. `Option<Vec<JsonValue>>`). Count the
-                // `>` chars so nested generics close correctly; otherwise the depth
-                // never returns to 0 and the scan runs into the method body (EOF),
-                // dumping the whole declaration into the signature `detail`.
-                const close_count = blk: {
-                    const ts = tokenString(tk);
-                    if (ts.len == 0) break :blk @as(usize, 0);
-                    for (ts) |c| {
-                        if (c != '>') break :blk @as(usize, 0);
-                    }
-                    break :blk ts.len;
-                };
-                if (close_count > 0) {
-                    var c: usize = 0;
-                    while (c < close_count) : (c += 1) {
-                        generic_depth -= 1;
-                        try out_buf.append('>');
-                        if (generic_depth == 0) {
-                            return nextNonTrivialToken(all_tokens, i + 1) orelse (i + 1);
-                        }
-                    }
-                    continue;
-                }
-
-                if (generic_depth <= 0) break;
-
-                if (isPunctChar(tk, ',')) {
-                    try out_buf.appendSlice(", ");
-                    continue;
-                }
-
-                const ts = tokenString(tk);
-                if (ts.len == 0) continue;
-                try out_buf.appendSlice(ts);
-            }
-
-            return i;
-        }
-
         fn appendPointerSuffix(out_buf: *ArrayList(u8), all_tokens: []const token.Token, start_i: usize) !usize {
             var i = start_i;
             while (i < all_tokens.len and isStarToken(all_tokens[i])) : (i += 1) {
@@ -737,7 +747,7 @@ pub fn buildSignatureFromTokens(
         defer ptype_buf.deinit();
         try ptype_buf.appendSlice(ptype);
         var after_type_i = nextNonTrivialToken(tokens, pi + 1) orelse break;
-        after_type_i = try parsed.appendGenericSuffix(&ptype_buf, tokens, after_type_i);
+        after_type_i = try appendGenericSuffix(&ptype_buf, tokens, after_type_i);
         const after_ptr_i = try parsed.appendPointerSuffix(&ptype_buf, tokens, after_type_i);
         const after_array_i = try parsed.appendArraySuffix(&ptype_buf, tokens, after_ptr_i);
 
@@ -781,7 +791,7 @@ pub fn buildSignatureFromTokens(
             try rt_buf.appendSlice(rts);
 
             var after_type_i = nextNonTrivialToken(tokens, ri + 1) orelse (ri + 1);
-            after_type_i = try parsed.appendGenericSuffix(&rt_buf, tokens, after_type_i);
+            after_type_i = try appendGenericSuffix(&rt_buf, tokens, after_type_i);
 
             const after_ptr_i = try parsed.appendPointerSuffix(&rt_buf, tokens, after_type_i);
             _ = try parsed.appendArraySuffix(&rt_buf, tokens, after_ptr_i);
@@ -2778,35 +2788,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
 
                 // Preserve generic suffix in parameter types (e.g. `Box<T>`).
                 var name_i = nextNonTrivialToken(tokens_, pi + 1) orelse break;
-                if (name_i < tokens_.len and isPunctChar(tokens_[name_i], '<')) {
-                    var gdepth: i64 = 0;
-                    var gi = name_i;
-                    while (gi < tokens_.len) : (gi += 1) {
-                        const gtok = tokens_[gi];
-                        if (gtok.type == .NewLine or gtok.type == .Comment) continue;
-                        if (isPunctChar(gtok, '<')) {
-                            gdepth += 1;
-                            ptype_buf.append('<') catch {};
-                            continue;
-                        }
-                        if (isPunctChar(gtok, '>')) {
-                            gdepth -= 1;
-                            ptype_buf.append('>') catch {};
-                            if (gdepth == 0) {
-                                name_i = nextNonTrivialToken(tokens_, gi + 1) orelse break;
-                                break;
-                            }
-                            continue;
-                        }
-                        if (gdepth <= 0) break;
-                        if (isPunctChar(gtok, ',')) {
-                            ptype_buf.appendSlice(", ") catch {};
-                            continue;
-                        }
-                        const ts = tokenString(gtok);
-                        if (ts.len != 0) ptype_buf.appendSlice(ts) catch {};
-                    }
-                }
+                name_i = appendGenericSuffix(&ptype_buf, tokens_, name_i) catch name_i;
 
                 while (name_i < tokens_.len and isPunctChar(tokens_[name_i], '[')) {
                     ptype_buf.appendSlice("[]") catch {};
@@ -3060,35 +3042,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
             owner_name_buf.appendSlice(name) catch {};
 
             var after_compound_name_i = nextNonTrivialToken(tokens, name_i + 1) orelse tokens.len;
-            if (after_compound_name_i < tokens.len and isPunctChar(tokens[after_compound_name_i], '<')) {
-                var gdepth: i64 = 0;
-                var gi = after_compound_name_i;
-                while (gi < tokens.len) : (gi += 1) {
-                    const gtok = tokens[gi];
-                    if (gtok.type == .NewLine or gtok.type == .Comment) continue;
-                    if (isPunctChar(gtok, '<')) {
-                        gdepth += 1;
-                        owner_name_buf.append('<') catch {};
-                        continue;
-                    }
-                    if (isPunctChar(gtok, '>')) {
-                        gdepth -= 1;
-                        owner_name_buf.append('>') catch {};
-                        if (gdepth == 0) {
-                            after_compound_name_i = nextNonTrivialToken(tokens, gi + 1) orelse tokens.len;
-                            break;
-                        }
-                        continue;
-                    }
-                    if (gdepth <= 0) break;
-                    if (isPunctChar(gtok, ',')) {
-                        owner_name_buf.appendSlice(", ") catch {};
-                        continue;
-                    }
-                    const ts = tokenString(gtok);
-                    if (ts.len != 0) owner_name_buf.appendSlice(ts) catch {};
-                }
-            }
+            after_compound_name_i = appendGenericSuffix(&owner_name_buf, tokens, after_compound_name_i) catch after_compound_name_i;
 
             const owner_name = allocator.dupe(u8, owner_name_buf.items) catch name;
             // Find opening '{'
@@ -3111,35 +3065,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                         ftype_buf.appendSlice(ftype_raw) catch {};
 
                         var field_name_i = nextNonTrivialToken(tokens, k + 1) orelse continue;
-                        if (field_name_i < tokens.len and isPunctChar(tokens[field_name_i], '<')) {
-                            var gdepth: i64 = 0;
-                            var gi = field_name_i;
-                            while (gi < tokens.len) : (gi += 1) {
-                                const gtok = tokens[gi];
-                                if (gtok.type == .NewLine or gtok.type == .Comment) continue;
-                                if (isPunctChar(gtok, '<')) {
-                                    gdepth += 1;
-                                    ftype_buf.append('<') catch {};
-                                    continue;
-                                }
-                                if (isPunctChar(gtok, '>')) {
-                                    gdepth -= 1;
-                                    ftype_buf.append('>') catch {};
-                                    if (gdepth == 0) {
-                                        field_name_i = nextNonTrivialToken(tokens, gi + 1) orelse continue;
-                                        break;
-                                    }
-                                    continue;
-                                }
-                                if (gdepth <= 0) break;
-                                if (isPunctChar(gtok, ',')) {
-                                    ftype_buf.appendSlice(", ") catch {};
-                                    continue;
-                                }
-                                const ts = tokenString(gtok);
-                                if (ts.len != 0) ftype_buf.appendSlice(ts) catch {};
-                            }
-                        }
+                        field_name_i = appendGenericSuffix(&ftype_buf, tokens, field_name_i) catch field_name_i;
 
                         // Consume array dimension brackets that are part of the field type,
                         // e.g. `T[] data;` or `num[][] grid;`.
@@ -3159,7 +3085,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                             field_name_i = nextNonTrivialToken(tokens, field_name_i + 1) orelse break;
                         }
 
-                        if (!isIdent(tokens[field_name_i])) continue;
+                        if (field_name_i >= tokens.len or !isIdent(tokens[field_name_i])) continue;
 
                         const after_name_i = nextNonTrivialToken(tokens, field_name_i + 1) orelse continue;
                         if (!isSymbolChar(tokens[after_name_i], ';')) continue;
@@ -3399,35 +3325,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
             owner_buf.appendSlice(owner_base) catch {};
 
             var after_type_i = nextNonTrivialToken(tokens, type_i + 1) orelse tokens.len;
-            if (after_type_i < tokens.len and isPunctChar(tokens[after_type_i], '<')) {
-                var gdepth: i64 = 0;
-                var gi = after_type_i;
-                while (gi < tokens.len) : (gi += 1) {
-                    const gtok = tokens[gi];
-                    if (gtok.type == .NewLine or gtok.type == .Comment) continue;
-                    if (isPunctChar(gtok, '<')) {
-                        gdepth += 1;
-                        owner_buf.append('<') catch {};
-                        continue;
-                    }
-                    if (isPunctChar(gtok, '>')) {
-                        gdepth -= 1;
-                        owner_buf.append('>') catch {};
-                        if (gdepth == 0) {
-                            after_type_i = nextNonTrivialToken(tokens, gi + 1) orelse tokens.len;
-                            break;
-                        }
-                        continue;
-                    }
-                    if (gdepth <= 0) break;
-                    if (isPunctChar(gtok, ',')) {
-                        owner_buf.appendSlice(", ") catch {};
-                        continue;
-                    }
-                    const ts = tokenString(gtok);
-                    if (ts.len != 0) owner_buf.appendSlice(ts) catch {};
-                }
-            }
+            after_type_i = appendGenericSuffix(&owner_buf, tokens, after_type_i) catch after_type_i;
 
             const owner_name = allocator.dupe(u8, owner_buf.items) catch owner_base;
             impl_owner_name = owner_name;
@@ -3790,35 +3688,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
             vtype_buf.appendSlice(vtype_base_raw) catch {};
 
             var name_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
-            if (name_i < tokens.len and isPunctChar(tokens[name_i], '<')) {
-                var gdepth: i64 = 0;
-                var gi = name_i;
-                while (gi < tokens.len) : (gi += 1) {
-                    const gtok = tokens[gi];
-                    if (gtok.type == .NewLine or gtok.type == .Comment) continue;
-                    if (isPunctChar(gtok, '<')) {
-                        gdepth += 1;
-                        vtype_buf.append('<') catch {};
-                        continue;
-                    }
-                    if (isPunctChar(gtok, '>')) {
-                        gdepth -= 1;
-                        vtype_buf.append('>') catch {};
-                        if (gdepth == 0) {
-                            name_i = nextNonTrivialToken(tokens, gi + 1) orelse continue;
-                            break;
-                        }
-                        continue;
-                    }
-                    if (gdepth <= 0) break;
-                    if (isPunctChar(gtok, ',')) {
-                        vtype_buf.appendSlice(", ") catch {};
-                        continue;
-                    }
-                    const ts = tokenString(gtok);
-                    if (ts.len != 0) vtype_buf.appendSlice(ts) catch {};
-                }
-            }
+            name_i = appendGenericSuffix(&vtype_buf, tokens, name_i) catch name_i;
             // Consume array dimension brackets `[][]...` that are part of the type.
             while (name_i < tokens.len and isPunctChar(tokens[name_i], '[')) {
                 const rbr_i = nextNonTrivialToken(tokens, name_i + 1) orelse break;
@@ -3905,35 +3775,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
             vtype_buf.appendSlice(vtype_raw) catch {};
 
             var name_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
-            if (name_i < tokens.len and isPunctChar(tokens[name_i], '<')) {
-                var gdepth: i64 = 0;
-                var gi = name_i;
-                while (gi < tokens.len) : (gi += 1) {
-                    const gtok = tokens[gi];
-                    if (gtok.type == .NewLine or gtok.type == .Comment) continue;
-                    if (isPunctChar(gtok, '<')) {
-                        gdepth += 1;
-                        vtype_buf.append('<') catch {};
-                        continue;
-                    }
-                    if (isPunctChar(gtok, '>')) {
-                        gdepth -= 1;
-                        vtype_buf.append('>') catch {};
-                        if (gdepth == 0) {
-                            name_i = nextNonTrivialToken(tokens, gi + 1) orelse continue;
-                            break;
-                        }
-                        continue;
-                    }
-                    if (gdepth <= 0) break;
-                    if (isPunctChar(gtok, ',')) {
-                        vtype_buf.appendSlice(", ") catch {};
-                        continue;
-                    }
-                    const ts = tokenString(gtok);
-                    if (ts.len != 0) vtype_buf.appendSlice(ts) catch {};
-                }
-            }
+            name_i = appendGenericSuffix(&vtype_buf, tokens, name_i) catch name_i;
 
             // Consume array dimension brackets `[][]...` that follow the base type (or generic).
             while (name_i < tokens.len and isPunctChar(tokens[name_i], '[')) {
@@ -3951,7 +3793,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                 if (isPunctChar(tokens[name_i], '&')) try markers.append('&');
                 name_i = nextNonTrivialToken(tokens, name_i + 1) orelse break;
             }
-            if (!isIdent(tokens[name_i])) continue;
+            if (name_i >= tokens.len or !isIdent(tokens[name_i])) continue;
             const after_i = nextNonTrivialToken(tokens, name_i + 1) orelse continue;
             const after = tokens[after_i];
             if (!(isPunctChar(after, ';') or isPunctChar(after, '=') or isPunctChar(after, ','))) continue;
