@@ -25,12 +25,14 @@
 // receiver's DECLARED type (a deliberately narrow, non-inference-based
 // heuristic -- see `emit_field_access`/`emit_receiver_and_resolve_type`'s
 // doc comments for exactly what it can't handle), a
-// plain (non-quirk, non-generic) `impl Type { methods }` block (each
-// method is ALREADY parsed as a pre-mangled, self-first-arg `Function`
-// node -- see `emit_impl`'s doc comment -- so it's emitted exactly like
-// any other function), a method call `recv.method(...)` resolved
-// statically to `Type__method(<self-arg>, ...)` from the receiver's
-// known local type (see `emit_method_call`'s doc comment), `fit subject {
+// non-generic `impl Type { methods }` block, PLAIN or
+// quirk-implementing (each method is ALREADY parsed as a pre-mangled,
+// self-first-arg `Function` node -- see `emit_impl`'s doc comment -- so
+// it's emitted exactly like any other function), a method call
+// `recv.method(...)` resolved statically to `Type__method(<self-arg>,
+// ...)` (or `Type__Quirk__method(...)` when a quirk-implementing impl
+// defined it -- see `register_impl_methods`/`emit_method_call`'s doc
+// comments) from the receiver's known local type, `fit subject {
 // patterns -> { body } ... }` over a plain identifier, a `*name`
 // dereference (`fit *self { ... }`), or a chained field access (`fit
 // t.data { ... }`) subject -- either a literal-pattern chain, or a
@@ -88,10 +90,13 @@
 // the rest.
 // - A GENERIC enum (`enum Option<T> { ... }`) -- monomorphization is a
 // separate, larger deferred item, same as generic compounds/impls.
-// - Quirk-implementing impls (`impl Type as Quirk { ... }`) -- their
-// methods are dispatched dynamically through a vtable in the original,
-// a separate, larger deferred item; a plain impl's methods are resolved
-// statically instead (see `emit_method_call`'s doc comment).
+// - TRUE dynamic dispatch through a receiver declared as an ABSTRACT
+// quirk type itself (a vtable lookup) -- a separate, larger deferred
+// item. A quirk-implementing impl's OWN methods emit fine now (see
+// `emit_impl`), and a STATIC call through a receiver whose declared
+// type is already the CONCRETE implementing type resolves correctly
+// (see `emit_method_call`/`register_impl_methods`'s doc comments) --
+// only the abstract-quirk-typed-variable case is still unreachable.
 // - The iterator form of `for` over anything other than a known-`Vec`
 // local (an array literal, or a general `Iterator`-implementing quirk
 // value dispatched through `.next()`) -- see `emit_for_iter`'s doc
@@ -101,9 +106,11 @@
 // variable AND a type to declare it with -- see `emit_fit`'s doc
 // comment).
 // - Every declaration kind besides a plain function/non-generic
-// compound/non-generic enum/non-quirk-non-generic impl (`quirk`, a
-// GENERIC compound's/enum's monomorphized specializations, and a generic
-// or quirk-implementing impl's methods).
+// compound/non-generic enum/non-generic impl (a top-level `quirk`
+// declaration itself needs no C emission at all -- it's a structural,
+// compile-time-only interface spec -- but a GENERIC compound's/enum's/
+// impl's monomorphized specializations are still a separate, larger
+// deferred item).
 // - Type INFERENCE: a function's return type and every literal's type are
 // already fully explicit at this stage (an omitted `let` type, or a
 // function relying on inferred generics, isn't reachable yet), so no
@@ -214,6 +221,20 @@ pub compound Codegen {
   Vec<Vec<str>> compound_field_names;
   Vec<Vec<str>> compound_field_type_names;
   Vec<Vec<bin>> compound_field_is_pointer;
+  // Whole-program record of every impl method's owning type, its OWN
+  // bare name, and its FULLY MANGLED C call-site name -- populated by
+  // `register_impl_methods`' own dedicated pre-pass (see `transpile`'s
+  // doc comment for why this can't just happen as a side effect of
+  // `emit_impl` itself). A PLAIN impl's method mangles to
+  // `Type__method`; a QUIRK-implementing impl's mangles to
+  // `Type__Quirk__method` instead (`_parse_impl_method`'s own scheme in
+  // the parser -- codegen doesn't invent this, it only has to
+  // reconstruct which one applies at a CALL site). Lets
+  // `emit_method_call` resolve the right one regardless of which kind of
+  // impl actually defined the method being called.
+  Vec<str> impl_method_owner_type;
+  Vec<str> impl_method_bare_name;
+  Vec<str> impl_method_mangled_name;
 }
 
 pub fun codegen_new(CodegenState* state) Codegen {
@@ -229,6 +250,9 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.compound_field_names.init(0);
   g.compound_field_type_names.init(0);
   g.compound_field_is_pointer.init(0);
+  g.impl_method_owner_type.init(0);
+  g.impl_method_bare_name.init(0);
+  g.impl_method_mangled_name.init(0);
   g.current_fn_rtype_name = "";
   g.expected_enum_type = "";
   ret g;
@@ -394,6 +418,33 @@ impl Codegen {
           j = j + 1;
         }
         ret .None;
+      }
+      i = i + 1;
+    }
+    ret .None;
+  }
+
+  // Records one impl method's owning type, bare name, and fully mangled
+  // C call-site name -- see `Codegen.impl_method_owner_type`'s doc
+  // comment.
+  record_impl_method(str owner_type, str bare_name, str mangled_name) {
+    self.impl_method_owner_type.push(owner_type);
+    self.impl_method_bare_name.push(bare_name);
+    self.impl_method_mangled_name.push(mangled_name);
+  }
+
+  // Looks up `bare_name`'s fully mangled C call-site name on the known
+  // impl-implementing type `owner_type`. `.None` means either isn't
+  // recognized -- the caller must treat that as "not registered yet (or
+  // ever)", not guess.
+  lookup_impl_method(str owner_type, str bare_name) Option<str> {
+    num i = 0;
+    for i < self.impl_method_owner_type.len {
+      if equals(self.impl_method_owner_type.get(i), owner_type) && equals(
+        self.impl_method_bare_name.get(i),
+        bare_name
+      ) {
+        ret .Some(self.impl_method_mangled_name.get(i));
       }
       i = i + 1;
     }
@@ -695,23 +746,29 @@ impl Codegen {
   }
 
   // Emits a method call `recv.method(arg1, ...)` as C
-  // `TypeName__method(<self-arg>, arg1, ...)`, mirroring the parser's own
-  // implicit-`self`/mangled-name scheme (`_parse_impl_method`'s doc
-  // comment: a plain impl's method `mname` on type `TypeName` is parsed
-  // straight into a `Function` node ALREADY named `TypeName__mname` with
-  // `self` as its first arg -- codegen doesn't invent any mangling of its
-  // own, it just has to reproduce the same recipe at the CALL site). The
-  // self-arg is `recv` directly when `recv` is already a pointer local,
-  // or `&recv` when it's a value local (the callee always expects a
-  // pointer, matching the implicit `self` parameter's type).
+  // `TypeName__method(<self-arg>, arg1, ...)` -- or `TypeName__Quirk__
+  // method(...)` when `method` was defined by a QUIRK-implementing impl
+  // instead of a plain one, resolved via `lookup_impl_method` (populated
+  // by `register_impl_methods`' own pre-pass -- see `transpile`'s pass
+  // ordering). Falls back to the plain `TypeName__method` naming
+  // directly when nothing's registered (an isolated call to
+  // `emit_method_call` outside `transpile`, as every existing unit test
+  // below does) -- codegen doesn't invent either mangling scheme itself,
+  // it only has to reproduce whichever one `_parse_impl_method` already
+  // used for that method's `Function` node in the parser. The self-arg
+  // is `recv` directly when `recv` is already a pointer local, or `&recv`
+  // when it's a value local (the callee always expects a pointer,
+  // matching the implicit `self` parameter's type).
   // 
   // Deliberately narrow for this slice, same spirit as
   // `emit_field_access` (whose doc comment explains why an unrecognized
   // receiver is REJECTED rather than guessed): `recv` must be a plain
   // identifier that's a KNOWN local, and `method` a plain identifier.
-  // Quirk-dispatched calls (dynamic vtable dispatch) aren't reachable
-  // yet either -- only a plain (non-quirk) impl's method, resolved
-  // statically by the receiver's DECLARED type name.
+  // TRUE dynamic dispatch (calling through a receiver declared as the
+  // ABSTRACT quirk type itself, via a vtable) isn't reachable yet --
+  // only a STATIC call resolved by the receiver's own DECLARED
+  // (concrete) type name, whether that type implements the method via a
+  // plain impl or a quirk-implementing one.
   emit_method_call(ExprNode recv_e, Node* args_node) Option<CodegenErrorKind> {
     if !recv_e.has_left || !recv_e.has_right {
       ret .Some(CodegenErrorKind.InvalidNode);
@@ -733,9 +790,14 @@ impl Codegen {
       ret .Some(CodegenErrorKind.UnsupportedNode);
     }
 
-    self.state.write(type_found.unwrap());
-    self.state.write("__");
-    self.state.write(method_name);
+    let registered = self.lookup_impl_method(type_found.unwrap(), method_name);
+    if registered.is_some() {
+      self.state.write(registered.unwrap());
+    } else {
+      self.state.write(type_found.unwrap());
+      self.state.write("__");
+      self.state.write(method_name);
+    }
     self.state.write("(");
     if ptr_found.unwrap() {
       self.state.write(recv_name);
@@ -1845,26 +1907,75 @@ impl Codegen {
     }
   }
 
-  // Emits every method of a plain (non-quirk, non-generic) `impl Type {
-  // methods }` block as an ordinary top-level C function -- the parser
-  // ALREADY did the work that makes this trivial: each method is parsed
-  // as a `Function` node pre-mangled to `Type__method` with `<Type>*
-  // self` as its real first arg (`_parse_impl_method`'s doc comment in
-  // the parser), so a method is emitted exactly like any other function
-  // via the existing `emit_function` -- no separate self-injection or
-  // name-mangling logic needed here.
-  // 
-  // Deliberately simplified from the original for this slice: a
-  // quirk-implementing impl (`impl Type as Quirk { ... }`, `has_quirk_
-  // name`) is silently skipped -- its methods are still dispatched
-  // dynamically through a vtable in the original, which is a separate,
-  // larger deferred item (see this file's own top-level doc comment). A
-  // generic impl (`has_type_params`) is skipped too, same reasoning as
+  // Pre-registers every method of a plain OR quirk-implementing
+  // (non-generic) impl block under its own bare name and fully mangled
+  // C call-site name (see `Codegen.impl_method_owner_type`'s doc
+  // comment), WITHOUT emitting any C -- run as its OWN whole-program
+  // pass, before ANY impl method body is generated (see `transpile`'s
+  // doc comment for why: a method that calls another type's method
+  // needs that OTHER type's row recorded already, regardless of which
+  // impl block happens to come first in source order -- the same
+  // reason `emit_enum`/`emit_compound` get their own full passes before
+  // impl bodies are emitted at all). The bare name is recovered by
+  // stripping the known prefix (`Type__` for a plain impl, `Type__
+  // Quirk__` for a quirk-implementing one) off each method's ALREADY
+  // pre-mangled `Function` node name -- `_parse_impl_method`'s own
+  // scheme in the parser, not something this file invents. Generic
+  // impls (`has_type_params`) are skipped, same reasoning as
   // `emit_compound`'s generic-template skip.
+  register_impl_methods(Node node) {
+    fit node.kind {
+      .Impl(i) -> {
+        if i.has_type_params {
+          ret;
+        }
+        StringBuilder pfx = string_builder_init(16);
+        pfx.append(i.type_name);
+        pfx.append("__");
+        if i.has_quirk_name {
+          pfx.append(i.quirk_name);
+          pfx.append("__");
+        }
+        str prefix = pfx.build();
+        for m : i.methods {
+          str mangled_name = "";
+          fit m.kind {
+            .Function(fnv) -> { mangled_name = fnv.name; }
+            _ -> {}
+          }
+          let bare_name = strip_prefix(mangled_name, prefix);
+          self.record_impl_method(i.type_name, bare_name, mangled_name);
+        }
+      }
+      _ -> {}
+    }
+  }
+
+  // Emits every method of a plain OR quirk-implementing (non-generic)
+  // `impl Type { methods }` block as an ordinary top-level C function --
+  // the parser ALREADY did the work that makes this trivial: each
+  // method is parsed as a `Function` node pre-mangled to `Type__method`
+  // (or `Type__Quirk__method`) with `<Type>* self` as its real first arg
+  // (`_parse_impl_method`'s doc comment in the parser), so a method is
+  // emitted exactly like any other function via the existing
+  // `emit_function` -- no separate self-injection or name-mangling
+  // logic needed here. Assumes `register_impl_methods` already ran for
+  // every impl in the program (see its own doc comment and `transpile`'s
+  // pass ordering) -- this function only EMITS, it doesn't register.
+  // 
+  // Still deliberately narrow for this slice: TRUE dynamic dispatch
+  // through an abstract quirk-TYPED value (assigning a concrete
+  // quirk-implementor to a variable declared as the quirk itself, then
+  // calling through it via a vtable) isn't reachable yet -- only a
+  // STATIC call through a receiver whose OWN declared type is already
+  // the concrete implementing type works (see `emit_method_call`'s doc
+  // comment), which is by far the common case in this codebase's own
+  // real source. A generic impl (`has_type_params`) is skipped too,
+  // same reasoning as `emit_compound`'s generic-template skip.
   emit_impl(Node node) Option<CodegenErrorKind> {
     fit node.kind {
       .Impl(i) -> {
-        if i.has_type_params || i.has_quirk_name {
+        if i.has_type_params {
           ret .None;
         }
         for m : i.methods {
@@ -1899,10 +2010,16 @@ impl Codegen {
   // before any impl-method/function, so those can reference any of them
   // regardless of source order -- see `emit_compound`'s doc comment for
   // what that pass deliberately doesn't handle yet (dependency ordering
-  // between compounds themselves). Impl methods are emitted in a third
-  // pass (each becomes an ordinary C function, see `emit_impl`), before
-  // plain top-level functions in a fourth, so a plain function calling a
-  // method doesn't need a forward declaration.
+  // between compounds themselves). EVERY impl's methods are then
+  // pre-registered (`register_impl_methods`) in their own dedicated
+  // pass, before any impl method BODY is generated in the pass after --
+  // so a method calling another type's method resolves the right
+  // mangled name regardless of which impl block comes first in source
+  // order (same reasoning as the enum/compound passes finishing in
+  // full before either is ever read from). Impl methods are then emitted
+  // (each becomes an ordinary C function, see `emit_impl`) in a fourth
+  // pass, before plain top-level functions in a fifth, so a plain
+  // function calling a method doesn't need a forward declaration.
   pub transpile(Vec<Node> nodes) Option<CodegenErrorKind> {
     self.write_prelude();
     for n : nodes {
@@ -1924,6 +2041,12 @@ impl Codegen {
             ret cerr;
           }
         }
+        _ -> {}
+      }
+    }
+    for n : nodes {
+      fit n.kind {
+        .Impl(i) -> { self.register_impl_methods(n); }
         _ -> {}
       }
     }
@@ -3790,18 +3913,136 @@ test "emit_impl emits each method as a mangled top-level C function, with self r
   assert equals(st.out.build(), "int64_t Point__get_x(Point* self) {\n    return self->x;\n}\n"), "expected the method emitted as a plain C function reading 'self->x'";
 }
 
-test "emit_impl skips a quirk-implementing impl (dynamic dispatch not yet supported)" {
+test "emit_impl emits a quirk-implementing impl's method under its already-double-mangled name" {
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
+
+  DataType* self_dt = malloc(sizeof(DataType));
+  *self_dt = dtype_new();
+  self_dt.type_str = "Point";
+  self_dt.pointer_depth = 1;
+  VariableNode selfv;
+  selfv.var_type = self_dt;
+  selfv.name = "self";
+  selfv.has_val = false;
+  Node* self_param = malloc(sizeof(Node));
+  *self_param = node_new(NodeKind.Variable(selfv));
+  Vec<Node*> margs;
+  margs.init(0);
+  margs.push(self_param);
+
+  Node* val = malloc(sizeof(Node));
+  *val = node_new(NodeKind.Number(TokenData.Num(0)));
+  Node* ret_stmt = malloc(sizeof(Node));
+  *ret_stmt = node_new(NodeKind.StatementReturn(val));
+  Vec<Node*> stmts;
+  stmts.init(0);
+  stmts.push(ret_stmt);
+  BodyNode bn;
+  bn.statements = stmts;
+  Node* body = malloc(sizeof(Node));
+  *body = node_new(NodeKind.Body(bn));
+
+  FunctionNode fnv = function_node_new();
+  // Double-mangled, exactly as `_parse_impl_method` names a quirk-impl's
+  // method (`Type__Quirk__method`) -- codegen must reproduce this
+  // verbatim, not invent its own scheme.
+  fnv.name = "Point__To__convert";
+  fnv.has_name = true;
+  DataType* rtype = malloc(sizeof(DataType));
+  *rtype = dtype_new();
+  rtype.type_str = "num";
+  fnv.rtype = rtype;
+  fnv.has_rtype = true;
+  fnv.args = margs;
+  fnv.has_args = true;
+  fnv.body = body;
+  fnv.has_body = true;
+  Node* method_node = malloc(sizeof(Node));
+  *method_node = node_new(NodeKind.Function(fnv));
 
   ImplNode impln = impl_node_new();
   impln.type_name = "Point";
   impln.quirk_name = "To";
   impln.has_quirk_name = true;
+  impln.methods.push(method_node);
 
   Node impl_node = node_new(NodeKind.Impl(impln));
-  assert g.emit_impl(impl_node).is_none(), "expected a quirk-implementing impl to be silently skipped";
-  assert equals(st.out.build(), ""), "expected nothing emitted for a quirk-implementing impl";
+  assert g.emit_impl(impl_node).is_none(), "expected the quirk-implementing impl's method to emit";
+  assert equals(st.out.build(), "int64_t Point__To__convert(Point* self) {\n    return 0;\n}\n"), "expected the method emitted under its own already-mangled name, unmodified";
+}
+
+test "register_impl_methods lets emit_method_call resolve a quirk-implementing impl's double-mangled name" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  g.record_local("p", "Point", false);
+
+  DataType* self_dt = malloc(sizeof(DataType));
+  *self_dt = dtype_new();
+  self_dt.type_str = "Point";
+  self_dt.pointer_depth = 1;
+  VariableNode selfv;
+  selfv.var_type = self_dt;
+  selfv.name = "self";
+  selfv.has_val = false;
+  Node* self_param = malloc(sizeof(Node));
+  *self_param = node_new(NodeKind.Variable(selfv));
+  Vec<Node*> margs;
+  margs.init(0);
+  margs.push(self_param);
+
+  FunctionNode fnv = function_node_new();
+  fnv.name = "Point__To__convert";
+  fnv.has_name = true;
+  DataType* rtype = malloc(sizeof(DataType));
+  *rtype = dtype_new();
+  rtype.type_str = "num";
+  fnv.rtype = rtype;
+  fnv.has_rtype = true;
+  fnv.args = margs;
+  fnv.has_args = true;
+  Node* method_node = malloc(sizeof(Node));
+  *method_node = node_new(NodeKind.Function(fnv));
+
+  ImplNode impln = impl_node_new();
+  impln.type_name = "Point";
+  impln.quirk_name = "To";
+  impln.has_quirk_name = true;
+  impln.methods.push(method_node);
+  Node impl_node = node_new(NodeKind.Impl(impln));
+
+  // Registration only (no emission) -- mirrors `transpile`'s own
+  // dedicated pre-pass, run before any method body/call is emitted.
+  g.register_impl_methods(impl_node);
+
+  Node* recv = malloc(sizeof(Node));
+  *recv = node_new(NodeKind.Identifier("p"));
+  Node* method = malloc(sizeof(Node));
+  *method = node_new(NodeKind.Identifier("convert"));
+  ExprNode dot_e;
+  dot_e.left = recv;
+  dot_e.has_left = true;
+  dot_e.right = method;
+  dot_e.has_right = true;
+  dot_e.op = ".";
+  Node* dot_node = malloc(sizeof(Node));
+  *dot_node = node_new(NodeKind.Expression(dot_e));
+
+  Node* blank = malloc(sizeof(Node));
+  *blank = node_new(NodeKind.Blank);
+  Node* args = malloc(sizeof(Node));
+  *args = node_new(NodeKind.ExpressionParenthesis(blank));
+
+  ExprNode call_e;
+  call_e.left = dot_node;
+  call_e.has_left = true;
+  call_e.right = args;
+  call_e.has_right = true;
+  call_e.op = "()";
+  Node n = node_new(NodeKind.Expression(call_e));
+
+  assert g.emit_expr(n).is_none(), "expected the method call to emit";
+  assert equals(st.out.build(), "Point__To__convert(&p)"), "expected the double-mangled quirk name, not the naive 'Point__convert'";
 }
 
 test "emit_compound skips a generic compound (monomorphization not yet supported)" {
