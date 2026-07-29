@@ -1015,6 +1015,112 @@ test "-fmt nested generics keep closing brackets tight" {
     try std.testing.expect(std.mem.indexOf(u8, got, "Result<Vec<str >>") == null);
 }
 
+test "-fmt glues a pointer type in a non-last generic argument, and stays idempotent" {
+    const allocator = std.testing.allocator;
+
+    // Regression: `isPointerTypeStarContext` only recognized a generic
+    // argument's pointer star as the LAST type argument (`Vec<Type*>`,
+    // followed by `>`) -- a pointer type followed by ANOTHER argument
+    // (`Result<Type*, Error>`, star followed by `,`) fell through to the
+    // default spacing and kept a stray space before the star, even
+    // though `in_decl_only_ctx` (a function's return-type position here)
+    // already rules out any ambiguity with real multiplication.
+    const ugly = "pub fun parse(str src) Result<Expr *, Error> {\n  ret ok(src);\n}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_generic_ptr_midlist", ugly);
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+
+    try std.testing.expect(std.mem.indexOf(u8, got, "Result<Expr*, Error>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "Expr *,") == null);
+
+    // Idempotent: formatting the already-formatted output must not change it.
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+    const got2 = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got2);
+    try std.testing.expectEqualStrings(got, got2);
+}
+
+test "-fmt keeps decl_block_depth correct across multiple impl methods" {
+    const allocator = std.testing.allocator;
+
+    // Regression: a closing `}` decremented decl_block_depth/enum_block_depth/
+    // function_body_depth UNCONDITIONALLY (whichever was nonzero), instead of
+    // only the ONE counter that particular brace had actually incremented. A
+    // bare impl method with no explicit return type (`a() { }`) increments
+    // ONLY function_body_depth on open -- but its closing `}` was ALSO
+    // decrementing decl_block_depth, the ENCLOSING impl block's own counter,
+    // one step too many. After the first such method, decl_block_depth hit 0
+    // prematurely, so every method after it lost in_decl_only_ctx for its OWN
+    // signature (visible here as a stray space before the generic pointer
+    // star, and before the closing `>`, in the SECOND method's return type
+    // only -- the first method in an impl never showed this).
+    const ugly =
+        "compound Lexer{num pos;}\n" ++
+        "impl Lexer{a(){}\n" ++
+        "next() Result<Option<num>, Error>{ret .Err(error_none());}}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_impl_multi_method_depth", ugly);
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+
+    try std.testing.expect(std.mem.indexOf(u8, got, "Result<Option<num>, Error>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "Error >") == null);
+
+    // Idempotent: formatting the already-formatted output must not change it.
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+    const got2 = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got2);
+    try std.testing.expectEqualStrings(got, got2);
+}
+
+test "-fmt keeps a pointer-typed enum variant payload glued when not the last payload" {
+    const allocator = std.testing.allocator;
+
+    // Regression: `in_decl_only_ctx` checked `decl_block_depth` (impl/
+    // compound/quirk) but never `enum_block_depth` -- an enum variant's
+    // payload list is JUST as much a declaration-only, type-list context,
+    // but a pointer-typed payload followed by ANOTHER payload
+    // (`Bin(chr, Expr*, Expr*)`, star followed by `,`) fell through to
+    // non-declaration spacing and gained a stray space, even on input that
+    // was ALREADY correctly spaced going in.
+    const ugly = "enum Expr {\n  Neg(Expr*),\n  Bin(chr, Expr*, Expr*),\n}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_enum_payload_ptr_midlist", ugly);
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+
+    try std.testing.expect(std.mem.indexOf(u8, got, "Bin(chr, Expr*, Expr*)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "Expr *,") == null);
+
+    // Idempotent: formatting the already-formatted output must not change it.
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+    const got2 = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got2);
+    try std.testing.expectEqualStrings(got, got2);
+}
+
 test "-fmt constrained generic impl keeps colon tight" {
     const allocator = std.testing.allocator;
 

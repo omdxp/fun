@@ -852,12 +852,20 @@ fn isPointerTypeStarContext(toks: []const token.Token, idx: usize, prev: token.T
     if (next.type == .Symbol and (next.data.cval == '{' or next.data.cval == ';')) return true;
 
     // Generic argument pointer as the LAST type argument: `Vec<Type*>`
-    // (closing `>`, no name follows the star). Deliberately narrow --
-    // unlike a following identifier/`;`/`)`, a following `,` here would be
-    // ambiguous with real multiplication followed by a call argument
-    // (`foo(a * b, c)`), so that shape is left alone.
+    // (closing `>`, no name follows the star).
     if (next.type == .Operator and std.mem.eql(u8, next.data.sval.items, ">")) return true;
     if (next.type == .Symbol and next.data.cval == '>') return true;
+
+    // Generic argument pointer followed by ANOTHER type argument:
+    // `Result<Type*, Error>`. A following `,` here would be ambiguous
+    // with real multiplication followed by a call argument (`foo(a * b,
+    // c)`) in general -- but `in_decl_only_ctx` already means we're
+    // somewhere a value expression can't appear at all (a function's
+    // return-type position, a field/param type, ...), so there's no
+    // ambiguity to guard against. Without this, `Result<Expr *, Error>`
+    // formatted with a stray space before the star and never converged
+    // even under repeated `-fmt` passes (not idempotent).
+    if (in_decl_only_ctx and next.type == .Operator and std.mem.eql(u8, next.data.sval.items, ",")) return true;
 
     // Unnamed pointer type immediately closing a parenthesized list, e.g. an
     // enum data-carrying variant's payload (`StatementFork(Node*)`) or a
@@ -1662,7 +1670,17 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
     var function_body_depth: isize = 0;
     var generic_angle_depth: usize = 0;
     var asm_raw: ?AsmRawRange = null;
-    var brace_stack = ArrayList(bool).init(state.allocator);
+    // What an opening `{` actually incremented, so the matching `}` decrements
+    // EXACTLY that counter back -- not a blind "decrement everything that's
+    // nonzero" (see the bug this fixes: a bare impl method's body closing was
+    // ALSO decrementing `decl_block_depth`, the ENCLOSING `impl`/`compound`
+    // block's own counter, one step too many. After the first such method in
+    // an `impl` block, `decl_block_depth` prematurely hit 0, so every method
+    // after it lost `in_decl_only_ctx` for its own signature -- e.g. a
+    // generic argument's pointer star, or its final closing `>`, silently
+    // reverted to non-declaration spacing).
+    const BraceKind = enum { not_a_block, plain_block, decl_block, enum_block, function_body };
+    var brace_stack = ArrayList(BraceKind).init(state.allocator);
     defer brace_stack.deinit();
     // Stack of close-token indices for comma groups currently being wrapped one
     // item per line (width-based wrapping). When the current token's index matches
@@ -2061,8 +2079,9 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                     continue;
                 }
             }
-            const is_block_close = if (brace_stack.items.len > 0) brace_stack.items[brace_stack.items.len - 1] else true;
+            const popped_brace_kind = if (brace_stack.items.len > 0) brace_stack.items[brace_stack.items.len - 1] else .plain_block;
             if (brace_stack.items.len > 0) _ = brace_stack.pop();
+            const is_block_close = popped_brace_kind != .not_a_block;
 
             if (!is_block_close) {
                 try state.out.append('}');
@@ -2070,9 +2089,18 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                 continue;
             }
 
-            if (decl_block_depth > 0) decl_block_depth -= 1;
-            if (enum_block_depth > 0) enum_block_depth -= 1;
-            if (function_body_depth > 0) function_body_depth -= 1;
+            switch (popped_brace_kind) {
+                .decl_block => if (decl_block_depth > 0) {
+                    decl_block_depth -= 1;
+                },
+                .enum_block => if (enum_block_depth > 0) {
+                    enum_block_depth -= 1;
+                },
+                .function_body => if (function_body_depth > 0) {
+                    function_body_depth -= 1;
+                },
+                .plain_block, .not_a_block => {},
+            }
             if (!state.at_line_start.*) try state.out.append('\n');
             if (state.indent.* > 0) state.indent.* -= 1;
             try state.out.appendNTimes(' ', state.indent.* * fmt_indent_width);
@@ -2129,7 +2157,15 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
             state.at_line_start.* = false;
         }
 
-        const in_decl_only_ctx = in_fun_signature or (decl_block_depth > 0 and function_body_depth == 0);
+        // An enum body (`enum E { Variant(Type*, ...), ... }`) is ALSO a
+        // declaration-only context -- variant payload lists are type lists,
+        // never executable code -- but tracks its own `enum_block_depth`
+        // rather than `decl_block_depth` (an enum isn't an `impl`/`compound`/
+        // `quirk`). Without this, a pointer-typed payload followed by
+        // another payload (`Bin(chr, Type*, Type*)`, star followed by `,`)
+        // fell through to non-declaration spacing and gained a stray space,
+        // even on ALREADY-correctly-spaced input.
+        const in_decl_only_ctx = in_fun_signature or (decl_block_depth > 0 and function_body_depth == 0) or (enum_block_depth > 0 and function_body_depth == 0);
         const generic_open = is_generic_angle_open(toks, idx, in_decl_only_ctx);
         const prev_sig_idx = prev_significant_index(toks, idx);
         const prev_sig = if (prev_sig_idx) |pi| toks[pi] else null;
@@ -2434,27 +2470,34 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                     }
                 }
                 if (is_block_brace) {
+                    var brace_kind: BraceKind = .plain_block;
                     if (pending_decl_block_open) {
                         decl_block_depth += 1;
                         pending_decl_block_open = false;
+                        brace_kind = .decl_block;
                     }
                     if (pending_enum_block_open) {
                         enum_block_depth += 1;
                         pending_enum_block_open = false;
+                        brace_kind = .enum_block;
                     }
                     if (pending_control_block_open) pending_control_block_open = false;
                     if (in_fun_signature) {
                         in_fun_signature = false;
                         function_body_depth += 1;
+                        brace_kind = .function_body;
                     } else if (in_test_signature) {
                         in_test_signature = false;
                         function_body_depth += 1;
+                        brace_kind = .function_body;
                     } else if (function_body_depth == 0 and decl_block_depth > 0 and !pending_decl_block_open and !pending_enum_block_open and !pending_control_block_open and (prev_sig_is_rparen or prev_sig_is_type_after_paren or paren_before_brace)) {
                         function_body_depth = 1;
+                        brace_kind = .function_body;
                     } else if (function_body_depth > 0) {
                         function_body_depth += 1;
+                        brace_kind = .function_body;
                     }
-                    try brace_stack.append(true);
+                    try brace_stack.append(brace_kind);
                     try state.out.append('{');
                     try state.out.append('\n');
                     state.indent.* += 1;
@@ -2462,7 +2505,7 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                     state.prev_token.* = null;
                     continue;
                 }
-                try brace_stack.append(false);
+                try brace_stack.append(.not_a_block);
                 try state.out.append('{');
                 state.prev_token.* = t2;
                 continue;
