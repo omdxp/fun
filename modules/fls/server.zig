@@ -10125,7 +10125,34 @@ pub const LspServer = struct {
     /// list (see `findAnyGlobalDefinitionInGivenImports`) instead of re-resolving
     /// `uri`'s imports on every call. `handleInlayHint` resolves the list once
     /// per request and calls this in its per-call-site loop instead.
-    fn calleeSignatureDetailCached(self: *LspServer, uri: []const u8, idx: *const Index, callee_i: usize, import_uris: []const []const u8) ?[]const u8 {
+    /// Per-request memo for `calleeSignatureDetailCached`: a call site's
+    /// resolved signature detail, keyed by `"RecvType.name"` for a method
+    /// call or bare `"name"` for a plain call. Owned by the caller
+    /// (`handleInlayHint`), which frees every key on the way out.
+    const CalleeSigCache = std.StringHashMap(?[]const u8);
+
+    /// Resolves the signature `detail` string for a call-site callee,
+    /// memoized in `cache` for the lifetime of one `handleInlayHint`
+    /// request. Without this, a file that calls the SAME function/method
+    /// many times (routine in this codebase -- e.g. `self.state.write(...)`
+    /// dozens of times in one file) re-ran this whole resolution --
+    /// `resolveTypeOfChainUpTo`/`findMemberByContainer` for a method call,
+    /// or a full scan of the current file's symbols plus every direct
+    /// import's symbols for a plain call -- from scratch at EVERY
+    /// occurrence, on EVERY inlay-hint request VS Code sends (on basically
+    /// every keystroke/scroll). On a large, import-heavy workspace this was
+    /// a major contributor to the server sitting at ~100% CPU for extended
+    /// stretches.
+    ///
+    /// Correctness note: a plain (non-method) call is cached by name alone,
+    /// which is sound because this language enforces globally-unique
+    /// top-level function names (no nested/locally-scoped function
+    /// declarations exist), so `findBestDefinition`'s position-dependent
+    /// local-shadowing preference can never actually change which
+    /// definition wins for a `.function`/`.method`-kind symbol. A method
+    /// call is cached by `recv_type ++ "." ++ name` instead, since the
+    /// same method name can validly resolve differently per receiver type.
+    fn calleeSignatureDetailCached(self: *LspServer, uri: []const u8, idx: *const Index, callee_i: usize, import_uris: []const []const u8, cache: *CalleeSigCache) ?[]const u8 {
         const callee = idx.tokens[callee_i];
         if (callee.kind != .identifier) return null;
         const name = callee.text;
@@ -10133,12 +10160,29 @@ pub const LspServer = struct {
 
         if (callee_i >= 2 and isDotToken(idx.tokens[callee_i - 1]) and idx.tokens[callee_i - 2].kind == .identifier) {
             if (self.resolveTypeOfChainUpTo(idx, uri, at, callee_i - 2)) |recv_type| {
-                if (self.findMemberByContainer(uri, recv_type, name, .method)) |hit| {
-                    return hit.sym.detail;
+                const key = std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ recv_type, name }) catch
+                    return self.calleeSignatureDetailUncached(uri, idx, import_uris, name, at);
+                if (cache.get(key)) |cached| {
+                    self.allocator.free(key);
+                    return cached;
                 }
+                const result = if (self.findMemberByContainer(uri, recv_type, name, .method)) |hit| hit.sym.detail else null;
+                cache.put(key, result) catch self.allocator.free(key);
+                return result;
             }
         }
 
+        if (cache.get(name)) |cached| return cached;
+        const result = self.calleeSignatureDetailUncached(uri, idx, import_uris, name, at);
+        const owned_name = self.allocator.dupe(u8, name) catch return result;
+        cache.put(owned_name, result) catch self.allocator.free(owned_name);
+        return result;
+    }
+
+    /// The actual (uncached) plain-call resolution `calleeSignatureDetailCached`
+    /// memoizes -- also the fallback when the method-call branch's cache-key
+    /// allocation itself fails.
+    fn calleeSignatureDetailUncached(self: *LspServer, uri: []const u8, idx: *const Index, import_uris: []const []const u8, name: []const u8, at: Position) ?[]const u8 {
         if (findBestDefinition(idx.symbols, name, at)) |d| {
             if (d.kind == .function or d.kind == .method) return d.detail;
         }
@@ -10199,6 +10243,17 @@ pub const LspServer = struct {
         }
         self.collectDirectImportUris(&import_uris, uri, idx) catch {};
 
+        // See `calleeSignatureDetailCached`'s doc comment: memoizes each
+        // resolved callee signature for the rest of THIS request, so a
+        // function/method called many times in one file only pays the
+        // resolution cost once.
+        var callee_sig_cache = CalleeSigCache.init(self.allocator);
+        defer {
+            var kit = callee_sig_cache.keyIterator();
+            while (kit.next()) |k| self.allocator.free(k.*);
+            callee_sig_cache.deinit();
+        }
+
         const toks = idx.tokens;
         var i: usize = 0;
         while (i + 1 < toks.len) : (i += 1) {
@@ -10210,7 +10265,7 @@ pub const LspServer = struct {
             // already written, so inlay hints there are noise.
             if (callParenIsDeclaration(toks, i, i + 1)) continue;
 
-            const detail = self.calleeSignatureDetailCached(uri, idx, i, import_uris.items) orelse continue;
+            const detail = self.calleeSignatureDetailCached(uri, idx, i, import_uris.items, &callee_sig_cache) orelse continue;
             var params_list = self.parseParamsFromSignatureLabel(detail) catch continue;
             defer {
                 for (params_list.items) |p| self.allocator.free(p.label);

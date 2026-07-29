@@ -1144,8 +1144,12 @@ test "fls e2e: initialize, open, typing didChange, completion + definition do no
     );
     defer allocator.free(sym_params);
 
+    // 45s (not the usual 5s): this is the first request the test issues
+    // after opening the doc, so it alone pays the full first-request
+    // workspace-indexing cost (which has grown substantially during the
+    // self-hosting port) rather than warming up via an earlier request.
     const sym_id = try lsp.request("textDocument/documentSymbol", sym_params);
-    var sym_res = try lsp.waitResponse(sym_id, 5000);
+    var sym_res = try lsp.waitResponse(sym_id, 45000);
     defer sym_res.deinit();
 
     // Expect a symbol list response (ideally includes factorial/main).
@@ -5523,8 +5527,12 @@ test "fls e2e: dot completion + definition find async impl methods across import
     );
     defer allocator.free(comp_params);
 
+    // 45s (not the usual 5s): this is the first request the test issues
+    // after opening the doc, so it alone pays the full first-request
+    // workspace-indexing cost (which has grown substantially during the
+    // self-hosting port) rather than warming up via an earlier request.
     const comp_id = try lsp.request("textDocument/completion", comp_params);
-    var comp_res = try lsp.waitResponse(comp_id, 5000);
+    var comp_res = try lsp.waitResponse(comp_id, 45000);
     defer comp_res.deinit();
     try std.testing.expect(comp_res.parsed.value == .object);
     const comp_obj = comp_res.parsed.value.object;
@@ -5740,8 +5748,12 @@ test "fls e2e: didChange before didOpen is ignored unless full replace" {
         .{doc_uri},
     );
     defer allocator.free(comp_params_0);
+    // 45s (not the usual 5s): this is the first request the test issues
+    // after initialize, so it alone pays the full first-request
+    // workspace-indexing cost (which has grown substantially during the
+    // self-hosting port) rather than warming up via an earlier request.
     const comp_id_0 = try lsp.request("textDocument/completion", comp_params_0);
-    var comp_res_0 = try lsp.waitResponse(comp_id_0, 5000);
+    var comp_res_0 = try lsp.waitResponse(comp_id_0, 45000);
     defer comp_res_0.deinit();
     _ = try jsonResultFromResponseObj(comp_res_0.parsed.value.object);
 
@@ -5955,8 +5967,12 @@ test "fls e2e: unknown request method responds null and stays alive" {
     defer lsp.stop();
     try lspInitialize(allocator, &lsp, setup.root_uri);
 
+    // 45s (not the usual 5s): this is the first request the test issues
+    // after initialize, so it alone pays the full first-request
+    // workspace-indexing cost (which has grown substantially during the
+    // self-hosting port) rather than warming up via an earlier request.
     const id = try lsp.request("fun/doesNotExist", "{}");
-    var res = try lsp.waitResponse(id, 5000);
+    var res = try lsp.waitResponse(id, 45000);
     defer res.deinit();
     const root = res.parsed.value;
     try std.testing.expect(root == .object);
@@ -6207,8 +6223,12 @@ test "fls e2e: hover has no bold title, completion uses arg snippets, inlay hint
         .{ doc_uri, add_def.line, add_def.col + 4 },
     );
     defer allocator.free(hover_params);
+    // 45s (not the usual 5s): this is the first request the test issues
+    // after opening the doc, so it alone pays the full first-request
+    // workspace-indexing cost (which has grown substantially during the
+    // self-hosting port) rather than warming up via an earlier request.
     const hov_id = try lsp.request("textDocument/hover", hover_params);
-    var hov_res = try lsp.waitResponse(hov_id, 5000);
+    var hov_res = try lsp.waitResponse(hov_id, 45000);
     defer hov_res.deinit();
     const hov_result = try jsonResultFromResponseObj(hov_res.parsed.value.object);
     if (hov_result == .object) {
@@ -6514,8 +6534,12 @@ test "fls e2e: inlay hint shows the called function's own param name, not anothe
         .{doc_uri},
     );
     defer allocator.free(inlay_params);
+    // 45s (not the usual 5s): this is the first request the test issues
+    // after opening the doc, so it alone pays the full first-request
+    // workspace-indexing cost (which has grown substantially during the
+    // self-hosting port) rather than warming up via an earlier request.
     const inlay_id = try lsp.request("textDocument/inlayHint", inlay_params);
-    var inlay_res = try lsp.waitResponse(inlay_id, 5000);
+    var inlay_res = try lsp.waitResponse(inlay_id, 45000);
     defer inlay_res.deinit();
     const inlay_result = try jsonResultFromResponseObj(inlay_res.parsed.value.object);
     var saw_a = false;
@@ -6573,8 +6597,12 @@ test "fls e2e: a parameter default does not corrupt inlay hints or completion sn
         .{doc_uri},
     );
     defer allocator.free(inlay_params);
+    // 45s (not the usual 5s): this is the first request the test issues
+    // after opening the doc, so it alone pays the full first-request
+    // workspace-indexing cost (which has grown substantially during the
+    // self-hosting port) rather than warming up via an earlier request.
     const inlay_id = try lsp.request("textDocument/inlayHint", inlay_params);
-    var inlay_res = try lsp.waitResponse(inlay_id, 5000);
+    var inlay_res = try lsp.waitResponse(inlay_id, 45000);
     defer inlay_res.deinit();
     const inlay_result = try jsonResultFromResponseObj(inlay_res.parsed.value.object);
     if (inlay_result == .array) {
@@ -6833,8 +6861,12 @@ test "fls e2e: hover on a generic method specializes type params to the receiver
         .{ doc_uri, call_pos.line, call_pos.col + 2 }, // +2 to land on `get_or`
     );
     defer allocator.free(hover_params);
+    // 45s (not the usual 5s): this is the first request the test issues
+    // after opening the doc, so it alone pays the full first-request
+    // workspace-indexing cost (which has grown substantially during the
+    // self-hosting port) rather than warming up via an earlier request.
     const hov_id = try lsp.request("textDocument/hover", hover_params);
-    var hov_res = try lsp.waitResponse(hov_id, 5000);
+    var hov_res = try lsp.waitResponse(hov_id, 45000);
     defer hov_res.deinit();
 
     const hov_result = try jsonResultFromResponseObj(hov_res.parsed.value.object);
