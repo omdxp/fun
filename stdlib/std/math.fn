@@ -9,6 +9,7 @@
 
 imp std.c.math as cmath;
 imp std.result;
+imp std.error;
 
 // The sign of a value, as a type-safe alternative to the -1/0/1 returned by
 // `sign()`. Match it with `fit`:
@@ -514,7 +515,7 @@ pub fun pow_int(num base, num exp) num {
 // Returns:
 // - `Ok(base^exp)` when `exp >= 0`
 // - `Err` when `exp` is negative
-pub fun try_pow_int(num base, num exp) Result<num> {
+pub fun try_pow_int(num base, num exp) Result<num, Error> {
   if exp < 0 {
     ret err_kind(.Invalid, "pow_int: negative exponent", 1);
   }

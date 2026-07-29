@@ -1,13 +1,14 @@
-// Result<T>: the outcome of a fallible operation — `Ok(value)` or `Err(error)`.
+// Result<T, Error>: the outcome of a fallible operation — `Ok(value)` or `Err(error)`.
 // 
 // Construct it with `ok(v)` / `err(code, message, default)`, then match it with
 // `fit` (to read the value or the error) or use a combinator like `unwrap_or`.
 
 imp std.c.io;
 imp std.result;
+imp std.error;
 
 // A tiny fallible operation to produce Results.
-fun checked_double(num n) Result<num> {
+fun checked_double(num n) Result<num, Error> {
   if n < 0 {
     ret err(1, "negative input", 0);
   }
@@ -15,34 +16,34 @@ fun checked_double(num n) Result<num> {
 }
 
 fun main() num {
-  Result<num> n = checked_double(21);
+  Result<num, Error> n = checked_double(21);
   fit n {
     Result.Ok(v) -> { printf("n ok val=%lld\n", v); }
     Result.Err(e) -> { printf("n err %lld %s\n", e.code, e.message); }
   }
 
-  Result<num> n2 = checked_double(-5);
+  Result<num, Error> n2 = checked_double(-5);
   printf("n2 ok=%d def=%lld\n", n2.is_ok(), n2.unwrap_or(99));
   fit n2 {
     Result.Ok(v) -> { printf("n2 ok val=%lld\n", v); }
     Result.Err(e) -> { printf("n2 err=%lld %s\n", e.code, e.message); }
   }
 
-  Result<str> s = ok("hi");
+  Result<str, Error> s = ok("hi");
   printf("s=%s\n", s.unwrap_or("none"));
 
-  Result<str> s2 = err(2, "oops", "fallback");
+  Result<str, Error> s2 = err(2, "oops", "fallback");
   printf("s2=%s\n", s2.unwrap_or("none"));
 
-  Result<dec> d = ok(3.14);
+  Result<dec, Error> d = ok(3.14);
   printf("d=%.2f\n", d.unwrap_or(0.0));
 
-  Result<bin> b = ok(true);
+  Result<bin, Error> b = ok(true);
   printf("b=%d\n", b.unwrap_or(false));
 
   // `or` falls back to a second Result on Err.
-  Result<num> failed = checked_double(-1);
-  Result<num> recovered = failed.or(ok(0));
+  Result<num, Error> failed = checked_double(-1);
+  Result<num, Error> recovered = failed.or(ok(0));
   printf("recovered=%lld\n", recovered.unwrap_or(-1));
   ret 0;
 }

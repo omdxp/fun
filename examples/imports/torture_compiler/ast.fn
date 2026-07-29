@@ -19,10 +19,10 @@ imp std.quirks;
 pub enum Expr {
   Num(dec),
   Var(str),
-  Neg(Expr *),
-  Bin(chr, Expr *, Expr *),
-  Let(str, Expr *, Expr *),
-  Call(str, Vec<Expr *>),
+  Neg(Expr*),
+  Bin(chr, Expr*, Expr*),
+  Let(str, Expr*, Expr*),
+  Call(str, Vec<Expr*>),
 }
 
 impl Expr as Display {

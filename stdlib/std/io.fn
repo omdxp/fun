@@ -11,6 +11,7 @@ imp std.c.mem;
 imp std.string;
 imp std.vec;
 imp std.result;
+imp std.error;
 
 // Print a string to stdout (no newline).
 // 
@@ -251,7 +252,7 @@ pub fun open_read(str path) File {
 }
 
 // Open file for reading (binary) with Result.
-pub fun try_open_read(str path) Result<File> {
+pub fun try_open_read(str path) Result<File, Error> {
   let f = open_read(path);
   if f.handle == nil {
     ret err_kind(.Io, "open_read failed", f);
@@ -273,7 +274,7 @@ pub fun open_write(str path) File {
 }
 
 // Open file for writing (binary) with Result.
-pub fun try_open_write(str path) Result<File> {
+pub fun try_open_write(str path) Result<File, Error> {
   let f = open_write(path);
   if f.handle == nil {
     ret err_kind(.Io, "open_write failed", f);
@@ -295,7 +296,7 @@ pub fun open_append(str path) File {
 }
 
 // Open file for appending (binary) with Result.
-pub fun try_open_append(str path) Result<File> {
+pub fun try_open_append(str path) Result<File, Error> {
   let f = open_append(path);
   if f.handle == nil {
     ret err_kind(.Io, "open_append failed", f);
@@ -337,7 +338,7 @@ impl File {
   }
 
   // Read entire file into a new string with Result.
-  pub try_read_all() Result<str> {
+  pub try_read_all() Result<str, Error> {
     if self.handle == nil {
       ret err_kind(.Invalid, "read_all on closed file", "");
     }
@@ -363,7 +364,7 @@ impl File {
   }
 
   // Read up to max_len bytes with Result.
-  pub try_read_bytes(num max_len) Result<str> {
+  pub try_read_bytes(num max_len) Result<str, Error> {
     if self.handle == nil || max_len <= 0 {
       ret err_kind(.Invalid, "read_bytes invalid", "");
     }
@@ -392,7 +393,7 @@ impl File {
   }
 
   // Read a line up to max_len with Result.
-  pub try_read_line_max(num max_len) Result<str> {
+  pub try_read_line_max(num max_len) Result<str, Error> {
     if self.handle == nil || max_len <= 1 {
       ret err_kind(.Invalid, "read_line_max invalid", "");
     }
@@ -422,7 +423,7 @@ impl File {
   }
 
   // Read all lines (up to max_len per line) with Result.
-  pub try_read_lines(num max_len) Result<Vec<str>> {
+  pub try_read_lines(num max_len) Result<Vec<str>, Error> {
     if self.handle == nil {
       Vec<str> empty;
       empty.len = 0;
@@ -443,7 +444,7 @@ impl File {
   }
 
   // Write raw bytes to the file with Result.
-  pub try_write_bytes(raw* data, num len) Result<bin> {
+  pub try_write_bytes(raw* data, num len) Result<bin, Error> {
     if self.handle == nil || data == nil {
       ret err_kind(.Invalid, "write_bytes invalid", false);
     }
@@ -463,7 +464,7 @@ impl File {
   }
 
   // Read raw bytes into a buffer with Result.
-  pub try_read_into(raw* dst, num len) Result<num> {
+  pub try_read_into(raw* dst, num len) Result<num, Error> {
     if self.handle == nil || dst == nil {
       ret err_kind(.Invalid, "read_into invalid", 0);
     }
@@ -480,7 +481,7 @@ impl File {
   }
 
   // Seek within the file with Result.
-  pub try_seek(num offset, num whence) Result<bin> {
+  pub try_seek(num offset, num whence) Result<bin, Error> {
     if self.handle == nil {
       ret err_kind(.Invalid, "seek on closed file", false);
     }
@@ -500,7 +501,7 @@ impl File {
   }
 
   // Tell current file position with Result.
-  pub try_tell() Result<num> {
+  pub try_tell() Result<num, Error> {
     if self.handle == nil {
       ret err_kind(.Invalid, "tell on closed file", -1);
     }
@@ -528,7 +529,7 @@ impl File {
   }
 
   // Flush buffered output with Result.
-  pub try_flush() Result<bin> {
+  pub try_flush() Result<bin, Error> {
     if self.handle == nil {
       ret err_kind(.Invalid, "flush on closed file", false);
     }
@@ -567,7 +568,7 @@ impl File {
   }
 
   // Write a string to the file with Result.
-  pub try_write(str data) Result<bin> {
+  pub try_write(str data) Result<bin, Error> {
     if self.handle == nil {
       ret err_kind(.Invalid, "write on closed file", false);
     }
@@ -596,7 +597,7 @@ pub enum Sink {
   Stderr,
   Stdin,
   File(File),
-  Rotating(RotatingSink *),
+  Rotating(RotatingSink*),
 }
 
 impl Sink {
@@ -618,7 +619,7 @@ impl Sink {
     // RotatingSink.write() instead of the plain handle()+fputs path below.
     fit *self {
       .Rotating(r) -> { ret r.write(s); }
-      _ -> { }
+      _ -> {}
     }
     let h = self.handle();
     if h == nil {
@@ -629,7 +630,7 @@ impl Sink {
   }
 
   // Write a string to the sink with a Result.
-  pub try_write(str s) Result<bin> {
+  pub try_write(str s) Result<bin, Error> {
     fit *self {
       .Rotating(r) -> {
         if r.write(s) {
@@ -637,7 +638,7 @@ impl Sink {
         }
         ret err_kind(.Io, "sink write failed", false);
       }
-      _ -> { }
+      _ -> {}
     }
     let h = self.handle();
     if h == nil {
@@ -654,7 +655,7 @@ impl Sink {
   pub flush() bin {
     fit *self {
       .Rotating(r) -> { ret r.flush(); }
-      _ -> { }
+      _ -> {}
     }
     let h = self.handle();
     if h == nil {
@@ -664,7 +665,7 @@ impl Sink {
   }
 
   // Flush any buffered bytes to the underlying stream, with a Result.
-  pub try_flush() Result<bin> {
+  pub try_flush() Result<bin, Error> {
     if self.flush() {
       ret ok(true);
     }

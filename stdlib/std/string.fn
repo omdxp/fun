@@ -12,6 +12,7 @@ imp std.c.io;
 imp std.vec;
 imp std.quirks;
 imp std.result;
+imp std.error;
 
 // String builder for efficient concatenation.
 pub compound StringBuilder {
@@ -272,7 +273,7 @@ pub fun substr(str s, num start, num length) str {
 
 // Bounds-checked substring. `Ok(slice)` when `start`/`length` fall within `s`,
 // otherwise `Err` — unlike `substr`, which reads past the string on a bad range.
-pub fun try_substr(str s, num start, num length) Result<str> {
+pub fun try_substr(str s, num start, num length) Result<str, Error> {
   if start < 0 || length < 0 {
     ret err_kind(.Invalid, "substr: negative start or length", "");
   }
@@ -830,7 +831,7 @@ pub fun parse_int(str s) num {
 // Parse a signed integer, validating the WHOLE string. `Ok(n)` only when `s` is a
 // non-empty run of digits (with an optional leading `-`); otherwise `Err`. Use this
 // for untrusted input where `parse_int`'s silent 0/partial result is a footgun.
-pub fun try_parse_int(str s) Result<num> {
+pub fun try_parse_int(str s) Result<num, Error> {
   num n = _string_len(s);
   if n == 0 {
     ret err_kind(.Parse, "parse_int: empty string", 0);
@@ -999,7 +1000,7 @@ pub fun parse_dec(str s) dec {
 // Parse a decimal, validating the WHOLE string. `Ok(d)` only when `s` is a non-empty
 // number — optional leading `-`, digits, at most one `.` — otherwise `Err`. Use this
 // for untrusted input where `parse_dec`'s silent partial result is a footgun.
-pub fun try_parse_dec(str s) Result<dec> {
+pub fun try_parse_dec(str s) Result<dec, Error> {
   num n = _string_len(s);
   if n == 0 {
     ret err_kind(.Parse, "parse_dec: empty string", 0.0);

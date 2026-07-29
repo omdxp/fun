@@ -122,7 +122,7 @@ pub fun some<T>(T value) Option<T> {
 // Convert an Option to a Result: Some(v) -> Ok(v); None -> Err tagged with `kind`.
 // Provided as a free function (rather than a method) so the Result type parameter
 // resolves from the call site.
-pub fun ok_or<T>(Option<T> o, ErrorKind kind, str message) Result<T> {
+pub fun ok_or<T>(Option<T> o, ErrorKind kind, str message) Result<T, Error> {
   fit o {
     .Some(v) -> { ret ok(v); }
     .None -> {

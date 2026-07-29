@@ -1,9 +1,9 @@
-// Result<T>: the outcome of a fallible operation — `Ok(value)` or `Err(error)`.
+// Result<T, E>: the outcome of a fallible operation — `Ok(value)` or `Err(error)`.
 // 
 // Result is a data-carrying enum (a sum type), matched with `fit`:
 // 
 // ```
-// Result<str> r = read_file("config.toml");
+// Result<str, Error> r = read_file("config.toml");
 // fit r {
 //   Result.Ok(text) -> { use(text); }
 //   Result.Err(e) -> { log_error(e); }
@@ -16,19 +16,29 @@
 // str text = read_file(path).unwrap_or(""); // value, or a fallback on Err
 // ```
 // 
-// Construct with `ok(v)`, `err(code, message, default)`, or `err_error(e, default)`.
-// The error arm carries a full `Error` (kind + code + message + context).
+// `E` is the error type — most stdlib functions use the shared `Error`
+// compound (kind + code + message + context) and can be built with `ok(v)`,
+// `err(code, message, default)`, `err_kind(kind, message, default)`, or
+// `err_error(e, default)`. A caller that wants its OWN specific error type
+// (an enum of just the failure modes it actually has, e.g. `Result<Node,
+// ParseErrorKind>`) constructs it directly via the bare shorthand
+// (`ret .Err(ParseErrorKind.UnexpectedToken);`), which resolves against the
+// enclosing function's declared return type or a variable's declared type
+// like any other enum-variant shorthand — no stdlib helper needed for that
+// case, since a helper generic over an unconstrained `E` would need a
+// witness value with nothing natural to infer it from (`Err` never carries
+// a `T`-shaped value the way `Ok` does).
 
 imp std.error;
 imp std.c.string;
 
 // A fallible result: `Ok(value)` on success, `Err(error)` on failure.
-pub enum Result<T> {
+pub enum Result<T, E> {
   Ok(T),
-  Err(Error),
+  Err(E),
 }
 
-impl Result<T> {
+impl Result<T, E> {
   // Return true when the result is Ok.
   pub is_ok() bin {
     fit *self {
@@ -70,13 +80,13 @@ impl Result<T> {
     ret self.zero();
   }
 
-  // Return the Err value, or `error_none()` when the result is Ok.
-  pub unwrap_err() Error {
+  // Return the Err value, or a zero-initialized `E` when the result is Ok.
+  pub unwrap_err() E {
     fit *self {
-      .Ok(v) -> { ret error_none(); }
+      .Ok(v) -> { ret self.zero_e(); }
       .Err(e) -> { ret e; }
     }
-    ret error_none();
+    ret self.zero_e();
   }
 
   // A zero-initialized T, used as the empty fallback for `unwrap`.
@@ -86,8 +96,15 @@ impl Result<T> {
     ret out;
   }
 
+  // A zero-initialized E, used as the empty fallback for `unwrap_err`.
+  zero_e() E {
+    E out;
+    memset(&out, 0, sizeof(E));
+    ret out;
+  }
+
   // Return `other` when this result is Ok; otherwise keep this Err.
-  pub and(Result<T> other) Result<T> {
+  pub and(Result<T, E> other) Result<T, E> {
     fit *self {
       .Ok(v) -> { ret other; }
       .Err(e) -> { ret .Err(e); }
@@ -96,7 +113,7 @@ impl Result<T> {
   }
 
   // Return this result when it is Ok; otherwise return `other`.
-  pub or(Result<T> other) Result<T> {
+  pub or(Result<T, E> other) Result<T, E> {
     fit *self {
       .Ok(v) -> { ret .Ok(v); }
       .Err(e) -> { ret other; }
@@ -106,20 +123,20 @@ impl Result<T> {
 }
 
 // Construct a successful `Ok(value)`.
-pub fun ok<T>(T value) Result<T> {
+pub fun ok<T>(T value) Result<T, Error> {
   ret .Ok(value);
 }
 
 // Construct an `Err` from a code + message, tagged `ErrorKind.System`. The trailing
 // value is not stored (an Err carries only the Error); it exists purely as a
 // generic-type WITNESS so `T` is inferred from the call site — `err(1, "msg",
-// fallback)` resolves `Result<T>`. The leading underscore marks it intentionally
-// unused.
+// fallback)` resolves `Result<T, Error>`. The leading underscore marks it
+// intentionally unused.
 // 
 // Prefer `err_kind()` when the failure has an unambiguous category (`Io`, `Parse`,
 // `NotFound`, `Invalid`, `OutOfMemory`, `Unexpected`) — callers inspecting
 // `result.unwrap_err().kind` see that category instead of the generic `System`.
-pub fun err<T>(num code, str message, T _default_value) Result<T> {
+pub fun err<T>(num code, str message, T _default_value) Result<T, Error> {
   ret .Err(error_new(code, message));
 }
 
@@ -132,7 +149,7 @@ pub fun err<T>(num code, str message, T _default_value) Result<T> {
 // - kind: broad error category
 // - message: human-readable error message
 // - _default_value: generic-type witness only, not stored (see `err()`)
-pub fun err_kind<T>(ErrorKind kind, str message, T _default_value) Result<T> {
+pub fun err_kind<T>(ErrorKind kind, str message, T _default_value) Result<T, Error> {
   ret .Err(error_new_simple(kind, message));
 }
 
@@ -145,12 +162,12 @@ pub fun err_kind<T>(ErrorKind kind, str message, T _default_value) Result<T> {
 // - code: numeric error code
 // - message: human-readable error message
 // - _default_value: generic-type witness only, not stored (see `err()`)
-pub fun err_kind_code<T>(ErrorKind kind, num code, str message, T _default_value) Result<T> {
+pub fun err_kind_code<T>(ErrorKind kind, num code, str message, T _default_value) Result<T, Error> {
   ret .Err(error_new_kind(kind, code, message));
 }
 
 // Construct an `Err` from a pre-built Error. The trailing value is the same
 // generic-type witness as in `err` (the enum stores only the Error).
-pub fun err_error<T>(Error e, T _default_value) Result<T> {
+pub fun err_error<T>(Error e, T _default_value) Result<T, Error> {
   ret .Err(e);
 }

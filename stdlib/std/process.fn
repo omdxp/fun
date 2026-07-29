@@ -21,6 +21,7 @@ imp std.c.process;
 imp std.c.mem;
 imp std.string;
 imp std.result;
+imp std.error;
 imp std.channel;
 imp std.vec;
 
@@ -157,7 +158,7 @@ async fun _drain_pipe(num fd, Channel<str>* out) {
 // Returns:
 // - `Ok(ProcessResult)` once the child has exited, with its captured output
 // - `Err` if the process could not be spawned at all (e.g. not found)
-pub fun run(str[] argv) Result<ProcessResult> {
+pub fun run(str[] argv) Result<ProcessResult, Error> {
   num out_read = 0;
   num out_write = 0;
   if _open_pipe(&out_read, &out_write) != 0 {

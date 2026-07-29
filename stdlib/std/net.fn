@@ -13,6 +13,7 @@ imp std.c.net;
 imp std.channel;
 imp std.thread_runtime;
 imp std.result;
+imp std.error;
 
 // Parsed URL components.
 pub compound Url {
@@ -93,7 +94,7 @@ pub fun parse_url(str s) Url {
 // Parse a URL with validation. `Ok(url)` when a non-empty host is present,
 // otherwise `Err` — unlike `parse_url`, which returns a Url with an empty host
 // on malformed input.
-pub fun try_parse_url(str s) Result<Url> {
+pub fun try_parse_url(str s) Result<Url, Error> {
   let u = parse_url(s);
   if is_empty(u.host) {
     ret err_kind(.Parse, "parse_url: missing host", u);
@@ -196,7 +197,7 @@ pub fun tcp_listen(num port) num {
 // Returns:
 // - `Ok(fd)` on success
 // - `Err` when socket setup fails
-pub fun try_tcp_listen(num port) Result<num> {
+pub fun try_tcp_listen(num port) Result<num, Error> {
   let fd = tcp_listen(port);
   if fd < 0 {
     ret err_kind(.Io, "tcp_listen failed", -1);
@@ -220,7 +221,7 @@ pub fun tcp_accept(num server_fd) num {
 // Returns:
 // - `Ok(fd)` on success
 // - `Err` when accept fails
-pub fun try_tcp_accept(num server_fd) Result<num> {
+pub fun try_tcp_accept(num server_fd) Result<num, Error> {
   let fd = tcp_accept(server_fd);
   if fd < 0 {
     ret err_kind(.Io, "tcp_accept failed", -1);
@@ -251,7 +252,7 @@ pub fun tcp_read(num fd, str buf, num len) num {
 // Returns:
 // - `Ok(bytes_read)` on success
 // - `Err` when the read fails
-pub fun try_tcp_read(num fd, str buf, num len) Result<num> {
+pub fun try_tcp_read(num fd, str buf, num len) Result<num, Error> {
   let n = tcp_read(fd, buf, len);
   if n < 0 {
     ret err_kind(.Io, "tcp_read failed", -1);
@@ -282,7 +283,7 @@ pub fun tcp_write(num fd, str buf, num len) num {
 // Returns:
 // - `Ok(bytes_written)` on success
 // - `Err` when the write fails
-pub fun try_tcp_write(num fd, str buf, num len) Result<num> {
+pub fun try_tcp_write(num fd, str buf, num len) Result<num, Error> {
   let n = tcp_write(fd, buf, len);
   if n < 0 {
     ret err_kind(.Io, "tcp_write failed", -1);
@@ -525,7 +526,7 @@ pub fun http_serve_once(num port, str body) num {
 // Returns:
 // - `Ok(0)` on success
 // - `Err` when serving fails
-pub fun try_http_serve_once(num port, str body) Result<num> {
+pub fun try_http_serve_once(num port, str body) Result<num, Error> {
   let rc = http_serve_once(port, body);
   if rc != 0 {
     ret err_kind(.Io, "http_serve_once failed", rc);
@@ -578,7 +579,7 @@ pub fun http_serve_forever(num port, str body) num {
 // Returns:
 // - `Ok(0)` if the loop exits normally
 // - `Err` when serving fails
-pub fun try_http_serve_forever(num port, str body) Result<num> {
+pub fun try_http_serve_forever(num port, str body) Result<num, Error> {
   let rc = http_serve_forever(port, body);
   if rc != 0 {
     ret err_kind(.Io, "http_serve_forever failed", rc);

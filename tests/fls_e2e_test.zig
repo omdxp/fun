@@ -1883,10 +1883,11 @@ test "fls e2e: cross-file generic fit-binding hover resolves the imported enum's
     // payload `e` as `Error` — resolved cross-file from the imported enum definition.
     const doc_text =
         "imp std.c.io;\n" ++
+        "imp std.error;\n" ++
         "imp std.json;\n" ++
         "imp std.result;\n\n" ++
         "fun main() num {\n" ++
-        "  Result<JsonValue> r = parse(\"{}\");\n" ++
+        "  Result<JsonValue, Error> r = parse(\"{}\");\n" ++
         "  fit r {\n" ++
         "    Result.Ok(doc) -> { printf(\"ok\\n\"); }\n" ++
         "    Result.Err(e) -> { printf(\"err\\n\"); }\n" ++

@@ -10,7 +10,7 @@ fun main() num {
   Error e = error_new_kind(.Invalid, 7, "bad input");
   e.with_context("field: age");
 
-  Result<num> r = err_error(e, 0);
+  Result<num, Error> r = err_error(e, 0);
   fit r {
     Result.Ok(v) -> { printf("ok val=%lld\n", v); }
     Result.Err(err) -> {

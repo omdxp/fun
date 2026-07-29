@@ -1,10 +1,11 @@
 imp std.log as l;
 imp std.result;
+imp std.error;
 imp std.sys as sys;
 
 fun main() {
   let env = sys.try_env("PATH");
-  Result<str> path_res = env;
+  Result<str, Error> path_res = env;
 
   l.Logger logger = l.logger_init(l.LogLevel.Debug);
   if path_res.is_ok() {

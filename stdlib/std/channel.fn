@@ -2111,10 +2111,10 @@ impl Channel<T> {
   // Grow the buffer to at least `new_cap`, preserving any already-queued
   // values in order. No-op if `new_cap` is not larger than the current
   // capacity.
-  //
+  // 
   // Params:
   // - new_cap: minimum capacity the buffer should have afterward
-  //
+  // 
   // Returns:
   // - 0 on success (including the no-op case)
   // - nonzero backend sync/init code on failure

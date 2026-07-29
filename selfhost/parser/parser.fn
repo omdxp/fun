@@ -594,7 +594,7 @@ impl ParseState {
   // pairings. Used elsewhere to type-check that a generic call's inferred
   // type arguments satisfy the constraints; parsing doesn't interpret the
   // constraint names itself; they're just captured as strings.
-  pub parse_type_params_with_constraints(Vec<str>* out_params, Vec<Vec<str>> *out_forced_insts) Option<ParseErrorKind> {
+  pub parse_type_params_with_constraints(Vec<str>* out_params, Vec<Vec<str>>* out_forced_insts) Option<ParseErrorKind> {
     self.split_angle_opener_token_if_needed();
     if !self.next_token_is_angle_open() {
       ret .None;

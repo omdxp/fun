@@ -55,17 +55,17 @@ pub compound WaitGroup {
 }
 
 // Create a WaitGroup expecting `n` tasks to complete.
-//
+// 
 // The signalling channel is buffered to `n` so `done()` never blocks before
 // `wait()` starts draining. Passing the full count up front avoids the buffer
 // growth `add()` would otherwise need to do later, but growing via
 // `wait_group_new(0)` + `add()` in a loop is also safe: `add()` grows the
 // signalling buffer to match, so `done()` still never blocks before `wait()`
 // drains it.
-//
+// 
 // Params:
 // - n: number of virtual tasks that will each call `done()` once
-//
+// 
 // Returns:
 // - a WaitGroup whose `wait()` blocks until `n` completions arrive
 pub fun wait_group_new(num n) WaitGroup {

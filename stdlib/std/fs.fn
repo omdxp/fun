@@ -13,6 +13,7 @@ imp std.c.mem;
 imp std.c.dirent;
 imp std.vec;
 imp std.result;
+imp std.error;
 imp std.string;
 
 // File system helper container.
@@ -110,8 +111,8 @@ impl Fs {
   // - path: file path
   // 
   // Returns:
-  // - Result<str> with contents or error
-  pub try_read_to_string(str path) Result<str> {
+  // - Result<str, Error> with contents or error
+  pub try_read_to_string(str path) Result<str, Error> {
     let out = read_all(path);
     if out == nil {
       ret err_kind(.Io, "read_to_string failed", "");
@@ -152,8 +153,8 @@ impl Fs {
   // - max_len: maximum bytes to read
   // 
   // Returns:
-  // - Result<str> with bytes or error
-  pub try_read_bytes(str path, num max_len) Result<str> {
+  // - Result<str, Error> with bytes or error
+  pub try_read_bytes(str path, num max_len) Result<str, Error> {
     let out = self.read_bytes(path, max_len);
     if out == nil {
       ret err_kind(.Io, "read_bytes failed", "");
@@ -180,8 +181,8 @@ impl Fs {
   // - data: contents
   // 
   // Returns:
-  // - Result<bin> with success flag or error
-  pub try_write_string(str path, str data) Result<bin> {
+  // - Result<bin, Error> with success flag or error
+  pub try_write_string(str path, str data) Result<bin, Error> {
     let ok_write = write_all(path, data);
     if ok_write == false {
       ret err_kind(.Io, "write_string failed", false);
@@ -215,8 +216,8 @@ impl Fs {
   // - data: contents
   // 
   // Returns:
-  // - Result<bin> with success flag or error
-  pub try_append_string(str path, str data) Result<bin> {
+  // - Result<bin, Error> with success flag or error
+  pub try_append_string(str path, str data) Result<bin, Error> {
     let ok_append = self.append_string(path, data);
     if ok_append == false {
       ret err_kind(.Io, "append_string failed", false);
@@ -247,8 +248,8 @@ impl Fs {
   // - dst: destination path
   // 
   // Returns:
-  // - Result<bin> with success flag or error
-  pub try_copy_file(str src, str dst) Result<bin> {
+  // - Result<bin, Error> with success flag or error
+  pub try_copy_file(str src, str dst) Result<bin, Error> {
     let data = read_all(src);
     if data == nil {
       ret err_kind(.Io, "copy_file read failed", false);
@@ -288,8 +289,8 @@ impl Fs {
   // - path: file path
   // 
   // Returns:
-  // - Result<num> with size or error
-  pub try_size(str path) Result<num> {
+  // - Result<num, Error> with size or error
+  pub try_size(str path) Result<num, Error> {
     let out = self.size(path);
     if out < 0 {
       ret err_kind(.Io, "size failed", -1);
@@ -338,8 +339,8 @@ impl Fs {
   // - max_len: maximum line length
   // 
   // Returns:
-  // - Result<Vec<str>> with lines or error
-  pub try_read_lines(str path, num max_len) Result<Vec<str>> {
+  // - Result<Vec<str>, Error> with lines or error
+  pub try_read_lines(str path, num max_len) Result<Vec<str>, Error> {
     let out = self.read_lines(path, max_len);
     if out.len == 0 {
       // Best-effort: treat empty as ok unless file can't be opened.
@@ -369,9 +370,9 @@ impl Fs {
   // - path: directory path to create
   // 
   // Returns:
-  // - Result<bin> Ok(true) on success, Err on failure (including if the
+  // - Result<bin, Error> Ok(true) on success, Err on failure (including if the
   // directory already exists)
-  pub make_dir(str path) Result<bin> {
+  pub make_dir(str path) Result<bin, Error> {
     if __fun_make_dir(path) != 0 {
       ret err_kind(.Io, "make_dir failed", false);
     }
@@ -385,8 +386,8 @@ impl Fs {
   // - path: directory path
   // 
   // Returns:
-  // - Result<Vec<str>> Ok(names) on success, Err if the directory can't be opened
-  pub list_dir(str path) Result<Vec<str>> {
+  // - Result<Vec<str>, Error> Ok(names) on success, Err if the directory can't be opened
+  pub list_dir(str path) Result<Vec<str>, Error> {
     raw* d = __fun_dir_open(path);
     if d == nil {
       Vec<str> empty;
@@ -516,7 +517,7 @@ pub fun size(str path) num {
 
 // File size with Result. `Ok(bytes)` on success, `Err` when the file can't be
 // sized — clearer than checking `size(path) < 0` for the -1 sentinel.
-pub fun try_size(str path) Result<num> {
+pub fun try_size(str path) Result<num, Error> {
   let n = size(path);
   if n < 0 {
     ret err_kind(.Io, "size failed", -1);
@@ -555,8 +556,8 @@ pub fun is_dir(str path) bin {
 // - path: directory path to create
 // 
 // Returns:
-// - Result<bin> Ok(true) on success, Err on failure
-pub fun make_dir(str path) Result<bin> {
+// - Result<bin, Error> Ok(true) on success, Err on failure
+pub fun make_dir(str path) Result<bin, Error> {
   let f = fs();
   ret f.make_dir(path);
 }
@@ -567,8 +568,8 @@ pub fun make_dir(str path) Result<bin> {
 // - path: directory path
 // 
 // Returns:
-// - Result<Vec<str>> Ok(names) on success, Err if the directory can't be opened
-pub fun list_dir(str path) Result<Vec<str>> {
+// - Result<Vec<str>, Error> Ok(names) on success, Err if the directory can't be opened
+pub fun list_dir(str path) Result<Vec<str>, Error> {
   let f = fs();
   ret f.list_dir(path);
 }
@@ -662,7 +663,7 @@ pub async fun copy_file_progress_async(
         .Cancelled -> { ret -3; }
         .Closed -> { ret -1; }
         .Error(e) -> { ret -1; }
-        _ -> { }
+        _ -> {}
       }
     }
   }
@@ -714,7 +715,7 @@ pub async fun read_lines_into_channel_async(
     }
 
     fit await out_lines.send_result_with_token_async(line, cancel_token) {
-      .Ok -> { }
+      .Ok -> {}
       .Cancelled -> {
         free(line);
         ret -3;

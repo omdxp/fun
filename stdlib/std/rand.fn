@@ -8,6 +8,7 @@
 
 imp std.vec;
 imp std.result;
+imp std.error;
 
 // Pseudo-random number generator.
 pub compound Rand {
@@ -69,7 +70,7 @@ impl Rand {
   // Returns:
   // - `Ok(value)` when `min <= max`
   // - `Err` when the bounds are invalid
-  pub try_range(num min, num max) Result<num> {
+  pub try_range(num min, num max) Result<num, Error> {
     if min > max {
       ret err_kind(.Invalid, "range: min > max", min);
     }
@@ -107,7 +108,7 @@ impl Rand {
   // Returns:
   // - `Ok(value)` when `min <= max`
   // - `Err` when the bounds are invalid
-  pub try_range_dec(dec min, dec max) Result<dec> {
+  pub try_range_dec(dec min, dec max) Result<dec, Error> {
     if min > max {
       ret err_kind(.Invalid, "range_dec: min > max", min);
     }

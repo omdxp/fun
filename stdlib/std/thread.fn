@@ -10,6 +10,7 @@
 
 imp std.c.thread;
 imp std.result;
+imp std.error;
 
 // Managed thread handle.
 pub compound Thread {
@@ -114,7 +115,7 @@ pub fun thread_start(Thread* thread, raw* entry, raw* arg) num {
 
 // Start a thread with Result. `Ok(true)` on success, `Err` with the backend code
 // otherwise (where `thread_start` returns a raw nonzero/-1 code that's easy to ignore).
-pub fun try_thread_start(Thread* thread, raw* entry, raw* arg) Result<bin> {
+pub fun try_thread_start(Thread* thread, raw* entry, raw* arg) Result<bin, Error> {
   let rc = thread_start(thread, entry, arg);
   if rc != 0 {
     ret err_kind_code(.System, rc, "thread_start failed", false);
@@ -145,7 +146,7 @@ pub fun thread_join(Thread* thread, raw* out_ret) num {
 }
 
 // Join a thread with Result. `Ok(true)` on success, `Err` with the backend code otherwise.
-pub fun try_thread_join(Thread* thread, raw* out_ret) Result<bin> {
+pub fun try_thread_join(Thread* thread, raw* out_ret) Result<bin, Error> {
   let rc = thread_join(thread, out_ret);
   if rc != 0 {
     ret err_kind_code(.System, rc, "thread_join failed", false);
@@ -175,7 +176,7 @@ pub fun thread_detach(Thread* thread) num {
 }
 
 // Detach a thread with Result. `Ok(true)` on success, `Err` with the backend code otherwise.
-pub fun try_thread_detach(Thread* thread) Result<bin> {
+pub fun try_thread_detach(Thread* thread) Result<bin, Error> {
   let rc = thread_detach(thread);
   if rc != 0 {
     ret err_kind_code(.System, rc, "thread_detach failed", false);

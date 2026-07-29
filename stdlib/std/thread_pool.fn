@@ -8,6 +8,7 @@ imp std.thread;
 imp std.thread_runtime;
 imp std.c.mem;
 imp std.result;
+imp std.error;
 imp std.quirks;
 
 // Managed pool of worker threads.
@@ -119,7 +120,7 @@ impl ThreadPool {
   // Start all workers with Result. `Ok(count)` (workers started) on success, `Err`
   // when storage failed or a worker couldn't start — clearer than the -2/raw-code
   // sentinels of `start_all`.
-  pub try_start_all(raw* entry, raw** args) Result<num> {
+  pub try_start_all(raw* entry, raw** args) Result<num, Error> {
     let rc = self.start_all(entry, args);
     if rc != 0 {
       ret err_kind_code(.System, rc, "thread pool start_all failed", rc);
@@ -162,7 +163,7 @@ impl ThreadPool {
   }
 
   // Join all started workers with Result. `Ok(count)` on success, `Err` otherwise.
-  pub try_join_all(raw** out_rets) Result<num> {
+  pub try_join_all(raw** out_rets) Result<num, Error> {
     let rc = self.join_all(out_rets);
     if rc != 0 {
       ret err_kind_code(.System, rc, "thread pool join_all failed", rc);
@@ -197,7 +198,7 @@ impl ThreadPool {
   }
 
   // Detach all started workers with Result. `Ok(count)` on success, `Err` otherwise.
-  pub try_detach_all() Result<num> {
+  pub try_detach_all() Result<num, Error> {
     let rc = self.detach_all();
     if rc != 0 {
       ret err_kind_code(.System, rc, "thread pool detach_all failed", rc);

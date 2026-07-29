@@ -11,6 +11,7 @@ imp std.c.io;
 imp std.c.mem;
 imp std.c.string;
 imp std.result;
+imp std.error;
 
 // Timestamp wrapper (epoch seconds).
 pub compound Timestamp {
@@ -166,7 +167,7 @@ pub fun format_local(num epoch, str buf, num buf_len, str format) num {
 }
 
 // Format an epoch value with a custom format (Result).
-pub fun try_format_local(num epoch, str buf, num buf_len, str format) Result<num> {
+pub fun try_format_local(num epoch, str buf, num buf_len, str format) Result<num, Error> {
   let n = format_local(epoch, buf, buf_len, format);
   if n <= 0 {
     ret err_kind(.Unexpected, "format_local failed", 0);
@@ -191,7 +192,7 @@ pub fun format_utc(num epoch, str buf, num buf_len, str format) num {
 }
 
 // Format an epoch value with a custom format (UTC) with Result.
-pub fun try_format_utc(num epoch, str buf, num buf_len, str format) Result<num> {
+pub fun try_format_utc(num epoch, str buf, num buf_len, str format) Result<num, Error> {
   let n = format_utc(epoch, buf, buf_len, format);
   if n <= 0 {
     ret err_kind(.Unexpected, "format_utc failed", 0);
@@ -260,7 +261,7 @@ pub fun now_string(str buf, num buf_len) num {
 }
 
 // Format current time with default format (Result).
-pub fun try_now_string(str buf, num buf_len) Result<num> {
+pub fun try_now_string(str buf, num buf_len) Result<num, Error> {
   let n = now_string(buf, buf_len);
   if n <= 0 {
     ret err_kind(.Unexpected, "now_string failed", 0);
@@ -286,7 +287,7 @@ pub fun now_string_utc(str buf, num buf_len) num {
 }
 
 // Format current time with default format (UTC) with Result.
-pub fun try_now_string_utc(str buf, num buf_len) Result<num> {
+pub fun try_now_string_utc(str buf, num buf_len) Result<num, Error> {
   let n = now_string_utc(buf, buf_len);
   if n <= 0 {
     ret err_kind(.Unexpected, "now_string_utc failed", 0);

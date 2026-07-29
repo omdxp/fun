@@ -19,6 +19,7 @@ imp std.map;
 imp std.vec;
 imp std.option;
 imp std.result;
+imp std.error;
 imp std.string;
 imp std.math;
 imp std.quirks;
@@ -366,7 +367,7 @@ impl JsonParser {
   }
 
   // Parse a JSON string literal (assumes the opening quote is current).
-  parse_string() Result<str> {
+  parse_string() Result<str, Error> {
     if self.peek() != '"' {
       ret err_kind(.Parse, "expected '\"'", "");
     }
@@ -429,7 +430,7 @@ impl JsonParser {
     ret true;
   }
 
-  parse_value() Result<JsonValue> {
+  parse_value() Result<JsonValue, Error> {
     self.skip_ws();
     let c = self.peek();
 
@@ -464,7 +465,7 @@ impl JsonParser {
     ret err_kind(.Parse, "unexpected character in JSON", JsonValue.Null);
   }
 
-  parse_array() Result<JsonValue> {
+  parse_array() Result<JsonValue, Error> {
     self.pos = self.pos + 1;
     Vec<JsonValue> items;
     items.init(8);
@@ -496,7 +497,7 @@ impl JsonParser {
     ret ok(JsonValue.Array(items));
   }
 
-  parse_object() Result<JsonValue> {
+  parse_object() Result<JsonValue, Error> {
     self.pos = self.pos + 1;
     Map<str, JsonValue> entries;
     entries.init(8);
@@ -545,7 +546,7 @@ impl JsonParser {
 }
 
 // Parse JSON text into a typed `JsonValue`. Returns `Err` on malformed input.
-pub fun parse(str src) Result<JsonValue> {
+pub fun parse(str src) Result<JsonValue, Error> {
   let p = JsonParser{src = src, pos = 0};
   ret p.parse_value();
 }

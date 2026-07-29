@@ -8,6 +8,7 @@
 
 imp std.c.mem;
 imp std.result;
+imp std.error;
 
 // Read an environment variable.
 // 
@@ -21,7 +22,7 @@ pub fun env(str name) str {
 }
 
 // Read an environment variable with Result.
-pub fun try_env(str name) Result<str> {
+pub fun try_env(str name) Result<str, Error> {
   let out = env(name);
   if out == nil {
     ret err_kind(.NotFound, "env missing", "");

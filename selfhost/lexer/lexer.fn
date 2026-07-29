@@ -27,6 +27,7 @@ imp std.string;
 imp std.vec;
 imp std.ctype;
 imp std.result;
+imp std.error;
 imp token;
 imp lexdefs;
 
@@ -97,7 +98,7 @@ fun _parse_radix(str digits, num base) num {
 }
 
 // A zero-valued Token, used as the (unused) error-path payload for
-// `Result<Token>` -- callers check `is_err()` before ever reading it.
+// `Result<Token, Error>` -- callers check `is_err()` before ever reading it.
 fun token_zero() Token {
   Token t;
   t.type = .NewLine;
@@ -143,7 +144,7 @@ impl Lexer {
   }
 
   // Peek the current/next character without advancing. Returns NUL at EOF
-  // (an internal sentinel; Option<Token>/Result<Token> is used at the
+  // (an internal sentinel; Option<Token>/Result<Token, Error> is used at the
   // PUBLIC token-stream boundary instead of threading EOF through every
   // single-character read).
   _peek() chr {
@@ -218,7 +219,7 @@ impl Lexer {
 
   // Reads a `/* ... */` block comment, from just after the opening `/*` to
   // (not including) the closing `*/`. Errors if EOF is reached first.
-  _read_comment_block() Result<Token> {
+  _read_comment_block() Result<Token, Error> {
     let start = self._start_pos();
     let b = string_builder_init(16);
     for {
@@ -341,7 +342,7 @@ impl Lexer {
   // non-binary) number literal into a Number token, routing to a decimal or
   // integer parse depending on whether a `.`/exponent is present, and
   // consuming an optional `L`/`f` suffix (accepted but not tracked).
-  _finish_number_from_string(str number_str) Result<Token> {
+  _finish_number_from_string(str number_str) Result<Token, Error> {
     let has_dot = contains(number_str, ".");
     let has_exp = contains(number_str, "e") || contains(number_str, "E");
     Token t;
@@ -387,7 +388,7 @@ impl Lexer {
   // a decimal with an optional fractional part and/or exponent. Called only
   // when the current/next character has already been confirmed to start a
   // number (a digit, or `.` immediately followed by a digit).
-  _read_number() Result<Token> {
+  _read_number() Result<Token, Error> {
     let start = self._start_pos();
     let b = string_builder_init(16);
     b.append(self._read_digits());
@@ -461,7 +462,7 @@ impl Lexer {
   // A single escape character (the byte AFTER the backslash) to its decoded
   // value, or an error for an unrecognized escape. Matches the escape
   // sequences the original implementation's `get_escape_char` supports.
-  _decode_escape_char(chr c) Result<chr> {
+  _decode_escape_char(chr c) Result<chr, Error> {
     fit c {
       'n' -> { ret ok('\n'); }
       't' -> { ret ok('\t'); }
@@ -479,7 +480,7 @@ impl Lexer {
   // emits the text straight into a C string literal, which interprets `\n`
   // /`\t`/etc. itself. This also means an escaped quote `\"` does not
   // prematurely end the Fun string literal.
-  _read_string() Result<Token> {
+  _read_string() Result<Token, Error> {
     let start = self._start_pos();
     self._advance(); // opening '"'
     let b = string_builder_init(16);
@@ -514,7 +515,7 @@ impl Lexer {
   // Reads a `'c'` character literal. Unlike string escapes, these ARE
   // decoded to their actual byte value here (the token carries a real
   // `chr`, not source text for a C compiler to reinterpret).
-  _read_character() Result<Token> {
+  _read_character() Result<Token, Error> {
     let start = self._start_pos();
     self._advance(); // opening '\''
     if self.pos >= self.len {
@@ -569,7 +570,7 @@ impl Lexer {
   // characters) then backing off to the longest prefix that's actually a
   // valid operator -- e.g. `a >=-1` must lex as `>=` then `-1`, not
   // over-consume into an invalid `>=-`.
-  _read_operator() Result<Token> {
+  _read_operator() Result<Token, Error> {
     let start = self._start_pos();
     let b = string_builder_init(4);
     let op0 = self._advance();
@@ -665,7 +666,7 @@ impl Lexer {
 
   // Reads the next token, or `None` at end of input, and records it onto
   // `self.tokens` (see the field doc comment for why).
-  next() Result<Option<Token>> {
+  next() Result<Option<Token>, Error> {
     let r = self._next_inner();
     if r.is_err() {
       ret r;
@@ -682,7 +683,7 @@ impl Lexer {
   // character and routes to the matching reader. Split out from `next()`
   // so the whitespace-skip branch can recurse without double-recording the
   // eventual token onto `self.tokens`.
-  _next_inner() Result<Option<Token>> {
+  _next_inner() Result<Option<Token>, Error> {
     if self.pos >= self.len {
       ret ok(.None);
     }
@@ -799,7 +800,7 @@ impl Lexer {
 
 // Tokenizes `src` (a whole file's contents) into a flat Vec<Token>. Mirrors
 // `LexProcess.lex()`.
-pub fun tokenize(str src, str filename) Result<Vec<Token>> {
+pub fun tokenize(str src, str filename) Result<Vec<Token>, Error> {
   Lexer lex = lexer_new(src, filename);
 
   for {

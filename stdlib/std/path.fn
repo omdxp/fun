@@ -10,6 +10,7 @@ imp std.c.mem;
 imp std.string;
 imp std.vec;
 imp std.result;
+imp std.error;
 
 // Path wrapper.
 pub compound Path {
@@ -144,7 +145,7 @@ pub fun path_join(str a, str b) str {
 // Returns:
 // - `Ok(joined_path)` on success
 // - `Err` when allocation fails
-pub fun try_path_join(str a, str b) Result<str> {
+pub fun try_path_join(str a, str b) Result<str, Error> {
   let out = path_join(a, b);
   if out == nil {
     ret err_kind(.Invalid, "path_join failed", "");
@@ -185,7 +186,7 @@ pub fun path_join_many(Vec<str>* parts) str {
 // Returns:
 // - `Ok(joined_path)` on success
 // - `Err` when allocation fails
-pub fun try_path_join_many(Vec<str>* parts) Result<str> {
+pub fun try_path_join_many(Vec<str>* parts) Result<str, Error> {
   let out = path_join_many(parts);
   if out == nil {
     ret err_kind(.Invalid, "path_join_many failed", "");
@@ -369,7 +370,7 @@ pub fun change_ext(str path, str new_ext) str {
 // Returns:
 // - `Ok(path_with_new_extension)` on success
 // - `Err` when allocation fails
-pub fun try_change_ext(str path, str new_ext) Result<str> {
+pub fun try_change_ext(str path, str new_ext) Result<str, Error> {
   let out = change_ext(path, new_ext);
   if out == nil {
     ret err_kind(.Invalid, "change_ext failed", "");
