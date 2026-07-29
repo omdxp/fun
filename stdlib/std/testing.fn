@@ -1,0 +1,84 @@
+// Concurrent test runner: discovers and runs `test "name" { ... }` blocks
+// found in a compiled program, dispatching each one onto its own virtual
+// task (`fork`) and collecting results over a channel.
+// 
+// In test-compile mode (`fun test file.fn`), the compiler auto-imports this
+// module and calls `run_discovered_tests` itself, passing three
+// compiler-generated bridge functions: a test count, an index-to-name
+// lookup, and a run-at-index function whose failures are recovered (via a
+// per-thread jump back to the runner) rather than aborting the whole
+// process. Ordinary Fun source never calls this directly.
+
+imp std.channel;
+imp std.io;
+
+// One test's outcome, sent back over a channel by its own forked task.
+compound TestOutcome {
+  num index;
+  bin passed;
+}
+
+fun default_outcome() TestOutcome {
+  TestOutcome o;
+  o.index = 0;
+  o.passed = false;
+  ret o;
+}
+
+// Runs test `i` and reports its outcome over `out`. A forked virtual task's
+// body, one per discovered test -- see `run_discovered_tests`.
+async fun run_one(num i, fun(num) bin run_at, Channel<TestOutcome>* out) {
+  TestOutcome o;
+  o.index = i;
+  o.passed = run_at(i);
+  out <- o;
+}
+
+// Runs every discovered test CONCURRENTLY, printing a `PASS`/`FAIL` line per
+// test (in COMPLETION order, not declaration order -- tests run in
+// parallel) and a final summary line. Returns 0 when every test passed, 1
+// otherwise, matching the exit-code convention every other Fun program
+// uses.
+// 
+// Params:
+// - count: number of tests discovered (from the compiler's own bridge
+// function)
+// - name_of: maps a test's index to its declared name
+// - run_at: runs test `i`; returns true on pass, false on a failed
+// assertion recovered without aborting the process
+pub fun run_discovered_tests(num count, fun(num) str name_of, fun(num) bin run_at) num {
+  if count == 0 {
+    println("no tests found");
+    ret 0;
+  }
+
+  Channel<TestOutcome> outcomes = channel_new_cap(default_outcome(), count);
+
+  num i = 0;
+  for i < count {
+    fork run_one(i, run_at, &outcomes);
+    i = i + 1;
+  }
+
+  num passed = 0;
+  num received = 0;
+  for received < count {
+    TestOutcome o = <- outcomes;
+    str name = name_of(o.index);
+    if o.passed {
+      println(format("test: {str} ... PASS", name));
+      passed = passed + 1;
+    } else {
+      println(format("test: {str} ... FAIL", name));
+    }
+    received = received + 1;
+  }
+
+  let _rc = outcomes.destroy();
+
+  println(format("{num}/{num} tests passed", passed, count));
+  if passed == count {
+    ret 0;
+  }
+  ret 1;
+}

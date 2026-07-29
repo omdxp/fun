@@ -17873,6 +17873,24 @@ pub const TranspileProcess = struct {
             try self.process_import(self.nodes.items()[i]);
         }
 
+        // Test-compile mode (`fun test file.fn`) implicitly needs the
+        // concurrent test-runner module -- its `run_discovered_tests` is
+        // called directly by `emit_test_mode_functions_and_runner` later,
+        // so it must go through the SAME early import/typecheck/generic-
+        // instantiation pipeline every other import does (rather than being
+        // synthesized only at emission time, which would skip typechecking
+        // it entirely). `!self.is_importing` keeps this to the root module
+        // only -- test_mode is copied onto every child process too (see
+        // `child_flags.test_mode` above), so without this guard every
+        // ordinary import would ALSO try to pull this in.
+        if (self.flags.test_mode and !self.is_importing) {
+            const synthetic_testing_import = ast.Node{
+                .type = .Import,
+                .node_variant = .{ .import = .{ .path = "std.testing" } },
+            };
+            try self.process_import(synthetic_testing_import);
+        }
+
         // Allow running entrypoint scripts that reference workspace-defined types
         // without explicitly importing their defining modules.
         // This is intentionally conservative: only auto-imports when a single
@@ -18008,16 +18026,28 @@ pub const TranspileProcess = struct {
     }
 
     /// Emits each `test "name" { ... }` block (from this module and any
-    /// imported/child modules) as its own C function, plus a generated
-    /// `main` that calls each in sequence and reports PASS/a summary.
+    /// imported/child modules) as its own C function, plus two small
+    /// bridge functions (`__fun_test_name`/`__fun_run_test`) that the
+    /// concurrent runner (`std.testing`'s `run_discovered_tests`, force-
+    /// imported for every test-mode compile -- see `transpile`) calls
+    /// back into by index. `main` itself only resolves `argv[1]` (an
+    /// optional per-test name filter, see below) into the matching
+    /// subset, then hands off to the runner, which dispatches each
+    /// matched test onto its own virtual task (`fork`) and reports
+    /// results as they complete -- see std/testing.fn.
     ///
-    /// `assert`/`panic` failures `abort()` the whole process (their existing,
-    /// unchanged semantics) -- there is no per-test recovery in this first
-    /// version, so a failing test's message/abort is the last thing printed
-    /// and no later tests run in that case. Simple and honest about the
-    /// current assert/panic contract; revisit with per-test process
-    /// isolation if Phase 1 (the self-hosted compiler's own test suite)
-    /// shows a real need to see every failure in one run.
+    /// A failing `assert` is recovered (not aborted) via a per-thread
+    /// jump back into `__fun_run_test` instead (see
+    /// `transpile_prelude`'s `__fun_test_jmp` doc comment and the
+    /// `.assert_stmt` transpile case), so one failing test no longer
+    /// prevents the rest of the suite from running.
+    ///
+    /// `argv[1]`, when present, filters to just the test(s) whose name
+    /// matches EXACTLY -- lets an editor's per-test "Run"/"Debug" CodeLens
+    /// (see editors/vscode/src/extension.ts's FunCodeLensProvider) execute
+    /// one test instead of the whole file's suite, via the ordinary
+    /// `fun test file.fn -- "name"` program-argument passthrough -- no
+    /// separate CLI flag needed.
     fn emit_test_mode_functions_and_runner(self: *Self) TranspileError!void {
         const TestRef = struct { name: []const u8, body: *ast.Node };
         var tests = ArrayList(TestRef).init(self.allocator);
@@ -18064,34 +18094,47 @@ pub const TranspileProcess = struct {
             try self.write("\n}\n\n");
         }
 
-        // `argv[1]`, when present, filters to just the test(s) whose name
-        // matches EXACTLY -- lets an editor's per-test "Run"/"Debug" CodeLens
-        // (see editors/vscode/src/extension.ts's FunCodeLensProvider) execute
-        // one test instead of the whole file's suite, the same way `go test
-        // -run '^Name$'` does, via the ordinary `fun test file.fn -- "name"`
-        // program-argument passthrough -- no separate CLI flag needed.
+        // Maps a MATCHED index (0..__fun_test_map_count, what the runner
+        // sees) back to the REAL test index (what the switch statements
+        // below dispatch on) -- built once in main() from the optional
+        // name filter, then read (never written) concurrently by every
+        // forked test task, so no synchronization is needed here.
+        try self.print("static int __fun_test_map[{d}];\n", .{tests.items.len});
+        try self.write("static int __fun_test_map_count = 0;\n\n");
+
+        try self.write("static bool __fun_run_test(int64_t __i) {\n");
+        try self.write("  if (setjmp(__fun_test_jmp)) { return false; }\n");
+        try self.write("  switch (__fun_test_map[__i]) {\n");
+        for (tests.items, 0..) |_, i| {
+            try self.print("    case {d}: __fun_test_{d}(); break;\n", .{ i, i });
+        }
+        try self.write("  }\n");
+        try self.write("  return true;\n");
+        try self.write("}\n\n");
+
+        try self.write("static char* __fun_test_name(int64_t __i) {\n");
+        try self.write("  switch (__fun_test_map[__i]) {\n");
+        for (tests.items, 0..) |t, i| {
+            try self.print("    case {d}: return \"", .{i});
+            try self.write_c_string_literal_body(t.name);
+            try self.write("\";\n");
+        }
+        try self.write("  }\n");
+        try self.write("  return \"\";\n");
+        try self.write("}\n\n");
+
         try self.write("int main(int argc, char** argv) {\n");
         try self.write("  const char* filter = argc > 1 ? argv[1] : (const char*)0;\n");
-        try self.write("  int total = 0;\n");
-        try self.write("  int passed = 0;\n");
         for (tests.items, 0..) |t, i| {
             try self.write("  if (!filter || strcmp(filter, \"");
             try self.write_c_string_literal_body(t.name);
-            try self.write("\") == 0) {\n");
-            try self.write("    total++;\n");
-            try self.write("    printf(\"test: %s ... \", \"");
-            try self.write_c_string_literal_body(t.name);
-            try self.write("\");\n");
-            try self.print("    __fun_test_{d}();\n", .{i});
-            try self.write("    printf(\"PASS\\n\"); passed++;\n");
-            try self.write("  }\n");
+            try self.print("\") == 0) {{ __fun_test_map[__fun_test_map_count] = {d}; __fun_test_map_count++; }}\n", .{i});
         }
-        try self.write("  if (filter && total == 0) {\n");
+        try self.write("  if (filter && __fun_test_map_count == 0) {\n");
         try self.write("    printf(\"no test named \\\"%s\\\" found\\n\", filter);\n");
         try self.write("    return 1;\n");
         try self.write("  }\n");
-        try self.write("  printf(\"%d/%d tests passed\\n\", passed, total);\n");
-        try self.write("  return 0;\n");
+        try self.write("  return (int)run_discovered_tests((int64_t)__fun_test_map_count, __fun_test_name, __fun_run_test);\n");
         try self.write("}\n");
     }
 
@@ -18997,6 +19040,19 @@ pub const TranspileProcess = struct {
             // write_std_imports's "core headers" above -- don't re-include
             // them here (this used to emit a literal duplicate
             // `#include <stdlib.h>#include <stdio.h>` pair every time).
+            if (self.flags.test_mode) {
+                // Recoverable assertion failure: a failing `assert` inside a
+                // test-mode compile jumps back to whichever test dispatched
+                // it (via the runner's own setjmp, see
+                // emit_test_mode_functions_and_runner) instead of aborting
+                // the whole process -- see the `.assert_stmt` transpile
+                // case. `_Thread_local` because tests run concurrently, one
+                // per virtual task, potentially on different worker
+                // threads; a single shared jmp_buf would be a data race if
+                // two tests failed at once.
+                try self.write("#include <setjmp.h>\n");
+                try self.write("static _Thread_local jmp_buf __fun_test_jmp;\n");
+            }
             // Standard-stream accessors. `stdout`/`stderr`/`stdin` are macros/globals
             // (not callable), and differ per libc (glibc/musl/macOS/MSVCRT resolve
             // them differently — MSVCRT via a function call). Wrapping them in tiny
@@ -21473,7 +21529,19 @@ pub const TranspileProcess = struct {
                             try self.transpile_node(msg.*);
                             try self.write("); ");
                         }
-                        try self.write("abort(); }");
+                        // In test mode, a failing assertion must not take down
+                        // the whole runner -- it jumps back to the currently
+                        // running test's own dispatch point instead (see
+                        // transpile_prelude's `__fun_test_jmp` doc comment),
+                        // so tests after this one still run. Outside test
+                        // mode, an assertion failure is a real program bug;
+                        // abort() (the original behavior) is still correct
+                        // there.
+                        if (self.flags.test_mode) {
+                            try self.write("longjmp(__fun_test_jmp, 1); }");
+                        } else {
+                            try self.write("abort(); }");
+                        }
                     },
                     .warning_ctrl => |ctrl| {
                         // Warning control was already queued during the typecheck pass;

@@ -10326,13 +10326,14 @@ test "test blocks: fun test mode runs all-passing tests and reports a summary" {
     try compileWithZigCc(allocator, c_path, exe_path);
     const stdout = try runExeWithEnv(allocator, exe_path, &.{});
     defer allocator.free(stdout);
-    try std.testing.expectEqualStrings(
-        "test: add works ... PASS\ntest: add handles negatives ... PASS\n2/2 tests passed\n",
-        stdout,
-    );
+    // Tests run CONCURRENTLY (one virtual task each -- see std/testing.fn),
+    // so PASS lines can appear in either order; check presence, not order.
+    try std.testing.expect(std.mem.indexOf(u8, stdout, "test: add works ... PASS") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stdout, "test: add handles negatives ... PASS") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stdout, "2/2 tests passed") != null);
 }
 
-test "test blocks: a failing assert aborts the runner, leaving earlier PASS output intact" {
+test "test blocks: a failing assert is isolated, other tests still run" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_test_block_fail.fn";
     const c_path = "codegen_test_block_fail.c";
@@ -10341,10 +10342,12 @@ test "test blocks: a failing assert aborts the runner, leaving earlier PASS outp
     defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
     defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
-    // `assert`/`panic` keep their existing hard-abort semantics inside a test
-    // (no per-test recovery in this first version): a failing test kills the
-    // whole runner immediately, so a LATER test never runs. This is the
-    // documented v1 tradeoff (see `emit_test_mode_functions_and_runner`).
+    // A failing assert is recovered (a per-thread jump back to the runner,
+    // see the `.assert_stmt` transpile case) instead of aborting the whole
+    // process -- every OTHER test still runs, and the runner exits nonzero
+    // after reporting a full summary. Tests run CONCURRENTLY (one virtual
+    // task each -- see std/testing.fn), so PASS/FAIL lines can appear in
+    // any order; assert presence, not exact order.
     const input =
         "test \"passes\" {\n" ++
         "  assert true, \"ok\";\n" ++
@@ -10352,8 +10355,8 @@ test "test blocks: a failing assert aborts the runner, leaving earlier PASS outp
         "test \"fails\" {\n" ++
         "  assert 1 == 2, \"one is not two\";\n" ++
         "}\n\n" ++
-        "test \"never reached\" {\n" ++
-        "  assert false, \"should not run\";\n" ++
+        "test \"also passes\" {\n" ++
+        "  assert true, \"still runs\";\n" ++
         "}\n";
 
     const out_owned = try runTranspileTestMode(allocator, ifilepath, input);
@@ -10365,9 +10368,6 @@ test "test blocks: a failing assert aborts the runner, leaving earlier PASS outp
     }
     try compileWithZigCc(allocator, c_path, exe_path);
 
-    // Run directly (not via `runExeWithEnv`, which discards stdout on a
-    // non-exited/nonzero result) so the partial PASS output survives the
-    // abort for inspection.
     const exe_abs = blk: {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         const n = try std.Io.Dir.cwd().realPathFile(std.testing.io, exe_path, &buf);
@@ -10385,11 +10385,15 @@ test "test blocks: a failing assert aborts the runner, leaving earlier PASS outp
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
-    // Did NOT exit cleanly (aborted).
+    // Exits CLEANLY (not aborted), just with a nonzero code since not
+    // every test passed.
     switch (result.term) {
         .exited => |code| try std.testing.expect(code != 0),
-        else => {},
+        else => try std.testing.expect(false),
     }
     try std.testing.expect(std.mem.indexOf(u8, result.stderr, "one is not two") != null);
-    try std.testing.expectEqualStrings("test: passes ... PASS\ntest: fails ... ", result.stdout);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "test: passes ... PASS") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "test: fails ... FAIL") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "test: also passes ... PASS") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "2/3 tests passed") != null);
 }
