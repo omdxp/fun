@@ -19,8 +19,11 @@
 // bare expression statements (an assignment, a call for its side effect,
 // `x++;` -- these have no dedicated `StatementExpression` AST wrapper,
 // they're a plain `.Expression`/`.Unary` node straight in the statement
-// list), a non-generic `compound Name { fields }` declaration as a C
-// struct (see `emit_compound`), `ident.field` member access -- including a
+// list), a `compound Name { fields }` declaration as a C struct (see
+// `emit_compound`) -- a GENERIC one (`compound Box<T> { ... }`) is
+// recorded as a template and monomorphized on demand the first time a
+// concrete instantiation (`Box<num>`) is actually used, via
+// `ensure_compound_instantiated` -- `ident.field` member access -- including a
 // CHAINED access (`a.b.c`) -- deciding `.`/`->` at every link from each
 // receiver's DECLARED type (a deliberately narrow, non-inference-based
 // heuristic -- see `emit_field_access`/`emit_receiver_and_resolve_type`'s
@@ -88,8 +91,15 @@
 // around those three specific sites; a real expected-type mechanism
 // threaded through arbitrary expression contexts would be needed for
 // the rest.
-// - A GENERIC enum (`enum Option<T> { ... }`) -- monomorphization is a
-// separate, larger deferred item, same as generic compounds/impls.
+// - A GENERIC enum (`enum Option<T> { ... }`) or a generic impl's
+// methods (`impl Vec<T> { ... }`) -- monomorphization for EITHER is
+// still a separate, larger deferred item. A generic COMPOUND (`compound
+// Box<T> { ... }`) DOES monomorphize now (see
+// `ensure_compound_instantiated`'s doc comment), but only for a
+// template whose fields are bare `T`-shaped (no array-of-generic field,
+// e.g. the real `Vec<T>`'s own `T[] data;`) and concrete arguments with
+// no generic args of their own (`Box<Vec<num>>` -- nested generics --
+// is rejected, not guessed).
 // - TRUE dynamic dispatch through a receiver declared as an ABSTRACT
 // quirk type itself (a vtable lookup) -- a separate, larger deferred
 // item. A quirk-implementing impl's OWN methods emit fine now (see
@@ -105,19 +115,19 @@
 // dereference, or a chained field access (a CALL subject needs a temp
 // variable AND a type to declare it with -- see `emit_fit`'s doc
 // comment).
-// - Every declaration kind besides a plain function/non-generic
-// compound/non-generic enum/non-generic impl (a top-level `quirk`
+// - Every declaration kind besides a plain function/compound (generic
+// or not)/non-generic enum/non-generic impl (a top-level `quirk`
 // declaration itself needs no C emission at all -- it's a structural,
-// compile-time-only interface spec -- but a GENERIC compound's/enum's/
-// impl's monomorphized specializations are still a separate, larger
-// deferred item).
+// compile-time-only interface spec -- but a GENERIC enum's or impl's
+// monomorphized specializations are still a separate, larger deferred
+// item).
 // - Type INFERENCE: a function's return type and every literal's type are
 // already fully explicit at this stage (an omitted `let` type, or a
 // function relying on inferred generics, isn't reachable yet), so no
 // `infer_expr_type`-equivalent exists yet either.
-// - Multi-file imports, generics monomorphization, quirk/vtable dispatch,
-// async/channels -- each is a substantial slice of its own in the
-// original and will get one here too.
+// - Multi-file imports, generic enum/impl monomorphization, quirk/vtable
+// dispatch, async/channels -- each is a substantial slice of its own in
+// the original and will get one here too.
 // - Exotic literal-escaping edge cases the original handles (splitting a
 // string literal around a `\xFF`-then-more-hex-digits run so C doesn't
 // fold extra digits into the escape) -- string content is written back
@@ -235,6 +245,21 @@ pub compound Codegen {
   Vec<str> impl_method_owner_type;
   Vec<str> impl_method_bare_name;
   Vec<str> impl_method_mangled_name;
+  // A generic COMPOUND template (`compound Box<T> { ... }`): its name,
+  // type-param names, and each field's OWN pre-substitution declared
+  // type -- recorded by `emit_compound` when it sees `has_type_params`,
+  // WITHOUT emitting any C (a template is never emitted directly, only
+  // a concrete monomorphization of it -- see
+  // `ensure_compound_instantiated`'s doc comment).
+  Vec<str> generic_compound_names;
+  Vec<Vec<str>> generic_compound_type_params;
+  Vec<Vec<str>> generic_compound_field_names;
+  Vec<Vec<str>> generic_compound_field_type_names;
+  Vec<Vec<bin>> generic_compound_field_is_pointer;
+  // Mangled names already monomorphized (see `ensure_compound_
+  // instantiated`), so instantiating the SAME concrete type arguments
+  // twice doesn't emit a duplicate C typedef.
+  Vec<str> emitted_generic_instantiations;
 }
 
 pub fun codegen_new(CodegenState* state) Codegen {
@@ -253,6 +278,12 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.impl_method_owner_type.init(0);
   g.impl_method_bare_name.init(0);
   g.impl_method_mangled_name.init(0);
+  g.generic_compound_names.init(0);
+  g.generic_compound_type_params.init(0);
+  g.generic_compound_field_names.init(0);
+  g.generic_compound_field_type_names.init(0);
+  g.generic_compound_field_is_pointer.init(0);
+  g.emitted_generic_instantiations.init(0);
   g.current_fn_rtype_name = "";
   g.expected_enum_type = "";
   ret g;
@@ -268,19 +299,47 @@ fun dtype_is_pointer(DataType dt) bin {
 }
 
 impl Codegen {
-  // Writes `dt`'s C spelling: a sized/dynamic int (`iN`/`uN`) via
-  // `dynamic_int_type_to_c`, else the builtin mapping via `map_type_to_c`
-  // (a user-defined type name passes through unchanged, matching the
-  // original), followed by one `*` per pointer-depth level.
-  // 
-  // Deliberately simplified from the original for this slice: no C-
-  // typedef-alias resolution or generic-name mangling for a user-defined
-  // type -- neither is reachable yet (no `compound`/generics support).
-  pub write_type(DataType dt) {
-    fit parse_dynamic_int_datatype(dt.type_str) {
+  // Writes `type_name`'s bare C spelling (no pointer stars): a sized/
+  // dynamic int (`iN`/`uN`) via `dynamic_int_type_to_c`, else the
+  // builtin mapping via `map_type_to_c` (a user-defined type name passes
+  // through unchanged, matching the original). Split out of `write_type`
+  // so `ensure_compound_instantiated` can apply the exact same rule to
+  // an already-RESOLVED field type name, not just a raw `DataType`.
+  write_type_name(str type_name) {
+    fit parse_dynamic_int_datatype(type_name) {
       .Some(dyn) -> { self.state.write(dynamic_int_type_to_c(dyn)); }
-      .None -> { self.state.write(map_type_to_c(dt.type_str)); }
+      .None -> { self.state.write(map_type_to_c(type_name)); }
     }
+  }
+
+  // Writes `dt`'s C spelling via `write_type_name`, followed by one `*`
+  // per pointer-depth level, and returns the RESOLVED type name used --
+  // ordinarily just `dt.type_str` unchanged, but the MANGLED
+  // monomorphization name (`Box__num`) when `dt` is a generic
+  // instantiation (`dt.generic_args` non-empty, resolved via
+  // `ensure_compound_instantiated`). Callers that need to register this
+  // type for later lookup (`record_local`, a compound field's own
+  // registry entry) must use the RETURNED name, not `dt.type_str`
+  // directly -- for a generic instantiation those differ, and only the
+  // mangled name is what `record_compound` registers fields under.
+  // 
+  // `.None` means `dt` is a generic instantiation this codegen can't
+  // resolve (an unrecognized template, wrong argument count, or a
+  // nested generic argument -- see `ensure_compound_instantiated`'s doc
+  // comment) -- the caller must reject rather than emit guessed/wrong
+  // C. Deliberately simplified from the original for this slice: no C-
+  // typedef-alias resolution, and only a generic COMPOUND (not enum or
+  // impl) is monomorphized.
+  pub write_type(DataType dt) Option<str> {
+    str resolved_name = dt.type_str;
+    if dt.generic_args.len > 0 {
+      let inst = self.ensure_compound_instantiated(dt);
+      if inst.is_none() {
+        ret .None;
+      }
+      resolved_name = inst.unwrap();
+    }
+    self.write_type_name(resolved_name);
     num ptr_depth = dt.pointer_depth;
     if ptr_depth == 0 && dt.flags.is_pointer {
       ptr_depth = 1;
@@ -290,6 +349,140 @@ impl Codegen {
       self.state.write("*");
       i = i + 1;
     }
+    ret .Some(resolved_name);
+  }
+
+  // Given a DataType with `generic_args` non-empty (`Box<num>`),
+  // resolves -- and, the FIRST time this exact instantiation is seen,
+  // EMITS -- the concrete monomorphized C struct for it, returning the
+  // mangled name (`Box__num`). Mangling matches the original
+  // transpiler's own scheme (`append_mangled_type`): `<base>__<arg1>__
+  // <arg2>...`, each arg's own Fun-level type name (`arg.type_str`),
+  // with a `_ptrN` suffix when that arg itself has pointer depth
+  // (`Vec<Node*>` -> `Vec__Node_ptr1`, distinct from `Vec<Node>` ->
+  // `Vec__Node` -- these need DIFFERENT monomorphizations, a `T` field
+  // substituting to `Node` by value vs. `Node*` by pointer). A repeat
+  // instantiation with the SAME mangled name is recognized via
+  // `emitted_generic_instantiations` and not re-emitted.
+  // 
+  // `.None` means: `dt.type_str` isn't a known generic compound
+  // template, the argument COUNT doesn't match the template's own
+  // type-param count, or some argument itself has generic args of its
+  // own (`Vec<Vec<num>>` -- nested generics are a separate, larger
+  // deferred item). Each template field must be a bare occurrence of
+  // one of the template's OWN type-param names (`T value;`) to be
+  // substituted -- an array-of-generic field (`T[] data;`, e.g. the
+  // real `Vec<T>`'s own `data` field) or any other non-matching field
+  // type is left UNCHANGED (not substituted), which is only correct
+  // when that field doesn't actually depend on the type param -- a
+  // template with a genuinely generic array field isn't fully supported
+  // by this slice yet.
+  ensure_compound_instantiated(DataType dt) Option<str> {
+    num template_idx = 0;
+    bin found = false;
+    for template_idx < self.generic_compound_names.len {
+      if equals(self.generic_compound_names.get(template_idx), dt.type_str) {
+        found = true;
+        break;
+      }
+      template_idx = template_idx + 1;
+    }
+    if !found {
+      ret .None;
+    }
+
+    let type_params = self.generic_compound_type_params.get(template_idx);
+    if type_params.len != dt.generic_args.len {
+      ret .None;
+    }
+
+    StringBuilder name_sb = string_builder_init(16);
+    name_sb.append(dt.type_str);
+    Vec<str> arg_type_names;
+    arg_type_names.init(0);
+    Vec<bin> arg_is_pointer;
+    arg_is_pointer.init(0);
+    num ai = 0;
+    for ai < dt.generic_args.len {
+      let arg = dt.generic_args.get(ai);
+      if arg.generic_args.len > 0 {
+        ret .None;
+      }
+      name_sb.append("__");
+      name_sb.append(arg.type_str);
+      bin arg_ptr = dtype_is_pointer(*arg);
+      if arg_ptr {
+        name_sb.append("_ptr");
+        name_sb.append(format_num(arg.pointer_depth));
+      }
+      arg_type_names.push(arg.type_str);
+      arg_is_pointer.push(arg_ptr);
+      ai = ai + 1;
+    }
+    str mangled_name = name_sb.build();
+
+    num ei = 0;
+    for ei < self.emitted_generic_instantiations.len {
+      if equals(self.emitted_generic_instantiations.get(ei), mangled_name) {
+        ret .Some(mangled_name);
+      }
+      ei = ei + 1;
+    }
+
+    let field_names = self.generic_compound_field_names.get(template_idx);
+    let field_type_names = self.generic_compound_field_type_names.get(template_idx);
+    let field_is_pointer = self.generic_compound_field_is_pointer.get(template_idx);
+
+    Vec<str> resolved_field_names;
+    resolved_field_names.init(0);
+    Vec<str> resolved_field_type_names;
+    resolved_field_type_names.init(0);
+    Vec<bin> resolved_field_is_pointer;
+    resolved_field_is_pointer.init(0);
+
+    self.state.write("typedef struct ");
+    self.state.write(mangled_name);
+    self.state.write(" {\n");
+    num fi = 0;
+    for fi < field_names.len {
+      str ftype = field_type_names.get(fi);
+      bin fptr = field_is_pointer.get(fi);
+      str resolved_type = ftype;
+      bin resolved_ptr = fptr;
+      num pi = 0;
+      for pi < type_params.len {
+        if equals(type_params.get(pi), ftype) {
+          resolved_type = arg_type_names.get(pi);
+          resolved_ptr = arg_is_pointer.get(pi);
+          break;
+        }
+        pi = pi + 1;
+      }
+      self.state.write("  ");
+      self.write_type_name(resolved_type);
+      if resolved_ptr {
+        self.state.write("*");
+      }
+      self.state.write(" ");
+      self.state.write(field_names.get(fi));
+      self.state.write(";\n");
+      resolved_field_names.push(field_names.get(fi));
+      resolved_field_type_names.push(resolved_type);
+      resolved_field_is_pointer.push(resolved_ptr);
+      fi = fi + 1;
+    }
+    self.state.write("} ");
+    self.state.write(mangled_name);
+    self.state.write(";\n\n");
+
+    self.record_compound(
+      mangled_name,
+      resolved_field_names,
+      resolved_field_type_names,
+      resolved_field_is_pointer
+    );
+    self.emitted_generic_instantiations.push(mangled_name);
+    ret .Some(mangled_name);
   }
 
   // Records that local `name` is (or isn't) a pointer, and its declared
@@ -1074,7 +1267,10 @@ impl Codegen {
       }
       .Variable(v) -> {
         self.state.write_indent();
-        self.write_type(*v.var_type);
+        let wt = self.write_type(*v.var_type);
+        if wt.is_none() {
+          ret .Some(CodegenErrorKind.UnsupportedNode);
+        }
         self.state.write(" ");
         self.state.write(v.name);
         if v.has_val {
@@ -1092,7 +1288,7 @@ impl Codegen {
           }
         }
         self.state.write(";\n");
-        self.record_local(v.name, v.var_type.type_str, dtype_is_pointer(*v.var_type));
+        self.record_local(v.name, wt.unwrap(), dtype_is_pointer(*v.var_type));
         ret .None;
       }
       .StatementFor(fk) -> {
@@ -1674,10 +1870,13 @@ impl Codegen {
   emit_function_param(Node param) Option<CodegenErrorKind> {
     fit param.kind {
       .Variable(v) -> {
-        self.write_type(*v.var_type);
+        let wt = self.write_type(*v.var_type);
+        if wt.is_none() {
+          ret .Some(CodegenErrorKind.UnsupportedNode);
+        }
         self.state.write(" ");
         self.state.write(v.name);
-        self.record_local(v.name, v.var_type.type_str, dtype_is_pointer(*v.var_type));
+        self.record_local(v.name, wt.unwrap(), dtype_is_pointer(*v.var_type));
         ret .None;
       }
       _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
@@ -1704,7 +1903,10 @@ impl Codegen {
           ret .Some(CodegenErrorKind.InvalidNode);
         }
         self.current_fn_rtype_name = f.rtype.type_str;
-        self.write_type(*f.rtype);
+        let rt = self.write_type(*f.rtype);
+        if rt.is_none() {
+          ret .Some(CodegenErrorKind.UnsupportedNode);
+        }
         self.state.write(" ");
         self.state.write(f.name);
         self.state.write("(");
@@ -1860,12 +2062,13 @@ impl Codegen {
 
   // Emits a non-generic `compound Name { fields }` declaration as a C
   // struct typedef: `typedef struct Name { <type> <field>; ... } Name;`.
+  // A GENERIC compound (`has_type_params`) is instead only RECORDED as a
+  // template (see `Codegen.generic_compound_names`'s doc comment) --
+  // never emitted directly itself, matching the original's own rule
+  // that only a concrete monomorphized specialization of a generic
+  // template is ever emitted (see `ensure_compound_instantiated`).
   // 
-  // Deliberately simplified from the original for this slice: a generic
-  // compound (`has_type_params`) is silently skipped rather than emitted
-  // (matching the original's own rule that a generic TEMPLATE is never
-  // emitted directly, only its concrete monomorphized specializations --
-  // monomorphization itself is a separate, larger deferred item). No
+  // Deliberately simplified from the original for this slice: no
   // forward declaration and no dependency-ordering pass for by-value
   // nested compounds either (the original topologically sorts these) --
   // this assumes source order already satisfies it, same as a plain
@@ -1874,9 +2077,6 @@ impl Codegen {
   emit_compound(Node node) Option<CodegenErrorKind> {
     fit node.kind {
       .Compound(c) -> {
-        if c.has_type_params {
-          ret .None;
-        }
         Vec<str> field_names;
         field_names.init(0);
         Vec<str> field_type_names;
@@ -1884,17 +2084,34 @@ impl Codegen {
         Vec<bin> field_is_pointer;
         field_is_pointer.init(0);
 
+        if c.has_type_params {
+          for f : c.fields {
+            field_names.push(f.name);
+            field_type_names.push(f.dtype.type_str);
+            field_is_pointer.push(dtype_is_pointer(*f.dtype));
+          }
+          self.generic_compound_names.push(c.name);
+          self.generic_compound_type_params.push(c.type_params);
+          self.generic_compound_field_names.push(field_names);
+          self.generic_compound_field_type_names.push(field_type_names);
+          self.generic_compound_field_is_pointer.push(field_is_pointer);
+          ret .None;
+        }
+
         self.state.write("typedef struct ");
         self.state.write(c.name);
         self.state.write(" {\n");
         for f : c.fields {
           self.state.write("  ");
-          self.write_type(*f.dtype);
+          let wt = self.write_type(*f.dtype);
+          if wt.is_none() {
+            ret .Some(CodegenErrorKind.UnsupportedNode);
+          }
           self.state.write(" ");
           self.state.write(f.name);
           self.state.write(";\n");
           field_names.push(f.name);
-          field_type_names.push(f.dtype.type_str);
+          field_type_names.push(wt.unwrap());
           field_is_pointer.push(dtype_is_pointer(*f.dtype));
         }
         self.state.write("} ");
@@ -4045,7 +4262,7 @@ test "register_impl_methods lets emit_method_call resolve a quirk-implementing i
   assert equals(st.out.build(), "Point__To__convert(&p)"), "expected the double-mangled quirk name, not the naive 'Point__convert'";
 }
 
-test "emit_compound skips a generic compound (monomorphization not yet supported)" {
+test "emit_compound records a generic compound as a template without emitting it" {
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
@@ -4053,10 +4270,204 @@ test "emit_compound skips a generic compound (monomorphization not yet supported
   c.name = "Box";
   c.type_params.push("T");
   c.has_type_params = true;
+  CompoundField f;
+  f.name = "value";
+  DataType* fdt = malloc(sizeof(DataType));
+  *fdt = dtype_new();
+  fdt.type_str = "T";
+  f.dtype = fdt;
+  c.fields.push(f);
 
   Node n = node_new(NodeKind.Compound(c));
-  assert g.emit_compound(n).is_none(), "expected a generic compound to be silently skipped";
-  assert equals(st.out.build(), ""), "expected nothing emitted for a generic compound";
+  assert g.emit_compound(n).is_none(), "expected the generic template to record without error";
+  assert equals(st.out.build(), ""), "expected nothing emitted for a generic template itself, only its monomorphizations";
+}
+
+// Shared setup for the generic-compound-instantiation tests below: records
+// `compound Box<T> { T value; }` as a template (no C emitted for the
+// template itself -- see the test above).
+fun _record_box_template(Codegen* g) {
+  CompoundNode c = compound_node_new();
+  c.name = "Box";
+  c.type_params.push("T");
+  c.has_type_params = true;
+  CompoundField f;
+  f.name = "value";
+  DataType* fdt = malloc(sizeof(DataType));
+  *fdt = dtype_new();
+  fdt.type_str = "T";
+  f.dtype = fdt;
+  c.fields.push(f);
+  Node n = node_new(NodeKind.Compound(c));
+  g.emit_compound(n);
+}
+
+// A `Box<num> name;` Variable declaration node.
+fun _box_num_var_decl(str name) Node {
+  DataType* num_arg = malloc(sizeof(DataType));
+  *num_arg = dtype_new();
+  num_arg.type_str = "num";
+  DataType* box_dt = malloc(sizeof(DataType));
+  *box_dt = dtype_new();
+  box_dt.type_str = "Box";
+  box_dt.generic_args.push(num_arg);
+  VariableNode v;
+  v.var_type = box_dt;
+  v.name = name;
+  v.has_val = false;
+  ret node_new(NodeKind.Variable(v));
+}
+
+test "emit_statement instantiates a generic compound's monomorphized struct on first use" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  _record_box_template(&g);
+
+  Node n = _box_num_var_decl("b");
+  assert g.emit_statement(n).is_none(), "expected the Box<num> declaration to emit";
+  assert equals(
+    st.out.build(),
+    "typedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nBox__num b;\n"
+  ), "expected the monomorphized struct emitted once, then the declaration using its mangled name";
+}
+
+test "emit_statement does not re-emit an already-instantiated generic compound" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  _record_box_template(&g);
+
+  Node n1 = _box_num_var_decl("b1");
+  Node n2 = _box_num_var_decl("b2");
+  assert g.emit_statement(n1).is_none(), "expected the first Box<num> declaration to emit";
+  assert g.emit_statement(n2).is_none(), "expected the second Box<num> declaration to emit";
+  assert equals(
+    st.out.build(),
+    "typedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nBox__num b1;\nBox__num b2;\n"
+  ), "expected the struct typedef only once, even though Box<num> is used twice";
+}
+
+test "emit_expr resolves chained field access through a generic-compound-instantiated local" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  _record_box_template(&g);
+
+  Node decl = _box_num_var_decl("b");
+  assert g.emit_statement(decl).is_none(), "expected the Box<num> declaration to emit";
+
+  Node* recv = malloc(sizeof(Node));
+  *recv = node_new(NodeKind.Identifier("b"));
+  Node* field = malloc(sizeof(Node));
+  *field = node_new(NodeKind.Identifier("value"));
+  ExprNode e;
+  e.left = recv;
+  e.has_left = true;
+  e.right = field;
+  e.has_right = true;
+  e.op = ".";
+  Node access = node_new(NodeKind.Expression(e));
+
+  assert g.emit_expr(access).is_none(), "expected 'b.value' to resolve through the monomorphized Box__num's own registered field";
+  assert equals(
+    st.out.build(),
+    "typedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nBox__num b;\nb.value"
+  ), "expected the field access appended after the declaration, resolved via the mangled compound's registry";
+}
+
+test "ensure_compound_instantiated rejects an unrecognized generic template name" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  _record_box_template(&g);
+
+  DataType* num_arg = malloc(sizeof(DataType));
+  *num_arg = dtype_new();
+  num_arg.type_str = "num";
+  DataType* dt = malloc(sizeof(DataType));
+  *dt = dtype_new();
+  dt.type_str = "Unrecognized";
+  dt.generic_args.push(num_arg);
+  VariableNode v;
+  v.var_type = dt;
+  v.name = "x";
+  v.has_val = false;
+  Node n = node_new(NodeKind.Variable(v));
+
+  assert g.emit_statement(n).is_some(), "expected an unrecognized generic template name to be rejected rather than guessed";
+}
+
+test "ensure_compound_instantiated rejects a wrong generic argument count" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  _record_box_template(&g);
+
+  DataType* num_arg = malloc(sizeof(DataType));
+  *num_arg = dtype_new();
+  num_arg.type_str = "num";
+  DataType* str_arg = malloc(sizeof(DataType));
+  *str_arg = dtype_new();
+  str_arg.type_str = "str";
+  DataType* dt = malloc(sizeof(DataType));
+  *dt = dtype_new();
+  dt.type_str = "Box";
+  dt.generic_args.push(num_arg);
+  dt.generic_args.push(str_arg);
+  VariableNode v;
+  v.var_type = dt;
+  v.name = "x";
+  v.has_val = false;
+  Node n = node_new(NodeKind.Variable(v));
+
+  assert g.emit_statement(n).is_some(), "expected Box (one type param) instantiated with two arguments to be rejected";
+}
+
+test "ensure_compound_instantiated rejects a nested generic argument" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  _record_box_template(&g);
+
+  DataType* num_arg = malloc(sizeof(DataType));
+  *num_arg = dtype_new();
+  num_arg.type_str = "num";
+  DataType* inner_vec = malloc(sizeof(DataType));
+  *inner_vec = dtype_new();
+  inner_vec.type_str = "Vec";
+  inner_vec.generic_args.push(num_arg);
+  DataType* dt = malloc(sizeof(DataType));
+  *dt = dtype_new();
+  dt.type_str = "Box";
+  dt.generic_args.push(inner_vec);
+  VariableNode v;
+  v.var_type = dt;
+  v.name = "x";
+  v.has_val = false;
+  Node n = node_new(NodeKind.Variable(v));
+
+  assert g.emit_statement(n).is_some(), "expected Box<Vec<num>> (a nested generic argument) to be rejected -- not yet supported";
+}
+
+test "ensure_compound_instantiated mangles a pointer-typed generic argument distinctly" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  _record_box_template(&g);
+
+  DataType* node_ptr_arg = malloc(sizeof(DataType));
+  *node_ptr_arg = dtype_new();
+  node_ptr_arg.type_str = "Node";
+  node_ptr_arg.pointer_depth = 1;
+  DataType* dt = malloc(sizeof(DataType));
+  *dt = dtype_new();
+  dt.type_str = "Box";
+  dt.generic_args.push(node_ptr_arg);
+  VariableNode v;
+  v.var_type = dt;
+  v.name = "b";
+  v.has_val = false;
+  Node n = node_new(NodeKind.Variable(v));
+
+  assert g.emit_statement(n).is_none(), "expected Box<Node*> to instantiate";
+  assert equals(
+    st.out.build(),
+    "typedef struct Box__Node_ptr1 {\n  Node* value;\n} Box__Node_ptr1;\n\nBox__Node_ptr1 b;\n"
+  ), "expected the mangled name to include the pointer depth, and the field itself to be a pointer";
 }
 
 test "emit_statement emits a bare assignment expression as a statement" {
