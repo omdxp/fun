@@ -1007,11 +1007,25 @@ impl Codegen {
 
               self.record_impl_method(mangled_name, bare_name, new_name, nil);
 
+              // `hoist_insert_pos` (if set) is a position measured
+              // against the OUTER, now-swapped-away buffer -- suspending
+              // it for the duration of the swap makes any NESTED
+              // instantiation triggered from inside this method's own
+              // signature/body (e.g. a return type that's ITSELF a
+              // generic enum) append inline to `method_scratch` instead
+              // of splicing at a stale position into the wrong buffer
+              // (which corrupts `substr`'s own length arithmetic and
+              // crashes) -- the whole scratch buffer still ends up
+              // hoisted to the correct outer position via `emit_hoisted`
+              // below regardless.
               CodegenState method_scratch = codegen_state_new();
               CodegenState* saved_method_state = self.state;
+              let saved_hoist_pos = self.hoist_insert_pos;
               self.state = &method_scratch;
+              self.hoist_insert_pos = .None;
               self.emit_function_named(*m, new_name);
               self.state = saved_method_state;
+              self.hoist_insert_pos = saved_hoist_pos;
               self.emit_hoisted(method_scratch.out.build());
             }
 
@@ -1604,7 +1618,12 @@ impl Codegen {
     // (already-registered non-generic) callee, or one this codegen
     // doesn't recognize at all, is left as `callee_name` unchanged --
     // matching this file's "no name resolution for the free-function
-    // case" simplification elsewhere.
+    // case" simplification elsewhere. `template_callee_name` (the
+    // ORIGINAL, un-mangled name) is kept separately for the per-argument
+    // bare-shorthand lookup below -- `lookup_function_param_type` only
+    // recognizes a generic template under ITS OWN bare name, not the
+    // mangled call-site name `callee_name` becomes once monomorphized.
+    str template_callee_name = callee_name;
     let generic_inst = self.maybe_instantiate_generic_function(callee_name, args);
     if generic_inst.is_some() {
       callee_name = generic_inst.unwrap();
@@ -1628,7 +1647,7 @@ impl Codegen {
       // `Codegen.function_names`'s doc comment. An unresolvable callee/
       // position leaves `expected_enum_type` untouched, same as every
       // other site.
-      let ptype = self.lookup_function_param_type(callee_name, arg_idx);
+      let ptype = self.lookup_function_param_type(template_callee_name, arg_idx);
       str prev_expected = self.expected_enum_type;
       if ptype.is_some() {
         let resolved = self.resolve_type_name(*ptype.unwrap());
@@ -3225,11 +3244,25 @@ impl Codegen {
             self.type_subst_arg_type_strs = arg_type_names;
             self.type_subst_arg_is_pointer = arg_is_pointer;
 
+            // `hoist_insert_pos` (if set) is a position measured against
+            // the OUTER, now-swapped-away buffer -- suspending it for
+            // the duration of the swap makes any NESTED instantiation
+            // triggered from inside this function's own signature/body
+            // (e.g. a return type that's ITSELF a generic enum, like
+            // `err_kind<T>`'s own `Result<T, Error>`) append inline to
+            // `scratch` instead of splicing at a stale position into the
+            // wrong buffer (which corrupts `substr`'s own length
+            // arithmetic and crashes) -- the whole scratch buffer still
+            // ends up hoisted to the correct outer position via
+            // `emit_hoisted` below regardless.
             CodegenState scratch = codegen_state_new();
             CodegenState* saved_state = self.state;
+            let saved_hoist_pos = self.hoist_insert_pos;
             self.state = &scratch;
+            self.hoist_insert_pos = .None;
             self.emit_function_named(tmpl, mangled_name);
             self.state = saved_state;
+            self.hoist_insert_pos = saved_hoist_pos;
             self.emit_hoisted(scratch.out.build());
 
             self.type_subst_param_names = prev_params;
@@ -3246,12 +3279,19 @@ impl Codegen {
   }
 
   // Looks up the declared type of `fn_name`'s parameter at `arg_index`
-  // (0-based) -- see `Codegen.function_names`'s doc comment. `.None`
-  // means either the function isn't registered (unknown, a method, or a
-  // generic function -- see `register_function_signatures`), or
-  // `arg_index` is out of range (a variadic C binding's trailing `...`
-  // args, say) -- the caller must treat that as "can't resolve this
-  // argument's expected type," not guess.
+  // (0-based) -- see `Codegen.function_names`'s doc comment. Falls back
+  // to a GENERIC function template's OWN declared parameter type at that
+  // position when `fn_name` isn't in the plain registry (`err_kind(
+  // .Invalid, "msg", "")` -- try_substr's real body, e.g. -- needs
+  // `.Invalid` resolved against `kind`'s own `ErrorKind` type even
+  // though `err_kind` itself is generic; the TEMPLATE's own param type
+  // at a non-generic position is already fully concrete, no
+  // substitution needed for bare-shorthand purposes). `.None` means
+  // `fn_name` isn't registered ANYWHERE (unknown, or a method -- see
+  // `register_function_signatures`), or `arg_index` is out of range (a
+  // variadic C binding's trailing `...` args, say) -- the caller must
+  // treat that as "can't resolve this argument's expected type," not
+  // guess.
   lookup_function_param_type(str fn_name, num arg_index) Option<DataType*> {
     num i = 0;
     for i < self.function_names.len {
@@ -3263,6 +3303,23 @@ impl Codegen {
         ret .Some(params.get(arg_index));
       }
       i = i + 1;
+    }
+    for tmpl : self.generic_function_templates {
+      fit tmpl.kind {
+        .Function(f) -> {
+          if equals(f.name, fn_name) {
+            if arg_index < 0 || !f.has_args || arg_index >= f.args.len {
+              ret .None;
+            }
+            let param_node = f.args.get(arg_index);
+            fit param_node.kind {
+              .Variable(v) -> { ret .Some(v.var_type); }
+              _ -> { ret .None; }
+            }
+          }
+        }
+        _ -> {}
+      }
     }
     ret .None;
   }
@@ -7072,6 +7129,161 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
     st.out.build(),
     "#include <stdio.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdarg.h>\n#include <stdlib.h>\n#include <string.h>\nstatic FILE* stderr_stream(void){ return stderr; }\nint64_t identity__num(int64_t value) {\n    return value;\n}\nint64_t main(void) {\n    return identity__num(5);\n}\n"
   ), "expected only the monomorphized 'identity__num', never the unsubstituted 'identity' template itself";
+}
+
+test "pub transpile does not crash when a generic function's OWN return type is itself a generic enum instantiation" {
+  // Regression test for a real crash found via the self-compile
+  // experiment: std.result's err_kind<T>(...) Result<T, Error> is a
+  // generic function whose OWN return type (Result<T, Error>) is
+  // ITSELF a generic enum instantiation -- so monomorphizing err_kind
+  // (which swaps self.state to a scratch buffer) triggers a NESTED
+  // ensure_enum_instantiated call (for Result__num__Error) that ALSO
+  // swaps self.state, while `hoist_insert_pos` still held a position
+  // measured against the OUTER (now-swapped-away) buffer. The nested
+  // emit_hoisted then spliced at that stale position into the WRONG
+  // (much shorter) scratch buffer, corrupting substr's own length
+  // arithmetic and crashing outright -- not a clean CodegenErrorKind
+  // rejection. Fixed by suspending hoist_insert_pos (like
+  // type_subst_param_names already was) for the duration of
+  // maybe_instantiate_generic_function's/
+  // maybe_instantiate_generic_impl_methods's own state swap.
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  EnumDeclNode optd = enum_decl_node_new();
+  optd.name = "Opt";
+  optd.type_params.push("T");
+  optd.has_type_params = true;
+  EnumVariant some_v = enum_variant_new();
+  some_v.name = "Some";
+  DataType* pdt = malloc(sizeof(DataType));
+  *pdt = dtype_new();
+  pdt.type_str = "T";
+  some_v.payload.push(pdt);
+  some_v.has_payload = true;
+  optd.variants.push(some_v);
+  EnumVariant none_v = enum_variant_new();
+  none_v.name = "None";
+  optd.variants.push(none_v);
+  Node opt_node = node_new(NodeKind.Enum(optd));
+
+  DataType* pdt2 = malloc(sizeof(DataType));
+  *pdt2 = dtype_new();
+  pdt2.type_str = "T";
+  VariableNode wv;
+  wv.var_type = pdt2;
+  wv.name = "value";
+  wv.has_val = false;
+  Node* wparam = malloc(sizeof(Node));
+  *wparam = node_new(NodeKind.Variable(wv));
+  Vec<Node*> wparams;
+  wparams.init(0);
+  wparams.push(wparam);
+
+  Node* val_ident = malloc(sizeof(Node));
+  *val_ident = node_new(NodeKind.Identifier("value"));
+  Node* wrap_blank = malloc(sizeof(Node));
+  *wrap_blank = node_new(NodeKind.Blank);
+  Node* some_ident = malloc(sizeof(Node));
+  *some_ident = node_new(NodeKind.Identifier("Some"));
+  ExprNode some_dot;
+  some_dot.left = wrap_blank;
+  some_dot.has_left = true;
+  some_dot.right = some_ident;
+  some_dot.has_right = true;
+  some_dot.op = ".";
+  Node* some_dot_node = malloc(sizeof(Node));
+  *some_dot_node = node_new(NodeKind.Expression(some_dot));
+  Node* some_args = malloc(sizeof(Node));
+  *some_args = node_new(NodeKind.ExpressionParenthesis(val_ident));
+  ExprNode some_call;
+  some_call.left = some_dot_node;
+  some_call.has_left = true;
+  some_call.right = some_args;
+  some_call.has_right = true;
+  some_call.op = "()";
+  Node* some_call_node = malloc(sizeof(Node));
+  *some_call_node = node_new(NodeKind.Expression(some_call));
+  Node* wrap_ret = malloc(sizeof(Node));
+  *wrap_ret = node_new(NodeKind.StatementReturn(some_call_node));
+  Vec<Node*> wrap_stmts;
+  wrap_stmts.init(0);
+  wrap_stmts.push(wrap_ret);
+  BodyNode wrap_bn;
+  wrap_bn.statements = wrap_stmts;
+  Node* wrap_body = malloc(sizeof(Node));
+  *wrap_body = node_new(NodeKind.Body(wrap_bn));
+
+  FunctionNode wrapfn = function_node_new();
+  wrapfn.name = "wrap";
+  wrapfn.has_name = true;
+  DataType* wrap_rt_arg = malloc(sizeof(DataType));
+  *wrap_rt_arg = dtype_new();
+  wrap_rt_arg.type_str = "T";
+  DataType* wrap_rt = malloc(sizeof(DataType));
+  *wrap_rt = dtype_new();
+  wrap_rt.type_str = "Opt";
+  wrap_rt.generic_args.push(wrap_rt_arg);
+  wrapfn.rtype = wrap_rt;
+  wrapfn.has_rtype = true;
+  wrapfn.type_params.push("T");
+  wrapfn.has_type_params = true;
+  wrapfn.args = wparams;
+  wrapfn.has_args = true;
+  wrapfn.body = wrap_body;
+  wrapfn.has_body = true;
+  Node wrap_node = node_new(NodeKind.Function(wrapfn));
+
+  Node* callee = malloc(sizeof(Node));
+  *callee = node_new(NodeKind.Identifier("wrap"));
+  Node* call_arg = malloc(sizeof(Node));
+  *call_arg = node_new(NodeKind.Number(TokenData.Num(5)));
+  Node* call_args_node = malloc(sizeof(Node));
+  *call_args_node = node_new(NodeKind.ExpressionParenthesis(call_arg));
+  ExprNode call_e;
+  call_e.left = callee;
+  call_e.has_left = true;
+  call_e.right = call_args_node;
+  call_e.has_right = true;
+  call_e.op = "()";
+  Node* call_node = malloc(sizeof(Node));
+  *call_node = node_new(NodeKind.Expression(call_e));
+  Node* main_ret = malloc(sizeof(Node));
+  *main_ret = node_new(NodeKind.StatementReturn(call_node));
+  Vec<Node*> main_stmts;
+  main_stmts.init(0);
+  main_stmts.push(main_ret);
+  BodyNode main_bn;
+  main_bn.statements = main_stmts;
+  Node* main_body = malloc(sizeof(Node));
+  *main_body = node_new(NodeKind.Body(main_bn));
+
+  FunctionNode mainfn = function_node_new();
+  mainfn.name = "main";
+  mainfn.has_name = true;
+  DataType* main_rt_arg = malloc(sizeof(DataType));
+  *main_rt_arg = dtype_new();
+  main_rt_arg.type_str = "num";
+  DataType* main_rtype = malloc(sizeof(DataType));
+  *main_rtype = dtype_new();
+  main_rtype.type_str = "Opt";
+  main_rtype.generic_args.push(main_rt_arg);
+  mainfn.rtype = main_rtype;
+  mainfn.has_rtype = true;
+  mainfn.has_args = false;
+  mainfn.body = main_body;
+  mainfn.has_body = true;
+  Node main_node = node_new(NodeKind.Function(mainfn));
+
+  Vec<Node> nodes;
+  nodes.init(0);
+  nodes.push(opt_node);
+  nodes.push(wrap_node);
+  nodes.push(main_node);
+
+  assert g.transpile(nodes).is_none(), "expected the whole program to transpile without crashing";
+  assert contains(st.out.build(), "typedef struct Opt__num {"), "expected the nested generic enum instantiation to be hoisted correctly";
+  assert contains(st.out.build(), "return wrap__num(5);"), "expected the monomorphized generic function call";
 }
 
 test "transpile emits the prelude followed by every top-level function" {
