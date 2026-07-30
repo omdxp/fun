@@ -1844,6 +1844,55 @@ impl Parser {
           if equals(kw, "await") {
             ret self.parse_await_operand();
           }
+          // A builtin scalar type keyword (`sizeof(bin)`/`sizeof(str)`,
+          // e.g. `std.map`'s own real `alloc()` body, found via the
+          // self-compile experiment) as the sole operand of `sizeof(...)`
+          // -- `sizeof` isn't a keyword in this language itself (an
+          // ordinary call, see `parse_expressionable_single`'s own doc
+          // comment above), but its OPERAND here is a type keyword token,
+          // not a value expression, so it needs its own primary-expression
+          // case: consumed and turned into a plain `.Identifier` node
+          // carrying the keyword's own text, letting `emit_call`'s
+          // `sizeof`-callee special case (see its own doc comment in
+          // codegen.fn) map it to the real C type. Gated the same way
+          // `is_sizeof_type_operand` gates a custom type name in
+          // `parse_single_token_to_node` -- immediately preceded by `(`
+          // whose own preceding token is the identifier `sizeof`.
+          if keyword_is_datatype(kw) {
+            bin in_sizeof = false;
+            // `t` hasn't been consumed yet here (unlike the `.Identifier`
+            // case in `parse_single_token_to_node`, which peeks backward
+            // from the JUST-consumed token) -- `token_peek_prev_stream_n`
+            // (relative to the next token still to be consumed), not
+            // `token_peek_prev`/`token_peek_prev_n` (relative to the most
+            // recently consumed one), is the correct lookup here.
+            fit self.state.token_peek_prev_stream_n(0) {
+              .Some(p) -> {
+                if token_is_operator(p, "(") {
+                  fit self.state.token_peek_prev_stream_n(1) {
+                    .Some(p2) -> {
+                      if p2.type == TokenType.Identifier {
+                        fit p2.data {
+                          .Sval(s2) -> { in_sizeof = equals(s2, "sizeof"); }
+                          _ -> {}
+                        }
+                      }
+                    }
+                    .None -> {}
+                  }
+                }
+              }
+              .None -> {}
+            }
+            if in_sizeof {
+              self.state.token_next(); // consume the type keyword
+              Node node = node_new(NodeKind.Identifier(kw));
+              node.pos = t.pos;
+              node.has_pos = true;
+              self.create_node(&node);
+              ret .None;
+            }
+          }
         }
         ret .None;
       }
@@ -6927,6 +6976,51 @@ test "parse_expressionable_root parses 'sizeof(Type)' as an ordinary call" {
     }
     _ -> { panic("expected an Expression node"); }
   }
+}
+
+test "parse_expressionable_root parses 'sizeof(bin)' with a builtin type keyword operand" {
+  // Regression test: `std.map`'s own real `alloc()` body (`cap *
+  // sizeof(bin)`) -- found via the self-compile experiment -- failed to
+  // parse entirely ("expected expression"). Unlike a custom type name
+  // (`sizeof(Point)`, an ordinary `.Identifier` token, handled by
+  // `is_sizeof_type_operand` above), a BUILTIN scalar type name
+  // (`bin`/`num`/`str`/...) lexes as a `.Keyword` token, which
+  // `parse_expressionable_single` didn't have ANY primary-expression
+  // case for at all outside of `nil`/`panic`/`await`.
+  ParseState st = _state_from("sizeof(bin)");
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected 'sizeof(bin)' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Expression(e) -> {
+      assert equals(e.op, "()"), "expected op '()'";
+      fit e.left.kind {
+        .Identifier(s) -> { assert equals(s, "sizeof"), "expected callee 'sizeof'"; }
+        _ -> { panic("expected Identifier 'sizeof'"); }
+      }
+      fit e.right.kind {
+        .ExpressionParenthesis(inner) -> {
+          fit inner.kind {
+            .Identifier(s2) -> {
+              assert equals(s2, "bin"), "expected the operand 'bin' folded into a plain Identifier node";
+            }
+            _ -> { panic("expected Identifier 'bin'"); }
+          }
+        }
+        _ -> { panic("expected a parenthesized argument"); }
+      }
+    }
+    _ -> { panic("expected an Expression node"); }
+  }
+}
+
+test "parse_expressionable_root rejects a bare builtin type keyword outside of sizeof(...)" {
+  // The new sizeof-operand case must stay scoped to that ONE context --
+  // 'bin' on its own (not immediately inside 'sizeof(...)') still isn't a
+  // value expression.
+  ParseState st = _state_from("bin");
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_some(), "expected a bare 'bin' outside sizeof(...) to still be rejected";
 }
 
 test "parse_expressionable_root parses array indexing" {
