@@ -2380,12 +2380,12 @@ impl Parser {
     if t2.type == TokenType.Operator {
       bin is_lparen = false;
       bin is_lbracket = false;
-      bin is_dot_or_recv = false;
+      bin is_dot_recv_or_unary = false;
       fit t2.data {
         .Sval(s2) -> {
           is_lparen = equals(s2, "(");
           is_lbracket = equals(s2, "[");
-          is_dot_or_recv = equals(s2, ".") || equals(s2, "<-");
+          is_dot_recv_or_unary = equals(s2, ".") || equals(s2, "<-") || is_unary_operator(s2);
         }
         _ -> {}
       }
@@ -2403,12 +2403,14 @@ impl Parser {
         if berr.is_some() {
           ret berr;
         }
-      } elif is_dot_or_recv {
-        // Allow enum-variant shorthand (`.Variant`) and a prefix channel
-        // receive (`<-ch`) as a valid RHS operand after a binary
-        // operator (`sum + <-ch`, `x == .Variant`): `parse_normal_expression`
-        // sees no left operand here and routes to the `.`/`<-` prefix
-        // handler above.
+      } elif is_dot_recv_or_unary {
+        // Allow enum-variant shorthand (`.Variant`), a prefix channel
+        // receive (`<-ch`), or a PREFIX UNARY operator (`-`, `!`, `~`,
+        // `*`, `&`, `++`, `--`) as a valid RHS operand after a binary
+        // operator (`sum + <-ch`, `x == .Variant`, `x != -1`):
+        // `parse_normal_expression` sees no left operand here and routes
+        // to the `.`/`<-`/unary prefix handler above (its own trailing
+        // `is_unary_operator(op)` check, the same one this mirrors).
         let rerr = self.parse_normal_expression();
         if rerr.is_some() {
           ret rerr;
@@ -6719,6 +6721,38 @@ test "parse_expressionable_root parses a simple binary expression" {
       fit e.right.kind {
         .Identifier(s) -> { assert equals(s, "b"), "expected right 'b'"; }
         _ -> { panic("expected Identifier 'b'"); }
+      }
+    }
+    _ -> { panic("expected an Expression node"); }
+  }
+}
+
+test "parse_expressionable_root parses a negative-literal right-hand side after a comparison operator" {
+  // Regression test: `x != -1` (found via the self-compile experiment in
+  // stdlib/std/string.fn's own real `contains` function) used to fail
+  // "expected expressionable for '!=' operator" -- the binary-RHS
+  // continuation only recognized '(', '[', '.', and '<-' as valid
+  // operator-token starts for the right-hand operand, not a prefix
+  // unary operator like '-'.
+  Vec<str> names;
+  names.init(0);
+  names.push("x");
+  ParseState st = _state_with_declared("x != -1", names);
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected 'x != -1' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Expression(e) -> {
+      assert equals(e.op, "!="), "expected op '!='";
+      fit e.right.kind {
+        .Unary(u) -> {
+          assert equals(u.op, "-"), "expected the right operand to be a unary '-'";
+          fit u.operand.kind {
+            .Number(_) -> {}
+            _ -> { panic("expected the unary operand to be a Number"); }
+          }
+        }
+        _ -> { panic("expected the right operand to be a Unary node"); }
       }
     }
     _ -> { panic("expected an Expression node"); }
