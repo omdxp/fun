@@ -178,6 +178,21 @@ compound ChainResolution {
   bin is_pointer;
 }
 
+// One variant's template shape within a generic enum template (see
+// `Codegen.generic_enum_names`'s doc comment): its bare name, whether it
+// carries a payload, and -- if so -- each payload position's OWN
+// pre-substitution declared type (possibly a bare occurrence of one of
+// the enclosing template's type-param names, e.g. `T` in `Some(T)`),
+// substituted per concrete instantiation the same way a generic
+// compound's own fields are (see `ensure_compound_instantiated`'s doc
+// comment).
+compound GenericEnumVariantTemplate {
+  str name;
+  bin has_payload;
+  Vec<str> payload_type_strs;
+  Vec<bin> payload_is_pointer;
+}
+
 pub compound Codegen {
   CodegenState* state;
   // A best-effort, function-local (reset at the start of every
@@ -256,9 +271,20 @@ pub compound Codegen {
   Vec<Vec<str>> generic_compound_field_names;
   Vec<Vec<str>> generic_compound_field_type_names;
   Vec<Vec<bin>> generic_compound_field_is_pointer;
+  // A generic ENUM template (`enum Option<T> { ... }`): its name,
+  // type-param names, and each variant's OWN pre-substitution template
+  // shape -- recorded by `emit_enum` when it sees `has_type_params`,
+  // WITHOUT emitting any C, same reasoning as the generic COMPOUND
+  // registry above (see `ensure_enum_instantiated`'s doc comment).
+  Vec<str> generic_enum_names;
+  Vec<Vec<str>> generic_enum_type_params;
+  Vec<Vec<GenericEnumVariantTemplate>> generic_enum_variants;
   // Mangled names already monomorphized (see `ensure_compound_
-  // instantiated`), so instantiating the SAME concrete type arguments
-  // twice doesn't emit a duplicate C typedef.
+  // instantiated`/`ensure_enum_instantiated`), so instantiating the SAME
+  // concrete type arguments twice doesn't emit a duplicate C typedef --
+  // shared across both compound and enum instantiations, since their
+  // mangled names are drawn from the same namespace (a compound and an
+  // enum can never share a bare name in this language).
   Vec<str> emitted_generic_instantiations;
 }
 
@@ -283,6 +309,9 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.generic_compound_field_names.init(0);
   g.generic_compound_field_type_names.init(0);
   g.generic_compound_field_is_pointer.init(0);
+  g.generic_enum_names.init(0);
+  g.generic_enum_type_params.init(0);
+  g.generic_enum_variants.init(0);
   g.emitted_generic_instantiations.init(0);
   g.current_fn_rtype_name = "";
   g.expected_enum_type = "";
@@ -315,29 +344,37 @@ impl Codegen {
   // Writes `dt`'s C spelling via `write_type_name`, followed by one `*`
   // per pointer-depth level, and returns the RESOLVED type name used --
   // ordinarily just `dt.type_str` unchanged, but the MANGLED
-  // monomorphization name (`Box__num`) when `dt` is a generic
-  // instantiation (`dt.generic_args` non-empty, resolved via
-  // `ensure_compound_instantiated`). Callers that need to register this
-  // type for later lookup (`record_local`, a compound field's own
-  // registry entry) must use the RETURNED name, not `dt.type_str`
-  // directly -- for a generic instantiation those differ, and only the
-  // mangled name is what `record_compound` registers fields under.
+  // monomorphization name (`Box__num`, `Option__num`) when `dt` is a
+  // generic instantiation (`dt.generic_args` non-empty, resolved via
+  // `ensure_compound_instantiated` or, when that doesn't recognize the
+  // base name, `ensure_enum_instantiated`). Callers that need to
+  // register this type for later lookup (`record_local`, a compound
+  // field's own registry entry) must use the RETURNED name, not
+  // `dt.type_str` directly -- for a generic instantiation those differ,
+  // and only the mangled name is what `record_compound`/`record_enum`
+  // register fields/variants under.
   // 
   // `.None` means `dt` is a generic instantiation this codegen can't
   // resolve (an unrecognized template, wrong argument count, or a
-  // nested generic argument -- see `ensure_compound_instantiated`'s doc
-  // comment) -- the caller must reject rather than emit guessed/wrong
-  // C. Deliberately simplified from the original for this slice: no C-
-  // typedef-alias resolution, and only a generic COMPOUND (not enum or
-  // impl) is monomorphized.
+  // nested generic argument -- see `ensure_compound_instantiated`/
+  // `ensure_enum_instantiated`'s doc comments) -- the caller must reject
+  // rather than emit guessed/wrong C. Deliberately simplified from the
+  // original for this slice: no C-typedef-alias resolution, and a
+  // generic IMPL's own methods still aren't monomorphized (only its
+  // enclosing compound/enum type).
   pub write_type(DataType dt) Option<str> {
     str resolved_name = dt.type_str;
     if dt.generic_args.len > 0 {
-      let inst = self.ensure_compound_instantiated(dt);
-      if inst.is_none() {
-        ret .None;
+      let compound_inst = self.ensure_compound_instantiated(dt);
+      if compound_inst.is_some() {
+        resolved_name = compound_inst.unwrap();
+      } else {
+        let enum_inst = self.ensure_enum_instantiated(dt);
+        if enum_inst.is_none() {
+          ret .None;
+        }
+        resolved_name = enum_inst.unwrap();
       }
-      resolved_name = inst.unwrap();
     }
     self.write_type_name(resolved_name);
     num ptr_depth = dt.pointer_depth;
@@ -483,6 +520,195 @@ impl Codegen {
     );
     self.emitted_generic_instantiations.push(mangled_name);
     ret .Some(mangled_name);
+  }
+
+  // Given a DataType with `generic_args` non-empty (`Option<num>`),
+  // resolves -- and, the FIRST time this exact instantiation is seen,
+  // EMITS -- the concrete monomorphized C enum/tagged-union for it,
+  // returning the mangled name (`Option__num`). Mirrors
+  // `ensure_compound_instantiated` almost exactly (same mangling
+  // scheme, same `.None` conditions -- an unrecognized template, wrong
+  // argument count, or a nested generic argument -- same repeat-
+  // instantiation dedup via `emitted_generic_instantiations`, shared
+  // with compounds since a compound and an enum can never share a bare
+  // name); the difference is purely in what gets emitted per variant
+  // (see `emit_tagged_union_enum_instance`'s doc comment for the
+  // tagged-union layout, or a plain C enum inline below when no variant
+  // has a payload).
+  // 
+  // Only called from `write_type` AFTER `ensure_compound_instantiated`
+  // already found no matching compound template -- so this only needs
+  // to search the ENUM registry, not re-check compounds.
+  ensure_enum_instantiated(DataType dt) Option<str> {
+    num template_idx = 0;
+    bin found = false;
+    for template_idx < self.generic_enum_names.len {
+      if equals(self.generic_enum_names.get(template_idx), dt.type_str) {
+        found = true;
+        break;
+      }
+      template_idx = template_idx + 1;
+    }
+    if !found {
+      ret .None;
+    }
+
+    let type_params = self.generic_enum_type_params.get(template_idx);
+    if type_params.len != dt.generic_args.len {
+      ret .None;
+    }
+
+    StringBuilder name_sb = string_builder_init(16);
+    name_sb.append(dt.type_str);
+    Vec<str> arg_type_names;
+    arg_type_names.init(0);
+    Vec<bin> arg_is_pointer;
+    arg_is_pointer.init(0);
+    num ai = 0;
+    for ai < dt.generic_args.len {
+      let arg = dt.generic_args.get(ai);
+      if arg.generic_args.len > 0 {
+        ret .None;
+      }
+      name_sb.append("__");
+      name_sb.append(arg.type_str);
+      bin arg_ptr = dtype_is_pointer(*arg);
+      if arg_ptr {
+        name_sb.append("_ptr");
+        name_sb.append(format_num(arg.pointer_depth));
+      }
+      arg_type_names.push(arg.type_str);
+      arg_is_pointer.push(arg_ptr);
+      ai = ai + 1;
+    }
+    str mangled_name = name_sb.build();
+
+    num ei = 0;
+    for ei < self.emitted_generic_instantiations.len {
+      if equals(self.emitted_generic_instantiations.get(ei), mangled_name) {
+        ret .Some(mangled_name);
+      }
+      ei = ei + 1;
+    }
+
+    let variant_templates = self.generic_enum_variants.get(template_idx);
+
+    bin is_tagged_union = false;
+    for vt : variant_templates {
+      if vt.has_payload {
+        is_tagged_union = true;
+      }
+    }
+
+    Vec<str> variant_names;
+    variant_names.init(0);
+    for vt : variant_templates {
+      variant_names.push(vt.name);
+    }
+
+    if is_tagged_union {
+      self.emit_tagged_union_enum_instance(
+        mangled_name,
+        variant_templates,
+        type_params,
+        arg_type_names,
+        arg_is_pointer
+      );
+    } else {
+      self.state.write("typedef enum ");
+      self.state.write(mangled_name);
+      self.state.write(" {\n");
+      for vt : variant_templates {
+        self.state.write("  ");
+        self.state.write(mangled_name);
+        self.state.write("_");
+        self.state.write(vt.name);
+        self.state.write(",\n");
+      }
+      self.state.write("} ");
+      self.state.write(mangled_name);
+      self.state.write(";\n\n");
+    }
+
+    self.record_enum(mangled_name, variant_names, is_tagged_union);
+    self.emitted_generic_instantiations.push(mangled_name);
+    ret .Some(mangled_name);
+  }
+
+  // Emits ONE concrete monomorphization of a generic tagged-union enum
+  // template -- same C layout as `emit_tagged_union_enum`, but using
+  // `mangled_name` throughout instead of the template's own bare name,
+  // and substituting each variant's payload types against the
+  // template's OWN type-param names (`type_params`), positionally
+  // matched to this instantiation's concrete `arg_type_names`/
+  // `arg_is_pointer` -- the exact same substitution
+  // `ensure_compound_instantiated` applies to a generic compound's own
+  // fields. A payload type that ISN'T a bare occurrence of one of
+  // `type_params` is left unchanged, same limitation/reasoning as the
+  // compound case (see `ensure_compound_instantiated`'s doc comment) --
+  // covers `Option<T> { Some(T), None }`/`Result<T, E> { Ok(T), Err(E) }`
+  // exactly, not a payload that's itself a nested generic instantiation
+  // of the type param.
+  emit_tagged_union_enum_instance(
+    str mangled_name,
+    Vec<GenericEnumVariantTemplate> variant_templates,
+    Vec<str> type_params,
+    Vec<str> arg_type_names,
+    Vec<bin> arg_is_pointer
+  ) {
+    self.state.write("typedef enum ");
+    self.state.write(mangled_name);
+    self.state.write("_tag {\n");
+    for vt : variant_templates {
+      self.state.write("  ");
+      self.state.write(mangled_name);
+      self.state.write("_");
+      self.state.write(vt.name);
+      self.state.write(",\n");
+    }
+    self.state.write("} ");
+    self.state.write(mangled_name);
+    self.state.write("_tag;\n");
+
+    self.state.write("typedef struct ");
+    self.state.write(mangled_name);
+    self.state.write(" {\n  ");
+    self.state.write(mangled_name);
+    self.state.write("_tag tag;\n  union {\n");
+    for vt : variant_templates {
+      if vt.has_payload {
+        self.state.write("    struct { ");
+        num i = 0;
+        for i < vt.payload_type_strs.len {
+          str ptype = vt.payload_type_strs.get(i);
+          bin pptr = vt.payload_is_pointer.get(i);
+          str resolved_type = ptype;
+          bin resolved_ptr = pptr;
+          num pi = 0;
+          for pi < type_params.len {
+            if equals(type_params.get(pi), ptype) {
+              resolved_type = arg_type_names.get(pi);
+              resolved_ptr = arg_is_pointer.get(pi);
+            }
+            pi = pi + 1;
+          }
+          self.write_type_name(resolved_type);
+          if resolved_ptr {
+            self.state.write("*");
+          }
+          self.state.write(" _");
+          self.state.write(format_num(i));
+          self.state.write("; ");
+          i = i + 1;
+        }
+        self.state.write("} ");
+        self.state.write(vt.name);
+        self.state.write(";\n");
+      }
+    }
+    self.state.write("  } payload;\n} ");
+    self.state.write(mangled_name);
+    self.state.write(";\n\n");
   }
 
   // Records that local `name` is (or isn't) a pointer, and its declared
@@ -1941,28 +2167,48 @@ impl Codegen {
     }
   }
 
-  // Emits a non-generic, non-tagged-union (no variant has a payload)
-  // `enum Name { variants }` declaration as a C enum typedef: `typedef
-  // enum Name { Name_Variant1, Name_Variant2 = <val>, ... } Name;` --
-  // single underscore between the enum name and each variant, matching
-  // the original and distinct from the double-underscore `Type__method`
-  // impl-method mangling. Also registers the enum (`record_enum`) so a
-  // later `EnumName.Variant` qualified access resolves to the right
-  // constant -- see `emit_field_access`'s doc comment.
+  // Emits a non-generic `enum Name { variants }` declaration -- either a
+  // plain C enum typedef (`typedef enum Name { Name_Variant1,
+  // Name_Variant2 = <val>, ... } Name;`, single underscore, distinct
+  // from the double-underscore `Type__method` impl-method mangling) when
+  // no variant carries a payload, or the tagged-union discriminant-
+  // enum-plus-struct/union layout (see `emit_tagged_union_enum`'s doc
+  // comment) when at least one does. Also registers the enum
+  // (`record_enum`) so a later `EnumName.Variant` qualified access
+  // resolves to the right constant -- see `emit_field_access`'s doc
+  // comment.
   // 
-  // Deliberately simplified from the original for this slice: a
-  // TAGGED-UNION enum (any variant with a payload, `has_payload`) is
-  // silently skipped -- that lowers to a `struct { tag; union; }` in the
-  // original, a separate, larger deferred item (this also blocks bare
-  // enum-variant-shorthand patterns like `.Some(x)`, since those need a
-  // payload-carrying enum's tag/union machinery, not just a constant). A
-  // GENERIC enum (`has_type_params`) is skipped too, same reasoning as
-  // `emit_compound`'s generic-template skip -- monomorphization is
-  // separate.
+  // A GENERIC enum (`has_type_params`, e.g. `enum Option<T> { ... }`) is
+  // instead only RECORDED as a template (see
+  // `Codegen.generic_enum_names`'s doc comment) -- never emitted
+  // directly itself, matching `emit_compound`'s own rule for a generic
+  // compound: only a concrete monomorphized specialization
+  // (`ensure_enum_instantiated`) is ever actually emitted.
   emit_enum(Node node) Option<CodegenErrorKind> {
     fit node.kind {
       .Enum(e) -> {
         if e.has_type_params {
+          Vec<GenericEnumVariantTemplate> variant_templates;
+          variant_templates.init(0);
+          for v : e.variants {
+            GenericEnumVariantTemplate vt;
+            vt.name = v.name;
+            vt.has_payload = v.has_payload && v.payload.len > 0;
+            Vec<str> payload_type_strs;
+            payload_type_strs.init(0);
+            Vec<bin> payload_is_pointer;
+            payload_is_pointer.init(0);
+            for pt : v.payload {
+              payload_type_strs.push(pt.type_str);
+              payload_is_pointer.push(dtype_is_pointer(*pt));
+            }
+            vt.payload_type_strs = payload_type_strs;
+            vt.payload_is_pointer = payload_is_pointer;
+            variant_templates.push(vt);
+          }
+          self.generic_enum_names.push(e.name);
+          self.generic_enum_type_params.push(e.type_params);
+          self.generic_enum_variants.push(variant_templates);
           ret .None;
         }
         bin is_tagged_union = false;
@@ -3654,7 +3900,7 @@ test "emit_enum emits a tagged-union enum as a discriminant enum plus a tagged s
   ), "expected a discriminant enum, a tag field, and a union with only the payload variant present";
 }
 
-test "emit_enum skips a generic enum (monomorphization not yet supported)" {
+test "emit_enum records (not emits) a generic enum template" {
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
 
@@ -3664,8 +3910,8 @@ test "emit_enum skips a generic enum (monomorphization not yet supported)" {
   e.has_type_params = true;
 
   Node n = node_new(NodeKind.Enum(e));
-  assert g.emit_enum(n).is_none(), "expected a generic enum to be silently skipped";
-  assert equals(st.out.build(), ""), "expected nothing emitted for a generic enum";
+  assert g.emit_enum(n).is_none(), "expected a generic enum template to record cleanly";
+  assert equals(st.out.build(), ""), "expected nothing emitted for a template -- only a concrete instantiation emits C";
 }
 
 test "emit_expr emits a qualified enum-variant-constant access" {
@@ -4318,6 +4564,47 @@ fun _box_num_var_decl(str name) Node {
   ret node_new(NodeKind.Variable(v));
 }
 
+// Records a generic tagged-union enum template equivalent to
+// `enum Opt<T> { Some(T), None }`, for the monomorphization tests below.
+fun _record_opt_template(Codegen* g) {
+  EnumDeclNode e = enum_decl_node_new();
+  e.name = "Opt";
+  e.type_params.push("T");
+  e.has_type_params = true;
+
+  EnumVariant some_v = enum_variant_new();
+  some_v.name = "Some";
+  DataType* pdt = malloc(sizeof(DataType));
+  *pdt = dtype_new();
+  pdt.type_str = "T";
+  some_v.payload.push(pdt);
+  some_v.has_payload = true;
+  e.variants.push(some_v);
+
+  EnumVariant none_v = enum_variant_new();
+  none_v.name = "None";
+  e.variants.push(none_v);
+
+  Node n = node_new(NodeKind.Enum(e));
+  g.emit_enum(n);
+}
+
+// An `Opt<num> name;` Variable declaration node.
+fun _opt_num_var_decl(str name) Node {
+  DataType* num_arg = malloc(sizeof(DataType));
+  *num_arg = dtype_new();
+  num_arg.type_str = "num";
+  DataType* opt_dt = malloc(sizeof(DataType));
+  *opt_dt = dtype_new();
+  opt_dt.type_str = "Opt";
+  opt_dt.generic_args.push(num_arg);
+  VariableNode v;
+  v.var_type = opt_dt;
+  v.name = name;
+  v.has_val = false;
+  ret node_new(NodeKind.Variable(v));
+}
+
 test "emit_statement instantiates a generic compound's monomorphized struct on first use" {
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
@@ -4468,6 +4755,179 @@ test "ensure_compound_instantiated mangles a pointer-typed generic argument dist
     st.out.build(),
     "typedef struct Box__Node_ptr1 {\n  Node* value;\n} Box__Node_ptr1;\n\nBox__Node_ptr1 b;\n"
   ), "expected the mangled name to include the pointer depth, and the field itself to be a pointer";
+}
+
+test "emit_statement instantiates a generic tagged-union enum on first use" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  _record_opt_template(&g);
+
+  Node n = _opt_num_var_decl("o");
+  assert g.emit_statement(n).is_none(), "expected the Opt<num> declaration to emit";
+  assert equals(
+    st.out.build(),
+    "typedef enum Opt__num_tag {\n  Opt__num_Some,\n  Opt__num_None,\n} Opt__num_tag;\ntypedef struct Opt__num {\n  Opt__num_tag tag;\n  union {\n    struct { int64_t _0; } Some;\n  } payload;\n} Opt__num;\n\nOpt__num o;\n"
+  ), "expected the monomorphized tagged-union emitted once, then the declaration using its mangled name";
+}
+
+test "emit_statement does not re-emit an already-instantiated generic enum" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  _record_opt_template(&g);
+
+  Node n1 = _opt_num_var_decl("o1");
+  Node n2 = _opt_num_var_decl("o2");
+  assert g.emit_statement(n1).is_none(), "expected the first Opt<num> declaration to emit";
+  assert g.emit_statement(n2).is_none(), "expected the second Opt<num> declaration to emit";
+  let out = st.out.build();
+  assert count(out, "typedef struct Opt__num {") == 1, "expected the tagged-union struct typedef only once, even though Opt<num> is used twice";
+}
+
+test "fit destructures a bare-shorthand pattern against a monomorphized generic enum local" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  _record_opt_template(&g);
+
+  Node decl = _opt_num_var_decl("o");
+  assert g.emit_statement(decl).is_none(), "expected the Opt<num> declaration to emit";
+
+  Node* blank = malloc(sizeof(Node));
+  *blank = node_new(NodeKind.Blank);
+  Node* variant_ident = malloc(sizeof(Node));
+  *variant_ident = node_new(NodeKind.Identifier("Some"));
+  ExprNode dot;
+  dot.left = blank;
+  dot.has_left = true;
+  dot.right = variant_ident;
+  dot.has_right = true;
+  dot.op = ".";
+  Node* cond = malloc(sizeof(Node));
+  *cond = node_new(NodeKind.Expression(dot));
+
+  Node* ret_r = malloc(sizeof(Node));
+  *ret_r = node_new(NodeKind.StatementReturn(nil));
+  Vec<Node*> stmts;
+  stmts.init(0);
+  stmts.push(ret_r);
+  BodyNode bn;
+  bn.statements = stmts;
+  Node* body = malloc(sizeof(Node));
+  *body = node_new(NodeKind.Body(bn));
+
+  FitBranch br = fit_branch_new();
+  br.condition = cond;
+  br.has_condition = true;
+  br.body = body;
+  br.bindings.push("v");
+  br.has_bindings = true;
+
+  FitStmtNode f = fit_stmt_node_new();
+  Node* o_ident = malloc(sizeof(Node));
+  *o_ident = node_new(NodeKind.Identifier("o"));
+  f.exp = o_ident;
+  f.branches.push(br);
+
+  Node fit_n = node_new(NodeKind.StatementFit(f));
+  assert g.emit_statement(fit_n).is_none(), "expected the bare-shorthand destructuring fit to emit against the monomorphized Opt__num local";
+  let out = st.out.build();
+  assert contains(out, "if (o.tag == Opt__num_Some) {"), "expected the tag check to use the MANGLED enum name, resolved via the local's own registered (mangled) type";
+  assert contains(out, "__auto_type v = o.payload.Some._0;"), "expected the payload binding to resolve too";
+}
+
+test "ensure_enum_instantiated rejects an unrecognized generic template name" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  _record_opt_template(&g);
+
+  DataType* num_arg = malloc(sizeof(DataType));
+  *num_arg = dtype_new();
+  num_arg.type_str = "num";
+  DataType* dt = malloc(sizeof(DataType));
+  *dt = dtype_new();
+  dt.type_str = "Unrecognized";
+  dt.generic_args.push(num_arg);
+  VariableNode v;
+  v.var_type = dt;
+  v.name = "x";
+  v.has_val = false;
+  Node n = node_new(NodeKind.Variable(v));
+
+  assert g.emit_statement(n).is_some(), "expected an unrecognized generic enum template name to be rejected rather than guessed";
+}
+
+test "ensure_enum_instantiated rejects a wrong generic argument count" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  _record_opt_template(&g);
+
+  DataType* num_arg = malloc(sizeof(DataType));
+  *num_arg = dtype_new();
+  num_arg.type_str = "num";
+  DataType* str_arg = malloc(sizeof(DataType));
+  *str_arg = dtype_new();
+  str_arg.type_str = "str";
+  DataType* dt = malloc(sizeof(DataType));
+  *dt = dtype_new();
+  dt.type_str = "Opt";
+  dt.generic_args.push(num_arg);
+  dt.generic_args.push(str_arg);
+  VariableNode v;
+  v.var_type = dt;
+  v.name = "x";
+  v.has_val = false;
+  Node n = node_new(NodeKind.Variable(v));
+
+  assert g.emit_statement(n).is_some(), "expected Opt (one type param) instantiated with two arguments to be rejected";
+}
+
+test "ensure_enum_instantiated rejects a nested generic argument" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  _record_opt_template(&g);
+
+  DataType* num_arg = malloc(sizeof(DataType));
+  *num_arg = dtype_new();
+  num_arg.type_str = "num";
+  DataType* inner_vec = malloc(sizeof(DataType));
+  *inner_vec = dtype_new();
+  inner_vec.type_str = "Vec";
+  inner_vec.generic_args.push(num_arg);
+  DataType* dt = malloc(sizeof(DataType));
+  *dt = dtype_new();
+  dt.type_str = "Opt";
+  dt.generic_args.push(inner_vec);
+  VariableNode v;
+  v.var_type = dt;
+  v.name = "x";
+  v.has_val = false;
+  Node n = node_new(NodeKind.Variable(v));
+
+  assert g.emit_statement(n).is_some(), "expected Opt<Vec<num>> (a nested generic argument) to be rejected -- not yet supported";
+}
+
+test "ensure_enum_instantiated mangles a pointer-typed generic argument distinctly" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  _record_opt_template(&g);
+
+  DataType* node_ptr_arg = malloc(sizeof(DataType));
+  *node_ptr_arg = dtype_new();
+  node_ptr_arg.type_str = "Node";
+  node_ptr_arg.pointer_depth = 1;
+  DataType* dt = malloc(sizeof(DataType));
+  *dt = dtype_new();
+  dt.type_str = "Opt";
+  dt.generic_args.push(node_ptr_arg);
+  VariableNode v;
+  v.var_type = dt;
+  v.name = "o";
+  v.has_val = false;
+  Node n = node_new(NodeKind.Variable(v));
+
+  assert g.emit_statement(n).is_none(), "expected Opt<Node*> to instantiate";
+  let out = st.out.build();
+  assert contains(out, "Opt__Node_ptr1"), "expected the mangled name to include the pointer depth";
+  assert contains(out, "Node* _0;"), "expected the Some payload field itself to be a pointer";
 }
 
 test "emit_statement emits a bare assignment expression as a statement" {
