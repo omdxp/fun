@@ -50,8 +50,12 @@
 // defined it -- see `register_impl_methods`/`emit_method_call`'s doc
 // comments) from the receiver's known local type, `fit subject {
 // patterns -> { body } ... }` over a plain identifier, a `*name`
-// dereference (`fit *self { ... }`), or a chained field access (`fit
-// t.data { ... }`) subject -- either a literal-pattern chain, or a
+// dereference (`fit *self { ... }`), a chained field access (`fit
+// t.data { ... }`), or a `receiver.method()` call (`fit self.next_tok()
+// { ... }`, hoisted into a temp `__auto_type` variable first since,
+// unlike the other three subject shapes, it can't just be re-evaluated
+// per branch -- see `Codegen.impl_method_rtype`'s doc comment) subject
+// -- either a literal-pattern chain, or a
 // tagged-union enum-variant pattern (bare `.Variant`/`.Variant(x)`,
 // resolved against the SUBJECT's own declared/resolved type, or
 // qualified `EnumName.Variant`/`EnumName.Variant(x)`),
@@ -132,9 +136,13 @@
 // value dispatched through `.next()`) -- see `emit_for_iter`'s doc
 // comment; `[]` (indexing).
 // - A `fit` subject that isn't a plain identifier, a single `*name`
-// dereference, or a chained field access (a CALL subject needs a temp
-// variable AND a type to declare it with -- see `emit_fit`'s doc
-// comment).
+// dereference, a chained field access, or a `receiver.method()` call
+// matching `emit_method_call`'s own recognized shape (this last one now
+// works: a temp `__auto_type` variable holds the call's result, and its
+// bare-shorthand enum type resolves from the CALLEE's own declared
+// return type -- see `emit_fit`'s doc comment and `Codegen.
+// impl_method_rtype`) -- a plain-FUNCTION-call subject, or a chained
+// call (`a.b().c()`), is still rejected rather than guessed.
 // - Every declaration kind besides a plain function/compound (generic or
 // not)/enum (generic or not)/impl (generic or not) (a top-level `quirk`
 // declaration itself needs no C emission at all -- it's a structural,
@@ -278,6 +286,19 @@ pub compound Codegen {
   Vec<str> impl_method_owner_type;
   Vec<str> impl_method_bare_name;
   Vec<str> impl_method_mangled_name;
+  // Each entry's OWN declared return type, parallel to the three arrays
+  // above -- lets `emit_fit` resolve a bare-shorthand enum pattern
+  // (`.Some(x) -> { ... }`) against a `fit self.method() { ... }`
+  // subject (a CALL, not a plain local) by looking up the CALLEE's own
+  // declared return type instead of a local's, then hoisting a temp
+  // `__auto_type` variable to hold the call's result (see
+  // `emit_fit`'s doc comment for why a call subject specifically needs
+  // one). Populated ONLY for a PLAIN (non-generic) impl's methods, by
+  // `register_impl_methods` -- a generic impl's own monomorphized
+  // methods aren't registered here yet (a separate, smaller follow-up:
+  // `maybe_instantiate_generic_impl_methods` would need to resolve the
+  // SUBSTITUTED return type, not the template's raw `T`).
+  Vec<DataType*> impl_method_rtype;
   // A generic COMPOUND template (`compound Box<T> { ... }`): its name,
   // type-param names, and each field's OWN pre-substitution declared
   // type -- recorded by `emit_compound` when it sees `has_type_params`,
@@ -366,6 +387,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.impl_method_owner_type.init(0);
   g.impl_method_bare_name.init(0);
   g.impl_method_mangled_name.init(0);
+  g.impl_method_rtype.init(0);
   g.generic_compound_names.init(0);
   g.generic_compound_type_params.init(0);
   g.generic_compound_field_names.init(0);
@@ -499,21 +521,13 @@ impl Codegen {
   // rather than emit guessed/wrong C. Deliberately simplified from the
   // original for this slice: no C-typedef-alias resolution.
   pub write_type(DataType dt) Option<str> {
-    let rdt = self.resolve_type_subst(dt);
-    str resolved_name = rdt.type_str;
-    if rdt.generic_args.len > 0 {
-      let compound_inst = self.ensure_compound_instantiated(rdt);
-      if compound_inst.is_some() {
-        resolved_name = compound_inst.unwrap();
-      } else {
-        let enum_inst = self.ensure_enum_instantiated(rdt);
-        if enum_inst.is_none() {
-          ret .None;
-        }
-        resolved_name = enum_inst.unwrap();
-      }
+    let resolved = self.resolve_type_name(dt);
+    if resolved.is_none() {
+      ret .None;
     }
+    str resolved_name = resolved.unwrap();
     self.write_type_name(resolved_name);
+    let rdt = self.resolve_type_subst(dt);
     num ptr_depth = rdt.pointer_depth;
     if ptr_depth == 0 && rdt.flags.is_pointer {
       ptr_depth = 1;
@@ -524,6 +538,25 @@ impl Codegen {
       i = i + 1;
     }
     ret .Some(resolved_name);
+  }
+
+  // The name-resolution half of `write_type`, split out so a caller that
+  // only needs `dt`'s resolved NAME (not to emit its C spelling inline
+  // right now) can trigger the same monomorphization side effect without
+  // writing anything -- `emit_fit` uses this to resolve a `fit self.
+  // method() { ... }` CALL subject's declared return type (see its own
+  // doc comment), where a temp `__auto_type` variable holds the value
+  // and no explicit C type needs to be written at all.
+  resolve_type_name(DataType dt) Option<str> {
+    let rdt = self.resolve_type_subst(dt);
+    if rdt.generic_args.len == 0 {
+      ret .Some(rdt.type_str);
+    }
+    let compound_inst = self.ensure_compound_instantiated(rdt);
+    if compound_inst.is_some() {
+      ret compound_inst;
+    }
+    ret self.ensure_enum_instantiated(rdt);
   }
 
   // Appends `text` (a fully-rendered struct/enum typedef or generic impl
@@ -909,7 +942,7 @@ impl Codegen {
               nb.append(bare_name);
               str new_name = nb.build();
 
-              self.record_impl_method(mangled_name, bare_name, new_name);
+              self.record_impl_method(mangled_name, bare_name, new_name, nil);
 
               CodegenState method_scratch = codegen_state_new();
               CodegenState* saved_method_state = self.state;
@@ -1137,13 +1170,38 @@ impl Codegen {
     ret .None;
   }
 
-  // Records one impl method's owning type, bare name, and fully mangled
-  // C call-site name -- see `Codegen.impl_method_owner_type`'s doc
-  // comment.
-  record_impl_method(str owner_type, str bare_name, str mangled_name) {
+  // Records one impl method's owning type, bare name, fully mangled
+  // C call-site name, and OWN declared return type (`nil` when unknown,
+  // e.g. a generic impl's method -- see `Codegen.impl_method_rtype`'s
+  // doc comment) -- see `Codegen.impl_method_owner_type`'s doc comment.
+  record_impl_method(str owner_type, str bare_name, str mangled_name, DataType* rtype) {
     self.impl_method_owner_type.push(owner_type);
     self.impl_method_bare_name.push(bare_name);
     self.impl_method_mangled_name.push(mangled_name);
+    self.impl_method_rtype.push(rtype);
+  }
+
+  // Looks up `bare_name`'s OWN declared return type on the known
+  // impl-implementing type `owner_type` -- see `Codegen.
+  // impl_method_rtype`'s doc comment. `.None` means either the method
+  // isn't recognized at all, or it IS but its return type wasn't
+  // recorded (a generic impl's method).
+  lookup_impl_method_rtype(str owner_type, str bare_name) Option<DataType*> {
+    num i = 0;
+    for i < self.impl_method_owner_type.len {
+      if equals(self.impl_method_owner_type.get(i), owner_type) && equals(
+        self.impl_method_bare_name.get(i),
+        bare_name
+      ) {
+        let rtype = self.impl_method_rtype.get(i);
+        if rtype == nil {
+          ret .None;
+        }
+        ret .Some(rtype);
+      }
+      i = i + 1;
+    }
+    ret .None;
   }
 
   // Looks up `bare_name`'s fully mangled C call-site name on the known
@@ -2076,13 +2134,29 @@ impl Codegen {
   // Deliberately narrow for this slice: the subject must be a plain
   // identifier, a single `*name` dereference of a pointer local (the
   // `fit *self { ... }` idiom used throughout this codebase's own real
-  // stdlib), or a chained field access (`fit t.data { ... }`, resolved
-  // via `resolve_field_chain`) -- each re-evaluated once per branch
-  // instead of hoisted into a temp variable, safe only because none of
-  // these three shapes has a side effect when read twice (a CALL subject
-  // would need a temp var, and this codegen has no type to declare one
-  // with anyway, so it's still rejected). A comma-chained LITERAL pattern
-  // (`1, 2 -> ...`) matches any of its values (OR-ed comparisons); reuses
+  // stdlib), a chained field access (`fit t.data { ... }`, resolved via
+  // `resolve_field_chain`), or a METHOD CALL (`fit self.method() {
+  // ... }`, the single most common shape in this codebase's own real
+  // parser -- e.g. `fit self.tokens_peek_no_increment() { .Some(t) -> {
+  // ... } .None -> { ... } }`) -- the first three are each re-evaluated
+  // once per branch instead of hoisted into a temp variable, safe only
+  // because none of them has a side effect when read twice; a CALL
+  // subject can't be re-evaluated (a real side effect, e.g. advancing a
+  // cursor) so it's hoisted into ONE `__auto_type __fit_subj = <call>;`
+  // temp declaration first (mirroring `emit_for_iter`'s own fixed-name,
+  // no-real-hygiene `__fun_i` -- a SECOND `fit`-over-a-call nested
+  // inside this one's own branch body would shadow it, an accepted,
+  // narrow limitation, not a silently wrong one), with its bare-
+  // shorthand enum type resolved from the CALLEE's own declared return
+  // type (`Codegen.impl_method_rtype`, populated by
+  // `register_impl_methods` -- see its own doc comment for why this is
+  // ONLY populated for a non-generic impl's methods so far) rather than
+  // a local's. Only a receiver.method() call matching `emit_method_call`
+  // exactly (plain-identifier receiver that's a known local, plain-
+  // identifier method name) is recognized; anything else (a plain-
+  // function call, a chained call, an unknown receiver/method) is
+  // rejected rather than guessed. A comma-chained LITERAL pattern (`1, 2
+  // -> ...`) matches any of its values (OR-ed comparisons); reuses
   // `flatten_call_args` directly for that, since it's the exact same
   // comma-flattening a call's argument list needs. A destructuring/
   // enum-variant pattern whose enum/variant ISN'T recognized (an unknown
@@ -2113,17 +2187,63 @@ impl Codegen {
         }
       }
       .Expression(dot_e) -> {
-        if !equals(dot_e.op, ".") {
-          ret .Some(CodegenErrorKind.UnsupportedNode);
+        if equals(dot_e.op, "()") {
+          if !dot_e.has_left || !dot_e.has_right {
+            ret .Some(CodegenErrorKind.UnsupportedNode);
+          }
+          ExprNode recv_e;
+          fit dot_e.left.kind {
+            .Expression(inner) -> { recv_e = inner; }
+            _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+          }
+          if !equals(recv_e.op, ".") || !recv_e.has_left || !recv_e.has_right {
+            ret .Some(CodegenErrorKind.UnsupportedNode);
+          }
+          str recv_name = "";
+          fit recv_e.left.kind {
+            .Identifier(n) -> { recv_name = n; }
+            _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+          }
+          str method_name = "";
+          fit recv_e.right.kind {
+            .Identifier(n) -> { method_name = n; }
+            _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+          }
+          let owner_type = self.lookup_local_type_name(recv_name);
+          if owner_type.is_none() {
+            ret .Some(CodegenErrorKind.UnsupportedNode);
+          }
+          let rtype = self.lookup_impl_method_rtype(owner_type.unwrap(), method_name);
+          if rtype.is_none() {
+            ret .Some(CodegenErrorKind.UnsupportedNode);
+          }
+          let resolved_rtype = self.resolve_type_name(*rtype.unwrap());
+          if resolved_rtype.is_none() {
+            ret .Some(CodegenErrorKind.UnsupportedNode);
+          }
+          self.state.write("__auto_type __fit_subj = ");
+          let merr = self.emit_method_call(recv_e, dot_e.right);
+          if merr.is_some() {
+            ret merr;
+          }
+          self.state.write(";\n");
+          self.state.write_indent();
+          subj_name = "__fit_subj";
+          subj_type = resolved_rtype;
+          subj_is_pointer = false;
+        } else {
+          if !equals(dot_e.op, ".") {
+            ret .Some(CodegenErrorKind.UnsupportedNode);
+          }
+          let resolved = self.resolve_field_chain(f.exp);
+          if resolved.is_none() {
+            ret .Some(CodegenErrorKind.UnsupportedNode);
+          }
+          let r = resolved.unwrap();
+          subj_name = r.text;
+          subj_type = .Some(r.type_name);
+          subj_is_pointer = r.is_pointer;
         }
-        let resolved = self.resolve_field_chain(f.exp);
-        if resolved.is_none() {
-          ret .Some(CodegenErrorKind.UnsupportedNode);
-        }
-        let r = resolved.unwrap();
-        subj_name = r.text;
-        subj_type = .Some(r.type_name);
-        subj_is_pointer = r.is_pointer;
       }
       _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
     }
@@ -2729,12 +2849,18 @@ impl Codegen {
         str prefix = pfx.build();
         for m : i.methods {
           str mangled_name = "";
+          DataType* rtype = nil;
           fit m.kind {
-            .Function(fnv) -> { mangled_name = fnv.name; }
+            .Function(fnv) -> {
+              mangled_name = fnv.name;
+              if fnv.has_rtype {
+                rtype = fnv.rtype;
+              }
+            }
             _ -> {}
           }
           let bare_name = strip_prefix(mangled_name, prefix);
-          self.record_impl_method(i.type_name, bare_name, mangled_name);
+          self.record_impl_method(i.type_name, bare_name, mangled_name, rtype);
         }
       }
       _ -> {}
@@ -3742,6 +3868,117 @@ test "emit_statement emits a fit destructuring a bare enum-variant shorthand pat
     st.out.build(),
     "if (o.tag == Opt_Some) {\n    __auto_type r = o.payload.Some._0;\n    return;\n}\n"
   ), "expected a tag check plus a payload-field binding";
+}
+
+test "emit_statement emits a fit over a method-call subject, hoisting a temp __auto_type var" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  g.record_local("h", "Holder", false);
+
+  Vec<str> variants;
+  variants.init(0);
+  variants.push("Some");
+  variants.push("None");
+  g.record_enum("Opt", variants, true);
+
+  DataType* opt_rtype = malloc(sizeof(DataType));
+  *opt_rtype = dtype_new();
+  opt_rtype.type_str = "Opt";
+  g.record_impl_method("Holder", "get_opt", "Holder__get_opt", opt_rtype);
+
+  Node* recv = malloc(sizeof(Node));
+  *recv = node_new(NodeKind.Identifier("h"));
+  Node* method = malloc(sizeof(Node));
+  *method = node_new(NodeKind.Identifier("get_opt"));
+  ExprNode dot_e;
+  dot_e.left = recv;
+  dot_e.has_left = true;
+  dot_e.right = method;
+  dot_e.has_right = true;
+  dot_e.op = ".";
+  Node* dot_node = malloc(sizeof(Node));
+  *dot_node = node_new(NodeKind.Expression(dot_e));
+
+  Node* blank_arg = malloc(sizeof(Node));
+  *blank_arg = node_new(NodeKind.Blank);
+  Node* args = malloc(sizeof(Node));
+  *args = node_new(NodeKind.ExpressionParenthesis(blank_arg));
+
+  ExprNode call_e;
+  call_e.left = dot_node;
+  call_e.has_left = true;
+  call_e.right = args;
+  call_e.has_right = true;
+  call_e.op = "()";
+  Node* subj = malloc(sizeof(Node));
+  *subj = node_new(NodeKind.Expression(call_e));
+
+  Node* blank = malloc(sizeof(Node));
+  *blank = node_new(NodeKind.Blank);
+  Node* variant_ident = malloc(sizeof(Node));
+  *variant_ident = node_new(NodeKind.Identifier("Some"));
+  ExprNode dot;
+  dot.left = blank;
+  dot.has_left = true;
+  dot.right = variant_ident;
+  dot.has_right = true;
+  dot.op = ".";
+  Node* cond = malloc(sizeof(Node));
+  *cond = node_new(NodeKind.Expression(dot));
+
+  Node* ret_r = malloc(sizeof(Node));
+  *ret_r = node_new(NodeKind.StatementReturn(nil));
+  Vec<Node*> stmts;
+  stmts.init(0);
+  stmts.push(ret_r);
+  BodyNode bn;
+  bn.statements = stmts;
+  Node* body = malloc(sizeof(Node));
+  *body = node_new(NodeKind.Body(bn));
+
+  FitBranch br = fit_branch_new();
+  br.condition = cond;
+  br.has_condition = true;
+  br.body = body;
+  br.bindings.push("r");
+  br.has_bindings = true;
+
+  FitStmtNode f = fit_stmt_node_new();
+  f.exp = subj;
+  f.branches.push(br);
+
+  Node n = node_new(NodeKind.StatementFit(f));
+  assert g.emit_statement(n).is_none(), "expected the fit-over-a-method-call to emit";
+  assert equals(
+    st.out.build(),
+    "__auto_type __fit_subj = Holder__get_opt(&h);\nif (__fit_subj.tag == Opt_Some) {\n    __auto_type r = __fit_subj.payload.Some._0;\n    return;\n}\n"
+  ), "expected the call hoisted into a temp var first, then the tag check/binding against IT, not the call re-evaluated per branch";
+}
+
+test "emit_statement rejects a fit over a call whose callee isn't a recognized receiver.method() shape" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  Node* callee = malloc(sizeof(Node));
+  *callee = node_new(NodeKind.Identifier("some_free_function"));
+  Node* blank_arg = malloc(sizeof(Node));
+  *blank_arg = node_new(NodeKind.Blank);
+  Node* args = malloc(sizeof(Node));
+  *args = node_new(NodeKind.ExpressionParenthesis(blank_arg));
+  ExprNode call_e;
+  call_e.left = callee;
+  call_e.has_left = true;
+  call_e.right = args;
+  call_e.has_right = true;
+  call_e.op = "()";
+  Node* subj = malloc(sizeof(Node));
+  *subj = node_new(NodeKind.Expression(call_e));
+
+  FitStmtNode f = fit_stmt_node_new();
+  f.exp = subj;
+
+  Node n = node_new(NodeKind.StatementFit(f));
+  assert g.emit_statement(n).is_some(), "expected a plain-function-call fit subject (not receiver.method()) to be rejected, not guessed";
 }
 
 test "emit_statement emits a fit over a '*self'-dereferenced subject using '->'" {
