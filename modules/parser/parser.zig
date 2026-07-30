@@ -4555,6 +4555,133 @@ pub const ParseProcess = struct {
         };
     }
 
+    /// Parses a `fuzz "name" (data, len) { ... }` declaration (top-level
+    /// only, like `test`).
+    ///
+    /// Syntax: `fuzz "description" (data_name, len_name) { ...body... }`
+    ///
+    /// The two parameter names are user-chosen but their TYPES are always
+    /// fixed (`raw* data_name, num len_name` -- the byte buffer + length a
+    /// fuzzing engine feeds in), so unlike a real function's parameter list
+    /// there is no type annotation to parse, just two bare identifiers.
+    /// Skipped entirely by an ordinary compile OR `fun test` mode; only
+    /// emitted/run in `fun fuzz` mode.
+    fn parse_fuzz(self: *Self, hist: *utils.History) ParseError!void {
+        if (!hist.flags.is_global_scope) {
+            self.transpile_proc.err("'fuzz' declarations are only valid at the top level", .{});
+            return ParseError.InvalidStatement;
+        }
+        const fuzz_token = self.token_next(); // skip 'fuzz'
+        const name_tok = self.token_next();
+        if (name_tok == null or name_tok.?.type != .String) {
+            self.transpile_proc.err("expected a string name after 'fuzz'", .{});
+            return ParseError.InvalidString;
+        }
+        const name = name_tok.?.data.sval.items;
+
+        _ = try self.transpile_proc.new_scope();
+        errdefer self.transpile_proc.finish_scope();
+
+        try self.expect_op("(");
+        const data_tok = self.token_next();
+        if (data_tok == null or data_tok.?.type != .Identifier) {
+            self.transpile_proc.err("expected a parameter name after 'fuzz \"name\" ('", .{});
+            return ParseError.InvalidIdentifier;
+        }
+        if (!self.next_token_is_operator(",")) {
+            self.transpile_proc.err("expected ',' between fuzz parameter names", .{});
+            return ParseError.InvalidSymbol;
+        }
+        _ = self.token_next(); // skip ,
+        const len_tok = self.token_next();
+        if (len_tok == null or len_tok.?.type != .Identifier) {
+            self.transpile_proc.err("expected a second parameter name after the comma in 'fuzz'", .{});
+            return ParseError.InvalidIdentifier;
+        }
+        try self.expect_sym(')');
+
+        const data_param = data_tok.?.data.sval.items;
+        const len_param = len_tok.?.data.sval.items;
+
+        // Register the two fixed-type synthetic parameters into this fuzz
+        // body's own scope, the same way `parse_function`'s variadic
+        // `vargs` synthetic parameter registers itself (see
+        // `parse_function`'s own `is_variadic` branch) -- so ordinary
+        // identifier resolution inside the body just works.
+        inline for (.{
+            .{ .param_name = data_param, .type_name = "raw", .pointer_depth = @as(usize, 1) },
+            .{ .param_name = len_param, .type_name = "num", .pointer_depth = @as(usize, 0) },
+        }) |p| {
+            const pnode = self.transpile_proc.allocator.create(ast.Node) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer self.transpile_proc.allocator.destroy(pnode);
+            var pname = ArrayList(u8).init(self.transpile_proc.allocator);
+            pname.appendSlice(p.param_name) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+            const pdt = self.transpile_proc.allocator.create(dtype.DataType) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+            var ptype_str = ArrayList(u8).init(self.transpile_proc.allocator);
+            ptype_str.appendSlice(p.type_name) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+            pdt.* = dtype.DataType{
+                .type = utils.get_datatype_type(p.type_name),
+                .type_str = ptype_str,
+                .pointer_depth = p.pointer_depth,
+                .flags = .{ .is_pointer = p.pointer_depth > 0 },
+            };
+            pnode.* = ast.Node{
+                .type = .Variable,
+                .pos = if (fuzz_token) |t| t.pos else null,
+                .node_variant = .{ .variable = .{ .name = pname, .type = pdt } },
+            };
+            const scope_entity = try self.new_scope_entity(pnode, .{});
+            self.transpile_proc.owned_nodes.append(pnode) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer _ = self.transpile_proc.owned_nodes.pop();
+            self.transpile_proc.owned_scope_entities.append(scope_entity) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+            errdefer _ = self.transpile_proc.owned_scope_entities.pop();
+            try self.transpile_proc.push_scope_entity(scope_entity);
+        }
+
+        // A dummy function context so ordinary statement parsing (`if`/
+        // `for`/`ret`/etc.) works the same inside a fuzz body as inside a
+        // real function body -- same reasoning as `parse_test`.
+        const prev_fn = self.parser_current_function;
+        self.parser_current_function = ast.Node{ .type = .Function, .node_variant = .{ .function = .{} } };
+        defer self.parser_current_function = prev_fn;
+
+        var hist_body = utils.History.init(self.transpile_proc.allocator, .{ .inside_function_body = true });
+        defer hist_body.deinit();
+        try self.parse_body(&hist_body);
+        const body_node = self.node_pop();
+        if (body_node == null) {
+            self.transpile_proc.err("expected fuzz body", .{});
+            return ParseError.InvalidStatement;
+        }
+        const body = self.transpile_proc.allocator.create(ast.Node) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+        errdefer self.transpile_proc.allocator.destroy(body);
+        body.* = body_node.?;
+
+        self.transpile_proc.finish_scope();
+
+        self.transpile_proc.nodes.push(ast.Node{
+            .type = .Fuzz,
+            .pos = if (fuzz_token) |t| t.pos else null,
+            .node_variant = .{ .fuzz_decl = .{ .name = name, .data_param = data_param, .len_param = len_param, .body = body } },
+        }) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+    }
+
     /// Parses a return statement.
     ///
     /// This function expects the 'ret' keyword, followed by an optional expression, and a semicolon.
@@ -5651,6 +5778,8 @@ pub const ParseProcess = struct {
             return try self.parse_function(false, false);
         } else if (mem.eql(u8, "test", sval)) {
             return try self.parse_test(hist);
+        } else if (mem.eql(u8, "fuzz", sval)) {
+            return try self.parse_fuzz(hist);
         } else if (mem.eql(u8, "for", sval)) {
             return try self.parse_for_statement(hist);
         } else if (mem.eql(u8, "if", sval)) {

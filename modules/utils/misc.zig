@@ -117,7 +117,8 @@ pub fn is_keyword(str: []const u8) bool {
         mem.eql(u8, "expect", str) or
         mem.eql(u8, "assert", str) or
         mem.eql(u8, "panic", str) or
-        mem.eql(u8, "test", str);
+        mem.eql(u8, "test", str) or
+        mem.eql(u8, "fuzz", str);
 }
 
 /// Checks if the given character is a boolean keyword.
@@ -940,6 +941,19 @@ pub fn print_node(node: ast.Node, writer: *std.Io.Writer, depth: usize) !void {
                 try print_indent(writer, depth + 1);
                 try writer.print("Body:\n", .{});
                 try print_node(nv.test_decl.body.*, writer, depth + 2);
+            }
+        },
+        .Fuzz => {
+            if (node.node_variant) |nv| {
+                try print_indent(writer, depth + 1);
+                try writer.print("Name: {s}\n", .{nv.fuzz_decl.name});
+                try print_indent(writer, depth + 1);
+                try writer.print("Data param: {s}\n", .{nv.fuzz_decl.data_param});
+                try print_indent(writer, depth + 1);
+                try writer.print("Len param: {s}\n", .{nv.fuzz_decl.len_param});
+                try print_indent(writer, depth + 1);
+                try writer.print("Body:\n", .{});
+                try print_node(nv.fuzz_decl.body.*, writer, depth + 2);
             }
         },
         .Blank => {

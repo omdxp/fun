@@ -176,6 +176,10 @@ pub const NodeType = enum {
     /// Represents a `test "name" { ... }` declaration (top-level only). Skipped
     /// entirely by an ordinary compile; only emitted/run in `fun test` mode.
     Test,
+    /// Represents a `fuzz "name" (data, len) { ... }` declaration (top-level
+    /// only). Skipped entirely by an ordinary compile OR `fun test` mode;
+    /// only emitted/run in `fun fuzz` mode.
+    Fuzz,
     /// Represents a blank node.
     Blank,
 };
@@ -275,6 +279,22 @@ pub const Node = struct {
             /// The test's descriptive name (borrowed from the string token,
             /// like `warning_ctrl.reason` -- not owned by this node).
             name: []const u8,
+            body: *Node,
+        },
+        /// A `fuzz "name" (data, len) { ... }` declaration (see
+        /// `NodeType.Fuzz`). The two parameter names are user-chosen but
+        /// their TYPES are always fixed (`raw*`/`num`, the byte-buffer +
+        /// length a fuzzing engine feeds in) -- there is no type annotation
+        /// in the source syntax, only the two bare names, since the shape
+        /// never varies.
+        fuzz_decl: struct {
+            /// The fuzz target's descriptive name.
+            name: []const u8,
+            /// The buffer parameter's chosen name (always `raw*` in the
+            /// synthesized harness).
+            data_param: []const u8,
+            /// The length parameter's chosen name (always `num`).
+            len_param: []const u8,
             body: *Node,
         },
         /// The compound initializer node.

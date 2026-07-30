@@ -10347,6 +10347,48 @@ test "test blocks: an ordinary (non-test-mode) compile ignores them entirely" {
     try std.testing.expectEqualStrings("normal run\n", stdout);
 }
 
+test "fuzz blocks: parse with fixed raw*/num parameter types, and an ordinary compile ignores them entirely" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_fuzz_block_ignored.fn";
+    const c_path = "codegen_fuzz_block_ignored.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_fuzz_block_ignored.exe" else "codegen_fuzz_block_ignored";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // `fuzz "name" (data, len) { ... }` (like `test`) is only meaningful in
+    // its own compile mode (not built yet -- this exercises the parser/AST
+    // slice only). An ordinary compile must ignore it entirely, same as a
+    // `test` block: the two parameter names get fixed raw*/num types with
+    // no type annotation in the source, and referencing them inside the
+    // body (here, comparing `len` -- only valid if it typechecks as `num`)
+    // must not affect or appear in a normal compile's output.
+    const input =
+        "imp std.c.io;\n\n" ++
+        "fuzz \"parses without crashing\" (data, len) {\n" ++
+        "  if len > 0 {\n" ++
+        "    printf(\"nonempty\\n\");\n" ++
+        "  }\n" ++
+        "}\n\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"normal run\\n\");\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "nonempty") == null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("normal run\n", stdout);
+}
+
 test "test blocks: fun test mode runs all-passing tests and reports a summary" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_test_block_pass.fn";
