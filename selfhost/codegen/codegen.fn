@@ -146,8 +146,14 @@
 // variant-payloads/method-or-function self-and-param-and-return types
 // are bare `T`-shaped (no array-of-generic field, e.g. the real
 // `Vec<T>`'s own `T[] data;`) and concrete arguments with no generic
-// args of their own (`Box<Vec<num>>` -- nested generics -- is rejected,
-// not guessed). TRUE dynamic dispatch through an abstract quirk-typed
+// args of their own -- a NESTED generic argument (`Result<Option<Token>,
+// Error>`, `Box<Box<num>>`) resolves fine now (see `ensure_compound_
+// instantiated`'s doc comment), recursing to arbitrary depth; only an
+// argument whose own template ISN'T registered at all is rejected.
+// A bare enum-variant shorthand nested inside ANOTHER variant's own
+// construction (`.Ok(.Some(t))`) resolves against that position's own
+// recorded payload type too (`Codegen.enum_variant_payload_owner`'s doc
+// comment). TRUE dynamic dispatch through an abstract quirk-typed
 // receiver (see below) still doesn't reach a generic impl's methods
 // either, same as a non-generic one's.
 // - TRUE dynamic dispatch through a receiver declared as an ABSTRACT
@@ -692,18 +698,23 @@ impl Codegen {
   // instantiation with the SAME mangled name is recognized via
   // `emitted_generic_instantiations` and not re-emitted.
   // 
+  // A NESTED generic argument (`Vec<Vec<num>>`, `Result<Option<Token>,
+  // Error>`) resolves (and, on first use, emits) the inner instantiation
+  // FIRST via `resolve_type_name`, then uses ITS OWN mangled name as
+  // this position's arg name -- this recurses to arbitrary depth, not
+  // just one level.
+  // 
   // `.None` means: `dt.type_str` isn't a known generic compound
   // template, the argument COUNT doesn't match the template's own
-  // type-param count, or some argument itself has generic args of its
-  // own (`Vec<Vec<num>>` -- nested generics are a separate, larger
-  // deferred item). Each template field must be a bare occurrence of
-  // one of the template's OWN type-param names (`T value;`) to be
-  // substituted -- an array-of-generic field (`T[] data;`, e.g. the
-  // real `Vec<T>`'s own `data` field) or any other non-matching field
-  // type is left UNCHANGED (not substituted), which is only correct
-  // when that field doesn't actually depend on the type param -- a
-  // template with a genuinely generic array field isn't fully supported
-  // by this slice yet.
+  // type-param count, or a nested argument itself couldn't be resolved.
+  // Each template field must be a bare occurrence of one of the
+  // template's OWN type-param names (`T value;`) to be substituted --
+  // an array-of-generic field (`T[] data;`, e.g. the real `Vec<T>`'s own
+  // `data` field) or any other non-matching field type is left
+  // UNCHANGED (not substituted), which is only correct when that field
+  // doesn't actually depend on the type param -- a template with a
+  // genuinely generic array field isn't fully supported by this slice
+  // yet.
   ensure_compound_instantiated(DataType dt) Option<str> {
     num template_idx = 0;
     bin found = false;
@@ -732,17 +743,29 @@ impl Codegen {
     num ai = 0;
     for ai < dt.generic_args.len {
       let arg = dt.generic_args.get(ai);
+      str arg_name = arg.type_str;
       if arg.generic_args.len > 0 {
-        ret .None;
+        // A NESTED generic argument (`Result<Option<Token>, Error>`'s
+        // own first arg, `Option<Token>`) -- resolve (and, on first
+        // use, EMIT) it FIRST via the exact same `resolve_type_name`
+        // dispatch `write_type` itself uses, so it's already hoisted
+        // and dedup-registered before the OUTER type's own mangled name
+        // even gets built. Its OWN resolved (mangled) name becomes THIS
+        // position's arg name, same as any other arg.
+        let nested_name = self.resolve_type_name(*arg);
+        if nested_name.is_none() {
+          ret .None;
+        }
+        arg_name = nested_name.unwrap();
       }
       name_sb.append("__");
-      name_sb.append(arg.type_str);
+      name_sb.append(arg_name);
       bin arg_ptr = dtype_is_pointer(*arg);
       if arg_ptr {
         name_sb.append("_ptr");
         name_sb.append(format_num(arg.pointer_depth));
       }
-      arg_type_names.push(arg.type_str);
+      arg_type_names.push(arg_name);
       arg_is_pointer.push(arg_ptr);
       ai = ai + 1;
     }
@@ -828,9 +851,9 @@ impl Codegen {
   // EMITS -- the concrete monomorphized C enum/tagged-union for it,
   // returning the mangled name (`Option__num`). Mirrors
   // `ensure_compound_instantiated` almost exactly (same mangling
-  // scheme, same `.None` conditions -- an unrecognized template, wrong
-  // argument count, or a nested generic argument -- same repeat-
-  // instantiation dedup via `emitted_generic_instantiations`, shared
+  // scheme -- including resolving a NESTED generic argument first, to
+  // arbitrary depth, via `resolve_type_name` -- same `.None` conditions,
+  // same repeat-instantiation dedup via `emitted_generic_instantiations`, shared
   // with compounds since a compound and an enum can never share a bare
   // name); the difference is purely in what gets emitted per variant
   // (see `emit_tagged_union_enum_instance`'s doc comment for the
@@ -868,17 +891,25 @@ impl Codegen {
     num ai = 0;
     for ai < dt.generic_args.len {
       let arg = dt.generic_args.get(ai);
+      str arg_name = arg.type_str;
       if arg.generic_args.len > 0 {
-        ret .None;
+        // See `ensure_compound_instantiated`'s own doc comment: a nested
+        // generic argument resolves (and, on first use, emits) FIRST via
+        // `resolve_type_name`, recursing to arbitrary depth.
+        let nested_name = self.resolve_type_name(*arg);
+        if nested_name.is_none() {
+          ret .None;
+        }
+        arg_name = nested_name.unwrap();
       }
       name_sb.append("__");
-      name_sb.append(arg.type_str);
+      name_sb.append(arg_name);
       bin arg_ptr = dtype_is_pointer(*arg);
       if arg_ptr {
         name_sb.append("_ptr");
         name_sb.append(format_num(arg.pointer_depth));
       }
-      arg_type_names.push(arg.type_str);
+      arg_type_names.push(arg_name);
       arg_is_pointer.push(arg_ptr);
       ai = ai + 1;
     }
@@ -1893,7 +1924,20 @@ impl Codegen {
       self.state.write("._");
       self.state.write(format_num(i));
       self.state.write(" = (");
+      // A bare enum-variant shorthand nested inside ANOTHER variant's
+      // own construction (`.Ok(.Some(t))` -- `check`'s real body once
+      // `Result<Option<Token>, Error>` monomorphizes, e.g.) resolves
+      // against THIS position's own payload type -- see `Codegen.
+      // enum_variant_payload_owner`'s doc comment. An unresolvable
+      // enum/variant/position leaves `expected_enum_type` untouched,
+      // same as every other site.
+      let payload_info = self.lookup_enum_variant_payload_type(enum_name, variant_name, i);
+      str prev_expected = self.expected_enum_type;
+      if payload_info.is_some() {
+        self.expected_enum_type = payload_info.unwrap().type_name;
+      }
       let aerr = self.emit_expr(*arg);
+      self.expected_enum_type = prev_expected;
       if aerr.is_some() {
         ret aerr;
       }
@@ -5979,6 +6023,92 @@ test "emit_expr emits a bare-shorthand payload construction resolved against exp
   assert equals(st.out.build(), "((Option){ .tag = Option_Some, .payload.Some = { ._0 = (9) } })"), "expected 'Option' resolved from expected_enum_type, not a qualifier";
 }
 
+test "emit_expr resolves a bare-shorthand construction NESTED inside another variant's own construction" {
+  // Regression test: `.Ok(.Some(t))` (check's real body once
+  // `Result<Option<Token>, Error>` monomorphizes, a nested generic
+  // instantiation -- see `ensure_compound_instantiated`'s own doc
+  // comment) used to fail -- the inner bare shorthand had no
+  // expected-type context, since emit_enum_variant_construction never
+  // set expected_enum_type per argument position the way emit_call's
+  // free-function argument loop already did. Fixed by resolving each
+  // position's own payload type via lookup_enum_variant_payload_type,
+  // the same registry emit_fit_enum_branch's binding registration uses.
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  Vec<str> outer_variants;
+  outer_variants.init(0);
+  outer_variants.push("Wrap");
+  g.record_enum("Outer", outer_variants, true);
+  Vec<str> wrap_payload_types;
+  wrap_payload_types.init(0);
+  wrap_payload_types.push("Inner");
+  Vec<bin> wrap_payload_ptrs;
+  wrap_payload_ptrs.init(0);
+  wrap_payload_ptrs.push(false);
+  g.record_enum_variant_payload("Outer", "Wrap", wrap_payload_types, wrap_payload_ptrs);
+
+  Vec<str> inner_variants;
+  inner_variants.init(0);
+  inner_variants.push("Some");
+  inner_variants.push("None");
+  g.record_enum("Inner", inner_variants, true);
+
+  Node* outer_ident = malloc(sizeof(Node));
+  *outer_ident = node_new(NodeKind.Identifier("Outer"));
+  Node* wrap_ident = malloc(sizeof(Node));
+  *wrap_ident = node_new(NodeKind.Identifier("Wrap"));
+  ExprNode outer_dot;
+  outer_dot.left = outer_ident;
+  outer_dot.has_left = true;
+  outer_dot.right = wrap_ident;
+  outer_dot.has_right = true;
+  outer_dot.op = ".";
+  Node* outer_callee = malloc(sizeof(Node));
+  *outer_callee = node_new(NodeKind.Expression(outer_dot));
+
+  Node* inner_blank = malloc(sizeof(Node));
+  *inner_blank = node_new(NodeKind.Blank);
+  Node* some_ident = malloc(sizeof(Node));
+  *some_ident = node_new(NodeKind.Identifier("Some"));
+  ExprNode inner_dot;
+  inner_dot.left = inner_blank;
+  inner_dot.has_left = true;
+  inner_dot.right = some_ident;
+  inner_dot.has_right = true;
+  inner_dot.op = ".";
+  Node* inner_callee = malloc(sizeof(Node));
+  *inner_callee = node_new(NodeKind.Expression(inner_dot));
+  Node* inner_arg = malloc(sizeof(Node));
+  *inner_arg = node_new(NodeKind.Number(TokenData.Num(9)));
+  Node* inner_args = malloc(sizeof(Node));
+  *inner_args = node_new(NodeKind.ExpressionParenthesis(inner_arg));
+  ExprNode inner_call;
+  inner_call.left = inner_callee;
+  inner_call.has_left = true;
+  inner_call.right = inner_args;
+  inner_call.has_right = true;
+  inner_call.op = "()";
+  Node* inner_call_node = malloc(sizeof(Node));
+  *inner_call_node = node_new(NodeKind.Expression(inner_call));
+
+  Node* outer_args = malloc(sizeof(Node));
+  *outer_args = node_new(NodeKind.ExpressionParenthesis(inner_call_node));
+  ExprNode outer_call;
+  outer_call.left = outer_callee;
+  outer_call.has_left = true;
+  outer_call.right = outer_args;
+  outer_call.has_right = true;
+  outer_call.op = "()";
+  Node n = node_new(NodeKind.Expression(outer_call));
+
+  assert g.emit_expr(n).is_none(), "expected the nested construction to emit";
+  assert equals(
+    st.out.build(),
+    "((Outer){ .tag = Outer_Wrap, .payload.Wrap = { ._0 = (((Inner){ .tag = Inner_Some, .payload.Some = { ._0 = (9) } })) } })"
+  ), "expected the INNER bare '.Some(9)' resolved against 'Inner' (Wrap's own recorded payload type), not rejected";
+}
+
 test "emit_expr emits a bare-shorthand payload-less variant resolved against expected_enum_type" {
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
@@ -7140,7 +7270,13 @@ test "ensure_compound_instantiated rejects a wrong generic argument count" {
   assert g.emit_statement(n).is_some(), "expected Box (one type param) instantiated with two arguments to be rejected";
 }
 
-test "ensure_compound_instantiated rejects a nested generic argument" {
+test "ensure_compound_instantiated rejects a nested generic argument whose OWN template isn't registered" {
+  // Nested generic arguments themselves DO resolve now (see the
+  // "instantiates a nested generic argument" test below) -- this one
+  // specifically covers the argument still being rejected when the
+  // NESTED type itself is unresolvable (here, "Vec" was never
+  // registered as a template at all), same "reject rather than guess"
+  // reasoning as an unrecognized template name anywhere else.
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
   _record_box_template(&g);
@@ -7162,7 +7298,44 @@ test "ensure_compound_instantiated rejects a nested generic argument" {
   v.has_val = false;
   Node n = node_new(NodeKind.Variable(v));
 
-  assert g.emit_statement(n).is_some(), "expected Box<Vec<num>> (a nested generic argument) to be rejected -- not yet supported";
+  assert g.emit_statement(n).is_some(), "expected Box<Vec<num>> rejected because 'Vec' itself was never registered as a template, not because nesting itself is unsupported";
+}
+
+test "ensure_compound_instantiated instantiates a nested generic argument (Box<Box<num>>)" {
+  // Regression test for real, previously-rejected code: `Result<Option<
+  // Token>, Error>` (Lexer.next's real return type in the self-hosted
+  // lexer's own source, found via the self-compile experiment) is a
+  // NESTED generic instantiation -- a generic argument that's itself a
+  // generic instantiation. Fixed by resolving (and, on first use,
+  // emitting) the nested argument FIRST via resolve_type_name, using
+  // its own mangled name as the outer instantiation's arg name --
+  // recurses to arbitrary depth, not just one level.
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  _record_box_template(&g);
+
+  DataType* num_arg = malloc(sizeof(DataType));
+  *num_arg = dtype_new();
+  num_arg.type_str = "num";
+  DataType* inner_box = malloc(sizeof(DataType));
+  *inner_box = dtype_new();
+  inner_box.type_str = "Box";
+  inner_box.generic_args.push(num_arg);
+  DataType* outer_dt = malloc(sizeof(DataType));
+  *outer_dt = dtype_new();
+  outer_dt.type_str = "Box";
+  outer_dt.generic_args.push(inner_box);
+  VariableNode v;
+  v.var_type = outer_dt;
+  v.name = "x";
+  v.has_val = false;
+  Node n = node_new(NodeKind.Variable(v));
+
+  assert g.emit_statement(n).is_none(), "expected Box<Box<num>> to instantiate, resolving the nested Box<num> first";
+  let out = st.out.build();
+  assert contains(out, "typedef struct Box__num {\n  int64_t value;\n} Box__num;"), "expected the INNER instantiation (Box__num) emitted";
+  assert contains(out, "typedef struct Box__Box__num {\n  Box__num value;\n} Box__Box__num;"), "expected the OUTER instantiation (Box__Box__num) using the inner's own mangled name as its field type";
+  assert contains(out, "Box__Box__num x;"), "expected the declaration itself to use the outer mangled name";
 }
 
 test "ensure_compound_instantiated mangles a pointer-typed generic argument distinctly" {
@@ -7315,7 +7488,12 @@ test "ensure_enum_instantiated rejects a wrong generic argument count" {
   assert g.emit_statement(n).is_some(), "expected Opt (one type param) instantiated with two arguments to be rejected";
 }
 
-test "ensure_enum_instantiated rejects a nested generic argument" {
+test "ensure_enum_instantiated rejects a nested generic argument whose OWN template isn't registered" {
+  // Nested generic arguments themselves DO resolve now (see the
+  // "instantiates a nested generic argument" test below) -- this one
+  // specifically covers the argument still being rejected when the
+  // NESTED type itself is unresolvable (here, "Vec" was never
+  // registered as a template at all).
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
   _record_opt_template(&g);
@@ -7337,7 +7515,42 @@ test "ensure_enum_instantiated rejects a nested generic argument" {
   v.has_val = false;
   Node n = node_new(NodeKind.Variable(v));
 
-  assert g.emit_statement(n).is_some(), "expected Opt<Vec<num>> (a nested generic argument) to be rejected -- not yet supported";
+  assert g.emit_statement(n).is_some(), "expected Opt<Vec<num>> rejected because 'Vec' itself was never registered as a template, not because nesting itself is unsupported";
+}
+
+test "ensure_enum_instantiated instantiates a nested generic argument (Opt<Box<num>>)" {
+  // Regression test mirroring ensure_compound_instantiated's own nested-
+  // generic test, for the enum side (a generic enum whose OWN argument
+  // is itself a generic COMPOUND instantiation) -- see
+  // `ensure_compound_instantiated`'s doc comment for the real code this
+  // fixes (`Result<Option<Token>, Error>`).
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  _record_box_template(&g);
+  _record_opt_template(&g);
+
+  DataType* num_arg = malloc(sizeof(DataType));
+  *num_arg = dtype_new();
+  num_arg.type_str = "num";
+  DataType* inner_box = malloc(sizeof(DataType));
+  *inner_box = dtype_new();
+  inner_box.type_str = "Box";
+  inner_box.generic_args.push(num_arg);
+  DataType* dt = malloc(sizeof(DataType));
+  *dt = dtype_new();
+  dt.type_str = "Opt";
+  dt.generic_args.push(inner_box);
+  VariableNode v;
+  v.var_type = dt;
+  v.name = "x";
+  v.has_val = false;
+  Node n = node_new(NodeKind.Variable(v));
+
+  assert g.emit_statement(n).is_none(), "expected Opt<Box<num>> to instantiate, resolving the nested Box<num> first";
+  let out = st.out.build();
+  assert contains(out, "typedef struct Box__num {\n  int64_t value;\n} Box__num;"), "expected the INNER instantiation (Box__num) emitted";
+  assert contains(out, "typedef enum Opt__Box__num_tag {"), "expected the OUTER tagged-union instantiation using the inner's own mangled name";
+  assert contains(out, "struct { Box__num _0; } Some;"), "expected the Some variant's payload typed as the inner's own mangled name";
 }
 
 test "ensure_enum_instantiated mangles a pointer-typed generic argument distinctly" {
