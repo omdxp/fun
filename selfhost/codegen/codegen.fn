@@ -347,6 +347,22 @@ pub compound Codegen {
   // declaration's own initializer must resolve against THAT variable's
   // declared type, not the enclosing function's return type.
   str expected_enum_type;
+  // The compound type name a BARE `.{ field = value, ... }` compound-
+  // literal shorthand (no `Type` before the `{` -- `ci.has_dtype ==
+  // false`) should resolve against, standing in for "the expected type
+  // from context" the same way `expected_enum_type` does for a bare
+  // `.Variant`/`.Variant(x)` enum shorthand -- see that field's own doc
+  // comment for the general shape of this pattern (this codegen has no
+  // type-checker of its own, so context has to be threaded through
+  // explicitly like this rather than resolved by an earlier pass, unlike
+  // the original transpiler's `bind_compound_init_expected`). Populated
+  // only at the ONE real site found so far (`emit_expr`'s `=` assignment
+  // case, e.g. `dtype_new`'s own real body in this codebase, `dt.flags =
+  // .{is_pointer = false, ...};`) -- an EXPLICIT `Type{...}` compound
+  // literal (`DynamicIntType{is_signed = true, bits = 8}`, also real,
+  // `typedefs.fn`'s own body) carries its own type name directly and
+  // never consults this at all.
+  str expected_compound_type;
   // Whole-program record of every non-generic compound's name and its
   // fields' declared types, populated by `emit_compound`'s own emission
   // pass -- lets a CHAINED field access (`a.b.c`) determine `.`/`->` at
@@ -527,6 +543,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.current_fn_rtype_name = "";
   g.current_fn_rtype_dt = .None;
   g.expected_enum_type = "";
+  g.expected_compound_type = "";
   ret g;
 }
 
@@ -1574,6 +1591,51 @@ impl Codegen {
         self.state.write("); abort(); 0; })");
         ret .None;
       }
+      .CompoundInit(ci) -> {
+        // `Type{ field = value, ... }` (explicit -- `ci.has_dtype`, e.g.
+        // `typedefs.fn`'s own real `DynamicIntType{is_signed = ..., bits
+        // = ...}`) or `.{ field = value, ... }` (bare, resolved against
+        // `Codegen.expected_compound_type` -- see its own doc comment,
+        // e.g. `dtype_new`'s own real `dt.flags = .{is_pointer = false,
+        // ...};`). Lowers to a GNU C compound literal, same shape as the
+        // original's own (non-typechecking) emission: `(Type){ .field =
+        // value, ... }`, or `(Type){0}` for an empty initializer.
+        str type_name = "";
+        if ci.has_dtype {
+          let resolved = self.resolve_type_name(*ci.init_dtype);
+          if resolved.is_none() {
+            ret .Some(CodegenErrorKind.UnsupportedNode);
+          }
+          type_name = resolved.unwrap();
+        } elif !equals(self.expected_compound_type, "") {
+          type_name = self.expected_compound_type;
+        } else {
+          ret .Some(CodegenErrorKind.UnsupportedNode);
+        }
+        self.state.write("(");
+        self.state.write(type_name);
+        self.state.write("){");
+        if ci.fields.len == 0 {
+          self.state.write("0");
+        } else {
+          bin first = true;
+          for f : ci.fields {
+            if !first {
+              self.state.write(", ");
+            }
+            first = false;
+            self.state.write(".");
+            self.state.write(f.name);
+            self.state.write(" = ");
+            let ferr = self.emit_expr(*f.value);
+            if ferr.is_some() {
+              ret ferr;
+            }
+          }
+        }
+        self.state.write("}");
+        ret .None;
+      }
       .Identifier(name) -> {
         self.state.write(name);
         ret .None;
@@ -1679,15 +1741,26 @@ impl Codegen {
         // type could be known.
         bin resolves_rhs_shorthand = equals(e.op, "=") || equals(e.op, "==") || equals(e.op, "!=");
         str prev_expected = self.expected_enum_type;
+        str prev_expected_compound = self.expected_compound_type;
         if resolves_rhs_shorthand {
           let lhs_resolved = self.resolve_field_chain(e.left);
           if lhs_resolved.is_some() {
-            self.expected_enum_type = lhs_resolved.unwrap().type_name;
+            let lhs_type_name = lhs_resolved.unwrap().type_name;
+            self.expected_enum_type = lhs_type_name;
+            // See `Codegen.expected_compound_type`'s doc comment: a bare
+            // `.{...}` compound-literal shorthand on the right (`dt.flags
+            // = .{is_pointer = false, ...};`, `dtype_new`'s own real
+            // body) resolves against the SAME left-hand declared type as
+            // a bare enum shorthand would -- the AST distinguishes which
+            // one actually applies (`.CompoundInit` vs `.Expression` with
+            // op `.`), so setting both unconditionally here is safe.
+            self.expected_compound_type = lhs_type_name;
           }
         }
         let rerr = self.emit_expr(*e.right);
         if resolves_rhs_shorthand {
           self.expected_enum_type = prev_expected;
+          self.expected_compound_type = prev_expected_compound;
         }
         if rerr.is_some() {
           ret rerr;
@@ -7805,6 +7878,152 @@ test "emit_expr emits array indexing as C '[]'" {
 
   assert g.emit_expr(n).is_none(), "expected 'arr[i]' to emit";
   assert equals(st.out.build(), "arr[i]"), "expected 'arr[i]'";
+}
+
+test "emit_expr emits an explicit 'Type{ field = value, ... }' compound literal" {
+  // Regression test: `typedefs.fn`'s own real `DynamicIntType{is_signed =
+  // ..., bits = ...}` -- found via the self-compile experiment --
+  // rejected outright as CodegenErrorKind.UnsupportedNode (.CompoundInit
+  // had no emit_expr case at all).
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  DataType* dt = malloc(sizeof(DataType));
+  *dt = dtype_new();
+  dt.type_str = "DynamicIntType";
+
+  CompoundInitField f1;
+  f1.name = "is_signed";
+  Node* v1 = malloc(sizeof(Node));
+  *v1 = node_new(NodeKind.Boolean(true));
+  f1.value = v1;
+  CompoundInitField f2;
+  f2.name = "bits";
+  Node* v2 = malloc(sizeof(Node));
+  *v2 = node_new(NodeKind.Number(TokenData.Num(8)));
+  f2.value = v2;
+
+  CompoundInitNode ci = compound_init_node_new();
+  ci.init_dtype = dt;
+  ci.has_dtype = true;
+  ci.fields.push(f1);
+  ci.fields.push(f2);
+  Node n = node_new(NodeKind.CompoundInit(ci));
+
+  assert g.emit_expr(n).is_none(), "expected the explicit compound literal to emit";
+  assert equals(st.out.build(), "(DynamicIntType){.is_signed = true, .bits = 8}"), "expected a GNU C compound literal with each field set";
+}
+
+test "emit_expr emits an empty explicit compound literal as '(Type){0}'" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  DataType* dt = malloc(sizeof(DataType));
+  *dt = dtype_new();
+  dt.type_str = "Empty";
+
+  CompoundInitNode ci = compound_init_node_new();
+  ci.init_dtype = dt;
+  ci.has_dtype = true;
+  Node n = node_new(NodeKind.CompoundInit(ci));
+
+  assert g.emit_expr(n).is_none(), "expected the empty compound literal to emit";
+  assert equals(st.out.build(), "(Empty){0}"), "expected '(Empty){0}'";
+}
+
+test "emit_expr resolves a bare '.{ field = value, ... }' compound literal against expected_compound_type" {
+  // Regression test: `dtype_new`'s own real body (`dt.flags = .{
+  // is_pointer = false, ... };`) -- found via the self-compile
+  // experiment -- likewise rejected outright: the bare (no explicit
+  // `Type`) form has no dtype of its own, and needs
+  // `Codegen.expected_compound_type` (set by `emit_expr`'s own `=`
+  // assignment case from the left-hand side's resolved field type,
+  // mirroring `expected_enum_type`) to know which struct to emit.
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  g.expected_compound_type = "DataTypeFlags";
+
+  CompoundInitField f1;
+  f1.name = "is_pointer";
+  Node* v1 = malloc(sizeof(Node));
+  *v1 = node_new(NodeKind.Boolean(false));
+  f1.value = v1;
+
+  CompoundInitNode ci = compound_init_node_new();
+  ci.has_dtype = false;
+  ci.fields.push(f1);
+  Node n = node_new(NodeKind.CompoundInit(ci));
+
+  assert g.emit_expr(n).is_none(), "expected the bare compound literal to emit";
+  assert equals(st.out.build(), "(DataTypeFlags){.is_pointer = false}"), "expected 'DataTypeFlags' resolved from expected_compound_type, not a written-out type name";
+}
+
+test "emit_expr rejects a bare '.{...}' compound literal with no expected_compound_type in context" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  // expected_compound_type deliberately left empty (no ambient context).
+
+  CompoundInitNode ci = compound_init_node_new();
+  ci.has_dtype = false;
+  Node n = node_new(NodeKind.CompoundInit(ci));
+
+  assert g.emit_expr(n).is_some(), "expected a bare compound literal with no ambient expected type to be rejected, not guessed";
+}
+
+test "emit_statement resolves a bare '.{...}' compound-literal assignment right-hand side against the field's declared type" {
+  // The full real shape: `dt.flags = .{is_pointer = false, ...};` as an
+  // ASSIGNMENT STATEMENT, exercising the actual `resolve_field_chain`
+  // wiring in `emit_expr`'s `=` case, not just a pre-set
+  // expected_compound_type.
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  g.record_local("dt", "DataType", false);
+
+  Vec<str> field_names;
+  field_names.init(0);
+  field_names.push("flags");
+  Vec<str> field_types;
+  field_types.init(0);
+  field_types.push("DataTypeFlags");
+  Vec<bin> field_ptrs;
+  field_ptrs.init(0);
+  field_ptrs.push(false);
+  g.record_compound("DataType", field_names, field_types, field_ptrs);
+
+  Node* dt_ident = malloc(sizeof(Node));
+  *dt_ident = node_new(NodeKind.Identifier("dt"));
+  Node* flags_ident = malloc(sizeof(Node));
+  *flags_ident = node_new(NodeKind.Identifier("flags"));
+  ExprNode field_e;
+  field_e.left = dt_ident;
+  field_e.has_left = true;
+  field_e.right = flags_ident;
+  field_e.has_right = true;
+  field_e.op = ".";
+  Node* field_node = malloc(sizeof(Node));
+  *field_node = node_new(NodeKind.Expression(field_e));
+
+  CompoundInitField f1;
+  f1.name = "is_pointer";
+  Node* v1 = malloc(sizeof(Node));
+  *v1 = node_new(NodeKind.Boolean(false));
+  f1.value = v1;
+  CompoundInitNode ci = compound_init_node_new();
+  ci.has_dtype = false;
+  ci.fields.push(f1);
+  Node* ci_node = malloc(sizeof(Node));
+  *ci_node = node_new(NodeKind.CompoundInit(ci));
+
+  ExprNode assign;
+  assign.left = field_node;
+  assign.has_left = true;
+  assign.right = ci_node;
+  assign.has_right = true;
+  assign.op = "=";
+  Node n = node_new(NodeKind.Expression(assign));
+
+  assert g.emit_statement(n).is_none(), "expected the assignment statement to emit";
+  assert equals(st.out.build(), "(dt.flags = (DataTypeFlags){.is_pointer = false});\n"), "expected 'DataTypeFlags' resolved from the field's own declared type";
 }
 
 test "emit_expr emits a chained field access followed by indexing (self.data[i])" {
