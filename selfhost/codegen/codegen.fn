@@ -3,19 +3,23 @@
 // incrementally, the same way `selfhost/parser` was.
 // 
 // Coverage so far: literal expressions (number/decimal/string/character/
-// boolean), identifiers, unary operators (prefix, pointer-indirection
-// depth, postfix `++`/`--`), binary operators (arithmetic/comparison/
-// logical/bitwise/assignment -- every one shares an identical C
-// spelling), calls with a plain-identifier callee (any argument count,
+// boolean/`nil`, the last emitting C `NULL`), identifiers, unary
+// operators (prefix, pointer-indirection depth, postfix `++`/`--`),
+// binary operators (arithmetic/comparison/logical/bitwise/assignment --
+// every one shares an identical C spelling), array indexing (`arr[i]`,
+// as an rvalue or an assignment target -- see `emit_index`'s doc
+// comment), calls with a plain-identifier callee (any argument count,
 // flattening the parser's comma-chained argument-list representation --
 // see `flatten_call_args`), variable declarations (explicit type only,
-// no `let` inference yet), `ret` statements, `if`/`elif`/`else` (chained
-// correctly into one C construct even though they're three independent
-// sibling AST statements -- see `emit_if_chain`'s doc comment), `for`
-// (condition/infinite form as a C `while`, integer-range form as a C
-// counted `for`, and the `Vec` iterator form -- `for item : arr { ... }`
-// / `for i, item :: arr { ... }` -- as the original's own `.len`/`.data`
-// fast-path loop; see `emit_for_cond`/`emit_for_range`/`emit_for_iter`),
+// no `let` inference yet), `ret` statements, bare `break;`/`continue;`
+// (an identical C spelling, no translation needed), `if`/`elif`/`else`
+// (chained correctly into one C construct even though they're three
+// independent sibling AST statements -- see `emit_if_chain`'s doc
+// comment), `for` (condition/infinite form as a C `while`, integer-range
+// form as a C counted `for`, and the `Vec` iterator form -- `for item :
+// arr { ... }` / `for i, item :: arr { ... }` -- as the original's own
+// `.len`/`.data` fast-path loop; see `emit_for_cond`/`emit_for_range`/
+// `emit_for_iter`),
 // bare expression statements (an assignment, a call for its side effect,
 // `x++;` -- these have no dedicated `StatementExpression` AST wrapper,
 // they're a plain `.Expression`/`.Unary` node straight in the statement
@@ -138,7 +142,10 @@
 // - The iterator form of `for` over anything other than a known-`Vec`
 // local (an array literal, or a general `Iterator`-implementing quirk
 // value dispatched through `.next()`) -- see `emit_for_iter`'s doc
-// comment; `[]` (indexing).
+// comment. `[]` indexing (`arr[i]`, as an rvalue or an assignment
+// target) DOES work now -- see `emit_index`'s doc comment -- needing no
+// type resolution at all, since C's own `[]` composes directly with
+// whatever the receiver already emitted as.
 // - A `fit` subject that isn't a plain identifier, a single `*name`
 // dereference, a chained field access, or a `receiver.method()` call
 // matching `emit_method_call`'s own recognized shape (this last one now
@@ -1301,6 +1308,10 @@ impl Codegen {
         }
         ret .None;
       }
+      .Nil -> {
+        self.state.write("NULL");
+        ret .None;
+      }
       .Identifier(name) -> {
         self.state.write(name);
         ret .None;
@@ -1351,21 +1362,25 @@ impl Codegen {
         ret .None;
       }
       .Expression(e) -> {
-        // `[]` (indexing) and a bare `,` (reached directly, i.e. NOT as
-        // part of a call's argument list -- see `emit_call`/
-        // `flatten_call_args`) don't have dedicated handling yet. `()`
-        // (calls) and `.` (member access, single-level only -- see
-        // `emit_field_access`'s doc comment) ARE handled. Every OTHER
-        // binary operator (arithmetic/comparison/logical/bitwise/
-        // assignment) already has an identical C spelling and a plain
-        // `(left op right)` emission is correct as-is.
+        // A bare `,` (reached directly, i.e. NOT as part of a call's
+        // argument list -- see `emit_call`/`flatten_call_args`) doesn't
+        // have dedicated handling yet. `()` (calls), `.` (member access,
+        // single-level only -- see `emit_field_access`'s doc comment),
+        // and `[]` (indexing -- see `emit_index`'s doc comment) ARE
+        // handled. Every OTHER binary operator (arithmetic/comparison/
+        // logical/bitwise/assignment) already has an identical C
+        // spelling and a plain `(left op right)` emission is correct
+        // as-is.
         if equals(e.op, "()") {
           ret self.emit_call(e);
         }
         if equals(e.op, ".") {
           ret self.emit_field_access(e);
         }
-        if equals(e.op, "[]") || equals(e.op, ",") {
+        if equals(e.op, "[]") {
+          ret self.emit_index(e);
+        }
+        if equals(e.op, ",") {
           ret .Some(CodegenErrorKind.UnsupportedNode);
         }
         if !e.has_left || !e.has_right {
@@ -1652,6 +1667,43 @@ impl Codegen {
     ret .None;
   }
 
+  // Emits `arr[i]` as C `arr[i]` -- the parser already built this as
+  // `Expression{ op = "[]", left = arr, right = Bracket(i) }` (see
+  // `parser.parse_for_bracket`'s doc comment, which also builds a bare
+  // `Bracket` node with no left for an array LITERAL, `[1, 2, 3]` --
+  // structurally distinct, not reachable through here). Needs no type
+  // resolution at all: C's own `[]` composes directly with whatever
+  // `arr` already emitted as (a raw array, a pointer, or a `.`/`->`
+  // field access -- `self.data[i]` and `self->data[i]` both just work,
+  // since `emit_expr(e.left)` already resolved that), and this codegen
+  // doesn't track element types the way it tracks a LOCAL's own
+  // compound/enum type, so there's nothing further to look up here
+  // either. Reused automatically as an ASSIGNMENT target too (`arr[i] =
+  // x;`) since the `=` case dispatches its own left side through this
+  // same `emit_expr` -> `.Expression` path, exactly like `.`/`->` field
+  // access already does.
+  emit_index(ExprNode e) Option<CodegenErrorKind> {
+    if !e.has_left || !e.has_right {
+      ret .Some(CodegenErrorKind.InvalidNode);
+    }
+    let lerr = self.emit_expr(*e.left);
+    if lerr.is_some() {
+      ret lerr;
+    }
+    self.state.write("[");
+    fit e.right.kind {
+      .Bracket(inner) -> {
+        let ierr = self.emit_expr(*inner);
+        if ierr.is_some() {
+          ret ierr;
+        }
+      }
+      _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
+    }
+    self.state.write("]");
+    ret .None;
+  }
+
   // Emits `recv.field` as C `recv.field` or `recv->field`, deciding
   // `.`/`->` from `recv`'s DECLARED pointer-ness (`lookup_local_is_pointer`
   // -- no type inference, just the same "already fully explicit" model
@@ -1860,6 +1912,16 @@ impl Codegen {
           }
         }
         self.state.write(";\n");
+        ret .None;
+      }
+      .StatementBreak -> {
+        self.state.write_indent();
+        self.state.write("break;\n");
+        ret .None;
+      }
+      .StatementContinue -> {
+        self.state.write_indent();
+        self.state.write("continue;\n");
         ret .None;
       }
       .Variable(v) -> {
@@ -3100,6 +3162,14 @@ test "emit_expr emits a boolean literal" {
   assert equals(st.out.build(), "true"), "expected 'true'";
 }
 
+test "emit_expr emits the nil literal as C NULL" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  Node n = node_new(NodeKind.Nil);
+  assert g.emit_expr(n).is_none(), "expected 'nil' to emit";
+  assert equals(st.out.build(), "NULL"), "expected 'NULL'";
+}
+
 test "emit_expr escapes a character literal" {
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
@@ -3724,6 +3794,61 @@ test "emit_statement emits a conditional for as a while loop" {
 
   assert g.emit_statement(n).is_none(), "expected the for-cond to emit";
   assert equals(st.out.build(), "while (ok) {\n    return;\n}\n"), "expected a while loop";
+}
+
+test "emit_statement emits a bare 'break;'" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  Node n = node_new(NodeKind.StatementBreak);
+  assert g.emit_statement(n).is_none(), "expected 'break;' to emit";
+  assert equals(st.out.build(), "break;\n"), "expected 'break;\\n'";
+}
+
+test "emit_statement emits a bare 'continue;'" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  Node n = node_new(NodeKind.StatementContinue);
+  assert g.emit_statement(n).is_none(), "expected 'continue;' to emit";
+  assert equals(st.out.build(), "continue;\n"), "expected 'continue;\\n'";
+}
+
+test "emit_statement emits 'break;' inside a for loop's own if branch" {
+  Node* break_stmt = malloc(sizeof(Node));
+  *break_stmt = node_new(NodeKind.StatementBreak);
+  Vec<Node*> if_stmts;
+  if_stmts.init(0);
+  if_stmts.push(break_stmt);
+  BodyNode if_bn;
+  if_bn.statements = if_stmts;
+  Node* if_body = malloc(sizeof(Node));
+  *if_body = node_new(NodeKind.Body(if_bn));
+
+  Node* cond = malloc(sizeof(Node));
+  *cond = node_new(NodeKind.Boolean(true));
+  IfStmtNode ifn;
+  ifn.condition = cond;
+  ifn.body = if_body;
+  Node* if_stmt = malloc(sizeof(Node));
+  *if_stmt = node_new(NodeKind.StatementIf(ifn));
+
+  Vec<Node*> for_stmts;
+  for_stmts.init(0);
+  for_stmts.push(if_stmt);
+  BodyNode for_bn;
+  for_bn.statements = for_stmts;
+  Node* for_body = malloc(sizeof(Node));
+  *for_body = node_new(NodeKind.Body(for_bn));
+
+  ForCondNode fc;
+  fc.condition = nil;
+  fc.has_condition = false;
+  fc.body = for_body;
+  Node n = node_new(NodeKind.StatementFor(ForKind.Cond(fc)));
+
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  assert g.emit_statement(n).is_none(), "expected the for-loop-with-a-conditional-break to emit";
+  assert equals(st.out.build(), "while (1) {\n    if (true) {\n        break;\n    }\n}\n"), "expected the C 'break;' nested inside the if inside the while loop";
 }
 
 test "emit_statement emits an infinite for as while (1)" {
@@ -5990,6 +6115,106 @@ test "emit_statement emits a bare assignment expression as a statement" {
 
   assert g.emit_statement(n).is_none(), "expected the assignment to emit";
   assert equals(st.out.build(), "(x = 3);\n"), "expected '(x = 3);\\n'";
+}
+
+test "emit_expr emits array indexing as C '[]'" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  Node* arr_ident = malloc(sizeof(Node));
+  *arr_ident = node_new(NodeKind.Identifier("arr"));
+  Node* i_ident = malloc(sizeof(Node));
+  *i_ident = node_new(NodeKind.Identifier("i"));
+  Node* bracket_inner = malloc(sizeof(Node));
+  *bracket_inner = node_new(NodeKind.Bracket(i_ident));
+  ExprNode idx;
+  idx.left = arr_ident;
+  idx.has_left = true;
+  idx.right = bracket_inner;
+  idx.has_right = true;
+  idx.op = "[]";
+  Node n = node_new(NodeKind.Expression(idx));
+
+  assert g.emit_expr(n).is_none(), "expected 'arr[i]' to emit";
+  assert equals(st.out.build(), "arr[i]"), "expected 'arr[i]'";
+}
+
+test "emit_expr emits a chained field access followed by indexing (self.data[i])" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  g.record_local("self", "Vec", true);
+
+  Vec<str> vec_fields;
+  vec_fields.init(0);
+  vec_fields.push("data");
+  Vec<str> vec_field_types;
+  vec_field_types.init(0);
+  vec_field_types.push("str");
+  Vec<bin> vec_field_ptrs;
+  vec_field_ptrs.init(0);
+  vec_field_ptrs.push(true);
+  g.record_compound("Vec", vec_fields, vec_field_types, vec_field_ptrs);
+
+  Node* self_ident = malloc(sizeof(Node));
+  *self_ident = node_new(NodeKind.Identifier("self"));
+  Node* data_ident = malloc(sizeof(Node));
+  *data_ident = node_new(NodeKind.Identifier("data"));
+  ExprNode dot;
+  dot.left = self_ident;
+  dot.has_left = true;
+  dot.right = data_ident;
+  dot.has_right = true;
+  dot.op = ".";
+  Node* dot_node = malloc(sizeof(Node));
+  *dot_node = node_new(NodeKind.Expression(dot));
+
+  Node* i_ident = malloc(sizeof(Node));
+  *i_ident = node_new(NodeKind.Identifier("i"));
+  Node* bracket_inner = malloc(sizeof(Node));
+  *bracket_inner = node_new(NodeKind.Bracket(i_ident));
+  ExprNode idx;
+  idx.left = dot_node;
+  idx.has_left = true;
+  idx.right = bracket_inner;
+  idx.has_right = true;
+  idx.op = "[]";
+  Node n = node_new(NodeKind.Expression(idx));
+
+  assert g.emit_expr(n).is_none(), "expected 'self.data[i]' to emit";
+  assert equals(st.out.build(), "self->data[i]"), "expected 'self->data[i]', deciding '->' from self's own pointer-ness";
+}
+
+test "emit_statement emits an index assignment as a statement (arr[i] = x)" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  Node* arr_ident = malloc(sizeof(Node));
+  *arr_ident = node_new(NodeKind.Identifier("arr"));
+  Node* i_ident = malloc(sizeof(Node));
+  *i_ident = node_new(NodeKind.Identifier("i"));
+  Node* bracket_inner = malloc(sizeof(Node));
+  *bracket_inner = node_new(NodeKind.Bracket(i_ident));
+  ExprNode idx;
+  idx.left = arr_ident;
+  idx.has_left = true;
+  idx.right = bracket_inner;
+  idx.has_right = true;
+  idx.op = "[]";
+  Node* lhs = malloc(sizeof(Node));
+  *lhs = node_new(NodeKind.Expression(idx));
+
+  Node* rhs = malloc(sizeof(Node));
+  *rhs = node_new(NodeKind.Identifier("x"));
+  ExprNode assign;
+  assign.left = lhs;
+  assign.has_left = true;
+  assign.right = rhs;
+  assign.has_right = true;
+  assign.op = "=";
+  Node n = node_new(NodeKind.Expression(assign));
+
+  assert g.emit_statement(n).is_none(), "expected 'arr[i] = x;' to emit";
+  assert equals(st.out.build(), "(arr[i] = x);\n"), "expected the index expression reused as the assignment target, same emit_expr path as a plain identifier";
 }
 
 test "emit_statement resolves a bare-shorthand assignment right-hand side against the field's declared type" {
