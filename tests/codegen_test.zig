@@ -6228,6 +6228,57 @@ test "direct call-site quirk coercion: callee(&concrete) wraps in __fun_coerce" 
     try std.testing.expectEqualStrings("7 woof hi\n5\n", stdout);
 }
 
+test "std.mock_time: MockClock lets a Clock-parameterized function be tested without real waiting" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_mock_time_basic.fn";
+    const c_path = "codegen_mock_time_basic.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_mock_time_basic.exe" else "codegen_mock_time_basic";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // A function accepting a `Clock`-typed parameter (rather than calling
+    // std.time's now() directly) can be exercised deterministically with a
+    // MockClock: no expiry until 60s elapse, immediate expiry once advanced
+    // past that -- no real sleeping. A concrete value coerces to a
+    // quirk-typed parameter by its address (`&clk`), same as any other
+    // quirk coercion.
+    const input =
+        "imp std.mock_time;\n" ++
+        "imp std.time;\n" ++
+        "imp std.c.io;\n\n" ++
+        "fun is_expired(Clock c, Timestamp issued_at, num ttl_seconds) bin {\n" ++
+        "  ret diff_seconds(c.now().epoch, issued_at.epoch) >= ttl_seconds;\n" ++
+        "}\n\n" ++
+        "fun main() num {\n" ++
+        "  MockClock clk = mock_clock_at(0);\n" ++
+        "  Timestamp issued = clk.now();\n" ++
+        "  if is_expired(&clk, issued, 60) {\n" ++
+        "    printf(\"FAIL: expired too early\\n\");\n" ++
+        "    ret 1;\n" ++
+        "  }\n" ++
+        "  clk.advance(61);\n" ++
+        "  if !is_expired(&clk, issued, 60) {\n" ++
+        "    printf(\"FAIL: did not expire\\n\");\n" ++
+        "    ret 1;\n" ++
+        "  }\n" ++
+        "  printf(\"ok\\n\");\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("ok\n", stdout);
+}
+
 test "generic compound coerces to a quirk at a call site and via var-init" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_generic_callsite_quirk.fn";

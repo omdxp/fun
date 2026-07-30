@@ -1,0 +1,122 @@
+// A `Clock` abstraction for writing deterministic, instant time-dependent
+// tests -- no real sleeping/waiting required.
+// 
+// Any function that needs "the current time" to be testable should accept a
+// `Clock`-typed parameter instead of calling `std.time`'s `now()` directly:
+// 
+// ```
+// fun is_expired(Clock c, Timestamp issued_at, num ttl_seconds) bin {
+//   ret diff_seconds(c.now().epoch, issued_at.epoch) >= ttl_seconds;
+// }
+// ```
+// 
+// Production code passes a `SystemClock` (backed by the real clock); a test
+// passes a `MockClock` it fully controls instead -- a concrete value always
+// coerces to a quirk-typed parameter by its ADDRESS:
+// 
+// ```
+// test "a token expires after its ttl" {
+//   MockClock clk = mock_clock_at(0);
+//   Timestamp issued = clk.now();
+//   assert !is_expired(&clk, issued, 60), "should not be expired yet";
+//   clk.advance(61);
+//   assert is_expired(&clk, issued, 60), "should be expired now";
+// }
+// ```
+// 
+// Deliberately a per-value abstraction, not a global override: each
+// `MockClock` is an ordinary local value a test constructs and owns, so
+// concurrently running tests (see std.testing's concurrent runner) never
+// share or race over fake time -- there is nothing global to race over.
+
+imp std.time;
+
+// Uniform "what time is it" access, implemented by both `SystemClock` (the
+// real clock) and `MockClock` (a fully controllable fake one for tests).
+pub quirk Clock {
+  // Return the clock's current time.
+  // 
+  // Returns:
+  // - the clock's current Timestamp
+  now() Timestamp;
+}
+
+// The real system clock, for production code paths that accept a `Clock`
+// parameter.
+pub compound SystemClock {
+}
+
+// Construct a `SystemClock`.
+// 
+// Returns:
+// - a Clock backed by the real system time
+pub fun system_clock() SystemClock {
+  SystemClock c;
+  ret c;
+}
+
+impl SystemClock as Clock {
+  pub now() Timestamp {
+    ret now();
+  }
+}
+
+// A fully controllable fake clock for tests: starts at a fixed time and only
+// ever advances when the test explicitly tells it to (`advance`/`set`) --
+// never the real wall clock.
+pub compound MockClock {
+  Timestamp current;
+}
+
+// Construct a mock clock starting at `start`.
+// 
+// Params:
+// - start: the initial fake time
+// 
+// Returns:
+// - a MockClock fixed at `start` until advanced/set
+pub fun mock_clock_new(Timestamp start) MockClock {
+  MockClock c;
+  c.current = start;
+  ret c;
+}
+
+// Construct a mock clock starting at `epoch_seconds` (Unix epoch seconds) --
+// a convenience over `mock_clock_new` for the common case of not caring
+// about a real calendar date, just a fixed reference point.
+// 
+// Params:
+// - epoch_seconds: the initial fake time, as epoch seconds
+// 
+// Returns:
+// - a MockClock fixed at that epoch until advanced/set
+pub fun mock_clock_at(num epoch_seconds) MockClock {
+  Timestamp t;
+  t.epoch = epoch_seconds;
+  ret mock_clock_new(t);
+}
+
+impl MockClock as Clock {
+  pub now() Timestamp {
+    ret self.current;
+  }
+}
+
+impl MockClock {
+  // Move the fake clock forward by `seconds` (or backward, given a negative
+  // value) -- instant, no real waiting.
+  // 
+  // Params:
+  // - seconds: how far to advance the fake time
+  pub advance(num seconds) {
+    self.current.epoch = add_seconds(self.current.epoch, seconds);
+  }
+
+  // Jump the fake clock directly to `t`, ignoring its previous value.
+  // 
+  // Params:
+  // - t: the new fake time
+  pub set(Timestamp t) {
+    self.current = t;
+  }
+}
