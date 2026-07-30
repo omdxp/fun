@@ -124,18 +124,25 @@
 // real expected-type mechanism threaded through arbitrary expression
 // contexts, which this narrow, site-by-site approach deliberately isn't.
 // - A generic COMPOUND (`compound Box<T> { ... }`), a generic ENUM
-// (`enum Option<T> { ... }`), and a generic impl's OWN methods (`impl
-// Box<T> { ... }`) all monomorphize now, lazily, the first time a
+// (`enum Option<T> { ... }`), a generic impl's OWN methods (`impl
+// Box<T> { ... }`), and a generic FUNCTION (`fun err_kind<T>(...) ...`)
+// all monomorphize now -- the first three lazily, the first time a
 // concrete instantiation is actually used (see
 // `ensure_compound_instantiated`/`ensure_enum_instantiated`/
-// `maybe_instantiate_generic_impl_methods`'s doc comments) -- but only
-// for a template whose fields/variant-payloads/method self-and-param-
-// and-return types are bare `T`-shaped (no array-of-generic field, e.g.
-// the real `Vec<T>`'s own `T[] data;`) and concrete arguments with no
-// generic args of their own (`Box<Vec<num>>` -- nested generics -- is
-// rejected, not guessed). TRUE dynamic dispatch through an abstract
-// quirk-typed receiver (see below) still doesn't reach a generic impl's
-// methods either, same as a non-generic one's.
+// `maybe_instantiate_generic_impl_methods`'s doc comments); the last
+// from its own CALL site, inferring each type param's binding from the
+// arguments actually passed (see
+// `maybe_instantiate_generic_function`/`infer_arg_type_name`'s doc
+// comments -- only a known local, a literal, or a call to an already-
+// registered plain function can be inferred FROM; anything else is
+// rejected, not guessed) -- but only for a template whose fields/
+// variant-payloads/method-or-function self-and-param-and-return types
+// are bare `T`-shaped (no array-of-generic field, e.g. the real
+// `Vec<T>`'s own `T[] data;`) and concrete arguments with no generic
+// args of their own (`Box<Vec<num>>` -- nested generics -- is rejected,
+// not guessed). TRUE dynamic dispatch through an abstract quirk-typed
+// receiver (see below) still doesn't reach a generic impl's methods
+// either, same as a non-generic one's.
 // - TRUE dynamic dispatch through a receiver declared as an ABSTRACT
 // quirk type itself (a vtable lookup) -- a separate, larger deferred
 // item. A quirk-implementing impl's OWN methods emit fine now (see
@@ -338,6 +345,19 @@ pub compound Codegen {
   // args don't go through this lookup yet).
   Vec<str> function_names;
   Vec<Vec<DataType *>> function_param_types;
+  // Each entry's OWN declared return type, parallel to `function_names`
+  // -- lets `infer_arg_type_name` bind a generic function's type
+  // parameter from a call-site argument that's ITSELF a call to an
+  // already-registered plain function (`err_kind(.Parse, "msg",
+  // token_zero())`, binding `T` from `token_zero`'s own `Token` return
+  // type -- see `maybe_instantiate_generic_function`'s doc comment).
+  Vec<DataType*> function_rtypes;
+  // Every GENERIC top-level function (`fun err_kind<T>(...) ...`),
+  // recorded whole by `register_function_signatures` when it sees
+  // `has_type_params`, instead of registering it into `function_names`
+  // -- see `maybe_instantiate_generic_function`'s doc comment for how
+  // (and when) one gets monomorphized.
+  Vec<Node> generic_function_templates;
   // A generic COMPOUND template (`compound Box<T> { ... }`): its name,
   // type-param names, and each field's OWN pre-substitution declared
   // type -- recorded by `emit_compound` when it sees `has_type_params`,
@@ -429,6 +449,8 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.impl_method_rtype.init(0);
   g.function_names.init(0);
   g.function_param_types.init(0);
+  g.function_rtypes.init(0);
+  g.generic_function_templates.init(0);
   g.generic_compound_names.init(0);
   g.generic_compound_type_params.init(0);
   g.generic_compound_field_names.init(0);
@@ -1570,13 +1592,25 @@ impl Codegen {
       }
       _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
     }
-    self.state.write(callee_name);
-    self.state.write("(");
-
     Vec<Node*> args;
     args.init(0);
     defer args.free();
     self.flatten_call_args(e.right, &args);
+
+    // A call to a GENERIC function (`err_kind(.Parse, "msg",
+    // token_zero())`) is monomorphized from THIS call site's own
+    // arguments, under a mangled name -- see
+    // `maybe_instantiate_generic_function`'s doc comment. A plain
+    // (already-registered non-generic) callee, or one this codegen
+    // doesn't recognize at all, is left as `callee_name` unchanged --
+    // matching this file's "no name resolution for the free-function
+    // case" simplification elsewhere.
+    let generic_inst = self.maybe_instantiate_generic_function(callee_name, args);
+    if generic_inst.is_some() {
+      callee_name = generic_inst.unwrap();
+    }
+    self.state.write(callee_name);
+    self.state.write("(");
 
     bin first = true;
     num arg_idx = 0;
@@ -3011,17 +3045,17 @@ impl Codegen {
   // before ANY function body is emitted, so a call to a function defined
   // LATER in source order still resolves (same reasoning as
   // `register_impl_methods`'s own separate pass). A generic function
-  // (`f.has_type_params`) is skipped entirely -- monomorphizing a
-  // generic FUNCTION (as opposed to a generic impl's methods, a generic
-  // compound, or a generic enum, all of which already work) is a
-  // separate, larger deferred item; a bare-shorthand argument passed to
-  // one simply won't resolve (rejected, not guessed), same as before
-  // this registry existed at all.
+  // (`f.has_type_params`) is instead only RECORDED whole (see
+  // `Codegen.generic_function_templates`'s doc comment) -- monomorphized
+  // lazily, from its own CALL site, by
+  // `maybe_instantiate_generic_function`.
   register_function_signatures(Vec<Node> nodes) {
     for n : nodes {
       fit n.kind {
         .Function(f) -> {
-          if !f.has_type_params {
+          if f.has_type_params {
+            self.generic_function_templates.push(n);
+          } else {
             Vec<DataType*> param_types;
             param_types.init(0);
             if f.has_args {
@@ -3034,11 +3068,181 @@ impl Codegen {
             }
             self.function_names.push(f.name);
             self.function_param_types.push(param_types);
+            if f.has_rtype {
+              self.function_rtypes.push(f.rtype);
+            } else {
+              self.function_rtypes.push(nil);
+            }
           }
         }
         _ -> {}
       }
     }
+  }
+
+  // Looks up `fn_name`'s OWN declared return type -- see
+  // `Codegen.function_rtypes`'s doc comment. `.None` means the function
+  // isn't registered (unknown, a method, or a generic function).
+  lookup_function_rtype(str fn_name) Option<DataType*> {
+    num i = 0;
+    for i < self.function_names.len {
+      if equals(self.function_names.get(i), fn_name) {
+        let rt = self.function_rtypes.get(i);
+        if rt == nil {
+          ret .None;
+        }
+        ret .Some(rt);
+      }
+      i = i + 1;
+    }
+    ret .None;
+  }
+
+  // Infers a call ARGUMENT expression's own bare type name, for binding
+  // one of a generic function's type parameters from its actual call
+  // site (see `maybe_instantiate_generic_function`'s doc comment) --
+  // deliberately narrow, the same "already fully explicit, no real
+  // inference" spirit as everywhere else in this file: a known LOCAL
+  // (its own recorded type), a call to an already-registered PLAIN
+  // function (its own declared return type -- `err_kind`'s real call
+  // site infers `T` from `token_zero()` this way), or a literal
+  // (num/dec/str/chr/bin, from the literal's own kind). Anything else
+  // (a field access, a method call, a nested generic call, ...) is
+  // unresolvable, rejected rather than guessed.
+  infer_arg_type_name(Node* arg) Option<str> {
+    fit arg.kind {
+      .Identifier(name) -> { ret self.lookup_local_type_name(name); }
+      .Number(data) -> {
+        fit data {
+          .Num(_) -> { ret .Some("num"); }
+          .Dec(_) -> { ret .Some("dec"); }
+          _ -> { ret .None; }
+        }
+      }
+      .String(_) -> { ret .Some("str"); }
+      .Character(_) -> { ret .Some("chr"); }
+      .Boolean(_) -> { ret .Some("bin"); }
+      .Expression(e) -> {
+        if !equals(e.op, "()") || !e.has_left {
+          ret .None;
+        }
+        fit e.left.kind {
+          .Identifier(callee_name) -> {
+            let rt = self.lookup_function_rtype(callee_name);
+            if rt.is_none() {
+              ret .None;
+            }
+            ret .Some(rt.unwrap().type_str);
+          }
+          _ -> { ret .None; }
+        }
+      }
+      _ -> { ret .None; }
+    }
+  }
+
+  // Given `fn_name` (a call's plain-identifier callee) and its already-
+  // flattened, actual call ARGUMENTS, checks whether `fn_name` matches a
+  // registered GENERIC function template (see `Codegen.
+  // generic_function_templates`'s doc comment); if so, infers each of
+  // the template's own type parameters' concrete binding from whichever
+  // positional argument's OWN declared parameter type is a bare
+  // occurrence of that type param (`T _default_value` -- matching
+  // `ensure_compound_instantiated`'s own "bare occurrence only"
+  // restriction, via `infer_arg_type_name`), monomorphizes the function
+  // body under a mangled name (`<name>__<arg1>__<arg2>...`, deduped via
+  // `emitted_generic_instantiations`, the SAME shared registry generic
+  // compounds/enums/impls already use), and returns that mangled name
+  // for `emit_call` to use as the actual C callee. `.None` means either
+  // `fn_name` isn't a generic function template at all (the ordinary,
+  // ALREADY-registered-non-generic case, or genuinely unknown), or a
+  // type param's binding couldn't be inferred from this call's own
+  // arguments -- `emit_call` must reject rather than guess in that case.
+  // 
+  // Deliberately narrow for this slice: no pointer-arg mangling (unlike
+  // the compound/enum/impl-method cases, every inferred binding is
+  // treated as a bare value type, matching every call site this slice
+  // was verified against), and the monomorphized body's OWN call
+  // arguments don't get bare-shorthand resolution the way a plain
+  // (non-generic) function's calls do (`Codegen.function_names`'s own
+  // per-argument lookup isn't consulted here).
+  maybe_instantiate_generic_function(str fn_name, Vec<Node*> args) Option<str> {
+    for tmpl : self.generic_function_templates {
+      fit tmpl.kind {
+        .Function(f) -> {
+          if equals(f.name, fn_name) {
+            Vec<str> arg_type_names;
+            arg_type_names.init(0);
+            Vec<bin> arg_is_pointer;
+            arg_is_pointer.init(0);
+            for tp : f.type_params {
+              bin found = false;
+              str found_name = "";
+              num ai = 0;
+              for parg : f.args {
+                fit parg.kind {
+                  .Variable(v) -> {
+                    if equals(v.var_type.type_str, tp) && v.var_type.generic_args.len == 0 && ai < args.len {
+                      let inferred = self.infer_arg_type_name(args.get(ai));
+                      if inferred.is_some() {
+                        found_name = inferred.unwrap();
+                        found = true;
+                      }
+                    }
+                  }
+                  _ -> {}
+                }
+                ai = ai + 1;
+              }
+              if !found {
+                ret .None;
+              }
+              arg_type_names.push(found_name);
+              arg_is_pointer.push(false);
+            }
+
+            StringBuilder nb = string_builder_init(16);
+            nb.append(fn_name);
+            for an : arg_type_names {
+              nb.append("__");
+              nb.append(an);
+            }
+            str mangled_name = nb.build();
+
+            num ei = 0;
+            for ei < self.emitted_generic_instantiations.len {
+              if equals(self.emitted_generic_instantiations.get(ei), mangled_name) {
+                ret .Some(mangled_name);
+              }
+              ei = ei + 1;
+            }
+            self.emitted_generic_instantiations.push(mangled_name);
+
+            let prev_params = self.type_subst_param_names;
+            let prev_arg_names = self.type_subst_arg_type_strs;
+            let prev_arg_ptrs = self.type_subst_arg_is_pointer;
+            self.type_subst_param_names = f.type_params;
+            self.type_subst_arg_type_strs = arg_type_names;
+            self.type_subst_arg_is_pointer = arg_is_pointer;
+
+            CodegenState scratch = codegen_state_new();
+            CodegenState* saved_state = self.state;
+            self.state = &scratch;
+            self.emit_function_named(tmpl, mangled_name);
+            self.state = saved_state;
+            self.emit_hoisted(scratch.out.build());
+
+            self.type_subst_param_names = prev_params;
+            self.type_subst_arg_type_strs = prev_arg_names;
+            self.type_subst_arg_is_pointer = prev_arg_ptrs;
+
+            ret .Some(mangled_name);
+          }
+        }
+        _ -> {}
+      }
+    }
+    ret .None;
   }
 
   // Looks up the declared type of `fn_name`'s parameter at `arg_index`
@@ -3242,10 +3446,12 @@ impl Codegen {
     for n : nodes {
       fit n.kind {
         .Function(f) -> {
-          self.hoist_insert_pos = .Some(self.state.out.len());
-          let ferr = self.emit_function(n);
-          if ferr.is_some() {
-            ret ferr;
+          if !f.has_type_params {
+            self.hoist_insert_pos = .Some(self.state.out.len());
+            let ferr = self.emit_function(n);
+            if ferr.is_some() {
+              ret ferr;
+            }
           }
         }
         _ -> {}
@@ -6760,6 +6966,112 @@ test "pub transpile resolves a bare-shorthand call argument against the callee's
 
   assert g.transpile(nodes).is_none(), "expected the whole program to transpile";
   assert contains(st.out.build(), "return takes_kind(ErrorKind_Parse);"), "expected the bare '.Parse' resolved against takes_kind's own declared 'kind' parameter type";
+}
+
+test "pub transpile monomorphizes a generic function from its own call site, inferring T from a literal argument" {
+  // Regression test: found via the self-compile experiment continuing
+  // past _read_comment_block's own bare-shorthand-argument fix --
+  // std.result's err_kind<T>(...) Result<T, Error> is a GENERIC
+  // FUNCTION (as opposed to a generic impl's methods/a generic compound/
+  // a generic enum, all of which already worked), and this codegen used
+  // to silently emit its bare, unsubstituted `T` as a literal (invalid)
+  // C type instead of monomorphizing it. Fixed by
+  // maybe_instantiate_generic_function: infers each type param's
+  // concrete binding from the CALL site's own arguments (here, a plain
+  // Number literal infers "num"), monomorphizes under a mangled name
+  // reusing the exact same type_subst_*/emit_hoisted machinery already
+  // built for generic impl methods, and rewrites the call to use it.
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  DataType* pdt = malloc(sizeof(DataType));
+  *pdt = dtype_new();
+  pdt.type_str = "T";
+  VariableNode pv;
+  pv.var_type = pdt;
+  pv.name = "value";
+  pv.has_val = false;
+  Node* param = malloc(sizeof(Node));
+  *param = node_new(NodeKind.Variable(pv));
+  Vec<Node*> params;
+  params.init(0);
+  params.push(param);
+
+  Node* val_ident = malloc(sizeof(Node));
+  *val_ident = node_new(NodeKind.Identifier("value"));
+  Node* ret_stmt = malloc(sizeof(Node));
+  *ret_stmt = node_new(NodeKind.StatementReturn(val_ident));
+  Vec<Node*> stmts;
+  stmts.init(0);
+  stmts.push(ret_stmt);
+  BodyNode bn;
+  bn.statements = stmts;
+  Node* body = malloc(sizeof(Node));
+  *body = node_new(NodeKind.Body(bn));
+
+  FunctionNode idfn = function_node_new();
+  idfn.name = "identity";
+  idfn.has_name = true;
+  DataType* idrt = malloc(sizeof(DataType));
+  *idrt = dtype_new();
+  idrt.type_str = "T";
+  idfn.rtype = idrt;
+  idfn.has_rtype = true;
+  idfn.type_params.push("T");
+  idfn.has_type_params = true;
+  idfn.args = params;
+  idfn.has_args = true;
+  idfn.body = body;
+  idfn.has_body = true;
+  Node id_node = node_new(NodeKind.Function(idfn));
+
+  Node* callee = malloc(sizeof(Node));
+  *callee = node_new(NodeKind.Identifier("identity"));
+  Node* arg = malloc(sizeof(Node));
+  *arg = node_new(NodeKind.Number(TokenData.Num(5)));
+  Node* args_node = malloc(sizeof(Node));
+  *args_node = node_new(NodeKind.ExpressionParenthesis(arg));
+  ExprNode call_e;
+  call_e.left = callee;
+  call_e.has_left = true;
+  call_e.right = args_node;
+  call_e.has_right = true;
+  call_e.op = "()";
+  Node* call_node = malloc(sizeof(Node));
+  *call_node = node_new(NodeKind.Expression(call_e));
+  Node* main_ret = malloc(sizeof(Node));
+  *main_ret = node_new(NodeKind.StatementReturn(call_node));
+  Vec<Node*> main_stmts;
+  main_stmts.init(0);
+  main_stmts.push(main_ret);
+  BodyNode main_bn;
+  main_bn.statements = main_stmts;
+  Node* main_body = malloc(sizeof(Node));
+  *main_body = node_new(NodeKind.Body(main_bn));
+
+  FunctionNode mainfn = function_node_new();
+  mainfn.name = "main";
+  mainfn.has_name = true;
+  DataType* main_rtype = malloc(sizeof(DataType));
+  *main_rtype = dtype_new();
+  main_rtype.type_str = "num";
+  mainfn.rtype = main_rtype;
+  mainfn.has_rtype = true;
+  mainfn.has_args = false;
+  mainfn.body = main_body;
+  mainfn.has_body = true;
+  Node main_node = node_new(NodeKind.Function(mainfn));
+
+  Vec<Node> nodes;
+  nodes.init(0);
+  nodes.push(id_node);
+  nodes.push(main_node);
+
+  assert g.transpile(nodes).is_none(), "expected the whole program to transpile";
+  assert equals(
+    st.out.build(),
+    "#include <stdio.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdarg.h>\n#include <stdlib.h>\n#include <string.h>\nstatic FILE* stderr_stream(void){ return stderr; }\nint64_t identity__num(int64_t value) {\n    return value;\n}\nint64_t main(void) {\n    return identity__num(5);\n}\n"
+  ), "expected only the monomorphized 'identity__num', never the unsubstituted 'identity' template itself";
 }
 
 test "transpile emits the prelude followed by every top-level function" {
