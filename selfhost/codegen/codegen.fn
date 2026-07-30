@@ -110,15 +110,18 @@
 // payload layout threaded into the compound-field-type registry; the
 // latter needs import support, neither of which exists yet.
 // - A bare enum-variant shorthand anywhere OTHER than directly as a `ret`
-// value, a `Variable` initializer, an assignment's right-hand side, or
-// an equality/inequality comparison's right-hand side (`self.kind ==
+// value, a `Variable` initializer, an assignment's right-hand side, an
+// equality/inequality comparison's right-hand side (`self.kind ==
 // .None`, `is_ok`/`is_err`-style predicate methods throughout this
 // codebase's own real stdlib -- `Codegen.expected_enum_type` resolves
 // against the LEFT side's own declared/resolved type for `=`/`==`/`!=`
-// alike) -- a call argument, a compound-literal field initializer, a
-// shorthand on the LEFT of any of those four operators, or a nested
-// sub-expression anywhere deeper still, would all need a real
-// expected-type mechanism threaded through arbitrary expression
+// alike), or a call argument to a PLAIN function (`err_kind(.Parse,
+// "msg", 0)`, resolved against the CALLEE's own declared parameter type
+// at that position -- see `Codegen.function_names`'s doc comment; a
+// method-call argument doesn't resolve this way yet) -- a compound-
+// literal field initializer, a shorthand on the LEFT of `=`/`==`/`!=`,
+// or a nested sub-expression anywhere deeper still, would all need a
+// real expected-type mechanism threaded through arbitrary expression
 // contexts, which this narrow, site-by-site approach deliberately isn't.
 // - A generic COMPOUND (`compound Box<T> { ... }`), a generic ENUM
 // (`enum Option<T> { ... }`), and a generic impl's OWN methods (`impl
@@ -319,6 +322,22 @@ pub compound Codegen {
   // `maybe_instantiate_generic_impl_methods` would need to resolve the
   // SUBSTITUTED return type, not the template's raw `T`).
   Vec<DataType*> impl_method_rtype;
+  // A PLAIN top-level function's own name and its parameters' OWN
+  // declared types (positional, parallel Vecs) -- lets `emit_call`
+  // resolve a bare enum-variant shorthand (`.Parse`) passed as a CALL
+  // ARGUMENT (`err_kind(.Parse, "msg", 0)`, e.g. `_read_comment_block`'s
+  // real body in the self-hosted lexer's own source) against the
+  // CALLEE's own declared parameter type at that position, the same
+  // "expected type from the one place that actually declares it, not
+  // real inference" trick as `Codegen.expected_enum_type`'s other three
+  // sites. Populated by `register_function_signatures`, a whole-program
+  // pre-pass over every top-level `Function` node (see `pub transpile`'s
+  // doc comment for why forward references need their own pass, same
+  // reasoning as `register_impl_methods`) -- NOT populated for an impl
+  // method's own params (a separate, narrower case: `emit_method_call`'s
+  // args don't go through this lookup yet).
+  Vec<str> function_names;
+  Vec<Vec<DataType *>> function_param_types;
   // A generic COMPOUND template (`compound Box<T> { ... }`): its name,
   // type-param names, and each field's OWN pre-substitution declared
   // type -- recorded by `emit_compound` when it sees `has_type_params`,
@@ -408,6 +427,8 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.impl_method_bare_name.init(0);
   g.impl_method_mangled_name.init(0);
   g.impl_method_rtype.init(0);
+  g.function_names.init(0);
+  g.function_param_types.init(0);
   g.generic_compound_names.init(0);
   g.generic_compound_type_params.init(0);
   g.generic_compound_field_names.init(0);
@@ -1558,15 +1579,35 @@ impl Codegen {
     self.flatten_call_args(e.right, &args);
 
     bin first = true;
+    num arg_idx = 0;
     for arg : args {
       if !first {
         self.state.write(", ");
       }
       first = false;
+
+      // A bare enum-variant shorthand (`.Parse`) passed as a call
+      // argument (`err_kind(.Parse, "msg", 0)`, e.g.
+      // `_read_comment_block`'s real body in the self-hosted lexer's own
+      // source, found via the self-compile experiment) resolves against
+      // the CALLEE's own declared parameter type at this position -- see
+      // `Codegen.function_names`'s doc comment. An unresolvable callee/
+      // position leaves `expected_enum_type` untouched, same as every
+      // other site.
+      let ptype = self.lookup_function_param_type(callee_name, arg_idx);
+      str prev_expected = self.expected_enum_type;
+      if ptype.is_some() {
+        let resolved = self.resolve_type_name(*ptype.unwrap());
+        if resolved.is_some() {
+          self.expected_enum_type = resolved.unwrap();
+        }
+      }
       let aerr = self.emit_expr(*arg);
+      self.expected_enum_type = prev_expected;
       if aerr.is_some() {
         ret aerr;
       }
+      arg_idx = arg_idx + 1;
     }
     self.state.write(")");
     ret .None;
@@ -2964,6 +3005,64 @@ impl Codegen {
     }
   }
 
+  // Pre-registers every PLAIN top-level function's name and its own
+  // parameters' declared types (see `Codegen.function_names`'s doc
+  // comment), WITHOUT emitting any C -- its own whole-program pass, run
+  // before ANY function body is emitted, so a call to a function defined
+  // LATER in source order still resolves (same reasoning as
+  // `register_impl_methods`'s own separate pass). A generic function
+  // (`f.has_type_params`) is skipped entirely -- monomorphizing a
+  // generic FUNCTION (as opposed to a generic impl's methods, a generic
+  // compound, or a generic enum, all of which already work) is a
+  // separate, larger deferred item; a bare-shorthand argument passed to
+  // one simply won't resolve (rejected, not guessed), same as before
+  // this registry existed at all.
+  register_function_signatures(Vec<Node> nodes) {
+    for n : nodes {
+      fit n.kind {
+        .Function(f) -> {
+          if !f.has_type_params {
+            Vec<DataType*> param_types;
+            param_types.init(0);
+            if f.has_args {
+              for arg : f.args {
+                fit arg.kind {
+                  .Variable(v) -> { param_types.push(v.var_type); }
+                  _ -> {}
+                }
+              }
+            }
+            self.function_names.push(f.name);
+            self.function_param_types.push(param_types);
+          }
+        }
+        _ -> {}
+      }
+    }
+  }
+
+  // Looks up the declared type of `fn_name`'s parameter at `arg_index`
+  // (0-based) -- see `Codegen.function_names`'s doc comment. `.None`
+  // means either the function isn't registered (unknown, a method, or a
+  // generic function -- see `register_function_signatures`), or
+  // `arg_index` is out of range (a variadic C binding's trailing `...`
+  // args, say) -- the caller must treat that as "can't resolve this
+  // argument's expected type," not guess.
+  lookup_function_param_type(str fn_name, num arg_index) Option<DataType*> {
+    num i = 0;
+    for i < self.function_names.len {
+      if equals(self.function_names.get(i), fn_name) {
+        let params = self.function_param_types.get(i);
+        if arg_index < 0 || arg_index >= params.len {
+          ret .None;
+        }
+        ret .Some(params.get(arg_index));
+      }
+      i = i + 1;
+    }
+    ret .None;
+  }
+
   // Pre-registers every method of a plain OR quirk-implementing
   // (non-generic) impl block under its own bare name and fully mangled
   // C call-site name (see `Codegen.impl_method_owner_type`'s doc
@@ -3097,6 +3196,7 @@ impl Codegen {
   // function calling a method doesn't need a forward declaration.
   pub transpile(Vec<Node> nodes) Option<CodegenErrorKind> {
     self.write_prelude();
+    self.register_function_signatures(nodes);
     for n : nodes {
       fit n.kind {
         .Enum(e) -> {
@@ -6545,6 +6645,121 @@ test "emit_expr resolves a bare-shorthand equality comparison's right-hand side 
 
   assert g.emit_expr(n).is_none(), "expected 'self.kind == .None' to resolve the shorthand against 'kind's declared type";
   assert equals(st.out.build(), "(self->kind == ErrorKind_None)"), "expected the bare '.None' resolved against ErrorKind (a plain, non-tagged-union enum), not rejected";
+}
+
+test "pub transpile resolves a bare-shorthand call argument against the callee's own declared parameter type" {
+  // Regression test: `err_kind(.Parse, "msg", 0)` (_read_comment_block's
+  // real body in the self-hosted lexer's own source, calling
+  // std.result's err_kind) used to fail -- a bare shorthand passed as a
+  // CALL ARGUMENT had no expected-type context to resolve against
+  // (unlike a 'ret' value/Variable initializer/assignment or comparison
+  // RHS, which already worked). Fixed via a new whole-program pre-pass,
+  // register_function_signatures, recording each plain function's own
+  // parameter types so emit_call can resolve a bare shorthand argument
+  // against the position it's actually passed to.
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  Vec<str> variants;
+  variants.init(0);
+  variants.push("None");
+  variants.push("Parse");
+  g.record_enum("ErrorKind", variants, false);
+
+  DataType* kind_dt = malloc(sizeof(DataType));
+  *kind_dt = dtype_new();
+  kind_dt.type_str = "ErrorKind";
+  VariableNode kindv;
+  kindv.var_type = kind_dt;
+  kindv.name = "kind";
+  kindv.has_val = false;
+  Node* kind_param = malloc(sizeof(Node));
+  *kind_param = node_new(NodeKind.Variable(kindv));
+
+  Vec<Node*> params;
+  params.init(0);
+  params.push(kind_param);
+
+  Node* ret_stmt = malloc(sizeof(Node));
+  *ret_stmt = node_new(NodeKind.StatementReturn(nil));
+  Vec<Node*> stmts;
+  stmts.init(0);
+  stmts.push(ret_stmt);
+  BodyNode bn;
+  bn.statements = stmts;
+  Node* body = malloc(sizeof(Node));
+  *body = node_new(NodeKind.Body(bn));
+
+  FunctionNode takesfn = function_node_new();
+  takesfn.name = "takes_kind";
+  takesfn.has_name = true;
+  DataType* rtype = malloc(sizeof(DataType));
+  *rtype = dtype_new();
+  rtype.type_str = "void";
+  rtype.kind = DataTypeType.Void;
+  takesfn.rtype = rtype;
+  takesfn.has_rtype = true;
+  takesfn.args = params;
+  takesfn.has_args = true;
+  takesfn.body = body;
+  takesfn.has_body = true;
+  Node takes_node = node_new(NodeKind.Function(takesfn));
+
+  Node* callee = malloc(sizeof(Node));
+  *callee = node_new(NodeKind.Identifier("takes_kind"));
+  Node* blank = malloc(sizeof(Node));
+  *blank = node_new(NodeKind.Blank);
+  Node* variant_ident = malloc(sizeof(Node));
+  *variant_ident = node_new(NodeKind.Identifier("Parse"));
+  ExprNode shorthand;
+  shorthand.left = blank;
+  shorthand.has_left = true;
+  shorthand.right = variant_ident;
+  shorthand.has_right = true;
+  shorthand.op = ".";
+  Node* shorthand_node = malloc(sizeof(Node));
+  *shorthand_node = node_new(NodeKind.Expression(shorthand));
+  Node* args = malloc(sizeof(Node));
+  *args = node_new(NodeKind.ExpressionParenthesis(shorthand_node));
+
+  ExprNode call_e;
+  call_e.left = callee;
+  call_e.has_left = true;
+  call_e.right = args;
+  call_e.has_right = true;
+  call_e.op = "()";
+  Node* call_node = malloc(sizeof(Node));
+  *call_node = node_new(NodeKind.Expression(call_e));
+  Node* call_ret_stmt = malloc(sizeof(Node));
+  *call_ret_stmt = node_new(NodeKind.StatementReturn(call_node));
+  Vec<Node*> main_stmts;
+  main_stmts.init(0);
+  main_stmts.push(call_ret_stmt);
+  BodyNode main_bn;
+  main_bn.statements = main_stmts;
+  Node* main_body = malloc(sizeof(Node));
+  *main_body = node_new(NodeKind.Body(main_bn));
+
+  FunctionNode mainfn = function_node_new();
+  mainfn.name = "main";
+  mainfn.has_name = true;
+  DataType* main_rtype = malloc(sizeof(DataType));
+  *main_rtype = dtype_new();
+  main_rtype.type_str = "num";
+  mainfn.rtype = main_rtype;
+  mainfn.has_rtype = true;
+  mainfn.has_args = false;
+  mainfn.body = main_body;
+  mainfn.has_body = true;
+  Node main_node = node_new(NodeKind.Function(mainfn));
+
+  Vec<Node> nodes;
+  nodes.init(0);
+  nodes.push(takes_node);
+  nodes.push(main_node);
+
+  assert g.transpile(nodes).is_none(), "expected the whole program to transpile";
+  assert contains(st.out.build(), "return takes_kind(ErrorKind_Parse);"), "expected the bare '.Parse' resolved against takes_kind's own declared 'kind' parameter type";
 }
 
 test "transpile emits the prelude followed by every top-level function" {
