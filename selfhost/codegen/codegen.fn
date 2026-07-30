@@ -3059,6 +3059,7 @@ impl Codegen {
     for n : nodes {
       fit n.kind {
         .Enum(e) -> {
+          self.hoist_insert_pos = .Some(self.state.out.len());
           let eerr = self.emit_enum(n);
           if eerr.is_some() {
             ret eerr;
@@ -3070,6 +3071,7 @@ impl Codegen {
     for n : nodes {
       fit n.kind {
         .Compound(c) -> {
+          self.hoist_insert_pos = .Some(self.state.out.len());
           let cerr = self.emit_compound(n);
           if cerr.is_some() {
             ret cerr;
@@ -5697,6 +5699,60 @@ test "emit_expr calls a generic impl's monomorphized method through a value-type
     st.out.build(),
     "typedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nBox__num b;\nBox__num__get(&b)"
   ), "expected 'Box__num__get(&b)', resolved via the same lookup_impl_method path a non-generic impl uses";
+}
+
+test "pub transpile hoists a generic compound's monomorphized typedef BEFORE another compound whose OWN field first triggers it" {
+  // Regression test: `StringBuilder { Vec<str> parts; ... }` (the real
+  // stdlib's own shape, found via the self-compile experiment) used to
+  // emit `Vec__str`'s struct typedef NESTED INSIDE StringBuilder's own
+  // `typedef struct StringBuilder { ... }` field list -- valid-looking
+  // but actually illegal C (a typedef can't be declared in the middle of
+  // another struct's member list). `pub transpile`'s enum/compound
+  // passes didn't set `hoist_insert_pos` at all (only the impl/function
+  // passes did, from the EARLIER function-nested-inside-a-function fix)
+  // -- this covers the exact same hoisting mechanism for the compound
+  // pass too.
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  CompoundNode boxc = compound_node_new();
+  boxc.name = "Box";
+  boxc.type_params.push("T");
+  boxc.has_type_params = true;
+  CompoundField boxf;
+  boxf.name = "value";
+  DataType* boxfdt = malloc(sizeof(DataType));
+  *boxfdt = dtype_new();
+  boxfdt.type_str = "T";
+  boxf.dtype = boxfdt;
+  boxc.fields.push(boxf);
+  Node box_node = node_new(NodeKind.Compound(boxc));
+
+  CompoundNode outerc = compound_node_new();
+  outerc.name = "Outer";
+  DataType* num_arg = malloc(sizeof(DataType));
+  *num_arg = dtype_new();
+  num_arg.type_str = "num";
+  DataType* inner_dt = malloc(sizeof(DataType));
+  *inner_dt = dtype_new();
+  inner_dt.type_str = "Box";
+  inner_dt.generic_args.push(num_arg);
+  CompoundField innerf;
+  innerf.name = "inner";
+  innerf.dtype = inner_dt;
+  outerc.fields.push(innerf);
+  Node outer_node = node_new(NodeKind.Compound(outerc));
+
+  Vec<Node> nodes;
+  nodes.init(0);
+  nodes.push(box_node);
+  nodes.push(outer_node);
+
+  assert g.transpile(nodes).is_none(), "expected the whole program to transpile";
+  assert equals(
+    st.out.build(),
+    "#include <stdio.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdarg.h>\n#include <stdlib.h>\n#include <string.h>\ntypedef struct Box__num {\n  int64_t value;\n} Box__num;\n\ntypedef struct Outer {\n  Box__num inner;\n} Outer;\n\n"
+  ), "expected Box__num's typedef BEFORE Outer's, not nested inside its field list";
 }
 
 test "pub transpile hoists a generic impl method's monomorphized definition BEFORE the function that first triggers it, not nested inside it" {
