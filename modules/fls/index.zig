@@ -1483,6 +1483,42 @@ test "fls index: function-type parameter (fun(T1, T2) R) does not crash indexing
     try std.testing.expect(data.len % 5 == 0);
 }
 
+test "fls index: an async fn with a function-typed parameter does not crash indexing" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Regression coverage for the specific shape that was broken at the
+    // CODEGEN level (async functions taking a function-typed parameter
+    // generated invalid C -- see `fix(codegen): support function-typed
+    // parameters on async functions`). FLS's indexing is token/AST-based
+    // and never runs C emission, so it was never actually at risk from
+    // that bug, but there was no direct test confirming that -- this pins
+    // it down rather than leaving it as an assumption.
+    const text =
+        "imp std.task;\n\n" ++
+        "async fun run_one(fun(num) num f, num arg, WaitGroup* wg) {\n" ++
+        "  num r = f(arg);\n" ++
+        "  wg.done();\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found = false;
+    for (idx.symbols) |s| {
+        if (s.kind != .function) continue;
+        if (!std.mem.eql(u8, s.name, "run_one")) continue;
+        found = true;
+        break;
+    }
+    try std.testing.expect(found);
+
+    const data = try buildSemanticTokens(allocator, idx);
+    defer allocator.free(data);
+    try std.testing.expect(data.len % 5 == 0);
+}
+
 test "fls index: test blocks (test \"name\" { ... }) do not crash indexing" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
@@ -1501,6 +1537,54 @@ test "fls index: test blocks (test \"name\" { ... }) do not crash indexing" {
 
     const idx = try buildIndexFromText(allocator, text);
     defer idx.deinit();
+
+    const data = try buildSemanticTokens(allocator, idx);
+    defer allocator.free(data);
+    try std.testing.expect(data.len % 5 == 0);
+}
+
+test "fls index: fuzz blocks (fuzz \"name\" (data, len) { ... }) index data/len as typed locals" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // `fuzz` blocks are new; guards against a crash/hang in FLS's indexing/
+    // semantic-token building when it encounters the new `.Fuzz` node type
+    // (same bar as the `.Test` regression above -- was NOT covered when
+    // `.Fuzz` was added, unlike `.Test`), AND asserts the stronger bar
+    // `.Test` doesn't need: `fuzz`'s two parameters (unlike `test`, which
+    // has none) must be indexed as typed locals inside the body -- fixed
+    // ABI types (`raw*`/`num`), not parsed from any source annotation --
+    // so hovering over `data`/`len` inside the block shows their real
+    // type instead of nothing.
+    const text =
+        "imp std.c.io;\n\n" ++
+        "fuzz \"parses without crashing\" (data, len) {\n" ++
+        "  if len > 0 {\n" ++
+        "    printf(\"nonempty\\n\");\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found_data = false;
+    var found_len = false;
+    for (idx.symbols) |s| {
+        if (s.kind != .variable) continue;
+        if (std.mem.eql(u8, s.name, "data")) {
+            found_data = true;
+            try std.testing.expect(s.value_type != null);
+            try std.testing.expectEqualStrings("raw*", s.value_type.?);
+        }
+        if (std.mem.eql(u8, s.name, "len")) {
+            found_len = true;
+            try std.testing.expect(s.value_type != null);
+            try std.testing.expectEqualStrings("num", s.value_type.?);
+        }
+    }
+    try std.testing.expect(found_data);
+    try std.testing.expect(found_len);
 
     const data = try buildSemanticTokens(allocator, idx);
     defer allocator.free(data);

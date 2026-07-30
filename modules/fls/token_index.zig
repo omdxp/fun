@@ -1021,7 +1021,8 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
     // - `fun name(...) { ... }`
     // - `impl Type { method(...) { ... } }`
     // - `test "name" { ... }`
-    const PendingBodyKind = enum { none, fun_decl, impl_method, test_decl };
+    // - `fuzz "name" (data, len) { ... }`
+    const PendingBodyKind = enum { none, fun_decl, impl_method, test_decl, fuzz_decl };
 
     var pending_body: PendingBodyKind = .none;
     var pending_params = ArrayList(ParamLite).init(allocator);
@@ -2969,6 +2970,46 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
             // in the common case.
             resetPendingBody(&pending_body, &pending_params, &pending_impl_owner, &pending_is_variadic);
             pending_body = .test_decl;
+            continue;
+        }
+
+        if (isKeyword(t, "fuzz")) {
+            // `fuzz "name" (data, len) { ... }` -- same reasoning as `test`
+            // above, but ALSO has two parameters (unlike `test`) whose
+            // TYPES are always fixed (`raw* data, num len` -- see
+            // `parse_fuzz` in the parser) rather than parsed from the
+            // token stream the way `fun`'s params are: there's no type
+            // annotation in the source to read, just the two bare names,
+            // so they're synthesized directly here instead of going
+            // through `parseParamsAfterLParen`.
+            resetPendingBody(&pending_body, &pending_params, &pending_impl_owner, &pending_is_variadic);
+            pending_body = .fuzz_decl;
+            const name_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
+            if (tokens[name_i].type != .String) continue;
+            const lparen_i = nextNonTrivialToken(tokens, name_i + 1) orelse continue;
+            if (!isPunctChar(tokens[lparen_i], '(')) continue;
+            const data_i = nextNonTrivialToken(tokens, lparen_i + 1) orelse continue;
+            if (isIdent(tokens[data_i])) {
+                const pname = tokenString(tokens[data_i]);
+                const pname_owned = allocator.dupe(u8, pname) catch pname;
+                pending_params.append(.{
+                    .name = pname_owned,
+                    .dtype_base = "raw",
+                    .dtype_display = "raw*",
+                }) catch {};
+            }
+            const comma_i = nextNonTrivialToken(tokens, data_i + 1) orelse continue;
+            if (!isPunctChar(tokens[comma_i], ',')) continue;
+            const len_i = nextNonTrivialToken(tokens, comma_i + 1) orelse continue;
+            if (isIdent(tokens[len_i])) {
+                const pname = tokenString(tokens[len_i]);
+                const pname_owned = allocator.dupe(u8, pname) catch pname;
+                pending_params.append(.{
+                    .name = pname_owned,
+                    .dtype_base = "num",
+                    .dtype_display = "num",
+                }) catch {};
+            }
             continue;
         }
 
