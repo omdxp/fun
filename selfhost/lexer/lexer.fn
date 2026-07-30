@@ -28,6 +28,8 @@ imp std.vec;
 imp std.ctype;
 imp std.result;
 imp std.error;
+imp std.c.mem;
+imp std.c.string;
 imp token;
 imp lexdefs;
 
@@ -972,4 +974,33 @@ test "lexes symbols and newlines" {
   assert token_is_symbol(toks.get(0), '{'), "expected '{' symbol";
   assert token_is_symbol(toks.get(1), '}'), "expected '}' symbol";
   assert toks.get(2).type == .NewLine, "expected NewLine token";
+}
+
+// A lexer's whole job is to survive input it never validated in advance --
+// malformed UTF-8, truncated escapes/comments/strings, byte sequences no
+// human would type. `tokenize` already returns a Result for the EXPECTED
+// failure case (an unterminated string/comment, an unknown character) --
+// this fuzz target isn't hunting for that, it's hunting for the crash a
+// hand-rolled cursor-based scanner is prone to on truncated/edge-case input
+// (an off-the-end read, an infinite loop that never advances the cursor).
+// 
+// `data`/`len` are a raw byte buffer with no guarantee of NUL-termination
+// (fuzzing engines don't null-terminate their generated inputs), but
+// `tokenize` takes a `str` -- so this copies into a freshly NUL-terminated
+// buffer first, same as any other C boundary crossing a length-prefixed
+// buffer into a NUL-terminated string.
+fuzz "tokenize never crashes on arbitrary input" (data, len) {
+  str src = malloc(len + 1);
+  if src == nil {
+    ret;
+  }
+  defer free(src);
+  memcpy(src, data, len);
+  src[len] = 0;
+
+  let result = tokenize(src, "fuzz_input");
+  if result.is_ok() {
+    let toks = result.unwrap();
+    defer toks.free();
+  }
 }
