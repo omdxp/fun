@@ -1108,30 +1108,34 @@ impl ParseState {
   // `Name{...}`/`Name<T>{...}` should be parsed as a compound-literal
   // initializer rather than left as a plain identifier reference.
   // 
-  // Deliberately narrower than the original: only checks symbols already
-  // registered in THIS file up to the current parse position (via
-  // `get_symbol`) -- not a compound declared LATER in the same file (the
-  // original's `is_forward_declared_type` pre-scan, deferred along with
-  // `forward_type_names` per this file's own top-level doc comment) nor
-  // one imported from another module (`is_known_imported`, deferred
-  // along with cross-file import resolution -- see `parse_import`'s doc
-  // comment). Covers the common "declare, then use" case; a forward or
-  // cross-file reference falls through to being read as a plain
-  // identifier instead, the same clean-but-incomplete outcome as any
-  // other not-yet-supported shape in this port.
+  // Checks symbols already registered in THIS file up to the current
+  // parse position (via `get_symbol`) FIRST -- not a compound declared
+  // LATER in the same file (the original's `is_forward_declared_type`
+  // pre-scan, deferred along with `forward_type_names` per this file's
+  // own top-level doc comment). Falls back to `global_symbols` (a public
+  // compound declared in ANOTHER file, e.g. `DynamicIntType{...}` used
+  // in `codegen/typedefs.fn` while declared in `parser/datatype_defs.fn`
+  // -- found via the self-compile experiment) -- populated across the
+  // whole transitive import graph by `import_resolver.fn`'s
+  // `preload_global_symbols`, BEFORE any file's own real parse begins.
+  // A forward reference within the SAME file still falls through to
+  // being read as a plain identifier, the same clean-but-incomplete
+  // outcome as any other not-yet-supported shape in this port.
   pub is_known_compound_symbol(str name) bin {
     let maybe_sym = self.get_symbol(name);
-    if maybe_sym.is_none() {
-      ret false;
+    if maybe_sym.is_some() {
+      let maybe_node = get_node_symbol(maybe_sym.unwrap());
+      if maybe_node.is_some() {
+        fit maybe_node.unwrap().kind {
+          .Compound(c) -> { ret true; }
+          _ -> {}
+        }
+      }
     }
-    let maybe_node = get_node_symbol(maybe_sym.unwrap());
-    if maybe_node.is_none() {
-      ret false;
+    if self.global_symbols.has(name) {
+      ret self.global_symbols.get(name).is_compound;
     }
-    fit maybe_node.unwrap().kind {
-      .Compound(c) -> { ret true; }
-      _ -> { ret false; }
-    }
+    ret false;
   }
 }
 

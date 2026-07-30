@@ -23,12 +23,29 @@ imp std.c.mem;
 
 // Tracks a public symbol's declaring file, to detect cross-module name
 // collisions. Only public symbols are ever recorded (see
-// `parse_state_register_symbol` in parser.fn).
+// `parse_state_register_symbol` in parser.fn). `is_compound` additionally
+// lets `is_known_compound_symbol` recognize a CROSS-FILE compound (`pub
+// compound Foo { ... }` in an imported file), not just one already
+// declared earlier in THIS file's own symbol table -- see
+// `import_resolver.fn`'s `preload_global_symbols`, which populates
+// `ParseState.global_symbols` across the whole transitive import graph
+// before any file's own real parse begins.
 pub compound GlobalSymbolInfo {
   str symbol_name;
   str file_path;
   bin is_function;
   bin is_public;
+  bin is_compound;
+}
+
+pub fun global_symbol_info_new(str symbol_name, str file_path) GlobalSymbolInfo {
+  GlobalSymbolInfo g;
+  g.symbol_name = symbol_name;
+  g.file_path = file_path;
+  g.is_function = false;
+  g.is_public = true;
+  g.is_compound = false;
+  ret g;
 }
 
 // All state a parse of a single file needs, from raw tokens down to the

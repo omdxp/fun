@@ -230,13 +230,25 @@ pub enum CodegenErrorKind {
 // so a chained field access (`a.b.c`) can determine `.`/`->` at each
 // link without a real type-inference engine. See
 // `emit_receiver_and_resolve_type`'s doc comment.
+// `dtype` additionally carries the field's FULL, un-mangled declared
+// `DataType` (its own `generic_args` intact), when the recording call
+// site had one on hand (`record_compound_typed`, e.g. `emit_compound`'s
+// own real field pass) -- `.None` for a hand-built unit test's stand-in
+// field (`record_compound`). Lets a caller that needs REAL structure (a
+// generic arg, e.g. `Vec<T>`'s own `T`) read it directly instead of
+// reverse-engineering it out of a mangled name string -- see
+// `emit_for_iter`'s own doc comment for the motivating case (a for-each
+// iterable that's itself a field access, `for a : dt.generic_args { ...
+// }`, needing to know ITS OWN element type to record `a` as a known
+// local too).
 compound FieldTypeInfo {
   str type_name;
   bin is_pointer;
+  Option<DataType> dtype;
 }
 
-// Same two facts as `FieldTypeInfo`, plus the RESOLVED C text itself --
-// the pure counterpart of `emit_receiver_and_resolve_type` (which writes
+// Same facts as `FieldTypeInfo`, plus the RESOLVED C text itself -- the
+// pure counterpart of `emit_receiver_and_resolve_type` (which writes
 // text as it resolves, fine for a receiver emitted exactly once inline).
 // `emit_fit`'s subject needs its text computed once but WRITTEN once per
 // branch, so resolution has to happen without touching the output buffer
@@ -245,6 +257,7 @@ compound ChainResolution {
   str text;
   str type_name;
   bin is_pointer;
+  Option<DataType> dtype;
 }
 
 // The result of monomorphizing a generic function CALL (see
@@ -411,6 +424,11 @@ pub compound Codegen {
   Vec<Vec<str>> compound_field_names;
   Vec<Vec<str>> compound_field_type_names;
   Vec<Vec<bin>> compound_field_is_pointer;
+  // The FULL, un-mangled declared `DataType` for each field, when the
+  // recording call site had one on hand -- see `FieldTypeInfo.dtype`'s
+  // doc comment for why (a field-access iterable's own element type,
+  // `for a : dt.generic_args { ... }`).
+  Vec<Vec<Option<DataType>>> compound_field_dtype;
   // Whole-program record of every impl method's owning type, its OWN
   // bare name, and its FULLY MANGLED C call-site name -- populated by
   // `register_impl_methods`' own dedicated pre-pass (see `transpile`'s
@@ -557,6 +575,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.compound_field_names.init(0);
   g.compound_field_type_names.init(0);
   g.compound_field_is_pointer.init(0);
+  g.compound_field_dtype.init(0);
   g.impl_method_owner_type.init(0);
   g.impl_method_bare_name.init(0);
   g.impl_method_mangled_name.init(0);
@@ -1441,6 +1460,7 @@ impl Codegen {
         FieldTypeInfo info;
         info.type_name = type_names.get(position);
         info.is_pointer = is_pointers.get(position);
+        info.dtype = .None;
         ret .Some(info);
       }
       i = i + 1;
@@ -1489,17 +1509,50 @@ impl Codegen {
 
   // Records `name` as a known compound with the given fields' names and
   // declared types, for later chained-field-access resolution. See the
-  // `Codegen.compound_names`/etc. field doc comment.
+  // `Codegen.compound_names`/etc. field doc comment. No full per-field
+  // `DataType` on hand here (a hand-built unit test's stand-in fields,
+  // not a real declaration's own) -- see `record_compound_typed` for the
+  // call site that has one.
   record_compound(
     str name,
     Vec<str> field_names,
     Vec<str> field_type_names,
     Vec<bin> field_is_pointer
   ) {
+    Vec<Option<DataType>> field_dtypes;
+    field_dtypes.init(0);
+    num k = 0;
+    for k < field_names.len {
+      field_dtypes.push(.None);
+      k = k + 1;
+    }
     self.compound_names.push(name);
     self.compound_field_names.push(field_names);
     self.compound_field_type_names.push(field_type_names);
     self.compound_field_is_pointer.push(field_is_pointer);
+    self.compound_field_dtype.push(field_dtypes);
+  }
+
+  // Like `record_compound`, but for a call site that has each field's
+  // REAL, un-mangled `DataType` on hand (`emit_compound`'s own real
+  // field pass) -- see `FieldTypeInfo.dtype`'s doc comment.
+  record_compound_typed(
+    str name,
+    Vec<str> field_names,
+    Vec<str> field_type_names,
+    Vec<bin> field_is_pointer,
+    Vec<DataType> field_dtypes_raw
+  ) {
+    Vec<Option<DataType>> field_dtypes;
+    field_dtypes.init(0);
+    for d : field_dtypes_raw {
+      field_dtypes.push(.Some(d));
+    }
+    self.compound_names.push(name);
+    self.compound_field_names.push(field_names);
+    self.compound_field_type_names.push(field_type_names);
+    self.compound_field_is_pointer.push(field_is_pointer);
+    self.compound_field_dtype.push(field_dtypes);
   }
 
   // Looks up `field_name`'s declared type on the known compound
@@ -1512,12 +1565,14 @@ impl Codegen {
         let field_names = self.compound_field_names.get(i);
         let field_types = self.compound_field_type_names.get(i);
         let field_ptrs = self.compound_field_is_pointer.get(i);
+        let field_dtypes = self.compound_field_dtype.get(i);
         num j = 0;
         for j < field_names.len {
           if equals(field_names.get(j), field_name) {
             FieldTypeInfo info;
             info.type_name = field_types.get(j);
             info.is_pointer = field_ptrs.get(j);
+            info.dtype = field_dtypes.get(j);
             ret .Some(info);
           }
           j = j + 1;
@@ -2314,6 +2369,7 @@ impl Codegen {
         r.text = name;
         r.type_name = type_found.unwrap();
         r.is_pointer = ptr_found.unwrap();
+        r.dtype = self.lookup_local_dtype(name);
         ret .Some(r);
       }
       .Expression(inner_e) -> {
@@ -2388,6 +2444,7 @@ impl Codegen {
           r.text = call_scratch.out.build();
           r.type_name = resolved_name_opt.unwrap();
           r.is_pointer = dtype_is_pointer(rdt);
+          r.dtype = .Some(rdt);
           ret .Some(r);
         }
         if !equals(inner_e.op, ".") || !inner_e.has_left || !inner_e.has_right {
@@ -2420,6 +2477,7 @@ impl Codegen {
         r.text = sb.build();
         r.type_name = field_info.type_name;
         r.is_pointer = field_info.is_pointer;
+        r.dtype = field_info.dtype;
         ret .Some(r);
       }
       _ -> { ret .None; }
@@ -2439,6 +2497,7 @@ impl Codegen {
     FieldTypeInfo info;
     info.type_name = r.type_name;
     info.is_pointer = r.is_pointer;
+    info.dtype = r.dtype;
     ret .Some(info);
   }
 
@@ -2784,9 +2843,41 @@ impl Codegen {
   // exercised by a REAL declaration before, only ever by hand-recorded
   // test locals).
   emit_for_iter(ForIterNode fi) Option<CodegenErrorKind> {
-    str arr_name = "";
+    // The iterable is either a plain identifier (a known local, checked
+    // structurally via `lookup_local_dtype` or by name otherwise -- see
+    // this function's own doc comment) OR a chained field access (`for a
+    // : dt.generic_args { ... }` -- `Codegen.resolve_type_subst`'s own
+    // real body, found via the self-compile experiment) resolved via
+    // `resolve_field_chain` (any depth) instead, the same lookup several
+    // other sites in this file already use for a chained receiver.
+    // `resolve_field_chain`'s own `ChainResolution.dtype` (see its doc
+    // comment) carries the field's FULL structured `DataType` too, when
+    // `record_compound_typed` recorded it (a real declaration's own
+    // field, not a hand-built unit test's stand-in) -- letting `item` be
+    // recorded as a known local of its real element type here too, same
+    // as the identifier case below.
+    str arr_text = "";
+    Option<DataType> arr_dtype = .None;
+    Option<str> arr_type_name = .None;
     fit fi.iterable.kind {
-      .Identifier(name) -> { arr_name = name; }
+      .Identifier(name) -> {
+        arr_text = name;
+        arr_dtype = self.lookup_local_dtype(name);
+        arr_type_name = self.lookup_local_type_name(name);
+      }
+      .Expression(e) -> {
+        if !equals(e.op, ".") {
+          ret .Some(CodegenErrorKind.UnsupportedNode);
+        }
+        let resolved = self.resolve_field_chain(fi.iterable);
+        if resolved.is_none() {
+          ret .Some(CodegenErrorKind.UnsupportedNode);
+        }
+        let r = resolved.unwrap();
+        arr_text = r.text;
+        arr_type_name = .Some(r.type_name);
+        arr_dtype = r.dtype;
+      }
       _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
     }
 
@@ -2800,23 +2891,40 @@ impl Codegen {
     // loop's own `item`) was never a known local at all (see below on
     // why `item` isn't normally recorded), so the INNER `for et :
     // existing` rejected it outright.
+    // 
+    // `arr_dtype` being `.Some` does NOT always mean it's structural,
+    // though: a local whose type came from a MONOMORPHIZED generic
+    // method's own registered return type (`let variant_templates =
+    // self.generic_enum_variants.get(template_idx);` --
+    // `ensure_enum_instantiated`'s own real body, found via the self-
+    // compile experiment) has an ALREADY-MANGLED `type_str`
+    // ("Vec__GenericEnumVariantTemplate") with EMPTY `generic_args` --
+    // the structural information was already collapsed into a name
+    // upstream (`maybe_instantiate_generic_impl_methods` records a
+    // template method's substituted return type as a plain resolved
+    // name, not a re-expanded structural one). Recognized as a Vec
+    // either way (structurally, or by name via `arr_dt.type_str` itself
+    // OR the name-only fallback), but only the STRUCTURAL case can also
+    // resolve `item`'s own element type.
     Option<DataType> elem_dt = .None;
-    let dtype_found = self.lookup_local_dtype(arr_name);
-    if dtype_found.is_some() {
-      let arr_dt = dtype_found.unwrap();
-      if !equals(arr_dt.type_str, "Vec") || arr_dt.generic_args.len != 1 {
-        ret .Some(CodegenErrorKind.UnsupportedNode);
+    bin is_vec = false;
+    if arr_dtype.is_some() {
+      let arr_dt = arr_dtype.unwrap();
+      if equals(arr_dt.type_str, "Vec") && arr_dt.generic_args.len == 1 {
+        elem_dt = .Some(self.resolve_type_subst(*arr_dt.generic_args.get(0)));
+        is_vec = true;
+      } elif equals(arr_dt.type_str, "Vec") || starts_with(arr_dt.type_str, "Vec__") {
+        is_vec = true;
       }
-      elem_dt = .Some(self.resolve_type_subst(*arr_dt.generic_args.get(0)));
-    } else {
-      let type_found = self.lookup_local_type_name(arr_name);
-      if type_found.is_none() {
-        ret .Some(CodegenErrorKind.UnsupportedNode);
+    }
+    if !is_vec && arr_type_name.is_some() {
+      let found_name = arr_type_name.unwrap();
+      if equals(found_name, "Vec") || starts_with(found_name, "Vec__") {
+        is_vec = true;
       }
-      let found_name = type_found.unwrap();
-      if !equals(found_name, "Vec") && !starts_with(found_name, "Vec__") {
-        ret .Some(CodegenErrorKind.UnsupportedNode);
-      }
+    }
+    if !is_vec {
+      ret .Some(CodegenErrorKind.UnsupportedNode);
     }
 
     str idx_name = "__fun_i";
@@ -2829,7 +2937,7 @@ impl Codegen {
     self.state.write(" = 0; ");
     self.state.write(idx_name);
     self.state.write(" < ");
-    self.state.write(arr_name);
+    self.state.write(arr_text);
     self.state.write(".len; ");
     self.state.write(idx_name);
     self.state.write("++) {\n");
@@ -2838,7 +2946,7 @@ impl Codegen {
     self.state.write("__auto_type ");
     self.state.write(fi.item_name);
     self.state.write(" = ");
-    self.state.write(arr_name);
+    self.state.write(arr_text);
     self.state.write(".data[");
     self.state.write(idx_name);
     self.state.write("];\n");
@@ -3814,6 +3922,8 @@ impl Codegen {
           ret .None;
         }
 
+        Vec<DataType> field_dtypes;
+        field_dtypes.init(0);
         self.state.write("typedef struct ");
         self.state.write(c.name);
         self.state.write(" {\n");
@@ -3829,11 +3939,18 @@ impl Codegen {
           field_names.push(f.name);
           field_type_names.push(wt.unwrap());
           field_is_pointer.push(dtype_is_pointer(*f.dtype));
+          field_dtypes.push(self.resolve_type_subst(*f.dtype));
         }
         self.state.write("} ");
         self.state.write(c.name);
         self.state.write(";\n\n");
-        self.record_compound(c.name, field_names, field_type_names, field_is_pointer);
+        self.record_compound_typed(
+          c.name,
+          field_names,
+          field_type_names,
+          field_is_pointer,
+          field_dtypes
+        );
         ret .None;
       }
       _ -> { ret .Some(CodegenErrorKind.InvalidNode); }

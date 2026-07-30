@@ -1,0 +1,4 @@
+pub compound Point {
+  num x;
+  num y;
+}

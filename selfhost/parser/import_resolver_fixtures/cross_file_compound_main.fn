@@ -1,0 +1,6 @@
+imp cross_file_compound_helper;
+
+fun main() num {
+  Point p = Point{x = 1, y = 2};
+  ret p.x;
+}

@@ -12,11 +12,13 @@ imp parse_state;
 imp parser;
 imp ..ast.ast;
 imp ..lexer.lexer;
+imp ..lexer.token;
 imp std.string;
 imp std.path;
 imp std.fs;
 imp std.vec;
 imp std.set;
+imp std.map;
 imp std.option;
 imp std.result;
 
@@ -115,17 +117,51 @@ pub fun resolve_import_path(str input_file_path, str import_path) str {
 // short-circuits the whole merge as `.Err`, rather than silently
 // returning a partial program.
 pub fun parse_program_with_imports(str entry_path) Result<Vec<Node>, str> {
+  Map<str, GlobalSymbolInfo> global_symbols;
+  global_symbols.init(8);
+  Set<str> preload_visited = set_init("", 8);
+  let preload_err = _preload_and_collect(entry_path, &global_symbols, &preload_visited);
+  if preload_err.is_some() {
+    ret .Err(preload_err.unwrap());
+  }
+
   Vec<Node> merged;
   merged.init(0);
   Set<str> visited = set_init("", 8);
-  let err = _parse_and_merge(entry_path, &merged, &visited);
+  let err = _parse_and_merge(entry_path, &merged, &visited, &global_symbols);
   if err.is_some() {
     ret .Err(err.unwrap());
   }
   ret .Ok(merged);
 }
 
-fun _parse_and_merge(str path, Vec<Node>* merged, Set<str>* visited) Option<str> {
+// Recursively discovers `path`'s (transitive) import graph and collects
+// just the NAME of each public top-level `compound` declared anywhere in
+// it (into `out`, keyed by name) -- a lightweight first pass so
+// `is_known_compound_symbol` can recognize a compound declared in
+// ANOTHER file before that file's own REAL parse ever starts
+// (`parse_program_with_imports` runs this FIRST, then threads the
+// resulting map into every file's own `ParseState.global_symbols` via
+// `_parse_and_merge`).
+// 
+// Deliberately does NOT reuse `Parser.pub parse()` (a full parse) the
+// way `_parse_and_merge` does: a full parse of THIS file would need
+// `is_known_compound_symbol` to already know about compounds from files
+// it hasn't been visited yet either (`codegen/typedefs.fn`'s own real
+// `DynamicIntType{...}` test body, found via the self-compile
+// experiment, is exactly this -- a compound-literal expression whose
+// type is declared in a DIFFERENT file). Sidesteps the circularity two
+// ways instead: `imp` statements (always grouped at the top of a file,
+// before any other declaration, matching this whole codebase's own
+// convention) are parsed via the real `Parser.parse_import` in a loop
+// (reusing its already-correct dotted-path/`../`-run reconstruction
+// logic exactly, rather than duplicating it here) so the import graph
+// itself is discovered accurately; a top-level `pub compound NAME`
+// declaration is instead found via a raw TOKEN scan over the remaining
+// tokens (tracking `{`/`}` depth to stay at top level) -- simple pattern
+// matching that can't itself fail on an unresolved identifier, since it
+// never needs to understand expressions at all.
+fun _preload_and_collect(str path, Map<str, GlobalSymbolInfo>* out, Set<str>* visited) Option<str> {
   if visited.has(path) {
     ret .None;
   }
@@ -143,6 +179,110 @@ fun _parse_and_merge(str path, Vec<Node>* merged, Set<str>* visited) Option<str>
 
   ParseState state = parse_state_new(path, src);
   state.tokens = tok_result.unwrap();
+  state.emit_stderr = false;
+  Parser p = parser_new(&state);
+
+  for state.next_token_is_keyword("imp") {
+    let ierr = p.parse_import();
+    if ierr.is_some() {
+      ret .Some(format("parse error in {str}", path));
+    }
+  }
+
+  for n : state.nodes {
+    fit n.kind {
+      .Import(imp_node) -> {
+        str resolved = resolve_import_path(path, imp_node.path);
+        let rerr = _preload_and_collect(resolved, out, visited);
+        if rerr.is_some() {
+          ret rerr;
+        }
+      }
+      _ -> {}
+    }
+  }
+
+  _scan_compound_names(state.tokens, state.pindex, path, out);
+  ret .None;
+}
+
+// Raw token scan (see `_preload_and_collect`'s own doc comment for why
+// this doesn't just reuse the real parser) for every top-level `pub
+// compound NAME` sequence from `start_idx` to the end of `tokens`,
+// recording each into `out`. Tracks `{`/`}` depth so a NESTED compound-
+// like sequence (there isn't one in practice, but a field named
+// `compound` inside some OTHER top-level construct isn't reachable here
+// regardless) never matches -- only depth 0 counts.
+fun _scan_compound_names(Vec<Token> tokens, num start_idx, str path, Map<str, GlobalSymbolInfo>* out) {
+  num i = start_idx;
+  num depth = 0;
+  bin prev_was_pub = false;
+  for i < tokens.len {
+    let t = tokens.get(i);
+    if token_is_nl_or_comment_or_newline_separator(t) {
+      i = i + 1;
+      continue;
+    }
+    if token_is_symbol(t, '{') {
+      depth = depth + 1;
+      prev_was_pub = false;
+      i = i + 1;
+      continue;
+    }
+    if token_is_symbol(t, '}') {
+      if depth > 0 {
+        depth = depth - 1;
+      }
+      prev_was_pub = false;
+      i = i + 1;
+      continue;
+    }
+    if depth == 0 && prev_was_pub && token_is_keyword(t, "compound") {
+      num j = i + 1;
+      for j < tokens.len && token_is_nl_or_comment_or_newline_separator(tokens.get(j)) {
+        j = j + 1;
+      }
+      if j < tokens.len && tokens.get(j).type == TokenType.Identifier {
+        str name = "";
+        fit tokens.get(j).data {
+          .Sval(s) -> { name = s; }
+          _ -> {}
+        }
+        let info = global_symbol_info_new(name, path);
+        info.is_compound = true;
+        out.put(name, info);
+      }
+    }
+    prev_was_pub = token_is_keyword(t, "pub");
+    i = i + 1;
+  }
+}
+
+fun _parse_and_merge(
+  str path,
+  Vec<Node>* merged,
+  Set<str>* visited,
+  Map<str,
+  GlobalSymbolInfo>* global_symbols
+) Option<str> {
+  if visited.has(path) {
+    ret .None;
+  }
+  visited.add(path);
+
+  if !exists(path) {
+    ret .Some(format("import not found: {str}", path));
+  }
+  str src = read_to_string(path);
+
+  let tok_result = tokenize(src, path);
+  if tok_result.is_err() {
+    ret .Some(format("lex error in {str}", path));
+  }
+
+  ParseState state = parse_state_new(path, src);
+  state.tokens = tok_result.unwrap();
+  state.global_symbols = *global_symbols;
   Parser p = parser_new(&state);
   let perr = p.parse();
   if perr.is_some() {
@@ -153,7 +293,7 @@ fun _parse_and_merge(str path, Vec<Node>* merged, Set<str>* visited) Option<str>
     fit n.kind {
       .Import(imp_node) -> {
         str resolved = resolve_import_path(path, imp_node.path);
-        let ierr = _parse_and_merge(resolved, merged, visited);
+        let ierr = _parse_and_merge(resolved, merged, visited, global_symbols);
         if ierr.is_some() {
           ret ierr;
         }
@@ -238,4 +378,32 @@ test "parse_program_with_imports terminates on a diamond import instead of dupli
 test "parse_program_with_imports reports an error for a missing import rather than guessing" {
   let result = parse_program_with_imports("selfhost/parser/import_resolver_fixtures/missing_import.fn");
   assert result.is_err(), "expected a missing import to fail the whole merge, not silently skip it";
+}
+
+test "parse_program_with_imports resolves a compound-literal expression whose type is declared in ANOTHER file" {
+  // Regression test: `codegen/typedefs.fn`'s own real test body
+  // (`DynamicIntType{is_signed = true, bits = 8}`, `DynamicIntType`
+  // declared in the separate `parser/datatype_defs.fn`) -- found via the
+  // self-compile experiment -- failed to parse at all ("unknown
+  // identifier 'DynamicIntType'"): `is_known_compound_symbol` only ever
+  // checked THIS file's own symbol table, never a compound declared in
+  // an imported file. Fixed via `preload_global_symbols`/
+  // `_preload_and_collect`, a lightweight first pass over the whole
+  // import graph that seeds every file's own `ParseState.global_symbols`
+  // before its real parse begins.
+  let result = parse_program_with_imports("selfhost/parser/import_resolver_fixtures/cross_file_compound_main.fn");
+  assert result.is_ok(), "expected the cross-file compound-literal program to resolve and parse cleanly";
+  let nodes = result.unwrap();
+  bin saw_main = false;
+  for n : nodes {
+    fit n.kind {
+      .Function(fnv) -> {
+        if equals(fnv.name, "main") {
+          saw_main = true;
+        }
+      }
+      _ -> {}
+    }
+  }
+  assert saw_main, "expected the entry file's own 'main' function in the merged nodes";
 }
