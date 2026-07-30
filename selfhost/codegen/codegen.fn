@@ -289,6 +289,20 @@ pub compound Codegen {
   Vec<str> local_names;
   Vec<bin> local_is_pointer;
   Vec<str> local_type_name;
+  // The FULL structured type for a local, when the call site recording
+  // it actually had one on hand (a real `Variable` declaration or
+  // function/method parameter's own `DataType`, post-substitution --
+  // see `record_local_typed`) -- `.None` for everything recorded through
+  // plain `record_local` (a name derived/synthesized from something
+  // else, like a `let`-inferred bookkeeping type, a `fit` destructuring
+  // binding, or a hand-built unit test's stand-in local). Lets a site
+  // that needs REAL structure (a generic arg, e.g. `Vec<T>`'s own `T`,
+  // not just the resolved/mangled NAME string `local_type_name` has) read
+  // it directly instead of reverse-engineering it out of a mangled name
+  // -- see `emit_for_iter`'s own doc comment for the motivating case
+  // (determining a `for item : vec_local` loop's own `item` element
+  // type, needed to support a FURTHER nested `for x : item` iteration).
+  Vec<Option<DataType>> local_dtype;
   // Whole-program record of every non-generic enum's name, its variants'
   // names, and whether it's a tagged union (any variant has a payload),
   // populated by `transpile`'s own first pass over top-level `Enum`
@@ -531,6 +545,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.local_names.init(0);
   g.local_is_pointer.init(0);
   g.local_type_name.init(0);
+  g.local_dtype.init(0);
   g.enum_names.init(0);
   g.enum_variant_names.init(0);
   g.enum_is_tagged_union.init(0);
@@ -583,6 +598,7 @@ fun dtype_is_pointer(DataType dt) bin {
 }
 
 impl Codegen {
+
   // Writes `type_name`'s bare C spelling (no pointer stars): a sized/
   // dynamic int (`iN`/`uN`) via `dynamic_int_type_to_c`, else the
   // builtin mapping via `map_type_to_c` (a user-defined type name passes
@@ -1185,6 +1201,7 @@ impl Codegen {
               let saved_local_names = self.local_names;
               let saved_local_is_pointer = self.local_is_pointer;
               let saved_local_type_name = self.local_type_name;
+              let saved_local_dtype = self.local_dtype;
               let saved_fn_rtype_name = self.current_fn_rtype_name;
               let saved_fn_rtype_dt = self.current_fn_rtype_dt;
               let saved_defer_stack = self.defer_stack;
@@ -1197,6 +1214,7 @@ impl Codegen {
               self.local_names = saved_local_names;
               self.local_is_pointer = saved_local_is_pointer;
               self.local_type_name = saved_local_type_name;
+              self.local_dtype = saved_local_dtype;
               self.current_fn_rtype_name = saved_fn_rtype_name;
               self.current_fn_rtype_dt = saved_fn_rtype_dt;
               self.defer_stack = saved_defer_stack;
@@ -1305,11 +1323,28 @@ impl Codegen {
   // Records that local `name` is (or isn't) a pointer, and its declared
   // type name, for later `ident.field`/`recv.method(...)` decisions. See
   // the `Codegen.local_names`/`local_is_pointer`/`local_type_name` field
-  // doc comment for the scope of this tracking.
+  // doc comment for the scope of this tracking. No FULL `DataType` on
+  // hand here (a derived/synthesized name, not a real declaration's own
+  // type) -- see `record_local_typed` for the sites that have one.
   record_local(str name, str type_name, bin is_pointer) {
     self.local_names.push(name);
     self.local_is_pointer.push(is_pointer);
     self.local_type_name.push(type_name);
+    self.local_dtype.push(.None);
+  }
+
+  // Like `record_local`, but for a call site that has the local's REAL,
+  // already-substituted `DataType` on hand (a `Variable` declaration or a
+  // function/method parameter -- see `Codegen.local_dtype`'s doc
+  // comment). `type_name`/`is_pointer` are still passed explicitly
+  // (rather than re-derived from `dtype` here) since callers already
+  // computed them via `write_type`/`dtype_is_pointer` for the C
+  // declaration itself; this only ALSO keeps the structured type around.
+  record_local_typed(str name, str type_name, bin is_pointer, DataType dtype) {
+    self.local_names.push(name);
+    self.local_is_pointer.push(is_pointer);
+    self.local_type_name.push(type_name);
+    self.local_dtype.push(.Some(dtype));
   }
 
   // Looks up whether `name` was recorded as a pointer local. `.None` means
@@ -1337,6 +1372,23 @@ impl Codegen {
     for i < self.local_names.len {
       if equals(self.local_names.get(i), name) {
         ret .Some(self.local_type_name.get(i));
+      }
+      i = i + 1;
+    }
+    ret .None;
+  }
+
+  // Looks up `name`'s FULL structured `DataType`, when it was recorded
+  // via `record_local_typed` -- see `Codegen.local_dtype`'s doc comment.
+  // `.None` covers BOTH "not a known local at all" and "a known local,
+  // but only recorded via plain `record_local`" -- the caller can't tell
+  // these apart from this result alone (use `lookup_local_type_name`
+  // first to distinguish, if that matters).
+  lookup_local_dtype(str name) Option<DataType> {
+    num i = 0;
+    for i < self.local_names.len {
+      if equals(self.local_names.get(i), name) {
+        ret self.local_dtype.get(i);
       }
       i = i + 1;
     }
@@ -2265,6 +2317,79 @@ impl Codegen {
         ret .Some(r);
       }
       .Expression(inner_e) -> {
+        // A CALL as the receiver (`tok.unwrap().type`, e.g. `ParseState.
+        // parse_type_params_with_constraints`'s own real body, found via
+        // the self-compile experiment -- `tok.unwrap()` is the call,
+        // `.type` the field read off its result, with NO intermediate
+        // `let` binding). Resolved in two steps: the call's own declared
+        // return type (a plain function via `lookup_function_rtype`, or
+        // a method call via `resolve_field_chain` on ITS OWN receiver +
+        // `lookup_impl_method_rtype` -- the exact same two lookups
+        // `infer_let_expr_type`'s identical "()" case already uses),
+        // then the call's OWN rendered C text -- which, unlike every
+        // other link in a chain, this function can't build by simple
+        // string concatenation, since a call has real emission logic
+        // (argument lists, mangled callee names, ...) already living in
+        // `emit_expr`/`emit_call`. Rendered into a throwaway SCRATCH
+        // buffer (same swap-self.state-then-restore technique
+        // `emit_hoisted`'s three callers already use) purely to capture
+        // that text without writing it here.
+        if equals(inner_e.op, "()") && inner_e.has_left {
+          Option<DataType> call_rtype = .None;
+          fit inner_e.left.kind {
+            .Identifier(fn_name) -> {
+              let rt = self.lookup_function_rtype(fn_name);
+              if rt.is_some() {
+                call_rtype = .Some(*rt.unwrap());
+              }
+            }
+            .Expression(recv_e) -> {
+              if equals(recv_e.op, ".") && recv_e.has_left && recv_e.has_right {
+                str method_name = "";
+                fit recv_e.right.kind {
+                  .Identifier(n) -> { method_name = n; }
+                  _ -> {}
+                }
+                if !equals(method_name, "") {
+                  let recv_r_opt = self.resolve_field_chain(recv_e.left);
+                  if recv_r_opt.is_some() {
+                    let rt = self.lookup_impl_method_rtype(
+                      recv_r_opt.unwrap().type_name,
+                      method_name
+                    );
+                    if rt.is_some() {
+                      call_rtype = .Some(*rt.unwrap());
+                    }
+                  }
+                }
+              }
+            }
+            _ -> {}
+          }
+          if call_rtype.is_none() {
+            ret .None;
+          }
+          let rdt = self.resolve_type_subst(call_rtype.unwrap());
+          let resolved_name_opt = self.resolve_type_name(rdt);
+          if resolved_name_opt.is_none() {
+            ret .None;
+          }
+
+          CodegenState call_scratch = codegen_state_new();
+          CodegenState* saved_call_state = self.state;
+          self.state = &call_scratch;
+          let cerr = self.emit_expr(*recv);
+          self.state = saved_call_state;
+          if cerr.is_some() {
+            ret .None;
+          }
+
+          ChainResolution r;
+          r.text = call_scratch.out.build();
+          r.type_name = resolved_name_opt.unwrap();
+          r.is_pointer = dtype_is_pointer(rdt);
+          ret .Some(r);
+        }
         if !equals(inner_e.op, ".") || !inner_e.has_left || !inner_e.has_right {
           ret .None;
         }
@@ -2407,6 +2532,7 @@ impl Codegen {
         bin have_resolved = false;
         str resolved_name = "";
         bin resolved_ptr = false;
+        Option<DataType> resolved_dtype = .None;
 
         if is_let {
           self.state.write("__auto_type");
@@ -2415,8 +2541,10 @@ impl Codegen {
           if wt.is_none() {
             ret .Some(CodegenErrorKind.UnsupportedNode);
           }
+          let subst_dt = self.resolve_type_subst(*v.var_type);
           resolved_name = wt.unwrap();
-          resolved_ptr = dtype_is_pointer(self.resolve_type_subst(*v.var_type));
+          resolved_ptr = dtype_is_pointer(subst_dt);
+          resolved_dtype = .Some(subst_dt);
           have_resolved = true;
         }
         self.state.write(" ");
@@ -2445,14 +2573,20 @@ impl Codegen {
             let idt = inferred.unwrap();
             let resolved = self.resolve_type_name(idt);
             if resolved.is_some() {
+              let subst_idt = self.resolve_type_subst(idt);
               resolved_name = resolved.unwrap();
-              resolved_ptr = dtype_is_pointer(self.resolve_type_subst(idt));
+              resolved_ptr = dtype_is_pointer(subst_idt);
+              resolved_dtype = .Some(subst_idt);
               have_resolved = true;
             }
           }
         }
         if have_resolved {
-          self.record_local(v.name, resolved_name, resolved_ptr);
+          if resolved_dtype.is_some() {
+            self.record_local_typed(v.name, resolved_name, resolved_ptr, resolved_dtype.unwrap());
+          } else {
+            self.record_local(v.name, resolved_name, resolved_ptr);
+          }
         }
         ret .None;
       }
@@ -2628,23 +2762,61 @@ impl Codegen {
   // itself, matching the original's own choice here.
   // 
   // Deliberately narrow for this slice: `arr` must be a plain identifier
-  // that's a known local whose declared type name is EXACTLY "Vec" (an
-  // array literal or a general `Iterator`-implementing quirk value isn't
-  // reachable yet either). `item` is NOT recorded in the locals table --
-  // its declared Fun type is unknown here (that's the whole point of
-  // `__auto_type`), so a later `item.field` inside the body is correctly
-  // rejected by `emit_field_access` rather than guessed at; dereferencing
-  // it (`*item`, common when `T` is itself a pointer) works fine since
-  // that doesn't need a locals lookup at all.
+  // that's a known local whose declared type is SOME instantiation of
+  // `Vec<T>` (an array literal or a general `Iterator`-implementing
+  // quirk value isn't reachable yet either). Prefers a STRUCTURAL check
+  // via `lookup_local_dtype` (the local's real `DataType` -- base
+  // `type_str == "Vec"` with exactly one generic arg, `T`) when the
+  // local was recorded with one (`record_local_typed`, e.g. a real
+  // `Variable` declaration or function/method parameter); falls back to
+  // a NAME-based check (bare "Vec", or a "Vec__"-prefixed mangled
+  // instantiation) for a local recorded through plain `record_local`
+  // instead (no structured type on hand at all -- e.g. a hand-built unit
+  // test's stand-in local, or `item` from an OUTER `for` whose element
+  // type couldn't be read structurally either). A REAL local's recorded
+  // NAME is never the bare "Vec" -- `record_local`/`record_local_typed`
+  // always store `write_type`'s own RESOLVED (monomorphized) name
+  // (`Vec__str`, `Vec__Vec__str`, ...) -- a real bug found via the self-
+  // compile experiment (`param_constraints: Vec<Vec<str>>` in
+  // `ParseState.parse_type_params_with_constraints`'s own real body,
+  // rejected outright since its recorded name, "Vec__Vec__str", isn't
+  // the bare "Vec" this check used to require -- apparently never
+  // exercised by a REAL declaration before, only ever by hand-recorded
+  // test locals).
   emit_for_iter(ForIterNode fi) Option<CodegenErrorKind> {
     str arr_name = "";
     fit fi.iterable.kind {
       .Identifier(name) -> { arr_name = name; }
       _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
     }
-    let type_found = self.lookup_local_type_name(arr_name);
-    if type_found.is_none() || !equals(type_found.unwrap(), "Vec") {
-      ret .Some(CodegenErrorKind.UnsupportedNode);
+
+    // Element `DataType`, when knowable STRUCTURALLY (see this
+    // function's own doc comment) -- lets `item` be recorded as a known
+    // local of its REAL type below, so a FURTHER nested iteration over
+    // it (`for existing : combos { for et : existing { ... } }`,
+    // `parse_type_params_with_constraints`'s own real body building
+    // `Vec<Vec<str>>` cross-products, found via the self-compile
+    // experiment) resolves too -- without this, `existing` (that OUTER
+    // loop's own `item`) was never a known local at all (see below on
+    // why `item` isn't normally recorded), so the INNER `for et :
+    // existing` rejected it outright.
+    Option<DataType> elem_dt = .None;
+    let dtype_found = self.lookup_local_dtype(arr_name);
+    if dtype_found.is_some() {
+      let arr_dt = dtype_found.unwrap();
+      if !equals(arr_dt.type_str, "Vec") || arr_dt.generic_args.len != 1 {
+        ret .Some(CodegenErrorKind.UnsupportedNode);
+      }
+      elem_dt = .Some(self.resolve_type_subst(*arr_dt.generic_args.get(0)));
+    } else {
+      let type_found = self.lookup_local_type_name(arr_name);
+      if type_found.is_none() {
+        ret .Some(CodegenErrorKind.UnsupportedNode);
+      }
+      let found_name = type_found.unwrap();
+      if !equals(found_name, "Vec") && !starts_with(found_name, "Vec__") {
+        ret .Some(CodegenErrorKind.UnsupportedNode);
+      }
     }
 
     str idx_name = "__fun_i";
@@ -2670,6 +2842,21 @@ impl Codegen {
     self.state.write(".data[");
     self.state.write(idx_name);
     self.state.write("];\n");
+    // `item` is recorded as a known local of the ELEMENT type too, when
+    // `elem_dt` was resolved above (see this function's own doc
+    // comment); otherwise it's left unrecorded -- its declared Fun type
+    // is unknown here (that's the whole point of `__auto_type`), so a
+    // later `item.field`/nested-iteration read is correctly rejected by
+    // whatever needs it rather than guessed at; dereferencing it
+    // (`*item`, common when `T` is itself a pointer) works fine either
+    // way since that doesn't need a locals lookup at all.
+    if elem_dt.is_some() {
+      let edt = elem_dt.unwrap();
+      let elem_name = self.resolve_type_name(edt);
+      if elem_name.is_some() {
+        self.record_local_typed(fi.item_name, elem_name.unwrap(), dtype_is_pointer(edt), edt);
+      }
+    }
     let berr = self.emit_body(*fi.body);
     if berr.is_some() {
       ret berr;
@@ -2841,46 +3028,89 @@ impl Codegen {
           if !dot_e.has_left || !dot_e.has_right {
             ret .Some(CodegenErrorKind.UnsupportedNode);
           }
-          ExprNode recv_e;
+          // `fit <plain function call>(...) { ... }` (e.g. `fit
+          // get_c_typedef_alias_datatype_type(name) { ... }` --
+          // `ParseState.parse_datatype`'s own real body, found via the
+          // self-compile experiment): the callee is a bare `.Identifier`,
+          // not a `recv.method()` `.Expression` -- resolved via the same
+          // `lookup_function_rtype` lookup `infer_let_expr_type`'s own
+          // "()" case uses for a plain call, and emitted the same way
+          // the method-call branch below does (a temp `__auto_type
+          // __fit_subj` holding the call's result).
+          bin is_plain_fn_call = false;
+          str plain_fn_name = "";
           fit dot_e.left.kind {
-            .Expression(inner) -> { recv_e = inner; }
-            _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+            .Identifier(fn_name) -> {
+              is_plain_fn_call = true;
+              plain_fn_name = fn_name;
+            }
+            _ -> {}
           }
-          if !equals(recv_e.op, ".") || !recv_e.has_left || !recv_e.has_right {
-            ret .Some(CodegenErrorKind.UnsupportedNode);
+          if is_plain_fn_call {
+            let rtype = self.lookup_function_rtype(plain_fn_name);
+            if rtype.is_none() {
+              ret .Some(CodegenErrorKind.UnsupportedNode);
+            }
+            let resolved_rtype = self.resolve_type_name(*rtype.unwrap());
+            if resolved_rtype.is_none() {
+              ret .Some(CodegenErrorKind.UnsupportedNode);
+            }
+            self.state.write("__auto_type __fit_subj = ");
+            let cerr = self.emit_expr(*f.exp);
+            if cerr.is_some() {
+              ret cerr;
+            }
+            self.state.write(";\n");
+            self.state.write_indent();
+            subj_name = "__fit_subj";
+            subj_type = resolved_rtype;
+            subj_is_pointer = false;
+          } else {
+            ExprNode recv_e;
+            fit dot_e.left.kind {
+              .Expression(inner) -> { recv_e = inner; }
+              _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+            }
+            if !equals(recv_e.op, ".") || !recv_e.has_left || !recv_e.has_right {
+              ret .Some(CodegenErrorKind.UnsupportedNode);
+            }
+            // The receiver itself may be a CHAINED field access, not
+            // just a bare local (`fit self.state.token_peek_prev_n(1)
+            // { ... }` -- `Parser.parse_single_token_to_node`'s own real
+            // body, found via the self-compile experiment) -- resolved
+            // via `resolve_field_chain` (any depth), the same lookup
+            // `emit_method_call`/`infer_let_expr_type` already use for a
+            // chained method-call receiver, instead of requiring a bare
+            // `.Identifier`.
+            let recv_chain = self.resolve_field_chain(recv_e.left);
+            if recv_chain.is_none() {
+              ret .Some(CodegenErrorKind.UnsupportedNode);
+            }
+            let owner_type_name = recv_chain.unwrap().type_name;
+            str method_name = "";
+            fit recv_e.right.kind {
+              .Identifier(n) -> { method_name = n; }
+              _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+            }
+            let rtype = self.lookup_impl_method_rtype(owner_type_name, method_name);
+            if rtype.is_none() {
+              ret .Some(CodegenErrorKind.UnsupportedNode);
+            }
+            let resolved_rtype = self.resolve_type_name(*rtype.unwrap());
+            if resolved_rtype.is_none() {
+              ret .Some(CodegenErrorKind.UnsupportedNode);
+            }
+            self.state.write("__auto_type __fit_subj = ");
+            let merr = self.emit_method_call(recv_e, dot_e.right);
+            if merr.is_some() {
+              ret merr;
+            }
+            self.state.write(";\n");
+            self.state.write_indent();
+            subj_name = "__fit_subj";
+            subj_type = resolved_rtype;
+            subj_is_pointer = false;
           }
-          str recv_name = "";
-          fit recv_e.left.kind {
-            .Identifier(n) -> { recv_name = n; }
-            _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
-          }
-          str method_name = "";
-          fit recv_e.right.kind {
-            .Identifier(n) -> { method_name = n; }
-            _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
-          }
-          let owner_type = self.lookup_local_type_name(recv_name);
-          if owner_type.is_none() {
-            ret .Some(CodegenErrorKind.UnsupportedNode);
-          }
-          let rtype = self.lookup_impl_method_rtype(owner_type.unwrap(), method_name);
-          if rtype.is_none() {
-            ret .Some(CodegenErrorKind.UnsupportedNode);
-          }
-          let resolved_rtype = self.resolve_type_name(*rtype.unwrap());
-          if resolved_rtype.is_none() {
-            ret .Some(CodegenErrorKind.UnsupportedNode);
-          }
-          self.state.write("__auto_type __fit_subj = ");
-          let merr = self.emit_method_call(recv_e, dot_e.right);
-          if merr.is_some() {
-            ret merr;
-          }
-          self.state.write(";\n");
-          self.state.write_indent();
-          subj_name = "__fit_subj";
-          subj_type = resolved_rtype;
-          subj_is_pointer = false;
         } else {
           if !equals(dot_e.op, ".") {
             ret .Some(CodegenErrorKind.UnsupportedNode);
@@ -3303,11 +3533,8 @@ impl Codegen {
         }
         self.state.write(" ");
         self.state.write(v.name);
-        self.record_local(
-          v.name,
-          wt.unwrap(),
-          dtype_is_pointer(self.resolve_type_subst(*v.var_type))
-        );
+        let param_dt = self.resolve_type_subst(*v.var_type);
+        self.record_local_typed(v.name, wt.unwrap(), dtype_is_pointer(param_dt), param_dt);
         ret .None;
       }
       _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
@@ -3350,6 +3577,7 @@ impl Codegen {
         self.local_names.init(0);
         self.local_is_pointer.init(0);
         self.local_type_name.init(0);
+        self.local_dtype.init(0);
         // Fresh per function too -- see `Codegen.defer_stack`'s doc
         // comment; a previous function's leftover pending defers (or
         // frame markers) must never bleed into this one.
@@ -4013,6 +4241,7 @@ impl Codegen {
               let saved_local_names = self.local_names;
               let saved_local_is_pointer = self.local_is_pointer;
               let saved_local_type_name = self.local_type_name;
+              let saved_local_dtype = self.local_dtype;
               let saved_fn_rtype_name = self.current_fn_rtype_name;
               let saved_fn_rtype_dt = self.current_fn_rtype_dt;
               let saved_defer_stack = self.defer_stack;
@@ -4025,6 +4254,7 @@ impl Codegen {
               self.local_names = saved_local_names;
               self.local_is_pointer = saved_local_is_pointer;
               self.local_type_name = saved_local_type_name;
+              self.local_dtype = saved_local_dtype;
               self.current_fn_rtype_name = saved_fn_rtype_name;
               self.current_fn_rtype_dt = saved_fn_rtype_dt;
               self.defer_stack = saved_defer_stack;
@@ -5768,6 +5998,135 @@ test "emit_statement emits a Vec iterator for with an explicit index name" {
   ), "expected the given index name used instead of the synthetic default";
 }
 
+test "emit_statement accepts a Vec iterator for over a REAL (mangled) generic Vec instantiation, not just the bare 'Vec' stand-in" {
+  // Regression test: a REAL `Vec<str> local;` declaration (found via the
+  // self-compile experiment, `parse_type_params_with_constraints`'s own
+  // real body) records its local under `write_type`'s own RESOLVED
+  // (mangled) name -- "Vec__str" -- never the bare "Vec" every OTHER
+  // test in this file hand-records via `record_local` directly.
+  // `emit_for_iter`'s own "is this a Vec?" check required an EXACT match
+  // against "Vec", rejecting every real declaration outright -- an
+  // apparently never-before-exercised combination (a real `Vec<T>` local
+  // fed into a `for x : local` loop) until the self-compile experiment.
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  g.record_local("items", "Vec__str", false);
+
+  Node* iterable = malloc(sizeof(Node));
+  *iterable = node_new(NodeKind.Identifier("items"));
+  BodyNode bn;
+  bn.statements.init(0);
+  Node* body = malloc(sizeof(Node));
+  *body = node_new(NodeKind.Body(bn));
+
+  ForIterNode fi;
+  fi.index_name = "";
+  fi.has_index_name = false;
+  fi.item_name = "item";
+  fi.iterable = iterable;
+  fi.body = body;
+  Node n = node_new(NodeKind.StatementFor(ForKind.Iter(fi)));
+
+  assert g.emit_statement(n).is_none(), "expected the Vec__str iterator for to emit";
+  assert equals(
+    st.out.build(),
+    "for (int64_t __fun_i = 0; __fun_i < items.len; __fun_i++) {\n    __auto_type item = items.data[__fun_i];\n}\n"
+  ), "expected the same .len/.data fast path as the bare 'Vec' stand-in";
+}
+
+test "emit_statement records a Vec iterator's own item as a known local, so a NESTED iterator over it resolves" {
+  // Regression test: `parse_type_params_with_constraints`'s own real
+  // cross-product-building body (`for existing : combos { for et :
+  // existing { ... } }`, `combos: Vec<Vec<str>>`) -- found via the
+  // self-compile experiment. The OUTER loop's own item ("existing") was
+  // never recorded as a known local at all (deliberately, per this
+  // function's own doc comment -- `__auto_type` means its Fun type is
+  // usually unknowable), so the INNER loop over it rejected it outright.
+  // Fixed via `Codegen.local_dtype`: `combos`'s own FULL `DataType`
+  // (`Vec<Vec<str>>`, recorded via `record_local_typed` the same way a
+  // REAL `Variable` declaration/parameter now does) lets `emit_for_iter`
+  // read the element type (`Vec<str>`) directly off `generic_args`,
+  // rather than reverse-engineering it out of a mangled name string.
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  CompoundNode vecc = compound_node_new();
+  vecc.name = "Vec";
+  vecc.type_params.push("T");
+  vecc.has_type_params = true;
+  CompoundField vecf;
+  vecf.name = "len";
+  DataType* vecfdt = malloc(sizeof(DataType));
+  *vecfdt = dtype_new();
+  vecfdt.type_str = "num";
+  vecf.dtype = vecfdt;
+  vecc.fields.push(vecf);
+  Node vec_tmpl_node = node_new(NodeKind.Compound(vecc));
+  g.emit_compound(vec_tmpl_node);
+
+  DataType* inner_str_arg = malloc(sizeof(DataType));
+  *inner_str_arg = dtype_new();
+  inner_str_arg.type_str = "str";
+  DataType* inner_vec = malloc(sizeof(DataType));
+  *inner_vec = dtype_new();
+  inner_vec.type_str = "Vec";
+  inner_vec.generic_args.push(inner_str_arg);
+  DataType outer_vec = dtype_new();
+  outer_vec.type_str = "Vec";
+  outer_vec.generic_args.push(inner_vec);
+  g.record_local_typed("combos", "Vec__Vec__str", false, outer_vec);
+
+  // Pre-warm Vec<str>'s own monomorphization (into a throwaway scratch
+  // buffer) so the assertion below can match the for-loop's exact text
+  // without also accounting for the one-time "typedef struct Vec__str
+  // {...}" emission emit_for_iter's own element-type resolution below
+  // would otherwise trigger inline.
+  CodegenState warm_st = codegen_state_new();
+  CodegenState* real_state = g.state;
+  g.state = &warm_st;
+  g.resolve_type_name(*inner_vec);
+  g.state = real_state;
+
+  Node* outer_iterable = malloc(sizeof(Node));
+  *outer_iterable = node_new(NodeKind.Identifier("combos"));
+
+  Node* inner_iterable = malloc(sizeof(Node));
+  *inner_iterable = node_new(NodeKind.Identifier("existing"));
+  BodyNode inner_bn;
+  inner_bn.statements.init(0);
+  Node* inner_body = malloc(sizeof(Node));
+  *inner_body = node_new(NodeKind.Body(inner_bn));
+  ForIterNode inner_fi;
+  inner_fi.index_name = "";
+  inner_fi.has_index_name = false;
+  inner_fi.item_name = "et";
+  inner_fi.iterable = inner_iterable;
+  inner_fi.body = inner_body;
+  Node* inner_for = malloc(sizeof(Node));
+  *inner_for = node_new(NodeKind.StatementFor(ForKind.Iter(inner_fi)));
+  Vec<Node*> outer_stmts;
+  outer_stmts.init(0);
+  outer_stmts.push(inner_for);
+  BodyNode outer_bn;
+  outer_bn.statements = outer_stmts;
+  Node* outer_body = malloc(sizeof(Node));
+  *outer_body = node_new(NodeKind.Body(outer_bn));
+
+  ForIterNode outer_fi;
+  outer_fi.index_name = "";
+  outer_fi.has_index_name = false;
+  outer_fi.item_name = "existing";
+  outer_fi.iterable = outer_iterable;
+  outer_fi.body = outer_body;
+  Node n = node_new(NodeKind.StatementFor(ForKind.Iter(outer_fi)));
+
+  assert g.emit_statement(n).is_none(), "expected the nested Vec iterator for to emit, with 'existing' resolved as a known Vec__str local";
+  assert equals(
+    st.out.build(),
+    "for (int64_t __fun_i = 0; __fun_i < combos.len; __fun_i++) {\n    __auto_type existing = combos.data[__fun_i];\n    for (int64_t __fun_i = 0; __fun_i < existing.len; __fun_i++) {\n        __auto_type et = existing.data[__fun_i];\n    }\n}\n"
+  ), "expected the inner loop over 'existing' to emit via the same .len/.data fast path";
+}
+
 test "emit_statement rejects an iterator for over a receiver that isn't a known Vec local" {
   CodegenState st = codegen_state_new();
   Codegen g = codegen_new(&st);
@@ -6081,6 +6440,124 @@ test "emit_statement emits a fit over a method-call subject, hoisting a temp __a
     st.out.build(),
     "__auto_type __fit_subj = Holder__get_opt(&h);\nif (__fit_subj.tag == Opt_Some) {\n    __auto_type r = __fit_subj.payload.Some._0;\n    return;\n}\n"
   ), "expected the call hoisted into a temp var first, then the tag check/binding against IT, not the call re-evaluated per branch";
+}
+
+test "emit_statement emits a fit over a method-call subject with a CHAINED field-access receiver" {
+  // Regression test: `fit self.state.token_peek_prev_n(1) { ... }` --
+  // `Parser.parse_single_token_to_node`'s own real body, found via the
+  // self-compile experiment -- rejected outright since the receiver
+  // (`self.state`) is itself a chained field access, not a bare local;
+  // the method-call-subject branch previously required `recv_e.left` to
+  // be a plain `.Identifier`. Fixed by resolving the receiver via
+  // `resolve_field_chain` (any depth) instead, the same lookup
+  // `emit_method_call`/`infer_let_expr_type` already use.
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  g.record_local("self", "Parser", true);
+
+  Vec<str> parser_fields;
+  parser_fields.init(0);
+  parser_fields.push("state");
+  Vec<str> parser_field_types;
+  parser_field_types.init(0);
+  parser_field_types.push("ParseState");
+  Vec<bin> parser_field_ptrs;
+  parser_field_ptrs.init(0);
+  parser_field_ptrs.push(true);
+  g.record_compound("Parser", parser_fields, parser_field_types, parser_field_ptrs);
+
+  Vec<str> variants;
+  variants.init(0);
+  variants.push("Some");
+  variants.push("None");
+  g.record_enum("Opt", variants, true);
+
+  DataType* opt_rtype = malloc(sizeof(DataType));
+  *opt_rtype = dtype_new();
+  opt_rtype.type_str = "Opt";
+  g.record_impl_method(
+    "ParseState",
+    "token_peek_prev_n",
+    "ParseState__token_peek_prev_n",
+    opt_rtype
+  );
+
+  Node* self_ident = malloc(sizeof(Node));
+  *self_ident = node_new(NodeKind.Identifier("self"));
+  Node* state_ident = malloc(sizeof(Node));
+  *state_ident = node_new(NodeKind.Identifier("state"));
+  ExprNode field_e;
+  field_e.left = self_ident;
+  field_e.has_left = true;
+  field_e.right = state_ident;
+  field_e.has_right = true;
+  field_e.op = ".";
+  Node* recv = malloc(sizeof(Node));
+  *recv = node_new(NodeKind.Expression(field_e));
+
+  Node* method = malloc(sizeof(Node));
+  *method = node_new(NodeKind.Identifier("token_peek_prev_n"));
+  ExprNode dot_e;
+  dot_e.left = recv;
+  dot_e.has_left = true;
+  dot_e.right = method;
+  dot_e.has_right = true;
+  dot_e.op = ".";
+  Node* dot_node = malloc(sizeof(Node));
+  *dot_node = node_new(NodeKind.Expression(dot_e));
+
+  Node* one_arg = malloc(sizeof(Node));
+  *one_arg = node_new(NodeKind.Number(TokenData.Num(1)));
+  Node* args = malloc(sizeof(Node));
+  *args = node_new(NodeKind.ExpressionParenthesis(one_arg));
+
+  ExprNode call_e;
+  call_e.left = dot_node;
+  call_e.has_left = true;
+  call_e.right = args;
+  call_e.has_right = true;
+  call_e.op = "()";
+  Node* subj = malloc(sizeof(Node));
+  *subj = node_new(NodeKind.Expression(call_e));
+
+  Node* blank = malloc(sizeof(Node));
+  *blank = node_new(NodeKind.Blank);
+  Node* variant_ident = malloc(sizeof(Node));
+  *variant_ident = node_new(NodeKind.Identifier("None"));
+  ExprNode dot;
+  dot.left = blank;
+  dot.has_left = true;
+  dot.right = variant_ident;
+  dot.has_right = true;
+  dot.op = ".";
+  Node* cond = malloc(sizeof(Node));
+  *cond = node_new(NodeKind.Expression(dot));
+
+  Node* ret_r = malloc(sizeof(Node));
+  *ret_r = node_new(NodeKind.StatementReturn(nil));
+  Vec<Node*> stmts;
+  stmts.init(0);
+  stmts.push(ret_r);
+  BodyNode bn;
+  bn.statements = stmts;
+  Node* body = malloc(sizeof(Node));
+  *body = node_new(NodeKind.Body(bn));
+
+  FitBranch br = fit_branch_new();
+  br.condition = cond;
+  br.has_condition = true;
+  br.body = body;
+
+  FitStmtNode f = fit_stmt_node_new();
+  f.exp = subj;
+  f.branches.push(br);
+
+  Node n = node_new(NodeKind.StatementFit(f));
+  assert g.emit_statement(n).is_none(), "expected the fit over a chained-receiver method call to emit";
+  assert equals(
+    st.out.build(),
+    "__auto_type __fit_subj = ParseState__token_peek_prev_n(self->state, 1);\nif (__fit_subj.tag == Opt_None) {\n    return;\n}\n"
+  ), "expected 'self->state' resolved as the call's receiver via resolve_field_chain, hoisted into a temp var";
 }
 
 test "emit_statement rejects a fit over a call whose callee isn't a recognized receiver.method() shape" {
@@ -7502,6 +7979,77 @@ test "emit_expr resolves chained field access through a generic-compound-instant
     st.out.build(),
     "typedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nBox__num b;\nb.value"
   ), "expected the field access appended after the declaration, resolved via the mangled compound's registry";
+}
+
+test "emit_expr resolves a chained field access through a CALL receiver, with no intermediate 'let'" {
+  // Regression test: `ParseState.check`'s own real shape (`tok.unwrap().
+  // type`, `ParseState.parse_type_params_with_constraints`'s own real
+  // body -- found via the self-compile experiment) -- a field access
+  // whose RECEIVER is itself a call (a plain function OR a method call),
+  // not a known local. `resolve_field_chain` previously only handled a
+  // plain identifier or a nested `.`-Expression receiver; a call receiver
+  // rejected outright since there was no case for it at all. Fixed by
+  // resolving the call's own declared return type (the same
+  // lookup_function_rtype/lookup_impl_method_rtype lookups
+  // `infer_let_expr_type`'s identical "()" case already uses), then
+  // rendering the call's OWN text into a throwaway scratch buffer (a
+  // field-chain link otherwise has no emission logic of its own).
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  DataType* rtype = malloc(sizeof(DataType));
+  *rtype = dtype_new();
+  rtype.type_str = "Token";
+  FunctionNode fnv = function_node_new();
+  fnv.name = "mk";
+  fnv.has_name = true;
+  fnv.rtype = rtype;
+  fnv.has_rtype = true;
+  fnv.has_args = false;
+  Node fn_node = node_new(NodeKind.Function(fnv));
+  Vec<Node> sig_nodes;
+  sig_nodes.init(0);
+  sig_nodes.push(fn_node);
+  g.register_function_signatures(sig_nodes);
+
+  Vec<str> tok_fields;
+  tok_fields.init(0);
+  tok_fields.push("type");
+  Vec<str> tok_field_types;
+  tok_field_types.init(0);
+  tok_field_types.push("TokenType");
+  Vec<bin> tok_field_ptrs;
+  tok_field_ptrs.init(0);
+  tok_field_ptrs.push(false);
+  g.record_compound("Token", tok_fields, tok_field_types, tok_field_ptrs);
+
+  Node* callee = malloc(sizeof(Node));
+  *callee = node_new(NodeKind.Identifier("mk"));
+  Node* blank = malloc(sizeof(Node));
+  *blank = node_new(NodeKind.Blank);
+  Node* args = malloc(sizeof(Node));
+  *args = node_new(NodeKind.ExpressionParenthesis(blank));
+  ExprNode call_e;
+  call_e.left = callee;
+  call_e.has_left = true;
+  call_e.right = args;
+  call_e.has_right = true;
+  call_e.op = "()";
+  Node* call_node = malloc(sizeof(Node));
+  *call_node = node_new(NodeKind.Expression(call_e));
+
+  Node* field_name = malloc(sizeof(Node));
+  *field_name = node_new(NodeKind.Identifier("type"));
+  ExprNode field_e;
+  field_e.left = call_node;
+  field_e.has_left = true;
+  field_e.right = field_name;
+  field_e.has_right = true;
+  field_e.op = ".";
+  Node access = node_new(NodeKind.Expression(field_e));
+
+  assert g.emit_expr(access).is_none(), "expected 'mk().type' to resolve";
+  assert equals(st.out.build(), "mk().type"), "expected the call rendered inline, then '.type' appended";
 }
 
 // Registers a generic impl equivalent to `impl Box<T> { pub get() T { ret
@@ -9465,4 +10013,166 @@ test "emit_function resets the locals table's type-name column between functions
 
   assert g.emit_function(fb_node).is_none(), "expected fn_b to emit, resolving 'o' as Opt not a stale leaked type";
   assert contains(st.out.build(), "o.tag == Opt_Some"), "expected the bare-shorthand pattern to resolve against Opt, not a leaked type name";
+}
+
+test "emit_function resets local_dtype (not just local_names/local_type_name) between functions" {
+  // Regression test: `Codegen.local_dtype` (added for `emit_for_iter`'s
+  // own structural element-type lookup -- see its doc comment) was
+  // never reset in `emit_function_named`, unlike its three sibling
+  // columns. Since `local_names` WAS reset but `local_dtype` kept
+  // growing, a later function's OWN local ended up reading back an
+  // EARLIER function's STALE dtype at the same (now misaligned) index --
+  // exactly the same class of bug the sibling
+  // "resets the locals table's type-name column" test above already
+  // covers for `local_type_name`. Found via the self-compile experiment
+  // (`ParseState.parse_type_params_with_constraints`'s own real
+  // `Vec<Vec<str>>` local read back a stale `str` element type from an
+  // EARLIER method's own first parameter).
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  CompoundNode vecc = compound_node_new();
+  vecc.name = "Vec";
+  vecc.type_params.push("T");
+  vecc.has_type_params = true;
+  CompoundField vecf;
+  vecf.name = "len";
+  DataType* vecfdt = malloc(sizeof(DataType));
+  *vecfdt = dtype_new();
+  vecfdt.type_str = "num";
+  vecf.dtype = vecfdt;
+  vecc.fields.push(vecf);
+  Node vec_tmpl_node = node_new(NodeKind.Compound(vecc));
+  g.emit_compound(vec_tmpl_node);
+
+  // fn_a: one param, `Vec<str> unused` -- populates local_dtype's ONLY
+  // entry (index 0) with a Vec<str> dtype, then returns.
+  DataType* str_arg_a = malloc(sizeof(DataType));
+  *str_arg_a = dtype_new();
+  str_arg_a.type_str = "str";
+  DataType* a_param_dt = malloc(sizeof(DataType));
+  *a_param_dt = dtype_new();
+  a_param_dt.type_str = "Vec";
+  a_param_dt.generic_args.push(str_arg_a);
+  VariableNode av;
+  av.var_type = a_param_dt;
+  av.name = "unused";
+  av.has_val = false;
+  Node* a_param = malloc(sizeof(Node));
+  *a_param = node_new(NodeKind.Variable(av));
+  Vec<Node*> fa_params;
+  fa_params.init(0);
+  fa_params.push(a_param);
+
+  Node* fa_ret = malloc(sizeof(Node));
+  *fa_ret = node_new(NodeKind.StatementReturn(nil));
+  Vec<Node*> fa_stmts;
+  fa_stmts.init(0);
+  fa_stmts.push(fa_ret);
+  BodyNode fa_bn;
+  fa_bn.statements = fa_stmts;
+  Node* fa_body = malloc(sizeof(Node));
+  *fa_body = node_new(NodeKind.Body(fa_bn));
+
+  FunctionNode fa = function_node_new();
+  fa.name = "fn_a";
+  fa.has_name = true;
+  DataType* fa_rtype = malloc(sizeof(DataType));
+  *fa_rtype = dtype_new();
+  fa_rtype.type_str = "void";
+  fa_rtype.kind = DataTypeType.Void;
+  fa.rtype = fa_rtype;
+  fa.has_rtype = true;
+  fa.args = fa_params;
+  fa.has_args = true;
+  fa.body = fa_body;
+  fa.has_body = true;
+  Node fa_node = node_new(NodeKind.Function(fa));
+
+  assert g.emit_function(fa_node).is_none(), "expected fn_a to emit";
+
+  // fn_b: one param, `Vec<Vec<str>> y` -- its OWN index-0 local. If
+  // local_dtype wasn't reset, looking it up would instead read back
+  // fn_a's stale Vec<str> entry (also at index 0), giving 'item' the
+  // WRONG (too-shallow) element type and rejecting the NESTED iteration.
+  DataType* str_arg_b = malloc(sizeof(DataType));
+  *str_arg_b = dtype_new();
+  str_arg_b.type_str = "str";
+  DataType* inner_vec_b = malloc(sizeof(DataType));
+  *inner_vec_b = dtype_new();
+  inner_vec_b.type_str = "Vec";
+  inner_vec_b.generic_args.push(str_arg_b);
+  DataType* b_param_dt = malloc(sizeof(DataType));
+  *b_param_dt = dtype_new();
+  b_param_dt.type_str = "Vec";
+  b_param_dt.generic_args.push(inner_vec_b);
+  VariableNode bv;
+  bv.var_type = b_param_dt;
+  bv.name = "y";
+  bv.has_val = false;
+  Node* b_param = malloc(sizeof(Node));
+  *b_param = node_new(NodeKind.Variable(bv));
+  Vec<Node*> fb_params;
+  fb_params.init(0);
+  fb_params.push(b_param);
+
+  Node* outer_iterable = malloc(sizeof(Node));
+  *outer_iterable = node_new(NodeKind.Identifier("y"));
+  Node* inner_iterable = malloc(sizeof(Node));
+  *inner_iterable = node_new(NodeKind.Identifier("item"));
+  BodyNode inner_bn;
+  inner_bn.statements.init(0);
+  Node* inner_body = malloc(sizeof(Node));
+  *inner_body = node_new(NodeKind.Body(inner_bn));
+  ForIterNode inner_fi;
+  inner_fi.index_name = "";
+  inner_fi.has_index_name = false;
+  inner_fi.item_name = "s";
+  inner_fi.iterable = inner_iterable;
+  inner_fi.body = inner_body;
+  Node* inner_for = malloc(sizeof(Node));
+  *inner_for = node_new(NodeKind.StatementFor(ForKind.Iter(inner_fi)));
+  Vec<Node*> outer_stmts;
+  outer_stmts.init(0);
+  outer_stmts.push(inner_for);
+  BodyNode outer_bn;
+  outer_bn.statements = outer_stmts;
+  Node* outer_body = malloc(sizeof(Node));
+  *outer_body = node_new(NodeKind.Body(outer_bn));
+  ForIterNode outer_fi;
+  outer_fi.index_name = "";
+  outer_fi.has_index_name = false;
+  outer_fi.item_name = "item";
+  outer_fi.iterable = outer_iterable;
+  outer_fi.body = outer_body;
+  Node* outer_for = malloc(sizeof(Node));
+  *outer_for = node_new(NodeKind.StatementFor(ForKind.Iter(outer_fi)));
+  Vec<Node*> fb_stmts;
+  fb_stmts.init(0);
+  fb_stmts.push(outer_for);
+  BodyNode fb_bn;
+  fb_bn.statements = fb_stmts;
+  Node* fb_body = malloc(sizeof(Node));
+  *fb_body = node_new(NodeKind.Body(fb_bn));
+
+  FunctionNode fb = function_node_new();
+  fb.name = "fn_b";
+  fb.has_name = true;
+  DataType* fb_rtype = malloc(sizeof(DataType));
+  *fb_rtype = dtype_new();
+  fb_rtype.type_str = "void";
+  fb_rtype.kind = DataTypeType.Void;
+  fb.rtype = fb_rtype;
+  fb.has_rtype = true;
+  fb.args = fb_params;
+  fb.has_args = true;
+  fb.body = fb_body;
+  fb.has_body = true;
+  Node fb_node = node_new(NodeKind.Function(fb));
+
+  assert g.emit_function(fb_node).is_none(), "expected fn_b to emit, with 'y' resolved as its OWN Vec<Vec<str>> dtype, not fn_a's stale Vec<str> entry";
+  assert contains(
+    st.out.build(),
+    "for (int64_t __fun_i = 0; __fun_i < item.len; __fun_i++) {\n            __auto_type s = item.data[__fun_i];\n        }"
+  ), "expected the NESTED loop over 'item' (Vec<str>) to emit via the .len/.data fast path, proving 'item' resolved its real (not stale) element type";
 }
