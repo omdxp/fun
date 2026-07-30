@@ -198,12 +198,73 @@ payload; payload-free variants still coexist.
   file.fn` never type-checks or emits `test` blocks at all — a test referencing
   something broken doesn't stop the normal program from compiling.
 - **Running tests**: `fun test <path>` (shorthand for `fun -in <path> -test`)
-  compiles `test` blocks into a runner binary and runs it. Each test prints
-  `test: <name> ... PASS` as it completes, then a `N/N tests passed` summary.
-- **Failure semantics**: `assert`/`panic` keep their normal abort-the-process
-  behavior inside a test — there's no per-test recovery yet, so a failing test
-  aborts the whole run immediately and no later test executes. The output up to
-  that point (including the failing assertion's message) is still visible.
+  compiles `test` blocks into a runner and runs it. Every discovered test runs
+  CONCURRENTLY (each dispatched onto its own virtual task, via the same
+  `fork`/`channel` primitives ordinary Fun code uses), printing `test: <name>
+  ... PASS`/`FAIL` as each one completes (in completion order, not declaration
+  order) and a `N/N tests passed` summary at the end.
+- **Filtering to one test**: `fun test <path> -- "exact name"` runs just the
+  matching test(s) instead of the whole file — what an editor's per-test
+  "Run"/"Debug" button uses under the hood, needing no separate flag.
+- **Failure semantics**: a failing `assert` inside a test is caught and reported
+  as `FAIL` — it does NOT abort the run, so every other test still executes.
+  `panic`, by contrast, still aborts the whole process outright (no per-test
+  recovery for it yet) — prefer `assert` over `panic` inside a test body for
+  this reason.
+- **Time-mocked tests**: `imp std.mock_time;` provides a `Clock` quirk
+  implemented by `SystemClock` (the real clock) and `MockClock` (a fully
+  controllable fake one, for tests). A function that needs "the current time"
+  to be testable should accept a `Clock` parameter instead of calling
+  `std.time`'s `now()` directly:
+    ```fun
+    imp std.mock_time;
+    imp std.time;
+
+    fun is_expired(Clock c, Timestamp issued_at, num ttl_seconds) bin {
+      ret diff_seconds(c.now().epoch, issued_at.epoch) >= ttl_seconds;
+    }
+
+    test "a token expires after its ttl" {
+      MockClock clk = mock_clock_at(0);
+      Timestamp issued = clk.now();
+      assert !is_expired(&clk, issued, 60), "should not be expired yet";
+      clk.advance(61); // instant -- no real waiting
+      assert is_expired(&clk, issued, 60), "should be expired now";
+    }
+    ```
+  A concrete value always coerces to a quirk-typed parameter by its address
+  (`&clk`), same as any other quirk coercion.
+
+### Fuzzing
+- **Declaration**: `fuzz "description" (data, len) { ... }` at the top level.
+  Unlike a real function's parameters, `data`/`len` have no type annotation in
+  the source — their types are always fixed (`data` is `raw*`, a byte buffer;
+  `len` is `num`, its length), since that shape never varies.
+    ```fun
+    fuzz "parser never crashes on garbage input" (data, len) {
+      parse_bytes(data, len);
+    }
+    ```
+- **Ignored by an ordinary compile or `fun test` run**: same reasoning as
+  `test` blocks — a `fuzz` block is only type-checked/emitted in its own
+  compile mode.
+- **Running**: `fun fuzz <path> [<target>]` (shorthand for `fun -in <path>
+  -fuzz [-fuzz-target <target>]`) compiles the named `fuzz` block (or the
+  only one, if a file declares just one) into a single-purpose harness and
+  runs it. The harness has no `main` of its own — a coverage-guided fuzzing
+  engine's own driver supplies one, generating inputs, tracking which code
+  paths each one reaches, and mutating toward inputs that explore new
+  behavior. When it finds an input that crashes the harness, it saves that
+  input so the crash can be reproduced and debugged afterward.
+- **A crash is the point**: unlike `test`'s recovered `assert`, an `assert` (or
+  a real memory error) inside a `fuzz` block crashes the process outright —
+  that's the signal the engine is watching for.
+- **Platform/toolchain caveat**: this needs a compiler whose toolchain bundles
+  a coverage-guided fuzzing runtime. That's not guaranteed on every platform
+  or default compiler install (notably: not always bundled with the default
+  compiler on macOS) — `fun fuzz` tries `clang` by default and fails with a
+  clear message (not a silent no-op) if the runtime isn't available; set
+  `FUN_CC` to point at a compiler that has it if the default one doesn't.
 
 ### Build Manifest (`fun.toml`)
 - **Declares build targets, not an import graph**: `imp` already does path-based
@@ -363,8 +424,10 @@ fun main() num {
 - **std.net**: URL parsing, HTTP GET builder, and a best-effort local HTTP server launcher
     - Note: std.net TCP/HTTP helpers use POSIX sockets via `std.c.net`.
 - **std.option**: Generic `Option<T>` container with `some<T>`/`none<T>` helpers.
-- **std.result**: Generic `Result<T>` container with `ok<T>`/`err<T>` helpers.
+- **std.result**: Generic `Result<T, E>` container (`Ok(T)`/`Err(E)`) with `ok<T>`/`err<T>`/`err_kind<T>`/`err_error<T>` helpers (all fixed to `E = Error`; a custom `E` is constructed directly via `ret .Err(CustomKind.Variant);`).
 - **std.collections**: Collection quirk helpers (len/is_empty).
+- **std.mock_time**: `Clock` quirk (`SystemClock`/`MockClock`) for time-mocked tests — see [Testing](#testing).
+- **std.testing**: the concurrent test-mode runner `fun test` auto-imports and drives; not meant to be called from ordinary Fun source.
 
 ### Error Handling
 - **Type Checking**: Errors for type mismatches, e.g., assigning `str` to `num`.

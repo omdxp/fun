@@ -531,6 +531,44 @@ The watchdog is a diagnostic aid; it never changes the behavior of a correct
 program. Choose a threshold comfortably above your longest legitimate blocking
 wait to avoid warning on slow-but-live operations.
 
+## Testing
+- `test "description" { ... }` at the top level; body reuses ordinary statement
+  parsing (`assert`, `panic`, `if`/`for`, ... all work inside).
+- Ignored entirely by an ordinary compile (not type-checked, not emitted) —
+  matches `zig build` vs `zig test`.
+- `fun test <path>` (or `-test`) compiles every discovered `test` block into a
+  runner and runs it. Tests run CONCURRENTLY, one per virtual task (`fork`),
+  printing `test: <name> ... PASS`/`FAIL` in completion order plus a final
+  `N/N tests passed` summary.
+- `fun test <path> -- "exact name"` filters to just the matching test(s) — no
+  separate flag; this is what an editor's per-test Run/Debug button uses.
+- A failing `assert` inside a test is caught and reported as `FAIL` without
+  aborting the run — every other test still executes. `panic` still aborts
+  the whole process (no per-test recovery for it); prefer `assert`.
+- `imp std.mock_time;` gives a `Clock` quirk (`SystemClock`/`MockClock`) for
+  testing time-dependent code deterministically, with no real waiting — see
+  the Testing section of `docs/language.md` for a worked example.
+
+## Fuzzing
+- `fuzz "description" (data, len) { ... }` at the top level. `data`/`len` have
+  no type annotation — always `raw*`/`num` (a byte buffer and its length),
+  since that shape never varies.
+- Ignored entirely by an ordinary compile or `fun test` run, same reasoning
+  as `test` blocks.
+- `fun fuzz <path> [<target>]` (or `-fuzz [-fuzz-target <name>]`) compiles the
+  named `fuzz` block (or the only one, if there's just one) into a harness
+  with no `main` of its own — a coverage-guided fuzzing engine's own driver
+  supplies one, generating/mutating inputs toward ones that explore new code
+  paths, and saving any input that crashes the harness for later repro.
+- Unlike `test`, a crash (a failing `assert`, a real memory error) inside a
+  `fuzz` block is the whole point — it's left to abort the process outright
+  so the engine detects it.
+- Needs a compiler whose toolchain bundles that coverage-guided runtime —
+  not guaranteed on every platform/default install (notably not always
+  bundled with the default compiler on macOS). `fun fuzz` tries `clang` by
+  default and fails with a clear message if the runtime isn't available; set
+  `FUN_CC` to point at one that has it.
+
 ## Formatting
 - `fun -fmt -in file.fn` formats a file in place.
 - `fun -fmt-all -in file.fn` formats local imports (skips `std.*`).
@@ -561,7 +599,7 @@ wait to avoid warning on slow-but-live operations.
 - `std.map`: generic maps (`Map<K, V>`) with typed keys/values and bytewise hashed lookups by default
 - `std.set`: sets built on maps
 - `std.option`: generic `Option<T>` container
-- `std.result`: generic `Result<T>` container
+- `std.result`: generic `Result<T, E>` container (`Ok(T)`/`Err(E)`); the free-function constructors (`ok`/`err`/`err_kind`/`err_error`) are fixed to `E = Error` — a custom `E` is constructed directly via `ret .Err(CustomKind.Variant);`
 - `std.collections`: collection quirks (len/is_empty)
 - `std.string`: string helpers
 - `std.channel`: bounded blocking channels (ring buffer) with timeout send/recv, non-blocking `try_send`/`try_recv`, cancellation-aware send/recv helpers (`send_with_cancel`, `recv_into_with_cancel`, token variants `*_with_token`, timeout variants), default-branch select helpers (`select_recv_default_with`, `select_recv3_rr_default_with`), cancellation-aware select APIs (`*_with_cancel`, token variants `*_with_token`), dedicated cancel tokens (`ChannelCancelToken`, `channel_cancel_token_*`), status helper symbols (`channel_rc_*`), select index helpers (`channel_select_index_*`), and channel-level/per-call select wait-slice/backoff tuning (timeout and blocking variants), with synchronization routed through `std.sync_runtime`
@@ -581,13 +619,16 @@ wait to avoid warning on slow-but-live operations.
 - `std.log`: structured logging. `LogLevel` (`Trace`/`Debug`/`Info`/`Warn`/`Error`/`Fatal`, explicit ordered values), `LogFormat` (`Text`/`Json`), and a `Logger` that filters by level and routes to any `std.io.Sink`. Bare methods (`info`/`warn`/`error`/...) emit immediately; the fluent by-value builder (`l.info_r("msg").str_field(k,v).num_field(k,n).emit()`) attaches typed key/value fields. Text renders `[LEVEL] <ts> [name] msg k=v`; JSON renders one object per line (deterministic field order). Fluent config: `logger_init`/`logger_json`, `as_format`/`to_sink`/`named`/`route_errors`/`with_timestamps`. `route_errors(true)` sends `Warn`+ to stderr.
 - `std.quirks`: common quirks — `Sized`, `Display`, `Clearable`, `Iterator<T>`, and the generic conversion quirks `To<T>`/`From<T>` (e.g. `impl Config as To<JsonValue>`), which back `std.json`'s structured (de)serialization and `std.serde`'s text-layer `to_string`/`from_string` alike.
 - `std.time`, `std.rand`, `std.math`, `std.path`, `std.net`, etc.
+- `std.mock_time`: a `Clock` quirk for time-mocked tests — `SystemClock` (the real clock) and `MockClock` (a fully controllable fake one, advanced only via explicit `advance`/`set` calls, never real time)
+- `std.testing`: the concurrent test-mode runner (`run_discovered_tests`) `fun test` auto-imports and calls into — not intended to be used directly from ordinary Fun source
 - `std.sys`: environment and process helpers (`sys_exit`, `sys_abort`, `sys_system`)
 - `std.net`: URL parsing + pure Fun POSIX TCP/HTTP helpers (POSIX sockets)
 
 ## CLI
 ```
-fun -in <input_file> [-out <output_file>] [-no-exec] [-outf] [-ast] [-test] [-help]
+fun -in <input_file> [-out <output_file>] [-no-exec] [-outf] [-ast] [-test] [-fuzz] [-fuzz-target <name>] [-help]
 fun test <input_file>   (shorthand for `fun -in <input_file> -test`)
+fun fuzz <input_file> [<target>]   (shorthand for `fun -in <input_file> -fuzz [-fuzz-target <target>]`)
 fun build                (reads ./fun.toml, installs binaries under fun-out/bin/)
 ```
 
