@@ -247,6 +247,20 @@ compound ChainResolution {
   bin is_pointer;
 }
 
+// The result of monomorphizing a generic function CALL (see
+// `maybe_instantiate_generic_function`'s doc comment): the mangled
+// call-site name, plus each of the template's OWN parameters'
+// declared type ALREADY substituted against this call's concrete
+// bindings (positional, parallel to the template's own `f.args`) --
+// `emit_call` uses these to resolve a bare-shorthand ARGUMENT (`ok(
+// .None)`) against the param's ACTUAL (substituted) type, not the
+// template's raw, unsubstituted one (which could itself be a bare type
+// param like `T`, never a real enum name).
+compound GenericCallResolution {
+  str mangled_name;
+  Vec<DataType> param_types;
+}
+
 // One variant's template shape within a generic enum template (see
 // `Codegen.generic_enum_names`'s doc comment): its bare name, whether it
 // carries a payload, and -- if so -- each payload position's OWN
@@ -306,6 +320,19 @@ pub compound Codegen {
   // `ret <shorthand>;` statement's own expression (see `emit_statement`'s
   // `StatementReturn` case).
   str current_fn_rtype_name;
+  // The same CURRENT function's return type, as a full (substituted)
+  // `DataType` rather than just its resolved name -- lets
+  // `maybe_instantiate_generic_function` fall back to CONTEXTUAL
+  // inference when a type param's binding can't be read off the call's
+  // own arguments (`ret ok(.None);` inside `_next_inner`'s real body --
+  // `ok<T>(value) Result<T, Error>` called with a bare shorthand that
+  // carries no type info by itself; `T` instead comes from matching
+  // `ok`'s own declared `Result<T, Error>` return shape POSITIONALLY
+  // against `_next_inner`'s OWN concrete return type, `Result<
+  // Option<Token>, Error>`, the same "bare occurrence only" restriction
+  // as everywhere else). See `infer_generic_function_type_param_from_
+  // context`'s doc comment for the actual matching logic.
+  Option<DataType> current_fn_rtype_dt;
   // The enum name a BARE `.Variant`/`.Variant(x)` shorthand (no
   // `EnumName.` qualifier -- `e.left`/`recv_e.left` is `.Blank`) should
   // resolve against, standing in for the "expected type from context"
@@ -498,6 +525,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.type_subst_arg_is_pointer.init(0);
   g.hoist_insert_pos = .None;
   g.current_fn_rtype_name = "";
+  g.current_fn_rtype_dt = .None;
   g.expected_enum_type = "";
   ret g;
 }
@@ -1115,6 +1143,7 @@ impl Codegen {
               let saved_local_is_pointer = self.local_is_pointer;
               let saved_local_type_name = self.local_type_name;
               let saved_fn_rtype_name = self.current_fn_rtype_name;
+              let saved_fn_rtype_dt = self.current_fn_rtype_dt;
               self.state = &method_scratch;
               self.hoist_insert_pos = .None;
               self.emit_function_named(*m, new_name);
@@ -1124,6 +1153,7 @@ impl Codegen {
               self.local_is_pointer = saved_local_is_pointer;
               self.local_type_name = saved_local_type_name;
               self.current_fn_rtype_name = saved_fn_rtype_name;
+              self.current_fn_rtype_dt = saved_fn_rtype_dt;
               self.emit_hoisted(method_scratch.out.build());
             }
 
@@ -1779,7 +1809,7 @@ impl Codegen {
     str template_callee_name = callee_name;
     let generic_inst = self.maybe_instantiate_generic_function(callee_name, args);
     if generic_inst.is_some() {
-      callee_name = generic_inst.unwrap();
+      callee_name = generic_inst.unwrap().mangled_name;
     }
     self.state.write(callee_name);
     self.state.write("(");
@@ -1796,14 +1826,33 @@ impl Codegen {
       // argument (`err_kind(.Parse, "msg", 0)`, e.g.
       // `_read_comment_block`'s real body in the self-hosted lexer's own
       // source, found via the self-compile experiment) resolves against
-      // the CALLEE's own declared parameter type at this position -- see
-      // `Codegen.function_names`'s doc comment. An unresolvable callee/
-      // position leaves `expected_enum_type` untouched, same as every
-      // other site.
-      let ptype = self.lookup_function_param_type(template_callee_name, arg_idx);
+      // the CALLEE's own declared parameter type at this position. For
+      // a GENERIC callee (`ok(.None)`, e.g.), this MUST be the call's
+      // own ALREADY-SUBSTITUTED param type (`generic_inst`'s own
+      // `param_types`, e.g. `Option<num>` -> `Option__num`, not the
+      // template's raw, unsubstituted `T`) -- `T` alone would resolve to
+      // nothing (not a real enum name) and reject a shorthand that
+      // should actually work. Falls back to the plain (non-generic)
+      // registry -- `Codegen.function_names`'s doc comment -- when this
+      // callee wasn't a generic template at all. An unresolvable
+      // callee/position leaves `expected_enum_type` untouched, same as
+      // every other site.
+      Option<DataType> ptype = .None;
+      if generic_inst.is_some() {
+        let call_res = generic_inst.unwrap();
+        if arg_idx < call_res.param_types.len {
+          ptype = .Some(call_res.param_types.get(arg_idx));
+        }
+      }
+      if ptype.is_none() {
+        let plain_ptype = self.lookup_function_param_type(template_callee_name, arg_idx);
+        if plain_ptype.is_some() {
+          ptype = .Some(*plain_ptype.unwrap());
+        }
+      }
       str prev_expected = self.expected_enum_type;
       if ptype.is_some() {
-        let resolved = self.resolve_type_name(*ptype.unwrap());
+        let resolved = self.resolve_type_name(ptype.unwrap());
         if resolved.is_some() {
           self.expected_enum_type = resolved.unwrap();
         }
@@ -3039,6 +3088,7 @@ impl Codegen {
           ret .Some(CodegenErrorKind.UnsupportedNode);
         }
         self.current_fn_rtype_name = rt.unwrap();
+        self.current_fn_rtype_dt = .Some(self.resolve_type_subst(*f.rtype));
         self.state.write(" ");
         self.state.write(emit_name);
         self.state.write("(");
@@ -3513,7 +3563,42 @@ impl Codegen {
   // arguments don't get bare-shorthand resolution the way a plain
   // (non-generic) function's calls do (`Codegen.function_names`'s own
   // per-argument lookup isn't consulted here).
-  maybe_instantiate_generic_function(str fn_name, Vec<Node*> args) Option<str> {
+  // Falls back to CONTEXTUAL inference for a generic function's type
+  // param `tp` when the call's own arguments don't reveal it at all
+  // (`ret ok(.None);` inside `_next_inner`'s real body -- `ok<T>(value)
+  // Result<T, Error>` called with a bare shorthand that carries no type
+  // info by itself) -- matches `f`'s OWN declared return type
+  // STRUCTURALLY against the CURRENT enclosing function's own concrete
+  // return type (`Codegen.current_fn_rtype_dt`, same base name, same
+  // generic-arg count), finds the position where `tp` appears as a bare
+  // occurrence in `f`'s own return type, and resolves the ENCLOSING
+  // function's own return type at that SAME position (`_next_inner`'s
+  // `Result<Option<Token>, Error>`, position 0 -> `Option<Token>` ->
+  // `T`). `.None` when there's no enclosing function context, the
+  // return-type SHAPES don't match, or `tp` doesn't appear (bare) in
+  // `f`'s own return type at all -- the caller must reject rather than
+  // guess.
+  infer_generic_function_type_param_from_context(FunctionNode f, str tp) Option<str> {
+    if !f.has_rtype || self.current_fn_rtype_dt.is_none() {
+      ret .None;
+    }
+    let caller_rtype = self.current_fn_rtype_dt.unwrap();
+    if !equals(f.rtype.type_str, caller_rtype.type_str) || f.rtype.generic_args.len != caller_rtype.generic_args.len {
+      ret .None;
+    }
+    num pi = 0;
+    for pi < f.rtype.generic_args.len {
+      let templ_arg = f.rtype.generic_args.get(pi);
+      if equals(templ_arg.type_str, tp) && templ_arg.generic_args.len == 0 {
+        let caller_arg = caller_rtype.generic_args.get(pi);
+        ret self.resolve_type_name(*caller_arg);
+      }
+      pi = pi + 1;
+    }
+    ret .None;
+  }
+
+  maybe_instantiate_generic_function(str fn_name, Vec<Node*> args) Option<GenericCallResolution> {
     for tmpl : self.generic_function_templates {
       fit tmpl.kind {
         .Function(f) -> {
@@ -3542,6 +3627,13 @@ impl Codegen {
                 ai = ai + 1;
               }
               if !found {
+                let ctx_inferred = self.infer_generic_function_type_param_from_context(f, tp);
+                if ctx_inferred.is_some() {
+                  found_name = ctx_inferred.unwrap();
+                  found = true;
+                }
+              }
+              if !found {
                 ret .None;
               }
               arg_type_names.push(found_name);
@@ -3556,15 +3648,15 @@ impl Codegen {
             }
             str mangled_name = nb.build();
 
-            num ei = 0;
-            for ei < self.emitted_generic_instantiations.len {
-              if equals(self.emitted_generic_instantiations.get(ei), mangled_name) {
-                ret .Some(mangled_name);
-              }
-              ei = ei + 1;
-            }
-            self.emitted_generic_instantiations.push(mangled_name);
-
+            // The substitution context is set up-front (BEFORE the
+            // dedup check below) so `substituted param types` can be
+            // computed -- and returned to the caller via
+            // `GenericCallResolution.param_types` for its OWN
+            // bare-shorthand argument resolution (`ok(.None)`, e.g.) --
+            // on EITHER path: a repeat call resolves to the
+            // already-monomorphized instance without re-emitting
+            // anything, but its params still need to be resolved fresh
+            // for THIS call site.
             let prev_params = self.type_subst_param_names;
             let prev_arg_names = self.type_subst_arg_type_strs;
             let prev_arg_ptrs = self.type_subst_arg_is_pointer;
@@ -3572,48 +3664,79 @@ impl Codegen {
             self.type_subst_arg_type_strs = arg_type_names;
             self.type_subst_arg_is_pointer = arg_is_pointer;
 
-            // `hoist_insert_pos` (if set) is a position measured against
-            // the OUTER, now-swapped-away buffer -- suspending it for
-            // the duration of the swap makes any NESTED instantiation
-            // triggered from inside this function's own signature/body
-            // (e.g. a return type that's ITSELF a generic enum, like
-            // `err_kind<T>`'s own `Result<T, Error>`) append inline to
-            // `scratch` instead of splicing at a stale position into the
-            // wrong buffer (which corrupts `substr`'s own length
-            // arithmetic and crashes) -- the whole scratch buffer still
-            // ends up hoisted to the correct outer position via
-            // `emit_hoisted` below regardless.
-            // Same reasoning as `maybe_instantiate_generic_impl_methods`'s
-            // own local-state save/restore: this can run NESTED inside
-            // another function's own (still in-progress) emission (e.g.
-            // triggered from resolving ITS OWN return type), so
-            // `local_names`/`local_is_pointer`/`local_type_name`/
-            // `current_fn_rtype_name` -- all unconditionally overwritten
-            // by `emit_function_named` for ITS OWN target -- must be
-            // saved and restored too, not just `hoist_insert_pos`.
-            CodegenState scratch = codegen_state_new();
-            CodegenState* saved_state = self.state;
-            let saved_hoist_pos = self.hoist_insert_pos;
-            let saved_local_names = self.local_names;
-            let saved_local_is_pointer = self.local_is_pointer;
-            let saved_local_type_name = self.local_type_name;
-            let saved_fn_rtype_name = self.current_fn_rtype_name;
-            self.state = &scratch;
-            self.hoist_insert_pos = .None;
-            self.emit_function_named(tmpl, mangled_name);
-            self.state = saved_state;
-            self.hoist_insert_pos = saved_hoist_pos;
-            self.local_names = saved_local_names;
-            self.local_is_pointer = saved_local_is_pointer;
-            self.local_type_name = saved_local_type_name;
-            self.current_fn_rtype_name = saved_fn_rtype_name;
-            self.emit_hoisted(scratch.out.build());
+            Vec<DataType> param_types;
+            param_types.init(0);
+            for parg : f.args {
+              fit parg.kind {
+                .Variable(v) -> {
+                  param_types.push(self.resolve_type_subst(*v.var_type));
+                }
+                _ -> {}
+              }
+            }
+
+            num ei = 0;
+            bin already_emitted = false;
+            for ei < self.emitted_generic_instantiations.len {
+              if equals(self.emitted_generic_instantiations.get(ei), mangled_name) {
+                already_emitted = true;
+              }
+              ei = ei + 1;
+            }
+
+            if !already_emitted {
+              self.emitted_generic_instantiations.push(mangled_name);
+
+              // `hoist_insert_pos` (if set) is a position measured
+              // against the OUTER, now-swapped-away buffer -- suspending
+              // it for the duration of the swap makes any NESTED
+              // instantiation triggered from inside this function's own
+              // signature/body (e.g. a return type that's ITSELF a
+              // generic enum, like `err_kind<T>`'s own `Result<T,
+              // Error>`) append inline to `scratch` instead of splicing
+              // at a stale position into the wrong buffer (which
+              // corrupts `substr`'s own length arithmetic and crashes)
+              // -- the whole scratch buffer still ends up hoisted to
+              // the correct outer position via `emit_hoisted` below
+              // regardless. Same reasoning as
+              // `maybe_instantiate_generic_impl_methods`'s own
+              // local-state save/restore: this can run NESTED inside
+              // another function's own (still in-progress) emission
+              // (e.g. triggered from resolving ITS OWN return type), so
+              // `local_names`/`local_is_pointer`/`local_type_name`/
+              // `current_fn_rtype_name`/`current_fn_rtype_dt` -- all
+              // unconditionally overwritten by `emit_function_named`
+              // for ITS OWN target -- must be saved and restored too,
+              // not just `hoist_insert_pos`.
+              CodegenState scratch = codegen_state_new();
+              CodegenState* saved_state = self.state;
+              let saved_hoist_pos = self.hoist_insert_pos;
+              let saved_local_names = self.local_names;
+              let saved_local_is_pointer = self.local_is_pointer;
+              let saved_local_type_name = self.local_type_name;
+              let saved_fn_rtype_name = self.current_fn_rtype_name;
+              let saved_fn_rtype_dt = self.current_fn_rtype_dt;
+              self.state = &scratch;
+              self.hoist_insert_pos = .None;
+              self.emit_function_named(tmpl, mangled_name);
+              self.state = saved_state;
+              self.hoist_insert_pos = saved_hoist_pos;
+              self.local_names = saved_local_names;
+              self.local_is_pointer = saved_local_is_pointer;
+              self.local_type_name = saved_local_type_name;
+              self.current_fn_rtype_name = saved_fn_rtype_name;
+              self.current_fn_rtype_dt = saved_fn_rtype_dt;
+              self.emit_hoisted(scratch.out.build());
+            }
 
             self.type_subst_param_names = prev_params;
             self.type_subst_arg_type_strs = prev_arg_names;
             self.type_subst_arg_is_pointer = prev_arg_ptrs;
 
-            ret .Some(mangled_name);
+            GenericCallResolution res;
+            res.mangled_name = mangled_name;
+            res.param_types = param_types;
+            ret .Some(res);
           }
         }
         _ -> {}
@@ -8215,6 +8338,220 @@ test "pub transpile does not crash when a generic function's OWN return type is 
   assert g.transpile(nodes).is_none(), "expected the whole program to transpile without crashing";
   assert contains(st.out.build(), "typedef struct Opt__num {"), "expected the nested generic enum instantiation to be hoisted correctly";
   assert contains(st.out.build(), "return wrap__num(5);"), "expected the monomorphized generic function call";
+}
+
+test "pub transpile infers a generic function's type param from the CALLER's expected return type, not the argument itself" {
+  // Regression test: `ret ok(.None);` (_next_inner's real body once
+  // Result<Option<Token>, Error> monomorphizes -- see
+  // `ensure_compound_instantiated`'s own doc comment for the nested-
+  // generic fix this builds on) used to fail -- `ok<T>(value) Result<T,
+  // Error>`'s type param can't be read off `.None` alone (a bare
+  // shorthand carries no type info by itself), only from the ENCLOSING
+  // function's own declared return type (`Result<Opt<num>, Error>`
+  // here), matched structurally against `ok`'s own `Result<T, Error>`
+  // shape at the SAME generic-arg position. Fixed via
+  // infer_generic_function_type_param_from_context (Codegen.
+  // current_fn_rtype_dt) plus threading the resulting ALREADY-
+  // SUBSTITUTED param types back through GenericCallResolution so the
+  // bare '.None' argument ITSELF also resolves (not just the
+  // instantiation's own mangled name).
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  EnumDeclNode optd = enum_decl_node_new();
+  optd.name = "Opt";
+  optd.type_params.push("T");
+  optd.has_type_params = true;
+  EnumVariant some_v = enum_variant_new();
+  some_v.name = "Some";
+  DataType* pdt = malloc(sizeof(DataType));
+  *pdt = dtype_new();
+  pdt.type_str = "T";
+  some_v.payload.push(pdt);
+  some_v.has_payload = true;
+  optd.variants.push(some_v);
+  EnumVariant none_v = enum_variant_new();
+  none_v.name = "None";
+  optd.variants.push(none_v);
+  Node opt_node = node_new(NodeKind.Enum(optd));
+
+  EnumDeclNode resultd = enum_decl_node_new();
+  resultd.name = "Result";
+  resultd.type_params.push("T");
+  resultd.type_params.push("E");
+  resultd.has_type_params = true;
+  EnumVariant ok_v = enum_variant_new();
+  ok_v.name = "Ok";
+  DataType* ok_pdt = malloc(sizeof(DataType));
+  *ok_pdt = dtype_new();
+  ok_pdt.type_str = "T";
+  ok_v.payload.push(ok_pdt);
+  ok_v.has_payload = true;
+  resultd.variants.push(ok_v);
+  EnumVariant err_v = enum_variant_new();
+  err_v.name = "Err";
+  DataType* err_pdt = malloc(sizeof(DataType));
+  *err_pdt = dtype_new();
+  err_pdt.type_str = "E";
+  err_v.payload.push(err_pdt);
+  err_v.has_payload = true;
+  resultd.variants.push(err_v);
+  Node result_node = node_new(NodeKind.Enum(resultd));
+
+  CompoundNode errorc = compound_node_new();
+  errorc.name = "Error";
+  CompoundField errf;
+  errf.name = "code";
+  DataType* errfdt = malloc(sizeof(DataType));
+  *errfdt = dtype_new();
+  errfdt.type_str = "num";
+  errf.dtype = errfdt;
+  errorc.fields.push(errf);
+  Node error_node = node_new(NodeKind.Compound(errorc));
+
+  DataType* okp_dt = malloc(sizeof(DataType));
+  *okp_dt = dtype_new();
+  okp_dt.type_str = "T";
+  VariableNode okv;
+  okv.var_type = okp_dt;
+  okv.name = "value";
+  okv.has_val = false;
+  Node* ok_param = malloc(sizeof(Node));
+  *ok_param = node_new(NodeKind.Variable(okv));
+  Vec<Node*> ok_params;
+  ok_params.init(0);
+  ok_params.push(ok_param);
+
+  Node* ok_val_ident = malloc(sizeof(Node));
+  *ok_val_ident = node_new(NodeKind.Identifier("value"));
+  Node* ok_blank = malloc(sizeof(Node));
+  *ok_blank = node_new(NodeKind.Blank);
+  Node* ok_ident = malloc(sizeof(Node));
+  *ok_ident = node_new(NodeKind.Identifier("Ok"));
+  ExprNode ok_dot;
+  ok_dot.left = ok_blank;
+  ok_dot.has_left = true;
+  ok_dot.right = ok_ident;
+  ok_dot.has_right = true;
+  ok_dot.op = ".";
+  Node* ok_dot_node = malloc(sizeof(Node));
+  *ok_dot_node = node_new(NodeKind.Expression(ok_dot));
+  Node* ok_args = malloc(sizeof(Node));
+  *ok_args = node_new(NodeKind.ExpressionParenthesis(ok_val_ident));
+  ExprNode ok_call;
+  ok_call.left = ok_dot_node;
+  ok_call.has_left = true;
+  ok_call.right = ok_args;
+  ok_call.has_right = true;
+  ok_call.op = "()";
+  Node* ok_call_node = malloc(sizeof(Node));
+  *ok_call_node = node_new(NodeKind.Expression(ok_call));
+  Node* ok_ret = malloc(sizeof(Node));
+  *ok_ret = node_new(NodeKind.StatementReturn(ok_call_node));
+  Vec<Node*> ok_stmts;
+  ok_stmts.init(0);
+  ok_stmts.push(ok_ret);
+  BodyNode ok_bn;
+  ok_bn.statements = ok_stmts;
+  Node* ok_body = malloc(sizeof(Node));
+  *ok_body = node_new(NodeKind.Body(ok_bn));
+
+  FunctionNode okfn = function_node_new();
+  okfn.name = "ok";
+  okfn.has_name = true;
+  DataType* ok_rt_targ = malloc(sizeof(DataType));
+  *ok_rt_targ = dtype_new();
+  ok_rt_targ.type_str = "T";
+  DataType* ok_rt_earg = malloc(sizeof(DataType));
+  *ok_rt_earg = dtype_new();
+  ok_rt_earg.type_str = "Error";
+  DataType* ok_rt = malloc(sizeof(DataType));
+  *ok_rt = dtype_new();
+  ok_rt.type_str = "Result";
+  ok_rt.generic_args.push(ok_rt_targ);
+  ok_rt.generic_args.push(ok_rt_earg);
+  okfn.rtype = ok_rt;
+  okfn.has_rtype = true;
+  okfn.type_params.push("T");
+  okfn.has_type_params = true;
+  okfn.args = ok_params;
+  okfn.has_args = true;
+  okfn.body = ok_body;
+  okfn.has_body = true;
+  Node ok_node = node_new(NodeKind.Function(okfn));
+
+  Node* callee = malloc(sizeof(Node));
+  *callee = node_new(NodeKind.Identifier("ok"));
+  Node* none_blank = malloc(sizeof(Node));
+  *none_blank = node_new(NodeKind.Blank);
+  Node* none_ident = malloc(sizeof(Node));
+  *none_ident = node_new(NodeKind.Identifier("None"));
+  ExprNode none_dot;
+  none_dot.left = none_blank;
+  none_dot.has_left = true;
+  none_dot.right = none_ident;
+  none_dot.has_right = true;
+  none_dot.op = ".";
+  Node* none_node = malloc(sizeof(Node));
+  *none_node = node_new(NodeKind.Expression(none_dot));
+  Node* call_args_node = malloc(sizeof(Node));
+  *call_args_node = node_new(NodeKind.ExpressionParenthesis(none_node));
+  ExprNode call_e;
+  call_e.left = callee;
+  call_e.has_left = true;
+  call_e.right = call_args_node;
+  call_e.has_right = true;
+  call_e.op = "()";
+  Node* call_node = malloc(sizeof(Node));
+  *call_node = node_new(NodeKind.Expression(call_e));
+  Node* main_ret = malloc(sizeof(Node));
+  *main_ret = node_new(NodeKind.StatementReturn(call_node));
+  Vec<Node*> main_stmts;
+  main_stmts.init(0);
+  main_stmts.push(main_ret);
+  BodyNode main_bn;
+  main_bn.statements = main_stmts;
+  Node* main_body = malloc(sizeof(Node));
+  *main_body = node_new(NodeKind.Body(main_bn));
+
+  DataType* main_rt_targ = malloc(sizeof(DataType));
+  *main_rt_targ = dtype_new();
+  main_rt_targ.type_str = "num";
+  DataType* main_rt_opt = malloc(sizeof(DataType));
+  *main_rt_opt = dtype_new();
+  main_rt_opt.type_str = "Opt";
+  main_rt_opt.generic_args.push(main_rt_targ);
+  DataType* main_rt_earg = malloc(sizeof(DataType));
+  *main_rt_earg = dtype_new();
+  main_rt_earg.type_str = "Error";
+  DataType* main_rtype = malloc(sizeof(DataType));
+  *main_rtype = dtype_new();
+  main_rtype.type_str = "Result";
+  main_rtype.generic_args.push(main_rt_opt);
+  main_rtype.generic_args.push(main_rt_earg);
+
+  FunctionNode mainfn = function_node_new();
+  mainfn.name = "check";
+  mainfn.has_name = true;
+  mainfn.rtype = main_rtype;
+  mainfn.has_rtype = true;
+  mainfn.has_args = false;
+  mainfn.body = main_body;
+  mainfn.has_body = true;
+  Node main_node = node_new(NodeKind.Function(mainfn));
+
+  Vec<Node> nodes;
+  nodes.init(0);
+  nodes.push(opt_node);
+  nodes.push(result_node);
+  nodes.push(error_node);
+  nodes.push(ok_node);
+  nodes.push(main_node);
+
+  assert g.transpile(nodes).is_none(), "expected the whole program to transpile";
+  let out = st.out.build();
+  assert contains(out, "Result__Opt__num__Error ok__Opt__num(Opt__num value)"), "expected 'T' inferred as 'Opt__num' from check's own declared return type, not from the bare '.None' argument";
+  assert contains(out, "return ok__Opt__num(((Opt__num){ .tag = Opt__num_None }));"), "expected the bare '.None' argument ITSELF also resolved against 'Opt__num', not just the instantiation's own name";
 }
 
 test "transpile emits the prelude followed by every top-level function" {
