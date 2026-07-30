@@ -948,9 +948,9 @@ pub fn print_node(node: ast.Node, writer: *std.Io.Writer, depth: usize) !void {
                 try print_indent(writer, depth + 1);
                 try writer.print("Name: {s}\n", .{nv.fuzz_decl.name});
                 try print_indent(writer, depth + 1);
-                try writer.print("Data param: {s}\n", .{nv.fuzz_decl.data_param});
+                try writer.print("Data param: {s}\n", .{nv.fuzz_decl.data_param.node_variant.?.variable.name.items});
                 try print_indent(writer, depth + 1);
-                try writer.print("Len param: {s}\n", .{nv.fuzz_decl.len_param});
+                try writer.print("Len param: {s}\n", .{nv.fuzz_decl.len_param.node_variant.?.variable.name.items});
                 try print_indent(writer, depth + 1);
                 try writer.print("Body:\n", .{});
                 try print_node(nv.fuzz_decl.body.*, writer, depth + 2);

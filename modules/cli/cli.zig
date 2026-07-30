@@ -35,6 +35,8 @@ pub const CliError = error{
     /// Error indicating `fun build` could not find a `fun.toml` manifest in
     /// the current directory.
     ManifestNotFound,
+    /// Error indicating `-fuzz-target`/`fun fuzz <path>` was given no name.
+    MissingFuzzTarget,
 };
 
 /// `CliOptions` represents the command-line options for the transpiler.
@@ -92,6 +94,18 @@ pub const CliOptions = struct {
     /// user-defined `main`. Set by `-test` or the `fun test <path>`
     /// subcommand form (see `cmd/fun/main.zig`).
     test_mode: bool,
+
+    /// Flag to compile in FUZZ mode: exactly one `fuzz "name" (data, len)
+    /// { ... }` block (selected by `fuzz_target`) is type-checked/emitted
+    /// as a harness function, replacing any user-defined `main`. Set by
+    /// `-fuzz` or the `fun fuzz <path> [target]` subcommand form.
+    fuzz_mode: bool,
+
+    /// The specific fuzz target's name to build (see `fuzz_mode`). Set by
+    /// `-fuzz-target <name>` or the `fun fuzz <path> <target>` subcommand
+    /// form. Required when the file declares more than one `fuzz` block;
+    /// auto-selected when there's exactly one.
+    fuzz_target: ?[]const u8,
 };
 
 pub fn free_options(allocator: mem.Allocator, options: CliOptions) void {
@@ -99,6 +113,7 @@ pub fn free_options(allocator: mem.Allocator, options: CliOptions) void {
     allocator.free(options.output_file);
     for (options.program_args) |arg| allocator.free(arg);
     allocator.free(options.program_args);
+    if (options.fuzz_target) |t| allocator.free(t);
 }
 
 /// Prints the usage information for the transpiler command-line interface.
@@ -114,8 +129,9 @@ pub fn free_options(allocator: mem.Allocator, options: CliOptions) void {
 fn print_usage(io: std.Io) void {
     std.Io.File.stderr().writeStreamingAll(io,
         \\Usage:
-        \\  fun -in <input_file> [-fmt | -fmt-all | -fmt-diag | -fmt-check | -fmt-check-all] [-out <output_file>] [-no-exec] [-outf] [-ast] [-g] [-warn-unused] [-test] [-help] [-- <program args...>]
+        \\  fun -in <input_file> [-fmt | -fmt-all | -fmt-diag | -fmt-check | -fmt-check-all] [-out <output_file>] [-no-exec] [-outf] [-ast] [-g] [-warn-unused] [-test] [-fuzz] [-fuzz-target <name>] [-help] [-- <program args...>]
         \\  fun test <input_file>   (shorthand for `fun -in <input_file> -test`)
+        \\  fun fuzz <input_file> [<target>]   (shorthand for `fun -in <input_file> -fuzz [-fuzz-target <target>]`)
         \\  fun build               (reads ./fun.toml, installs binaries under fun-out/bin/)
         \\  fun -fmt-check-all [-in <file_or_dir>]
         \\  fun -version
@@ -133,6 +149,8 @@ fn print_usage(io: std.Io) void {
         \\  -warn-unused      Emit unused import/variable/function/compound warnings (optional)
         \\  -warn-unused-lenient  Like -warn-unused but still emits unused warnings when the file has an unrelated type error (used by fls) (optional)
         \\  -test             Compile `test "name" { ... }` blocks into a runner binary instead of the normal program (optional)
+        \\  -fuzz             Compile one `fuzz "name" (data, len) { ... }` block into a fuzzing harness instead of the normal program (optional)
+        \\  -fuzz-target <name>  Select which fuzz block to build, when the file declares more than one (optional)
         \\  -out     <file>   Output file (optional, defaults to input filename with .c extension)
         \\  -no-exec          Disable automatic compilation and execution (optional, execution enabled by default)
         \\  -outf             Generate .c output file (optional, disabled by default)
@@ -178,6 +196,9 @@ pub fn parse_args(allocator: mem.Allocator, io: std.Io, argv: []const []const u8
     var warn_unused = false;
     var warn_unused_lenient = false;
     var test_mode = false;
+    var fuzz_mode = false;
+    var fuzz_target: ?[]const u8 = null;
+    errdefer if (fuzz_target) |t| allocator.free(t);
     var program_args = ArrayList([]const u8).init(allocator);
     errdefer {
         for (program_args.items) |p| allocator.free(p);
@@ -238,6 +259,14 @@ pub fn parse_args(allocator: mem.Allocator, io: std.Io, argv: []const []const u8
             warn_unused_lenient = true;
         } else if (std.mem.eql(u8, arg, "-test")) {
             test_mode = true;
+        } else if (std.mem.eql(u8, arg, "-fuzz")) {
+            fuzz_mode = true;
+        } else if (std.mem.eql(u8, arg, "-fuzz-target")) {
+            if (i >= argv.len) return CliError.MissingFuzzTarget;
+            const name = argv[i];
+            i += 1;
+            if (fuzz_target) |old| allocator.free(old);
+            fuzz_target = try allocator.dupe(u8, name);
         }
     }
 
@@ -278,6 +307,8 @@ pub fn parse_args(allocator: mem.Allocator, io: std.Io, argv: []const []const u8
         .warn_unused_lenient = warn_unused_lenient,
         .program_args = try program_args.toOwnedSlice(),
         .test_mode = test_mode,
+        .fuzz_mode = fuzz_mode,
+        .fuzz_target = fuzz_target,
     };
 }
 

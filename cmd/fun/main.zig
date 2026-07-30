@@ -44,6 +44,9 @@ fn print_error_and_exit(io: std.Io, err: anyerror) noreturn {
         cli.CliError.ManifestNotFound => {
             stderr.writeStreamingAll(io, "Error: no fun.toml manifest found in the current directory\n") catch {};
         },
+        cli.CliError.MissingFuzzTarget => {
+            stderr.writeStreamingAll(io, "Error: fuzz target name is required after -fuzz-target\n") catch {};
+        },
         // Formatting uses the same lexer/transpiler error types; they are printed elsewhere.
         error.FileNotFound => {
             stderr.writeStreamingAll(io, "Error: Input file not found\n") catch {};
@@ -96,6 +99,12 @@ pub fn main(init: std.process.Init) void {
     // [...rest]`, mirroring `zig test <path>`. Only rewritten when a path
     // actually follows "test" -- otherwise pass argv through unchanged so
     // `cli.parse_args` reports its own (still sensible) missing-input error.
+    //
+    // `fun fuzz <path> [<target>] [...rest]` is the same idea for fuzz mode
+    // -- `<target>` is optional (a file with exactly one `fuzz` block
+    // doesn't need to name it) and, when present, is just a bare word
+    // (doesn't start with `-`), distinguishing it from a following flag
+    // like `--`.
     const effective_argv: []const []const u8 = blk: {
         if (argv.len >= 2 and std.mem.eql(u8, argv[0], "test")) {
             var rewritten = global_allocator.alloc([]const u8, argv.len + 1) catch |err| print_error_and_exit(init.io, err);
@@ -103,6 +112,22 @@ pub fn main(init: std.process.Init) void {
             rewritten[1] = argv[1];
             rewritten[2] = "-test";
             for (argv[2..], 0..) |a, i| rewritten[3 + i] = a;
+            break :blk rewritten;
+        }
+        if (argv.len >= 2 and std.mem.eql(u8, argv[0], "fuzz")) {
+            const has_target = argv.len >= 3 and argv[2].len > 0 and argv[2][0] != '-';
+            const extra: usize = if (has_target) 2 else 1;
+            var rewritten = global_allocator.alloc([]const u8, argv.len + extra) catch |err| print_error_and_exit(init.io, err);
+            rewritten[0] = "-in";
+            rewritten[1] = argv[1];
+            rewritten[2] = "-fuzz";
+            if (has_target) {
+                rewritten[3] = "-fuzz-target";
+                rewritten[4] = argv[2];
+                for (argv[3..], 0..) |a, i| rewritten[5 + i] = a;
+            } else {
+                for (argv[2..], 0..) |a, i| rewritten[3 + i] = a;
+            }
             break :blk rewritten;
         }
         break :blk argv;
@@ -202,8 +227,10 @@ fn run_pipeline(ctx: anytype) void {
             .emit_unused_warnings = options.warn_unused,
             .warn_unused_lenient = options.warn_unused_lenient,
             .test_mode = options.test_mode,
+            .fuzz_mode = options.fuzz_mode,
         },
     ) catch |err| print_error_and_exit(io, err);
+    tp.fuzz_target = options.fuzz_target;
 
     var lp = lexer.LexProcess.init(&tp);
     var pp = parser.ParseProcess.init(&tp);

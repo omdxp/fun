@@ -156,6 +156,15 @@ pub const TranspileProcessFlags = packed struct {
     /// compile), `test` blocks are parsed but otherwise completely ignored —
     /// not type-checked, not emitted — matching `zig build` vs `zig test`.
     test_mode: bool = false,
+
+    /// When true (the `fun fuzz` CLI subcommand), exactly one `fuzz "name"
+    /// (data, len) { ... }` block (selected by `fuzz_target`) is
+    /// type-checked and emitted as a harness function under the fixed ABI
+    /// name a coverage-guided fuzzing engine expects, replacing any
+    /// user-defined `main` (the fuzzing engine supplies its own). When
+    /// false, `fuzz` blocks are parsed but otherwise completely ignored —
+    /// not type-checked, not emitted — same reasoning as `test_mode`.
+    fuzz_mode: bool = false,
 };
 
 /// GlobalSymbolInfo tracks information about symbols across modules
@@ -258,6 +267,13 @@ pub const TranspileProcess = struct {
 
     /// Transpilation flags for this process.
     flags: TranspileProcessFlags,
+
+    /// The specific fuzz target's name to compile when `flags.fuzz_mode` is
+    /// set (a file may declare several `fuzz` blocks; the harness can only
+    /// ever target one at a time). Required whenever more than one exists;
+    /// auto-selected when there's exactly one. Not part of the packed
+    /// `TranspileProcessFlags` bag since `?[]const u8` isn't bit-packable.
+    fuzz_target: ?[]const u8 = null,
 
     /// I/O handle used for all file system operations.
     io: std.Io,
@@ -3608,8 +3624,10 @@ pub const TranspileProcess = struct {
         // std.net (children stopped preloading their OWN nested imports).
         var child_flags = TranspileProcessFlags{ .outf = false };
         child_flags.test_mode = self.flags.test_mode;
+        child_flags.fuzz_mode = self.flags.fuzz_mode;
         child_flags.emit_unused_warnings = self.flags.emit_unused_warnings;
         import_proc.* = try TranspileProcess.init_with_stdlib_dir(self.backing_allocator, canon, "temp.c", child_flags, self.stdlib_dir);
+        import_proc.fuzz_target = self.fuzz_target;
         import_proc.parent = self;
         import_proc.is_importing = true;
         if (import_alias) |alias| {
@@ -10764,6 +10782,40 @@ pub const TranspileProcess = struct {
 
                 try proc.check_body(tv.body, &test_env, fns, CheckedType{ .base = .Void });
                 proc.warn_unused_bindings_in_current_scope(&test_env);
+            }
+        }
+
+        // `fuzz "name" (data, len) { ... }` blocks: same reasoning as
+        // `test` above (only type-checked in `fun fuzz` mode, or fls's
+        // lenient pass), but ALSO seeds the two fixed-type synthetic
+        // parameters into the body's own env first, exactly the way a
+        // real function's own `args` get seeded (see `typecheck_module`'s
+        // function-body loop above) -- `data_param`/`len_param` are
+        // themselves `Variable` nodes (see `parse_fuzz`), not bare names,
+        // for exactly this reason.
+        if (proc.flags.fuzz_mode or proc.flags.emit_unused_warnings) {
+            for (proc.nodes.items()) |node| {
+                if (node.type != .Fuzz or node.node_variant == null) continue;
+                const fv = node.node_variant.?.fuzz_decl;
+
+                var fuzz_env = TypeEnv.init(proc.allocator);
+                defer fuzz_env.deinit();
+                try fuzz_env.push();
+
+                for (proc.nodes.items()) |*gn| {
+                    if (gn.type == .Variable and gn.node_variant != null and gn.binded == null) {
+                        const v = gn.node_variant.?.variable;
+                        try fuzz_env.put_current_marked(v.name.items, try proc.type_from_dtype_with_mangled(v.type), gn);
+                    }
+                }
+
+                inline for (.{ fv.data_param, fv.len_param }) |param_node| {
+                    const v = param_node.node_variant.?.variable;
+                    try fuzz_env.put_current_decl(v.name.items, try proc.type_from_dtype_with_mangled(v.type), param_node);
+                }
+
+                try proc.check_body(fv.body, &fuzz_env, fns, CheckedType{ .base = .Void });
+                proc.warn_unused_bindings_in_current_scope(&fuzz_env);
             }
         }
 
@@ -17998,10 +18050,13 @@ pub const TranspileProcess = struct {
         for (self.nodes.items()) |node| {
             if (node.type != .Import) { // Skip import nodes as they've been processed
                 if (node.type == .Compound or node.type == .Quirk) continue;
-                // `test` blocks are handled separately below (only in test
-                // mode, via `emit_test_mode_functions_and_runner`) -- an
-                // ordinary compile ignores them entirely.
+                // `test`/`fuzz` blocks are handled separately below (only in
+                // their own respective compile modes, via
+                // `emit_test_mode_functions_and_runner`/
+                // `emit_fuzz_mode_harness`) -- an ordinary compile ignores
+                // both entirely.
                 if (node.type == .Test) continue;
+                if (node.type == .Fuzz) continue;
                 if (node.type == .Function and node.node_variant != null) {
                     const function = node.node_variant.?.function;
                     if (function.type_params != null) continue;
@@ -18011,6 +18066,10 @@ pub const TranspileProcess = struct {
                         // The generated test-runner `main` (below) replaces any
                         // user-defined `main` in test mode.
                         if (self.flags.test_mode and mem.eql(u8, fname.items, "main")) continue;
+                        // Same reasoning in fuzz mode: the fuzzing engine's own
+                        // driver supplies `main`, so a user-defined one would
+                        // collide with it at link time.
+                        if (self.flags.fuzz_mode and mem.eql(u8, fname.items, "main")) continue;
                     }
                 }
                 try self.transpile_node(node);
@@ -18020,6 +18079,10 @@ pub const TranspileProcess = struct {
 
         if (self.flags.test_mode and !self.is_importing) {
             try self.emit_test_mode_functions_and_runner();
+        }
+
+        if (self.flags.fuzz_mode and !self.is_importing) {
+            try self.emit_fuzz_mode_harness();
         }
 
         try self.finalize_warning_expectations();
@@ -18136,6 +18199,94 @@ pub const TranspileProcess = struct {
         try self.write("  }\n");
         try self.write("  return (int)run_discovered_tests((int64_t)__fun_test_map_count, __fun_test_name, __fun_run_test);\n");
         try self.write("}\n");
+    }
+
+    /// Emits exactly one `fuzz "name" (data, len) { ... }` block (selected
+    /// by `fuzz_target`, or auto-selected when there's exactly one
+    /// declared across this module and any imported/child modules) as a
+    /// single harness function under the fixed ABI name a coverage-guided
+    /// fuzzing engine's own driver looks for, replacing any user-defined
+    /// `main` (see `transpile`'s own `.Fuzz`/main-skip logic -- the
+    /// engine's driver supplies `main` itself). The two Fun-level
+    /// parameter names (whatever the source chose) are locally aliased to
+    /// the engine's own data-pointer/length arguments right at the top of
+    /// the function body.
+    ///
+    /// Unlike `emit_test_mode_functions_and_runner`'s recovered-assert
+    /// mechanism, a failing `assert` inside a fuzz body still aborts the
+    /// process outright (`fuzz_mode` leaves `flags.test_mode` false, so
+    /// the `.assert_stmt` transpile case takes its ordinary abort() path)
+    /// -- that IS the point of fuzzing: the engine detects the crash and
+    /// keeps the input that triggered it.
+    fn emit_fuzz_mode_harness(self: *Self) TranspileError!void {
+        const FuzzRef = struct { name: []const u8, data_param: *ast.Node, len_param: *ast.Node, body: *ast.Node };
+        var targets = ArrayList(FuzzRef).init(self.allocator);
+        defer targets.deinit();
+
+        const Collector = struct {
+            fn collect(proc: *Self, out: *ArrayList(FuzzRef)) TranspileError!void {
+                for (proc.nodes.items()) |node| {
+                    if (node.type != .Fuzz or node.node_variant == null) continue;
+                    const fv = node.node_variant.?.fuzz_decl;
+                    out.append(.{ .name = fv.name, .data_param = fv.data_param, .len_param = fv.len_param, .body = fv.body }) catch return TranspileError.MemoryAllocationFailed;
+                }
+                for (proc.children.items) |child| {
+                    try collect(child, out);
+                }
+            }
+        };
+        try Collector.collect(self, &targets);
+
+        if (targets.items.len == 0) {
+            self.report_type_error(null, "no 'fuzz' target declared -- fuzz mode needs at least one fuzz \"name\" (data, len) {{ ... }} block", .{});
+            return TranspileError.TypeMismatch;
+        }
+
+        var chosen: ?FuzzRef = null;
+        if (self.fuzz_target) |target_name| {
+            for (targets.items) |t| {
+                if (mem.eql(u8, t.name, target_name)) {
+                    chosen = t;
+                    break;
+                }
+            }
+            if (chosen == null) {
+                self.report_type_error(null, "no fuzz target named '{s}' found", .{target_name});
+                return TranspileError.TypeMismatch;
+            }
+        } else if (targets.items.len == 1) {
+            chosen = targets.items[0];
+        } else {
+            self.report_type_error(null, "multiple fuzz targets declared -- specify which one to build", .{});
+            return TranspileError.TypeMismatch;
+        }
+
+        const target = chosen.?;
+
+        self.reset_function_defer_state();
+        const prev_in_fn_body = self.in_function_body;
+        const prev_body_depth = self.function_body_depth;
+        const prev_var = self.current_fn_is_variadic;
+        const prev_fn_return = self.current_fn_return;
+        self.in_function_body = true;
+        self.function_body_depth = 0;
+        self.current_fn_is_variadic = false;
+        self.current_fn_return = .{ .base = .Void };
+        defer {
+            self.in_function_body = prev_in_fn_body;
+            self.function_body_depth = prev_body_depth;
+            self.current_fn_is_variadic = prev_var;
+            self.current_fn_return = prev_fn_return;
+        }
+
+        const data_name = target.data_param.node_variant.?.variable.name.items;
+        const len_name = target.len_param.node_variant.?.variable.name.items;
+
+        try self.write("int LLVMFuzzerTestOneInput(const unsigned char* __fun_fuzz_data, unsigned long __fun_fuzz_size) {\n");
+        try self.print("  void* {s} = (void*)__fun_fuzz_data;\n", .{data_name});
+        try self.print("  int64_t {s} = (int64_t)__fun_fuzz_size;\n", .{len_name});
+        try self.transpile_node(target.body.*);
+        try self.write("\n  return 0;\n}\n");
     }
 
     fn emit_function_prototypes_all(self: *Self) TranspileError!void {
@@ -22539,8 +22690,10 @@ pub const TranspileProcess = struct {
         // std.net (children stopped preloading their OWN nested imports).
         var child_flags = TranspileProcessFlags{ .outf = false };
         child_flags.test_mode = self.flags.test_mode;
+        child_flags.fuzz_mode = self.flags.fuzz_mode;
         child_flags.emit_unused_warnings = self.flags.emit_unused_warnings;
         import_proc.* = try TranspileProcess.init_with_stdlib_dir(self.backing_allocator, canon, "temp.c", child_flags, self.stdlib_dir);
+        import_proc.fuzz_target = self.fuzz_target;
 
         if (import_alias) |alias| {
             import_proc.import_alias = import_proc.allocator.dupe(u8, alias) catch return TranspileError.MemoryAllocationFailed;

@@ -87,6 +87,46 @@ fn runTranspileTestMode(allocator: std.mem.Allocator, input_path: []const u8, in
     return allocator.dupe(u8, out);
 }
 
+/// Like `runTranspile`, but with `fuzz_mode` on: exactly one `fuzz "name"
+/// (data, len) { ... }` block (selected by `fuzz_target`, or auto-selected
+/// when there's exactly one and `fuzz_target` is null) is type-checked and
+/// emitted as a harness function -- mirrors the `fun fuzz <path> [target]`
+/// CLI subcommand.
+fn runTranspileFuzzMode(allocator: std.mem.Allocator, input_path: []const u8, input: []const u8, fuzz_target: ?[]const u8) ![]const u8 {
+    {
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, input_path, .{ .read = true, .truncate = true });
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, input);
+    }
+
+    const out_path = try std.fmt.allocPrint(allocator, "{s}.out.c", .{input_path});
+    defer allocator.free(out_path);
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, out_path) catch {};
+
+    var transpile_proc = try codegen.TranspileProcess.init(allocator, input_path, out_path, .{
+        .outf = false,
+        .preload_imports = false,
+        .preload_std_imports = false,
+        .emit_stderr = false,
+        .fuzz_mode = true,
+    });
+    transpile_proc.fuzz_target = fuzz_target;
+    var lex_proc = lexer.LexProcess.init(&transpile_proc);
+    var parse_proc = ParseProcess.init(&transpile_proc);
+
+    defer {
+        lex_proc.deinit();
+        transpile_proc.deinit();
+    }
+
+    try lex_proc.lex();
+    try parse_proc.parse();
+    try transpile_proc.transpile();
+
+    const out = transpile_proc.get_output() orelse return error.NoOutput;
+    return allocator.dupe(u8, out);
+}
+
 fn runTranspileExpectFailure(allocator: std.mem.Allocator, input_path: []const u8, input: []const u8) !void {
     const out_owned = runTranspile(allocator, input_path, input) catch {
         std.Io.Dir.cwd().deleteFile(std.testing.io, input_path) catch {};
@@ -10357,11 +10397,11 @@ test "fuzz blocks: parse with fixed raw*/num parameter types, and an ordinary co
     defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
 
     // `fuzz "name" (data, len) { ... }` (like `test`) is only meaningful in
-    // its own compile mode (not built yet -- this exercises the parser/AST
-    // slice only). An ordinary compile must ignore it entirely, same as a
-    // `test` block: the two parameter names get fixed raw*/num types with
-    // no type annotation in the source, and referencing them inside the
-    // body (here, comparing `len` -- only valid if it typechecks as `num`)
+    // its own compile mode (fuzz mode, exercised separately below). An
+    // ordinary compile must ignore it entirely, same as a `test` block:
+    // the two parameter names get fixed raw*/num types with no type
+    // annotation in the source, and referencing them inside the body
+    // (here, comparing `len` -- only valid if it typechecks as `num`)
     // must not affect or appear in a normal compile's output.
     const input =
         "imp std.c.io;\n\n" ++
@@ -10387,6 +10427,136 @@ test "fuzz blocks: parse with fixed raw*/num parameter types, and an ordinary co
     const stdout = try runExeWithEnv(allocator, exe_path, &.{});
     defer allocator.free(stdout);
     try std.testing.expectEqualStrings("normal run\n", stdout);
+}
+
+test "fuzz mode: single target auto-selected, harness aliases data/len and omits any user main" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_fuzz_harness_single.fn";
+    const c_path = "codegen_fuzz_harness_single.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_fuzz_harness_single.exe" else "codegen_fuzz_harness_single";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // With exactly one `fuzz` block declared, no `-fuzz-target` is needed.
+    // The harness aliases the chosen data/len parameter names to the fixed
+    // ABI arguments a coverage-guided fuzzing engine's own driver would
+    // supply, and the user's own `main` (which would collide with the
+    // engine's own driver-supplied `main` at link time) must not appear in
+    // the output at all.
+    const input =
+        "imp std.c.io;\n\n" ++
+        "fuzz \"reports large lengths\" (data, len) {\n" ++
+        "  if len > 3 {\n" ++
+        "    printf(\"large\\n\");\n" ++
+        "  } else {\n" ++
+        "    printf(\"small\\n\");\n" ++
+        "  }\n" ++
+        "}\n\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"should never run\\n\");\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspileFuzzMode(allocator, ifilepath, input, null);
+    defer allocator.free(out_owned);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "LLVMFuzzerTestOneInput") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "should never run") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "int main") == null);
+
+    // No real fuzzing engine is wired up in this test environment -- drive
+    // the harness directly with a tiny hand-written `main` that calls
+    // `LLVMFuzzerTestOneInput` twice (an empty input, then a 4-byte one),
+    // the same ABI a real engine would use.
+    const driver =
+        \\int main(void) {
+        \\  unsigned char empty[1] = {0};
+        \\  LLVMFuzzerTestOneInput(empty, 0);
+        \\  unsigned char four[4] = {1,2,3,4};
+        \\  LLVMFuzzerTestOneInput(four, 4);
+        \\  return 0;
+        \\}
+        \\
+    ;
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+        try c_file.writeStreamingAll(std.testing.io, driver);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("small\nlarge\n", stdout);
+}
+
+test "fuzz mode: -fuzz-target selects among multiple declared fuzz blocks" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_fuzz_harness_multi.fn";
+    const c_path = "codegen_fuzz_harness_multi.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_fuzz_harness_multi.exe" else "codegen_fuzz_harness_multi";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    const input =
+        "imp std.c.io;\n\n" ++
+        "fuzz \"target one\" (data, len) {\n" ++
+        "  printf(\"one\\n\");\n" ++
+        "}\n\n" ++
+        "fuzz \"target two\" (data, len) {\n" ++
+        "  printf(\"two\\n\");\n" ++
+        "}\n";
+
+    const out_owned = try runTranspileFuzzMode(allocator, ifilepath, input, "target two");
+    defer allocator.free(out_owned);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "\"two\\n\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "\"one\\n\"") == null);
+
+    const driver =
+        \\int main(void) {
+        \\  unsigned char b[1] = {0};
+        \\  LLVMFuzzerTestOneInput(b, 1);
+        \\  return 0;
+        \\}
+        \\
+    ;
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+        try c_file.writeStreamingAll(std.testing.io, driver);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("two\n", stdout);
+}
+
+test "fuzz mode: no target declared, ambiguous target, and unknown -fuzz-target all fail to compile" {
+    const allocator = std.testing.allocator;
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, "codegen_fuzz_none.fn") catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, "codegen_fuzz_ambiguous.fn") catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, "codegen_fuzz_unknown.fn") catch {};
+
+    try std.testing.expectError(error.TypeMismatch, runTranspileFuzzMode(allocator, "codegen_fuzz_none.fn",
+        \\imp std.c.io;
+        \\fun main() num { ret 0; }
+        \\
+    , null));
+
+    try std.testing.expectError(error.TypeMismatch, runTranspileFuzzMode(allocator, "codegen_fuzz_ambiguous.fn",
+        \\imp std.c.io;
+        \\fuzz "a" (data, len) { printf("a\n"); }
+        \\fuzz "b" (data, len) { printf("b\n"); }
+        \\
+    , null));
+
+    try std.testing.expectError(error.TypeMismatch, runTranspileFuzzMode(allocator, "codegen_fuzz_unknown.fn",
+        \\imp std.c.io;
+        \\fuzz "a" (data, len) { printf("a\n"); }
+        \\
+    , "nonexistent"));
 }
 
 test "test blocks: fun test mode runs all-passing tests and reports a summary" {

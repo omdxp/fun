@@ -4566,6 +4566,52 @@ pub const ParseProcess = struct {
     /// there is no type annotation to parse, just two bare identifiers.
     /// Skipped entirely by an ordinary compile OR `fun test` mode; only
     /// emitted/run in `fun fuzz` mode.
+    /// Builds and scope-registers one of `fuzz`'s two fixed-type synthetic
+    /// parameters (see `parse_fuzz`): a `Variable` node named `param_name`
+    /// with type `type_name` at `pointer_depth`, added to the CURRENT scope
+    /// (the caller must already have pushed one) the same way
+    /// `parse_function`'s variadic `vargs` synthetic parameter registers
+    /// itself.
+    fn make_fuzz_fixed_param(self: *Self, param_name: []const u8, type_name: []const u8, pointer_depth: usize, pos: ?token.Pos) ParseError!*ast.Node {
+        const pnode = self.transpile_proc.allocator.create(ast.Node) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+        errdefer self.transpile_proc.allocator.destroy(pnode);
+        var pname = ArrayList(u8).init(self.transpile_proc.allocator);
+        pname.appendSlice(param_name) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+        const pdt = self.transpile_proc.allocator.create(dtype.DataType) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+        var ptype_str = ArrayList(u8).init(self.transpile_proc.allocator);
+        ptype_str.appendSlice(type_name) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+        pdt.* = dtype.DataType{
+            .type = utils.get_datatype_type(type_name),
+            .type_str = ptype_str,
+            .pointer_depth = pointer_depth,
+            .flags = .{ .is_pointer = pointer_depth > 0 },
+        };
+        pnode.* = ast.Node{
+            .type = .Variable,
+            .pos = pos,
+            .node_variant = .{ .variable = .{ .name = pname, .type = pdt } },
+        };
+        const scope_entity = try self.new_scope_entity(pnode, .{});
+        self.transpile_proc.owned_nodes.append(pnode) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+        errdefer _ = self.transpile_proc.owned_nodes.pop();
+        self.transpile_proc.owned_scope_entities.append(scope_entity) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+        errdefer _ = self.transpile_proc.owned_scope_entities.pop();
+        try self.transpile_proc.push_scope_entity(scope_entity);
+        return pnode;
+    }
+
     fn parse_fuzz(self: *Self, hist: *utils.History) ParseError!void {
         if (!hist.flags.is_global_scope) {
             self.transpile_proc.err("'fuzz' declarations are only valid at the top level", .{});
@@ -4600,55 +4646,17 @@ pub const ParseProcess = struct {
         }
         try self.expect_sym(')');
 
-        const data_param = data_tok.?.data.sval.items;
-        const len_param = len_tok.?.data.sval.items;
-
         // Register the two fixed-type synthetic parameters into this fuzz
         // body's own scope, the same way `parse_function`'s variadic
         // `vargs` synthetic parameter registers itself (see
         // `parse_function`'s own `is_variadic` branch) -- so ordinary
-        // identifier resolution inside the body just works.
-        inline for (.{
-            .{ .param_name = data_param, .type_name = "raw", .pointer_depth = @as(usize, 1) },
-            .{ .param_name = len_param, .type_name = "num", .pointer_depth = @as(usize, 0) },
-        }) |p| {
-            const pnode = self.transpile_proc.allocator.create(ast.Node) catch {
-                return ParseError.MemoryAllocationFailed;
-            };
-            errdefer self.transpile_proc.allocator.destroy(pnode);
-            var pname = ArrayList(u8).init(self.transpile_proc.allocator);
-            pname.appendSlice(p.param_name) catch {
-                return ParseError.MemoryAllocationFailed;
-            };
-            const pdt = self.transpile_proc.allocator.create(dtype.DataType) catch {
-                return ParseError.MemoryAllocationFailed;
-            };
-            var ptype_str = ArrayList(u8).init(self.transpile_proc.allocator);
-            ptype_str.appendSlice(p.type_name) catch {
-                return ParseError.MemoryAllocationFailed;
-            };
-            pdt.* = dtype.DataType{
-                .type = utils.get_datatype_type(p.type_name),
-                .type_str = ptype_str,
-                .pointer_depth = p.pointer_depth,
-                .flags = .{ .is_pointer = p.pointer_depth > 0 },
-            };
-            pnode.* = ast.Node{
-                .type = .Variable,
-                .pos = if (fuzz_token) |t| t.pos else null,
-                .node_variant = .{ .variable = .{ .name = pname, .type = pdt } },
-            };
-            const scope_entity = try self.new_scope_entity(pnode, .{});
-            self.transpile_proc.owned_nodes.append(pnode) catch {
-                return ParseError.MemoryAllocationFailed;
-            };
-            errdefer _ = self.transpile_proc.owned_nodes.pop();
-            self.transpile_proc.owned_scope_entities.append(scope_entity) catch {
-                return ParseError.MemoryAllocationFailed;
-            };
-            errdefer _ = self.transpile_proc.owned_scope_entities.pop();
-            try self.transpile_proc.push_scope_entity(scope_entity);
-        }
+        // identifier resolution inside the body just works. The resulting
+        // Variable nodes are kept (not just their bare names) so typecheck
+        // can seed them into the fuzz body's env exactly like a real
+        // function's own `args` list (see `typecheck_module`'s `.Fuzz`
+        // handling).
+        const data_param = try self.make_fuzz_fixed_param(data_tok.?.data.sval.items, "raw", 1, if (fuzz_token) |t| t.pos else null);
+        const len_param = try self.make_fuzz_fixed_param(len_tok.?.data.sval.items, "num", 0, if (fuzz_token) |t| t.pos else null);
 
         // A dummy function context so ordinary statement parsing (`if`/
         // `for`/`ret`/etc.) works the same inside a fuzz body as inside a

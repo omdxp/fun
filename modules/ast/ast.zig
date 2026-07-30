@@ -290,11 +290,12 @@ pub const Node = struct {
         fuzz_decl: struct {
             /// The fuzz target's descriptive name.
             name: []const u8,
-            /// The buffer parameter's chosen name (always `raw*` in the
-            /// synthesized harness).
-            data_param: []const u8,
-            /// The length parameter's chosen name (always `num`).
-            len_param: []const u8,
+            /// The buffer parameter: a synthetic `Variable` node, always
+            /// `raw*`, named by the user in source (see `parse_fuzz`).
+            data_param: *Node,
+            /// The length parameter: a synthetic `Variable` node, always
+            /// `num`, named by the user in source.
+            len_param: *Node,
             body: *Node,
         },
         /// The compound initializer node.
