@@ -3196,17 +3196,34 @@ pub fn format_file_check(allocator: mem.Allocator, io: std.Io, input_file: []con
 /// support the flag at all would either reject it outright or silently
 /// produce a binary that never actually calls into the fuzz target).
 ///
-/// When `$FUN_CC` is set, it's trusted as-is (no fallback search) --
-/// same convention as `invoke_c_compiler_to_exe`. Otherwise this tries a
-/// short list of candidates most likely to actually have the runtime:
+/// When `$FUN_FUZZ_CC` is set, it's trusted as-is (no fallback search) --
+/// same "explicit override wins outright" convention as `FUN_CC` for
+/// `invoke_c_compiler_to_exe`, but under its OWN name: a user's ordinary
+/// `FUN_CC` (their normal build compiler -- gcc, cl, whatever) has
+/// nothing to do with whether it can ALSO do coverage-guided fuzzing,
+/// so reusing it here would silently skip the fallback search below in
+/// favor of a compiler picked for an unrelated reason. Otherwise this
+/// tries a short list of candidates most likely to actually have the
+/// runtime:
 /// plain `clang` first (works out of the box on many Linux distros'
 /// packaged clang), then a couple of common non-default install
 /// locations (Homebrew's LLVM on macOS, where the platform default --
 /// Xcode's bundled clang -- does NOT include this runtime; versioned
 /// `clang-N` binaries on Linux, where the unversioned `clang` symlink
-/// isn't always installed even when a versioned one is). Fails with a
-/// clear, actionable message (not a silent no-op) when nothing in the
-/// list works.
+/// isn't always installed even when a versioned one is; the official
+/// LLVM installer's default path on Windows). Fails with a clear,
+/// actionable message (not a silent no-op) when nothing in the list
+/// works.
+///
+/// Windows note: this has NOT been tested on Windows at all (no Windows
+/// machine available while building it) -- plain LLVM `clang.exe`
+/// SHOULD accept the same flags used here unmodified (it's the same
+/// GNU-style driver as macOS/Linux clang, distinct from `clang-cl.exe`'s
+/// MSVC-flag-compatible one, which isn't tried), but whether the
+/// coverage-guided runtime itself is reliably bundled with Windows LLVM
+/// builds, and whether the resulting binary actually runs correctly,
+/// is genuinely unverified. Treat Windows fuzzing as "might work," not
+/// a confirmed-working platform, until someone actually tries it.
 fn fuzz_compiler_candidates(allocator: mem.Allocator) ![][]const u8 {
     var list = ArrayList([]const u8).init(allocator);
     errdefer free_arg_list(allocator, list.items);
@@ -3217,14 +3234,30 @@ fn fuzz_compiler_candidates(allocator: mem.Allocator) ![][]const u8 {
     } else if (builtin.target.os.tag == .linux) {
         const versions = [_][]const u8{ "clang-20", "clang-19", "clang-18", "clang-17", "clang-16", "clang-15", "clang-14" };
         for (versions) |v| try list.append(try allocator.dupe(u8, v));
+    } else if (builtin.target.os.tag == .windows) {
+        // The official LLVM Windows installer's default install path, in
+        // case `clang.exe` (plain LLVM clang, NOT `clang-cl.exe` -- the
+        // MSVC-flag-compatible driver, which this doesn't try at all,
+        // see the doc comment above) isn't already on PATH.
+        try list.append(try allocator.dupe(u8, "C:\\Program Files\\LLVM\\bin\\clang.exe"));
     }
     return list.toOwnedSlice();
 }
 
 fn invoke_fuzz_compiler_to_exe(allocator: mem.Allocator, io: std.Io, c_path: []const u8, exe_file: []const u8, debug_info: bool) !void {
+    // Deliberately `FUN_FUZZ_CC`, NOT the general `FUN_CC` -- a user may
+    // already have `FUN_CC` set globally for their ORDINARY builds (gcc,
+    // cl, whatever they normally use), which has nothing to do with
+    // whether it can do coverage-guided fuzzing at all. Reusing `FUN_CC`
+    // here would silently skip the whole fallback candidate search
+    // (below) in favor of a compiler picked for an unrelated reason,
+    // exactly the trap this hit during development: `FUN_CC=gcc` set in
+    // the shell for normal use caused `fun fuzz` to try gcc specifically
+    // and fail, even though the fallback list would have found a working
+    // compiler immediately.
     var owned_cc: ?[]const u8 = null;
     defer if (owned_cc) |v| allocator.free(v);
-    if (std.c.getenv("FUN_CC")) |z| {
+    if (std.c.getenv("FUN_FUZZ_CC")) |z| {
         const s = std.mem.sliceTo(z, 0);
         if (s.len > 0) owned_cc = try allocator.dupe(u8, s);
     }
@@ -3288,8 +3321,8 @@ fn invoke_fuzz_compiler_to_exe(allocator: mem.Allocator, io: std.Io, c_path: []c
         allocator.free(result.stdout);
         if (last_stderr.len > 0) allocator.free(last_stderr);
         last_stderr = result.stderr;
-        // Try the next candidate (an explicit $FUN_CC never falls through --
-        // `candidates` only ever has one entry in that case).
+        // Try the next candidate (an explicit $FUN_FUZZ_CC never falls
+        // through -- `candidates` only ever has one entry in that case).
     }
 
     if (!any_compiler_found) return CliError.MissingCCompiler;
@@ -3301,13 +3334,24 @@ fn invoke_fuzz_compiler_to_exe(allocator: mem.Allocator, io: std.Io, c_path: []c
         \\Note: fuzzing needs a compiler whose toolchain bundles a
         \\coverage-guided fuzzing runtime (commonly available with a
         \\mainline install; not always bundled with a platform's default
-        \\one). Set FUN_CC to point at a compiler that has it if none of
-        \\the ones tried automatically worked. If it compiles but then
-        \\hangs immediately on running, try FUN_FUZZ_NO_ASAN=1 -- some
+        \\one). Set FUN_FUZZ_CC to point at a compiler that has it if none
+        \\of the ones tried automatically worked -- this is separate from
+        \\FUN_CC (your ordinary build compiler), since they may need to be
+        \\different compilers entirely. If it compiles but then hangs
+        \\immediately on running, try FUN_FUZZ_NO_ASAN=1 -- some
         \\restricted/sandboxed environments hang during AddressSanitizer's
         \\own startup.
         \\
     ) catch {};
+    if (builtin.target.os.tag == .windows) {
+        std.Io.File.stderr().writeStreamingAll(io,
+            \\
+            \\Windows note: fuzzing is unverified on Windows -- try
+            \\installing plain LLVM `clang.exe` (not clang-cl) and pointing
+            \\FUN_FUZZ_CC at it if it isn't already found automatically.
+            \\
+        ) catch {};
+    }
     return CliError.CompilationFailed;
 }
 
