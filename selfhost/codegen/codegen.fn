@@ -105,12 +105,16 @@
 // payload layout threaded into the compound-field-type registry; the
 // latter needs import support, neither of which exists yet.
 // - A bare enum-variant shorthand anywhere OTHER than directly as a `ret`
-// value, a `Variable` initializer, or an assignment's right-hand side
-// (a call argument, a compound-literal field initializer, a nested
-// sub-expression, ...) -- `Codegen.expected_enum_type` is only set
-// around those three specific sites; a real expected-type mechanism
-// threaded through arbitrary expression contexts would be needed for
-// the rest.
+// value, a `Variable` initializer, an assignment's right-hand side, or
+// an equality/inequality comparison's right-hand side (`self.kind ==
+// .None`, `is_ok`/`is_err`-style predicate methods throughout this
+// codebase's own real stdlib -- `Codegen.expected_enum_type` resolves
+// against the LEFT side's own declared/resolved type for `=`/`==`/`!=`
+// alike) -- a call argument, a compound-literal field initializer, a
+// shorthand on the LEFT of any of those four operators, or a nested
+// sub-expression anywhere deeper still, would all need a real
+// expected-type mechanism threaded through arbitrary expression
+// contexts, which this narrow, site-by-site approach deliberately isn't.
 // - A generic COMPOUND (`compound Box<T> { ... }`), a generic ENUM
 // (`enum Option<T> { ... }`), and a generic impl's OWN methods (`impl
 // Box<T> { ... }`) all monomorphize now, lazily, the first time a
@@ -1378,8 +1382,11 @@ impl Codegen {
 
         // An assignment's right-hand side (`t.data = .Cval(0);`, an
         // extremely common shape in this codebase's own real source --
-        // see `Codegen.expected_enum_type`'s doc comment) may itself be a
-        // bare enum-variant shorthand. Resolve the LEFT side's own
+        // see `Codegen.expected_enum_type`'s doc comment), or an
+        // equality/inequality comparison's right-hand side (`self.kind ==
+        // .None`, equally common -- `is_ok()`/`is_err()`-style predicate
+        // methods throughout this codebase's own real stdlib), may itself
+        // be a bare enum-variant shorthand. Resolve the LEFT side's own
         // declared/resolved type via `resolve_field_chain` (a plain
         // identifier or a field-access chain both work; `e.left` was
         // already EMITTED just above, this is a second, non-writing
@@ -1388,17 +1395,21 @@ impl Codegen {
         // An unresolvable left side (anything `resolve_field_chain`
         // rejects) leaves `expected_enum_type` untouched -- if the right
         // side needs it and it's still empty/stale, it's rejected same
-        // as ever, not guessed.
-        bin is_assign = equals(e.op, "=");
+        // as ever, not guessed. Deliberately narrow for this slice: only
+        // the RIGHT side is ever treated as a possible shorthand -- `.
+        // None == self.kind` (shorthand on the LEFT) isn't reachable,
+        // since `e.left` is already emitted by the time either side's
+        // type could be known.
+        bin resolves_rhs_shorthand = equals(e.op, "=") || equals(e.op, "==") || equals(e.op, "!=");
         str prev_expected = self.expected_enum_type;
-        if is_assign {
+        if resolves_rhs_shorthand {
           let lhs_resolved = self.resolve_field_chain(e.left);
           if lhs_resolved.is_some() {
             self.expected_enum_type = lhs_resolved.unwrap().type_name;
           }
         }
         let rerr = self.emit_expr(*e.right);
-        if is_assign {
+        if resolves_rhs_shorthand {
           self.expected_enum_type = prev_expected;
         }
         if rerr.is_some() {
@@ -6057,6 +6068,71 @@ test "emit_statement resolves a bare-shorthand assignment right-hand side agains
     st.out.build(),
     "(t->data = ((TokenData){ .tag = TokenData_Cval, .payload.Cval = { ._0 = (0) } }));\n"
   ), "expected the bare '.Cval(0)' resolved against TokenData, not rejected";
+}
+
+test "emit_expr resolves a bare-shorthand equality comparison's right-hand side against the field's declared type" {
+  // Regression test: `self.kind == .None` (Error.is_ok's real body in
+  // stdlib/std/error.fn, found via the self-compile experiment) used to
+  // fail -- a bare shorthand as a NESTED sub-expression (the right
+  // operand of '==', not directly a 'ret' value/Variable initializer/
+  // assignment RHS) had no expected-type context to resolve against.
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  g.record_local("self", "Error", true);
+
+  Vec<str> error_fields;
+  error_fields.init(0);
+  error_fields.push("kind");
+  Vec<str> error_field_types;
+  error_field_types.init(0);
+  error_field_types.push("ErrorKind");
+  Vec<bin> error_field_ptrs;
+  error_field_ptrs.init(0);
+  error_field_ptrs.push(false);
+  g.record_compound("Error", error_fields, error_field_types, error_field_ptrs);
+
+  Vec<str> variants;
+  variants.init(0);
+  variants.push("None");
+  variants.push("Io");
+  g.record_enum("ErrorKind", variants, false);
+
+  Node* self_ident = malloc(sizeof(Node));
+  *self_ident = node_new(NodeKind.Identifier("self"));
+  Node* kind_ident = malloc(sizeof(Node));
+  *kind_ident = node_new(NodeKind.Identifier("kind"));
+  ExprNode lhs_dot;
+  lhs_dot.left = self_ident;
+  lhs_dot.has_left = true;
+  lhs_dot.right = kind_ident;
+  lhs_dot.has_right = true;
+  lhs_dot.op = ".";
+  Node* lhs = malloc(sizeof(Node));
+  *lhs = node_new(NodeKind.Expression(lhs_dot));
+
+  Node* blank = malloc(sizeof(Node));
+  *blank = node_new(NodeKind.Blank);
+  Node* variant_ident = malloc(sizeof(Node));
+  *variant_ident = node_new(NodeKind.Identifier("None"));
+  ExprNode rhs_dot;
+  rhs_dot.left = blank;
+  rhs_dot.has_left = true;
+  rhs_dot.right = variant_ident;
+  rhs_dot.has_right = true;
+  rhs_dot.op = ".";
+  Node* rhs = malloc(sizeof(Node));
+  *rhs = node_new(NodeKind.Expression(rhs_dot));
+
+  ExprNode eq;
+  eq.left = lhs;
+  eq.has_left = true;
+  eq.right = rhs;
+  eq.has_right = true;
+  eq.op = "==";
+  Node n = node_new(NodeKind.Expression(eq));
+
+  assert g.emit_expr(n).is_none(), "expected 'self.kind == .None' to resolve the shorthand against 'kind's declared type";
+  assert equals(st.out.build(), "(self->kind == ErrorKind_None)"), "expected the bare '.None' resolved against ErrorKind (a plain, non-tagged-union enum), not rejected";
 }
 
 test "transpile emits the prelude followed by every top-level function" {
