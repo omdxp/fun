@@ -762,6 +762,101 @@ impl ParseState {
     ret .None;
   }
 
+  // Parses a function-TYPE parameter's datatype: `fun(T1, T2, ...) R`.
+  // Called from `parse_datatype` when the leading token is the `fun`
+  // keyword, matching the original's own `parse_fn_type_datatype` split
+  // (see there for why the parameter itself needs no further special
+  // handling at a CALL site: its own C type ends up a real function
+  // pointer, so `cb(a, b)` is ordinary C). `dt` ends up with
+  // `has_fn_sig = true` and `fn_sig` populated (params + return type,
+  // recursing back into `parse_datatype` for each -- so a function-type
+  // parameter's OWN param/return types can themselves be builtins, user
+  // types, or even ANOTHER function type); `type_str` holds a fixed
+  // placeholder (`"fun(...)"`, matching the original's own diagnostic
+  // text) rather than a real C type name, since codegen reads `fn_sig`
+  // directly instead (see `Codegen.write_type`'s doc comment once that
+  // side lands). An omitted return type defaults to `void`, matching
+  // every other omitted-return-type site in this codebase -- but ONLY
+  // detected when truly nothing follows the closing `)` (matching the
+  // original's own heuristic exactly): an identifier immediately after
+  // is ALWAYS consumed as the return type, even when it was actually
+  // meant as the enclosing parameter's own name (`fun(chr) pred` with no
+  // return type parses `pred` itself as the return type, then fails
+  // wherever the ACTUAL parameter name is expected next) -- real source
+  // avoids this by never omitting the return type when a bare
+  // identifier would follow directly.
+  pub parse_fn_type_datatype(DataType* dt) Option<ParseErrorKind> {
+    self.token_next(); // consume 'fun'
+    let operr = self.expect_op("(");
+    if operr.is_some() {
+      ret operr;
+    }
+
+    Vec<DataType*> params;
+    params.init(0);
+    for !self.next_token_is_symbol(')') {
+      DataType* pdt = malloc(sizeof(DataType));
+      *pdt = dtype_new();
+      let perr = self.parse_datatype(pdt);
+      if perr.is_some() {
+        ret perr;
+      }
+      params.push(pdt);
+      if !self.next_token_is_operator(",") {
+        break;
+      }
+      self.token_next();
+    }
+    let cperr = self.expect_sym(')');
+    if cperr.is_some() {
+      ret cperr;
+    }
+
+    DataType* rtype = malloc(sizeof(DataType));
+    *rtype = dtype_new();
+    bin has_rtype_tok = false;
+    fit self.token_peek_next() {
+      .Some(t) -> {
+        if t.type == TokenType.Identifier {
+          has_rtype_tok = true;
+        } else {
+          if t.type == TokenType.Keyword {
+            fit t.data {
+              .Sval(s) -> {
+                if keyword_is_datatype(s) {
+                  has_rtype_tok = true;
+                }
+              }
+              _ -> {}
+            }
+          }
+        }
+      }
+      .None -> {}
+    }
+    if has_rtype_tok {
+      let rerr = self.parse_datatype(rtype);
+      if rerr.is_some() {
+        ret rerr;
+      }
+    } else {
+      rtype.kind = DataTypeType.Void;
+      rtype.type_str = "void";
+    }
+
+    FnTypeSig sig = fn_type_sig_new();
+    sig.params = params;
+    sig.rtype = rtype;
+    FnTypeSig* sig_ptr = malloc(sizeof(FnTypeSig));
+    *sig_ptr = sig;
+
+    dt.kind = DataTypeType.Unknown;
+    dt.fn_sig = sig_ptr;
+    dt.has_fn_sig = true;
+    dt.type_str = "fun(...)";
+    ret .None;
+  }
+
   // Parses a type annotation into `dt`: a builtin scalar keyword, a
   // user-defined/identifier-based name (optionally alias-qualified,
   // `mod.Type`), its generic arguments if any, then a trailing run of `*`
@@ -770,12 +865,14 @@ impl ParseState {
   // the original's own `parse_datatype`/`parse_array_brackets` split --
   // called explicitly by each site that allows one (`parse_variable`,
   // compound fields, enum payloads, quirk/function/impl-method
-  // arg/return types), not from within this function itself.
-  // 
-  // Deferred from this slice: the `fun(T1, T2) R` function-type
-  // parameter form -- needs its own arg-list/return-type recursion,
-  // matching the original's own `parse_fn_type_datatype` split.
+  // arg/return types), not from within this function itself. A leading
+  // `fun` keyword delegates to `parse_fn_type_datatype` instead (the
+  // function-TYPE parameter form) rather than falling through to the
+  // ordinary keyword/identifier handling below.
   pub parse_datatype(DataType* dt) Option<ParseErrorKind> {
+    if self.next_token_is_keyword("fun") {
+      ret self.parse_fn_type_datatype(dt);
+    }
     let tok = self.token_next();
     if tok.is_none() {
       self.err("expected datatype, got end of input");
@@ -3110,6 +3207,24 @@ impl Parser {
     *fn_node_ptr = fn_node;
     self.current_function = fn_node_ptr;
     self.has_current_function = true;
+
+    // Registers the function's OWN name as a symbol as soon as it's known
+    // (before its args/body are parsed) -- same mechanism `parse_compound`/
+    // `parse_enum`/`parse_quirk` already use for their own names, so a bare
+    // reference to an already-declared function used as a VALUE (`self.
+    // _read_while(_not_newline)`, passing a function by name into a
+    // `fun(T) R`-typed parameter -- see `parse_fn_type_datatype`'s doc
+    // comment) is recognized by the identifier-validity check in
+    // `parse_single_token_to_node` instead of rejected as unknown; an
+    // out-of-order CALL (`foo(...)`) was already tolerated separately via
+    // that check's own "next token is '('" bypass, so this only closes the
+    // "referenced but not called" gap. The stored Symbol's own Node is a
+    // snapshot from THIS point (name only, args/body not parsed yet) --
+    // harmless, since nothing reads a function symbol's node content back;
+    // only `get_symbol(name).is_none()` (existence) is ever checked for it.
+    Symbol fn_sym = symbol_new(fname);
+    fn_sym.kind = SymbolKind.NodeSym(*fn_node_ptr);
+    self.state.push_symbol(fn_sym);
 
     Vec<str> type_params;
     type_params.init(0);
@@ -5934,6 +6049,52 @@ test "parse_datatype reports an error on end of input" {
   }
 }
 
+test "parse_datatype reads a function-type parameter with two params and a return type" {
+  ParseState st = _state_from("fun(num, num) num");
+  DataType dt = dtype_new();
+  assert st.parse_datatype(&dt).is_none(), "expected 'fun(num, num) num' to parse";
+  assert dt.has_fn_sig, "expected has_fn_sig set";
+  assert dt.fn_sig.params.len == 2, "expected two params";
+  let p0 = dt.fn_sig.params.get(0);
+  let p1 = dt.fn_sig.params.get(1);
+  assert p0.kind == DataTypeType.Num, "expected the first param typed num";
+  assert p1.kind == DataTypeType.Num, "expected the second param typed num";
+  assert dt.fn_sig.rtype.kind == DataTypeType.Num, "expected the return type num";
+}
+
+test "parse_datatype reads a zero-arg function-type parameter" {
+  ParseState st = _state_from("fun() bin");
+  DataType dt = dtype_new();
+  assert st.parse_datatype(&dt).is_none(), "expected 'fun() bin' to parse";
+  assert dt.has_fn_sig, "expected has_fn_sig set";
+  assert dt.fn_sig.params.len == 0, "expected no params";
+  assert dt.fn_sig.rtype.kind == DataTypeType.Bin, "expected the return type bin";
+}
+
+test "parse_datatype defaults an omitted function-type return type to void" {
+  // Nothing at all follows the closing ')' here (matching the ORIGINAL
+  // bootstrap compiler's own `parse_fn_type_datatype`, which treats ANY
+  // identifier immediately after ')' as the return type -- ambiguous
+  // with an omitted return type followed by the enclosing parameter's
+  // own name, ONLY resolved in real source by that name never being
+  // omitted in practice; end-of-input is the unambiguous case).
+  ParseState st = _state_from("fun(chr)");
+  DataType dt = dtype_new();
+  assert st.parse_datatype(&dt).is_none(), "expected 'fun(chr)' with nothing after it to parse";
+  assert dt.has_fn_sig, "expected has_fn_sig set";
+  assert dt.fn_sig.rtype.kind == DataTypeType.Void, "expected the omitted return type to default to void";
+}
+
+test "parse_datatype reads a user-defined type as a function-type parameter's own param/return type" {
+  ParseState st = _state_from("fun(Token) Node");
+  DataType dt = dtype_new();
+  assert st.parse_datatype(&dt).is_none(), "expected 'fun(Token) Node' to parse";
+  assert dt.fn_sig.params.len == 1, "expected one param";
+  let p0 = dt.fn_sig.params.get(0);
+  assert equals(p0.type_str, "Token"), "expected the param's own type_str 'Token'";
+  assert equals(dt.fn_sig.rtype.type_str, "Node"), "expected the return type's own type_str 'Node'";
+}
+
 test "parse_generic_type_args reads a single generic argument" {
   ParseState st = _state_from("Vec<num>");
   DataType dt = dtype_new();
@@ -7700,6 +7861,28 @@ test "parse_function defaults to a void return type with no args" {
     }
     _ -> { panic("expected a Function node"); }
   }
+}
+
+test "parse_function registers its own name as a symbol" {
+  ParseState st = _state_from("fun greet() { }");
+  Parser p = parser_new(&st);
+  assert st.get_symbol("greet").is_none(), "expected no symbol before parsing";
+  assert p.parse_function(false, false).is_none(), "expected the function to parse";
+  assert st.get_symbol("greet").is_some(), "expected 'greet' registered as a symbol once parsed";
+}
+
+test "parse_statement accepts a bare reference to an already-declared function used as a value, not just a call" {
+  // Regression test: a bare function name passed BY NAME into a
+  // `fun(T) R`-typed parameter (`self._read_while(_not_newline)` in the
+  // self-hosted lexer's own real source) isn't a CALL (no immediately
+  // following '('), so it used to fail "unknown identifier" -- the
+  // out-of-order-call bypass in `parse_single_token_to_node` only covers
+  // `foo(...)`, not a bare reference. Fixed by registering a function's
+  // own name as a symbol as soon as it's parsed (see `parse_function`'s
+  // doc comment).
+  ParseState st = _state_from("fun add_one(num x) num {\n  ret x + 1;\n}\nfun apply(fun(num) num cb, num x) num {\n  ret cb(x);\n}\nfun main() num {\n  ret apply(add_one, 5);\n}\n");
+  Parser p = parser_new(&st);
+  assert p.parse().is_none(), "expected the whole program (including the bare 'add_one' argument) to parse";
 }
 
 test "parse_function parses a bodyless declaration (C-binding style)" {

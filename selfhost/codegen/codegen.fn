@@ -2518,10 +2518,47 @@ impl Codegen {
 
   // Emits one function parameter (a `Variable` node with no initializer)
   // as `<type> <name>`, and records it as a local for `.`/`->` decisions
-  // (see `Codegen.local_names`'s doc comment).
+  // (see `Codegen.local_names`'s doc comment). A function-TYPE parameter
+  // (`fun(T1, T2) R name`, see `parser.parse_fn_type_datatype`'s doc
+  // comment) instead needs C's function-pointer declarator shape, which
+  // wraps the NAME rather than preceding it (`R (*name)(T1, T2)`) --
+  // handled as its OWN case before the ordinary `write_type` path below,
+  // matching the original's own special case for the exact same reason.
+  // A call THROUGH such a parameter (`cb(a, b)`) needs no special
+  // handling at the call site itself: its own C type is already a real
+  // function pointer, so ordinary call syntax just works (see
+  // `emit_call`'s doc comment). Recorded as a local under an empty type
+  // name (never matches a real compound/enum, so a later `.field`/
+  // `.method()` off of it is correctly rejected rather than guessed --
+  // this codegen has no sensible "type name" for a function pointer to
+  // begin with).
   emit_function_param(Node param) Option<CodegenErrorKind> {
     fit param.kind {
       .Variable(v) -> {
+        if v.var_type.has_fn_sig {
+          let sig = v.var_type.fn_sig;
+          let rt = self.write_type(*sig.rtype);
+          if rt.is_none() {
+            ret .Some(CodegenErrorKind.UnsupportedNode);
+          }
+          self.state.write(" (*");
+          self.state.write(v.name);
+          self.state.write(")(");
+          bin first = true;
+          for p : sig.params {
+            if !first {
+              self.state.write(", ");
+            }
+            first = false;
+            let pt = self.write_type(*p);
+            if pt.is_none() {
+              ret .Some(CodegenErrorKind.UnsupportedNode);
+            }
+          }
+          self.state.write(")");
+          self.record_local(v.name, "", false);
+          ret .None;
+        }
         let wt = self.write_type(*v.var_type);
         if wt.is_none() {
           ret .Some(CodegenErrorKind.UnsupportedNode);
@@ -3500,6 +3537,156 @@ test "emit_function emits parameters, and a call to it" {
   Node fn_node = node_new(NodeKind.Function(fnv));
   assert g.emit_function(fn_node).is_none(), "expected the function to emit";
   assert equals(st.out.build(), "int64_t add(int64_t a, int64_t b) {\n    return (a + b);\n}\n"), "expected a two-param C function definition";
+}
+
+test "emit_function_param emits a function-type parameter using C's function-pointer declarator shape" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  DataType* p0 = malloc(sizeof(DataType));
+  *p0 = dtype_new();
+  p0.type_str = "num";
+  DataType* p1 = malloc(sizeof(DataType));
+  *p1 = dtype_new();
+  p1.type_str = "num";
+  Vec<DataType*> params;
+  params.init(0);
+  params.push(p0);
+  params.push(p1);
+  DataType* rtype = malloc(sizeof(DataType));
+  *rtype = dtype_new();
+  rtype.type_str = "num";
+  FnTypeSig sig = fn_type_sig_new();
+  sig.params = params;
+  sig.rtype = rtype;
+  FnTypeSig* sig_ptr = malloc(sizeof(FnTypeSig));
+  *sig_ptr = sig;
+
+  DataType* cb_dt = malloc(sizeof(DataType));
+  *cb_dt = dtype_new();
+  cb_dt.fn_sig = sig_ptr;
+  cb_dt.has_fn_sig = true;
+  VariableNode cbv;
+  cbv.var_type = cb_dt;
+  cbv.name = "cb";
+  cbv.has_val = false;
+  Node param = node_new(NodeKind.Variable(cbv));
+
+  assert g.emit_function_param(param).is_none(), "expected the function-type parameter to emit";
+  assert equals(st.out.build(), "int64_t (*cb)(int64_t, int64_t)"), "expected C's 'R (*name)(T1, T2)' function-pointer declarator";
+}
+
+test "emit_function emits a function-type parameter's signature, and calls through it in the body" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  DataType* p0 = malloc(sizeof(DataType));
+  *p0 = dtype_new();
+  p0.type_str = "num";
+  DataType* p1 = malloc(sizeof(DataType));
+  *p1 = dtype_new();
+  p1.type_str = "num";
+  Vec<DataType*> sig_params;
+  sig_params.init(0);
+  sig_params.push(p0);
+  sig_params.push(p1);
+  DataType* sig_rtype = malloc(sizeof(DataType));
+  *sig_rtype = dtype_new();
+  sig_rtype.type_str = "num";
+  FnTypeSig sig = fn_type_sig_new();
+  sig.params = sig_params;
+  sig.rtype = sig_rtype;
+  FnTypeSig* sig_ptr = malloc(sizeof(FnTypeSig));
+  *sig_ptr = sig;
+
+  DataType* cb_dt = malloc(sizeof(DataType));
+  *cb_dt = dtype_new();
+  cb_dt.fn_sig = sig_ptr;
+  cb_dt.has_fn_sig = true;
+  VariableNode cbv;
+  cbv.var_type = cb_dt;
+  cbv.name = "cb";
+  cbv.has_val = false;
+  Node* cb_param = malloc(sizeof(Node));
+  *cb_param = node_new(NodeKind.Variable(cbv));
+
+  DataType* dt_a = malloc(sizeof(DataType));
+  *dt_a = dtype_new();
+  dt_a.type_str = "num";
+  VariableNode av;
+  av.var_type = dt_a;
+  av.name = "a";
+  av.has_val = false;
+  Node* a_param = malloc(sizeof(Node));
+  *a_param = node_new(NodeKind.Variable(av));
+
+  DataType* dt_b = malloc(sizeof(DataType));
+  *dt_b = dtype_new();
+  dt_b.type_str = "num";
+  VariableNode bv;
+  bv.var_type = dt_b;
+  bv.name = "b";
+  bv.has_val = false;
+  Node* b_param = malloc(sizeof(Node));
+  *b_param = node_new(NodeKind.Variable(bv));
+
+  Vec<Node*> params;
+  params.init(0);
+  params.push(cb_param);
+  params.push(a_param);
+  params.push(b_param);
+
+  Node* callee = malloc(sizeof(Node));
+  *callee = node_new(NodeKind.Identifier("cb"));
+  Node* arg_a = malloc(sizeof(Node));
+  *arg_a = node_new(NodeKind.Identifier("a"));
+  Node* arg_b = malloc(sizeof(Node));
+  *arg_b = node_new(NodeKind.Identifier("b"));
+  ExprNode comma;
+  comma.left = arg_a;
+  comma.has_left = true;
+  comma.right = arg_b;
+  comma.has_right = true;
+  comma.op = ",";
+  Node* args_node = malloc(sizeof(Node));
+  *args_node = node_new(NodeKind.Expression(comma));
+  ExprNode call_e;
+  call_e.left = callee;
+  call_e.has_left = true;
+  call_e.right = args_node;
+  call_e.has_right = true;
+  call_e.op = "()";
+  Node* call_node = malloc(sizeof(Node));
+  *call_node = node_new(NodeKind.Expression(call_e));
+  Node* ret_stmt = malloc(sizeof(Node));
+  *ret_stmt = node_new(NodeKind.StatementReturn(call_node));
+  Vec<Node*> stmts;
+  stmts.init(0);
+  stmts.push(ret_stmt);
+  BodyNode bn;
+  bn.statements = stmts;
+  Node* body = malloc(sizeof(Node));
+  *body = node_new(NodeKind.Body(bn));
+
+  FunctionNode fnv = function_node_new();
+  fnv.name = "apply";
+  fnv.has_name = true;
+  DataType* rtype = malloc(sizeof(DataType));
+  *rtype = dtype_new();
+  rtype.type_str = "num";
+  fnv.rtype = rtype;
+  fnv.has_rtype = true;
+  fnv.args = params;
+  fnv.has_args = true;
+  fnv.body = body;
+  fnv.has_body = true;
+
+  Node fn_node = node_new(NodeKind.Function(fnv));
+  assert g.emit_function(fn_node).is_none(), "expected 'apply' to emit";
+  assert equals(
+    st.out.build(),
+    "int64_t apply(int64_t (*cb)(int64_t, int64_t), int64_t a, int64_t b) {\n    return cb(a, b);\n}\n"
+  ), "expected the function-pointer param declarator, and an ordinary (uncast) call through it in the body";
 }
 
 test "emit_statement emits a conditional for as a while loop" {
