@@ -2370,6 +2370,33 @@ impl Codegen {
         self.state.write(";\n");
         ret .None;
       }
+      .StatementAssert(a) -> {
+        // `assert cond;` / `assert cond, "msg";` (e.g. `_lex`'s own real
+        // body in the self-hosted lexer's own source, found via the
+        // self-compile experiment) -- lowers to a plain `if (!(cond)) {
+        // ...; abort(); }`, matching the original's own non-test-mode
+        // lowering exactly (this codegen has no test-mode runner of its
+        // own yet -- `.Test` nodes are skipped entirely by an ordinary
+        // compile, see `NodeKind.Test`'s doc comment -- so there is no
+        // recovered-assertion path to support here).
+        self.state.write_indent();
+        self.state.write("if (!(");
+        let cerr = self.emit_expr(*a.condition);
+        if cerr.is_some() {
+          ret cerr;
+        }
+        self.state.write(")) { ");
+        if a.has_message {
+          self.state.write("fprintf(stderr_stream(), \"Assertion failed: %s\\n\", ");
+          let merr = self.emit_expr(*a.message);
+          if merr.is_some() {
+            ret merr;
+          }
+          self.state.write("); ");
+        }
+        self.state.write("abort(); }\n");
+        ret .None;
+      }
       _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
     }
   }
@@ -4081,6 +4108,43 @@ test "emit_statement emits a bare panic(...) as a statement" {
     st.out.build(),
     "({ fprintf(stderr_stream(), \"panic: %s\\n\", \"internal error\"); abort(); 0; });\n"
   ), "expected the panic expression followed by a trailing ';\\n', same as any other bare-expression statement";
+}
+
+test "emit_statement emits 'assert cond, msg;' as an if/abort with the message printed" {
+  // Regression test: `_lex`'s own real body in the self-hosted lexer's
+  // own source (`assert !r.is_err(), "tokenize() returned an error";`)
+  // -- found via the self-compile experiment -- was entirely unhandled
+  // (`.StatementAssert` had no `emit_statement` case at all, rejected as
+  // `CodegenErrorKind.UnsupportedNode`).
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  Node* cond = malloc(sizeof(Node));
+  *cond = node_new(NodeKind.Boolean(false));
+  Node* msg = malloc(sizeof(Node));
+  *msg = node_new(NodeKind.String("should not happen"));
+  AssertNode a;
+  a.condition = cond;
+  a.message = msg;
+  a.has_message = true;
+  Node n = node_new(NodeKind.StatementAssert(a));
+  assert g.emit_statement(n).is_none(), "expected the assert statement to emit";
+  assert equals(
+    st.out.build(),
+    "if (!(false)) { fprintf(stderr_stream(), \"Assertion failed: %s\\n\", \"should not happen\"); abort(); }\n"
+  ), "expected an if/abort guard printing the assert's own message on failure";
+}
+
+test "emit_statement emits a message-less 'assert cond;' as a plain if/abort" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  Node* cond = malloc(sizeof(Node));
+  *cond = node_new(NodeKind.Boolean(true));
+  AssertNode a;
+  a.condition = cond;
+  a.has_message = false;
+  Node n = node_new(NodeKind.StatementAssert(a));
+  assert g.emit_statement(n).is_none(), "expected the message-less assert statement to emit";
+  assert equals(st.out.build(), "if (!(true)) { abort(); }\n"), "expected a plain if/abort guard with no message printed";
 }
 
 test "emit_expr escapes a character literal" {
