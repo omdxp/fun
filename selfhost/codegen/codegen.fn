@@ -151,9 +151,17 @@
 // already fully explicit at this stage (an omitted `let` type, or a
 // function relying on inferred generics, isn't reachable yet), so no
 // `infer_expr_type`-equivalent exists yet either.
-// - Multi-file imports, quirk/vtable dispatch, async/channels -- each is
-// a substantial slice of its own in the original and will get one here
-// too.
+// - Quirk/vtable dispatch, async/channels -- each is a substantial slice
+// of its own in the original and will get one here too. Multi-file
+// resolution/merging itself now exists (`selfhost/parser/
+// import_resolver.fn`'s `parse_program_with_imports` recursively
+// resolves, parses, and flattens an entire `imp`-connected program into
+// one `Vec<Node>` this codegen's own `transpile` can take unchanged) --
+// but an ALIASED import's `alias.symbol` QUALIFIED access at a call site
+// is still unrecognized (it shares the `Identifier . Identifier` AST
+// shape with plain field access and qualified enum-variant access,
+// same as the tagged-union payload gap above), and cross-file
+// duplicate-symbol detection doesn't exist yet either.
 // - Exotic literal-escaping edge cases the original handles (splitting a
 // string literal around a `\xFF`-then-more-hex-digits run so C doesn't
 // fold extra digits into the escape) -- string content is written back

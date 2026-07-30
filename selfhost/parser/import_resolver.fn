@@ -1,0 +1,207 @@
+// Resolves and merges a whole `imp`-connected program into one flat
+// `Vec<Node>`, so `codegen.transpile` (which only ever sees a single
+// file's worth of top-level declarations today) can be handed a
+// multi-file program's declarations all at once, in one pass, with no
+// changes to codegen itself -- `imp`-qualified access (`alias.symbol`)
+// and cross-file duplicate-symbol detection are each a separate,
+// not-yet-supported gap (see `parse_program_with_imports`'s own doc
+// comment); this file only makes every reachable declaration visible in
+// one place.
+
+imp parse_state;
+imp parser;
+imp ..ast.ast;
+imp ..lexer.lexer;
+imp std.string;
+imp std.path;
+imp std.fs;
+imp std.vec;
+imp std.set;
+imp std.option;
+imp std.result;
+
+// Converts one `imp`-statement's dotted `path` (already parsed into an
+// `ImportNode.path` string, preserving leading/interior dot RUNS exactly
+// as written -- see `parser.parse_import`'s own doc comment) into an
+// actual `.fn` file path relative to `input_file_path`'s own directory.
+// Mirrors the CURRENT bootstrap compiler's own scheme EXACTLY (see
+// `build_full_import_path_for_formatter` in `modules/cli/cli.zig`, the
+// formatter's own local-import discovery): a run of N consecutive `.`
+// characters becomes `N / 2` `../` parent-traversal segments, plus one
+// EXTRA `/` path-separator when N is odd -- a plain single `.` between
+// two path segments (`lexer.token`) is exactly that odd-run-of-1 case,
+// and a leading `..`/`....`/... run (always an EVEN count, enforced by
+// `parse_import` itself) is exactly the even case, needing no extra
+// separator since `../` already ends in one.
+pub fun resolve_import_path(str input_file_path, str import_path) str {
+  str dir = dirname(input_file_path);
+  if equals(dir, input_file_path) {
+    dir = ".";
+  }
+  StringBuilder sb = string_builder_init(64);
+  sb.append(dir);
+  sb.append("/");
+  num n = len(import_path);
+  num i = 0;
+  for i < n {
+    if import_path[i] != '.' {
+      sb.append_char(import_path[i]);
+      i = i + 1;
+      continue;
+    }
+    num j = i;
+    for j < n && import_path[j] == '.' {
+      j = j + 1;
+    }
+    num run_len = j - i;
+    num parents = run_len / 2;
+    bin sep = run_len % 2 == 1;
+    num p = 0;
+    for p < parents {
+      sb.append("../");
+      p = p + 1;
+    }
+    if sep {
+      sb.append("/");
+    }
+    i = j;
+  }
+  sb.append(".fn");
+  ret sb.build();
+}
+
+// Recursively resolves, parses, and merges `entry_path` and every file it
+// (transitively) `imp`s into one `Vec<Node>` -- an ALIASED import (`imp x
+// as y;`) is traversed the exact same as an unaliased one (its
+// declarations still need to be reachable), but a `y.symbol` QUALIFIED
+// reference at a call site is a separate gap this doesn't resolve (see
+// `codegen.fn`'s own top-of-file doc comment, "calls/access through an
+// aliased/imported module"). Each file is parsed at MOST once (tracked
+// by its resolved path in a `Set<str>`), so a diamond import (two files
+// both importing a shared third) or a cyclic one terminates instead of
+// looping or duplicating declarations.
+// 
+// Deliberately narrow for this slice: no cross-file duplicate-symbol
+// detection -- two files each privately declaring the same bare name
+// would silently collide once flattened into one list (the SAME gap
+// `parser.pub parse`'s own doc comment already flags as not wired for a
+// single file's own top-level declarations, just now reachable across
+// files too). Every resolved path is assumed to exist and parse cleanly;
+// the first real failure (file not found, lex, or parse error)
+// short-circuits the whole merge as `.Err`, rather than silently
+// returning a partial program.
+pub fun parse_program_with_imports(str entry_path) Result<Vec<Node>, str> {
+  Vec<Node> merged;
+  merged.init(0);
+  Set<str> visited = set_init("", 8);
+  let err = _parse_and_merge(entry_path, &merged, &visited);
+  if err.is_some() {
+    ret .Err(err.unwrap());
+  }
+  ret .Ok(merged);
+}
+
+fun _parse_and_merge(str path, Vec<Node>* merged, Set<str>* visited) Option<str> {
+  if visited.has(path) {
+    ret .None;
+  }
+  visited.add(path);
+
+  if !exists(path) {
+    ret .Some(format("import not found: {str}", path));
+  }
+  str src = read_to_string(path);
+
+  let tok_result = tokenize(src, path);
+  if tok_result.is_err() {
+    ret .Some(format("lex error in {str}", path));
+  }
+
+  ParseState state = parse_state_new(path, src);
+  state.tokens = tok_result.unwrap();
+  Parser p = parser_new(&state);
+  let perr = p.parse();
+  if perr.is_some() {
+    ret .Some(format("parse error in {str}", path));
+  }
+
+  for n : state.nodes {
+    fit n.kind {
+      .Import(imp_node) -> {
+        str resolved = resolve_import_path(path, imp_node.path);
+        let ierr = _parse_and_merge(resolved, merged, visited);
+        if ierr.is_some() {
+          ret ierr;
+        }
+      }
+      _ -> { merged.push(n); }
+    }
+  }
+  ret .None;
+}
+
+test "resolve_import_path converts a same-directory dotted path" {
+  let resolved = resolve_import_path("selfhost/codegen/codegen.fn", "codegen_state");
+  assert equals(resolved, "selfhost/codegen/codegen_state.fn"), "expected the sibling file resolved relative to the importing file's own directory";
+}
+
+test "resolve_import_path converts a nested dotted path (single '.' as separator)" {
+  let resolved = resolve_import_path("selfhost/parser/parser.fn", "datatype_defs");
+  assert equals(resolved, "selfhost/parser/datatype_defs.fn"), "expected a bare sibling name to resolve with no extra traversal";
+}
+
+test "resolve_import_path handles one leading '..' parent-traversal segment" {
+  let resolved = resolve_import_path("selfhost/parser/parser.fn", "..ast.ast");
+  assert equals(resolved, "selfhost/parser/../ast/ast.fn"), "expected '..' (2 dots) to become one '../' parent step, then '.' between 'ast' and 'ast' to become '/'";
+}
+
+test "resolve_import_path handles an input file with no directory component" {
+  let resolved = resolve_import_path("main.fn", "std.io");
+  assert equals(resolved, "./std/io.fn"), "expected './' as the directory when the input path has no slash of its own";
+}
+
+test "parse_program_with_imports merges a two-file program into one Vec<Node>" {
+  let result = parse_program_with_imports("selfhost/parser/import_resolver_fixtures/two_file_main.fn");
+  assert result.is_ok(), "expected the two-file program to resolve and parse cleanly";
+  let nodes = result.unwrap();
+  bin saw_main = false;
+  bin saw_helper = false;
+  for n : nodes {
+    fit n.kind {
+      .Function(fnv) -> {
+        if equals(fnv.name, "main") {
+          saw_main = true;
+        }
+        if equals(fnv.name, "helper_add_one") {
+          saw_helper = true;
+        }
+      }
+      _ -> {}
+    }
+  }
+  assert saw_main, "expected the entry file's own 'main' function in the merged nodes";
+  assert saw_helper, "expected the imported file's 'helper_add_one' function in the merged nodes too";
+}
+
+test "parse_program_with_imports terminates on a diamond import instead of duplicating or looping" {
+  let result = parse_program_with_imports("selfhost/parser/import_resolver_fixtures/diamond_a.fn");
+  assert result.is_ok(), "expected the diamond import graph to resolve cleanly";
+  let nodes = result.unwrap();
+  num shared_count = 0;
+  for n : nodes {
+    fit n.kind {
+      .Function(fnv) -> {
+        if equals(fnv.name, "shared_fn") {
+          shared_count = shared_count + 1;
+        }
+      }
+      _ -> {}
+    }
+  }
+  assert shared_count == 1, "expected the shared file (imported by both a and b) parsed and merged exactly once";
+}
+
+test "parse_program_with_imports reports an error for a missing import rather than guessing" {
+  let result = parse_program_with_imports("selfhost/parser/import_resolver_fixtures/missing_import.fn");
+  assert result.is_err(), "expected a missing import to fail the whole merge, not silently skip it";
+}

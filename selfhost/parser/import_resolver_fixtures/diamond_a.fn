@@ -1,0 +1,6 @@
+imp diamond_shared;
+imp diamond_b;
+
+fun main() num {
+  ret shared_fn() + helper_b();
+}
