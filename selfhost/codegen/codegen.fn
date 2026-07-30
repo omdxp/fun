@@ -10,8 +10,15 @@
 // as an rvalue or an assignment target -- see `emit_index`'s doc
 // comment), calls with a plain-identifier callee (any argument count,
 // flattening the parser's comma-chained argument-list representation --
-// see `flatten_call_args`), variable declarations (explicit type only,
-// no `let` inference yet), `ret` statements, bare `break;`/`continue;`
+// see `flatten_call_args`), variable declarations -- explicit type, or
+// `let` (emits GNU C's own `__auto_type`, letting the C compiler infer
+// the real type, since this codegen has no type-checker of its own --
+// `infer_let_expr_type` ALSO best-effort infers the declared type for
+// this file's OWN bookkeeping, purely so a later bare-shorthand `fit`/
+// field access/method call on that local still resolves; failing to
+// infer only means the local isn't usable that way afterward, not that
+// the declaration itself is rejected) -- `ret` statements, bare
+// `break;`/`continue;`
 // (an identical C spelling, no translation needed), `if`/`elif`/`else`
 // (chained correctly into one C construct even though they're three
 // independent sibling AST statements -- see `emit_if_chain`'s doc
@@ -2062,9 +2069,32 @@ impl Codegen {
       }
       .Variable(v) -> {
         self.state.write_indent();
-        let wt = self.write_type(*v.var_type);
-        if wt.is_none() {
-          ret .Some(CodegenErrorKind.UnsupportedNode);
+        // `let NAME = <expr>;` (no explicit type -- `parse_let`'s own
+        // `__let_infer__` sentinel, see its doc comment in parser.fn)
+        // ALWAYS emits GNU C's own `__auto_type` for the declaration
+        // itself, letting the C compiler do the real inference -- this
+        // codegen has no type-checker of its own. `infer_let_expr_type`
+        // is then tried PURELY as a bonus for THIS codegen's OWN later
+        // bookkeeping (so a bare-shorthand `fit`/a chained field access/
+        // a method call reading `NAME` afterward still resolves); when
+        // it can't infer anything, `NAME` just isn't a known local
+        // afterward (rejected by whatever reads it next, not guessed --
+        // the C declaration itself is unaffected either way).
+        bin is_let = equals(v.var_type.type_str, "__let_infer__");
+        bin have_resolved = false;
+        str resolved_name = "";
+        bin resolved_ptr = false;
+
+        if is_let {
+          self.state.write("__auto_type");
+        } else {
+          let wt = self.write_type(*v.var_type);
+          if wt.is_none() {
+            ret .Some(CodegenErrorKind.UnsupportedNode);
+          }
+          resolved_name = wt.unwrap();
+          resolved_ptr = dtype_is_pointer(self.resolve_type_subst(*v.var_type));
+          have_resolved = true;
         }
         self.state.write(" ");
         self.state.write(v.name);
@@ -2073,7 +2103,10 @@ impl Codegen {
           // See `Codegen.expected_enum_type`'s doc comment: a bare
           // shorthand in a `Variable` declaration's own initializer
           // resolves against THAT variable's declared type, not
-          // whatever the enclosing function returns.
+          // whatever the enclosing function returns. For `let`, this is
+          // just `__let_infer__` (never a real enum name), so a bare
+          // shorthand initializer still correctly fails to resolve
+          // rather than guessing.
           let prev_expected = self.expected_enum_type;
           self.expected_enum_type = v.var_type.type_str;
           let verr = self.emit_expr(*v.val);
@@ -2083,11 +2116,21 @@ impl Codegen {
           }
         }
         self.state.write(";\n");
-        self.record_local(
-          v.name,
-          wt.unwrap(),
-          dtype_is_pointer(self.resolve_type_subst(*v.var_type))
-        );
+        if is_let && v.has_val {
+          let inferred = self.infer_let_expr_type(v.val);
+          if inferred.is_some() {
+            let idt = inferred.unwrap();
+            let resolved = self.resolve_type_name(idt);
+            if resolved.is_some() {
+              resolved_name = resolved.unwrap();
+              resolved_ptr = dtype_is_pointer(self.resolve_type_subst(idt));
+              have_resolved = true;
+            }
+          }
+        }
+        if have_resolved {
+          self.record_local(v.name, resolved_name, resolved_ptr);
+        }
         ret .None;
       }
       .StatementFor(fk) -> {
@@ -3181,6 +3224,105 @@ impl Codegen {
     }
   }
 
+  // Infers a `let NAME = <expr>;` declaration's own type, for THIS
+  // codegen's OWN bookkeeping (`record_local`, so a later bare-shorthand
+  // `fit`/chained field access/method call on `NAME` still resolves) --
+  // the C DECLARATION itself always emits GNU C's own `__auto_type`
+  // regardless (see `emit_statement`'s `.Variable` case), so a failed
+  // inference here only means `NAME` isn't a known local afterward, not
+  // that the declaration itself is rejected. Covers the same shapes
+  // `infer_arg_type_name` does (a known local, a literal, a call to an
+  // already-registered plain function) PLUS a method call
+  // (`recv.method()`, e.g. `let last = self.tokens.last();` --
+  // `_prev_token_is_bare_zero`'s real body in the self-hosted lexer's
+  // own source -- resolved via `resolve_field_chain` + `
+  // lookup_impl_method_rtype`, the exact same two lookups `emit_fit`'s
+  // own call-subject handling already uses). Anything else (a nested
+  // generic call, a chained method call whose OWN receiver is itself a
+  // call, ...) is unresolvable, rejected rather than guessed.
+  infer_let_expr_type(Node* val) Option<DataType> {
+    fit val.kind {
+      .Identifier(name) -> {
+        let t = self.lookup_local_type_name(name);
+        let p = self.lookup_local_is_pointer(name);
+        if t.is_none() || p.is_none() {
+          ret .None;
+        }
+        DataType dt = dtype_new();
+        dt.type_str = t.unwrap();
+        if p.unwrap() {
+          dt.pointer_depth = 1;
+        }
+        ret .Some(dt);
+      }
+      .Number(data) -> {
+        DataType dt = dtype_new();
+        fit data {
+          .Num(_) -> {
+            dt.type_str = "num";
+            ret .Some(dt);
+          }
+          .Dec(_) -> {
+            dt.type_str = "dec";
+            ret .Some(dt);
+          }
+          _ -> { ret .None; }
+        }
+      }
+      .String(_) -> {
+        DataType dt = dtype_new();
+        dt.type_str = "str";
+        ret .Some(dt);
+      }
+      .Character(_) -> {
+        DataType dt = dtype_new();
+        dt.type_str = "chr";
+        ret .Some(dt);
+      }
+      .Boolean(_) -> {
+        DataType dt = dtype_new();
+        dt.type_str = "bin";
+        ret .Some(dt);
+      }
+      .Expression(e) -> {
+        if !equals(e.op, "()") || !e.has_left {
+          ret .None;
+        }
+        fit e.left.kind {
+          .Identifier(fn_name) -> {
+            let rt = self.lookup_function_rtype(fn_name);
+            if rt.is_none() {
+              ret .None;
+            }
+            ret .Some(*rt.unwrap());
+          }
+          .Expression(recv_e) -> {
+            if !equals(recv_e.op, ".") || !recv_e.has_left || !recv_e.has_right {
+              ret .None;
+            }
+            str method_name = "";
+            fit recv_e.right.kind {
+              .Identifier(n) -> { method_name = n; }
+              _ -> { ret .None; }
+            }
+            let recv_r_opt = self.resolve_field_chain(recv_e.left);
+            if recv_r_opt.is_none() {
+              ret .None;
+            }
+            let recv_r = recv_r_opt.unwrap();
+            let rt = self.lookup_impl_method_rtype(recv_r.type_name, method_name);
+            if rt.is_none() {
+              ret .None;
+            }
+            ret .Some(*rt.unwrap());
+          }
+          _ -> { ret .None; }
+        }
+      }
+      _ -> { ret .None; }
+    }
+  }
+
   // Given `fn_name` (a call's plain-identifier callee) and its already-
   // flattened, actual call ARGUMENTS, checks whether `fn_name` matches a
   // registered GENERIC function template (see `Codegen.
@@ -3859,6 +4001,295 @@ test "emit_statement emits a variable declaration with an initializer" {
   Node n = node_new(NodeKind.Variable(v));
   assert g.emit_statement(n).is_none(), "expected the variable declaration to emit";
   assert equals(st.out.build(), "int64_t x = 5;\n"), "expected 'int64_t x = 5;\\n'";
+}
+
+test "emit_statement emits a 'let' declaration as '__auto_type', inferring its type from a plain function call" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  DataType* rtype = malloc(sizeof(DataType));
+  *rtype = dtype_new();
+  rtype.type_str = "num";
+  FunctionNode fnv = function_node_new();
+  fnv.name = "mk";
+  fnv.has_name = true;
+  fnv.rtype = rtype;
+  fnv.has_rtype = true;
+  fnv.has_args = false;
+  Node fn_node = node_new(NodeKind.Function(fnv));
+  Vec<Node> sig_nodes;
+  sig_nodes.init(0);
+  sig_nodes.push(fn_node);
+  g.register_function_signatures(sig_nodes);
+
+  DataType* let_dt = malloc(sizeof(DataType));
+  *let_dt = dtype_new();
+  let_dt.type_str = "__let_infer__";
+  Node* callee = malloc(sizeof(Node));
+  *callee = node_new(NodeKind.Identifier("mk"));
+  Node* blank = malloc(sizeof(Node));
+  *blank = node_new(NodeKind.Blank);
+  Node* args = malloc(sizeof(Node));
+  *args = node_new(NodeKind.ExpressionParenthesis(blank));
+  ExprNode call_e;
+  call_e.left = callee;
+  call_e.has_left = true;
+  call_e.right = args;
+  call_e.has_right = true;
+  call_e.op = "()";
+  Node* val = malloc(sizeof(Node));
+  *val = node_new(NodeKind.Expression(call_e));
+  VariableNode v;
+  v.var_type = let_dt;
+  v.name = "r";
+  v.val = val;
+  v.has_val = true;
+  Node n = node_new(NodeKind.Variable(v));
+
+  assert g.emit_statement(n).is_none(), "expected the 'let' declaration to emit";
+  assert equals(st.out.build(), "__auto_type r = mk();\n"), "expected '__auto_type', not the '__let_infer__' sentinel, in the emitted C";
+  assert equals(g.lookup_local_type_name("r").unwrap(), "num"), "expected 'r' inferred as 'num' from mk's own declared return type, so a later fit/field access on 'r' still resolves";
+}
+
+test "pub transpile resolves a 'fit' over a 'let'-declared local whose type was inferred from a method call" {
+  // Regression test: `let last = self.tokens.last(); fit last { .Some(t)
+  // -> {...} .None -> {...} }` (_prev_token_is_bare_zero's real body in
+  // the self-hosted lexer's own source) used to fail -- `last`'s type
+  // was recorded as the literal, un-inferred "__let_infer__" sentinel,
+  // so `fit`'s bare-shorthand pattern match against it was rejected
+  // (unrecognized "enum"). Fixed via infer_let_expr_type, resolving a
+  // method-call initializer's type through the SAME resolve_field_chain
+  // + lookup_impl_method_rtype lookups emit_fit's own call-subject
+  // handling already uses.
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  EnumDeclNode optd = enum_decl_node_new();
+  optd.name = "Option";
+  EnumVariant some_v = enum_variant_new();
+  some_v.name = "Some";
+  DataType* pdt = malloc(sizeof(DataType));
+  *pdt = dtype_new();
+  pdt.type_str = "num";
+  some_v.payload.push(pdt);
+  some_v.has_payload = true;
+  optd.variants.push(some_v);
+  EnumVariant none_v = enum_variant_new();
+  none_v.name = "None";
+  optd.variants.push(none_v);
+  Node opt_node = node_new(NodeKind.Enum(optd));
+
+  CompoundNode holderc = compound_node_new();
+  holderc.name = "Holder";
+  CompoundField hf;
+  hf.name = "v";
+  DataType* hfdt = malloc(sizeof(DataType));
+  *hfdt = dtype_new();
+  hfdt.type_str = "num";
+  hf.dtype = hfdt;
+  holderc.fields.push(hf);
+  Node holder_node = node_new(NodeKind.Compound(holderc));
+
+  DataType* self_dt = malloc(sizeof(DataType));
+  *self_dt = dtype_new();
+  self_dt.type_str = "Holder";
+  self_dt.pointer_depth = 1;
+  VariableNode selfv;
+  selfv.var_type = self_dt;
+  selfv.name = "self";
+  selfv.has_val = false;
+  Node* self_param = malloc(sizeof(Node));
+  *self_param = node_new(NodeKind.Variable(selfv));
+  Vec<Node*> get_params;
+  get_params.init(0);
+  get_params.push(self_param);
+
+  Node* self_ident_g = malloc(sizeof(Node));
+  *self_ident_g = node_new(NodeKind.Identifier("self"));
+  Node* v_ident = malloc(sizeof(Node));
+  *v_ident = node_new(NodeKind.Identifier("v"));
+  ExprNode field_e;
+  field_e.left = self_ident_g;
+  field_e.has_left = true;
+  field_e.right = v_ident;
+  field_e.has_right = true;
+  field_e.op = ".";
+  Node* field_expr = malloc(sizeof(Node));
+  *field_expr = node_new(NodeKind.Expression(field_e));
+  Node* get_blank = malloc(sizeof(Node));
+  *get_blank = node_new(NodeKind.Blank);
+  Node* some_ident = malloc(sizeof(Node));
+  *some_ident = node_new(NodeKind.Identifier("Some"));
+  ExprNode some_dot;
+  some_dot.left = get_blank;
+  some_dot.has_left = true;
+  some_dot.right = some_ident;
+  some_dot.has_right = true;
+  some_dot.op = ".";
+  Node* some_dot_node = malloc(sizeof(Node));
+  *some_dot_node = node_new(NodeKind.Expression(some_dot));
+  Node* some_args = malloc(sizeof(Node));
+  *some_args = node_new(NodeKind.ExpressionParenthesis(field_expr));
+  ExprNode some_call;
+  some_call.left = some_dot_node;
+  some_call.has_left = true;
+  some_call.right = some_args;
+  some_call.has_right = true;
+  some_call.op = "()";
+  Node* some_call_node = malloc(sizeof(Node));
+  *some_call_node = node_new(NodeKind.Expression(some_call));
+  Node* get_ret = malloc(sizeof(Node));
+  *get_ret = node_new(NodeKind.StatementReturn(some_call_node));
+  Vec<Node*> get_stmts;
+  get_stmts.init(0);
+  get_stmts.push(get_ret);
+  BodyNode get_bn;
+  get_bn.statements = get_stmts;
+  Node* get_body = malloc(sizeof(Node));
+  *get_body = node_new(NodeKind.Body(get_bn));
+
+  FunctionNode getfn = function_node_new();
+  getfn.name = "Holder__get";
+  getfn.has_name = true;
+  DataType* get_rt = malloc(sizeof(DataType));
+  *get_rt = dtype_new();
+  get_rt.type_str = "Option";
+  getfn.rtype = get_rt;
+  getfn.has_rtype = true;
+  getfn.args = get_params;
+  getfn.has_args = true;
+  getfn.body = get_body;
+  getfn.has_body = true;
+  Node* get_method_node = malloc(sizeof(Node));
+  *get_method_node = node_new(NodeKind.Function(getfn));
+
+  ImplNode holderimpl = impl_node_new();
+  holderimpl.type_name = "Holder";
+  holderimpl.methods.push(get_method_node);
+  Node holder_impl_node = node_new(NodeKind.Impl(holderimpl));
+
+  DataType* param_dt = malloc(sizeof(DataType));
+  *param_dt = dtype_new();
+  param_dt.type_str = "Holder";
+  VariableNode hparam;
+  hparam.var_type = param_dt;
+  hparam.name = "h";
+  hparam.has_val = false;
+  Node* h_param = malloc(sizeof(Node));
+  *h_param = node_new(NodeKind.Variable(hparam));
+  Vec<Node*> check_params;
+  check_params.init(0);
+  check_params.push(h_param);
+
+  DataType* let_dt = malloc(sizeof(DataType));
+  *let_dt = dtype_new();
+  let_dt.type_str = "__let_infer__";
+  Node* h_ident = malloc(sizeof(Node));
+  *h_ident = node_new(NodeKind.Identifier("h"));
+  Node* get_ident = malloc(sizeof(Node));
+  *get_ident = node_new(NodeKind.Identifier("get"));
+  ExprNode call_dot;
+  call_dot.left = h_ident;
+  call_dot.has_left = true;
+  call_dot.right = get_ident;
+  call_dot.has_right = true;
+  call_dot.op = ".";
+  Node* call_dot_node = malloc(sizeof(Node));
+  *call_dot_node = node_new(NodeKind.Expression(call_dot));
+  Node* call_blank = malloc(sizeof(Node));
+  *call_blank = node_new(NodeKind.Blank);
+  Node* call_args = malloc(sizeof(Node));
+  *call_args = node_new(NodeKind.ExpressionParenthesis(call_blank));
+  ExprNode call_e;
+  call_e.left = call_dot_node;
+  call_e.has_left = true;
+  call_e.right = call_args;
+  call_e.has_right = true;
+  call_e.op = "()";
+  Node* call_node = malloc(sizeof(Node));
+  *call_node = node_new(NodeKind.Expression(call_e));
+  VariableNode letv;
+  letv.var_type = let_dt;
+  letv.name = "last";
+  letv.val = call_node;
+  letv.has_val = true;
+  Node* let_stmt = malloc(sizeof(Node));
+  *let_stmt = node_new(NodeKind.Variable(letv));
+
+  Node* fit_subj = malloc(sizeof(Node));
+  *fit_subj = node_new(NodeKind.Identifier("last"));
+  Node* true_ret = malloc(sizeof(Node));
+  *true_ret = node_new(NodeKind.StatementReturn(nil));
+  Vec<Node*> true_stmts;
+  true_stmts.init(0);
+  true_stmts.push(true_ret);
+  BodyNode true_bn;
+  true_bn.statements = true_stmts;
+  Node* true_body = malloc(sizeof(Node));
+  *true_body = node_new(NodeKind.Body(true_bn));
+  Node* some_blank = malloc(sizeof(Node));
+  *some_blank = node_new(NodeKind.Blank);
+  Node* some_variant = malloc(sizeof(Node));
+  *some_variant = node_new(NodeKind.Identifier("Some"));
+  ExprNode some_pat;
+  some_pat.left = some_blank;
+  some_pat.has_left = true;
+  some_pat.right = some_variant;
+  some_pat.has_right = true;
+  some_pat.op = ".";
+  Node* some_pat_node = malloc(sizeof(Node));
+  *some_pat_node = node_new(NodeKind.Expression(some_pat));
+  Vec<str> some_bindings;
+  some_bindings.init(0);
+  some_bindings.push("t");
+  FitBranch some_branch;
+  some_branch.condition = some_pat_node;
+  some_branch.has_condition = true;
+  some_branch.body = true_body;
+  some_branch.bindings = some_bindings;
+  some_branch.has_bindings = true;
+
+  FitStmtNode fitn = fit_stmt_node_new();
+  fitn.exp = fit_subj;
+  fitn.branches.push(some_branch);
+  fitn.has_default_branch = false;
+  Node* fit_node = malloc(sizeof(Node));
+  *fit_node = node_new(NodeKind.StatementFit(fitn));
+
+  Vec<Node*> check_stmts;
+  check_stmts.init(0);
+  check_stmts.push(let_stmt);
+  check_stmts.push(fit_node);
+  BodyNode check_bn;
+  check_bn.statements = check_stmts;
+  Node* check_body = malloc(sizeof(Node));
+  *check_body = node_new(NodeKind.Body(check_bn));
+
+  FunctionNode checkfn = function_node_new();
+  checkfn.name = "check";
+  checkfn.has_name = true;
+  DataType* check_rt = malloc(sizeof(DataType));
+  *check_rt = dtype_new();
+  check_rt.type_str = "bin";
+  checkfn.rtype = check_rt;
+  checkfn.has_rtype = true;
+  checkfn.args = check_params;
+  checkfn.has_args = true;
+  checkfn.body = check_body;
+  checkfn.has_body = true;
+  Node check_node = node_new(NodeKind.Function(checkfn));
+
+  Vec<Node> nodes;
+  nodes.init(0);
+  nodes.push(opt_node);
+  nodes.push(holder_node);
+  nodes.push(holder_impl_node);
+  nodes.push(check_node);
+
+  assert g.transpile(nodes).is_none(), "expected the whole program to transpile";
+  let out = st.out.build();
+  assert contains(out, "__auto_type last = Holder__get(&h);"), "expected '__auto_type', not '__let_infer__', in the emitted C";
+  assert contains(out, "if (last.tag == Option_Some)"), "expected the fit's bare '.Some' pattern resolved against Option, inferred from Holder__get's own declared return type";
 }
 
 test "emit_statement emits an uninitialized variable declaration" {
