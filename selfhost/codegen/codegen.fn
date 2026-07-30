@@ -363,6 +363,30 @@ pub compound Codegen {
   // `typedefs.fn`'s own body) carries its own type name directly and
   // never consults this at all.
   str expected_compound_type;
+  // `defer <body>;` support: a FLAT list of every pending deferred
+  // statement body currently in scope, across ALL nested blocks of the
+  // function being emitted right now (registered in source order by
+  // `emit_statement`'s `.StatementDefer` case), plus a stack of frame
+  // markers (each an index into `defer_stack` where that block's OWN
+  // defers begin, pushed/popped by `emit_statements` around its own
+  // statement loop -- see its doc comment). Mirrors the original
+  // transpiler's `defer_stack`/`defer_scope_stack` pair, simplified: this
+  // codegen doesn't yet distinguish a LOOP frame from a plain block frame
+  // (no real `break`/`continue`-past-a-`defer` usage has been found yet
+  // to require it -- see `emit_function_scope_defers`'s doc comment for
+  // the resulting limitation), so there is only ever "the current
+  // block's own frame" and "everything back to function entry".
+  // Deferred bodies are never actually POPPED off `defer_stack` by an
+  // early exit (a `ret` inside a nested block) -- only replicated as
+  // ordinary C statements at that exit point (`emit_defers_from`) -- the
+  // ACTUAL pop happens once, when the owning block finishes being
+  // emitted at all (`emit_statements`' own `pop_defer_scope` call),
+  // regardless of how many early-exit copies were already emitted from
+  // it. This is the standard compile-time "replicate the cleanup at
+  // every exit point" lowering (no runtime unwind table), matching the
+  // original.
+  Vec<Node*> defer_stack;
+  Vec<num> defer_scope_starts;
   // Whole-program record of every non-generic compound's name and its
   // fields' declared types, populated by `emit_compound`'s own emission
   // pass -- lets a CHAINED field access (`a.b.c`) determine `.`/`->` at
@@ -544,6 +568,8 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.current_fn_rtype_dt = .None;
   g.expected_enum_type = "";
   g.expected_compound_type = "";
+  g.defer_stack.init(0);
+  g.defer_scope_starts.init(0);
   ret g;
 }
 
@@ -1161,6 +1187,8 @@ impl Codegen {
               let saved_local_type_name = self.local_type_name;
               let saved_fn_rtype_name = self.current_fn_rtype_name;
               let saved_fn_rtype_dt = self.current_fn_rtype_dt;
+              let saved_defer_stack = self.defer_stack;
+              let saved_defer_scope_starts = self.defer_scope_starts;
               self.state = &method_scratch;
               self.hoist_insert_pos = .None;
               self.emit_function_named(*m, new_name);
@@ -1171,6 +1199,8 @@ impl Codegen {
               self.local_type_name = saved_local_type_name;
               self.current_fn_rtype_name = saved_fn_rtype_name;
               self.current_fn_rtype_dt = saved_fn_rtype_dt;
+              self.defer_stack = saved_defer_stack;
+              self.defer_scope_starts = saved_defer_scope_starts;
               self.emit_hoisted(method_scratch.out.build());
             }
 
@@ -2298,14 +2328,37 @@ impl Codegen {
   pub emit_statement(Node node) Option<CodegenErrorKind> {
     fit node.kind {
       .StatementReturn(exp) -> {
-        self.state.write_indent();
-        self.state.write("return");
+        // A `ret` unwinds EVERY enclosing block at once, so any
+        // currently pending `defer` (this function's own, or an
+        // enclosing block's) must run first -- see
+        // `Codegen.defer_stack`'s doc comment. Common case (no `defer`
+        // anywhere in this function) keeps the exact prior single-
+        // statement form untouched. When defers ARE pending, the return
+        // expression is evaluated into a temp FIRST (`__auto_type`, this
+        // codegen's usual no-type-checker inference dodge -- see
+        // `Variable`'s own doc comment below) so a deferred statement
+        // can't retroactively change what gets returned by mutating a
+        // variable the expression already read (matching the original's
+        // own `has_pending_function_defers` guard).
+        if self.defer_stack.len == 0 {
+          self.state.write_indent();
+          self.state.write("return");
+          if exp != nil {
+            self.state.write(" ");
+            let prev_expected = self.expected_enum_type;
+            self.expected_enum_type = self.current_fn_rtype_name;
+            let eerr = self.emit_expr(*exp);
+            self.expected_enum_type = prev_expected;
+            if eerr.is_some() {
+              ret eerr;
+            }
+          }
+          self.state.write(";\n");
+          ret .None;
+        }
         if exp != nil {
-          self.state.write(" ");
-          // See `Codegen.expected_enum_type`'s doc comment: a bare
-          // `.Variant`/`.Variant(x)` shorthand in `ret <shorthand>;`
-          // resolves against the enclosing FUNCTION's own declared
-          // return type.
+          self.state.write_indent();
+          self.state.write("__auto_type __fun_defer_ret = ");
           let prev_expected = self.expected_enum_type;
           self.expected_enum_type = self.current_fn_rtype_name;
           let eerr = self.emit_expr(*exp);
@@ -2313,8 +2366,18 @@ impl Codegen {
           if eerr.is_some() {
             ret eerr;
           }
+          self.state.write(";\n");
         }
-        self.state.write(";\n");
+        let dferr = self.emit_function_scope_defers();
+        if dferr.is_some() {
+          ret dferr;
+        }
+        self.state.write_indent();
+        if exp != nil {
+          self.state.write("return __fun_defer_ret;\n");
+        } else {
+          self.state.write("return;\n");
+        }
         ret .None;
       }
       .StatementBreak -> {
@@ -2468,6 +2531,17 @@ impl Codegen {
           self.state.write("); ");
         }
         self.state.write("abort(); }\n");
+        ret .None;
+      }
+      .StatementDefer(body) -> {
+        // `defer <body>;` (e.g. `ParseState.err`'s own real body,
+        // `defer free(loc);`, found via the self-compile experiment) --
+        // registers `body` onto `Codegen.defer_stack` rather than
+        // emitting anything here directly; it's replicated as an
+        // ordinary statement at every point this block's scope actually
+        // ends (`emit_statements`' fall-through, or a `ret` anywhere
+        // inside it -- see `Codegen.defer_stack`'s doc comment).
+        self.defer_stack.push(body);
         ret .None;
       }
       _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
@@ -3042,11 +3116,95 @@ impl Codegen {
     ret .None;
   }
 
+  // True for a statement kind that's KNOWN to always leave its enclosing
+  // block (a `ret`/`break`/`continue`, or a bare `panic(...)` statement,
+  // which always aborts) -- used by `emit_statements` to decide whether
+  // ordinary fall-through defer cleanup is needed after the LAST
+  // statement in a block. Conservative, matching the original's own
+  // `node_is_scope_terminator`: an if/elif/else chain is never treated as
+  // a terminator here even when every one of its own branches returns --
+  // proving that would need real branch-coverage analysis this codegen
+  // doesn't do, so a block ending in such a chain harmlessly emits (dead
+  // but valid) fall-through defer cleanup after it too.
+  node_is_scope_terminator(Node stmt) bin {
+    fit stmt.kind {
+      .StatementReturn(_) -> { ret true; }
+      .StatementBreak -> { ret true; }
+      .StatementContinue -> { ret true; }
+      .Panic(_) -> { ret true; }
+      _ -> { ret false; }
+    }
+  }
+
+  // Pushes a new `defer` scope frame, marking `defer_stack`'s CURRENT
+  // length as where THIS block's own defers begin -- see
+  // `Codegen.defer_stack`'s doc comment.
+  push_defer_scope() {
+    self.defer_scope_starts.push(self.defer_stack.len);
+  }
+
+  // Pops the innermost `defer` scope frame and discards its (by now
+  // already-emitted, one way or another) entries from `defer_stack`.
+  pop_defer_scope() {
+    if self.defer_scope_starts.len == 0 {
+      ret;
+    }
+    let start = self.defer_scope_starts.pop();
+    self.defer_stack.resize(start, nil);
+  }
+
+  // Emits (WITHOUT removing -- see `Codegen.defer_stack`'s doc comment)
+  // every pending defer from `defer_stack`'s end back down to
+  // `start_index`, in REVERSE (LIFO) registration order, each as an
+  // ordinary statement via `emit_body` (a deferred body is either a
+  // single statement or a `{ ... }` block, exactly what `emit_body`
+  // already dispatches on).
+  emit_defers_from(num start_index) Option<CodegenErrorKind> {
+    num i = self.defer_stack.len;
+    for i > start_index {
+      i = i - 1;
+      let d = self.defer_stack.get(i);
+      let derr = self.emit_body(*d);
+      if derr.is_some() {
+        ret derr;
+      }
+    }
+    ret .None;
+  }
+
+  // Emits just the CURRENT (innermost) block's own pending defers --
+  // used at ordinary fall-through (the block ends without an explicit
+  // `ret`/`break`/`continue`/`panic` as its last statement).
+  emit_current_scope_defers() Option<CodegenErrorKind> {
+    if self.defer_scope_starts.len == 0 {
+      ret .None;
+    }
+    let start = self.defer_scope_starts.get(self.defer_scope_starts.len - 1);
+    ret self.emit_defers_from(start);
+  }
+
+  // Emits EVERY currently pending defer, back to function entry -- used
+  // at a `ret` statement, which unwinds every enclosing block at once
+  // regardless of nesting depth. Simplified from the original's own
+  // `emit_function_scope_defers` (which stops at the nearest FUNCTION-
+  // kind frame specifically, distinct from a LOOP frame): this codegen
+  // doesn't yet distinguish frame kinds at all -- see
+  // `Codegen.defer_stack`'s doc comment -- so "back to function entry"
+  // and "back to index 0" are the same thing here.
+  emit_function_scope_defers() Option<CodegenErrorKind> {
+    ret self.emit_defers_from(0);
+  }
+
   // Emits `stmts` in order, one statement per line, chaining any
   // `StatementIf`/`StatementElseIf`/`StatementElse` run into a single C
-  // if/else-if/else construct via `emit_if_chain`.
+  // if/else-if/else construct via `emit_if_chain`. Pushes/pops its OWN
+  // `defer` scope frame around the whole statement list (see
+  // `Codegen.defer_stack`'s doc comment) -- every block, not just a
+  // function's top-level body, is its own defer scope.
   emit_statements(Vec<Node*> stmts) Option<CodegenErrorKind> {
+    self.push_defer_scope();
     num i = 0;
+    bin last_is_terminator = false;
     for i < stmts.len {
       Node* stmt = stmts.get(i);
       bin is_if = false;
@@ -3059,17 +3217,29 @@ impl Codegen {
         num next_i = i;
         let cherr = self.emit_if_chain(stmts, i, &next_i);
         if cherr.is_some() {
+          self.pop_defer_scope();
           ret cherr;
         }
         i = next_i;
+        last_is_terminator = false;
         continue;
       }
+      last_is_terminator = self.node_is_scope_terminator(*stmt);
       let serr = self.emit_statement(*stmt);
       if serr.is_some() {
+        self.pop_defer_scope();
         ret serr;
       }
       i = i + 1;
     }
+    if !last_is_terminator {
+      let dferr = self.emit_current_scope_defers();
+      if dferr.is_some() {
+        self.pop_defer_scope();
+        ret dferr;
+      }
+    }
+    self.pop_defer_scope();
     ret .None;
   }
 
@@ -3180,6 +3350,11 @@ impl Codegen {
         self.local_names.init(0);
         self.local_is_pointer.init(0);
         self.local_type_name.init(0);
+        // Fresh per function too -- see `Codegen.defer_stack`'s doc
+        // comment; a previous function's leftover pending defers (or
+        // frame markers) must never bleed into this one.
+        self.defer_stack.init(0);
+        self.defer_scope_starts.init(0);
         if !f.has_rtype {
           ret .Some(CodegenErrorKind.InvalidNode);
         }
@@ -3600,6 +3775,30 @@ impl Codegen {
         ret .Some(dt);
       }
       .Expression(e) -> {
+        // A plain field-access initializer (`let ct = self.current_token;`
+        // -- `ParseState.err`'s own real body, found via the self-compile
+        // experiment): resolve the WHOLE chain (any depth) via
+        // `resolve_field_chain`, the same resolution a later `ct.pos.line`
+        // read of this local would need to already have registered.
+        // Without this case, `ct` was never recorded as a known local at
+        // all (falling through to the `_ -> { ret .None; }` catch-all
+        // below), so any FURTHER field access off of it was rejected as
+        // an unrecognized local -- not a `defer`-specific bug, just never
+        // exercised until a real chained-field-copy-then-read pattern
+        // showed up.
+        if equals(e.op, ".") {
+          let chain = self.resolve_field_chain(val);
+          if chain.is_none() {
+            ret .None;
+          }
+          let r = chain.unwrap();
+          DataType dt = dtype_new();
+          dt.type_str = r.type_name;
+          if r.is_pointer {
+            dt.pointer_depth = 1;
+          }
+          ret .Some(dt);
+        }
         if !equals(e.op, "()") || !e.has_left {
           ret .None;
         }
@@ -3816,6 +4015,8 @@ impl Codegen {
               let saved_local_type_name = self.local_type_name;
               let saved_fn_rtype_name = self.current_fn_rtype_name;
               let saved_fn_rtype_dt = self.current_fn_rtype_dt;
+              let saved_defer_stack = self.defer_stack;
+              let saved_defer_scope_starts = self.defer_scope_starts;
               self.state = &scratch;
               self.hoist_insert_pos = .None;
               self.emit_function_named(tmpl, mangled_name);
@@ -3826,6 +4027,8 @@ impl Codegen {
               self.local_type_name = saved_local_type_name;
               self.current_fn_rtype_name = saved_fn_rtype_name;
               self.current_fn_rtype_dt = saved_fn_rtype_dt;
+              self.defer_stack = saved_defer_stack;
+              self.defer_scope_starts = saved_defer_scope_starts;
               self.emit_hoisted(scratch.out.build());
             }
 
@@ -4476,6 +4679,68 @@ test "emit_statement emits a 'let' declaration as '__auto_type', inferring its t
   assert equals(g.lookup_local_type_name("r").unwrap(), "num"), "expected 'r' inferred as 'num' from mk's own declared return type, so a later fit/field access on 'r' still resolves";
 }
 
+test "emit_statement infers a 'let' declaration's type from a plain field-access initializer, so a chained field read off of it still resolves" {
+  // Regression test: `ParseState.err`'s own real body (`let ct = self.
+  // current_token; ... ct.pos.line ...`) -- found via the self-compile
+  // experiment while verifying the new 'defer' feature -- rejected the
+  // LATER `ct.pos.line` read as an unrecognized local, since
+  // `infer_let_expr_type` had no case for a plain `.`-field-access
+  // initializer at all (only a known local/literal/call). Fixed by
+  // resolving the WHOLE chain via `resolve_field_chain`, the same
+  // resolution a later read off of it would need.
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  g.record_local("self", "ParseState", true);
+
+  Vec<str> ps_fields;
+  ps_fields.init(0);
+  ps_fields.push("current_token");
+  Vec<str> ps_field_types;
+  ps_field_types.init(0);
+  ps_field_types.push("Token");
+  Vec<bin> ps_field_ptrs;
+  ps_field_ptrs.init(0);
+  ps_field_ptrs.push(false);
+  g.record_compound("ParseState", ps_fields, ps_field_types, ps_field_ptrs);
+
+  Vec<str> tok_fields;
+  tok_fields.init(0);
+  tok_fields.push("pos");
+  Vec<str> tok_field_types;
+  tok_field_types.init(0);
+  tok_field_types.push("Pos");
+  Vec<bin> tok_field_ptrs;
+  tok_field_ptrs.init(0);
+  tok_field_ptrs.push(false);
+  g.record_compound("Token", tok_fields, tok_field_types, tok_field_ptrs);
+
+  DataType* let_dt = malloc(sizeof(DataType));
+  *let_dt = dtype_new();
+  let_dt.type_str = "__let_infer__";
+  Node* self_ident = malloc(sizeof(Node));
+  *self_ident = node_new(NodeKind.Identifier("self"));
+  Node* ct_field_ident = malloc(sizeof(Node));
+  *ct_field_ident = node_new(NodeKind.Identifier("current_token"));
+  ExprNode field_e;
+  field_e.left = self_ident;
+  field_e.has_left = true;
+  field_e.right = ct_field_ident;
+  field_e.has_right = true;
+  field_e.op = ".";
+  Node* val = malloc(sizeof(Node));
+  *val = node_new(NodeKind.Expression(field_e));
+  VariableNode v;
+  v.var_type = let_dt;
+  v.name = "ct";
+  v.val = val;
+  v.has_val = true;
+  Node n = node_new(NodeKind.Variable(v));
+
+  assert g.emit_statement(n).is_none(), "expected the 'let' declaration to emit";
+  assert equals(st.out.build(), "__auto_type ct = self->current_token;\n"), "expected '__auto_type', not the '__let_infer__' sentinel, in the emitted C";
+  assert equals(g.lookup_local_type_name("ct").unwrap(), "Token"), "expected 'ct' inferred as 'Token' from 'self.current_token's own declared field type, so a later 'ct.pos' read still resolves";
+}
+
 test "pub transpile resolves a 'fit' over a 'let'-declared local whose type was inferred from a method call" {
   // Regression test: `let last = self.tokens.last(); fit last { .Some(t)
   // -> {...} .None -> {...} }` (_prev_token_is_bare_zero's real body in
@@ -4888,6 +5153,199 @@ test "emit_function emits a plain no-arg function definition with indentation" {
   Node fn_node = node_new(NodeKind.Function(fnv));
   assert g.emit_function(fn_node).is_none(), "expected the function to emit";
   assert equals(st.out.build(), "int64_t main(void) {\n    return 0;\n}\n"), "expected a complete C function definition";
+}
+
+test "emit_function emits a deferred statement at ordinary fall-through, after the rest of the body" {
+  // Regression test: `.StatementDefer` (e.g. `ParseState.err`'s own real
+  // body, `defer free(loc);`, found via the self-compile experiment) had
+  // no `emit_statement` case at all. A `defer` doesn't emit anything at
+  // its OWN source position -- it's replicated at the block's actual
+  // exit point instead, here just ordinary fall-through off the end of
+  // the function body.
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  FunctionNode fnv = function_node_new();
+  fnv.name = "cleanup";
+  fnv.has_name = true;
+  DataType* rtype = malloc(sizeof(DataType));
+  *rtype = dtype_new();
+  rtype.type_str = "void";
+  rtype.kind = DataTypeType.Void;
+  fnv.rtype = rtype;
+  fnv.has_rtype = true;
+
+  Node* free_callee = malloc(sizeof(Node));
+  *free_callee = node_new(NodeKind.Identifier("free"));
+  Node* x_ident = malloc(sizeof(Node));
+  *x_ident = node_new(NodeKind.Identifier("x"));
+  Node* free_args = malloc(sizeof(Node));
+  *free_args = node_new(NodeKind.ExpressionParenthesis(x_ident));
+  ExprNode free_call;
+  free_call.left = free_callee;
+  free_call.has_left = true;
+  free_call.right = free_args;
+  free_call.has_right = true;
+  free_call.op = "()";
+  Node* free_call_node = malloc(sizeof(Node));
+  *free_call_node = node_new(NodeKind.Expression(free_call));
+  Node* defer_stmt = malloc(sizeof(Node));
+  *defer_stmt = node_new(NodeKind.StatementDefer(free_call_node));
+
+  Node* g_callee = malloc(sizeof(Node));
+  *g_callee = node_new(NodeKind.Identifier("g"));
+  Node* g_blank = malloc(sizeof(Node));
+  *g_blank = node_new(NodeKind.Blank);
+  Node* g_args = malloc(sizeof(Node));
+  *g_args = node_new(NodeKind.ExpressionParenthesis(g_blank));
+  ExprNode g_call;
+  g_call.left = g_callee;
+  g_call.has_left = true;
+  g_call.right = g_args;
+  g_call.has_right = true;
+  g_call.op = "()";
+  Node* g_call_node = malloc(sizeof(Node));
+  *g_call_node = node_new(NodeKind.Expression(g_call));
+
+  Vec<Node*> stmts;
+  stmts.init(0);
+  stmts.push(defer_stmt);
+  stmts.push(g_call_node);
+  BodyNode bn;
+  bn.statements = stmts;
+  Node* body = malloc(sizeof(Node));
+  *body = node_new(NodeKind.Body(bn));
+  fnv.body = body;
+  fnv.has_body = true;
+
+  Node fn_node = node_new(NodeKind.Function(fnv));
+  assert g.emit_function(fn_node).is_none(), "expected the function to emit";
+  assert equals(st.out.build(), "void cleanup(void) {\n    g();\n    free(x);\n}\n"), "expected the deferred 'free(x)' emitted AFTER 'g()', at the block's actual (fall-through) exit, not at its own source position";
+}
+
+test "emit_function emits a deferred statement before an early 'ret', snapshotting the return value first" {
+  // Regression test for the correctness subtlety: `ret <expr>;` must
+  // evaluate `<expr>` BEFORE any pending defer runs (a defer might
+  // mutate a variable the expression already read), so a `ret` with
+  // pending defers snapshots into `__auto_type __fun_defer_ret` first.
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  FunctionNode fnv = function_node_new();
+  fnv.name = "read_val";
+  fnv.has_name = true;
+  DataType* rtype = malloc(sizeof(DataType));
+  *rtype = dtype_new();
+  rtype.type_str = "num";
+  fnv.rtype = rtype;
+  fnv.has_rtype = true;
+
+  Node* free_callee = malloc(sizeof(Node));
+  *free_callee = node_new(NodeKind.Identifier("free"));
+  Node* x_ident = malloc(sizeof(Node));
+  *x_ident = node_new(NodeKind.Identifier("x"));
+  Node* free_args = malloc(sizeof(Node));
+  *free_args = node_new(NodeKind.ExpressionParenthesis(x_ident));
+  ExprNode free_call;
+  free_call.left = free_callee;
+  free_call.has_left = true;
+  free_call.right = free_args;
+  free_call.has_right = true;
+  free_call.op = "()";
+  Node* free_call_node = malloc(sizeof(Node));
+  *free_call_node = node_new(NodeKind.Expression(free_call));
+  Node* defer_stmt = malloc(sizeof(Node));
+  *defer_stmt = node_new(NodeKind.StatementDefer(free_call_node));
+
+  Node* five = malloc(sizeof(Node));
+  *five = node_new(NodeKind.Number(TokenData.Num(5)));
+  Node* ret_stmt = malloc(sizeof(Node));
+  *ret_stmt = node_new(NodeKind.StatementReturn(five));
+
+  Vec<Node*> stmts;
+  stmts.init(0);
+  stmts.push(defer_stmt);
+  stmts.push(ret_stmt);
+  BodyNode bn;
+  bn.statements = stmts;
+  Node* body = malloc(sizeof(Node));
+  *body = node_new(NodeKind.Body(bn));
+  fnv.body = body;
+  fnv.has_body = true;
+
+  Node fn_node = node_new(NodeKind.Function(fnv));
+  assert g.emit_function(fn_node).is_none(), "expected the function to emit";
+  assert equals(
+    st.out.build(),
+    "int64_t read_val(void) {\n    __auto_type __fun_defer_ret = 5;\n    free(x);\n    return __fun_defer_ret;\n}\n"
+  ), "expected the return value snapshotted BEFORE the deferred 'free(x)' runs";
+}
+
+test "emit_function emits nested-block defers in their own LIFO order, scoped to their own block" {
+  // Two defers registered in the SAME block emit in REVERSE (LIFO)
+  // order; a defer registered inside an if-branch fires at THAT
+  // branch's own exit, not smeared across the whole function.
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  FunctionNode fnv = function_node_new();
+  fnv.name = "two_defers";
+  fnv.has_name = true;
+  DataType* rtype = malloc(sizeof(DataType));
+  *rtype = dtype_new();
+  rtype.type_str = "void";
+  rtype.kind = DataTypeType.Void;
+  fnv.rtype = rtype;
+  fnv.has_rtype = true;
+
+  Node* a_callee = malloc(sizeof(Node));
+  *a_callee = node_new(NodeKind.Identifier("a"));
+  Node* a_blank = malloc(sizeof(Node));
+  *a_blank = node_new(NodeKind.Blank);
+  Node* a_args = malloc(sizeof(Node));
+  *a_args = node_new(NodeKind.ExpressionParenthesis(a_blank));
+  ExprNode a_call;
+  a_call.left = a_callee;
+  a_call.has_left = true;
+  a_call.right = a_args;
+  a_call.has_right = true;
+  a_call.op = "()";
+  Node* a_call_node = malloc(sizeof(Node));
+  *a_call_node = node_new(NodeKind.Expression(a_call));
+  Node* defer_a = malloc(sizeof(Node));
+  *defer_a = node_new(NodeKind.StatementDefer(a_call_node));
+
+  Node* b_callee = malloc(sizeof(Node));
+  *b_callee = node_new(NodeKind.Identifier("b"));
+  Node* b_blank = malloc(sizeof(Node));
+  *b_blank = node_new(NodeKind.Blank);
+  Node* b_args = malloc(sizeof(Node));
+  *b_args = node_new(NodeKind.ExpressionParenthesis(b_blank));
+  ExprNode b_call;
+  b_call.left = b_callee;
+  b_call.has_left = true;
+  b_call.right = b_args;
+  b_call.has_right = true;
+  b_call.op = "()";
+  Node* b_call_node = malloc(sizeof(Node));
+  *b_call_node = node_new(NodeKind.Expression(b_call));
+  Node* defer_b = malloc(sizeof(Node));
+  *defer_b = node_new(NodeKind.StatementDefer(b_call_node));
+
+  Vec<Node*> stmts;
+  stmts.init(0);
+  stmts.push(defer_a);
+  stmts.push(defer_b);
+  BodyNode bn;
+  bn.statements = stmts;
+  Node* body = malloc(sizeof(Node));
+  *body = node_new(NodeKind.Body(bn));
+  fnv.body = body;
+  fnv.has_body = true;
+
+  Node fn_node = node_new(NodeKind.Function(fnv));
+  assert g.emit_function(fn_node).is_none(), "expected the function to emit";
+  assert equals(st.out.build(), "void two_defers(void) {\n    b();\n    a();\n}\n"), "expected 'b()' (registered second) emitted before 'a()' (registered first) -- LIFO order";
 }
 
 test "emit_function emits parameters, and a call to it" {
