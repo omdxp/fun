@@ -280,6 +280,21 @@ pub compound Codegen {
   Vec<str> enum_names;
   Vec<Vec<str>> enum_variant_names;
   Vec<bin> enum_is_tagged_union;
+  // Whole-program record of a tagged-union enum's OWN per-variant
+  // payload field types (positional, parallel to
+  // `enum_variant_payload_type_names`/`enum_variant_payload_is_pointer`)
+  // -- lets `emit_fit_enum_branch` register each destructuring binding
+  // (`.Some(t) -> { ... }`) as a KNOWN LOCAL via `record_local`, so
+  // FURTHER access on it (`t.data`, another `fit`, a method call) still
+  // resolves, instead of `t` only ever being usable as a bare value.
+  // Populated by `emit_tagged_union_enum`/`emit_tagged_union_enum_
+  // instance` (both the plain and the monomorphized path) right after
+  // computing each payload field's own resolved type, the same "already
+  // fully explicit" bookkeeping this file uses everywhere else.
+  Vec<str> enum_variant_payload_owner;
+  Vec<str> enum_variant_payload_variant;
+  Vec<Vec<str>> enum_variant_payload_type_names;
+  Vec<Vec<bin>> enum_variant_payload_is_pointer;
   // The CURRENT function's declared return type name, refreshed at the
   // start of every `emit_function` -- feeds `expected_enum_type` for a
   // `ret <shorthand>;` statement's own expression (see `emit_statement`'s
@@ -446,6 +461,10 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.enum_names.init(0);
   g.enum_variant_names.init(0);
   g.enum_is_tagged_union.init(0);
+  g.enum_variant_payload_owner.init(0);
+  g.enum_variant_payload_variant.init(0);
+  g.enum_variant_payload_type_names.init(0);
+  g.enum_variant_payload_is_pointer.init(0);
   g.compound_names.init(0);
   g.compound_field_names.init(0);
   g.compound_field_type_names.init(0);
@@ -996,8 +1015,14 @@ impl Codegen {
 
             for m : i.methods {
               str tmpl_name = "";
+              DataType* tmpl_rtype = nil;
               fit m.kind {
-                .Function(fnv) -> { tmpl_name = fnv.name; }
+                .Function(fnv) -> {
+                  tmpl_name = fnv.name;
+                  if fnv.has_rtype {
+                    tmpl_rtype = fnv.rtype;
+                  }
+                }
                 _ -> {}
               }
               let bare_name = strip_prefix(tmpl_name, prefix);
@@ -1012,7 +1037,21 @@ impl Codegen {
               nb.append(bare_name);
               str new_name = nb.build();
 
-              self.record_impl_method(mangled_name, bare_name, new_name, nil);
+              // The TEMPLATE's own declared return type (often a bare
+              // `T`) substituted against THIS instantiation's concrete
+              // binding, so `infer_let_expr_type` can resolve `let out =
+              // res.unwrap();`-style locals against a monomorphized
+              // generic impl method's return type too -- previously
+              // always recorded as `nil` (untracked), so a `let` local
+              // holding such a call's result was never a known local
+              // afterward.
+              DataType* recorded_rtype = nil;
+              if tmpl_rtype != nil {
+                DataType substituted_rtype = self.resolve_type_subst(*tmpl_rtype);
+                recorded_rtype = malloc(sizeof(DataType));
+                *recorded_rtype = substituted_rtype;
+              }
+              self.record_impl_method(mangled_name, bare_name, new_name, recorded_rtype);
 
               // `hoist_insert_pos` (if set) is a position measured
               // against the OUTER, now-swapped-away buffer -- suspending
@@ -1111,6 +1150,10 @@ impl Codegen {
       if vt.has_payload {
         self.state.write("    struct { ");
         num i = 0;
+        Vec<str> resolved_payload_names;
+        resolved_payload_names.init(0);
+        Vec<bin> resolved_payload_ptrs;
+        resolved_payload_ptrs.init(0);
         for i < vt.payload_type_strs.len {
           str ptype = vt.payload_type_strs.get(i);
           bin pptr = vt.payload_is_pointer.get(i);
@@ -1131,11 +1174,19 @@ impl Codegen {
           self.state.write(" _");
           self.state.write(format_num(i));
           self.state.write("; ");
+          resolved_payload_names.push(resolved_type);
+          resolved_payload_ptrs.push(resolved_ptr);
           i = i + 1;
         }
         self.state.write("} ");
         self.state.write(vt.name);
         self.state.write(";\n");
+        self.record_enum_variant_payload(
+          mangled_name,
+          vt.name,
+          resolved_payload_names,
+          resolved_payload_ptrs
+        );
       }
     }
     self.state.write("  } payload;\n} ");
@@ -1192,6 +1243,49 @@ impl Codegen {
     self.enum_names.push(name);
     self.enum_variant_names.push(variant_names);
     self.enum_is_tagged_union.push(is_tagged_union);
+  }
+
+  // Records `variant_name`'s own OWN payload field types (positional),
+  // for a tagged-union enum `enum_name` -- see `Codegen.
+  // enum_variant_payload_owner`'s doc comment.
+  record_enum_variant_payload(
+    str enum_name,
+    str variant_name,
+    Vec<str> type_names,
+    Vec<bin> is_pointer
+  ) {
+    self.enum_variant_payload_owner.push(enum_name);
+    self.enum_variant_payload_variant.push(variant_name);
+    self.enum_variant_payload_type_names.push(type_names);
+    self.enum_variant_payload_is_pointer.push(is_pointer);
+  }
+
+  // Looks up `variant_name`'s own payload field type at `position`
+  // (0-based) for the tagged-union enum `enum_name` -- see `Codegen.
+  // enum_variant_payload_owner`'s doc comment. `.None` means the
+  // enum/variant isn't recorded, or `position` is out of range -- the
+  // caller must treat that as "can't resolve this binding's type," not
+  // guess.
+  lookup_enum_variant_payload_type(str enum_name, str variant_name, num position) Option<FieldTypeInfo> {
+    num i = 0;
+    for i < self.enum_variant_payload_owner.len {
+      if equals(self.enum_variant_payload_owner.get(i), enum_name) && equals(
+        self.enum_variant_payload_variant.get(i),
+        variant_name
+      ) {
+        let type_names = self.enum_variant_payload_type_names.get(i);
+        if position < 0 || position >= type_names.len {
+          ret .None;
+        }
+        let is_pointers = self.enum_variant_payload_is_pointer.get(i);
+        FieldTypeInfo info;
+        info.type_name = type_names.get(position);
+        info.is_pointer = is_pointers.get(position);
+        ret .Some(info);
+      }
+      i = i + 1;
+    }
+    ret .None;
   }
 
   // True if `enum_name` was recorded as a known enum with a variant
@@ -2328,8 +2422,11 @@ impl Codegen {
   // matching the literal-chain path's own convention in `emit_fit`. Each
   // positional binding name gets its own `__auto_type name =
   // subj.payload.Variant._N;` declaration first (matching
-  // `emit_for_iter`'s own reason for `__auto_type`: this codegen has no
-  // way to know the payload field's declared Fun type here either).
+  // `emit_for_iter`'s own reason for `__auto_type`: the C compiler
+  // infers the actual type). Also registers each binding as a known
+  // LOCAL when its own payload field type is on record (see `Codegen.
+  // enum_variant_payload_owner`'s doc comment), so further access on it
+  // inside the branch still resolves.
   emit_fit_enum_branch(
     str subj_name,
     bin subj_is_pointer,
@@ -2373,6 +2470,19 @@ impl Codegen {
         self.state.write("._");
         self.state.write(format_num(bi));
         self.state.write(";\n");
+        // See `Codegen.enum_variant_payload_owner`'s doc comment: a
+        // known payload field type means `bname` is registered as a
+        // known local too, so further access on it inside the branch
+        // (a chained field access, another `fit`, a method call --
+        // `_prev_token_is_bare_zero`'s real body, e.g., destructures
+        // `t` then reads `t.data`) resolves. An unresolvable payload
+        // type just leaves `bname` unregistered, same as everywhere
+        // else in this file.
+        let payload_info = self.lookup_enum_variant_payload_type(enum_name, variant_name, bi);
+        if payload_info.is_some() {
+          let info = payload_info.unwrap();
+          self.record_local(bname, info.type_name, info.is_pointer);
+        }
         bi = bi + 1;
       }
     }
@@ -3041,8 +3151,18 @@ impl Codegen {
       if v.has_payload && v.payload.len > 0 {
         self.state.write("    struct { ");
         num i = 0;
+        Vec<str> payload_type_names;
+        payload_type_names.init(0);
+        Vec<bin> payload_is_pointer;
+        payload_is_pointer.init(0);
         for pt : v.payload {
-          self.write_type(*pt);
+          let wt = self.write_type(*pt);
+          if wt.is_some() {
+            payload_type_names.push(wt.unwrap());
+          } else {
+            payload_type_names.push("");
+          }
+          payload_is_pointer.push(dtype_is_pointer(self.resolve_type_subst(*pt)));
           self.state.write(" _");
           self.state.write(format_num(i));
           self.state.write("; ");
@@ -3051,6 +3171,7 @@ impl Codegen {
         self.state.write("} ");
         self.state.write(v.name);
         self.state.write(";\n");
+        self.record_enum_variant_payload(e.name, v.name, payload_type_names, payload_is_pointer);
       }
     }
     self.state.write("  } payload;\n} ");
@@ -7145,6 +7266,7 @@ test "fit destructures a bare-shorthand pattern against a monomorphized generic 
   let out = st.out.build();
   assert contains(out, "if (o.tag == Opt__num_Some) {"), "expected the tag check to use the MANGLED enum name, resolved via the local's own registered (mangled) type";
   assert contains(out, "__auto_type v = o.payload.Some._0;"), "expected the payload binding to resolve too";
+  assert equals(g.lookup_local_type_name("v").unwrap(), "num"), "expected 'v' registered as a known local (type 'num', Opt<num>'s own payload type) so further access on it inside the branch -- a chained field access, another fit, a method call -- still resolves, not just usable as a bare value";
 }
 
 test "ensure_enum_instantiated rejects an unrecognized generic template name" {
