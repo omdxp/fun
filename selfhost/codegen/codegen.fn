@@ -1018,14 +1018,35 @@ impl Codegen {
               // crashes) -- the whole scratch buffer still ends up
               // hoisted to the correct outer position via `emit_hoisted`
               // below regardless.
+              // `emit_function_named` unconditionally resets/overwrites
+              // `local_names`/`local_is_pointer`/`local_type_name`/
+              // `current_fn_rtype_name` for ITS OWN target function, with
+              // no awareness that it might be running NESTED inside
+              // another function's own (still in-progress) emission --
+              // e.g. this monomorphization can be triggered from
+              // resolving an OUTER method's own return type, BEFORE that
+              // outer method's own `self`/params are recorded. Without
+              // saving/restoring these too, the outer method's `self`
+              // would end up SHADOWED by this nested call's own leftover
+              // entries (linear lookup finds the earlier, now-stale one
+              // first), resolving field/method access against the WRONG
+              // type entirely once the outer method's own body runs.
               CodegenState method_scratch = codegen_state_new();
               CodegenState* saved_method_state = self.state;
               let saved_hoist_pos = self.hoist_insert_pos;
+              let saved_local_names = self.local_names;
+              let saved_local_is_pointer = self.local_is_pointer;
+              let saved_local_type_name = self.local_type_name;
+              let saved_fn_rtype_name = self.current_fn_rtype_name;
               self.state = &method_scratch;
               self.hoist_insert_pos = .None;
               self.emit_function_named(*m, new_name);
               self.state = saved_method_state;
               self.hoist_insert_pos = saved_hoist_pos;
+              self.local_names = saved_local_names;
+              self.local_is_pointer = saved_local_is_pointer;
+              self.local_type_name = saved_local_type_name;
+              self.current_fn_rtype_name = saved_fn_rtype_name;
               self.emit_hoisted(method_scratch.out.build());
             }
 
@@ -3255,14 +3276,30 @@ impl Codegen {
             // arithmetic and crashes) -- the whole scratch buffer still
             // ends up hoisted to the correct outer position via
             // `emit_hoisted` below regardless.
+            // Same reasoning as `maybe_instantiate_generic_impl_methods`'s
+            // own local-state save/restore: this can run NESTED inside
+            // another function's own (still in-progress) emission (e.g.
+            // triggered from resolving ITS OWN return type), so
+            // `local_names`/`local_is_pointer`/`local_type_name`/
+            // `current_fn_rtype_name` -- all unconditionally overwritten
+            // by `emit_function_named` for ITS OWN target -- must be
+            // saved and restored too, not just `hoist_insert_pos`.
             CodegenState scratch = codegen_state_new();
             CodegenState* saved_state = self.state;
             let saved_hoist_pos = self.hoist_insert_pos;
+            let saved_local_names = self.local_names;
+            let saved_local_is_pointer = self.local_is_pointer;
+            let saved_local_type_name = self.local_type_name;
+            let saved_fn_rtype_name = self.current_fn_rtype_name;
             self.state = &scratch;
             self.hoist_insert_pos = .None;
             self.emit_function_named(tmpl, mangled_name);
             self.state = saved_state;
             self.hoist_insert_pos = saved_hoist_pos;
+            self.local_names = saved_local_names;
+            self.local_is_pointer = saved_local_is_pointer;
+            self.local_type_name = saved_local_type_name;
+            self.current_fn_rtype_name = saved_fn_rtype_name;
             self.emit_hoisted(scratch.out.build());
 
             self.type_subst_param_names = prev_params;
@@ -3440,24 +3477,44 @@ impl Codegen {
   // Transpiles every top-level `Enum`/`Compound`/`Impl`/`Function` node
   // in `nodes` (anything else is skipped -- not an error, since a
   // whole-file parse can contain declarations not reachable yet, like
-  // `imp`). Enums are emitted first (registering their names/variants as
+  // `imp`). EVERY impl's methods are pre-registered
+  // (`register_impl_methods`) FIRST, before enums or compounds are even
+  // looked at -- a generic impl's own template must already be in
+  // `generic_impl_templates` before the enum/compound pass runs, since a
+  // plain compound/enum's OWN field can itself be a generic
+  // instantiation (`compound Lexer { Vec<Token> tokens; }`) that
+  // immediately triggers monomorphizing `Vec<T>`'s own methods (see
+  // `pub transpile`'s own inline comment for the bug this ordering
+  // fixes). Enums are emitted next (registering their names/variants as
   // a side effect -- see `emit_enum`'s doc comment), then compounds, all
-  // before any impl-method/function, so those can reference any of them
-  // regardless of source order -- see `emit_compound`'s doc comment for
-  // what that pass deliberately doesn't handle yet (dependency ordering
-  // between compounds themselves). EVERY impl's methods are then
-  // pre-registered (`register_impl_methods`) in their own dedicated
-  // pass, before any impl method BODY is generated in the pass after --
-  // so a method calling another type's method resolves the right
-  // mangled name regardless of which impl block comes first in source
-  // order (same reasoning as the enum/compound passes finishing in
-  // full before either is ever read from). Impl methods are then emitted
-  // (each becomes an ordinary C function, see `emit_impl`) in a fourth
-  // pass, before plain top-level functions in a fifth, so a plain
-  // function calling a method doesn't need a forward declaration.
+  // before any impl-method/function BODY is generated -- so a method
+  // calling another type's method, or referencing an enum/compound,
+  // resolves correctly regardless of which declaration comes first in
+  // source order (see `emit_compound`'s doc comment for what that pass
+  // deliberately doesn't handle yet: dependency ordering between
+  // compounds themselves). Impl methods are then emitted (each becomes
+  // an ordinary C function, see `emit_impl`) in a fourth pass, before
+  // plain top-level functions in a fifth, so a plain function calling a
+  // method doesn't need a forward declaration.
   pub transpile(Vec<Node> nodes) Option<CodegenErrorKind> {
     self.write_prelude();
     self.register_function_signatures(nodes);
+    // Impl methods are pre-registered FIRST, before either the enum or
+    // compound pass -- a generic impl's own template must already be in
+    // `generic_impl_templates` by the time `emit_enum`/`emit_compound`
+    // run, since a NON-generic compound/enum's OWN field can itself be a
+    // generic instantiation (`compound Lexer { Vec<Token> tokens; }`)
+    // that immediately triggers `maybe_instantiate_generic_impl_methods`
+    // -- registering impls AFTER the enum/compound pass (the previous
+    // order) meant that first-use trigger found no template registered
+    // yet, silently skipping Vec<T>'s own methods instead of
+    // monomorphizing them.
+    for n : nodes {
+      fit n.kind {
+        .Impl(i) -> { self.register_impl_methods(n); }
+        _ -> {}
+      }
+    }
     for n : nodes {
       fit n.kind {
         .Enum(e) -> {
@@ -3479,12 +3536,6 @@ impl Codegen {
             ret cerr;
           }
         }
-        _ -> {}
-      }
-    }
-    for n : nodes {
-      fit n.kind {
-        .Impl(i) -> { self.register_impl_methods(n); }
         _ -> {}
       }
     }
@@ -6193,6 +6244,120 @@ test "emit_expr calls a generic impl's monomorphized method through a value-type
     st.out.build(),
     "typedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nBox__num b;\nBox__num__get(&b)"
   ), "expected 'Box__num__get(&b)', resolved via the same lookup_impl_method path a non-generic impl uses";
+}
+
+test "pub transpile monomorphizes a generic impl's methods even when a PLAIN compound's OWN field is the first trigger" {
+  // Regression test: `compound Lexer { Vec<Token> tokens; }` (the real
+  // self-hosted lexer's own shape, found via the self-compile
+  // experiment) never got Vec<T>'s own impl methods monomorphized at
+  // all -- pub transpile's enum/compound pass ran BEFORE its
+  // register_impl_methods pass, so `generic_impl_templates` was still
+  // EMPTY at the moment Lexer's own field triggered
+  // ensure_compound_instantiated for Vec<Token>, and
+  // maybe_instantiate_generic_impl_methods silently found no template
+  // to monomorphize (not an error -- a compound needn't have one).
+  // Fixed by moving the impl-registration pass to run FIRST.
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  CompoundNode vecc = compound_node_new();
+  vecc.name = "Vec";
+  vecc.type_params.push("T");
+  vecc.has_type_params = true;
+  CompoundField vecf;
+  vecf.name = "len";
+  DataType* vecfdt = malloc(sizeof(DataType));
+  *vecfdt = dtype_new();
+  vecfdt.type_str = "T";
+  vecf.dtype = vecfdt;
+  vecc.fields.push(vecf);
+  Node vec_node = node_new(NodeKind.Compound(vecc));
+
+  DataType* selfdt = malloc(sizeof(DataType));
+  *selfdt = dtype_new();
+  selfdt.type_str = "Vec";
+  selfdt.pointer_depth = 1;
+  DataType* t_arg = malloc(sizeof(DataType));
+  *t_arg = dtype_new();
+  t_arg.type_str = "T";
+  selfdt.generic_args.push(t_arg);
+  VariableNode selfv;
+  selfv.var_type = selfdt;
+  selfv.name = "self";
+  selfv.has_val = false;
+  Node* self_param = malloc(sizeof(Node));
+  *self_param = node_new(NodeKind.Variable(selfv));
+  Vec<Node*> margs;
+  margs.init(0);
+  margs.push(self_param);
+
+  Node* self_ident = malloc(sizeof(Node));
+  *self_ident = node_new(NodeKind.Identifier("self"));
+  Node* len_ident = malloc(sizeof(Node));
+  *len_ident = node_new(NodeKind.Identifier("len"));
+  ExprNode field_e;
+  field_e.left = self_ident;
+  field_e.has_left = true;
+  field_e.right = len_ident;
+  field_e.has_right = true;
+  field_e.op = ".";
+  Node* field_expr = malloc(sizeof(Node));
+  *field_expr = node_new(NodeKind.Expression(field_e));
+  Node* ret_stmt = malloc(sizeof(Node));
+  *ret_stmt = node_new(NodeKind.StatementReturn(field_expr));
+  Vec<Node*> mstmts;
+  mstmts.init(0);
+  mstmts.push(ret_stmt);
+  BodyNode mbn;
+  mbn.statements = mstmts;
+  Node* mbody = malloc(sizeof(Node));
+  *mbody = node_new(NodeKind.Body(mbn));
+
+  FunctionNode lastfn = function_node_new();
+  lastfn.name = "Vec__last";
+  lastfn.has_name = true;
+  DataType* lastrt = malloc(sizeof(DataType));
+  *lastrt = dtype_new();
+  lastrt.type_str = "T";
+  lastfn.rtype = lastrt;
+  lastfn.has_rtype = true;
+  lastfn.args = margs;
+  lastfn.has_args = true;
+  lastfn.body = mbody;
+  lastfn.has_body = true;
+  Node* last_method_node = malloc(sizeof(Node));
+  *last_method_node = node_new(NodeKind.Function(lastfn));
+
+  ImplNode vecimpl = impl_node_new();
+  vecimpl.type_name = "Vec";
+  vecimpl.type_params.push("T");
+  vecimpl.has_type_params = true;
+  vecimpl.methods.push(last_method_node);
+  Node vec_impl_node = node_new(NodeKind.Impl(vecimpl));
+
+  CompoundNode lexerc = compound_node_new();
+  lexerc.name = "Lexer";
+  CompoundField tokensf;
+  tokensf.name = "tokens";
+  DataType* num_arg = malloc(sizeof(DataType));
+  *num_arg = dtype_new();
+  num_arg.type_str = "num";
+  DataType* tokensdt = malloc(sizeof(DataType));
+  *tokensdt = dtype_new();
+  tokensdt.type_str = "Vec";
+  tokensdt.generic_args.push(num_arg);
+  tokensf.dtype = tokensdt;
+  lexerc.fields.push(tokensf);
+  Node lexer_node = node_new(NodeKind.Compound(lexerc));
+
+  Vec<Node> nodes;
+  nodes.init(0);
+  nodes.push(vec_node);
+  nodes.push(vec_impl_node);
+  nodes.push(lexer_node);
+
+  assert g.transpile(nodes).is_none(), "expected the whole program to transpile";
+  assert contains(st.out.build(), "int64_t Vec__num__last(Vec__num* self)"), "expected Vec<T>'s own impl method monomorphized from Lexer's field alone, not silently skipped";
 }
 
 test "pub transpile hoists a generic compound's monomorphized typedef BEFORE another compound whose OWN field first triggers it" {
