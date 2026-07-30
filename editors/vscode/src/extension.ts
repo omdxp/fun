@@ -290,6 +290,7 @@ function detectDebugType(): string {
 function buildDebugConfig(
   program: string,
   cwd: string,
+  args: string[] = [],
 ): vscode.DebugConfiguration {
   // Arm the runtime deadlock watchdog for debug sessions (warn-only, ~1s
   // threshold). A hang while debugging then surfaces a "possible deadlock"
@@ -319,7 +320,7 @@ function buildDebugConfig(
         request: "launch",
         name: "Debug Fun Program",
         program,
-        args: [],
+        args,
         cwd,
         environment: envList,
         stopAtEntry: false,
@@ -332,7 +333,7 @@ function buildDebugConfig(
       request: "launch",
       name: "Debug Fun Program",
       program,
-      args: [],
+      args,
       cwd,
       environment: envList,
       stopAtEntry: false,
@@ -352,7 +353,7 @@ function buildDebugConfig(
     request: "launch",
     name: "Debug Fun Program",
     program,
-    args: [],
+    args,
     cwd,
     env: envMap,
     stopAtEntry: false,
@@ -491,8 +492,13 @@ class FunCodeLensProvider implements vscode.CodeLensProvider {
 
   provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
     const lenses: vscode.CodeLens[] = [];
+    // Matches `test "name" {`, allowing an escaped `\"` inside the name the
+    // same way the lexer does for any other string literal.
+    const testLineRe = /^\s*test\s+"((?:[^"\\]|\\.)*)"\s*\{/;
+    let sawMain = false;
     for (let i = 0; i < document.lineCount; i++) {
-      if (/^\s*(async\s+)?fun\s+main\s*\(/.test(document.lineAt(i).text)) {
+      const text = document.lineAt(i).text;
+      if (!sawMain && /^\s*(async\s+)?fun\s+main\s*\(/.test(text)) {
         const range = new vscode.Range(i, 0, i, 0);
         lenses.push(
           new vscode.CodeLens(range, {
@@ -506,7 +512,25 @@ class FunCodeLensProvider implements vscode.CodeLensProvider {
             arguments: [document.uri],
           }),
         );
-        break; // only one main per file
+        sawMain = true; // only one main per file
+        continue;
+      }
+      const testMatch = testLineRe.exec(text);
+      if (testMatch) {
+        const testName = testMatch[1].replace(/\\(.)/g, "$1");
+        const range = new vscode.Range(i, 0, i, 0);
+        lenses.push(
+          new vscode.CodeLens(range, {
+            title: "▶ Run Test",
+            command: "fun.runTest",
+            arguments: [document.uri, testName],
+          }),
+          new vscode.CodeLens(range, {
+            title: "⚙ Debug Test",
+            command: "fun.debugTest",
+            arguments: [document.uri, testName],
+          }),
+        );
       }
     }
     return lenses;
@@ -913,6 +937,36 @@ export function activate(context: vscode.ExtensionContext) {
     }),
   );
 
+  // ▶ Run Test — compile in test mode and run just the one named test,
+  // via the runner's own argv[1] exact-name filter (`fun test file.fn --
+  // "name"`, see stdlib/std/testing.fn / emit_test_mode_functions_and_runner).
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "fun.runTest",
+      async (uri?: vscode.Uri, testName?: string) => {
+        const fileUri = uri ?? vscode.window.activeTextEditor?.document.uri;
+        if (!fileUri || fileUri.scheme !== "file" || !testName) return;
+
+        const doc = vscode.workspace.textDocuments.find(
+          (d) => d.uri.toString() === fileUri.toString(),
+        );
+        if (doc?.isDirty) await doc.save();
+
+        const root = workspaceRootPath();
+        const funExe = resolveFunCompilerExe(root);
+
+        if (!runTerminal || runTerminal.exitStatus !== undefined) {
+          runTerminal = vscode.window.createTerminal({ name: "Fun: Run" });
+        }
+        runTerminal.show(true);
+        const escapedName = testName.replace(/(["\\$`])/g, "\\$1");
+        runTerminal.sendText(
+          `"${funExe}" -in "${fileUri.fsPath}" -test -- "${escapedName}"`,
+        );
+      },
+    ),
+  );
+
   // ⚙ Debug — compile with -g, then launch native debugger
   context.subscriptions.push(
     vscode.commands.registerCommand(
@@ -1048,6 +1102,152 @@ export function activate(context: vscode.ExtensionContext) {
 
         if (started) {
           // Register cleanup for when the session ends.
+          const disposable = vscode.debug.onDidStartDebugSession((session) => {
+            if (session.configuration.name === config.name) {
+              debugCleanup.set(session.id, [cFile, binFile]);
+              disposable.dispose();
+            }
+          });
+          context.subscriptions.push(disposable);
+        } else {
+          fs.unlink(cFile, () => {});
+          fs.unlink(binFile, () => {});
+        }
+      },
+    ),
+  );
+
+  // ⚙ Debug Test — same as ⚙ Debug, but compiles in test mode (-test) and
+  // passes the test's exact name as the one program arg, so the compiled
+  // runner's own argv[1] filter (see stdlib/std/testing.fn) runs and stops
+  // at just that one test under the debugger.
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "fun.debugTest",
+      async (uri?: vscode.Uri, testName?: string) => {
+        const fileUri = uri ?? vscode.window.activeTextEditor?.document.uri;
+        if (!fileUri || fileUri.scheme !== "file" || !testName) return;
+
+        const doc = vscode.workspace.textDocuments.find(
+          (d) => d.uri.toString() === fileUri.toString(),
+        );
+        if (doc?.isDirty) await doc.save();
+
+        const root = workspaceRootPath() ?? path.dirname(fileUri.fsPath);
+        const funExe = resolveFunCompilerExe(workspaceRootPath());
+
+        const stem = path.basename(
+          fileUri.fsPath,
+          path.extname(fileUri.fsPath),
+        );
+        const uid = Date.now();
+        const tmpDir = os.tmpdir();
+        const cFile = path.join(tmpDir, `fun_dbg_test_${stem}_${uid}.c`);
+        const binFile = path.join(
+          tmpDir,
+          process?.platform === "win32"
+            ? `fun_dbg_test_${stem}_${uid}.exe`
+            : `fun_dbg_test_${stem}_${uid}`,
+        );
+
+        try {
+          await runProcess(
+            funExe,
+            [
+              "-in",
+              fileUri.fsPath,
+              "-g",
+              "-no-exec",
+              "-outf",
+              "-out",
+              cFile,
+              "-test",
+            ],
+            root,
+            buildFunEnv(workspaceRootPath()),
+          );
+        } catch (err: any) {
+          void vscode.window.showErrorMessage(
+            `Fun: compilation failed:\n${err?.message ?? String(err)}`,
+          );
+          return;
+        }
+
+        try {
+          const compilers =
+            process?.platform === "win32"
+              ? ["clang-cl", "cl"]
+              : ["cc", "clang", "gcc"];
+          let compiled = false;
+          let lastErr = "";
+          for (const cc of compilers) {
+            try {
+              if (process?.platform === "win32") {
+                if (cc === "clang-cl") {
+                  await runProcess(
+                    cc,
+                    ["-Z7", "-Od", cFile, `-Fe${binFile}`],
+                    root,
+                  );
+                } else {
+                  const pdbFile = binFile.replace(/\.exe$/i, ".pdb");
+                  await runProcess(
+                    cc,
+                    [
+                      cFile,
+                      `/Fe${binFile}`,
+                      `/Fd${pdbFile}`,
+                      "/Zi",
+                      "/Od",
+                      "/link",
+                    ],
+                    root,
+                  );
+                }
+              } else {
+                await runProcess(cc, ["-g", cFile, "-o", binFile], root);
+              }
+              compiled = true;
+              break;
+            } catch (e: any) {
+              lastErr = e?.message ?? String(e);
+            }
+          }
+          if (!compiled) {
+            void vscode.window.showErrorMessage(
+              `Fun: C compilation failed:\n${lastErr}`,
+            );
+            fs.unlink(cFile, () => {});
+            return;
+          }
+        } catch (err: any) {
+          void vscode.window.showErrorMessage(
+            `Fun: C compilation failed:\n${err?.message ?? String(err)}`,
+          );
+          fs.unlink(cFile, () => {});
+          return;
+        }
+
+        const debugType = detectDebugType();
+        const noDebugExtMsg =
+          debugType === "lldb"
+            ? 'Install the "CodeLLDB" extension (vadimcn.vscode-lldb) to debug Fun programs.'
+            : 'Install the "C/C++" extension (ms-vscode.cpptools) to debug Fun programs.';
+
+        const folder = vscode.workspace.workspaceFolders?.[0];
+        const config = buildDebugConfig(binFile, root, [testName]);
+
+        const started = await vscode.debug.startDebugging(folder, config).then(
+          (ok) => ok,
+          (e: any) => {
+            void vscode.window.showErrorMessage(
+              `Fun: failed to start debugger: ${e?.message ?? String(e)}\n${noDebugExtMsg}`,
+            );
+            return false;
+          },
+        );
+
+        if (started) {
           const disposable = vscode.debug.onDidStartDebugSession((session) => {
             if (session.configuration.name === config.name) {
               debugCleanup.set(session.id, [cFile, binFile]);
