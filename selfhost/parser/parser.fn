@@ -4426,19 +4426,25 @@ impl Parser {
       }
 
       // User-defined-type bare variable declaration: `Point p;`, `Point p
-      // = ...;`, `Point* p;`. Detected the same way the original does: a
-      // `<Identifier> [* ...] <Identifier>` lookahead, guarded by "isn't
-      // already a known scope entity" so an ordinary expression statement
-      // that happens to start with an identifier and contain a `*` (`w *
-      // h;`) isn't misparsed as a pointer declaration.
+      // = ...;`, `Point* p;`, `Vec<num> v;`. Detected the same way the
+      // original does: a `<Identifier> [<generic args>] [* ...]
+      // <Identifier>` lookahead, guarded by "isn't already a known scope
+      // entity" so an ordinary expression statement that happens to
+      // start with an identifier and contain a `*` (`w * h;`) isn't
+      // misparsed as a pointer declaration. The optional `<...>` between
+      // the type name and any pointer stars is skipped via
+      // `skip_generic_args_tokens` -- pure lookahead, a no-op when
+      // there's no `<` there at all -- the same helper
+      // `looks_like_compound_init` uses to look past a possibly-generic
+      // type name.
       // 
       // Deliberately narrower than the original for this slice: no
       // module-alias-qualified type segments (`alias.Type name;`), no
-      // generic type arguments (`Vec<num> v;`), no array-bracket types
-      // (`T[] xs;`) -- each needs its own extra lookahead and isn't
-      // reachable by anything this slice's tests exercise yet.
+      // array-bracket types (`T[] xs;`) -- each needs its own extra
+      // lookahead and isn't reachable by anything this slice's tests
+      // exercise yet.
       if self.state.get_scope_entity(name) == nil {
-        num off = 1;
+        num off = self.state.skip_generic_args_tokens(1);
         for true {
           let tn = self.state.token_peek_n(off);
           if tn.is_none() {
@@ -7098,6 +7104,42 @@ test "parse_statement parses a bare user-defined-type pointer variable declarati
     .Variable(v) -> {
       assert equals(v.var_type.type_str, "Point"), "expected a 'Point' type";
       assert v.var_type.pointer_depth == 1, "expected pointer depth 1";
+    }
+    _ -> { panic("expected a Variable statement"); }
+  }
+}
+
+test "parse_statement parses a bare generic-type variable declaration" {
+  Vec<str> names;
+  names.init(0);
+  ParseState st = _state_with_declared("Box<num> b;", names);
+  Parser p = parser_new(&st);
+  assert p.parse_statement().is_none(), "expected 'Box<num> b;' to parse as a statement";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Variable(v) -> {
+      assert equals(v.var_type.type_str, "Box"), "expected a 'Box' type";
+      assert equals(v.name, "b"), "expected the variable name 'b'";
+      assert v.var_type.generic_args.len == 1, "expected one generic argument";
+      let arg = v.var_type.generic_args.get(0);
+      assert equals(arg.type_str, "num"), "expected the generic argument 'num'";
+    }
+    _ -> { panic("expected a Variable statement"); }
+  }
+}
+
+test "parse_statement parses a bare generic-type pointer variable declaration" {
+  Vec<str> names;
+  names.init(0);
+  ParseState st = _state_with_declared("Box<num>* b;", names);
+  Parser p = parser_new(&st);
+  assert p.parse_statement().is_none(), "expected 'Box<num>* b;' to parse as a statement";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Variable(v) -> {
+      assert equals(v.var_type.type_str, "Box"), "expected a 'Box' type";
+      assert v.var_type.pointer_depth == 1, "expected pointer depth 1";
+      assert v.var_type.generic_args.len == 1, "expected one generic argument";
     }
     _ -> { panic("expected a Variable statement"); }
   }
