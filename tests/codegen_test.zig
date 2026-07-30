@@ -10429,6 +10429,65 @@ test "fuzz blocks: parse with fixed raw*/num parameter types, and an ordinary co
     try std.testing.expectEqualStrings("normal run\n", stdout);
 }
 
+test "fuzz mode: a bare 'ret;' inside the body compiles as 'return 0;', not invalid 'return;'" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_fuzz_bare_ret.fn";
+    const c_path = "codegen_fuzz_bare_ret.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_fuzz_bare_ret.exe" else "codegen_fuzz_bare_ret";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // Regression: the fuzz body's own dummy function context is void (a
+    // bare `ret;` is the only return form typecheck allows there), but
+    // the harness it's transpiled into is `int LLVMFuzzerTestOneInput(...)`
+    // -- naively emitting a bare `ret;` as C `return;` produced invalid C
+    // ("non-void function should return a value", a real clang error, not
+    // just a warning). Fixed by reusing the exact mechanism a Fun-level
+    // void `main()` already needs for the same reason against its own C
+    // `int main(void)` wrapper (`self.in_main`, see `emit_fuzz_mode_harness`).
+    const input =
+        "imp std.c.io;\n\n" ++
+        "fuzz \"early-returns on empty input\" (data, len) {\n" ++
+        "  if len == 0 {\n" ++
+        "    ret;\n" ++
+        "  }\n" ++
+        "  printf(\"nonempty\\n\");\n" ++
+        "}\n";
+
+    const out_owned = try runTranspileFuzzMode(allocator, ifilepath, input, null);
+    defer allocator.free(out_owned);
+    // Scope the "no bare 'return;'" check to just the harness function's own
+    // body -- the prelude's unrelated watchdog helpers legitimately have
+    // their own bare `return;` in a genuinely void C function, which isn't
+    // what this regression is about.
+    const harness_start = std.mem.indexOf(u8, out_owned, "int LLVMFuzzerTestOneInput").?;
+    const harness_body = out_owned[harness_start..];
+    try std.testing.expect(std.mem.indexOf(u8, harness_body, "return 0;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, harness_body, "return;") == null);
+
+    const driver =
+        \\int main(void) {
+        \\  unsigned char empty[1] = {0};
+        \\  LLVMFuzzerTestOneInput(empty, 0);
+        \\  unsigned char one[1] = {'x'};
+        \\  LLVMFuzzerTestOneInput(one, 1);
+        \\  return 0;
+        \\}
+        \\
+    ;
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+        try c_file.writeStreamingAll(std.testing.io, driver);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("nonempty\n", stdout);
+}
+
 test "fuzz mode: single target auto-selected, harness aliases data/len and omits any user main" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_fuzz_harness_single.fn";

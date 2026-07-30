@@ -18268,15 +18268,28 @@ pub const TranspileProcess = struct {
         const prev_body_depth = self.function_body_depth;
         const prev_var = self.current_fn_is_variadic;
         const prev_fn_return = self.current_fn_return;
+        const prev_in_main = self.in_main;
         self.in_function_body = true;
         self.function_body_depth = 0;
         self.current_fn_is_variadic = false;
         self.current_fn_return = .{ .base = .Void };
+        // Reuses the SAME mechanism a Fun-level `void main() { ... ret; }`
+        // already needs for its own C `int main(void)` wrapper: a bare
+        // `ret;` (no value -- the only form typecheck allows here, since
+        // this body's context is void) must become C `return 0;`, not a
+        // bare `return;`, or the emitted `int LLVMFuzzerTestOneInput(...)`
+        // fails to compile ("non-void function should return a value").
+        // `in_main` also happens to drain any forked tasks before
+        // returning (`emit_fork_wait_idle_if_main`), which is exactly
+        // right here too -- a fuzz body using `fork` shouldn't leave tasks
+        // still running into the next input.
+        self.in_main = true;
         defer {
             self.in_function_body = prev_in_fn_body;
             self.function_body_depth = prev_body_depth;
             self.current_fn_is_variadic = prev_var;
             self.current_fn_return = prev_fn_return;
+            self.in_main = prev_in_main;
         }
 
         const data_name = target.data_param.node_variant.?.variable.name.items;

@@ -3189,62 +3189,121 @@ pub fn format_file_check(allocator: mem.Allocator, io: std.Io, input_file: []con
 /// fallback: only a compiler whose toolchain bundles that engine's
 /// runtime can produce a WORKING binary here (a compiler that doesn't
 /// support the flag at all would either reject it outright or silently
-/// produce a binary that never actually calls into the fuzz target), so
-/// this tries `clang` specifically (or `$FUN_CC` if set) and fails with a
-/// clear, actionable message rather than silently falling back to a
-/// compiler that can't actually do this.
+/// produce a binary that never actually calls into the fuzz target).
+///
+/// When `$FUN_CC` is set, it's trusted as-is (no fallback search) --
+/// same convention as `invoke_c_compiler_to_exe`. Otherwise this tries a
+/// short list of candidates most likely to actually have the runtime:
+/// plain `clang` first (works out of the box on many Linux distros'
+/// packaged clang), then a couple of common non-default install
+/// locations (Homebrew's LLVM on macOS, where the platform default --
+/// Xcode's bundled clang -- does NOT include this runtime; versioned
+/// `clang-N` binaries on Linux, where the unversioned `clang` symlink
+/// isn't always installed even when a versioned one is). Fails with a
+/// clear, actionable message (not a silent no-op) when nothing in the
+/// list works.
+fn fuzz_compiler_candidates(allocator: mem.Allocator) ![][]const u8 {
+    var list = ArrayList([]const u8).init(allocator);
+    errdefer free_arg_list(allocator, list.items);
+    try list.append(try allocator.dupe(u8, "clang"));
+    if (builtin.target.os.tag == .macos) {
+        try list.append(try allocator.dupe(u8, "/opt/homebrew/opt/llvm/bin/clang"));
+        try list.append(try allocator.dupe(u8, "/usr/local/opt/llvm/bin/clang"));
+    } else if (builtin.target.os.tag == .linux) {
+        const versions = [_][]const u8{ "clang-20", "clang-19", "clang-18", "clang-17", "clang-16", "clang-15", "clang-14" };
+        for (versions) |v| try list.append(try allocator.dupe(u8, v));
+    }
+    return list.toOwnedSlice();
+}
+
 fn invoke_fuzz_compiler_to_exe(allocator: mem.Allocator, io: std.Io, c_path: []const u8, exe_file: []const u8, debug_info: bool) !void {
-    var cc: []const u8 = "clang";
     var owned_cc: ?[]const u8 = null;
     defer if (owned_cc) |v| allocator.free(v);
     if (std.c.getenv("FUN_CC")) |z| {
         const s = std.mem.sliceTo(z, 0);
-        if (s.len > 0) {
-            owned_cc = try allocator.dupe(u8, s);
-            cc = owned_cc.?;
+        if (s.len > 0) owned_cc = try allocator.dupe(u8, s);
+    }
+
+    // Coverage-guided-only by default (`-fsanitize=fuzzer`) plus memory-error
+    // detection (`,address`) for stronger bug-finding -- but AddressSanitizer's
+    // own startup (its shadow-memory mmap setup) has been observed to hang
+    // indefinitely under some restricted/sandboxed/containerized environments
+    // even when the compiler and fuzzing engine both work fine otherwise.
+    // `FUN_FUZZ_NO_ASAN=1` drops just the `,address` half for exactly that
+    // case -- fuzzing still runs and finds crashes/failed asserts, just
+    // without ASan's additional memory-safety detection.
+    const sanitize_flag = blk: {
+        if (std.c.getenv("FUN_FUZZ_NO_ASAN")) |z| {
+            const s = std.mem.sliceTo(z, 0);
+            if (s.len > 0 and !std.mem.eql(u8, s, "0")) break :blk "-fsanitize=fuzzer";
         }
-    }
-
-    var argv_list = ArrayList([]const u8).init(allocator);
-    defer argv_list.deinit();
-    defer free_arg_list(allocator, argv_list.items);
-
-    try argv_list.append(try allocator.dupe(u8, cc));
-    try argv_list.append(try allocator.dupe(u8, "-fsanitize=fuzzer,address"));
-    try argv_list.append(try allocator.dupe(u8, if (debug_info) "-g" else "-g0"));
-    try argv_list.append(try allocator.dupe(u8, c_path));
-    try argv_list.append(try allocator.dupe(u8, "-o"));
-    try argv_list.append(try allocator.dupe(u8, exe_file));
-    if (builtin.target.os.tag != .windows) {
-        try argv_list.append(try allocator.dupe(u8, "-pthread"));
-        try argv_list.append(try allocator.dupe(u8, "-lm"));
-    }
-
-    const result = std.process.run(allocator, io, .{
-        .argv = argv_list.items,
-    }) catch |err| switch (err) {
-        error.FileNotFound => return CliError.MissingCCompiler,
-        else => return err,
+        break :blk "-fsanitize=fuzzer,address";
     };
-    defer {
+
+    const candidates: [][]const u8 = if (owned_cc) |cc|
+        try allocator.dupe([]const u8, &.{cc})
+    else
+        try fuzz_compiler_candidates(allocator);
+    defer if (owned_cc == null) free_arg_list(allocator, candidates) else allocator.free(candidates);
+
+    var last_stderr: []const u8 = "";
+    defer if (last_stderr.len > 0) allocator.free(last_stderr);
+    var any_compiler_found = false;
+
+    for (candidates) |cc| {
+        var argv_list = ArrayList([]const u8).init(allocator);
+        defer argv_list.deinit();
+        defer free_arg_list(allocator, argv_list.items);
+
+        try argv_list.append(try allocator.dupe(u8, cc));
+        try argv_list.append(try allocator.dupe(u8, sanitize_flag));
+        try argv_list.append(try allocator.dupe(u8, if (debug_info) "-g" else "-g0"));
+        try argv_list.append(try allocator.dupe(u8, c_path));
+        try argv_list.append(try allocator.dupe(u8, "-o"));
+        try argv_list.append(try allocator.dupe(u8, exe_file));
+        if (builtin.target.os.tag != .windows) {
+            try argv_list.append(try allocator.dupe(u8, "-pthread"));
+            try argv_list.append(try allocator.dupe(u8, "-lm"));
+        }
+
+        const result = std.process.run(allocator, io, .{
+            .argv = argv_list.items,
+        }) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
+        any_compiler_found = true;
+
+        if (result.term.exited == 0) {
+            allocator.free(result.stdout);
+            allocator.free(result.stderr);
+            return;
+        }
+
         allocator.free(result.stdout);
-        allocator.free(result.stderr);
+        if (last_stderr.len > 0) allocator.free(last_stderr);
+        last_stderr = result.stderr;
+        // Try the next candidate (an explicit $FUN_CC never falls through --
+        // `candidates` only ever has one entry in that case).
     }
 
-    if (result.term.exited != 0) {
-        std.Io.File.stderr().writeStreamingAll(io, "Compilation error:\n") catch {};
-        std.Io.File.stderr().writeStreamingAll(io, result.stderr) catch {};
-        std.Io.File.stderr().writeStreamingAll(io,
-            \\
-            \\Note: fuzzing needs a compiler whose toolchain bundles a
-            \\coverage-guided fuzzing runtime (commonly available with a
-            \\mainline install; not always bundled with a platform's default
-            \\one). Set FUN_CC to point at a compiler that has it if the
-            \\default one doesn't.
-            \\
-        ) catch {};
-        return CliError.CompilationFailed;
-    }
+    if (!any_compiler_found) return CliError.MissingCCompiler;
+
+    std.Io.File.stderr().writeStreamingAll(io, "Compilation error:\n") catch {};
+    std.Io.File.stderr().writeStreamingAll(io, last_stderr) catch {};
+    std.Io.File.stderr().writeStreamingAll(io,
+        \\
+        \\Note: fuzzing needs a compiler whose toolchain bundles a
+        \\coverage-guided fuzzing runtime (commonly available with a
+        \\mainline install; not always bundled with a platform's default
+        \\one). Set FUN_CC to point at a compiler that has it if none of
+        \\the ones tried automatically worked. If it compiles but then
+        \\hangs immediately on running, try FUN_FUZZ_NO_ASAN=1 -- some
+        \\restricted/sandboxed environments hang during AddressSanitizer's
+        \\own startup.
+        \\
+    ) catch {};
+    return CliError.CompilationFailed;
 }
 
 /// Invokes a C compiler on `c_path`, producing `exe_file`. Honors
