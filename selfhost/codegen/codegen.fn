@@ -49,10 +49,11 @@
 // does, lazily, the first time a concrete instantiation of the
 // enclosing type is used -- see
 // `maybe_instantiate_generic_impl_methods`'s doc comment), a method call
-// `recv.method(...)` resolved statically to `Type__method(<self-arg>,
-// ...)` (or `Type__Quirk__method(...)` when a quirk-implementing impl
-// defined it -- see `register_impl_methods`/`emit_method_call`'s doc
-// comments) from the receiver's known local type, `fit subject {
+// `recv.method(...)` -- `recv` a plain local OR a chained field access
+// (`self.parts.push(s)`) -- resolved statically to `Type__method(<self-
+// arg>, ...)` (or `Type__Quirk__method(...)` when a quirk-implementing
+// impl defined it -- see `register_impl_methods`/`emit_method_call`'s
+// doc comments) from the receiver's own resolved type, `fit subject {
 // patterns -> { body } ... }` over a plain identifier, a `*name`
 // dereference (`fit *self { ... }`), a chained field access (`fit
 // t.data { ... }`), or a `receiver.method()` call (`fit self.next_tok()
@@ -1565,50 +1566,49 @@ impl Codegen {
   // when it's a value local (the callee always expects a pointer,
   // matching the implicit `self` parameter's type).
   // 
-  // Deliberately narrow for this slice, same spirit as
-  // `emit_field_access` (whose doc comment explains why an unrecognized
-  // receiver is REJECTED rather than guessed): `recv` must be a plain
-  // identifier that's a KNOWN local, and `method` a plain identifier.
-  // TRUE dynamic dispatch (calling through a receiver declared as the
-  // ABSTRACT quirk type itself, via a vtable) isn't reachable yet --
-  // only a STATIC call resolved by the receiver's own DECLARED
-  // (concrete) type name, whether that type implements the method via a
-  // plain impl or a quirk-implementing one.
+  // Deliberately narrow for this slice: `recv` must be a plain
+  // identifier OR a chained field access `resolve_field_chain` can
+  // resolve (`self.parts.push(s)`, e.g. `StringBuilder.append`'s real
+  // body in stdlib/std/string.fn, found via the self-compile
+  // experiment -- reuses the exact same resolution `emit_fit`'s subject
+  // and the bare-shorthand assignment case already use, rather than a
+  // second, narrower bare-identifier-only lookup), and `method` a plain
+  // identifier. An unrecognized receiver is REJECTED rather than
+  // guessed, same spirit as `emit_field_access`. TRUE dynamic dispatch
+  // (calling through a receiver declared as the ABSTRACT quirk type
+  // itself, via a vtable) isn't reachable yet -- only a STATIC call
+  // resolved by the receiver's own DECLARED (concrete) type name,
+  // whether that type implements the method via a plain impl or a
+  // quirk-implementing one.
   emit_method_call(ExprNode recv_e, Node* args_node) Option<CodegenErrorKind> {
     if !recv_e.has_left || !recv_e.has_right {
       ret .Some(CodegenErrorKind.InvalidNode);
     }
-    str recv_name = "";
-    fit recv_e.left.kind {
-      .Identifier(name) -> { recv_name = name; }
-      _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
+    let recv_r_opt = self.resolve_field_chain(recv_e.left);
+    if recv_r_opt.is_none() {
+      ret .Some(CodegenErrorKind.UnsupportedNode);
     }
+    let recv_r = recv_r_opt.unwrap();
     str method_name = "";
     fit recv_e.right.kind {
       .Identifier(name) -> { method_name = name; }
       _ -> { ret .Some(CodegenErrorKind.UnsupportedNode); }
     }
 
-    let type_found = self.lookup_local_type_name(recv_name);
-    let ptr_found = self.lookup_local_is_pointer(recv_name);
-    if type_found.is_none() || ptr_found.is_none() {
-      ret .Some(CodegenErrorKind.UnsupportedNode);
-    }
-
-    let registered = self.lookup_impl_method(type_found.unwrap(), method_name);
+    let registered = self.lookup_impl_method(recv_r.type_name, method_name);
     if registered.is_some() {
       self.state.write(registered.unwrap());
     } else {
-      self.state.write(type_found.unwrap());
+      self.state.write(recv_r.type_name);
       self.state.write("__");
       self.state.write(method_name);
     }
     self.state.write("(");
-    if ptr_found.unwrap() {
-      self.state.write(recv_name);
+    if recv_r.is_pointer {
+      self.state.write(recv_r.text);
     } else {
       self.state.write("&");
-      self.state.write(recv_name);
+      self.state.write(recv_r.text);
     }
 
     Vec<Node*> args;
@@ -5141,6 +5141,70 @@ test "emit_expr emits a method call on a value-typed receiver, taking its addres
 
   assert g.emit_expr(n).is_none(), "expected the method call to emit";
   assert equals(st.out.build(), "Point__get_x(&p)"), "expected 'Point__get_x(&p)'";
+}
+
+test "emit_expr emits a method call through a CHAINED field-access receiver (self.parts.push(s))" {
+  // Regression test: `self.parts.push(s)` (StringBuilder.append's real
+  // body in stdlib/std/string.fn, found via the self-compile experiment)
+  // used to be rejected outright -- emit_method_call only accepted a
+  // bare identifier receiver, not a chained field access. Fixed by
+  // resolving the receiver through the SAME resolve_field_chain
+  // machinery emit_fit's subject and the bare-shorthand assignment case
+  // already use, rather than a second, narrower lookup.
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  g.record_local("self", "StringBuilder", true);
+
+  Vec<str> sb_fields;
+  sb_fields.init(0);
+  sb_fields.push("parts");
+  Vec<str> sb_field_types;
+  sb_field_types.init(0);
+  sb_field_types.push("Vec__str");
+  Vec<bin> sb_field_ptrs;
+  sb_field_ptrs.init(0);
+  sb_field_ptrs.push(false);
+  g.record_compound("StringBuilder", sb_fields, sb_field_types, sb_field_ptrs);
+
+  Node* self_ident = malloc(sizeof(Node));
+  *self_ident = node_new(NodeKind.Identifier("self"));
+  Node* parts_ident = malloc(sizeof(Node));
+  *parts_ident = node_new(NodeKind.Identifier("parts"));
+  ExprNode chain_dot;
+  chain_dot.left = self_ident;
+  chain_dot.has_left = true;
+  chain_dot.right = parts_ident;
+  chain_dot.has_right = true;
+  chain_dot.op = ".";
+  Node* chain_node = malloc(sizeof(Node));
+  *chain_node = node_new(NodeKind.Expression(chain_dot));
+
+  Node* method = malloc(sizeof(Node));
+  *method = node_new(NodeKind.Identifier("push"));
+  ExprNode dot_e;
+  dot_e.left = chain_node;
+  dot_e.has_left = true;
+  dot_e.right = method;
+  dot_e.has_right = true;
+  dot_e.op = ".";
+  Node* dot_node = malloc(sizeof(Node));
+  *dot_node = node_new(NodeKind.Expression(dot_e));
+
+  Node* arg = malloc(sizeof(Node));
+  *arg = node_new(NodeKind.Identifier("s"));
+  Node* args = malloc(sizeof(Node));
+  *args = node_new(NodeKind.ExpressionParenthesis(arg));
+
+  ExprNode call_e;
+  call_e.left = dot_node;
+  call_e.has_left = true;
+  call_e.right = args;
+  call_e.has_right = true;
+  call_e.op = "()";
+  Node n = node_new(NodeKind.Expression(call_e));
+
+  assert g.emit_expr(n).is_none(), "expected 'self.parts.push(s)' to emit";
+  assert equals(st.out.build(), "Vec__str__push(&self->parts, s)"), "expected the chained receiver resolved to 'self->parts', taking its address since 'parts' is a value field";
 }
 
 test "emit_expr emits a method call on a pointer-typed receiver directly, with extra args" {
