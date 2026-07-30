@@ -259,6 +259,20 @@ payload; payload-free variants still coexist.
 - **A crash is the point**: unlike `test`'s recovered `assert`, an `assert` (or
   a real memory error) inside a `fuzz` block crashes the process outright —
   that's the signal the engine is watching for.
+- **Passing flags to the fuzzing engine itself**: everything after `--` goes
+  straight through to the compiled harness's own argv — the same
+  passthrough every other Fun program already gets, no fuzz-specific
+  wiring. This is how you control the ENGINE'S behavior (as opposed to
+  `-fuzz-target`, which picks which Fun `fuzz` block gets built):
+    ```
+    fun fuzz file.fn -- -max_total_time=30   # run for 30 seconds
+    fun fuzz file.fn -- -runs=10000          # run a fixed number of inputs
+    fun fuzz file.fn -- -max_len=256         # cap generated input size
+    fun fuzz file.fn -- corpus/              # persist/seed a corpus directory
+    ```
+  These flags belong to the underlying engine, not to `fun` itself — consult
+  its own `-help=1` output (run the compiled harness directly with that flag)
+  for the full list.
 - **Platform/toolchain caveat**: this needs a compiler whose toolchain bundles
   a coverage-guided fuzzing runtime. That's not guaranteed on every platform
   or default compiler install — notably, Xcode's bundled clang on macOS does

@@ -563,6 +563,12 @@ wait to avoid warning on slow-but-live operations.
 - Unlike `test`, a crash (a failing `assert`, a real memory error) inside a
   `fuzz` block is the whole point — it's left to abort the process outright
   so the engine detects it.
+- Everything after `--` passes straight through to the engine's own argv
+  (ordinary Fun program-arg passthrough, no fuzz-specific wiring) — this is
+  how you control the ENGINE (`-max_total_time=N`, `-runs=N`, `-max_len=N`,
+  a corpus directory, ...), as opposed to `-fuzz-target`, which picks which
+  Fun `fuzz` block gets built. See the engine's own `-help=1` for the full
+  flag list.
 - Needs a compiler whose toolchain bundles that coverage-guided runtime —
   not guaranteed on every platform/default install (notably: NOT Xcode's
   bundled clang on macOS). `fun fuzz` tries `clang` first, then falls back
