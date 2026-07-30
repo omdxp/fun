@@ -23,15 +23,28 @@
 // `emit_compound`) -- a GENERIC one (`compound Box<T> { ... }`) is
 // recorded as a template and monomorphized on demand the first time a
 // concrete instantiation (`Box<num>`) is actually used, via
-// `ensure_compound_instantiated` -- `ident.field` member access -- including a
+// `ensure_compound_instantiated`. A monomorphized struct/enum typedef or
+// generic impl method is emitted at whatever point first triggers it,
+// which is often INSIDE some function's own body (`Box<num> b;` as a
+// local, say) -- when `pub transpile` is driving emission, that
+// definition is spliced in just before the enclosing top-level
+// function/impl instead of left nested inside its `{ }` (fatal for a
+// method's own C function definition, which can never nest; merely
+// oddly-scoped, not fatal, for a typedef) -- see `Codegen.
+// hoist_insert_pos`/`emit_hoisted`'s doc comments) -- `ident.field`
+// member access -- including a
 // CHAINED access (`a.b.c`) -- deciding `.`/`->` at every link from each
 // receiver's DECLARED type (a deliberately narrow, non-inference-based
 // heuristic -- see `emit_field_access`/`emit_receiver_and_resolve_type`'s
 // doc comments for exactly what it can't handle), a
-// non-generic `impl Type { methods }` block, PLAIN or
-// quirk-implementing (each method is ALREADY parsed as a pre-mangled,
-// self-first-arg `Function` node -- see `emit_impl`'s doc comment -- so
-// it's emitted exactly like any other function), a method call
+// `impl Type { methods }` block, PLAIN or quirk-implementing, generic or
+// not (each method is ALREADY parsed as a pre-mangled, self-first-arg
+// `Function` node -- see `emit_impl`'s doc comment -- so a non-generic
+// one is emitted exactly like any other function; a GENERIC impl's
+// methods instead monomorphize the same way a generic compound/enum
+// does, lazily, the first time a concrete instantiation of the
+// enclosing type is used -- see
+// `maybe_instantiate_generic_impl_methods`'s doc comment), a method call
 // `recv.method(...)` resolved statically to `Type__method(<self-arg>,
 // ...)` (or `Type__Quirk__method(...)` when a quirk-implementing impl
 // defined it -- see `register_impl_methods`/`emit_method_call`'s doc
@@ -44,10 +57,13 @@
 // qualified `EnumName.Variant`/`EnumName.Variant(x)`),
 // destructuring any positional bindings out of the payload -- as a C
 // `if`/`else if`/`else` chain (see `emit_fit`/`emit_fit_enum_branch`'s
-// doc comments), a non-generic `enum Name { variants }` declaration --
-// either a plain C enum, or, when any variant carries a payload, the
-// original's own discriminant-enum-plus-tagged-struct/union layout (see
-// `emit_enum`/`emit_tagged_union_enum`'s doc comments) -- together with
+// doc comments), an `enum Name { variants }` declaration -- either a
+// plain C enum, or, when any variant carries a payload, the original's
+// own discriminant-enum-plus-tagged-struct/union layout (see
+// `emit_enum`/`emit_tagged_union_enum`'s doc comments); a GENERIC one
+// (`enum Option<T> { ... }`) monomorphizes the same way a generic
+// compound does, lazily, on first concrete use (see
+// `ensure_enum_instantiated`'s doc comment) -- together with
 // a QUALIFIED enum-variant access (`EnumName.Variant` bare, or
 // `EnumName.Variant(args...)` a payload construction, both recognized
 // without a call needed to disambiguate from a method call), OR a BARE
@@ -91,15 +107,19 @@
 // around those three specific sites; a real expected-type mechanism
 // threaded through arbitrary expression contexts would be needed for
 // the rest.
-// - A GENERIC enum (`enum Option<T> { ... }`) or a generic impl's
-// methods (`impl Vec<T> { ... }`) -- monomorphization for EITHER is
-// still a separate, larger deferred item. A generic COMPOUND (`compound
-// Box<T> { ... }`) DOES monomorphize now (see
-// `ensure_compound_instantiated`'s doc comment), but only for a
-// template whose fields are bare `T`-shaped (no array-of-generic field,
-// e.g. the real `Vec<T>`'s own `T[] data;`) and concrete arguments with
-// no generic args of their own (`Box<Vec<num>>` -- nested generics --
-// is rejected, not guessed).
+// - A generic COMPOUND (`compound Box<T> { ... }`), a generic ENUM
+// (`enum Option<T> { ... }`), and a generic impl's OWN methods (`impl
+// Box<T> { ... }`) all monomorphize now, lazily, the first time a
+// concrete instantiation is actually used (see
+// `ensure_compound_instantiated`/`ensure_enum_instantiated`/
+// `maybe_instantiate_generic_impl_methods`'s doc comments) -- but only
+// for a template whose fields/variant-payloads/method self-and-param-
+// and-return types are bare `T`-shaped (no array-of-generic field, e.g.
+// the real `Vec<T>`'s own `T[] data;`) and concrete arguments with no
+// generic args of their own (`Box<Vec<num>>` -- nested generics -- is
+// rejected, not guessed). TRUE dynamic dispatch through an abstract
+// quirk-typed receiver (see below) still doesn't reach a generic impl's
+// methods either, same as a non-generic one's.
 // - TRUE dynamic dispatch through a receiver declared as an ABSTRACT
 // quirk type itself (a vtable lookup) -- a separate, larger deferred
 // item. A quirk-implementing impl's OWN methods emit fine now (see
@@ -115,19 +135,17 @@
 // dereference, or a chained field access (a CALL subject needs a temp
 // variable AND a type to declare it with -- see `emit_fit`'s doc
 // comment).
-// - Every declaration kind besides a plain function/compound (generic
-// or not)/non-generic enum/non-generic impl (a top-level `quirk`
+// - Every declaration kind besides a plain function/compound (generic or
+// not)/enum (generic or not)/impl (generic or not) (a top-level `quirk`
 // declaration itself needs no C emission at all -- it's a structural,
-// compile-time-only interface spec -- but a GENERIC enum's or impl's
-// monomorphized specializations are still a separate, larger deferred
-// item).
+// compile-time-only interface spec).
 // - Type INFERENCE: a function's return type and every literal's type are
 // already fully explicit at this stage (an omitted `let` type, or a
 // function relying on inferred generics, isn't reachable yet), so no
 // `infer_expr_type`-equivalent exists yet either.
-// - Multi-file imports, generic enum/impl monomorphization, quirk/vtable
-// dispatch, async/channels -- each is a substantial slice of its own in
-// the original and will get one here too.
+// - Multi-file imports, quirk/vtable dispatch, async/channels -- each is
+// a substantial slice of its own in the original and will get one here
+// too.
 // - Exotic literal-escaping edge cases the original handles (splitting a
 // string literal around a `\xFF`-then-more-hex-digits run so C doesn't
 // fold extra digits into the escape) -- string content is written back
@@ -286,6 +304,50 @@ pub compound Codegen {
   // mangled names are drawn from the same namespace (a compound and an
   // enum can never share a bare name in this language).
   Vec<str> emitted_generic_instantiations;
+  // Every GENERIC impl block (`impl Box<T> { ... }` or `impl Box<T> as
+  // Quirk { ... }`), recorded whole (not decomposed into parallel arrays
+  // like the generic compound/enum registries above -- a whole `Impl`
+  // node already carries its own `type_params`/`quirk_name`/`methods`,
+  // and re-reading them straight from the node avoids a second
+  // hand-rolled copy of the same data) by `register_impl_methods` when it
+  // sees `has_type_params`, WITHOUT emitting any C. Monomorphized lazily
+  // by `maybe_instantiate_generic_impl_methods`, the same "only on first
+  // concrete use" rule as a generic compound/enum template.
+  Vec<Node> generic_impl_templates;
+  // The ACTIVE type-param substitution for a generic impl method
+  // currently being monomorphized (see
+  // `maybe_instantiate_generic_impl_methods`) -- parallel arrays, `
+  // type_subst_param_names.get(i)` (one of the impl's OWN type-param
+  // names, e.g. `"T"`) substitutes to `type_subst_arg_type_strs.get(i)`/
+  // `type_subst_arg_is_pointer.get(i)` (this instantiation's concrete
+  // argument). Empty (the default, and restored to empty around any
+  // nested instantiation -- see that function's doc comment) means no
+  // substitution is active, so `resolve_type_subst` is a free no-op for
+  // every ordinary (non-generic-impl-method) emission -- this is NOT a
+  // general type-inference mechanism, just enough to re-resolve a bare
+  // occurrence of the impl's own type param (see `resolve_type_subst`'s
+  // doc comment for exactly what shape it handles).
+  Vec<str> type_subst_param_names;
+  Vec<str> type_subst_arg_type_strs;
+  Vec<bin> type_subst_arg_is_pointer;
+  // Where a lazily-monomorphized struct/enum typedef or generic impl
+  // method definition should land in `self.state.out`, instead of at
+  // whatever position happens to be CURRENT when it's first triggered
+  // (which, for a type first used inside a function's own body -- the
+  // common case, not an edge case -- would nest the definition INSIDE
+  // that function's `{ }`; harmless for a typedef (block-scoped, valid
+  // C), but a hard syntax error for an impl method's own FUNCTION
+  // DEFINITION, which C never allows nested). `.None` (the default, and
+  // what every hand-built unit test below leaves it at, since none of
+  // them call `pub transpile`) means "no enclosing top-level
+  // function/impl is being tracked -- just append at the current tail,"
+  // preserving every existing test's exact expected output. `pub
+  // transpile` sets this to `.Some(<position right before this
+  // top-level item's own emission started>)` around each `emit_impl`/
+  // `emit_function` call in its own passes, so a definition triggered
+  // from inside gets spliced in just before that enclosing item instead
+  // -- see `emit_hoisted`'s doc comment for the actual splice mechanism.
+  Option<num> hoist_insert_pos;
 }
 
 pub fun codegen_new(CodegenState* state) Codegen {
@@ -313,6 +375,11 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.generic_enum_type_params.init(0);
   g.generic_enum_variants.init(0);
   g.emitted_generic_instantiations.init(0);
+  g.generic_impl_templates.init(0);
+  g.type_subst_param_names.init(0);
+  g.type_subst_arg_type_strs.init(0);
+  g.type_subst_arg_is_pointer.init(0);
+  g.hoist_insert_pos = .None;
   g.current_fn_rtype_name = "";
   g.expected_enum_type = "";
   ret g;
@@ -341,17 +408,88 @@ impl Codegen {
     }
   }
 
+  // When an active substitution context exists (see `Codegen.
+  // type_subst_param_names`'s doc comment -- set only while emitting a
+  // monomorphized generic impl method, see
+  // `maybe_instantiate_generic_impl_methods`), returns a COPY of `dt`
+  // with every BARE occurrence of one of the active type-param names
+  // substituted for its concrete argument -- either `dt` itself (a
+  // method's own `T` param/return type substitutes directly to `num`),
+  // or one of `dt`'s OWN generic arguments (a `Vec<T>` local inside the
+  // method body substitutes to `Vec<num>`), matching the exact same
+  // "must be a bare occurrence, no nested generic args of its own"
+  // restriction `ensure_compound_instantiated` already applies to a
+  // generic compound template's own fields. Returns `dt` UNCHANGED (not
+  // a copy) when no substitution context is active at all, so every
+  // ordinary (non-generic-impl-method) call site pays zero cost.
+  resolve_type_subst(DataType dt) DataType {
+    if self.type_subst_param_names.len == 0 {
+      ret dt;
+    }
+    if dt.generic_args.len == 0 {
+      for i : 0..self.type_subst_param_names.len {
+        if equals(self.type_subst_param_names.get(i), dt.type_str) {
+          DataType out = dtype_new();
+          out.type_str = self.type_subst_arg_type_strs.get(i);
+          out.flags = dt.flags;
+          num extra = 0;
+          if self.type_subst_arg_is_pointer.get(i) {
+            extra = 1;
+          }
+          out.pointer_depth = dt.pointer_depth + extra;
+          ret out;
+        }
+      }
+      ret dt;
+    }
+    DataType out = dtype_new();
+    out.type_str = dt.type_str;
+    out.pointer_depth = dt.pointer_depth;
+    out.flags = dt.flags;
+    Vec<DataType*> new_args;
+    new_args.init(0);
+    for a : dt.generic_args {
+      bin substituted = false;
+      if a.generic_args.len == 0 {
+        for i : 0..self.type_subst_param_names.len {
+          if equals(self.type_subst_param_names.get(i), a.type_str) {
+            DataType* sub = malloc(sizeof(DataType));
+            *sub = dtype_new();
+            sub.type_str = self.type_subst_arg_type_strs.get(i);
+            num extra = 0;
+            if self.type_subst_arg_is_pointer.get(i) {
+              extra = 1;
+            }
+            sub.pointer_depth = a.pointer_depth + extra;
+            new_args.push(sub);
+            substituted = true;
+            break;
+          }
+        }
+      }
+      if !substituted {
+        new_args.push(a);
+      }
+    }
+    out.generic_args = new_args;
+    ret out;
+  }
+
   // Writes `dt`'s C spelling via `write_type_name`, followed by one `*`
   // per pointer-depth level, and returns the RESOLVED type name used --
   // ordinarily just `dt.type_str` unchanged, but the MANGLED
   // monomorphization name (`Box__num`, `Option__num`) when `dt` is a
   // generic instantiation (`dt.generic_args` non-empty, resolved via
   // `ensure_compound_instantiated` or, when that doesn't recognize the
-  // base name, `ensure_enum_instantiated`). Callers that need to
-  // register this type for later lookup (`record_local`, a compound
-  // field's own registry entry) must use the RETURNED name, not
-  // `dt.type_str` directly -- for a generic instantiation those differ,
-  // and only the mangled name is what `record_compound`/`record_enum`
+  // base name, `ensure_enum_instantiated`). `dt` is first passed through
+  // `resolve_type_subst`, so a bare occurrence of a generic impl
+  // method's own type param (`T`) resolves against the active
+  // instantiation instead of being (wrongly) looked up as a plain
+  // user-defined type name. Callers that need to register this type for
+  // later lookup (`record_local`, a compound field's own registry
+  // entry) must use the RETURNED name, not `dt.type_str` directly -- for
+  // a generic instantiation those differ, and only the mangled name is
+  // what `record_compound`/`record_enum`
   // register fields/variants under.
   // 
   // `.None` means `dt` is a generic instantiation this codegen can't
@@ -359,17 +497,16 @@ impl Codegen {
   // nested generic argument -- see `ensure_compound_instantiated`/
   // `ensure_enum_instantiated`'s doc comments) -- the caller must reject
   // rather than emit guessed/wrong C. Deliberately simplified from the
-  // original for this slice: no C-typedef-alias resolution, and a
-  // generic IMPL's own methods still aren't monomorphized (only its
-  // enclosing compound/enum type).
+  // original for this slice: no C-typedef-alias resolution.
   pub write_type(DataType dt) Option<str> {
-    str resolved_name = dt.type_str;
-    if dt.generic_args.len > 0 {
-      let compound_inst = self.ensure_compound_instantiated(dt);
+    let rdt = self.resolve_type_subst(dt);
+    str resolved_name = rdt.type_str;
+    if rdt.generic_args.len > 0 {
+      let compound_inst = self.ensure_compound_instantiated(rdt);
       if compound_inst.is_some() {
         resolved_name = compound_inst.unwrap();
       } else {
-        let enum_inst = self.ensure_enum_instantiated(dt);
+        let enum_inst = self.ensure_enum_instantiated(rdt);
         if enum_inst.is_none() {
           ret .None;
         }
@@ -377,8 +514,8 @@ impl Codegen {
       }
     }
     self.write_type_name(resolved_name);
-    num ptr_depth = dt.pointer_depth;
-    if ptr_depth == 0 && dt.flags.is_pointer {
+    num ptr_depth = rdt.pointer_depth;
+    if ptr_depth == 0 && rdt.flags.is_pointer {
       ptr_depth = 1;
     }
     num i = 0;
@@ -387,6 +524,37 @@ impl Codegen {
       i = i + 1;
     }
     ret .Some(resolved_name);
+  }
+
+  // Appends `text` (a fully-rendered struct/enum typedef or generic impl
+  // method definition -- see the three call sites, each of which builds
+  // its own text into a SCRATCH `CodegenState` first, by temporarily
+  // pointing `self.state` at it, so their existing `self.state.write`
+  // calls need no changes) either at the current tail of `self.state.out`
+  // (when `hoist_insert_pos` is `.None` -- every hand-built unit test
+  // below, which never calls `pub transpile`) or SPLICED in at the
+  // tracked earlier position (when driven by `pub transpile`, so a
+  // definition triggered from inside some top-level function/impl's own
+  // body lands BEFORE that enclosing item instead of nested inside it --
+  // see `Codegen.hoist_insert_pos`'s doc comment for why that distinction
+  // matters). Advances `hoist_insert_pos` by `text`'s own length after a
+  // splice, so a SECOND hoisted definition lands right after the first,
+  // not before it.
+  emit_hoisted(str text) {
+    if self.hoist_insert_pos.is_none() {
+      self.state.write(text);
+      ret;
+    }
+    num pos = self.hoist_insert_pos.unwrap();
+    str full = self.state.out.build();
+    str head = substr(full, 0, pos);
+    str tail = substr(full, pos, len(full) - pos);
+    StringBuilder rebuilt = string_builder_init(len(full) + len(text) + 16);
+    rebuilt.append(head);
+    rebuilt.append(text);
+    rebuilt.append(tail);
+    self.state.out = rebuilt;
+    self.hoist_insert_pos = .Some(pos + len(text));
   }
 
   // Given a DataType with `generic_args` non-empty (`Box<num>`),
@@ -477,6 +645,9 @@ impl Codegen {
     Vec<bin> resolved_field_is_pointer;
     resolved_field_is_pointer.init(0);
 
+    CodegenState typedef_scratch = codegen_state_new();
+    CodegenState* saved_state = self.state;
+    self.state = &typedef_scratch;
     self.state.write("typedef struct ");
     self.state.write(mangled_name);
     self.state.write(" {\n");
@@ -511,6 +682,8 @@ impl Codegen {
     self.state.write("} ");
     self.state.write(mangled_name);
     self.state.write(";\n\n");
+    self.state = saved_state;
+    self.emit_hoisted(typedef_scratch.out.build());
 
     self.record_compound(
       mangled_name,
@@ -519,6 +692,12 @@ impl Codegen {
       resolved_field_is_pointer
     );
     self.emitted_generic_instantiations.push(mangled_name);
+    self.maybe_instantiate_generic_impl_methods(
+      dt.type_str,
+      mangled_name,
+      arg_type_names,
+      arg_is_pointer
+    );
     ret .Some(mangled_name);
   }
 
@@ -606,6 +785,9 @@ impl Codegen {
       variant_names.push(vt.name);
     }
 
+    CodegenState enum_scratch = codegen_state_new();
+    CodegenState* saved_enum_state = self.state;
+    self.state = &enum_scratch;
     if is_tagged_union {
       self.emit_tagged_union_enum_instance(
         mangled_name,
@@ -629,10 +811,122 @@ impl Codegen {
       self.state.write(mangled_name);
       self.state.write(";\n\n");
     }
+    self.state = saved_enum_state;
+    self.emit_hoisted(enum_scratch.out.build());
 
     self.record_enum(mangled_name, variant_names, is_tagged_union);
     self.emitted_generic_instantiations.push(mangled_name);
+    self.maybe_instantiate_generic_impl_methods(
+      dt.type_str,
+      mangled_name,
+      arg_type_names,
+      arg_is_pointer
+    );
     ret .Some(mangled_name);
+  }
+
+  // Called by `ensure_compound_instantiated`/`ensure_enum_instantiated`
+  // right after emitting a NEW concrete monomorphization of a generic
+  // compound/enum template (`base_name` is the template's own bare name,
+  // e.g. `"Box"`; `mangled_name` this instantiation's mangled name, e.g.
+  // `"Box__num"`), monomorphizing and emitting every method of a generic
+  // impl block matching `base_name` (`impl Box<T> { ... }` or `impl
+  // Box<T> as Quirk { ... }`), if one was registered (see
+  // `Codegen.generic_impl_templates`'s doc comment) -- a NO-OP when no
+  // such impl exists (a generic compound/enum needn't have one). Called
+  // only on FIRST instantiation (guarded by the caller's own
+  // `emitted_generic_instantiations` dedup check), so a method is never
+  // emitted twice for the same concrete arguments.
+  // 
+  // Each method's self/param/return/local types resolve against
+  // `arg_type_names`/`arg_is_pointer` (positionally matched to the
+  // impl's own `type_params`) via the `type_subst_*` substitution
+  // context (see `resolve_type_subst`'s doc comment), pushed here and
+  // restored afterward -- a method BODY can itself trigger a NESTED
+  // instantiation (e.g. using some other generic type with the same
+  // type param), which must not clobber the outer, still-in-progress
+  // substitution once that nested call returns. A method's C symbol
+  // mangles to `<mangled_name>__<bare_method_name>` (or `<mangled_name>
+  // __<Quirk>__<bare_method_name>` for a quirk-implementing impl),
+  // registered via `record_impl_method` under `mangled_name` as the
+  // owner type so a call through a receiver of this monomorphized type
+  // (recorded under `mangled_name` by `record_local`, since that's what
+  // `write_type` returns for it) resolves via the ordinary
+  // `emit_method_call` path with no changes needed there.
+  // 
+  // `emit_function_named`'s own `Option<CodegenErrorKind>` result is
+  // deliberately discarded per method (matching the same simplification
+  // `emit_tagged_union_enum`'s own `write_type` call already makes for a
+  // payload field) -- this function is itself called from deep inside
+  // `write_type`'s own `Option<str>`-returning call chain
+  // (`ensure_compound_instantiated`/`ensure_enum_instantiated`), and
+  // propagating a per-method-instantiation failure through THAT chain's
+  // different error type is a separate, larger plumbing change than this
+  // slice's scope; an unsupported generic method body will simply emit
+  // no/partial C for that one method rather than surface a codegen
+  // error, which no existing test exercises.
+  maybe_instantiate_generic_impl_methods(
+    str base_name,
+    str mangled_name,
+    Vec<str> arg_type_names,
+    Vec<bin> arg_is_pointer
+  ) {
+    for tmpl : self.generic_impl_templates {
+      fit tmpl.kind {
+        .Impl(i) -> {
+          if equals(i.type_name, base_name) && i.type_params.len == arg_type_names.len {
+            let prev_params = self.type_subst_param_names;
+            let prev_arg_names = self.type_subst_arg_type_strs;
+            let prev_arg_ptrs = self.type_subst_arg_is_pointer;
+            self.type_subst_param_names = i.type_params;
+            self.type_subst_arg_type_strs = arg_type_names;
+            self.type_subst_arg_is_pointer = arg_is_pointer;
+
+            StringBuilder pfx = string_builder_init(16);
+            pfx.append(i.type_name);
+            pfx.append("__");
+            if i.has_quirk_name {
+              pfx.append(i.quirk_name);
+              pfx.append("__");
+            }
+            str prefix = pfx.build();
+
+            for m : i.methods {
+              str tmpl_name = "";
+              fit m.kind {
+                .Function(fnv) -> { tmpl_name = fnv.name; }
+                _ -> {}
+              }
+              let bare_name = strip_prefix(tmpl_name, prefix);
+
+              StringBuilder nb = string_builder_init(16);
+              nb.append(mangled_name);
+              nb.append("__");
+              if i.has_quirk_name {
+                nb.append(i.quirk_name);
+                nb.append("__");
+              }
+              nb.append(bare_name);
+              str new_name = nb.build();
+
+              self.record_impl_method(mangled_name, bare_name, new_name);
+
+              CodegenState method_scratch = codegen_state_new();
+              CodegenState* saved_method_state = self.state;
+              self.state = &method_scratch;
+              self.emit_function_named(*m, new_name);
+              self.state = saved_method_state;
+              self.emit_hoisted(method_scratch.out.build());
+            }
+
+            self.type_subst_param_names = prev_params;
+            self.type_subst_arg_type_strs = prev_arg_names;
+            self.type_subst_arg_is_pointer = prev_arg_ptrs;
+          }
+        }
+        _ -> {}
+      }
+    }
   }
 
   // Emits ONE concrete monomorphization of a generic tagged-union enum
@@ -1514,7 +1808,11 @@ impl Codegen {
           }
         }
         self.state.write(";\n");
-        self.record_local(v.name, wt.unwrap(), dtype_is_pointer(*v.var_type));
+        self.record_local(
+          v.name,
+          wt.unwrap(),
+          dtype_is_pointer(self.resolve_type_subst(*v.var_type))
+        );
         ret .None;
       }
       .StatementFor(fk) -> {
@@ -2102,7 +2400,11 @@ impl Codegen {
         }
         self.state.write(" ");
         self.state.write(v.name);
-        self.record_local(v.name, wt.unwrap(), dtype_is_pointer(*v.var_type));
+        self.record_local(
+          v.name,
+          wt.unwrap(),
+          dtype_is_pointer(self.resolve_type_subst(*v.var_type))
+        );
         ret .None;
       }
       _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
@@ -2116,6 +2418,26 @@ impl Codegen {
   // "no arguments").
   pub emit_function(Node node) Option<CodegenErrorKind> {
     fit node.kind {
+      .Function(f) -> { ret self.emit_function_named(node, f.name); }
+      _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
+    }
+  }
+
+  // Does the actual work of `pub emit_function`, under an explicit
+  // `emit_name` rather than always `node`'s own already-mangled
+  // `Function.name` -- so `maybe_instantiate_generic_impl_methods` can
+  // emit the SAME template method body once per concrete instantiation,
+  // each under its own further-mangled C symbol (`Box__num__get`,
+  // `Box__str__get`, ...), without a second copy of this function. `
+  // current_fn_rtype_name` is set from the RESOLVED (post-`write_type`,
+  // so post-substitution) return type name rather than `f.rtype.
+  // type_str` directly, so a generic method's own bare-`T` return type
+  // resolves against the active instantiation for `ret <shorthand>;`
+  // (see `Codegen.current_fn_rtype_name`'s doc comment) -- identical to
+  // `f.rtype.type_str` for every non-generic-impl-method call, so this
+  // doesn't change behavior anywhere else.
+  emit_function_named(Node node, str emit_name) Option<CodegenErrorKind> {
+    fit node.kind {
       .Function(f) -> {
         // Fresh per function -- see `Codegen.local_names`'s doc comment;
         // this is deliberately NOT scoped to nested blocks (an inner `{
@@ -2128,13 +2450,13 @@ impl Codegen {
         if !f.has_rtype {
           ret .Some(CodegenErrorKind.InvalidNode);
         }
-        self.current_fn_rtype_name = f.rtype.type_str;
         let rt = self.write_type(*f.rtype);
         if rt.is_none() {
           ret .Some(CodegenErrorKind.UnsupportedNode);
         }
+        self.current_fn_rtype_name = rt.unwrap();
         self.state.write(" ");
-        self.state.write(f.name);
+        self.state.write(emit_name);
         self.state.write("(");
         if f.has_args && f.args.len > 0 {
           bin first = true;
@@ -2383,13 +2705,18 @@ impl Codegen {
   // stripping the known prefix (`Type__` for a plain impl, `Type__
   // Quirk__` for a quirk-implementing one) off each method's ALREADY
   // pre-mangled `Function` node name -- `_parse_impl_method`'s own
-  // scheme in the parser, not something this file invents. Generic
-  // impls (`has_type_params`) are skipped, same reasoning as
-  // `emit_compound`'s generic-template skip.
+  // scheme in the parser, not something this file invents. A GENERIC
+  // impl (`has_type_params`) is instead only RECORDED whole (see
+  // `Codegen.generic_impl_templates`'s doc comment) -- never registered
+  // under its bare (un-instantiated) name here, matching
+  // `emit_compound`/`emit_enum`'s own rule for a generic template:
+  // monomorphization happens lazily, on first concrete use (see
+  // `maybe_instantiate_generic_impl_methods`).
   register_impl_methods(Node node) {
     fit node.kind {
       .Impl(i) -> {
         if i.has_type_params {
+          self.generic_impl_templates.push(node);
           ret;
         }
         StringBuilder pfx = string_builder_init(16);
@@ -2516,6 +2843,7 @@ impl Codegen {
     for n : nodes {
       fit n.kind {
         .Impl(i) -> {
+          self.hoist_insert_pos = .Some(self.state.out.len());
           let ierr = self.emit_impl(n);
           if ierr.is_some() {
             ret ierr;
@@ -2527,6 +2855,7 @@ impl Codegen {
     for n : nodes {
       fit n.kind {
         .Function(f) -> {
+          self.hoist_insert_pos = .Some(self.state.out.len());
           let ferr = self.emit_function(n);
           if ferr.is_some() {
             ret ferr;
@@ -4658,6 +4987,276 @@ test "emit_expr resolves chained field access through a generic-compound-instant
     st.out.build(),
     "typedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nBox__num b;\nb.value"
   ), "expected the field access appended after the declaration, resolved via the mangled compound's registry";
+}
+
+// Registers a generic impl equivalent to `impl Box<T> { pub get() T { ret
+// self.value; } }` (matching `_record_box_template`'s own `Box<T> { T value;
+// }` compound) as a template, via `register_impl_methods` -- no C emitted
+// yet, same as the compound/enum template-recording helpers above.
+fun _record_box_get_impl(Codegen* g) {
+  DataType* t_arg = malloc(sizeof(DataType));
+  *t_arg = dtype_new();
+  t_arg.type_str = "T";
+  DataType* self_dt = malloc(sizeof(DataType));
+  *self_dt = dtype_new();
+  self_dt.type_str = "Box";
+  self_dt.pointer_depth = 1;
+  self_dt.generic_args.push(t_arg);
+  VariableNode selfv;
+  selfv.var_type = self_dt;
+  selfv.name = "self";
+  selfv.has_val = false;
+  Node* self_param = malloc(sizeof(Node));
+  *self_param = node_new(NodeKind.Variable(selfv));
+  Vec<Node*> margs;
+  margs.init(0);
+  margs.push(self_param);
+
+  Node* field_recv = malloc(sizeof(Node));
+  *field_recv = node_new(NodeKind.Identifier("self"));
+  Node* field_name = malloc(sizeof(Node));
+  *field_name = node_new(NodeKind.Identifier("value"));
+  ExprNode field_e;
+  field_e.left = field_recv;
+  field_e.has_left = true;
+  field_e.right = field_name;
+  field_e.has_right = true;
+  field_e.op = ".";
+  Node* field_expr = malloc(sizeof(Node));
+  *field_expr = node_new(NodeKind.Expression(field_e));
+  Node* ret_stmt = malloc(sizeof(Node));
+  *ret_stmt = node_new(NodeKind.StatementReturn(field_expr));
+  Vec<Node*> stmts;
+  stmts.init(0);
+  stmts.push(ret_stmt);
+  BodyNode bn;
+  bn.statements = stmts;
+  Node* body = malloc(sizeof(Node));
+  *body = node_new(NodeKind.Body(bn));
+
+  FunctionNode fnv = function_node_new();
+  fnv.name = "Box__get";
+  fnv.has_name = true;
+  DataType* rtype = malloc(sizeof(DataType));
+  *rtype = dtype_new();
+  rtype.type_str = "T";
+  fnv.rtype = rtype;
+  fnv.has_rtype = true;
+  fnv.args = margs;
+  fnv.has_args = true;
+  fnv.body = body;
+  fnv.has_body = true;
+  Node* method_node = malloc(sizeof(Node));
+  *method_node = node_new(NodeKind.Function(fnv));
+
+  ImplNode impln = impl_node_new();
+  impln.type_name = "Box";
+  impln.type_params.push("T");
+  impln.has_type_params = true;
+  impln.methods.push(method_node);
+
+  Node impl_node = node_new(NodeKind.Impl(impln));
+  g.register_impl_methods(impl_node);
+}
+
+test "emit_statement instantiates a generic impl's monomorphized method the first time its compound is used" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  _record_box_template(&g);
+  _record_box_get_impl(&g);
+
+  Node n = _box_num_var_decl("b");
+  assert g.emit_statement(n).is_none(), "expected the Box<num> declaration to emit";
+  assert equals(
+    st.out.build(),
+    "typedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nBox__num b;\n"
+  ), "expected the struct AND its generic impl's method (self/return type substituted T -> num) emitted once, before the declaration";
+}
+
+test "emit_statement does not re-emit a generic impl's monomorphized method on a second use" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  _record_box_template(&g);
+  _record_box_get_impl(&g);
+
+  Node n1 = _box_num_var_decl("b1");
+  Node n2 = _box_num_var_decl("b2");
+  assert g.emit_statement(n1).is_none(), "expected the first Box<num> declaration to emit";
+  assert g.emit_statement(n2).is_none(), "expected the second Box<num> declaration to emit";
+  assert equals(
+    st.out.build(),
+    "typedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nBox__num b1;\nBox__num b2;\n"
+  ), "expected the struct and the method emitted only once, even though Box<num> is used twice";
+}
+
+test "emit_expr calls a generic impl's monomorphized method through a value-typed instance" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  _record_box_template(&g);
+  _record_box_get_impl(&g);
+
+  Node decl = _box_num_var_decl("b");
+  assert g.emit_statement(decl).is_none(), "expected the Box<num> declaration to emit";
+
+  Node* recv = malloc(sizeof(Node));
+  *recv = node_new(NodeKind.Identifier("b"));
+  Node* method = malloc(sizeof(Node));
+  *method = node_new(NodeKind.Identifier("get"));
+  ExprNode dot_e;
+  dot_e.left = recv;
+  dot_e.has_left = true;
+  dot_e.right = method;
+  dot_e.has_right = true;
+  dot_e.op = ".";
+  Node* dot_node = malloc(sizeof(Node));
+  *dot_node = node_new(NodeKind.Expression(dot_e));
+
+  Node* blank = malloc(sizeof(Node));
+  *blank = node_new(NodeKind.Blank);
+  Node* args = malloc(sizeof(Node));
+  *args = node_new(NodeKind.ExpressionParenthesis(blank));
+
+  ExprNode call_e;
+  call_e.left = dot_node;
+  call_e.has_left = true;
+  call_e.right = args;
+  call_e.has_right = true;
+  call_e.op = "()";
+  Node n = node_new(NodeKind.Expression(call_e));
+
+  assert g.emit_expr(n).is_none(), "expected 'b.get()' to resolve to the monomorphized method";
+  assert equals(
+    st.out.build(),
+    "typedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nBox__num b;\nBox__num__get(&b)"
+  ), "expected 'Box__num__get(&b)', resolved via the same lookup_impl_method path a non-generic impl uses";
+}
+
+test "pub transpile hoists a generic impl method's monomorphized definition BEFORE the function that first triggers it, not nested inside it" {
+  // Regression test for a real bug found via end-to-end verification (self-
+  // hosted lexer -> parser -> this codegen, then the resulting C actually
+  // compiled with a system C compiler): `Box<num>` used for the FIRST time
+  // INSIDE `main`'s own body -- the common case, not an edge case -- used
+  // to emit `Box__num`'s struct typedef AND `Box__num__get`'s C function
+  // DEFINITION nested inside `main`'s `{ }`. A nested typedef is valid (if
+  // oddly-scoped) C, but a nested FUNCTION DEFINITION is a hard C syntax
+  // error clang actually rejects ("function definition is not allowed
+  // here"). See `Codegen.hoist_insert_pos`/`emit_hoisted`'s doc comments
+  // for the fix: `pub transpile` tracks where `main` itself started, and
+  // anything hoisted from inside it is spliced in right before that point
+  // instead.
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+
+  CompoundNode c = compound_node_new();
+  c.name = "Box";
+  c.type_params.push("T");
+  c.has_type_params = true;
+  CompoundField f;
+  f.name = "value";
+  DataType* fdt = malloc(sizeof(DataType));
+  *fdt = dtype_new();
+  fdt.type_str = "T";
+  f.dtype = fdt;
+  c.fields.push(f);
+  Node compound_node = node_new(NodeKind.Compound(c));
+
+  DataType* t_arg = malloc(sizeof(DataType));
+  *t_arg = dtype_new();
+  t_arg.type_str = "T";
+  DataType* self_dt = malloc(sizeof(DataType));
+  *self_dt = dtype_new();
+  self_dt.type_str = "Box";
+  self_dt.pointer_depth = 1;
+  self_dt.generic_args.push(t_arg);
+  VariableNode selfv;
+  selfv.var_type = self_dt;
+  selfv.name = "self";
+  selfv.has_val = false;
+  Node* self_param = malloc(sizeof(Node));
+  *self_param = node_new(NodeKind.Variable(selfv));
+  Vec<Node*> margs;
+  margs.init(0);
+  margs.push(self_param);
+
+  Node* field_recv = malloc(sizeof(Node));
+  *field_recv = node_new(NodeKind.Identifier("self"));
+  Node* field_name = malloc(sizeof(Node));
+  *field_name = node_new(NodeKind.Identifier("value"));
+  ExprNode field_e;
+  field_e.left = field_recv;
+  field_e.has_left = true;
+  field_e.right = field_name;
+  field_e.has_right = true;
+  field_e.op = ".";
+  Node* field_expr = malloc(sizeof(Node));
+  *field_expr = node_new(NodeKind.Expression(field_e));
+  Node* method_ret_stmt = malloc(sizeof(Node));
+  *method_ret_stmt = node_new(NodeKind.StatementReturn(field_expr));
+  Vec<Node*> method_stmts;
+  method_stmts.init(0);
+  method_stmts.push(method_ret_stmt);
+  BodyNode method_bn;
+  method_bn.statements = method_stmts;
+  Node* method_body = malloc(sizeof(Node));
+  *method_body = node_new(NodeKind.Body(method_bn));
+
+  FunctionNode getfn = function_node_new();
+  getfn.name = "Box__get";
+  getfn.has_name = true;
+  DataType* get_rtype = malloc(sizeof(DataType));
+  *get_rtype = dtype_new();
+  get_rtype.type_str = "T";
+  getfn.rtype = get_rtype;
+  getfn.has_rtype = true;
+  getfn.args = margs;
+  getfn.has_args = true;
+  getfn.body = method_body;
+  getfn.has_body = true;
+  Node* method_node = malloc(sizeof(Node));
+  *method_node = node_new(NodeKind.Function(getfn));
+
+  ImplNode implb = impl_node_new();
+  implb.type_name = "Box";
+  implb.type_params.push("T");
+  implb.has_type_params = true;
+  implb.methods.push(method_node);
+  Node impl_node = node_new(NodeKind.Impl(implb));
+
+  Node main_decl = _box_num_var_decl("b");
+  Node* main_decl_ptr = malloc(sizeof(Node));
+  *main_decl_ptr = main_decl;
+  Vec<Node*> main_stmts;
+  main_stmts.init(0);
+  main_stmts.push(main_decl_ptr);
+  BodyNode main_bn;
+  main_bn.statements = main_stmts;
+  Node* main_body = malloc(sizeof(Node));
+  *main_body = node_new(NodeKind.Body(main_bn));
+
+  FunctionNode mainfn = function_node_new();
+  mainfn.name = "main";
+  mainfn.has_name = true;
+  DataType* main_rtype = malloc(sizeof(DataType));
+  *main_rtype = dtype_new();
+  main_rtype.type_str = "num";
+  mainfn.rtype = main_rtype;
+  mainfn.has_rtype = true;
+  mainfn.has_args = false;
+  mainfn.body = main_body;
+  mainfn.has_body = true;
+  Node main_node = node_new(NodeKind.Function(mainfn));
+
+  Vec<Node> nodes;
+  nodes.init(0);
+  nodes.push(compound_node);
+  nodes.push(impl_node);
+  nodes.push(main_node);
+
+  assert g.transpile(nodes).is_none(), "expected the whole program to transpile";
+  assert equals(
+    st.out.build(),
+    "#include <stdio.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdarg.h>\n#include <stdlib.h>\n#include <string.h>\ntypedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nint64_t main(void) {\n    Box__num b;\n}\n"
+  ), "expected the struct typedef AND the monomorphized method BEFORE 'main', not nested inside its braces";
 }
 
 test "ensure_compound_instantiated rejects an unrecognized generic template name" {
