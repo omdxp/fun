@@ -2415,6 +2415,11 @@ fn emitTokens(state: *EmitState, toks: []const token.Token, source: []const u8, 
                 if (t2.type == .Operator and (std.mem.eql(u8, t2.data.sval.items, "(") or std.mem.eql(u8, t2.data.sval.items, "["))) {
                     if (pt2.type == .Symbol and pt2.data.cval == '>') break :blk false;
                     if (pt2.type == .Operator and std.mem.eql(u8, pt2.data.sval.items, ">")) break :blk false;
+                    // A string literal is never a callee/index target -- unlike an
+                    // identifier, `"name"(` isn't a call. The only place this shape
+                    // occurs is `fuzz "name" (data, len) { ... }`, whose parameter
+                    // list must not glue to the description string.
+                    if (pt2.type == .String) break :blk true;
                     // A statement keyword taking a parenthesized OPERAND (`ret (x) & y;`,
                     // `if (a) {`, `fit (x) {`) is not a call/index -- unlike a real
                     // callee name, it must not glue to the paren (`ret(x)` reads as a

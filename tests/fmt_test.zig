@@ -1403,3 +1403,48 @@ test "-fmt keeps a pointer-dereference assignment correctly spaced inside a test
     defer allocator.free(got2);
     try std.testing.expectEqualStrings(got, got2);
 }
+
+test "-fmt keeps a space between a fuzz block's name string and its parameter list" {
+    const allocator = std.testing.allocator;
+
+    // Regression: `fuzz "name" (data, len) { ... }`'s `(` follows a STRING
+    // token (the description), not an identifier/keyword -- the general
+    // "no space before a call/index `(`" rule didn't distinguish a string
+    // from a real callee name, so it glued them into `"name"(data, len)`,
+    // which reads as if the string were being called. A string is never a
+    // callee/index target anywhere else in the grammar, so this is a
+    // blanket fix (any string immediately before `(`/`[` now keeps its
+    // space), not a fuzz-specific special case.
+    const ugly =
+        "fuzz \"parses without crashing\"(data,len) {\n" ++
+        "if len>0 {\n" ++
+        "printf(\"nonempty\\n\");\n" ++
+        "}\n" ++
+        "}\n";
+
+    const path = try writeTempFnFile(allocator, "fmtfuzzblock", ugly);
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+
+    try std.testing.expectEqualStrings(
+        "fuzz \"parses without crashing\" (data, len) {\n" ++
+            "  if len > 0 {\n" ++
+            "    printf(\"nonempty\\n\");\n" ++
+            "  }\n" ++
+            "}\n",
+        got,
+    );
+
+    // Idempotent: reformatting the already-formatted output must be a no-op.
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+    const got2 = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got2);
+    try std.testing.expectEqualStrings(got, got2);
+}
