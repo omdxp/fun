@@ -3181,6 +3181,72 @@ pub fn format_file_check(allocator: mem.Allocator, io: std.Io, input_file: []con
 /// Returns:
 /// - Might return error.CompilationFailed if GCC compilation fails.
 /// - Might return other errors from file operations or process execution.
+/// Compiles `c_path` (a `fuzz`-mode harness, see `emit_fuzz_mode_harness`
+/// in the transpiler) with the fixed flag a coverage-guided fuzzing
+/// engine's own runtime needs, into `exe_file`.
+///
+/// Deliberately narrower than `invoke_c_compiler_to_exe`'s multi-candidate
+/// fallback: only a compiler whose toolchain bundles that engine's
+/// runtime can produce a WORKING binary here (a compiler that doesn't
+/// support the flag at all would either reject it outright or silently
+/// produce a binary that never actually calls into the fuzz target), so
+/// this tries `clang` specifically (or `$FUN_CC` if set) and fails with a
+/// clear, actionable message rather than silently falling back to a
+/// compiler that can't actually do this.
+fn invoke_fuzz_compiler_to_exe(allocator: mem.Allocator, io: std.Io, c_path: []const u8, exe_file: []const u8, debug_info: bool) !void {
+    var cc: []const u8 = "clang";
+    var owned_cc: ?[]const u8 = null;
+    defer if (owned_cc) |v| allocator.free(v);
+    if (std.c.getenv("FUN_CC")) |z| {
+        const s = std.mem.sliceTo(z, 0);
+        if (s.len > 0) {
+            owned_cc = try allocator.dupe(u8, s);
+            cc = owned_cc.?;
+        }
+    }
+
+    var argv_list = ArrayList([]const u8).init(allocator);
+    defer argv_list.deinit();
+    defer free_arg_list(allocator, argv_list.items);
+
+    try argv_list.append(try allocator.dupe(u8, cc));
+    try argv_list.append(try allocator.dupe(u8, "-fsanitize=fuzzer,address"));
+    try argv_list.append(try allocator.dupe(u8, if (debug_info) "-g" else "-g0"));
+    try argv_list.append(try allocator.dupe(u8, c_path));
+    try argv_list.append(try allocator.dupe(u8, "-o"));
+    try argv_list.append(try allocator.dupe(u8, exe_file));
+    if (builtin.target.os.tag != .windows) {
+        try argv_list.append(try allocator.dupe(u8, "-pthread"));
+        try argv_list.append(try allocator.dupe(u8, "-lm"));
+    }
+
+    const result = std.process.run(allocator, io, .{
+        .argv = argv_list.items,
+    }) catch |err| switch (err) {
+        error.FileNotFound => return CliError.MissingCCompiler,
+        else => return err,
+    };
+    defer {
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
+
+    if (result.term.exited != 0) {
+        std.Io.File.stderr().writeStreamingAll(io, "Compilation error:\n") catch {};
+        std.Io.File.stderr().writeStreamingAll(io, result.stderr) catch {};
+        std.Io.File.stderr().writeStreamingAll(io,
+            \\
+            \\Note: fuzzing needs a compiler whose toolchain bundles a
+            \\coverage-guided fuzzing runtime (commonly available with a
+            \\mainline install; not always bundled with a platform's default
+            \\one). Set FUN_CC to point at a compiler that has it if the
+            \\default one doesn't.
+            \\
+        ) catch {};
+        return CliError.CompilationFailed;
+    }
+}
+
 /// Invokes a C compiler on `c_path`, producing `exe_file`. Honors
 /// `FUN_CC`/`FUN_CC_ARGS` env var overrides, falling back to a list of
 /// default compiler candidates (see `get_default_compiler_candidates`).
@@ -3300,7 +3366,7 @@ fn invoke_c_compiler_to_exe(allocator: mem.Allocator, io: std.Io, c_path: []cons
     }
 }
 
-pub fn compile_and_run(allocator: mem.Allocator, io: std.Io, c_file_or_content: []const u8, is_file: bool, input_file: []const u8, program_args: []const []const u8, debug_info: bool) !void {
+pub fn compile_and_run(allocator: mem.Allocator, io: std.Io, c_file_or_content: []const u8, is_file: bool, input_file: []const u8, program_args: []const []const u8, debug_info: bool, fuzz_mode: bool) !void {
     const input_path = std.fs.path.basename(input_file);
     const extension_index = std.mem.lastIndexOf(u8, input_path, ".");
     var exe_file_name: []const u8 = input_path;
@@ -3362,7 +3428,11 @@ pub fn compile_and_run(allocator: mem.Allocator, io: std.Io, c_file_or_content: 
         allocator.free(temp_name.?);
     };
 
-    try invoke_c_compiler_to_exe(allocator, io, c_path, exe_file, debug_info);
+    if (fuzz_mode) {
+        try invoke_fuzz_compiler_to_exe(allocator, io, c_path, exe_file, debug_info);
+    } else {
+        try invoke_c_compiler_to_exe(allocator, io, c_path, exe_file, debug_info);
+    }
 
     // Run the compiled program
     {

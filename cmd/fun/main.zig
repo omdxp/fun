@@ -257,9 +257,9 @@ fn run_pipeline(ctx: anytype) void {
 
     if (tp.flags.exec) {
         if (tp.flags.outf) {
-            cli.compile_and_run(global_allocator, io, options.output_file, true, options.input_file, options.program_args, options.debug_info) catch |err| print_error_and_exit(io, err);
+            cli.compile_and_run(global_allocator, io, options.output_file, true, options.input_file, options.program_args, options.debug_info, options.fuzz_mode) catch |err| print_error_and_exit(io, err);
         } else if (tp.get_output()) |output| {
-            cli.compile_and_run(global_allocator, io, output, false, options.input_file, options.program_args, options.debug_info) catch |err| print_error_and_exit(io, err);
+            cli.compile_and_run(global_allocator, io, output, false, options.input_file, options.program_args, options.debug_info, options.fuzz_mode) catch |err| print_error_and_exit(io, err);
         }
     }
 }

@@ -69,7 +69,7 @@ test "compile_and_run succeeds with valid C (file)" {
     }
 
     // Should compile and execute without error.
-    try cli.compile_and_run(allocator, std.testing.io, c_path, true, "cli_compile_and_run_ok.fn", &.{}, false);
+    try cli.compile_and_run(allocator, std.testing.io, c_path, true, "cli_compile_and_run_ok.fn", &.{}, false, false);
 }
 
 test "compile_and_run reports compilation failure for invalid C (file)" {
@@ -83,7 +83,7 @@ test "compile_and_run reports compilation failure for invalid C (file)" {
         allocator.free(c_path);
     }
 
-    try std.testing.expectError(cli.CliError.CompilationFailed, cli.compile_and_run(allocator, std.testing.io, c_path, true, "cli_compile_and_run_bad.fn", &.{}, false));
+    try std.testing.expectError(cli.CliError.CompilationFailed, cli.compile_and_run(allocator, std.testing.io, c_path, true, "cli_compile_and_run_bad.fn", &.{}, false, false));
 }
 
 test "parse_args supports -fmt-check-all without -in" {
