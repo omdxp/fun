@@ -4353,6 +4353,143 @@ impl Parser {
     ret .None;
   }
 
+  // Builds and scope-registers one of `fuzz`'s two fixed-type synthetic
+  // parameters (see `parse_fuzz_declaration`): a `Variable` node named
+  // `param_name` with type `type_name` at `pointer_depth`, added to the
+  // CURRENT scope (the caller must already have pushed one) the same way
+  // `parse_function`'s variadic `vargs` synthetic parameter registers
+  // itself.
+  _make_fuzz_fixed_param(str param_name, str type_name, num pointer_depth) Node* {
+    DataType* pdt = malloc(sizeof(DataType));
+    *pdt = dtype_new();
+    pdt.kind = get_datatype_type(type_name);
+    pdt.type_str = type_name;
+    pdt.pointer_depth = pointer_depth;
+    pdt.flags.is_pointer = pointer_depth > 0;
+
+    VariableNode pv;
+    pv.var_type = pdt;
+    pv.name = param_name;
+    pv.has_val = false;
+
+    Node* pnode = malloc(sizeof(Node));
+    *pnode = node_new(NodeKind.Variable(pv));
+    let entity = self.new_scope_entity(pnode);
+    self.state.push_scope_entity(entity);
+    ret pnode;
+  }
+
+  // Parses `fuzz "name" (data, len) { ... }`. Top-level only, the same
+  // way `parse_test_declaration` enforces it (never wired into
+  // `parse_statement`'s dispatch). The two parameter names are user-
+  // chosen but their TYPES are always fixed (`raw* data_name, num
+  // len_name` -- the byte buffer + length a fuzzing engine feeds in),
+  // so unlike a real function's parameter list there's no type
+  // annotation to parse, just two bare identifiers -- registered into
+  // the body's own scope via `_make_fuzz_fixed_param`, so ordinary
+  // identifier resolution inside the body just works (matching
+  // `parse_test_declaration`'s synthetic function-context trick for
+  // `if`/`for`/`ret`/`defer`/etc. too).
+  pub parse_fuzz_declaration() Option<ParseErrorKind> {
+    let fuzz_tok = self.state.token_next(); // consume 'fuzz'
+
+    let name_tok = self.state.token_next();
+    if name_tok.is_none() || name_tok.unwrap().type != TokenType.String {
+      self.state.err("expected a string name after 'fuzz'");
+      ret .Some(ParseErrorKind.InvalidString);
+    }
+    str name = "";
+    fit name_tok.unwrap().data {
+      .Sval(s) -> { name = s; }
+      _ -> {}
+    }
+
+    self.state.new_scope();
+
+    let operr = self.state.expect_op("(");
+    if operr.is_some() {
+      self.state.finish_scope();
+      ret operr;
+    }
+
+    let data_tok = self.state.token_next();
+    if data_tok.is_none() || data_tok.unwrap().type != TokenType.Identifier {
+      self.state.err("expected a parameter name after 'fuzz \"name\" ('");
+      self.state.finish_scope();
+      ret .Some(ParseErrorKind.InvalidIdentifier);
+    }
+    str data_name = "";
+    fit data_tok.unwrap().data {
+      .Sval(s) -> { data_name = s; }
+      _ -> {}
+    }
+
+    let commaerr = self.state.expect_op(",");
+    if commaerr.is_some() {
+      self.state.finish_scope();
+      ret commaerr;
+    }
+
+    let len_tok = self.state.token_next();
+    if len_tok.is_none() || len_tok.unwrap().type != TokenType.Identifier {
+      self.state.err("expected a second parameter name after the comma in 'fuzz'");
+      self.state.finish_scope();
+      ret .Some(ParseErrorKind.InvalidIdentifier);
+    }
+    str len_name = "";
+    fit len_tok.unwrap().data {
+      .Sval(s) -> { len_name = s; }
+      _ -> {}
+    }
+
+    let cperr = self.state.expect_sym(')');
+    if cperr.is_some() {
+      self.state.finish_scope();
+      ret cperr;
+    }
+
+    Node* data_param = self._make_fuzz_fixed_param(data_name, "raw", 1);
+    Node* len_param = self._make_fuzz_fixed_param(len_name, "num", 0);
+
+    let prev_fn = self.current_function;
+    let prev_has_fn = self.has_current_function;
+    Node fn_stub = node_new(NodeKind.Function(function_node_new()));
+    self.current_function = &fn_stub;
+    self.has_current_function = true;
+
+    let berr = self.parse_body();
+    self.current_function = prev_fn;
+    self.has_current_function = prev_has_fn;
+    self.state.finish_scope();
+    if berr.is_some() {
+      ret berr;
+    }
+    let maybe_body = self.state.node_pop();
+    if maybe_body.is_none() {
+      self.state.err("expected fuzz body");
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+    Node* body = malloc(sizeof(Node));
+    *body = maybe_body.unwrap();
+
+    FuzzDeclNode fd;
+    fd.name = name;
+    fd.data_param = data_param;
+    fd.len_param = len_param;
+    fd.body = body;
+
+    Node node = node_new(NodeKind.Fuzz(fd));
+    fit fuzz_tok {
+      .Some(t) -> {
+        node.pos = t.pos;
+        node.has_pos = true;
+      }
+      .None -> {}
+    }
+    self.state.nodes.push(node);
+    ret .None;
+  }
+
   // True for the warning ids that may be controlled at module scope (no
   // enclosing function) -- everything else needs a function to actually
   // check inside.
@@ -5664,6 +5801,10 @@ impl Parser {
 
       if equals(kw, "test") {
         ret self.parse_test_declaration();
+      }
+
+      if equals(kw, "fuzz") {
+        ret self.parse_fuzz_declaration();
       }
 
       if equals(kw, "compound") {
@@ -8703,6 +8844,64 @@ test "parse_top_level_declaration dispatches 'test'" {
   fit top.kind {
     .Test(td) -> { assert equals(td.name, "noop"), "expected test name 'noop'"; }
     _ -> { panic("expected a Test node"); }
+  }
+}
+
+test "parse_fuzz_declaration parses a named fuzz body with its two fixed-type params" {
+  ParseState st = _state_from("fuzz \"never crashes\" (data, len) { assert len >= 0; }");
+  Parser p = parser_new(&st);
+  assert p.parse_fuzz_declaration().is_none(), "expected the fuzz declaration to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Fuzz(fd) -> {
+      assert equals(fd.name, "never crashes"), "expected fuzz name 'never crashes'";
+      fit fd.data_param.kind {
+        .Variable(dv) -> {
+          assert equals(dv.name, "data"), "expected the data param named 'data'";
+          assert dv.var_type.pointer_depth == 1, "expected the data param to be a pointer (raw*)";
+        }
+        _ -> { panic("expected a Variable node for data_param"); }
+      }
+      fit fd.len_param.kind {
+        .Variable(lv) -> {
+          assert equals(lv.name, "len"), "expected the len param named 'len'";
+          assert lv.var_type.kind == DataTypeType.Num, "expected the len param typed num";
+        }
+        _ -> { panic("expected a Variable node for len_param"); }
+      }
+      fit fd.body.kind {
+        .Body(bn) -> { assert bn.statements.len == 1, "expected 1 statement in the fuzz body"; }
+        _ -> { panic("expected a Body node"); }
+      }
+    }
+    _ -> { panic("expected a Fuzz node"); }
+  }
+}
+
+test "parse_fuzz_declaration requires a string name" {
+  ParseState st = _state_from("fuzz foo (data, len) { }");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_fuzz_declaration();
+  assert err.is_some(), "expected an error for a non-string fuzz name";
+}
+
+test "parse_fuzz_declaration requires two comma-separated parameter names" {
+  ParseState st = _state_from("fuzz \"noop\" (data) { }");
+  st.emit_stderr = false;
+  Parser p = parser_new(&st);
+  let err = p.parse_fuzz_declaration();
+  assert err.is_some(), "expected an error for a single-parameter fuzz signature";
+}
+
+test "parse_top_level_declaration dispatches 'fuzz'" {
+  ParseState st = _state_from("fuzz \"noop\" (d, n) { }");
+  Parser p = parser_new(&st);
+  assert p.parse_top_level_declaration().is_none(), "expected parse_top_level_declaration to dispatch 'fuzz'";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Fuzz(fd) -> { assert equals(fd.name, "noop"), "expected fuzz name 'noop'"; }
+    _ -> { panic("expected a Fuzz node"); }
   }
 }
 

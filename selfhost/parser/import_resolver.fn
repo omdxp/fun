@@ -23,23 +23,19 @@ imp std.result;
 // Converts one `imp`-statement's dotted `path` (already parsed into an
 // `ImportNode.path` string, preserving leading/interior dot RUNS exactly
 // as written -- see `parser.parse_import`'s own doc comment) into an
-// actual `.fn` file path relative to `input_file_path`'s own directory.
-// Mirrors the CURRENT bootstrap compiler's own scheme EXACTLY (see
-// `build_full_import_path_for_formatter` in `modules/cli/cli.zig`, the
-// formatter's own local-import discovery): a run of N consecutive `.`
-// characters becomes `N / 2` `../` parent-traversal segments, plus one
-// EXTRA `/` path-separator when N is odd -- a plain single `.` between
-// two path segments (`lexer.token`) is exactly that odd-run-of-1 case,
-// and a leading `..`/`....`/... run (always an EVEN count, enforced by
-// `parse_import` itself) is exactly the even case, needing no extra
-// separator since `../` already ends in one.
-pub fun resolve_import_path(str input_file_path, str import_path) str {
-  str dir = dirname(input_file_path);
-  if equals(dir, input_file_path) {
-    dir = ".";
-  }
+// actual `.fn` file path under `root`, joining path segments with `/`
+// and converting a run of N consecutive `.` characters into `N / 2`
+// `../` parent-traversal segments, plus one EXTRA `/` path-separator
+// when N is odd -- a plain single `.` between two path segments
+// (`lexer.token`) is exactly that odd-run-of-1 case, and a leading
+// `..`/`....`/... run (always an EVEN count, enforced by `parse_import`
+// itself) is exactly the even case, needing no extra separator since
+// `../` already ends in one. Shared by `resolve_import_path` for BOTH a
+// local (relative-to-importing-file) and a `std.*` (relative-to-
+// stdlib-root) import -- only `root` differs between the two.
+fun _convert_dotted_path(str root, str import_path) str {
   StringBuilder sb = string_builder_init(64);
-  sb.append(dir);
+  sb.append(root);
   sb.append("/");
   num n = len(import_path);
   num i = 0;
@@ -68,6 +64,34 @@ pub fun resolve_import_path(str input_file_path, str import_path) str {
   }
   sb.append(".fn");
   ret sb.build();
+}
+
+// Resolves one `imp`-statement's dotted `path` to an actual `.fn` file
+// path -- mirroring the CURRENT bootstrap compiler's own two-way split
+// EXACTLY (see `process_import` in `modules/codegen/transpiler.zig`): a
+// path starting with `std.` (the stdlib convention every real `.fn` file
+// already uses, e.g. `imp std.string;`) resolves against the STDLIB
+// ROOT, not relative to the importing file -- otherwise every stdlib
+// import would need re-resolving from EACH importing file's own
+// directory, which is wrong the moment two files in different
+// directories both `imp std.string;`. Everything else resolves relative
+// to `input_file_path`'s own directory (see `_convert_dotted_path`'s doc
+// comment for the actual dot-to-path conversion, shared by both).
+// 
+// Deliberately narrow for this slice: the stdlib root is a fixed
+// `"stdlib"` (matching the CURRENT bootstrap compiler's own dev-tree
+// fallback when run from the repo root, which is how every caller of
+// this function runs today) -- no `FUN_STDLIB_DIR` environment-variable
+// override, since this stdlib has no `getenv`-equivalent binding yet.
+pub fun resolve_import_path(str input_file_path, str import_path) str {
+  if starts_with(import_path, "std.") {
+    ret _convert_dotted_path("stdlib", import_path);
+  }
+  str dir = dirname(input_file_path);
+  if equals(dir, input_file_path) {
+    dir = ".";
+  }
+  ret _convert_dotted_path(dir, import_path);
 }
 
 // Recursively resolves, parses, and merges `entry_path` and every file it
@@ -156,8 +180,18 @@ test "resolve_import_path handles one leading '..' parent-traversal segment" {
 }
 
 test "resolve_import_path handles an input file with no directory component" {
-  let resolved = resolve_import_path("main.fn", "std.io");
-  assert equals(resolved, "./std/io.fn"), "expected './' as the directory when the input path has no slash of its own";
+  let resolved = resolve_import_path("main.fn", "helper");
+  assert equals(resolved, "./helper.fn"), "expected './' as the directory when the input path has no slash of its own";
+}
+
+test "resolve_import_path resolves a 'std.' import against the stdlib root, not the importing file's own directory" {
+  let resolved = resolve_import_path("selfhost/lexer/lexer.fn", "std.string");
+  assert equals(resolved, "stdlib/std/string.fn"), "expected a stdlib import resolved against the stdlib root regardless of the importing file's own location";
+}
+
+test "resolve_import_path resolves a nested 'std.c.*' import against the stdlib root" {
+  let resolved = resolve_import_path("selfhost/lexer/lexer.fn", "std.c.io");
+  assert equals(resolved, "stdlib/std/c/io.fn"), "expected the nested 'std.c.io' path joined under the stdlib root";
 }
 
 test "parse_program_with_imports merges a two-file program into one Vec<Node>" {

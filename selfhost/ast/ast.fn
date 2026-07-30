@@ -622,6 +622,19 @@ pub compound TestDeclNode {
   Node* body;
 }
 
+// A `fuzz "name" (data, len) { body }` declaration (see NodeKind.Fuzz).
+// `data_param`/`len_param` are `Variable` nodes for the two user-chosen
+// parameter names, at ALWAYS-fixed types (`raw*`/`num` -- the byte
+// buffer + length a fuzzing engine feeds in), matching
+// `parser.parse_fuzz_declaration`'s own doc comment for why there's no
+// type annotation to parse for either.
+pub compound FuzzDeclNode {
+  str name;
+  Node* data_param;
+  Node* len_param;
+  Node* body;
+}
+
 // ===== The node kind itself =====
 // 
 // A single flat data-carrying enum -- see the file-level design note for
@@ -675,6 +688,10 @@ pub enum NodeKind {
   // `test "name" { ... }` (top-level only). Skipped entirely by an
   // ordinary compile; only emitted/run in `fun test` mode.
   Test(TestDeclNode),
+  // `fuzz "name" (data, len) { ... }` (top-level only). Skipped entirely
+  // by an ordinary compile OR `fun test` mode; only emitted/run in `fun
+  // fuzz` mode.
+  Fuzz(FuzzDeclNode),
   Blank,
 }
 
