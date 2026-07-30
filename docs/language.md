@@ -261,10 +261,18 @@ payload; payload-free variants still coexist.
   that's the signal the engine is watching for.
 - **Platform/toolchain caveat**: this needs a compiler whose toolchain bundles
   a coverage-guided fuzzing runtime. That's not guaranteed on every platform
-  or default compiler install (notably: not always bundled with the default
-  compiler on macOS) — `fun fuzz` tries `clang` by default and fails with a
-  clear message (not a silent no-op) if the runtime isn't available; set
-  `FUN_CC` to point at a compiler that has it if the default one doesn't.
+  or default compiler install — notably, Xcode's bundled clang on macOS does
+  NOT include it. `fun fuzz` tries `clang` first, then falls back to a couple
+  of common non-default install locations (Homebrew's LLVM on macOS,
+  versioned `clang-N` on Linux, since the unversioned symlink isn't always
+  installed) before giving up with a clear message; set `FUN_CC` to point at
+  a specific compiler if none of those work for you.
+- **If it compiles but hangs immediately on running**: some restricted/
+  sandboxed/containerized environments hang during AddressSanitizer's own
+  startup (its shadow-memory setup), independent of Fun or the fuzzing engine
+  entirely. `FUN_FUZZ_NO_ASAN=1` drops just the memory-safety-detection half
+  of the sanitizer flag — coverage-guided fuzzing still runs and still finds
+  crashes/failed asserts, just without ASan's additional detection.
 
 ### Build Manifest (`fun.toml`)
 - **Declares build targets, not an import graph**: `imp` already does path-based

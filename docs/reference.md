@@ -564,10 +564,15 @@ wait to avoid warning on slow-but-live operations.
   `fuzz` block is the whole point — it's left to abort the process outright
   so the engine detects it.
 - Needs a compiler whose toolchain bundles that coverage-guided runtime —
-  not guaranteed on every platform/default install (notably not always
-  bundled with the default compiler on macOS). `fun fuzz` tries `clang` by
-  default and fails with a clear message if the runtime isn't available; set
-  `FUN_CC` to point at one that has it.
+  not guaranteed on every platform/default install (notably: NOT Xcode's
+  bundled clang on macOS). `fun fuzz` tries `clang` first, then falls back
+  to Homebrew's LLVM (macOS) / versioned `clang-N` (Linux) before failing
+  with a clear message; set `FUN_CC` to point at a specific one if none of
+  those work.
+- If it compiles but hangs on running: some sandboxed/containerized
+  environments hang during AddressSanitizer's own startup, unrelated to Fun
+  or the fuzzing engine. `FUN_FUZZ_NO_ASAN=1` drops just the memory-safety
+  half of the sanitizer flag — fuzzing still runs and still finds crashes.
 
 ## Formatting
 - `fun -fmt -in file.fn` formats a file in place.
