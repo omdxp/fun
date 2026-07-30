@@ -501,6 +501,11 @@ Examples:
 - `FUN_CC=zig` and `FUN_CC_ARGS="cc"`
 - `FUN_CC="clang -O2 {src} -o {out}"`
 
+`fun fuzz` does NOT use `FUN_CC`/`FUN_CC_ARGS` — it needs a compiler whose
+toolchain bundles a coverage-guided fuzzing runtime specifically, which has
+nothing to do with your ordinary build compiler, so it has its own separate
+`FUN_FUZZ_CC` override instead (see Fuzzing below).
+
 ## Runtime Backend Selection
 
 `std.runtime_backend` selects the runtime backend with this precedence:
@@ -572,13 +577,24 @@ wait to avoid warning on slow-but-live operations.
 - Needs a compiler whose toolchain bundles that coverage-guided runtime —
   not guaranteed on every platform/default install (notably: NOT Xcode's
   bundled clang on macOS). `fun fuzz` tries `clang` first, then falls back
-  to Homebrew's LLVM (macOS) / versioned `clang-N` (Linux) before failing
-  with a clear message; set `FUN_CC` to point at a specific one if none of
-  those work.
+  to Homebrew's LLVM (macOS) / versioned `clang-N` (Linux) / the official
+  LLVM installer's default path (Windows) before failing with a clear
+  message.
+- `FUN_FUZZ_CC` points at a specific compiler if none of those work for you.
+  Deliberately SEPARATE from `FUN_CC` (see C Compiler Selection above) —
+  your normal build compiler has nothing to do with whether it can ALSO do
+  coverage-guided fuzzing, so `fun fuzz` never reads `FUN_CC` at all; the
+  two build paths can use different compilers safely.
 - If it compiles but hangs on running: some sandboxed/containerized
   environments hang during AddressSanitizer's own startup, unrelated to Fun
   or the fuzzing engine. `FUN_FUZZ_NO_ASAN=1` drops just the memory-safety
   half of the sanitizer flag — fuzzing still runs and still finds crashes.
+- Windows is unverified: the macOS (via the Homebrew-LLVM fallback) and
+  (expected, by similar reasoning) Linux paths have actually been confirmed
+  working; Windows has not, for lack of a machine to test on. Plain LLVM
+  `clang.exe` (not `clang-cl.exe`) should in principle accept the same
+  flags, but whether the runtime is bundled and the result runs correctly
+  is genuinely unverified.
 
 ## Formatting
 - `fun -fmt -in file.fn` formats a file in place.

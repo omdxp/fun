@@ -278,15 +278,29 @@ payload; payload-free variants still coexist.
   or default compiler install — notably, Xcode's bundled clang on macOS does
   NOT include it. `fun fuzz` tries `clang` first, then falls back to a couple
   of common non-default install locations (Homebrew's LLVM on macOS,
-  versioned `clang-N` on Linux, since the unversioned symlink isn't always
-  installed) before giving up with a clear message; set `FUN_CC` to point at
-  a specific compiler if none of those work for you.
+  versioned `clang-N` on Linux since the unversioned symlink isn't always
+  installed, the official LLVM installer's default path on Windows) before
+  giving up with a clear message.
+- **`FUN_FUZZ_CC`**: point at a specific compiler if none of the automatic
+  candidates work for you. Deliberately a SEPARATE variable from `FUN_CC`
+  (the ordinary-build compiler override, see the C Compiler Selection
+  section of `docs/reference.md`) — your normal build compiler (gcc, cl,
+  ...) has nothing to do with whether it can ALSO do coverage-guided
+  fuzzing, so `fun fuzz` never looks at `FUN_CC` at all; the two can safely
+  be different compilers without stepping on each other.
 - **If it compiles but hangs immediately on running**: some restricted/
   sandboxed/containerized environments hang during AddressSanitizer's own
   startup (its shadow-memory setup), independent of Fun or the fuzzing engine
   entirely. `FUN_FUZZ_NO_ASAN=1` drops just the memory-safety-detection half
   of the sanitizer flag — coverage-guided fuzzing still runs and still finds
   crashes/failed asserts, just without ASan's additional detection.
+- **Windows is unverified**: everything above has been confirmed working on
+  macOS (after the Homebrew-LLVM fallback) and is expected to work similarly
+  on Linux, but there is no Windows machine to test on. Plain LLVM `clang.exe`
+  (not `clang-cl.exe`, which isn't tried) should in principle accept the same
+  flags, but whether the runtime is reliably bundled and the result actually
+  runs correctly on Windows is genuinely unknown — treat it as "might work,"
+  not confirmed.
 
 ### Build Manifest (`fun.toml`)
 - **Declares build targets, not an import graph**: `imp` already does path-based
