@@ -1313,6 +1313,27 @@ impl Codegen {
         self.state.write("NULL");
         ret .None;
       }
+      .Panic(msg) -> {
+        // `panic(msg)` "unifies with whatever type is expected at its use
+        // site" (see `NodeKind.Panic`'s own doc comment in ast.fn) --
+        // prints the message and aborts, never actually producing a
+        // value. Matches the original's own general (non-`ret`-special-
+        // cased) lowering exactly: a GNU C statement expression that
+        // prints, aborts, and trails off with a plain `0` so it type-checks
+        // as almost any scalar/pointer context (though not a struct/union
+        // one -- not supported, same as the original). Deliberately
+        // simplified from the original for this slice: no separate,
+        // slightly terser lowering for `ret panic(msg);` specifically
+        // (the original skips the trailing `0` there, since `abort()`
+        // never returns) -- this one form covers every context.
+        self.state.write("({ fprintf(stderr_stream(), \"panic: %s\\n\", ");
+        let merr = self.emit_expr(*msg);
+        if merr.is_some() {
+          ret merr;
+        }
+        self.state.write("); abort(); 0; })");
+        ret .None;
+      }
       .Identifier(name) -> {
         self.state.write(name);
         ret .None;
@@ -1987,6 +2008,19 @@ impl Codegen {
         let uerr = self.emit_expr(node);
         if uerr.is_some() {
           ret uerr;
+        }
+        self.state.write(";\n");
+        ret .None;
+      }
+      .Panic(_) -> {
+        // A bare `panic("msg");` statement (e.g. `_push_back`'s own real
+        // body in the self-hosted lexer's own source) -- same "no
+        // dedicated statement wrapper" reasoning as `.Expression`/
+        // `.Unary` just above.
+        self.state.write_indent();
+        let perr = self.emit_expr(node);
+        if perr.is_some() {
+          ret perr;
         }
         self.state.write(";\n");
         ret .None;
@@ -3026,7 +3060,13 @@ impl Codegen {
 
   // Writes the fixed set of C headers the original always includes
   // (before any conditional ones gated on stdlib usage, threads, sockets,
-  // etc. -- none of which are reachable yet since imports aren't ported).
+  // etc. -- none of which are reachable yet since imports aren't ported),
+  // plus the same fixed `stderr_stream()` helper the original's own
+  // prelude always defines too -- `emit_expr`'s `.Panic` case calls it
+  // unconditionally, so it must always be present regardless of whether
+  // this particular program uses `panic(...)` at all (matching the
+  // original's own reasoning: cheap, harmless when unused, and avoids
+  // conditionally tracking "does this program need it").
   pub write_prelude() {
     self.state.write("#include <stdio.h>\n");
     self.state.write("#include <stdbool.h>\n");
@@ -3034,6 +3074,7 @@ impl Codegen {
     self.state.write("#include <stdarg.h>\n");
     self.state.write("#include <stdlib.h>\n");
     self.state.write("#include <string.h>\n");
+    self.state.write("static FILE* stderr_stream(void){ return stderr; }\n");
   }
 
   // Transpiles every top-level `Enum`/`Compound`/`Impl`/`Function` node
@@ -3170,6 +3211,32 @@ test "emit_expr emits the nil literal as C NULL" {
   Node n = node_new(NodeKind.Nil);
   assert g.emit_expr(n).is_none(), "expected 'nil' to emit";
   assert equals(st.out.build(), "NULL"), "expected 'NULL'";
+}
+
+test "emit_expr emits a panic expression as a GNU statement expression" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  Node* msg = malloc(sizeof(Node));
+  *msg = node_new(NodeKind.String("oops"));
+  Node n = node_new(NodeKind.Panic(msg));
+  assert g.emit_expr(n).is_none(), "expected the panic expression to emit";
+  assert equals(
+    st.out.build(),
+    "({ fprintf(stderr_stream(), \"panic: %s\\n\", \"oops\"); abort(); 0; })"
+  ), "expected the GNU statement-expression lowering, printing the message and aborting";
+}
+
+test "emit_statement emits a bare panic(...) as a statement" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  Node* msg = malloc(sizeof(Node));
+  *msg = node_new(NodeKind.String("internal error"));
+  Node n = node_new(NodeKind.Panic(msg));
+  assert g.emit_statement(n).is_none(), "expected the bare panic statement to emit";
+  assert equals(
+    st.out.build(),
+    "({ fprintf(stderr_stream(), \"panic: %s\\n\", \"internal error\"); abort(); 0; });\n"
+  ), "expected the panic expression followed by a trailing ';\\n', same as any other bare-expression statement";
 }
 
 test "emit_expr escapes a character literal" {
@@ -5815,7 +5882,7 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
   assert g.transpile(nodes).is_none(), "expected the whole program to transpile";
   assert equals(
     st.out.build(),
-    "#include <stdio.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdarg.h>\n#include <stdlib.h>\n#include <string.h>\ntypedef struct Box__num {\n  int64_t value;\n} Box__num;\n\ntypedef struct Outer {\n  Box__num inner;\n} Outer;\n\n"
+    "#include <stdio.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdarg.h>\n#include <stdlib.h>\n#include <string.h>\nstatic FILE* stderr_stream(void){ return stderr; }\ntypedef struct Box__num {\n  int64_t value;\n} Box__num;\n\ntypedef struct Outer {\n  Box__num inner;\n} Outer;\n\n"
   ), "expected Box__num's typedef BEFORE Outer's, not nested inside its field list";
 }
 
@@ -5943,7 +6010,7 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
   assert g.transpile(nodes).is_none(), "expected the whole program to transpile";
   assert equals(
     st.out.build(),
-    "#include <stdio.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdarg.h>\n#include <stdlib.h>\n#include <string.h>\ntypedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nint64_t main(void) {\n    Box__num b;\n}\n"
+    "#include <stdio.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdarg.h>\n#include <stdlib.h>\n#include <string.h>\nstatic FILE* stderr_stream(void){ return stderr; }\ntypedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nint64_t main(void) {\n    Box__num b;\n}\n"
   ), "expected the struct typedef AND the monomorphized method BEFORE 'main', not nested inside its braces";
 }
 
