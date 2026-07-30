@@ -495,6 +495,9 @@ class FunCodeLensProvider implements vscode.CodeLensProvider {
     // Matches `test "name" {`, allowing an escaped `\"` inside the name the
     // same way the lexer does for any other string literal.
     const testLineRe = /^\s*test\s+"((?:[^"\\]|\\.)*)"\s*\{/;
+    // Matches `fuzz "name" (data, len) {` -- same name-escaping rule as
+    // `test`, plus the two fixed-shape parameter names (see parse_fuzz).
+    const fuzzLineRe = /^\s*fuzz\s+"((?:[^"\\]|\\.)*)"\s*\(/;
     let sawMain = false;
     for (let i = 0; i < document.lineCount; i++) {
       const text = document.lineAt(i).text;
@@ -529,6 +532,19 @@ class FunCodeLensProvider implements vscode.CodeLensProvider {
             title: "⚙ Debug Test",
             command: "fun.debugTest",
             arguments: [document.uri, testName],
+          }),
+        );
+        continue;
+      }
+      const fuzzMatch = fuzzLineRe.exec(text);
+      if (fuzzMatch) {
+        const fuzzName = fuzzMatch[1].replace(/\\(.)/g, "$1");
+        const range = new vscode.Range(i, 0, i, 0);
+        lenses.push(
+          new vscode.CodeLens(range, {
+            title: "▶ Fuzz",
+            command: "fun.fuzzTarget",
+            arguments: [document.uri, fuzzName],
           }),
         );
       }
@@ -962,6 +978,40 @@ export function activate(context: vscode.ExtensionContext) {
         const escapedName = testName.replace(/(["\\$`])/g, "\\$1");
         runTerminal.sendText(
           `"${funExe}" -in "${fileUri.fsPath}" -test -- "${escapedName}"`,
+        );
+      },
+    ),
+  );
+
+  // ▶ Fuzz — compile in fuzz mode and run the named fuzz target in an
+  // integrated terminal, via `-fuzz -fuzz-target "name"` (see
+  // emit_fuzz_mode_harness). Unlike Run Test, there's no separate Debug
+  // variant: the fuzzing engine's own driver takes over the process and
+  // runs indefinitely, so attaching a debugger up front isn't the useful
+  // workflow the way it is for a single deterministic test run -- a crash
+  // found by fuzzing is reproduced/debugged from its saved input instead.
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "fun.fuzzTarget",
+      async (uri?: vscode.Uri, fuzzName?: string) => {
+        const fileUri = uri ?? vscode.window.activeTextEditor?.document.uri;
+        if (!fileUri || fileUri.scheme !== "file" || !fuzzName) return;
+
+        const doc = vscode.workspace.textDocuments.find(
+          (d) => d.uri.toString() === fileUri.toString(),
+        );
+        if (doc?.isDirty) await doc.save();
+
+        const root = workspaceRootPath();
+        const funExe = resolveFunCompilerExe(root);
+
+        if (!runTerminal || runTerminal.exitStatus !== undefined) {
+          runTerminal = vscode.window.createTerminal({ name: "Fun: Run" });
+        }
+        runTerminal.show(true);
+        const escapedName = fuzzName.replace(/(["\\$`])/g, "\\$1");
+        runTerminal.sendText(
+          `"${funExe}" -in "${fileUri.fsPath}" -fuzz -fuzz-target "${escapedName}"`,
         );
       },
     ),
