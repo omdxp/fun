@@ -1416,7 +1416,7 @@ test "-fmt keeps a space between a fuzz block's name string and its parameter li
     // blanket fix (any string immediately before `(`/`[` now keeps its
     // space), not a fuzz-specific special case.
     const ugly =
-        "fuzz \"parses without crashing\"(data,len) {\n" ++
+        "fuzz \"parses without crashing\"(raw*data,num len) {\n" ++
         "if len>0 {\n" ++
         "printf(\"nonempty\\n\");\n" ++
         "}\n" ++
@@ -1434,7 +1434,7 @@ test "-fmt keeps a space between a fuzz block's name string and its parameter li
     defer allocator.free(got);
 
     try std.testing.expectEqualStrings(
-        "fuzz \"parses without crashing\" (data, len) {\n" ++
+        "fuzz \"parses without crashing\" (raw* data, num len) {\n" ++
             "  if len > 0 {\n" ++
             "    printf(\"nonempty\\n\");\n" ++
             "  }\n" ++

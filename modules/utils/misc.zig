@@ -97,7 +97,7 @@ pub fn is_keyword(str: []const u8) bool {
         mem.eql(u8, "as", str) or
         mem.eql(u8, "enum", str) or
         mem.eql(u8, "compound", str) or mem.eql(u8, "quirk", str) or mem.eql(u8, "impl", str) or
-        mem.eql(u8, "let", str) or
+        mem.eql(u8, "let", str) or mem.eql(u8, "const", str) or
         mem.eql(u8, "defer", str) or mem.eql(u8, "asm", str) or mem.eql(u8, "volatile", str) or mem.eql(u8, "arch", str) or
         mem.eql(u8, "void", str) or
         mem.eql(u8, "raw", str) or

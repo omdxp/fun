@@ -1239,6 +1239,51 @@ test "typecheck let cannot infer quirk type" {
     try runTranspileExpectError(std.testing.allocator, "typecheck_let_infer_quirk_err.fn", input);
 }
 
+test "typecheck const local reassignment is rejected" {
+    const input =
+        "fun main() {\n" ++
+        "  const num x = 5;\n" ++
+        "  x = 10;\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_const_local_reassign_err.fn", input);
+}
+
+test "typecheck const local compound assignment is rejected" {
+    const input =
+        "fun main() {\n" ++
+        "  const total = 5;\n" ++
+        "  total += 1;\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_const_compound_assign_err.fn", input);
+}
+
+test "typecheck const global reassignment is rejected" {
+    const input =
+        "const num MAX = 100;\n" ++
+        "fun bump() {\n" ++
+        "  MAX = 200;\n" ++
+        "}\n" ++
+        "fun main() {\n" ++
+        "  bump();\n" ++
+        "}\n";
+
+    try runTranspileExpectError(std.testing.allocator, "typecheck_const_global_reassign_err.fn", input);
+}
+
+test "typecheck const reads and ordinary let reassignment coexist fine" {
+    const input =
+        "const num MAX = 100;\n" ++
+        "fun main() {\n" ++
+        "  const local_max = MAX;\n" ++
+        "  num counter = 0;\n" ++
+        "  counter = counter + local_max;\n" ++
+        "}\n";
+
+    try runTranspileExpectOk(std.testing.allocator, "typecheck_const_ok.fn", input);
+}
+
 test "typecheck enums behave as numeric values across contexts" {
     const input =
         "enum Color { Red, Green, Blue }\n" ++

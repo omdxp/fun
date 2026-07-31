@@ -226,6 +226,13 @@ pub const Node = struct {
             right: ?*Node = null,
             /// The operator used in the expression.
             op: []const u8,
+            /// For a call expression (`op == "()"`) written with EXPLICIT generic
+            /// type arguments (`ok<num, MyErrorKind>(42)`): the parsed type args,
+            /// in source order. `null` for an ordinary call (type params are
+            /// inferred from the argument values instead — see
+            /// `bind_generic_param` in transpiler.zig). Only ever set when `op ==
+            /// "()"`.
+            generic_args: ?utils.Vector(*dtype.DataType) = null,
         },
         /// The expression in parentheses node.
         paren: struct {
@@ -240,6 +247,11 @@ pub const Node = struct {
             name: ArrayList(u8),
             /// The value of the variable.
             val: ?*Node = null,
+            /// True for a `const` declaration (immutable after initialization,
+            /// enforced at typecheck time — see `check_variable`/reassignment
+            /// checks in transpiler.zig). False for an ordinary `let`/typed
+            /// mutable declaration.
+            is_const: bool = false,
         },
         /// The unary node.
         unary: struct {

@@ -2088,8 +2088,8 @@ test "std.runtime_backend selector APIs transpile" {
         "  str name = runtime_backend_name();\n" ++
         "  bin p = runtime_backend_is_posix();\n" ++
         "  bin w = runtime_backend_is_windows();\n" ++
-        "  _ = runtime_backend_posix_id();\n" ++
-        "  _ = runtime_backend_windows_id();\n" ++
+        "  _ = RUNTIME_BACKEND_POSIX_ID;\n" ++
+        "  _ = RUNTIME_BACKEND_WINDOWS_ID;\n" ++
         "  _ = id;\n" ++
         "  _ = name;\n" ++
         "  _ = p;\n" ++
@@ -2103,8 +2103,8 @@ test "std.runtime_backend selector APIs transpile" {
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_backend_name(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_backend_is_posix(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_backend_is_windows(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_backend_posix_id(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out_owned, "runtime_backend_windows_id(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "RUNTIME_BACKEND_POSIX_ID") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "RUNTIME_BACKEND_WINDOWS_ID") != null);
 
     try std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath);
 }
@@ -2743,13 +2743,13 @@ test "std.channel runtime conformance matrix is stable across backend selectors"
         "\n" ++
         "  printf(\"backend=%s\\n\", runtime_backend_name());\n" ++
         "  printf(\"sync_backend=%s\\n\", sync_runtime_backend_name());\n" ++
-        "  printf(\"const_rc_ok=%lld\\n\", channel_rc_ok());\n" ++
-        "  printf(\"const_rc_timeout=%lld\\n\", channel_rc_timeout());\n" ++
-        "  printf(\"const_rc_full=%lld\\n\", channel_rc_full());\n" ++
-        "  printf(\"const_rc_empty=%lld\\n\", channel_rc_empty());\n" ++
-        "  printf(\"const_rc_default=%lld\\n\", channel_rc_default());\n" ++
-        "  printf(\"const_rc_cancelled=%lld\\n\", channel_rc_cancelled());\n" ++
-        "  printf(\"const_select_default=%lld\\n\", channel_select_index_default());\n" ++
+        "  printf(\"const_rc_ok=%lld\\n\", CHANNEL_RC_OK);\n" ++
+        "  printf(\"const_rc_timeout=%lld\\n\", CHANNEL_RC_TIMEOUT);\n" ++
+        "  printf(\"const_rc_full=%lld\\n\", CHANNEL_RC_FULL);\n" ++
+        "  printf(\"const_rc_empty=%lld\\n\", CHANNEL_RC_EMPTY);\n" ++
+        "  printf(\"const_rc_default=%lld\\n\", CHANNEL_RC_DEFAULT);\n" ++
+        "  printf(\"const_rc_cancelled=%lld\\n\", CHANNEL_RC_CANCELLED);\n" ++
+        "  printf(\"const_select_default=%lld\\n\", CHANNEL_SELECT_INDEX_DEFAULT);\n" ++
         "  printf(\"rc_try_recv_empty=%lld\\n\", rc_try_recv_empty);\n" ++
         "  printf(\"rc_send_ok=%lld\\n\", rc_send_ok);\n" ++
         "  printf(\"rc_try_send_full=%lld\\n\", rc_try_send_full);\n" ++
@@ -2857,22 +2857,22 @@ test "std.channel fairness and timeout benchmark stays within backend thresholds
         "  num count_a = 0;\n" ++
         "  num count_b = 0;\n" ++
         "  num count_c = 0;\n" ++
-        "  num fairness_rc = channel_rc_ok();\n" ++
+        "  num fairness_rc = CHANNEL_RC_OK;\n" ++
         "\n" ++
         "  i = 0;\n" ++
         "  for i < total_rounds {\n" ++
         "    num out = 0;\n" ++
         "    num which = -1;\n" ++
         "    num rc = a.select_recv_timeout3_rr_with_tuning_cancel(&b, &c, &next, &out, &which, 50, 5, 0);\n" ++
-        "    if rc != channel_rc_ok() {\n" ++
+        "    if rc != CHANNEL_RC_OK {\n" ++
         "      fairness_rc = rc;\n" ++
         "      i = total_rounds;\n" ++
         "    } else {\n" ++
-        "      if which == channel_select_index_self() {\n" ++
+        "      if which == CHANNEL_SELECT_INDEX_SELF {\n" ++
         "        count_a = count_a + 1;\n" ++
-        "      } elif which == channel_select_index_other() {\n" ++
+        "      } elif which == CHANNEL_SELECT_INDEX_OTHER {\n" ++
         "        count_b = count_b + 1;\n" ++
-        "      } elif which == channel_select_index_other_b() {\n" ++
+        "      } elif which == CHANNEL_SELECT_INDEX_OTHER_B {\n" ++
         "        count_c = count_c + 1;\n" ++
         "      }\n" ++
         "      i = i + 1;\n" ++
@@ -2906,7 +2906,7 @@ test "std.channel fairness and timeout benchmark stays within backend thresholds
         "  i = 0;\n" ++
         "  for i < timeout_rounds {\n" ++
         "    num timeout_rc = x.select_recv_timeout3_rr_with_tuning_cancel(&y, &z, &next_timeout, &out_timeout, &idx_timeout, 15, 5, 0);\n" ++
-        "    if timeout_rc != channel_rc_timeout() {\n" ++
+        "    if timeout_rc != CHANNEL_RC_TIMEOUT {\n" ++
         "      timeout_failures = timeout_failures + 1;\n" ++
         "    }\n" ++
         "    i = i + 1;\n" ++
@@ -3740,13 +3740,13 @@ test "channel select default returns default branch when empty" {
         "  num rc3 = a.select_recv3_rr_default_with(&b, &c, &next, &out, &idx);\n" ++
         "  num idx3 = idx;\n" ++
         "  num ok_rc2 = 0;\n" ++
-        "  if rc2 == channel_rc_default() { ok_rc2 = 1; }\n" ++
+        "  if rc2 == CHANNEL_RC_DEFAULT { ok_rc2 = 1; }\n" ++
         "  num ok_idx2 = 0;\n" ++
-        "  if idx2 == channel_select_index_default() { ok_idx2 = 1; }\n" ++
+        "  if idx2 == CHANNEL_SELECT_INDEX_DEFAULT { ok_idx2 = 1; }\n" ++
         "  num ok_rc3 = 0;\n" ++
-        "  if rc3 == channel_rc_default() { ok_rc3 = 1; }\n" ++
+        "  if rc3 == CHANNEL_RC_DEFAULT { ok_rc3 = 1; }\n" ++
         "  num ok_idx3 = 0;\n" ++
-        "  if idx3 == channel_select_index_default() { ok_idx3 = 1; }\n" ++
+        "  if idx3 == CHANNEL_SELECT_INDEX_DEFAULT { ok_idx3 = 1; }\n" ++
         "  printf(\"%lld|%lld|%lld|%lld\", ok_rc2, ok_idx2, ok_rc3, ok_idx3);\n" ++
         "  _ = a.destroy();\n" ++
         "  _ = b.destroy();\n" ++
@@ -3799,13 +3799,13 @@ test "channel select cancel returns cancelled status" {
         "  num rc3 = a.select_recv_timeout3_rr_with_tuning_cancel(&b, &c, &next, &out, &idx, 10, -1, -1, &cancel);\n" ++
         "  num idx3 = idx;\n" ++
         "  num ok_rc2 = 0;\n" ++
-        "  if rc2 == channel_rc_cancelled() { ok_rc2 = 1; }\n" ++
+        "  if rc2 == CHANNEL_RC_CANCELLED { ok_rc2 = 1; }\n" ++
         "  num ok_idx2 = 0;\n" ++
-        "  if idx2 == channel_select_index_default() { ok_idx2 = 1; }\n" ++
+        "  if idx2 == CHANNEL_SELECT_INDEX_DEFAULT { ok_idx2 = 1; }\n" ++
         "  num ok_rc3 = 0;\n" ++
-        "  if rc3 == channel_rc_cancelled() { ok_rc3 = 1; }\n" ++
+        "  if rc3 == CHANNEL_RC_CANCELLED { ok_rc3 = 1; }\n" ++
         "  num ok_idx3 = 0;\n" ++
-        "  if idx3 == channel_select_index_default() { ok_idx3 = 1; }\n" ++
+        "  if idx3 == CHANNEL_SELECT_INDEX_DEFAULT { ok_idx3 = 1; }\n" ++
         "  printf(\"%lld|%lld|%lld|%lld\", ok_rc2, ok_idx2, ok_rc3, ok_idx3);\n" ++
         "  _ = a.destroy();\n" ++
         "  _ = b.destroy();\n" ++
@@ -3854,9 +3854,9 @@ test "channel cancel-aware send and recv return cancelled status" {
         "  _ = ch.recv_into(&out);\n" ++
         "  num rc_recv = ch.recv_timeout_into_with_cancel(&out, 10, &cancel);\n" ++
         "  num ok_send = 0;\n" ++
-        "  if rc_send == channel_rc_cancelled() { ok_send = 1; }\n" ++
+        "  if rc_send == CHANNEL_RC_CANCELLED { ok_send = 1; }\n" ++
         "  num ok_recv = 0;\n" ++
-        "  if rc_recv == channel_rc_cancelled() { ok_recv = 1; }\n" ++
+        "  if rc_recv == CHANNEL_RC_CANCELLED { ok_recv = 1; }\n" ++
         "  printf(\"%lld|%lld\", ok_send, ok_recv);\n" ++
         "  _ = ch.destroy();\n" ++
         "}\n";
@@ -3903,13 +3903,13 @@ test "channel cancel-aware send and recv succeed when not cancelled" {
         "  num rc3 = ch.send_timeout_with_cancel(6, 10, &cancel);\n" ++
         "  num rc4 = ch.recv_timeout_into_with_cancel(&out, 10, &cancel);\n" ++
         "  num ok1 = 0;\n" ++
-        "  if rc1 == channel_rc_ok() { ok1 = 1; }\n" ++
+        "  if rc1 == CHANNEL_RC_OK { ok1 = 1; }\n" ++
         "  num ok2 = 0;\n" ++
-        "  if rc2 == channel_rc_ok() { ok2 = 1; }\n" ++
+        "  if rc2 == CHANNEL_RC_OK { ok2 = 1; }\n" ++
         "  num ok3 = 0;\n" ++
-        "  if rc3 == channel_rc_ok() { ok3 = 1; }\n" ++
+        "  if rc3 == CHANNEL_RC_OK { ok3 = 1; }\n" ++
         "  num ok4 = 0;\n" ++
-        "  if rc4 == channel_rc_ok() { ok4 = 1; }\n" ++
+        "  if rc4 == CHANNEL_RC_OK { ok4 = 1; }\n" ++
         "  num ok_out = 0;\n" ++
         "  if out == 6 { ok_out = 1; }\n" ++
         "  printf(\"%lld|%lld|%lld|%lld|%lld\", ok1, ok2, ok3, ok4, ok_out);\n" ++
@@ -3961,11 +3961,11 @@ test "channel cancel token controls cancel and reset behavior" {
         "  num rc_send = ch.send_with_token(3, &token);\n" ++
         "  num rc_recv = ch.recv_into_with_token(&out, &token);\n" ++
         "  num ok_cancel = 0;\n" ++
-        "  if rc_cancel == channel_rc_cancelled() { ok_cancel = 1; }\n" ++
+        "  if rc_cancel == CHANNEL_RC_CANCELLED { ok_cancel = 1; }\n" ++
         "  num ok_send = 0;\n" ++
-        "  if rc_send == channel_rc_ok() { ok_send = 1; }\n" ++
+        "  if rc_send == CHANNEL_RC_OK { ok_send = 1; }\n" ++
         "  num ok_recv = 0;\n" ++
-        "  if rc_recv == channel_rc_ok() { ok_recv = 1; }\n" ++
+        "  if rc_recv == CHANNEL_RC_OK { ok_recv = 1; }\n" ++
         "  num ok_out = 0;\n" ++
         "  if out == 3 { ok_out = 1; }\n" ++
         "  num ok_state = 0;\n" ++
@@ -4020,7 +4020,7 @@ test "channel select3 rr stress drains all values with expected statuses" {
         "  }\n" ++
         "  num next = 0;\n" ++
         "  num out = 0;\n" ++
-        "  num idx = channel_select_index_default();\n" ++
+        "  num idx = CHANNEL_SELECT_INDEX_DEFAULT;\n" ++
         "  num got_a = 0;\n" ++
         "  num got_b = 0;\n" ++
         "  num got_c = 0;\n" ++
@@ -4028,16 +4028,16 @@ test "channel select3 rr stress drains all values with expected statuses" {
         "  i = 0;\n" ++
         "  for i < 600 {\n" ++
         "    num rc = a.select_recv_timeout3_rr_with_tuning_cancel(&b, &c, &next, &out, &idx, -1);\n" ++
-        "    if rc != channel_rc_ok() {\n" ++
+        "    if rc != CHANNEL_RC_OK {\n" ++
         "      printf(\"0|0|0|0|0\");\n" ++
         "      _ = a.destroy();\n" ++
         "      _ = b.destroy();\n" ++
         "      _ = c.destroy();\n" ++
         "      ret;\n" ++
         "    }\n" ++
-        "    if idx == channel_select_index_self() {\n" ++
+        "    if idx == CHANNEL_SELECT_INDEX_SELF {\n" ++
         "      got_a = got_a + 1;\n" ++
-        "    } elif idx == channel_select_index_other() {\n" ++
+        "    } elif idx == CHANNEL_SELECT_INDEX_OTHER {\n" ++
         "      got_b = got_b + 1;\n" ++
         "    } else {\n" ++
         "      got_c = got_c + 1;\n" ++
@@ -4059,7 +4059,7 @@ test "channel select3 rr stress drains all values with expected statuses" {
         "  num ok_sum = 0;\n" ++
         "  if sum == 659700 { ok_sum = 1; }\n" ++
         "  num ok_done = 0;\n" ++
-        "  if rc_done == channel_rc_closed() { ok_done = 1; }\n" ++
+        "  if rc_done == CHANNEL_RC_CLOSED { ok_done = 1; }\n" ++
         "  printf(\"%lld|%lld|%lld|%lld|%lld\", ok_a, ok_b, ok_c, ok_sum, ok_done);\n" ++
         "  _ = a.destroy();\n" ++
         "  _ = b.destroy();\n" ++
@@ -4103,14 +4103,14 @@ test "channel default and cancel select stress stays stable" {
         "  Channel<num> a = channel_new(0);\n" ++
         "  Channel<num> b = channel_new(0);\n" ++
         "  num out = 0;\n" ++
-        "  num idx = channel_select_index_default();\n" ++
+        "  num idx = CHANNEL_SELECT_INDEX_DEFAULT;\n" ++
         "  num i = 0;\n" ++
         "  num ok_default = 1;\n" ++
         "  for i < 300 {\n" ++
         "    num rc = a.select_recv_default_with(&b, &out, &idx);\n" ++
-        "    if rc != channel_rc_default() {\n" ++
+        "    if rc != CHANNEL_RC_DEFAULT {\n" ++
         "      ok_default = 0;\n" ++
-        "    } elif idx != channel_select_index_default() {\n" ++
+        "    } elif idx != CHANNEL_SELECT_INDEX_DEFAULT {\n" ++
         "      ok_default = 0;\n" ++
         "    }\n" ++
         "    i = i + 1;\n" ++
@@ -4120,9 +4120,9 @@ test "channel default and cancel select stress stays stable" {
         "  num ok_cancel = 1;\n" ++
         "  for i < 300 {\n" ++
         "    num rc = a.select_recv_timeout_with_tuning_cancel(&b, &out, &idx, 5, -1, -1, &cancel);\n" ++
-        "    if rc != channel_rc_cancelled() {\n" ++
+        "    if rc != CHANNEL_RC_CANCELLED {\n" ++
         "      ok_cancel = 0;\n" ++
-        "    } elif idx != channel_select_index_default() {\n" ++
+        "    } elif idx != CHANNEL_SELECT_INDEX_DEFAULT {\n" ++
         "      ok_cancel = 0;\n" ++
         "    }\n" ++
         "    i = i + 1;\n" ++
@@ -4212,15 +4212,15 @@ test "channel pthread close race under contention" {
         "  SenderCtx* ctx = (SenderCtx*)arg;\n" ++
         "  for (long long i = 0; i < 10000; ++i) {\n" ++
         "    long long rc = Channel__num__try_send(ctx->ch, i);\n" ++
-        "    if (rc == channel_rc_ok()) {\n" ++
+        "    if (rc == CHANNEL_RC_OK) {\n" ++
         "      atomic_fetch_add(ctx->sends_ok, 1);\n" ++
         "      continue;\n" ++
         "    }\n" ++
-        "    if (rc == channel_rc_full()) {\n" ++
+        "    if (rc == CHANNEL_RC_FULL) {\n" ++
         "      spin_pause();\n" ++
         "      continue;\n" ++
         "    }\n" ++
-        "    if (rc == channel_rc_closed()) {\n" ++
+        "    if (rc == CHANNEL_RC_CLOSED) {\n" ++
         "      break;\n" ++
         "    }\n" ++
         "    atomic_fetch_add(ctx->bad_rc, 1);\n" ++
@@ -4234,15 +4234,15 @@ test "channel pthread close race under contention" {
         "  for (long long i = 0; i < 10000; ++i) {\n" ++
         "    long long out = 0;\n" ++
         "    long long rc = Channel__num__try_recv(ctx->ch, &out);\n" ++
-        "    if (rc == channel_rc_ok()) {\n" ++
+        "    if (rc == CHANNEL_RC_OK) {\n" ++
         "      atomic_fetch_add(ctx->recvs_ok, 1);\n" ++
         "      continue;\n" ++
         "    }\n" ++
-        "    if (rc == channel_rc_empty()) {\n" ++
+        "    if (rc == CHANNEL_RC_EMPTY) {\n" ++
         "      spin_pause();\n" ++
         "      continue;\n" ++
         "    }\n" ++
-        "    if (rc == channel_rc_closed()) {\n" ++
+        "    if (rc == CHANNEL_RC_CLOSED) {\n" ++
         "      break;\n" ++
         "    }\n" ++
         "    atomic_fetch_add(ctx->bad_rc, 1);\n" ++
@@ -4321,7 +4321,7 @@ test "channel pthread close race under contention" {
         "  long long len = Channel__num__len(&ch);\n" ++
         "\n" ++
         "  long long ok_close = 0;\n" ++
-        "  if (close_code == channel_rc_ok()) {\n" ++
+        "  if (close_code == CHANNEL_RC_OK) {\n" ++
         "    ok_close = 1;\n" ++
         "  }\n" ++
         "\n" ++
@@ -4417,7 +4417,7 @@ test "channel pthread cancelled-token contention is stable" {
         "  TokenSenderCtx* ctx = (TokenSenderCtx*)arg;\n" ++
         "  for (long long i = 0; i < 1000; ++i) {\n" ++
         "    long long rc = Channel__num__send_timeout_with_token(&ctx->ch, i, 0, &ctx->token);\n" ++
-        "    if (rc == channel_rc_cancelled()) {\n" ++
+        "    if (rc == CHANNEL_RC_CANCELLED) {\n" ++
         "      atomic_fetch_add(ctx->cancelled, 1);\n" ++
         "      continue;\n" ++
         "    }\n" ++
@@ -4432,7 +4432,7 @@ test "channel pthread cancelled-token contention is stable" {
         "  for (long long i = 0; i < 1000; ++i) {\n" ++
         "    long long out = 0;\n" ++
         "    long long rc = Channel__num__recv_timeout_into_with_token(&ctx->ch, &out, 0, &ctx->token);\n" ++
-        "    if (rc == channel_rc_cancelled()) {\n" ++
+        "    if (rc == CHANNEL_RC_CANCELLED) {\n" ++
         "      atomic_fetch_add(ctx->cancelled, 1);\n" ++
         "      continue;\n" ++
         "    }\n" ++
@@ -10405,7 +10405,7 @@ test "fuzz blocks: parse with fixed raw*/num parameter types, and an ordinary co
     // must not affect or appear in a normal compile's output.
     const input =
         "imp std.c.io;\n\n" ++
-        "fuzz \"parses without crashing\" (data, len) {\n" ++
+        "fuzz \"parses without crashing\" (raw* data, num len) {\n" ++
         "  if len > 0 {\n" ++
         "    printf(\"nonempty\\n\");\n" ++
         "  }\n" ++
@@ -10448,7 +10448,7 @@ test "fuzz mode: a bare 'ret;' inside the body compiles as 'return 0;', not inva
     // `int main(void)` wrapper (`self.in_main`, see `emit_fuzz_mode_harness`).
     const input =
         "imp std.c.io;\n\n" ++
-        "fuzz \"early-returns on empty input\" (data, len) {\n" ++
+        "fuzz \"early-returns on empty input\" (raw* data, num len) {\n" ++
         "  if len == 0 {\n" ++
         "    ret;\n" ++
         "  }\n" ++
@@ -10505,7 +10505,7 @@ test "fuzz mode: single target auto-selected, harness aliases data/len and omits
     // the output at all.
     const input =
         "imp std.c.io;\n\n" ++
-        "fuzz \"reports large lengths\" (data, len) {\n" ++
+        "fuzz \"reports large lengths\" (raw* data, num len) {\n" ++
         "  if len > 3 {\n" ++
         "    printf(\"large\\n\");\n" ++
         "  } else {\n" ++
@@ -10560,10 +10560,10 @@ test "fuzz mode: -fuzz-target selects among multiple declared fuzz blocks" {
 
     const input =
         "imp std.c.io;\n\n" ++
-        "fuzz \"target one\" (data, len) {\n" ++
+        "fuzz \"target one\" (raw* data, num len) {\n" ++
         "  printf(\"one\\n\");\n" ++
         "}\n\n" ++
-        "fuzz \"target two\" (data, len) {\n" ++
+        "fuzz \"target two\" (raw* data, num len) {\n" ++
         "  printf(\"two\\n\");\n" ++
         "}\n";
 
@@ -10606,14 +10606,14 @@ test "fuzz mode: no target declared, ambiguous target, and unknown -fuzz-target 
 
     try std.testing.expectError(error.TypeMismatch, runTranspileFuzzMode(allocator, "codegen_fuzz_ambiguous.fn",
         \\imp std.c.io;
-        \\fuzz "a" (data, len) { printf("a\n"); }
-        \\fuzz "b" (data, len) { printf("b\n"); }
+        \\fuzz "a" (raw* data, num len) { printf("a\n"); }
+        \\fuzz "b" (raw* data, num len) { printf("b\n"); }
         \\
     , null));
 
     try std.testing.expectError(error.TypeMismatch, runTranspileFuzzMode(allocator, "codegen_fuzz_unknown.fn",
         \\imp std.c.io;
-        \\fuzz "a" (data, len) { printf("a\n"); }
+        \\fuzz "a" (raw* data, num len) { printf("a\n"); }
         \\
     , "nonexistent"));
 }
@@ -10718,4 +10718,199 @@ test "test blocks: a failing assert is isolated, other tests still run" {
     try std.testing.expect(std.mem.indexOf(u8, result.stdout, "test: fails ... FAIL") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.stdout, "test: also passes ... PASS") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.stdout, "2/3 tests passed") != null);
+}
+
+test "const local with type inference emits C const qualifier and runs correctly" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_const_local_infer.fn";
+    const c_path = "codegen_const_local_infer.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_const_local_infer.exe" else "codegen_const_local_infer";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() num {\n" ++
+        "  const answer = 42;\n" ++
+        "  printf(\"%lld\\n\", answer);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "const int64_t answer = 42") != null);
+
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+
+    try std.testing.expectEqualStrings("42\n", stdout);
+}
+
+test "const local with explicit type emits C const qualifier" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_const_local_explicit.fn";
+    const input =
+        "fun main() num {\n" ++
+        "  const num max = 100;\n" ++
+        "  ret max;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "const int64_t max = 100") != null);
+}
+
+test "pub const at top level with both syntax forms emits C const qualifier" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_const_top_level.fn";
+    const input =
+        "pub const MAX = 10;\n" ++
+        "pub const num MIN = 0;\n" ++
+        "fun main() num {\n" ++
+        "  ret MAX - MIN;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "const int64_t MAX = 10") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "const int64_t MIN = 0") != null);
+}
+
+test "const pointer declaration places const after the stars in generated C" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_const_pointer.fn";
+    const input =
+        "fun main() num {\n" ++
+        "  num n = 5;\n" ++
+        "  const num* p = &n;\n" ++
+        "  ret *p;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    // "the pointer binding is immutable" (`T* const`), never "the pointee is
+    // immutable" (`const T*`) -- the latter is a stricter, wrong guarantee.
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "int64_t* const p") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "const int64_t* p") == null);
+}
+
+test "const declaration without initializer is a parse error" {
+    const allocator = std.testing.allocator;
+    const input =
+        "fun main() num {\n" ++
+        "  const num x;\n" ++
+        "  ret x;\n" ++
+        "}\n";
+
+    try runTranspileExpectFailure(allocator, "codegen_const_no_init.fn", input);
+}
+
+test "explicit generic call args resolve a type param with no argument to infer it from" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_explicit_generic_call.fn";
+    const c_path = "codegen_explicit_generic_call.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_explicit_generic_call.exe" else "codegen_explicit_generic_call";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // `E` appears only in the return type -- no argument carries it, so
+    // ordinary inference from call arguments can never bind it. Explicit
+    // generic args (`make<num, MyErrorKind>(42)`) are the only way to call
+    // this without going through the `.Ok(...)` shorthand.
+    const input =
+        "imp std.c.io;\n" ++
+        "imp std.result;\n" ++
+        "enum MyErrorKind { BadInput, Timeout }\n" ++
+        "pub fun make<T, E>(T value) Result<T, E> {\n" ++
+        "  ret .Ok(value);\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  Result<num, MyErrorKind> r = make<num, MyErrorKind>(42);\n" ++
+        "  fit r {\n" ++
+        "    Result.Ok(v) -> { printf(\"ok %lld\\n\", v); }\n" ++
+        "    Result.Err(e) -> { printf(\"err\\n\"); }\n" ++
+        "  }\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+
+    try std.testing.expectEqualStrings("ok 42\n", stdout);
+}
+
+test "explicit generic call with wrong argument count is a type error" {
+    const allocator = std.testing.allocator;
+    const input =
+        "fun make<T, E>(T value) T {\n" ++
+        "  ret value;\n" ++
+        "}\n" ++
+        "fun main() num {\n" ++
+        "  ret make<num>(42);\n" ++
+        "}\n";
+
+    try runTranspileExpectFailure(allocator, "codegen_explicit_generic_call_arity.fn", input);
+}
+
+test "global const referenced from a function defined earlier in the file forward-declares correctly" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_global_const_forward_ref.fn";
+    const c_path = "codegen_global_const_forward_ref.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_global_const_forward_ref.exe" else "codegen_global_const_forward_ref";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    // A function TEXTUALLY earlier than the global const it references --
+    // regression test for the missing extern-forward-declaration bug: C
+    // requires a global to be declared before use, and only FUNCTIONS got a
+    // forward-declaration pass; a global referenced from code emitted ahead
+    // of its own declaration (this ordering, or an async-lowered function
+    // body) hit a raw "undeclared identifier" from the C compiler.
+    const input =
+        "imp std.c.io;\n" ++
+        "fun uses_const() num { ret MAX; }\n" ++
+        "const num MAX = 7;\n" ++
+        "fun main() num {\n" ++
+        "  printf(\"%lld\\n\", uses_const());\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+
+    try std.testing.expectEqualStrings("7\n", stdout);
 }

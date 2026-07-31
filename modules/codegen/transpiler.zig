@@ -4838,6 +4838,22 @@ pub const TranspileProcess = struct {
             return null;
         }
 
+        /// Looks up `name`'s own DECLARING node (the `.Variable` node this
+        /// binding was registered from — see `put_current_decl`), without
+        /// marking it used (unlike `get`) — used by `check_const_reassignment`
+        /// to read the declaration's own `is_const` flag, a check that
+        /// shouldn't itself count as a "read" of the binding.
+        fn get_decl_node(self: *TypeEnv, name: []const u8) ?*ast.Node {
+            var i: usize = self.scopes.items.len;
+            while (i > 0) : (i -= 1) {
+                var scope_map = &self.scopes.items[i - 1];
+                if (scope_map.getPtr(name)) |binding| {
+                    return binding.decl_node;
+                }
+            }
+            return null;
+        }
+
         fn set_type_params(self: *TypeEnv, params: ?[]const []const u8) void {
             self.type_params = params;
         }
@@ -5859,15 +5875,15 @@ pub const TranspileProcess = struct {
                 // require a named receiver" (a blank dot-path misread as a
                 // method-call receiver).
                 if (self.lookup_enum_ctor_override(node)) |mangled| {
-                    const prefix_len = path.enum_name.len + 2; // "Enum__"
-                    if (mangled.len > prefix_len and mem.startsWith(u8, mangled, path.enum_name) and mem.eql(u8, mangled[path.enum_name.len .. path.enum_name.len + 2], "__")) {
-                        const concrete_name = mangled[prefix_len..];
-                        if (self.expected_enum_name(.{ .base = .Unknown, .name = concrete_name })) |enum_name| {
+                    if (self.resolve_fit_payload_dtype(mangled, ptypes[i])) |concrete| {
+                        const concrete_t = try self.type_from_dtype_with_mangled(concrete);
+                        if (self.expected_enum_name(concrete_t)) |enum_name| {
                             if (dot_shorthand_variant_name(arg)) |_| {
                                 _ = try self.resolve_dot_shorthand_enum_variant(arg, enum_name);
                             } else {
                                 try self.resolve_shorthand_enum_call(arg, enum_name);
                             }
+                            try self.bind_enum_ctor_expected(arg, concrete_t);
                         }
                     }
                 }
@@ -6652,6 +6668,32 @@ pub const TranspileProcess = struct {
             if (self.find_function_node_proc(child, name)) |found| return found;
         }
         return null;
+    }
+
+    fn find_global_variable_node_proc(self: *Self, proc: *Self, name: []const u8) ?*ast.Node {
+        for (proc.nodes.items()) |*n| {
+            if (n.type != .Variable or n.node_variant == null) continue;
+            if (mem.eql(u8, n.node_variant.?.variable.name.items, name)) return n;
+        }
+        for (proc.children.items) |child| {
+            if (self.find_global_variable_node_proc(child, name)) |found| return found;
+        }
+        return null;
+    }
+
+    /// Finds a top-level (module-scope) `.Variable` declaration node by name
+    /// — the GLOBAL-scope counterpart of `find_function_node`, same "current
+    /// module first, then whole-program" search order. Needed by
+    /// `check_const_reassignment` because a global's OWN `TypeEnv` binding
+    /// (`global_env` in `typecheck_module`) is scoped to the MODULE-level
+    /// pass only — every function body typechecks under its own completely
+    /// fresh `TypeEnv` that never inherits it, so a global referenced from
+    /// inside a function body has no `env`-visible declaration node to
+    /// check `is_const` against without this fallback.
+    fn find_global_variable_node(self: *Self, name: []const u8) ?*ast.Node {
+        if (self.find_global_variable_node_proc(self, name)) |found| return found;
+        const root = self.get_root();
+        return self.find_global_variable_node_proc(root, name);
     }
 
     fn find_function_node(self: *Self, name: []const u8) ?*ast.Node {
@@ -7762,6 +7804,32 @@ pub const TranspileProcess = struct {
         }
     }
 
+    /// Reports a type error when `left` (an assignment's own target) is a
+    /// bare identifier resolving to a `const`-declared binding — `const`'s
+    /// whole point is that its own binding is never reassignable after its
+    /// one (required) initializer. Looked up via `env` (the SAME `TypeEnv`
+    /// walk `infer_expr_type` itself uses for a plain identifier, see
+    /// `TypeEnv.get_decl_node`) rather than `self.get_scope_entity` — the
+    /// latter reflects PARSE-time scope, not the typecheck-time scope this
+    /// runs under, and a local's own parse-time scope entity is long gone by
+    /// the time a function body is typechecked. `node` is the whole
+    /// assignment expression, used only for the diagnostic's own position.
+    /// Deliberately narrow: only a DIRECT `name = ...` target is checked
+    /// here, not a field/index/dereference through one (`p.x = 5;` where `p`
+    /// is const, e.g.) — enforcing const-ness through an arbitrary chain
+    /// would need tracking it on every intermediate type, not just the leaf
+    /// binding.
+    fn check_const_reassignment(self: *Self, node: ast.Node, left: *ast.Node, env: *TypeEnv) TranspileError!void {
+        if (left.*.type != .Identifier or left.*.data == null) return;
+        const name = left.*.data.?.sval.items;
+        const decl = env.get_decl_node(name) orelse self.find_global_variable_node(name) orelse return;
+        if (decl.type != .Variable or decl.node_variant == null) return;
+        if (decl.node_variant.?.variable.is_const) {
+            self.report_type_error(node, "cannot assign to const '{s}'", .{name});
+            return TranspileError.TypeMismatch;
+        }
+    }
+
     fn infer_expr_type(self: *Self, node: ast.Node, env: *TypeEnv, fns: *const std.StringHashMap(FnSig)) TranspileError!CheckedType {
         if (self.recursion_depth >= max_expr_recursion_depth) {
             self.report_type_error(node, "expression nests too deeply for the compiler to analyze (limit {d})", .{max_expr_recursion_depth});
@@ -8732,6 +8800,23 @@ pub const TranspileProcess = struct {
                             var bindings = std.StringHashMap(*dtype.DataType).init(self.allocator);
                             defer bindings.deinit();
 
+                            // Explicit generic type arguments (`ok<num, MyErrorKind>(42)`)
+                            // pre-seed the bindings map -- needed for a param like `E`
+                            // that appears only in the return type, with no argument
+                            // value to infer it from. The argument-inference loop below
+                            // still runs and, via `bind_generic_param`'s "already bound"
+                            // branch, VALIDATES each inferred arg type against these
+                            // rather than silently trusting them.
+                            if (exp.generic_args) |explicit_gargs| {
+                                if (explicit_gargs.count != params_ptr.count) {
+                                    self.report_type_error(node, "call to '{s}' provides {d} explicit generic argument(s), expected {d}", .{ callee_name.?, explicit_gargs.count, params_ptr.count });
+                                    return TranspileError.TypeMismatch;
+                                }
+                                for (params_ptr.items(), 0..) |p, gi| {
+                                    bindings.put(p.items, explicit_gargs.items()[gi]) catch return TranspileError.MemoryAllocationFailed;
+                                }
+                            }
+
                             const expected_items = if (fnv.args) |args| args.items() else &[_]*ast.Node{};
                             const fixed_len = expected_items.len;
                             // Trailing params may carry a default (`fun f<T>(Node<T>* head, bin
@@ -9197,6 +9282,7 @@ pub const TranspileProcess = struct {
                 if (is_assign) {
                     const left = exp.left orelse return .{ .base = .Unknown };
                     const right = exp.right orelse return .{ .base = .Unknown };
+                    try self.check_const_reassignment(node, left, env);
                     const lt = try self.infer_expr_type(left.*, env, fns);
                     // Enum shorthand assignment: `c = .Blue`.
                     // Resolve the shorthand before inferring RHS type.
@@ -18029,6 +18115,18 @@ pub const TranspileProcess = struct {
             try self.emit_function_prototypes_all();
         }
 
+        // Emit forward declarations (`extern ...;`) for all top-level global
+        // variables/constants, mirroring the function-prototype pass above --
+        // unlike functions, a global's C definition previously had no
+        // forward-declared form at all, so any earlier-emitted code (e.g. an
+        // async function's lowered body, which is written out ahead of the
+        // module's ordinary top-level declarations) referencing a global/const
+        // declared later in program order hit a raw "undeclared identifier"
+        // from the C compiler.
+        if (!self.is_importing) {
+            try self.emit_global_variable_prototypes_all();
+        }
+
         // Emit impl method bodies/vtables/coercions after the prototype block.
         if (!self.is_importing) {
             try self.emit_impls_and_vtables();
@@ -18354,6 +18452,117 @@ pub const TranspileProcess = struct {
         for (proc.children.items) |child| {
             try self.emit_function_prototypes_module(child, emitted);
         }
+    }
+
+    fn emit_global_variable_prototypes_all(self: *Self) TranspileError!void {
+        // Only the root module emits this block.
+        if (self.is_importing) return;
+        try self.write("\n// Global variable/constant forward declarations (allow out-of-order references)\n");
+        var emitted = std.StringHashMap(bool).init(self.backing_allocator);
+        defer {
+            var it = emitted.iterator();
+            while (it.next()) |e| {
+                self.backing_allocator.free(e.key_ptr.*);
+            }
+            emitted.deinit();
+        }
+        try self.emit_global_variable_prototypes_module(self, &emitted);
+        try self.write("\n");
+    }
+
+    fn emit_global_variable_prototypes_module(self: *Self, proc: *Self, emitted: *std.StringHashMap(bool)) TranspileError!void {
+        for (proc.nodes.items()) |node| {
+            if (node.type != .Variable or node.node_variant == null) continue;
+            const variable = node.node_variant.?.variable;
+            const name = variable.name.items;
+
+            if (emitted.contains(name)) continue;
+            const emitted_key = self.backing_allocator.dupe(u8, name) catch return TranspileError.MemoryAllocationFailed;
+            emitted.put(emitted_key, true) catch return TranspileError.MemoryAllocationFailed;
+
+            try self.write_global_variable_prototype(node);
+        }
+
+        for (proc.children.items) |child| {
+            try self.emit_global_variable_prototypes_module(child, emitted);
+        }
+    }
+
+    /// Forward-declares a top-level global variable/constant (`extern ...;`),
+    /// mirroring the const/pointer-placement and array-declarator logic in the
+    /// `.Variable` case of `transpile_node` (see the comment there for why
+    /// `const` lands after the pointer stars for a pointer-typed binding).
+    fn write_global_variable_prototype(self: *Self, node: ast.Node) TranspileError!void {
+        if (node.type != .Variable or node.node_variant == null) return;
+        const variable = node.node_variant.?.variable;
+
+        if (variable.type.fn_sig) |sig| {
+            try self.write("extern ");
+            try self.write_type(sig.rtype.*);
+            try self.write(" (*");
+            try self.write(variable.name.items);
+            try self.write(")(");
+            for (sig.params.items(), 0..) |p, i| {
+                if (i > 0) try self.write(", ");
+                try self.write_type(p.*);
+            }
+            try self.write(");\n");
+            return;
+        }
+
+        const array_as_pointer = blk: {
+            if (variable.type.flags == null or !variable.type.flags.?.is_array) break :blk false;
+            const unsized = (variable.type.array == null or variable.type.array.?.brackets.is_empty()) and variable.type.array_depth <= 1;
+            if (!unsized) break :blk false;
+            const val = variable.val orelse break :blk false;
+            break :blk val.type != .Bracket;
+        };
+
+        const is_ptr_binding = variable.type.pointer_depth > 0 or
+            (variable.type.flags != null and variable.type.flags.?.is_pointer) or
+            array_as_pointer;
+
+        try self.write("extern ");
+        if (variable.is_const and !is_ptr_binding) try self.write("const ");
+        try self.write_type(variable.type.*);
+        if (array_as_pointer) try self.write("*");
+        if (variable.is_const and is_ptr_binding) try self.write(" const");
+        try self.write(" ");
+        try self.write(variable.name.items);
+
+        if (!array_as_pointer and variable.type.flags != null and variable.type.flags.?.is_array) {
+            if (variable.type.array) |array| {
+                if (!array.brackets.is_empty()) {
+                    for (array.brackets.items()) |bracket_node| {
+                        try self.write("[");
+                        if (bracket_node.type == .Bracket) {
+                            try self.transpile_node(bracket_node.node_variant.?.bracket.inner.*);
+                        } else {
+                            try self.transpile_node(bracket_node);
+                        }
+                        try self.write("]");
+                    }
+                } else {
+                    try self.write("[]");
+                }
+            } else if (variable.type.array_depth > 1) {
+                try self.write("[]");
+                if (variable.val) |val| {
+                    if (val.type == .Bracket) {
+                        try self.emit_multidim_inner_declarators(val, variable.type.array_depth - 1);
+                    } else {
+                        var d: usize = 1;
+                        while (d < variable.type.array_depth) : (d += 1) try self.write("[]");
+                    }
+                } else {
+                    var d: usize = 1;
+                    while (d < variable.type.array_depth) : (d += 1) try self.write("[]");
+                }
+            } else {
+                try self.write("[]");
+            }
+        }
+        try self.write(";\n");
     }
 
     fn emit_generic_function_prototypes(self: *Self, emitted: *std.StringHashMap(bool)) TranspileError!void {
@@ -20960,8 +21169,22 @@ pub const TranspileProcess = struct {
                     break :blk val.type != .Bracket;
                 };
 
+                // `const` on a POINTER-typed binding must land AFTER the
+                // pointer star(s) (`Type* const name`, "the pointer itself
+                // can't be reassigned") rather than before the base type
+                // (`const Type* name`, "what it points to can't be mutated"
+                // — a C pointer-to-const, a DIFFERENT and stricter guarantee
+                // than what `const`'s own reassignment check enforces —
+                // would wrongly reject legitimate writes through the
+                // pointee). A non-pointer binding has no such ambiguity:
+                // `const Type name` already means the whole value.
+                const is_ptr_binding = variable.type.pointer_depth > 0 or
+                    (variable.type.flags != null and variable.type.flags.?.is_pointer) or
+                    array_as_pointer;
+                if (variable.is_const and !is_ptr_binding) try self.write("const ");
                 try self.write_type(variable.type.*);
                 if (array_as_pointer) try self.write("*");
+                if (variable.is_const and is_ptr_binding) try self.write(" const");
                 try self.write(" ");
                 try self.write(variable.name.items);
 

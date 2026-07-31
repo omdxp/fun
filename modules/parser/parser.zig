@@ -109,6 +109,16 @@ pub const ParseProcess = struct {
     /// the condition is parsed, and the type-checker enforces correctness.
     in_fit_condition: bool = false,
 
+    /// Explicit generic type arguments (`ok<num, MyErrorKind>(...)`) parsed at
+    /// an identifier expression site, waiting to be attached to the call
+    /// expression built by the immediately-following `parse_for_parenthesis`.
+    /// Set only in the narrow window between consuming `name<T1,T2>` and
+    /// consuming the `(` that must follow it (see `parse_expressionable`'s
+    /// `.Identifier` case); always consumed (set back to `null`) by
+    /// `parse_for_parenthesis` before it returns, so it never leaks across
+    /// unrelated calls.
+    pending_call_generic_args: ?utils.Vector(*dtype.DataType) = null,
+
     const Self = @This();
 
     /// Initializes a new `ParseProcess` instance.
@@ -548,6 +558,72 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
+    /// Looks ahead from `start_offset` (relative to the current token cursor)
+    /// for a `<Type> [.Segment]* [<...>] [*...] [[...]] <Identifier>` pattern
+    /// — a user-defined-type declaration's own type name followed by its
+    /// variable name (`Point p;`, `alias.Type p;`, `Point<num> p;`,
+    /// `Point* p;`, `P[] pts;`, any combination). Returns the offset of the
+    /// trailing identifier (the variable's own name) when the pattern
+    /// matches, `null` otherwise — the caller decides what to do with a
+    /// match (`parse_statement`'s own local declaration detection, and
+    /// `parse_const_declaration`'s explicit-vs-inferred disambiguation
+    /// share this exact lookahead).
+    fn peek_type_then_name_offset(self: *Self, start_offset: usize) ?usize {
+        var off: usize = start_offset;
+
+        // Optional qualified type segments after the leading identifier:
+        // `alias.Type name;`
+        while (true) {
+            const dot_tok = self.token_peek_n(off) orelse break;
+            if (!(dot_tok.type == .Operator and mem.eql(u8, dot_tok.data.sval.items, "."))) break;
+
+            const seg_tok = self.token_peek_n(off + 1) orelse break;
+            if (seg_tok.type != .Identifier) break;
+            off += 2;
+        }
+
+        _ = self.skip_generic_args_tokens(&off);
+        while (true) {
+            const tn = self.token_peek_n(off);
+            if (tn == null) break;
+            if (tn.?.type == .Operator and mem.eql(u8, tn.?.data.sval.items, "*")) {
+                off += 1;
+                continue;
+            }
+            break;
+        }
+
+        // Optional array brackets after the type name: `T[] name;` or
+        // `T[64] name;`. Without skipping these, a local declaration of a
+        // user-defined array type (e.g. `P[] pts;`) was not recognized here
+        // and fell through to the expression path, which emitted the
+        // variable at file scope instead of inside the function body.
+        while (true) {
+            const tok_b = self.token_peek_n(off) orelse break;
+            if (!(tok_b.type == .Operator and mem.eql(u8, tok_b.data.sval.items, "["))) break;
+            off += 1; // skip '['
+            var closed = false;
+            while (true) {
+                const inner = self.token_peek_n(off) orelse break;
+                if (inner.type == .Symbol and inner.data.cval == ']') {
+                    off += 1; // skip ']'
+                    closed = true;
+                    break;
+                }
+                // Hitting a statement terminator before ']' means this is not a decl.
+                if (inner.type == .Symbol and inner.data.cval == ';') break;
+                off += 1;
+            }
+            if (!closed) break;
+        }
+
+        const t1 = self.token_peek_n(off);
+        if (t1 != null and t1.?.type == .Identifier) {
+            return off;
+        }
+        return null;
+    }
+
     fn parse_statement(self: *Self, hist: *utils.History) ParseError!void {
         var t = self.token_peek_next();
         if (t == null) {
@@ -581,56 +657,7 @@ pub const ParseProcess = struct {
             // treat `ident * ident` as a pointer declaration. This avoids mis-parsing
             // expression statements like `w * h;` as `w* h;`.
             if (self.transpile_proc.get_scope_entity(t.?.data.sval.items) == null) {
-                var off: usize = 1;
-
-                // Optional qualified type segments after the leading identifier:
-                // `alias.Type name;`
-                while (true) {
-                    const dot_tok = self.token_peek_n(off) orelse break;
-                    if (!(dot_tok.type == .Operator and mem.eql(u8, dot_tok.data.sval.items, "."))) break;
-
-                    const seg_tok = self.token_peek_n(off + 1) orelse break;
-                    if (seg_tok.type != .Identifier) break;
-                    off += 2;
-                }
-
-                _ = self.skip_generic_args_tokens(&off);
-                while (true) {
-                    const tn = self.token_peek_n(off);
-                    if (tn == null) break;
-                    if (tn.?.type == .Operator and mem.eql(u8, tn.?.data.sval.items, "*")) {
-                        off += 1;
-                        continue;
-                    }
-                    break;
-                }
-
-                // Optional array brackets after the type name: `T[] name;` or
-                // `T[64] name;`. Without skipping these, a local declaration of a
-                // user-defined array type (e.g. `P[] pts;`) was not recognized here
-                // and fell through to the expression path, which emitted the
-                // variable at file scope instead of inside the function body.
-                while (true) {
-                    const tok_b = self.token_peek_n(off) orelse break;
-                    if (!(tok_b.type == .Operator and mem.eql(u8, tok_b.data.sval.items, "["))) break;
-                    off += 1; // skip '['
-                    var closed = false;
-                    while (true) {
-                        const inner = self.token_peek_n(off) orelse break;
-                        if (inner.type == .Symbol and inner.data.cval == ']') {
-                            off += 1; // skip ']'
-                            closed = true;
-                            break;
-                        }
-                        // Hitting a statement terminator before ']' means this is not a decl.
-                        if (inner.type == .Symbol and inner.data.cval == ';') break;
-                        off += 1;
-                    }
-                    if (!closed) break;
-                }
-
-                const t1 = self.token_peek_n(off);
-                if (t1 != null and t1.?.type == .Identifier) {
+                if (self.peek_type_then_name_offset(1)) |_| {
                     const dt = self.transpile_proc.allocator.create(dtype.DataType) catch {
                         return ParseError.MemoryAllocationFailed;
                     };
@@ -643,7 +670,7 @@ pub const ParseProcess = struct {
                         .flags = .{},
                     };
                     try self.parse_datatype(dt);
-                    try self.parse_variable(dt, hist, false, false);
+                    try self.parse_variable(dt, hist, false, false, false);
                     try self.expect_sym(';');
                     return;
                 }
@@ -1693,6 +1720,13 @@ pub const ParseProcess = struct {
             };
             errdefer self.transpile_proc.allocator.destroy(right);
             right.* = parenthesis_node.?;
+            // Explicit generic type args parsed right before this `(` (see the
+            // `looks_like_generic_call` branch in `parse_expressionable`)
+            // belong to THIS call -- nothing can intervene between consuming
+            // `name<T1,T2>` and reaching its `(`, so the pending slot is
+            // always for the call being built right here.
+            const generic_args = self.pending_call_generic_args;
+            self.pending_call_generic_args = null;
             self.transpile_proc.nodes.push(ast.Node{
                 .type = .Expression,
                 .pos = if (lparen_token) |t| t.pos else left.*.pos,
@@ -1701,6 +1735,7 @@ pub const ParseProcess = struct {
                         .left = left,
                         .right = right,
                         .op = "()",
+                        .generic_args = generic_args,
                     },
                 },
             }) catch {
@@ -3074,10 +3109,49 @@ pub const ParseProcess = struct {
                         .flags = .{},
                     };
                     try self.parse_datatype(dt);
-                    try self.parse_variable(dt, hist, false, false);
+                    try self.parse_variable(dt, hist, false, false, false);
                     try self.expect_sym(';');
                     break :blk true;
                 }
+
+                // Explicit generic type arguments on a free-function call,
+                // `ok<num, MyErrorKind>(42)` -- for a type param that has no
+                // argument value to infer it from (e.g. an `E` used only in
+                // the RETURN type). Gated tightly (not a known local value,
+                // not right after `.`, and the base name is a known function)
+                // so an ordinary chained comparison like `a < b > (c)` is
+                // never misread: that shape requires BOTH operands to be
+                // real runtime values, which a function name never is.
+                const looks_like_generic_call = struct {
+                    fn check(p: *Self) bool {
+                        var off: usize = 1;
+                        if (!p.skip_generic_args_tokens(&off)) return false;
+                        const next_tok = p.token_peek_n(off) orelse return false;
+                        return next_tok.type == .Operator and mem.eql(u8, next_tok.data.sval.items, "(");
+                    }
+                }.check;
+
+                const is_known_function = blk4: {
+                    const hit = self.transpile_proc.global_symbols.get(t.?.data.sval.items) orelse break :blk4 false;
+                    break :blk4 hit.is_function;
+                };
+
+                if (!after_member_access and !is_value_in_scope and is_known_function and looks_like_generic_call(self)) {
+                    if (!try self.parse_identifier()) break :blk false;
+
+                    var scratch_dt = dtype.DataType{
+                        .array = null,
+                        .pointer_depth = 0,
+                        .type = .Unknown,
+                        .type_str = ArrayList(u8).init(self.transpile_proc.allocator),
+                        .flags = .{},
+                    };
+                    defer scratch_dt.type_str.deinit();
+                    try self.parse_generic_type_args(&scratch_dt);
+                    self.pending_call_generic_args = scratch_dt.generic_args;
+                    break :blk true;
+                }
+
                 break :blk try self.parse_identifier();
             },
             .Keyword => {
@@ -4125,7 +4199,7 @@ pub const ParseProcess = struct {
     /// Errors:
     /// - Returns an error if any parsing operation fails.
     /// - Logs an error message if any expected token is not found.
-    fn parse_variable(self: *Self, dt: *dtype.DataType, hist: *utils.History, is_public: bool, require_initializer: bool) ParseError!void {
+    fn parse_variable(self: *Self, dt: *dtype.DataType, hist: *utils.History, is_public: bool, require_initializer: bool, is_const: bool) ParseError!void {
         if (self.next_token_is_operator("[")) {
             try self.parse_array_brackets(dt, hist);
         }
@@ -4147,7 +4221,11 @@ pub const ParseProcess = struct {
         var value_node: ?ast.Node = null;
         const has_value = self.next_token_is_operator("=");
         if (!has_value and require_initializer) {
-            self.transpile_proc.err("'let' declarations require an initializer", .{});
+            if (is_const) {
+                self.transpile_proc.err("'const' declarations require an initializer", .{});
+            } else {
+                self.transpile_proc.err("'let' declarations require an initializer", .{});
+            }
             return ParseError.InvalidStatement;
         }
         if (has_value) {
@@ -4183,6 +4261,7 @@ pub const ParseProcess = struct {
                         .name = name,
                         .type = dt,
                         .val = val,
+                        .is_const = is_const,
                     },
                 },
             };
@@ -4266,7 +4345,7 @@ pub const ParseProcess = struct {
             .flags = .{},
         };
         try self.parse_datatype(dt);
-        try self.parse_variable(dt, hist, false, false);
+        try self.parse_variable(dt, hist, false, false, false);
     }
 
     fn parse_let_declaration(self: *Self, hist: *utils.History, is_public: bool) ParseError!void {
@@ -4290,7 +4369,81 @@ pub const ParseProcess = struct {
             return ParseError.MemoryAllocationFailed;
         };
 
-        try self.parse_variable(dt, hist, is_public, true);
+        try self.parse_variable(dt, hist, is_public, true, false);
+        try self.expect_sym(';');
+    }
+
+    /// Parses a `const` declaration in EITHER of two forms (see this
+    /// language's own `const x = 5;` / `const num x = 5;` grammar):
+    /// type-INFERRED (`const NAME = value;`, mirroring `parse_let_declaration`
+    /// exactly except immutable) or EXPLICIT-type (`const TYPE NAME = value;`,
+    /// mirroring a bare typed declaration). Disambiguated the same way
+    /// `parse_statement`'s own local-declaration detection tells a type name
+    /// apart from an ordinary identifier: a builtin datatype keyword (`num`,
+    /// `str`, ...) is unambiguous; a plain identifier needs the
+    /// `peek_type_then_name_offset` lookahead to see whether ANOTHER
+    /// identifier (the variable's own name) follows it before running into
+    /// `=` — if so, the first identifier was a user-defined TYPE name, not
+    /// the variable's own name. Valid at both top-level (global constant) and
+    /// local (function-body) scope — `parse_keyword` is the shared dispatcher
+    /// for both (see `parse_global_keyword`/`parse_statement`), so this needs
+    /// no separate global-vs-local branch of its own.
+    ///
+    /// Always requires an initializer (`require_initializer = true`): a
+    /// `const` with no value has nothing to ever be assigned, and this
+    /// codegen has no notion of a later one-time-only initialization to
+    /// enforce instead.
+    fn parse_const_declaration(self: *Self, hist: *utils.History, is_public: bool) ParseError!void {
+        const const_token = self.token_next();
+        if (const_token == null or const_token.?.type != .Keyword or !mem.eql(u8, const_token.?.data.sval.items, "const")) {
+            self.transpile_proc.err("expected keyword 'const'", .{});
+            return ParseError.InvalidKeyword;
+        }
+
+        const t = self.token_peek_next() orelse {
+            self.transpile_proc.err("expected identifier or type after 'const'", .{});
+            return ParseError.InvalidStatement;
+        };
+
+        var is_explicit_type = false;
+        if (t.type == .Keyword and utils.keyword_is_datatype(t.data.sval.items)) {
+            is_explicit_type = true;
+        } else if (t.type == .Identifier and self.peek_type_then_name_offset(1) != null) {
+            is_explicit_type = true;
+        }
+
+        if (is_explicit_type) {
+            const dt = self.transpile_proc.allocator.create(dtype.DataType) catch {
+                return ParseError.MemoryAllocationFailed;
+            };
+            dt.* = dtype.DataType{
+                .array = null,
+                .pointer_depth = 0,
+                .type = .Unknown,
+                .type_str = ArrayList(u8).init(self.transpile_proc.allocator),
+                .flags = .{},
+            };
+            try self.parse_datatype(dt);
+            try self.parse_variable(dt, hist, is_public, true, true);
+            try self.expect_sym(';');
+            return;
+        }
+
+        const dt = self.transpile_proc.allocator.create(dtype.DataType) catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+        dt.* = dtype.DataType{
+            .array = null,
+            .pointer_depth = 0,
+            .type = .Unknown,
+            .type_str = ArrayList(u8).init(self.transpile_proc.allocator),
+            .flags = .{},
+        };
+        dt.*.type_str.appendSlice("__let_infer__") catch {
+            return ParseError.MemoryAllocationFailed;
+        };
+
+        try self.parse_variable(dt, hist, is_public, true, true);
         try self.expect_sym(';');
     }
 
@@ -4566,50 +4719,25 @@ pub const ParseProcess = struct {
     /// there is no type annotation to parse, just two bare identifiers.
     /// Skipped entirely by an ordinary compile OR `fun test` mode; only
     /// emitted/run in `fun fuzz` mode.
-    /// Builds and scope-registers one of `fuzz`'s two fixed-type synthetic
-    /// parameters (see `parse_fuzz`): a `Variable` node named `param_name`
-    /// with type `type_name` at `pointer_depth`, added to the CURRENT scope
-    /// (the caller must already have pushed one) the same way
-    /// `parse_function`'s variadic `vargs` synthetic parameter registers
-    /// itself.
-    fn make_fuzz_fixed_param(self: *Self, param_name: []const u8, type_name: []const u8, pointer_depth: usize, pos: ?token.Pos) ParseError!*ast.Node {
-        const pnode = self.transpile_proc.allocator.create(ast.Node) catch {
-            return ParseError.MemoryAllocationFailed;
-        };
-        errdefer self.transpile_proc.allocator.destroy(pnode);
-        var pname = ArrayList(u8).init(self.transpile_proc.allocator);
-        pname.appendSlice(param_name) catch {
-            return ParseError.MemoryAllocationFailed;
-        };
-        const pdt = self.transpile_proc.allocator.create(dtype.DataType) catch {
-            return ParseError.MemoryAllocationFailed;
-        };
-        var ptype_str = ArrayList(u8).init(self.transpile_proc.allocator);
-        ptype_str.appendSlice(type_name) catch {
-            return ParseError.MemoryAllocationFailed;
-        };
-        pdt.* = dtype.DataType{
-            .type = utils.get_datatype_type(type_name),
-            .type_str = ptype_str,
-            .pointer_depth = pointer_depth,
-            .flags = .{ .is_pointer = pointer_depth > 0 },
-        };
-        pnode.* = ast.Node{
-            .type = .Variable,
-            .pos = pos,
-            .node_variant = .{ .variable = .{ .name = pname, .type = pdt } },
-        };
-        const scope_entity = try self.new_scope_entity(pnode, .{});
-        self.transpile_proc.owned_nodes.append(pnode) catch {
-            return ParseError.MemoryAllocationFailed;
-        };
-        errdefer _ = self.transpile_proc.owned_nodes.pop();
-        self.transpile_proc.owned_scope_entities.append(scope_entity) catch {
-            return ParseError.MemoryAllocationFailed;
-        };
-        errdefer _ = self.transpile_proc.owned_scope_entities.pop();
-        try self.transpile_proc.push_scope_entity(scope_entity);
-        return pnode;
+    /// Validates one of `fuzz`'s two parameters against its fixed
+    /// contract (see `parse_fuzz`) -- the fuzzing calling convention
+    /// (libFuzzer/AFL) always hands back a raw byte pointer + length, so
+    /// even though the parameter is now written out explicitly like an
+    /// ordinary function's, its type isn't free to vary.
+    fn check_fuzz_param_shape(self: *Self, param: *ast.Node, expected_type_name: []const u8, expected_pointer_depth: usize) ParseError!void {
+        if (param.type != .Variable or param.node_variant == null) {
+            self.transpile_proc.err("invalid 'fuzz' parameter", .{});
+            return ParseError.InvalidStatement;
+        }
+        const variable = param.node_variant.?.variable;
+        if (!mem.eql(u8, variable.type.type_str.items, expected_type_name) or variable.type.pointer_depth != expected_pointer_depth) {
+            self.transpile_proc.err("'fuzz' parameter '{s}' must be declared '{s}{s}'", .{
+                variable.name.items,
+                expected_type_name,
+                if (expected_pointer_depth > 0) "*" else "",
+            });
+            return ParseError.InvalidStatement;
+        }
     }
 
     fn parse_fuzz(self: *Self, hist: *utils.History) ParseError!void {
@@ -4628,35 +4756,26 @@ pub const ParseProcess = struct {
         _ = try self.transpile_proc.new_scope();
         errdefer self.transpile_proc.finish_scope();
 
+        // Parameters are written out explicitly, like an ordinary function's
+        // (`raw* data, num len`) rather than hidden/bare names -- the TYPES
+        // are still fixed by the fuzzing calling convention (libFuzzer/AFL
+        // always hand back a raw byte pointer + length), so this is parsed
+        // exactly like `parse_function`'s arg list and then validated
+        // against that fixed shape, not left open to arbitrary types.
         try self.expect_op("(");
-        const data_tok = self.token_next();
-        if (data_tok == null or data_tok.?.type != .Identifier) {
-            self.transpile_proc.err("expected a parameter name after 'fuzz \"name\" ('", .{});
-            return ParseError.InvalidIdentifier;
-        }
-        if (!self.next_token_is_operator(",")) {
-            self.transpile_proc.err("expected ',' between fuzz parameter names", .{});
-            return ParseError.InvalidSymbol;
-        }
-        _ = self.token_next(); // skip ,
-        const len_tok = self.token_next();
-        if (len_tok == null or len_tok.?.type != .Identifier) {
-            self.transpile_proc.err("expected a second parameter name after the comma in 'fuzz'", .{});
-            return ParseError.InvalidIdentifier;
-        }
+        var hist_args = utils.History.init(self.transpile_proc.allocator, .{});
+        defer hist_args.deinit();
+        const parsed_args = try self.parse_function_args(&hist_args);
         try self.expect_sym(')');
 
-        // Register the two fixed-type synthetic parameters into this fuzz
-        // body's own scope, the same way `parse_function`'s variadic
-        // `vargs` synthetic parameter registers itself (see
-        // `parse_function`'s own `is_variadic` branch) -- so ordinary
-        // identifier resolution inside the body just works. The resulting
-        // Variable nodes are kept (not just their bare names) so typecheck
-        // can seed them into the fuzz body's env exactly like a real
-        // function's own `args` list (see `typecheck_module`'s `.Fuzz`
-        // handling).
-        const data_param = try self.make_fuzz_fixed_param(data_tok.?.data.sval.items, "raw", 1, if (fuzz_token) |t| t.pos else null);
-        const len_param = try self.make_fuzz_fixed_param(len_tok.?.data.sval.items, "num", 0, if (fuzz_token) |t| t.pos else null);
+        if (parsed_args.is_variadic or parsed_args.args.count != 2) {
+            self.transpile_proc.err("'fuzz' requires exactly two explicitly-typed parameters: 'raw* data, num len'", .{});
+            return ParseError.InvalidStatement;
+        }
+        const data_param = parsed_args.args.items()[0];
+        const len_param = parsed_args.args.items()[1];
+        try self.check_fuzz_param_shape(data_param, "raw", 1);
+        try self.check_fuzz_param_shape(len_param, "num", 0);
 
         // A dummy function context so ordinary statement parsing (`if`/
         // `for`/`ret`/etc.) works the same inside a fuzz body as inside a
@@ -5750,13 +5869,17 @@ pub const ParseProcess = struct {
                 .flags = .{},
             };
             try self.parse_datatype(dt);
-            try self.parse_variable(dt, hist, false, false);
+            try self.parse_variable(dt, hist, false, false, false);
             try self.expect_sym(';');
             return;
         }
 
         if (mem.eql(u8, "let", sval)) {
             return try self.parse_let_declaration(hist, false);
+        }
+
+        if (mem.eql(u8, "const", sval)) {
+            return try self.parse_const_declaration(hist, false);
         }
 
         if (mem.eql(u8, "pub", sval)) {
@@ -6029,7 +6152,7 @@ pub const ParseProcess = struct {
                 var hist = utils.History.init(self.transpile_proc.allocator, .{});
                 defer hist.deinit();
                 try self.parse_datatype(dt);
-                try self.parse_variable(dt, &hist, true, false);
+                try self.parse_variable(dt, &hist, true, false, false);
                 try self.expect_sym(';');
                 return;
             }
@@ -6037,6 +6160,11 @@ pub const ParseProcess = struct {
                 var hist = utils.History.init(self.transpile_proc.allocator, .{});
                 defer hist.deinit();
                 return try self.parse_let_declaration(&hist, true);
+            }
+            if (mem.eql(u8, "const", kw)) {
+                var hist = utils.History.init(self.transpile_proc.allocator, .{});
+                defer hist.deinit();
+                return try self.parse_const_declaration(&hist, true);
             }
             if (mem.eql(u8, "enum", kw)) {
                 return try self.parse_enum(true);
@@ -6075,7 +6203,7 @@ pub const ParseProcess = struct {
             var hist = utils.History.init(self.transpile_proc.allocator, .{});
             defer hist.deinit();
             try self.parse_datatype(dt);
-            try self.parse_variable(dt, &hist, true, false);
+            try self.parse_variable(dt, &hist, true, false, false);
             try self.expect_sym(';');
             return;
         }
