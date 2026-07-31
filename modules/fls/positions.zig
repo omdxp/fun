@@ -729,9 +729,25 @@ pub fn findBestDefinitionOpts(symbols: []const SymbolLite, name: []const u8, at:
 }
 
 pub fn findAnyGlobalDefinition(symbols: []const SymbolLite, name: []const u8) ?SymbolLite {
+    return findAnyGlobalDefinitionOpts(symbols, name, true);
+}
+
+/// Like `findAnyGlobalDefinition`, but only excludes a receiver-only symbol
+/// (field/property/method/enumMember -- see `types.requiresReceiver`) when
+/// `exclude_receiver_kinds` is true. Without this, a bare DOT-SHORTHAND enum
+/// variant (`.InvalidNode` in a `fit` arm) defined in an IMPORTED file could
+/// never be found by this cross-file lookup at all -- `container_type != null`
+/// (the original, blunter check this replaces) unconditionally excluded every
+/// enum variant regardless of context, unlike the same-file lookup
+/// (`findBestDefinitionOpts`), which already conditions this exclusion on
+/// whether the identifier is actually preceded by a `.` (see that function's
+/// own doc comment for why a bare, unqualified name can never legitimately
+/// resolve to one of these, but a dot-shorthand/qualified reference must
+/// still be allowed to, as a last resort).
+pub fn findAnyGlobalDefinitionOpts(symbols: []const SymbolLite, name: []const u8, exclude_receiver_kinds: bool) ?SymbolLite {
     for (symbols) |s| {
         if (s.container_fn_range != null) continue;
-        if (s.container_type != null) continue;
+        if (exclude_receiver_kinds and types.requiresReceiver(s.kind)) continue;
         if (!std.mem.eql(u8, s.name, name)) continue;
         return s;
     }

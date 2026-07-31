@@ -135,6 +135,7 @@ const numericBuiltinRank = positions_mod.numericBuiltinRank;
 const findBestDefinition = positions_mod.findBestDefinition;
 const findBestDefinitionOpts = positions_mod.findBestDefinitionOpts;
 const findAnyGlobalDefinition = positions_mod.findAnyGlobalDefinition;
+const findAnyGlobalDefinitionOpts = positions_mod.findAnyGlobalDefinitionOpts;
 const byteIndexForPosition = positions_mod.byteIndexForPosition;
 const normalizePositionToByteColumns = positions_mod.normalizePositionToByteColumns;
 const guessIdentifierPrefix = positions_mod.guessIdentifierPrefix;
@@ -1658,7 +1659,7 @@ pub const LspServer = struct {
         // that case would turn a working (if imprecise) fallback into nothing.
         const tok_preceded_by_dot = if (findTokenIndexAt(idx.tokens, pos)) |ti| (ti > 0 and isDotToken(idx.tokens[ti - 1])) else false;
         var def_local_opt: ?SymbolLite = findBestDefinitionOpts(idx.symbols, tok.text, pos, !tok_preceded_by_dot) orelse null;
-        const def_import = if (def_local_opt == null) self.findAnyGlobalDefinitionInDirectImports(uri, tok.text) else null;
+        const def_import = if (def_local_opt == null) self.findAnyGlobalDefinitionInDirectImportsOpts(uri, tok.text, !tok_preceded_by_dot) else null;
         if (def_local_opt == null and def_import == null) {
             if (try self.trySendAliasHover(id_val, uri, idx, tok.text, tok.range)) return;
         }
@@ -3968,7 +3969,7 @@ pub const LspServer = struct {
         }
 
         // Fall back to global definition in direct imports.
-        if (self.findAnyGlobalDefinitionInDirectImports(uri, tok.text)) |hit| {
+        if (self.findAnyGlobalDefinitionInDirectImportsOpts(uri, tok.text, !def_tok_preceded_by_dot)) |hit| {
             const locs = [_]Location{.{ .uri = hit.uri, .range = hit.sym.selection_range }};
             const json = try jsonStringifyAlloc(self.allocator, locs);
             defer self.allocator.free(json);
@@ -8979,6 +8980,15 @@ pub const LspServer = struct {
     const GlobalDefHit = struct { uri: []const u8, sym: SymbolLite };
 
     fn findAnyGlobalDefinitionInDirectImports(self: *LspServer, current_uri: []const u8, name: []const u8) ?GlobalDefHit {
+        return self.findAnyGlobalDefinitionInDirectImportsOpts(current_uri, name, true);
+    }
+
+    /// Like `findAnyGlobalDefinitionInDirectImports`, but threads
+    /// `exclude_receiver_kinds` through to `findAnyGlobalDefinitionOpts` (see
+    /// its doc comment) so a caller that knows the identifier is dot-preceded
+    /// (a bare enum-variant shorthand, `.InvalidNode`) can still find it when
+    /// it's declared in an imported file.
+    fn findAnyGlobalDefinitionInDirectImportsOpts(self: *LspServer, current_uri: []const u8, name: []const u8, exclude_receiver_kinds: bool) ?GlobalDefHit {
         const doc = self.docs.get(current_uri) orelse return null;
         const idx = doc.index orelse return null;
 
@@ -8989,7 +8999,7 @@ pub const LspServer = struct {
         }
         self.collectDirectImportUris(&import_uris, current_uri, idx) catch return null;
 
-        return self.findAnyGlobalDefinitionInGivenImports(current_uri, name, import_uris.items);
+        return self.findAnyGlobalDefinitionInGivenImportsOpts(current_uri, name, import_uris.items, exclude_receiver_kinds);
     }
 
     /// Same search as `findAnyGlobalDefinitionInDirectImports`, but against an
@@ -9003,11 +9013,15 @@ pub const LspServer = struct {
     /// dominant source of `[fls:imports]` log volume during inlay-hint requests
     /// on a file with many call sites.
     fn findAnyGlobalDefinitionInGivenImports(self: *LspServer, current_uri: []const u8, name: []const u8, import_uris: []const []const u8) ?GlobalDefHit {
+        return self.findAnyGlobalDefinitionInGivenImportsOpts(current_uri, name, import_uris, true);
+    }
+
+    fn findAnyGlobalDefinitionInGivenImportsOpts(self: *LspServer, current_uri: []const u8, name: []const u8, import_uris: []const []const u8, exclude_receiver_kinds: bool) ?GlobalDefHit {
         for (import_uris) |iu| {
             self.ensureDocIndexedFromDisk(iu) catch {};
             const imported = self.docs.get(iu) orelse continue;
             const didx = imported.index orelse continue;
-            if (findAnyGlobalDefinition(didx.symbols, name)) |s| {
+            if (findAnyGlobalDefinitionOpts(didx.symbols, name, exclude_receiver_kinds)) |s| {
                 if (!self.isSymbolVisibleFromUri(current_uri, imported.uri, s)) continue;
                 return .{ .uri = imported.uri, .sym = s };
             }

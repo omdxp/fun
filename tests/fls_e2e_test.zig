@@ -2081,6 +2081,75 @@ test "fls e2e: cross-file generic fit-binding hover resolves the imported enum's
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: cross-file dot-shorthand hover resolves a plain (non-generic) enum variant" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    // A plain, non-generic enum with no-payload variants, defined in a SEPARATE
+    // file from the one that `fit`-matches it via bare dot-shorthand.
+    const mod_dir_abs = try std.fs.path.join(allocator, &[_][]const u8{ setup.root_abs, "fls_e2e_xfile_plain_enum" });
+    defer allocator.free(mod_dir_abs);
+    std.Io.Dir.createDirAbsolute(std.testing.io, mod_dir_abs, .default_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, mod_dir_abs) catch {};
+
+    const defs_abs = try std.fs.path.join(allocator, &[_][]const u8{ mod_dir_abs, "defs.fn" });
+    defer allocator.free(defs_abs);
+    {
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, defs_abs, .{ .truncate = true });
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(
+            std.testing.io,
+            "pub enum Kind {\n" ++
+                "  UnsupportedNode,\n" ++
+                "  InvalidNode,\n" ++
+                "}\n",
+        );
+    }
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "imp fls_e2e_xfile_plain_enum.defs;\n\n" ++
+        "fun describe(Kind k) str {\n" ++
+        "  fit k {\n" ++
+        "    .UnsupportedNode -> { ret \"a\"; }\n" ++
+        "    .InvalidNode -> { ret \"b\"; }\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-xfile-plain-enum-main.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // Hovering the bare `.InvalidNode` shorthand (no `Kind.` qualifier) must
+    // resolve cross-file to the imported enum's variant, not come back empty.
+    const pos = try findPosition(doc_text, ".InvalidNode", 0);
+    const hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, pos.line, pos.col + 2 },
+    );
+    defer allocator.free(hover_params);
+    // Longer budget than the usual 15000ms (matching the workspace-symbol
+    // test's own 45000ms precedent): resolving a cross-file import against
+    // the real, full repo root is measurably slower than an isolated fixture.
+    try waitForHoverContains(allocator, &lsp, hover_params, "Kind.InvalidNode", 45000);
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: query-time engine resolves a fit->let-chain->for-each binding cascade" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
