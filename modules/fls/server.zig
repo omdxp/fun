@@ -1536,6 +1536,7 @@ pub const LspServer = struct {
                                 if (variant_doc.len != 0) try buf.print("\n{s}\n", .{variant_doc});
                             }
                         }
+                        try self.appendSeeAlsoForSymbol(&buf, uri, h.sym);
                         const hover: Hover = .{ .contents = .{ .value = buf.items }, .range = tok.range };
                         const json = try jsonStringifyAlloc(self.allocator, hover);
                         defer self.allocator.free(json);
@@ -4092,9 +4093,9 @@ pub const LspServer = struct {
                     if (std.fs.path.isAbsolute(readme_path_fast)) {
                         var f = std.Io.Dir.openFileAbsolute(globalIo(), readme_path_fast, .{}) catch return false;
                         defer f.close(globalIo());
-                        break :blk fileReadAlloc(self.allocator, f, 128 * 1024) catch return false;
+                        break :blk fileReadAlloc(self.allocator, f, 4 * 1024 * 1024) catch return false;
                     }
-                    break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), readme_path_fast, self.allocator, .limited(128 * 1024)) catch return false;
+                    break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), readme_path_fast, self.allocator, .limited(4 * 1024 * 1024)) catch return false;
                 };
                 defer self.allocator.free(readme_text);
 
@@ -4427,9 +4428,9 @@ pub const LspServer = struct {
                 if (std.fs.path.isAbsolute(readme_path)) {
                     var f = std.Io.Dir.openFileAbsolute(globalIo(), readme_path, .{}) catch return false;
                     defer f.close(globalIo());
-                    break :blk fileReadAlloc(self.allocator, f, 128 * 1024) catch return false;
+                    break :blk fileReadAlloc(self.allocator, f, 4 * 1024 * 1024) catch return false;
                 }
-                break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), readme_path, self.allocator, .limited(128 * 1024)) catch return false;
+                break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), readme_path, self.allocator, .limited(4 * 1024 * 1024)) catch return false;
             };
             defer self.allocator.free(readme_text);
 
@@ -4449,9 +4450,9 @@ pub const LspServer = struct {
             if (std.fs.path.isAbsolute(module_file)) {
                 var f = std.Io.Dir.openFileAbsolute(globalIo(), module_file, .{}) catch return false;
                 defer f.close(globalIo());
-                break :blk fileReadAlloc(self.allocator, f, 128 * 1024) catch return false;
+                break :blk fileReadAlloc(self.allocator, f, 4 * 1024 * 1024) catch return false;
             }
-            break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), module_file, self.allocator, .limited(128 * 1024)) catch return false;
+            break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), module_file, self.allocator, .limited(4 * 1024 * 1024)) catch return false;
         };
         defer self.allocator.free(module_text);
 
@@ -8740,9 +8741,9 @@ pub const LspServer = struct {
                 if (std.fs.path.isAbsolute(readme_path)) {
                     var f = std.Io.Dir.openFileAbsolute(globalIo(), readme_path, .{}) catch return false;
                     defer f.close(globalIo());
-                    break :blk fileReadAlloc(self.allocator, f, 128 * 1024) catch return false;
+                    break :blk fileReadAlloc(self.allocator, f, 4 * 1024 * 1024) catch return false;
                 }
-                break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), readme_path, self.allocator, .limited(128 * 1024)) catch return false;
+                break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), readme_path, self.allocator, .limited(4 * 1024 * 1024)) catch return false;
             };
             defer self.allocator.free(readme_text);
 
@@ -8818,9 +8819,9 @@ pub const LspServer = struct {
                 if (std.fs.path.isAbsolute(readme_path)) {
                     var f = std.Io.Dir.openFileAbsolute(globalIo(), readme_path, .{}) catch return false;
                     defer f.close(globalIo());
-                    break :blk fileReadAlloc(self.allocator, f, 128 * 1024) catch return false;
+                    break :blk fileReadAlloc(self.allocator, f, 4 * 1024 * 1024) catch return false;
                 }
-                break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), readme_path, self.allocator, .limited(128 * 1024)) catch return false;
+                break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), readme_path, self.allocator, .limited(4 * 1024 * 1024)) catch return false;
             };
             defer self.allocator.free(readme_text);
 
@@ -8841,9 +8842,9 @@ pub const LspServer = struct {
             if (std.fs.path.isAbsolute(module_file)) {
                 var f = std.Io.Dir.openFileAbsolute(globalIo(), module_file, .{}) catch return false;
                 defer f.close(globalIo());
-                break :blk fileReadAlloc(self.allocator, f, 128 * 1024) catch return false;
+                break :blk fileReadAlloc(self.allocator, f, 4 * 1024 * 1024) catch return false;
             }
-            break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), module_file, self.allocator, .limited(128 * 1024)) catch return false;
+            break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), module_file, self.allocator, .limited(4 * 1024 * 1024)) catch return false;
         };
         defer self.allocator.free(module_text);
 
@@ -9327,9 +9328,9 @@ pub const LspServer = struct {
             if (std.fs.path.isAbsolute(readme_path)) {
                 var f = std.Io.Dir.openFileAbsolute(globalIo(), readme_path, .{}) catch return false;
                 defer f.close(globalIo());
-                break :blk fileReadAlloc(self.allocator, f, 128 * 1024) catch return false;
+                break :blk fileReadAlloc(self.allocator, f, 4 * 1024 * 1024) catch return false;
             }
-            break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), readme_path, self.allocator, .limited(128 * 1024)) catch return false;
+            break :blk std.Io.Dir.cwd().readFileAlloc(globalIo(), readme_path, self.allocator, .limited(4 * 1024 * 1024)) catch return false;
         };
         defer self.allocator.free(readme_text);
 

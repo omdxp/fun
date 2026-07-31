@@ -2952,6 +2952,138 @@ test "fls e2e: custom import namespace hover shows README" {
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: import module-doc hover works for a module file larger than the old 128KB cap" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    const mod_dir_abs = try std.fs.path.join(allocator, &[_][]const u8{ setup.root_abs, "biglib" });
+    defer allocator.free(mod_dir_abs);
+    std.Io.Dir.createDirAbsolute(std.testing.io, mod_dir_abs, .default_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, mod_dir_abs) catch {};
+
+    // A module file whose leading doc comment is genuine, but whose TOTAL size
+    // exceeds the old 128KB read cap (`fileReadAlloc`/`readFileAlloc` used to
+    // fail outright past that limit, silently falling through to an empty
+    // hover instead of showing the leading doc -- found via a real
+    // self-hosted compiler module, `selfhost/codegen/codegen.fn`, which is
+    // itself well past 128KB).
+    const big_abs = try std.fs.path.join(allocator, &[_][]const u8{ mod_dir_abs, "big.fn" });
+    defer allocator.free(big_abs);
+    {
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, big_abs, .{ .truncate = true });
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(std.testing.io, "// A big module that exceeds the old 128KB read cap.\n");
+        var i: usize = 0;
+        while (i < 5000) : (i += 1) {
+            try f.writeStreamingAll(std.testing.io, "fun pad_filler() num { ret 0; }\n");
+        }
+    }
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "imp biglib.big;\n\n" ++
+        "fun main() {\n" ++
+        "  ret;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-big-module-hover.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const pos = try findPosition(doc_text, "biglib.big", 0);
+    const hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, pos.line, pos.col + @as(i64, @intCast("biglib.".len)) },
+    );
+    defer allocator.free(hover_params);
+
+    try waitForHoverContains(allocator, &lsp, hover_params, "A big module that exceeds the old 128KB read cap", 30000);
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: dot-shorthand hover on every plain enum variant shows 'See also', not just some" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const defs_text =
+        "pub enum Kind {\n" ++
+        "  First,\n" ++
+        "  Second,\n" ++
+        "}\n";
+    const defs_abs = try std.fs.path.join(allocator, &[_][]const u8{ setup.root_abs, "fls_e2e_enum_seealso_defs.fn" });
+    defer allocator.free(defs_abs);
+    {
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, defs_abs, .{ .truncate = true });
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(std.testing.io, defs_text);
+    }
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, defs_abs) catch {};
+
+    const doc_text =
+        "imp fls_e2e_enum_seealso_defs;\n\n" ++
+        "fun describe(Kind k) str {\n" ++
+        "  fit k {\n" ++
+        "    .First -> { ret \"a\"; }\n" ++
+        "    .Second -> { ret \"b\"; }\n" ++
+        "  }\n" ++
+        "}\n";
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-enum-seealso-main.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // Both bare dot-shorthand variants -- the FIRST one declared (`First`, which
+    // resolves via the early "enum dot-shorthand hover" fast path in
+    // handleHover) and the SECOND (`Second`) -- must both show a "See also"
+    // link back to the enum, not just whichever one happens to resolve
+    // through a later fallback path that already called
+    // appendSeeAlsoForSymbol.
+    const first_pos = try findPosition(doc_text, ".First ->", 0);
+    const first_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, first_pos.line, first_pos.col + 1 },
+    );
+    defer allocator.free(first_params);
+    try waitForHoverContains(allocator, &lsp, first_params, "See also", 30000);
+
+    const second_pos = try findPosition(doc_text, ".Second ->", 0);
+    const second_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, second_pos.line, second_pos.col + 1 },
+    );
+    defer allocator.free(second_params);
+    try waitForHoverContains(allocator, &lsp, second_params, "See also", 30000);
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: typing with CRLF positions stays consistent" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
