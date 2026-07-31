@@ -652,11 +652,25 @@ pub fn numericBuiltinRank(name: []const u8) u8 {
 }
 
 pub fn findBestDefinition(symbols: []const SymbolLite, name: []const u8, at: Position) ?SymbolLite {
+    return findBestDefinitionOpts(symbols, name, at, false);
+}
+
+/// Same as `findBestDefinition`, but when `exclude_receiver_kinds` is true,
+/// a field/property/method/enum variant can never match -- those all
+/// require a receiver, so a BARE identifier (no preceding `.`) reference can
+/// never legitimately resolve to one. Without this, e.g. a compound field
+/// could shadow an unrelated free function/global of the same name (`Lexer.len`
+/// vs. the free function `len()`). Only bare-identifier callers should pass
+/// `true`: other callers (e.g. resolving an already-qualified `a.b` receiver,
+/// or a `.Variant` dot-shorthand) legitimately need `.enumMember`/`.field`
+/// results.
+pub fn findBestDefinitionOpts(symbols: []const SymbolLite, name: []const u8, at: Position, exclude_receiver_kinds: bool) ?SymbolLite {
     var best_local: ?SymbolLite = null;
     var best_global: ?SymbolLite = null;
 
     for (symbols) |s| {
         if (!std.mem.eql(u8, s.name, name)) continue;
+        if (exclude_receiver_kinds and types.requiresReceiver(s.kind)) continue;
 
         if (s.container_fn_range) |cr| {
             if (!posInRange(at, cr)) continue;
@@ -677,12 +691,21 @@ pub fn findBestDefinition(symbols: []const SymbolLite, name: []const u8, at: Pos
 
         for (symbols) |s| {
             if (!std.mem.eql(u8, s.name, name)) continue;
+            if (exclude_receiver_kinds and types.requiresReceiver(s.kind)) continue;
             if (s.container_fn_range) |cr| {
                 if (!posInRange(at, cr)) continue;
             } else {
                 continue;
             }
             if (!rangeStartLessOrEqual(s.selection_range, at)) continue;
+            // Never let a declaration EARLIER than the positionally-correct
+            // `bl` (a shadowed sibling from an already-exited block -- fls
+            // only tracks function-wide scope, not real block scope) win via
+            // the "prefer a more resolved type" heuristics below. Those exist
+            // to pick between two records of the SAME declaration (e.g. a
+            // placeholder vs. a later-resolved type), not to reach backward
+            // past a real, more recent shadowing declaration.
+            if (rangeStartGreater(bl.selection_range, s.selection_range)) continue;
 
             if (preferDetailedSymbol(s, best)) {
                 best = s;

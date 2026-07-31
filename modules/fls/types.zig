@@ -167,6 +167,28 @@ pub const SymbolKind = enum(i64) {
     typeParameter = 26,
 };
 
+/// `const` declarations are tagged `.constant` (so they get their own outline
+/// icon and aren't hidden the way plain globals are), but everywhere else --
+/// hover, goto-definition, completion, type inference -- they should be
+/// treated exactly like an ordinary `.variable`.
+pub fn isVariableLike(kind: SymbolKind) bool {
+    return kind == .variable or kind == .constant;
+}
+
+/// True for symbol kinds that can ONLY be referenced through a receiver/
+/// qualifier (`recv.field`, `recv.method()`, `EnumName.Variant` or its `.`
+/// shorthand) -- never as a bare, unqualified identifier. Callers must only
+/// apply this exclusion when the identifier being looked up is ACTUALLY not
+/// preceded by a `.` (see the call sites in server.zig): a truly bare name
+/// (`len(...)`) can never legitimately resolve to one of these (e.g. a
+/// compound's `len` field shadowing the free function `len()`), but a
+/// QUALIFIED reference (`p.translate`, `.Variant`) reaching this same
+/// fallback because its OWN dedicated resolution path failed should still be
+/// allowed to match one, as a last resort.
+pub fn requiresReceiver(kind: SymbolKind) bool {
+    return kind == .field or kind == .property or kind == .method or kind == .enumMember;
+}
+
 pub const SymbolLite = struct {
     name: []const u8,
     kind: SymbolKind,

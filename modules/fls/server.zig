@@ -133,6 +133,7 @@ const preferDetailedSymbol = positions_mod.preferDetailedSymbol;
 const hasNonBuiltinValueType = positions_mod.hasNonBuiltinValueType;
 const numericBuiltinRank = positions_mod.numericBuiltinRank;
 const findBestDefinition = positions_mod.findBestDefinition;
+const findBestDefinitionOpts = positions_mod.findBestDefinitionOpts;
 const findAnyGlobalDefinition = positions_mod.findAnyGlobalDefinition;
 const byteIndexForPosition = positions_mod.byteIndexForPosition;
 const normalizePositionToByteColumns = positions_mod.normalizePositionToByteColumns;
@@ -1647,7 +1648,16 @@ pub const LspServer = struct {
         }
 
         // Prefer definition in current doc; else search direct imports.
-        var def_local_opt: ?SymbolLite = findBestDefinition(idx.symbols, tok.text, pos) orelse null;
+        // Exclude field/property/method matches ONLY when `tok` isn't itself
+        // preceded by a `.` -- a truly bare, unqualified name (`len(...)`)
+        // can never legitimately resolve to one of those (see
+        // `types.requiresReceiver`), but a QUALIFIED reference (`p.translate`)
+        // reaches this fallback only when its dedicated member-chain
+        // resolution above already failed, and historically still found the
+        // right symbol here as a last resort -- excluding receiver-kinds in
+        // that case would turn a working (if imprecise) fallback into nothing.
+        const tok_preceded_by_dot = if (findTokenIndexAt(idx.tokens, pos)) |ti| (ti > 0 and isDotToken(idx.tokens[ti - 1])) else false;
+        var def_local_opt: ?SymbolLite = findBestDefinitionOpts(idx.symbols, tok.text, pos, !tok_preceded_by_dot) orelse null;
         const def_import = if (def_local_opt == null) self.findAnyGlobalDefinitionInDirectImports(uri, tok.text) else null;
         if (def_local_opt == null and def_import == null) {
             if (try self.trySendAliasHover(id_val, uri, idx, tok.text, tok.range)) return;
@@ -1668,11 +1678,12 @@ pub const LspServer = struct {
 
         const pickBestLocal = struct {
             fn call(symbols: []const SymbolLite, name: []const u8, at: Position) ?SymbolLite {
+                // Pass 1: the positionally-correct candidate -- the most
+                // recent matching declaration at or before `at`, ignoring
+                // type-based preferences entirely.
                 var best: ?SymbolLite = null;
-                var best_non_builtin: ?SymbolLite = null;
-                var best_rank: u8 = 0;
                 for (symbols) |s| {
-                    if (s.kind != .variable) continue;
+                    if (!types.isVariableLike(s.kind)) continue;
                     if (!std.mem.eql(u8, s.name, name)) continue;
                     if (s.container_fn_range) |cr| {
                         if (!posInRange(at, cr)) continue;
@@ -1686,6 +1697,30 @@ pub const LspServer = struct {
                     {
                         best = s;
                     }
+                }
+                const bl = best orelse return null;
+
+                // Pass 2: prefer a more-resolved type (numeric widening, or a
+                // non-builtin type over a placeholder) but ONLY among
+                // candidates at `bl`'s position or later -- these heuristics
+                // exist to pick between two RECORDS OF THE SAME declaration
+                // (e.g. a placeholder vs. its later-resolved type), not to
+                // reach backward past `bl` into an already-exited block's
+                // shadowed sibling (fls only tracks function-wide scope, not
+                // real block scope, so an earlier same-named local is always
+                // still "in range" here even when it's really out of scope).
+                var best_rank: u8 = if (bl.value_type) |vt| numericBuiltinRank(vt) else 0;
+                var best_non_builtin: ?SymbolLite = null;
+                for (symbols) |s| {
+                    if (!types.isVariableLike(s.kind)) continue;
+                    if (!std.mem.eql(u8, s.name, name)) continue;
+                    if (s.container_fn_range) |cr| {
+                        if (!posInRange(at, cr)) continue;
+                    } else {
+                        continue;
+                    }
+                    if (!rangeStartLessOrEqual(s.selection_range, at)) continue;
+                    if (rangeStartGreater(bl.selection_range, s.selection_range)) continue;
 
                     if (s.value_type) |vt| {
                         const rank = numericBuiltinRank(vt);
@@ -1708,20 +1743,27 @@ pub const LspServer = struct {
         }.call;
 
         if (def_local_opt) |d| {
-            if (d.kind == .variable) {
+            if (types.isVariableLike(d.kind)) {
                 if (pickBestLocal(idx.symbols, tok.text, pos)) |picked| {
                     def_local_opt = picked;
                 }
 
+                // Same "prefer a more-resolved type" heuristic as
+                // `pickBestLocal`'s pass 2, and the same fix: never let it
+                // reach backward past the CURRENT (already position-correct)
+                // `def_local_opt` into an earlier, shadowed sibling.
+                const bl = def_local_opt.?;
                 var best_non_builtin: ?SymbolLite = null;
                 for (idx.symbols) |cand| {
-                    if (cand.kind != .variable) continue;
+                    if (!types.isVariableLike(cand.kind)) continue;
                     if (!std.mem.eql(u8, cand.name, tok.text)) continue;
                     if (cand.container_fn_range) |cr| {
                         if (!posInRange(pos, cr)) continue;
                     } else {
                         continue;
                     }
+                    if (!rangeStartLessOrEqual(cand.selection_range, pos)) continue;
+                    if (rangeStartGreater(bl.selection_range, cand.selection_range)) continue;
                     if (!hasNonBuiltinValueType(cand)) continue;
                     if (best_non_builtin == null or preferDetailedSymbol(cand, best_non_builtin.?)) {
                         best_non_builtin = cand;
@@ -1733,7 +1775,7 @@ pub const LspServer = struct {
             }
         }
 
-        if (self.debug_definitions and def_local_opt != null and def_local_opt.?.kind == .variable) {
+        if (self.debug_definitions and def_local_opt != null and types.isVariableLike(def_local_opt.?.kind)) {
             const d = def_local_opt.?;
             self.dbg(true, "defs", "hover pick name={s} detail={s} value_type={s} decl=({d},{d}) sel=({d},{d})", .{
                 d.name,
@@ -1747,7 +1789,7 @@ pub const LspServer = struct {
         }
 
         if (def_local_opt) |d| {
-            const let_infer_detail = d.kind == .variable and ((d.value_type != null and isLetInferTypeName(d.value_type.?)) or
+            const let_infer_detail = types.isVariableLike(d.kind) and ((d.value_type != null and isLetInferTypeName(d.value_type.?)) or
                 (d.detail != null and std.mem.startsWith(u8, d.detail.?, "__let_infer__")));
             if (d.detail) |det| {
                 if (let_infer_detail) {
@@ -1771,7 +1813,7 @@ pub const LspServer = struct {
                     }
                 }
             }
-            if (d.kind == .variable and (d.detail == null or let_infer_detail)) {
+            if (types.isVariableLike(d.kind) and (d.detail == null or let_infer_detail)) {
                 // `guessVariableType` now also resolves `fit`-arm payload bindings
                 // (incl. imported generic enums), so a single call covers all cases.
                 const vt = d.value_type orelse self.guessVariableType(idx, uri, tok.text, pos);
@@ -1834,7 +1876,7 @@ pub const LspServer = struct {
                 }
             }
             if (!printed_detail) {
-                if (d.kind == .variable) {
+                if (types.isVariableLike(d.kind)) {
                     const vt = d.value_type orelse self.guessVariableType(idx, uri, tok.text, pos);
                     if (vt) |vts| {
                         try buf.print("```fun\n{s} {s}\n```\n", .{ vts, tok.text });
@@ -3911,8 +3953,11 @@ pub const LspServer = struct {
             return;
         }
 
-        // Prefer definition in the current document.
-        if (findBestDefinition(idx.symbols, tok.text, pos)) |def| {
+        // Prefer definition in the current document. Same "only exclude
+        // receiver-kinds for a truly bare, unqualified name" reasoning as
+        // the hover dispatch above (see the comment there).
+        const def_tok_preceded_by_dot = tok_i > 0 and isDotToken(idx.tokens[tok_i - 1]);
+        if (findBestDefinitionOpts(idx.symbols, tok.text, pos, !def_tok_preceded_by_dot)) |def| {
             const locs = [_]Location{.{ .uri = uri, .range = def.selection_range }};
             const json = try jsonStringifyAlloc(self.allocator, locs);
             defer self.allocator.free(json);
@@ -4665,7 +4710,7 @@ pub const LspServer = struct {
             .kind = kind,
             .detail = blk: {
                 if (s.detail) |d| break :blk try self.allocator.dupe(u8, d);
-                if (s.kind == .variable) {
+                if (types.isVariableLike(s.kind)) {
                     if (s.value_type) |vt| {
                         if (!isLetInferTypeName(vt)) break :blk try self.allocator.dupe(u8, vt);
                     }
@@ -4819,7 +4864,7 @@ pub const LspServer = struct {
     fn guessVariableType(self: *LspServer, idx: *const Index, preferred_uri: []const u8, var_name: []const u8, at: Position) ?[]const u8 {
         // Prefer symbol table (locals + globals) when available.
         if (findBestDefinition(idx.symbols, var_name, at)) |d| {
-            if (d.kind == .variable) {
+            if (types.isVariableLike(d.kind)) {
                 if (d.value_type) |vt| {
                     if (!isLetInferTypeName(vt)) return vt;
                 }
@@ -8600,7 +8645,7 @@ pub const LspServer = struct {
 
             if (sym.detail) |det| {
                 try buf.print("```fun\n{s}\n```\n", .{det});
-            } else if (sym.kind == .variable) {
+            } else if (types.isVariableLike(sym.kind)) {
                 if (sym.value_type) |vt| {
                     try buf.print("```fun\n{s} {s}\n```\n", .{ vt, symbol_name });
                 } else {
@@ -10516,7 +10561,7 @@ pub const LspServer = struct {
             var changed = false;
 
             for (idx.symbols) |*s| {
-                if (s.kind != .variable) continue;
+                if (!types.isVariableLike(s.kind)) continue;
 
                 const existing_vt_opt = s.value_type;
                 if (existing_vt_opt) |existing_vt| {

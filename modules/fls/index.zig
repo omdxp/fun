@@ -1031,6 +1031,49 @@ test "fls index: let locals infer types" {
     try std.testing.expect(found_s);
 }
 
+test "fls index: top-level and local const are tagged as constant symbols with types" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const text =
+        "pub const MAX = 10;\n" ++
+        "const num MIN = 0;\n" ++
+        "fun main() {\n" ++
+        "  const local_max = MAX;\n" ++
+        "  num counter = local_max;\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found_max = false;
+    var found_min = false;
+    var found_local_max = false;
+
+    for (idx.symbols) |s| {
+        if (!types.isVariableLike(s.kind)) continue;
+        if (std.mem.eql(u8, s.name, "MAX") and s.container_fn_range == null) {
+            found_max = true;
+            try std.testing.expectEqual(types.SymbolKind.constant, s.kind);
+        }
+        if (std.mem.eql(u8, s.name, "MIN") and s.container_fn_range == null) {
+            found_min = true;
+            try std.testing.expectEqual(types.SymbolKind.constant, s.kind);
+            try std.testing.expect(s.value_type != null);
+            try std.testing.expect(std.mem.eql(u8, s.value_type.?, "num"));
+        }
+        if (std.mem.eql(u8, s.name, "local_max") and s.container_fn_range != null) {
+            found_local_max = true;
+            try std.testing.expectEqual(types.SymbolKind.constant, s.kind);
+        }
+    }
+
+    try std.testing.expect(found_max);
+    try std.testing.expect(found_min);
+    try std.testing.expect(found_local_max);
+}
+
 test "fls index: compound array fields are indexed" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
@@ -1633,4 +1676,80 @@ test "fls index: known lowercase C typedef names get type-color semantic tokens,
     }
     try std.testing.expect(checked_param_type);
     try std.testing.expect(checked_local_decl_type);
+}
+
+test "fls index: an enum whose last variant has no trailing comma does not leak variant-scanning into the rest of the file" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Regression: the bare-variant terminator branch jumped straight to
+    // `after_name_i` (the `}`) and then `continue`d, so the loop's own
+    // `:(k += 1)` stepped PAST that `}` without ever running it through the
+    // `depth -= 1` check. With no trailing comma on the last variant (the
+    // common style -- see `Unexpected` below), `depth` never dropped back
+    // to 0 for THIS enum's own body, so the scanner kept running past it and
+    // misread the next `identifier(...)` shape found ANYWHERE later in the
+    // file (here, the plain function `error_new_kind`) as one more
+    // data-carrying variant of `ErrorKind`.
+    const text =
+        "enum ErrorKind {\n" ++
+        "  None,\n" ++
+        "  Io,\n" ++
+        "  System\n" ++ // no trailing comma
+        "}\n" ++
+        "compound Error {\n" ++
+        "  ErrorKind kind;\n" ++
+        "  num code;\n" ++
+        "  str message;\n" ++
+        "}\n" ++
+        "fun error_new_kind(ErrorKind kind, num code, str message) Error {\n" ++
+        "  Error e;\n" ++
+        "  e.kind = kind;\n" ++
+        "  e.code = code;\n" ++
+        "  e.message = message;\n" ++
+        "  ret e;\n" ++
+        "}\n" ++
+        "fun error_new(num code, str message) Error {\n" ++
+        "  ret error_new_kind(.System, code, message);\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found_fn = false;
+    for (idx.symbols) |s| {
+        if (!std.mem.eql(u8, s.name, "error_new_kind")) continue;
+        found_fn = true;
+        try std.testing.expectEqual(types.SymbolKind.function, s.kind);
+        try std.testing.expect(s.container_type == null);
+    }
+    try std.testing.expect(found_fn);
+}
+
+test "fls index: an enum variant with an explicit value and no trailing comma does not leak either" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const text =
+        "enum Status {\n" ++
+        "  Ok = 0,\n" ++
+        "  Failed = 1\n" ++ // no trailing comma
+        "}\n" ++
+        "fun make_status(num code) num {\n" ++
+        "  ret code;\n" ++
+        "}\n";
+
+    const idx = try buildIndexFromText(allocator, text);
+    defer idx.deinit();
+
+    var found_fn = false;
+    for (idx.symbols) |s| {
+        if (!std.mem.eql(u8, s.name, "make_status")) continue;
+        found_fn = true;
+        try std.testing.expectEqual(types.SymbolKind.function, s.kind);
+        try std.testing.expect(s.container_type == null);
+    }
+    try std.testing.expect(found_fn);
 }

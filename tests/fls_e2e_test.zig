@@ -7360,3 +7360,284 @@ test "fls e2e: dot-shorthand completion at a call-arg boundary narrows to the ex
     shutdown_res.deinit();
     try lsp.notify("exit", "{}");
 }
+
+test "fls e2e: a plain function call is not mistaken for a variant of an earlier enum with no trailing comma" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    // Regression (real repro from stdlib/std/error.fn): `ErrorKind`'s last
+    // variant has no trailing comma before its closing `}` -- the token-based
+    // enum-variant scanner's bare-variant branch used to skip past that `}`
+    // without ever accounting for it in its own brace-depth tracking, so it
+    // kept scanning past the enum's own body and misread the next
+    // `identifier(...)` shape anywhere later in the file (here,
+    // `error_new_kind`, an ordinary function) as one more data-carrying
+    // `ErrorKind` variant. Hovering `error_new_kind` showed
+    // `ErrorKind.error_new_kind(...)` instead of its real function signature.
+    const err_abs = try std.fs.path.join(allocator, &[_][]const u8{ setup.root_abs, "stdlib", "std", "error.fn" });
+    defer allocator.free(err_abs);
+    const doc_text = blk: {
+        var f = try std.Io.Dir.openFileAbsolute(std.testing.io, err_abs, .{});
+        defer f.close(std.testing.io);
+        break :blk try blk2: {
+            var _rb: [65536]u8 = undefined;
+            var _fr = f.reader(std.testing.io, &_rb);
+            break :blk2 _fr.interface.allocRemaining(allocator, .limited(1024 * 1024));
+        };
+    };
+    defer allocator.free(doc_text);
+    const doc_uri = try pathToFileUriAlloc(allocator, err_abs);
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const pos = try findPosition(doc_text, "error_new_kind(.System", 0);
+    const params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, pos.line, pos.col + 3 },
+    );
+    defer allocator.free(params);
+    const hid = try lsp.request("textDocument/hover", params);
+    var res = try lsp.waitResponse(hid, 15000);
+    defer res.deinit();
+    const val = try jsonResultFromResponseObj(res.parsed.value.object);
+
+    try expectHoverContains(allocator, val, "fun error_new_kind(ErrorKind kind, num code, str message) Error");
+    try expectHoverNotContains(allocator, val, "ErrorKind.error_new_kind");
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: a bare call is not shadowed by an unrelated compound field of the same name" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    // Regression (real repro from selfhost/lexer/lexer.fn): `Lexer` has a
+    // field named `len`, and the body separately calls the free function
+    // `len(src)`. A bare identifier (no preceding `.`) must never resolve to
+    // a field/property/method/enum variant -- those all require a receiver
+    // -- but `findBestDefinition` had no such exclusion, so whichever
+    // same-named symbol happened to be indexed could win. Hovering the bare
+    // `len(` call showed the FIELD's type (`num`) instead of the function's
+    // signature, with no go-to-definition to the function.
+    const doc_text =
+        "imp std.c.io;\n" ++
+        "imp std.string;\n\n" ++
+        "compound Lexer {\n" ++
+        "  str src;\n" ++
+        "  num len;\n" ++
+        "}\n\n" ++
+        "fun lexer_new(str src) Lexer {\n" ++
+        "  Lexer l;\n" ++
+        "  l.src = src;\n" ++
+        "  l.len = len(src);\n" ++
+        "  ret l;\n" ++
+        "}\n\n" ++
+        "fun main() num {\n" ++
+        "  Lexer l = lexer_new(\"hi\");\n" ++
+        "  printf(\"%lld\\n\", l.len);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-len-field-vs-fn.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const pos = try findPosition(doc_text, "len(src)", 0);
+    const hover_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, pos.line, pos.col + 1 },
+    );
+    defer allocator.free(hover_params);
+    const hid = try lsp.request("textDocument/hover", hover_params);
+    var hover_res = try lsp.waitResponse(hid, 15000);
+    defer hover_res.deinit();
+    const hover_val = try jsonResultFromResponseObj(hover_res.parsed.value.object);
+    try expectHoverContains(allocator, hover_val, "fun len(str s) num");
+
+    const def_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, pos.line, pos.col + 1 },
+    );
+    defer allocator.free(def_params);
+    const did = try lsp.request("textDocument/definition", def_params);
+    var def_res = try lsp.waitResponse(did, 15000);
+    defer def_res.deinit();
+    const def_val = try jsonResultFromResponseObj(def_res.parsed.value.object);
+    // stdlib/std/string.fn:152: `pub fun len(str s) num {` (0-indexed line
+    // 151, `len` starting at character 8 after `pub fun `).
+    try expectDefinitionPointsTo(allocator, def_val, "string.fn", 151, 8);
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: a local shadowing an earlier same-named local in an exited block hovers its own type" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    // Regression (real repro from selfhost/lexer/lexer.fn:365): fls only
+    // tracks function-WIDE scope, not real block scope, so two same-named
+    // locals in sibling blocks of the same function (the first exits via
+    // `ret` before the second is ever reached) both look "in range" for the
+    // whole function. The "prefer a more-resolved/non-builtin type" hover
+    // heuristic (three separate copies: `findBestDefinition`, `pickBestLocal`,
+    // and an inline pass in `handleHover`) had no guard against reaching
+    // BACKWARD past the positionally-correct candidate, so the earlier `v`
+    // (`Result<dec, Error>`) won over the later, actually-in-scope `v`
+    // (`num`) purely because a Result type "looks more interesting" than a
+    // builtin one.
+    const doc_text =
+        "imp std.c.io;\n" ++
+        "imp std.result;\n\n" ++
+        "fun try_parse_dec(str s) Result<dec, Error> {\n" ++
+        "  ret .Ok(1.5);\n" ++
+        "}\n\n" ++
+        "fun try_parse_int(str s) Result<num, Error> {\n" ++
+        "  ret .Ok(1);\n" ++
+        "}\n\n" ++
+        "fun check(str number_str, bin has_dot) num {\n" ++
+        "  if has_dot {\n" ++
+        "    let v = try_parse_dec(number_str);\n" ++
+        "    if v.is_err() { ret -1; }\n" ++
+        "    ret 0;\n" ++
+        "  }\n" ++
+        "  let iv = try_parse_int(number_str);\n" ++
+        "  num v = iv.unwrap();\n" ++
+        "  ret v;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-shadowed-local.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const pos = try findPosition(doc_text, "num v = iv.unwrap()", 0);
+    const params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, pos.line, pos.col + @as(i64, @intCast("num ".len)) },
+    );
+    defer allocator.free(params);
+    const hid = try lsp.request("textDocument/hover", params);
+    var res = try lsp.waitResponse(hid, 15000);
+    defer res.deinit();
+    const val = try jsonResultFromResponseObj(res.parsed.value.object);
+
+    try expectHoverContains(allocator, val, "num v");
+    try expectHoverNotContains(allocator, val, "Result");
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: a function-type parameter's nested `fun(...)` does not clobber the enclosing method" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    // Regression (real repro from selfhost/lexer/lexer.fn's `_read_while`):
+    // a function-TYPE parameter (`fun(chr) bin pred`) has its OWN nested
+    // `fun` keyword. The top-level scanner treated EVERY `fun` token as the
+    // start of a new top-level declaration and unconditionally reset all
+    // pending-declaration state, so the nested `fun` inside `read_while`'s
+    // own parameter list wiped out `read_while`'s in-progress params AND its
+    // impl-method ownership before either was ever flushed at the method's
+    // `{`. Two symptoms from the same root cause: `pred` hovered as a bare
+    // `bin` (losing the callable shape entirely) instead of
+    // `fun(chr) bin`, and the implicit `self` local silently never existed
+    // inside `read_while`'s body at all.
+    const doc_text =
+        "imp std.c.io;\n\n" ++
+        "compound Reader {\n" ++
+        "  str src;\n" ++
+        "  num pos;\n" ++
+        "}\n\n" ++
+        "impl Reader {\n" ++
+        "  read_while(fun(chr) bin pred) str {\n" ++
+        "    if pred('a') && self.pos < 1 { ret \"yes\"; }\n" ++
+        "    ret \"no\";\n" ++
+        "  }\n" ++
+        "}\n\n" ++
+        "fun is_digit_chr(chr c) bin { ret c >= '0' && c <= '9'; }\n\n" ++
+        "fun main() num {\n" ++
+        "  Reader r;\n" ++
+        "  let s = r.read_while(is_digit_chr);\n" ++
+        "  printf(\"%s\\n\", s);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-fn-type-param.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const pred_pos = try findPosition(doc_text, "pred('a')", 0);
+    const pred_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, pred_pos.line, pred_pos.col + 1 },
+    );
+    defer allocator.free(pred_params);
+    const pred_hid = try lsp.request("textDocument/hover", pred_params);
+    var pred_res = try lsp.waitResponse(pred_hid, 15000);
+    defer pred_res.deinit();
+    const pred_val = try jsonResultFromResponseObj(pred_res.parsed.value.object);
+    try expectHoverContains(allocator, pred_val, "fun(chr) bin pred");
+
+    const self_pos = try findPosition(doc_text, "self.pos", 0);
+    const self_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, self_pos.line, self_pos.col + 1 },
+    );
+    defer allocator.free(self_params);
+    const self_hid = try lsp.request("textDocument/hover", self_params);
+    var self_res = try lsp.waitResponse(self_hid, 15000);
+    defer self_res.deinit();
+    const self_val = try jsonResultFromResponseObj(self_res.parsed.value.object);
+    try expectHoverContains(allocator, self_val, "Reader*");
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}

@@ -1099,6 +1099,12 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
         }
     }.call;
 
+    const isConstToken = struct {
+        fn call(t: token.Token) bool {
+            return t.type == .Keyword and std.mem.eql(u8, tokenString(t), "const");
+        }
+    }.call;
+
     const isDotTokenAny = struct {
         fn call(t: token.Token) bool {
             if (t.type == .Symbol and t.data == .cval and t.data.cval == '.') return true;
@@ -2777,6 +2783,69 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                     pi += 1;
                     continue;
                 }
+
+                // A function-TYPE parameter: `fun(T1, T2) R name` (see
+                // `parse_fn_type_datatype` in the real parser). This doesn't
+                // start with a type token at all (`fun` is a keyword, and
+                // its own `(T1, T2)` looks like a nested parameter list), so
+                // without this branch the scan below skips straight past
+                // `fun(chr)` and finds the NEXT type-token-then-identifier
+                // pair instead -- misreading `fun(chr) bin pred` as a plain
+                // `bin pred` parameter (the return type standing in for the
+                // whole signature, losing the callable shape entirely).
+                if (isKeyword(pt, "fun")) {
+                    const lp_i = nextNonTrivialToken(tokens_, pi + 1) orelse break;
+                    if (!isPunctChar(tokens_[lp_i], '(')) {
+                        pi += 1;
+                        continue;
+                    }
+                    var sig_buf = ArrayList(u8).init(allocator_);
+                    defer sig_buf.deinit();
+                    sig_buf.appendSlice("fun(") catch {};
+
+                    var fpd: i64 = 1;
+                    var fk: usize = lp_i + 1;
+                    var wrote_arg = false;
+                    while (fk < rparen_i.? and fpd > 0) : (fk += 1) {
+                        const ftk = tokens_[fk];
+                        if (isPunctChar(ftk, '(')) fpd += 1;
+                        if (isPunctChar(ftk, ')')) {
+                            fpd -= 1;
+                            if (fpd == 0) break;
+                        }
+                        if (ftk.type == .NewLine or ftk.type == .Comment) continue;
+                        if (isPunctChar(ftk, ',')) {
+                            sig_buf.appendSlice(", ") catch {};
+                            continue;
+                        }
+                        if (wrote_arg) sig_buf.appendSlice(" ") catch {};
+                        sig_buf.appendSlice(tokenString(ftk)) catch {};
+                        wrote_arg = true;
+                    }
+                    sig_buf.appendSlice(")") catch {};
+
+                    const rt_i = nextNonTrivialToken(tokens_, fk + 1) orelse break;
+                    if (!isTypeToken(tokens_[rt_i])) {
+                        pi = rt_i;
+                        continue;
+                    }
+                    sig_buf.appendSlice(" ") catch {};
+                    sig_buf.appendSlice(tokenString(tokens_[rt_i])) catch {};
+
+                    const fname_i = nextNonTrivialToken(tokens_, rt_i + 1) orelse break;
+                    if (!isIdent(tokens_[fname_i])) {
+                        pi = fname_i;
+                        continue;
+                    }
+
+                    const sig_owned = allocator_.dupe(u8, sig_buf.items) catch continue;
+                    const fpname = tokenString(tokens_[fname_i]);
+                    const fpname_owned = allocator_.dupe(u8, fpname) catch fpname;
+                    params.append(.{ .name = fpname_owned, .dtype_base = sig_owned, .dtype_display = sig_owned }) catch {};
+                    pi = fname_i + 1;
+                    continue;
+                }
+
                 if (!isTypeToken(pt)) {
                     pi += 1;
                     continue;
@@ -3014,6 +3083,21 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
         }
 
         if (isKeyword(t, "fun")) {
+            // A function-TYPE annotation used as a PARAMETER's type
+            // (`read_while(fun(chr) bin pred)`) is not a real declaration --
+            // it's `fun` directly followed by `(` with no name in between.
+            // `parseParamsAfterLParen`'s own dedicated branch already parses
+            // this correctly when called from the enclosing declaration's
+            // param list; unconditionally resetting pending state here wiped
+            // out whatever method/function declaration was still waiting for
+            // its own `{` (e.g. clobbering `read_while`'s `pending_params`/
+            // `pending_impl_owner` before they were ever flushed), so its
+            // real params -- and the implicit `self` for impl methods --
+            // silently vanished.
+            const peek_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
+            if (isPunctChar(tokens[peek_i], '(')) {
+                continue;
+            }
             resetPendingBody(&pending_body, &pending_params, &pending_impl_owner, &pending_is_variadic);
             pending_body = .fun_decl;
             const is_public = hasPubModifierBefore(tokens, i);
@@ -3208,7 +3292,18 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                                 .value_type = try allocator.dupe(u8, owner_name),
                                 .detail = trailingCommentTextOnLine(allocator, tokens, after_name_i),
                             });
-                            k = after_name_i;
+                            // When the terminator IS the enum's own closing `}` (the
+                            // last variant, no trailing comma -- the common style),
+                            // land k one token BEFORE it so the loop's `:(k += 1)`
+                            // brings k back onto the `}` itself next iteration.
+                            // Jumping straight to `after_name_i` (as the comma/`;`
+                            // cases correctly do) skipped that `}` entirely, so
+                            // `depth` never dropped back to 0 for THIS enum's own
+                            // body -- the scanner kept running past it, silently
+                            // misreading the next `identifier(...)` it found ANYWHERE
+                            // later in the file (e.g. an ordinary function call/decl)
+                            // as one more data-carrying variant of this enum.
+                            k = if (isSymbolChar(tokens[after_name_i], '}')) after_name_i - 1 else after_name_i;
                             continue;
                         }
 
@@ -3277,7 +3372,9 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
                                     .value_type = try allocator.dupe(u8, owner_name),
                                     .detail = trailingCommentTextOnLine(allocator, tokens, m),
                                 });
-                                k = m;
+                                // Same "don't skip the enum's own closing `}`" fix as
+                                // the bare-variant case above.
+                                k = if (isSymbolChar(tokens[m], '}')) m - 1 else m;
                             }
                         }
                     }
@@ -3667,7 +3764,8 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
         // - `Type* name;` / `Type * name = ...;`
         // - `Type& name;` / `Type & name = ...;`
         // Attach locals to the enclosing `fun { ... }` body.
-        if (in_body and isLetToken(t)) {
+        if (in_body and (isLetToken(t) or isConstToken(t))) {
+            const is_const_decl = isConstToken(t);
             const name_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
             if (!isIdent(tokens[name_i])) continue;
 
@@ -3703,7 +3801,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
 
             try out.append(.{
                 .name = try allocator.dupe(u8, vname),
-                .kind = .variable,
+                .kind = if (is_const_decl) .constant else .variable,
                 .decl_range = r,
                 .selection_range = r,
                 .container_fn_range = body_range.?,
@@ -3715,12 +3813,16 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
             continue;
         }
         if (in_body and isTypeToken(t)) {
-            // Avoid `compound X`, `quirk X`, `impl X`, `fun name`.
+            // Avoid `compound X`, `quirk X`, `impl X`, `fun name`. `const <Type>
+            // name = ...` is a real (explicitly-typed) declaration, not excluded
+            // here -- it's detected below via `is_const_decl` instead.
+            var is_const_decl = false;
             if (i > 0 and tokens[i - 1].type == .Keyword) {
                 const kw = tokenString(tokens[i - 1]);
                 if (std.mem.eql(u8, kw, "compound") or std.mem.eql(u8, kw, "quirk") or std.mem.eql(u8, kw, "impl") or std.mem.eql(u8, kw, "enum") or std.mem.eql(u8, kw, "fun")) {
                     continue;
                 }
+                is_const_decl = std.mem.eql(u8, kw, "const");
             }
 
             const vtype_base_raw = tokenString(t);
@@ -3774,7 +3876,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
 
                 try out.append(.{
                     .name = try allocator.dupe(u8, vname),
-                    .kind = .variable,
+                    .kind = if (is_const_decl) .constant else .variable,
                     .decl_range = r,
                     .selection_range = r,
                     .container_fn_range = body_range.?,
@@ -3802,12 +3904,16 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
         // Best-effort top-level global variable indexing: `Type name;` or `Type name = ...;`
         // Only at top-level (brace_depth==0) and not in parameter lists (paren_depth==0).
         if (brace_depth == 0 and paren_depth == 0 and isTypeToken(t)) {
-            // Avoid `compound X`, `quirk X`, `impl X`, `fun name`.
+            // Avoid `compound X`, `quirk X`, `impl X`, `fun name`. `const <Type>
+            // name = ...` is a real (explicitly-typed) declaration, not excluded
+            // here -- it's detected below via `is_const_decl` instead.
+            var is_const_decl = false;
             if (i > 0 and tokens[i - 1].type == .Keyword) {
                 const kw = tokenString(tokens[i - 1]);
                 if (std.mem.eql(u8, kw, "compound") or std.mem.eql(u8, kw, "quirk") or std.mem.eql(u8, kw, "impl") or std.mem.eql(u8, kw, "fun")) {
                     continue;
                 }
+                is_const_decl = std.mem.eql(u8, kw, "const");
             }
 
             const vtype_raw = tokenString(t);
@@ -3853,18 +3959,76 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
 
             try out.append(.{
                 .name = try allocator.dupe(u8, vname),
-                .kind = .variable,
+                .kind = if (is_const_decl) .constant else .variable,
                 .decl_range = r,
                 .selection_range = r,
                 .container_type = null,
                 .value_type = try allocator.dupe(u8, vtype),
                 .detail = try allocator.dupe(u8, det_buf.items),
                 .is_public = blk: {
-                    const prev = prevNonTrivialToken(tokens, i) orelse break :blk false;
+                    var prev = prevNonTrivialToken(tokens, i) orelse break :blk false;
+                    // Skip back over `const` (`pub const num MIN = 0;`) to find `pub`.
+                    if (is_const_decl and isConstToken(tokens[prev])) {
+                        prev = prevNonTrivialToken(tokens, prev) orelse break :blk false;
+                    }
                     break :blk isPubToken(tokens[prev]);
                 },
             });
             putType(&globals_type_map, vname, vtype, allocator);
+            continue;
+        }
+
+        // Best-effort top-level INFERRED-type const indexing: `const NAME =
+        // <expr>;` / `pub const NAME = <expr>;`. Mirrors the local `let`/`const`
+        // inference scan above, but for globals (there is no top-level `let` --
+        // only `const` can introduce an inferred-type global).
+        if (brace_depth == 0 and paren_depth == 0 and isConstToken(t)) {
+            const name_i = nextNonTrivialToken(tokens, i + 1) orelse continue;
+            if (!isIdent(tokens[name_i])) continue;
+
+            const after_name_i = nextNonTrivialToken(tokens, name_i + 1) orelse continue;
+            if (!isPunctChar(tokens[after_name_i], '=')) continue;
+
+            var end_i = after_name_i + 1;
+            var depth: i64 = 0;
+            var generic_depth: i64 = 0;
+            while (end_i < tokens.len) : (end_i += 1) {
+                const tk = tokens[end_i];
+                if (tk.type == .NewLine or tk.type == .Comment) continue;
+                if (isPunctChar(tk, '(') or isPunctChar(tk, '[') or isSymbolChar(tk, '{')) depth += 1;
+                if (isPunctChar(tk, ')') or isPunctChar(tk, ']') or isSymbolChar(tk, '}')) depth -= 1;
+                if (isPunctChar(tk, '<')) generic_depth += 1;
+                if (isPunctChar(tk, '>') and generic_depth > 0) generic_depth -= 1;
+                if (depth <= 0 and isPunctChar(tk, ';')) break;
+            }
+
+            const vname_raw = tokenString(tokens[name_i]);
+            const vname = allocator.dupe(u8, vname_raw) catch vname_raw;
+            const r = rangeFromTokenPos(tokens[name_i].pos);
+
+            const inferred = inferExprTypeFromTokens(allocator, tokens, after_name_i + 1, end_i, &locals_type_map, &globals_type_map, out.items);
+            const value_type = if (inferred) |tname| (allocator.dupe(u8, tname) catch tname) else null;
+            const detail = if (inferred) |tname| blk: {
+                var det_buf = ArrayList(u8).init(allocator);
+                defer det_buf.deinit();
+                try det_buf.print("{s} {s}", .{ tname, vname });
+                break :blk try allocator.dupe(u8, det_buf.items);
+            } else null;
+
+            try out.append(.{
+                .name = try allocator.dupe(u8, vname),
+                .kind = .constant,
+                .decl_range = r,
+                .selection_range = r,
+                .container_type = null,
+                .value_type = value_type,
+                .detail = detail,
+                .is_public = blk: {
+                    const prev = prevNonTrivialToken(tokens, i) orelse break :blk false;
+                    break :blk isPubToken(tokens[prev]);
+                },
+            });
+            putType(&globals_type_map, vname, value_type, allocator);
             continue;
         }
     }
