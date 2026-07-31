@@ -1798,6 +1798,106 @@ test "fls e2e: hover on a dot-shorthand nested inside an enum-constructor call's
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: hover distinguishes const bindings from plain variables" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "pub const num TOP_EXPLICIT = 1;\n" ++
+        "pub const TOP_INFERRED = 2;\n\n" ++
+        "fun main() {\n" ++
+        "  const num local_explicit = 3;\n" ++
+        "  const local_inferred = 4;\n" ++
+        "  num plain = 5;\n" ++
+        "  _ = local_explicit;\n" ++
+        "  _ = local_inferred;\n" ++
+        "  _ = plain;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-const-hover.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const top_explicit_pos = try findPosition(doc_text, "TOP_EXPLICIT", 0);
+    const top_explicit_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, top_explicit_pos.line, top_explicit_pos.col },
+    );
+    defer allocator.free(top_explicit_params);
+    const top_explicit_id = try lsp.request("textDocument/hover", top_explicit_params);
+    var top_explicit_res = try lsp.waitResponse(top_explicit_id, 15000);
+    defer top_explicit_res.deinit();
+    const top_explicit_hover = try jsonResultFromResponseObj(top_explicit_res.parsed.value.object);
+    try expectHoverContains(allocator, top_explicit_hover, "const");
+
+    const top_inferred_pos = try findPosition(doc_text, "TOP_INFERRED", 0);
+    const top_inferred_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, top_inferred_pos.line, top_inferred_pos.col },
+    );
+    defer allocator.free(top_inferred_params);
+    const top_inferred_id = try lsp.request("textDocument/hover", top_inferred_params);
+    var top_inferred_res = try lsp.waitResponse(top_inferred_id, 15000);
+    defer top_inferred_res.deinit();
+    const top_inferred_hover = try jsonResultFromResponseObj(top_inferred_res.parsed.value.object);
+    try expectHoverContains(allocator, top_inferred_hover, "const");
+
+    const local_explicit_pos = try findPosition(doc_text, "local_explicit = 3", 0);
+    const local_explicit_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, local_explicit_pos.line, local_explicit_pos.col },
+    );
+    defer allocator.free(local_explicit_params);
+    const local_explicit_id = try lsp.request("textDocument/hover", local_explicit_params);
+    var local_explicit_res = try lsp.waitResponse(local_explicit_id, 15000);
+    defer local_explicit_res.deinit();
+    const local_explicit_hover = try jsonResultFromResponseObj(local_explicit_res.parsed.value.object);
+    try expectHoverContains(allocator, local_explicit_hover, "const");
+
+    const local_inferred_pos = try findPosition(doc_text, "local_inferred = 4", 0);
+    const local_inferred_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, local_inferred_pos.line, local_inferred_pos.col },
+    );
+    defer allocator.free(local_inferred_params);
+    const local_inferred_id = try lsp.request("textDocument/hover", local_inferred_params);
+    var local_inferred_res = try lsp.waitResponse(local_inferred_id, 15000);
+    defer local_inferred_res.deinit();
+    const local_inferred_hover = try jsonResultFromResponseObj(local_inferred_res.parsed.value.object);
+    try expectHoverContains(allocator, local_inferred_hover, "const");
+
+    // A plain (non-const) variable must NOT show `const` in its hover.
+    const plain_pos = try findPosition(doc_text, "plain = 5", 0);
+    const plain_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, plain_pos.line, plain_pos.col },
+    );
+    defer allocator.free(plain_params);
+    const plain_id = try lsp.request("textDocument/hover", plain_params);
+    var plain_res = try lsp.waitResponse(plain_id, 15000);
+    defer plain_res.deinit();
+    const plain_hover = try jsonResultFromResponseObj(plain_res.parsed.value.object);
+    try expectHoverNotContains(allocator, plain_hover, "const");
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: dot-shorthand in a fit whose subject is a method call returning a generic enum" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();

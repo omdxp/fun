@@ -1819,7 +1819,8 @@ pub const LspServer = struct {
                 const vt = d.value_type orelse self.guessVariableType(idx, uri, tok.text, pos);
                 if (vt) |vts| {
                     if (!isLetInferTypeName(vts)) {
-                        try buf.print("```fun\n{s} {s}\n```\n", .{ vts, tok.text });
+                        const const_prefix: []const u8 = if (d.kind == .constant) "const " else "";
+                        try buf.print("```fun\n{s}{s} {s}\n```\n", .{ const_prefix, vts, tok.text });
                     }
                 } else {
                     try buf.print("_{s}_\n", .{@tagName(d.kind)});
@@ -1879,7 +1880,8 @@ pub const LspServer = struct {
                 if (types.isVariableLike(d.kind)) {
                     const vt = d.value_type orelse self.guessVariableType(idx, uri, tok.text, pos);
                     if (vt) |vts| {
-                        try buf.print("```fun\n{s} {s}\n```\n", .{ vts, tok.text });
+                        const const_prefix: []const u8 = if (d.kind == .constant) "const " else "";
+                        try buf.print("```fun\n{s}{s} {s}\n```\n", .{ const_prefix, vts, tok.text });
                     } else {
                         try buf.print("_{s}_\n", .{@tagName(d.kind)});
                     }

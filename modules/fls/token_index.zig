@@ -3795,7 +3795,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
             const detail = if (inferred) |tname| blk: {
                 var det_buf = ArrayList(u8).init(allocator);
                 defer det_buf.deinit();
-                try det_buf.print("{s} {s}", .{ tname, vname });
+                try det_buf.print("{s}{s} {s}", .{ if (is_const_decl) "const " else "", tname, vname });
                 break :blk try allocator.dupe(u8, det_buf.items);
             } else null;
 
@@ -3872,7 +3872,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
 
                 var det_buf = ArrayList(u8).init(allocator);
                 defer det_buf.deinit();
-                try det_buf.print("{s} {s}", .{ vtype_display, vname });
+                try det_buf.print("{s}{s} {s}", .{ if (is_const_decl) "const " else "", vtype_display, vname });
 
                 try out.append(.{
                     .name = try allocator.dupe(u8, vname),
@@ -3955,7 +3955,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
 
             var det_buf = ArrayList(u8).init(allocator);
             defer det_buf.deinit();
-            try det_buf.print("{s} {s}", .{ vtype, vname });
+            try det_buf.print("{s}{s} {s}", .{ if (is_const_decl) "const " else "", vtype, vname });
 
             try out.append(.{
                 .name = try allocator.dupe(u8, vname),
@@ -4011,7 +4011,7 @@ pub fn collectSymbolsFromTokens(allocator: Allocator, out: *ArrayList(SymbolLite
             const detail = if (inferred) |tname| blk: {
                 var det_buf = ArrayList(u8).init(allocator);
                 defer det_buf.deinit();
-                try det_buf.print("{s} {s}", .{ tname, vname });
+                try det_buf.print("const {s} {s}", .{ tname, vname });
                 break :blk try allocator.dupe(u8, det_buf.items);
             } else null;
 
