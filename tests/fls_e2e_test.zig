@@ -1748,6 +1748,56 @@ test "fls e2e: enum dot shorthand completion/hover/definition" {
     try lsp.notify("exit", "{}");
 }
 
+test "fls e2e: hover on a dot-shorthand nested inside an enum-constructor call's args" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    const doc_text =
+        "imp std.option;\n" ++
+        "imp std.result;\n\n" ++
+        "pub next_or_none() Result<Option<num>, Error> {\n" ++
+        "  ret .Ok(.None);\n" ++
+        "}\n\n" ++
+        "fun main() {\n" ++
+        "  let r = next_or_none();\n" ++
+        "  _ = r;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-nested-dot-shorthand.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    // Hovering the NESTED `.None` (the payload of the outer `.Ok(...)` construction)
+    // must resolve it against `Option`, not against the outer `Result` (which has
+    // no `None` variant at all -- misattributing it there previously produced no
+    // hover), and not silently produce nothing either.
+    const none_pos = try findPosition(doc_text, ".None", 0);
+    const hover_none_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, none_pos.line, none_pos.col + 1 },
+    );
+    defer allocator.free(hover_none_params);
+    const hover_none_id = try lsp.request("textDocument/hover", hover_none_params);
+    var hover_none_res = try lsp.waitResponse(hover_none_id, 15000);
+    defer hover_none_res.deinit();
+    const hover_none_val = try jsonResultFromResponseObj(hover_none_res.parsed.value.object);
+    try expectHoverContains(allocator, hover_none_val, "Option");
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
 test "fls e2e: dot-shorthand in a fit whose subject is a method call returning a generic enum" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();

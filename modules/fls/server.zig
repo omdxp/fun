@@ -5058,6 +5058,116 @@ pub const LspServer = struct {
         return null;
     }
 
+    /// Resolves the enum a NESTED dot-shorthand argument belongs to, when it sits
+    /// directly inside an enclosing enum-variant constructor CALL's argument list
+    /// (`.Ok(.None)`'s `.None`, or the qualified `Result.Ok(.None)`). Returns null
+    /// when `dot_i` isn't inside such a call (including: not inside any call at
+    /// all, or inside a plain named function call -- that's case 1's job).
+    ///
+    /// Walks back to find the enclosing `(` and this argument's position, resolves
+    /// the callee's enum + variant, looks up that variant's payload type at this
+    /// position, and -- when the payload is a bare type parameter of the enum
+    /// (`Ok(T)` of `Result<T, E>`) -- unifies it with the enclosing FUNCTION's
+    /// declared return type's own generic args, when this construction is
+    /// directly `ret`'d as (or within) that return expression. That's the
+    /// concrete, common real case (`ret .Ok(.None);` inside a function returning
+    /// `Result<Option<Token>, Error>`); other contexts (a `let`-declared type,
+    /// an assignment) aren't unified and just fall through to null.
+    fn resolveNestedDotShorthandConstructorArgEnum(self: *LspServer, idx: *const Index, uri: []const u8, dot_i: usize) ?[]const u8 {
+        const toks = idx.tokens;
+
+        var depth: i64 = 0;
+        var arg_index: usize = 0;
+        var open_i: ?usize = null;
+        var k: isize = @as(isize, @intCast(dot_i)) - 1;
+        while (k >= 0) : (k -= 1) {
+            const t = toks[@intCast(k)];
+            if (isCloseParen(t)) {
+                depth += 1;
+                continue;
+            }
+            if (isOpenParen(t)) {
+                if (depth == 0) {
+                    open_i = @intCast(k);
+                    break;
+                }
+                depth -= 1;
+                continue;
+            }
+            if (depth == 0 and isCommaToken(t)) arg_index += 1;
+            if (depth == 0 and (t.kind == .symbol or t.kind == .operator)) {
+                const s = t.text;
+                if (std.mem.eql(u8, s, ";") or std.mem.eql(u8, s, "{") or std.mem.eql(u8, s, "}")) return null;
+            }
+        }
+        const oi = open_i orelse return null;
+
+        const callee_i = prevNonTrivialTokenLite(toks, oi) orelse return null;
+        if (toks[callee_i].kind != .identifier) return null;
+
+        var variant_name = toks[callee_i].text;
+        var enum_name: []const u8 = undefined;
+        if (variant_name.len > 1 and variant_name[0] == '.') {
+            // Combined `.Variant` token.
+            variant_name = variant_name[1..];
+            enum_name = self.guessEnumTypeForDotShorthand(uri, idx, callee_i) orelse return null;
+        } else {
+            const before_callee = prevNonTrivialTokenLite(toks, callee_i) orelse return null;
+            if (!((toks[before_callee].kind == .operator or toks[before_callee].kind == .symbol) and std.mem.eql(u8, toks[before_callee].text, "."))) {
+                return null; // plain named function call, not an enum-variant constructor.
+            }
+            const enum_tok = prevNonTrivialTokenLite(toks, before_callee);
+            if (enum_tok != null and toks[enum_tok.?].kind == .identifier) {
+                enum_name = toks[enum_tok.?].text; // qualified `Result.Ok(...)`.
+            } else {
+                enum_name = self.guessEnumTypeForDotShorthand(uri, idx, callee_i) orelse return null;
+            }
+        }
+
+        const enum_base = baseTypeNameForLookup(enum_name);
+
+        {
+            var import_uris = ArrayList([]u8).init(self.allocator);
+            defer {
+                for (import_uris.items) |u| self.allocator.free(u);
+                import_uris.deinit();
+            }
+            self.collectDirectImportUris(&import_uris, uri, idx) catch {};
+            for (import_uris.items) |iu| self.ensureDocIndexedFromDisk(iu) catch {};
+        }
+
+        const ehit = self.findEnumDefinitionAnyDoc(uri, enum_base) orelse return null;
+        const edoc = self.docs.get(ehit.uri) orelse return null;
+        const eidx = edoc.index orelse return null;
+        const payload_type = enumVariantPayloadFromDoc(self.allocator, eidx, enum_base, variant_name, arg_index) orelse return null;
+        defer self.allocator.free(payload_type);
+
+        const eparams = enumTypeParamsFromDoc(eidx, enum_base);
+        var pidx: ?usize = null;
+        for (eparams, 0..) |p, i| {
+            if (std.mem.eql(u8, p, payload_type)) {
+                pidx = i;
+                break;
+            }
+        }
+        if (pidx == null) {
+            if (self.isEnumTypeName(uri, payload_type)) return payload_type;
+            return null;
+        }
+
+        if (self.enclosingFunctionReturnTypeName(idx, oi)) |enc_base| {
+            if (std.mem.eql(u8, enc_base, enum_base)) {
+                if (self.enclosingFunctionReturnTypeGenericArgs(idx, oi)) |args| {
+                    if (pidx.? < args.len) {
+                        const arg_base = baseTypeNameForLookup(args[pidx.?]);
+                        if (self.isEnumTypeName(uri, arg_base)) return arg_base;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
     fn guessEnumTypeForDotShorthandAt(self: *LspServer, uri: []const u8, idx: *const Index, tok_i: usize) ?[]const u8 {
         var dot_i_opt: ?usize = null;
         if (idx.tokens[tok_i].kind == .identifier) {
@@ -5078,6 +5188,18 @@ pub const LspServer = struct {
 
         const dot_i = dot_i_opt.?;
         const dot_pos = idx.tokens[dot_i].range.start;
+
+        // 0) Nested-argument context: this dot-shorthand sits inside the argument
+        // list of an ENCLOSING enum-variant CONSTRUCTOR call (`.Ok(.None)`,
+        // `Result.Ok(.None)`) -- as opposed to a plain named function call
+        // (handled by case 1 below, via signature help) or a `fit`-arm PATTERN
+        // (handled by resolveFitBindingType/resolveFitVariantConcreteSig, which
+        // require a following `->`). Without this, hovering the nested shorthand
+        // argument found no enum at all (case 1's signature lookup fails since
+        // the outer callee isn't a real function once it's an enum-shorthand
+        // constructor), or case 4 below could misattribute it to the enclosing
+        // FUNCTION's own return type by walking past the unmatched `(` blindly.
+        if (self.resolveNestedDotShorthandConstructorArgEnum(idx, uri, dot_i)) |r| return r;
 
         // 1) Function-call context: use signature help to infer expected enum type.
         if (self.guessCallSignatureAt(uri, idx, dot_pos)) |sig| {
@@ -5252,12 +5374,27 @@ pub const LspServer = struct {
         // Confirm a `ret` precedes the dot in the same statement, then read the
         // enclosing function's return-type base name.
         var r: isize = @as(isize, @intCast(dot_i)) - 1;
+        var ret_ctx_pdepth: i64 = 0;
         while (r >= 0) : (r -= 1) {
             const t = idx.tokens[@intCast(r)];
             if (t.kind == .comment) continue;
             // Stop at a statement/block boundary that means we're not in a `ret` expr.
             if ((t.kind == .symbol or t.kind == .operator) and
                 (std.mem.eql(u8, t.text, ";") or std.mem.eql(u8, t.text, "{") or std.mem.eql(u8, t.text, "}"))) break;
+            if (isCloseParen(t)) {
+                ret_ctx_pdepth += 1;
+                continue;
+            }
+            if (isOpenParen(t)) {
+                // An unmatched `(` means the dot is an ARGUMENT of some call, not
+                // the direct `ret`'d expression itself -- the enclosing function's
+                // own return type doesn't govern it (case 0 above handles the
+                // enum-constructor-argument case; a plain function call is case 1's
+                // job). Don't misattribute it here.
+                if (ret_ctx_pdepth == 0) break;
+                ret_ctx_pdepth -= 1;
+                continue;
+            }
             if (t.kind == .keyword and std.mem.eql(u8, t.text, "ret")) {
                 const rt_opt = self.enclosingFunctionReturnTypeName(idx, dot_i);
                 if (self.debug_definitions) self.dbg(true, "defs", "shorthand ret-ctx: enclosing_return={s} is_enum={}", .{ rt_opt orelse "<none>", if (rt_opt) |rt| self.isEnumTypeName(uri, rt) else false });
