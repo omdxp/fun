@@ -242,7 +242,7 @@ impl Lexer {
     t.data = .Sval(b.build());
     t.pos = p;
     t.whitespace = false;
-    ret ok(t);
+    ret .Ok(t);
   }
 
   // Reads an identifier and classifies it as a boolean literal, a reserved
@@ -355,7 +355,7 @@ impl Lexer {
       }
       t.type = .Number;
       t.data = .Dec(v.unwrap());
-      ret ok(t);
+      ret .Ok(t);
     }
 
     let iv = try_parse_int(number_str);
@@ -383,7 +383,7 @@ impl Lexer {
         t.data = .Num(v);
       }
     }
-    ret ok(t);
+    ret .Ok(t);
   }
 
   // Reads an ordinary (non-hex, non-binary) numeric literal: an integer, or
@@ -424,7 +424,7 @@ impl Lexer {
     self._finish_pos(&p);
     out.pos = p;
     out.whitespace = false;
-    ret ok(out);
+    ret .Ok(out);
   }
 
   // Reads a `0x...` hex literal's digits (called right after popping the
@@ -466,13 +466,13 @@ impl Lexer {
   // sequences the original implementation's `get_escape_char` supports.
   _decode_escape_char(chr c) Result<chr, Error> {
     fit c {
-      'n' -> { ret ok('\n'); }
-      't' -> { ret ok('\t'); }
-      'r' -> { ret ok('\r'); }
-      '0' -> { ret ok('\0'); }
-      '\\' -> { ret ok('\\'); }
-      '\'' -> { ret ok('\''); }
-      '"' -> { ret ok('"'); }
+      'n' -> { ret .Ok('\n'); }
+      't' -> { ret .Ok('\t'); }
+      'r' -> { ret .Ok('\r'); }
+      '0' -> { ret .Ok('\0'); }
+      '\\' -> { ret .Ok('\\'); }
+      '\'' -> { ret .Ok('\''); }
+      '"' -> { ret .Ok('"'); }
       _ -> { ret err_kind(.Parse, "unknown escape sequence", '\0'); }
     }
   }
@@ -511,7 +511,7 @@ impl Lexer {
     t.data = .Sval(b.build());
     t.pos = p;
     t.whitespace = false;
-    ret ok(t);
+    ret .Ok(t);
   }
 
   // Reads a `'c'` character literal. Unlike string escapes, these ARE
@@ -550,7 +550,7 @@ impl Lexer {
     t.data = .Cval(value);
     t.pos = p;
     t.whitespace = false;
-    ret ok(t);
+    ret .Ok(t);
   }
 
   // Reads a single structural symbol character (`{`, `}`, `;`, `)`, `]`) as
@@ -612,7 +612,7 @@ impl Lexer {
       t.data = .Sval(text);
       t.pos = p;
       t.whitespace = false;
-      ret ok(t);
+      ret .Ok(t);
     }
 
     // Back off to the longest valid prefix, pushing back the rest.
@@ -640,7 +640,7 @@ impl Lexer {
     t.data = .Sval(substr(text, 0, keep));
     t.pos = p;
     t.whitespace = false;
-    ret ok(t);
+    ret .Ok(t);
   }
 
   // True if the most recently emitted token was a bare integer literal `0`
@@ -678,7 +678,7 @@ impl Lexer {
       .Some(t) -> { self.tokens.push(t); }
       .None -> {}
     }
-    ret ok(opt);
+    ret .Ok(opt);
   }
 
   // Does the actual dispatch work for `next()`: inspects the current
@@ -687,7 +687,7 @@ impl Lexer {
   // eventual token onto `self.tokens`.
   _next_inner() Result<Option<Token>, Error> {
     if self.pos >= self.len {
-      ret ok(.None);
+      ret .Ok(.None);
     }
 
     let c = self._peek();
@@ -707,7 +707,7 @@ impl Lexer {
       t.data = .Cval('\n');
       t.pos = p;
       t.whitespace = false;
-      ret ok(.Some(t));
+      ret .Ok(.Some(t));
     }
 
     if c == '/' {
@@ -715,7 +715,7 @@ impl Lexer {
       if nxt == '/' {
         self._advance();
         self._advance();
-        ret ok(.Some(self._read_comment_line()));
+        ret .Ok(.Some(self._read_comment_line()));
       }
       if nxt == '*' {
         self._advance();
@@ -724,13 +724,13 @@ impl Lexer {
         if r.is_err() {
           ret err_kind(.Parse, "unterminated block comment", .None);
         }
-        ret ok(.Some(r.unwrap()));
+        ret .Ok(.Some(r.unwrap()));
       }
       let r = self._read_operator();
       if r.is_err() {
         ret err_kind(.Parse, "invalid operator", .None);
       }
-      ret ok(.Some(r.unwrap()));
+      ret .Ok(.Some(r.unwrap()));
     }
 
     if c == '"' {
@@ -738,7 +738,7 @@ impl Lexer {
       if r.is_err() {
         ret err_kind(.Parse, "invalid string literal", .None);
       }
-      ret ok(.Some(r.unwrap()));
+      ret .Ok(.Some(r.unwrap()));
     }
 
     if c == '\'' {
@@ -746,7 +746,7 @@ impl Lexer {
       if r.is_err() {
         ret err_kind(.Parse, "invalid character literal", .None);
       }
-      ret ok(.Some(r.unwrap()));
+      ret .Ok(.Some(r.unwrap()));
     }
 
     // Leading-dot float literal (`.5`): a '.' immediately followed by a
@@ -756,7 +756,7 @@ impl Lexer {
       if r.is_err() {
         ret err_kind(.Parse, "invalid number literal", .None);
       }
-      ret ok(.Some(r.unwrap()));
+      ret .Ok(.Some(r.unwrap()));
     }
 
     if is_digit(c) {
@@ -764,7 +764,7 @@ impl Lexer {
       if r.is_err() {
         ret err_kind(.Parse, "invalid number literal", .None);
       }
-      ret ok(.Some(r.unwrap()));
+      ret .Ok(.Some(r.unwrap()));
     }
 
     // `b`/`x` prefix special numbers (`0b0101`, `0xFF`) only apply right
@@ -774,17 +774,17 @@ impl Lexer {
     if (c == 'b' || c == 'x') && self._prev_token_is_bare_zero() {
       self._pop_last_token();
       if c == 'b' {
-        ret ok(.Some(self._read_number_binary()));
+        ret .Ok(.Some(self._read_number_binary()));
       }
-      ret ok(.Some(self._read_number_hex()));
+      ret .Ok(.Some(self._read_number_hex()));
     }
 
     if _is_ident_start(c) {
-      ret ok(.Some(self._read_identifier_or_keyword()));
+      ret .Ok(.Some(self._read_identifier_or_keyword()));
     }
 
     if c == '{' || c == '}' || c == ';' || c == ')' || c == ']' {
-      ret ok(.Some(self._read_symbol()));
+      ret .Ok(.Some(self._read_symbol()));
     }
 
     fit c {
@@ -793,7 +793,7 @@ impl Lexer {
         if r.is_err() {
           ret err_kind(.Parse, "invalid operator", .None);
         }
-        ret ok(.Some(r.unwrap()));
+        ret .Ok(.Some(r.unwrap()));
       }
       _ -> { ret err_kind(.Parse, "unexpected character", .None); }
     }
@@ -816,7 +816,7 @@ pub fun tokenize(str src, str filename) Result<Vec<Token>, Error> {
       .None -> { break; }
     }
   }
-  ret ok(lex.tokens);
+  ret .Ok(lex.tokens);
 }
 
 // Test-only helper: tokenize `src` and unwrap, aborting the test with a clear
@@ -989,7 +989,7 @@ test "lexes symbols and newlines" {
 // `tokenize` takes a `str` -- so this copies into a freshly NUL-terminated
 // buffer first, same as any other C boundary crossing a length-prefixed
 // buffer into a NUL-terminated string.
-fuzz "tokenize never crashes on arbitrary input" (data, len) {
+fuzz "tokenize never crashes on arbitrary input" (raw* data, num len) {
   str src = malloc(len + 1);
   if src == nil {
     ret;
