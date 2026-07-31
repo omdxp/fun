@@ -1212,7 +1212,9 @@ test "fls e2e: indexing edge-case workspace files does not crash server" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
-    const slow_timeout_ms = 30000;
+    // First workspace/symbol call lazily triggers the full-workspace scan
+    // (see indexWorkspace); CI runners are slower than local, so give it room.
+    const slow_timeout_ms = 60000;
 
     var setup = try resolveTestSetup(allocator);
     defer freeTestSetup(allocator, &setup);
@@ -1277,7 +1279,9 @@ test "fls e2e: workspace indexing survives multiple malformed files" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
-    const slow_timeout_ms = 30000;
+    // First workspace/symbol call lazily triggers the full-workspace scan
+    // (see indexWorkspace); CI runners are slower than local, so give it room.
+    const slow_timeout_ms = 60000;
 
     var setup = try resolveTestSetup(allocator);
     defer freeTestSetup(allocator, &setup);

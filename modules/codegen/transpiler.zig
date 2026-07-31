@@ -19490,6 +19490,7 @@ pub const TranspileProcess = struct {
             // `raw*`, `long long` <-> `num`, `char*`/`const char*` <-> `str`),
             // sidestepping the ABI-width mismatches a raw libc binding risks.
             try self.write("#ifdef _WIN32\n");
+            try self.write("#include <windows.h>\n");
             try self.write("#include <direct.h>\n");
             try self.write("#include <sys/stat.h>\n");
             try self.write("typedef struct { HANDLE h; WIN32_FIND_DATAA data; int started; } __fun_dir_iter;\n");
