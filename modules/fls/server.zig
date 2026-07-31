@@ -417,6 +417,15 @@ fn freeDiags(allocator: Allocator, diags: []const DiagnosticWithUri) void {
 pub const LspServer = struct {
     allocator: Allocator,
     docs: std.StringHashMap(Doc),
+    // Whether the full-workspace `.fn` file walk has already run (see
+    // `indexWorkspace`). That walk is expensive (reads+indexes every file in
+    // the workspace, not just the ones actually open or imported), so it's
+    // deferred to the first request that genuinely needs whole-workspace
+    // knowledge (`references`, `workspace/symbol`) instead of running
+    // unconditionally on `initialize`, where it used to block the single
+    // message-processing loop -- starving `didOpen`/hover for the file the
+    // user actually opened -- for as long as the workspace takes to scan.
+    workspace_indexed: bool = false,
     io: std.Io,
     stdin: std.Io.File,
     stdout: std.Io.File,
@@ -1082,9 +1091,11 @@ pub const LspServer = struct {
         defer self.allocator.free(json);
         try self.sendResponseJson(id_val, json);
 
-        // Best-effort workspace indexing so completion/definition work across imports and other files.
+        // Cross-file completion/definition for imported files is handled
+        // on-demand elsewhere (`ensureDocIndexedFromDisk` off the current
+        // doc's own import graph); the full-workspace walk is deferred to
+        // `indexWorkspace`'s callers (see its own doc comment).
         self.captureRootFromInitialize(params_val) catch {};
-        self.indexWorkspace() catch {};
     }
 
     fn captureRootFromInitialize(self: *LspServer, params_val: ?std.json.Value) !void {
@@ -1132,7 +1143,16 @@ pub const LspServer = struct {
         }
     }
 
+    // Walks every `.fn` file under the workspace root and indexes it, so
+    // whole-workspace features (`references`, `workspace/symbol`) can see
+    // files the currently open document doesn't itself import. Expensive
+    // (one read+lex+parse per file), so callers must only invoke this when
+    // they actually need whole-workspace results, and it only ever does the
+    // walk once per server lifetime.
     fn indexWorkspace(self: *LspServer) !void {
+        if (self.workspace_indexed) return;
+        self.workspace_indexed = true;
+
         const root_path = self.root_path orelse return;
         var dir = try std.Io.Dir.openDirAbsolute(globalIo(), root_path, .{ .iterate = true });
         defer dir.close(globalIo());
@@ -6328,6 +6348,7 @@ pub const LspServer = struct {
     }
 
     fn handleReferences(self: *LspServer, id_val: ?std.json.Value, params_val: ?std.json.Value) !void {
+        self.indexWorkspace() catch {};
         const parsed = try parseTextDocPosition(params_val);
         if (parsed == null) {
             try self.sendResponseJson(id_val, "[]");
@@ -10625,6 +10646,7 @@ pub const LspServer = struct {
     }
 
     fn handleWorkspaceSymbols(self: *LspServer, id_val: ?std.json.Value, params_val: ?std.json.Value) !void {
+        self.indexWorkspace() catch {};
         const query = (try parseWorkspaceSymbolQuery(self.allocator, params_val)) orelse "";
         defer if (query.len != 0) self.allocator.free(query);
 
