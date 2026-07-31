@@ -5267,6 +5267,76 @@ test "escaped double-quote inside a string literal compiles and prints" {
     try std.testing.expectEqualStrings("she said \"hi\" ok\n", stdout);
 }
 
+test "raw string literal: backslashes and quotes need no escaping and print literally" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_raw_string_inline.fn";
+    const c_path = "codegen_raw_string_inline.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_raw_string_inline.exe" else "codegen_raw_string_inline";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() num {\n" ++
+        "  str path = `C:\\Users\\name\\file.txt`;\n" ++
+        "  str msg = `she said \"hi\" and left`;\n" ++
+        "  printf(\"%s\\n\", path);\n" ++
+        "  printf(\"%s\\n\", msg);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    // The emitted C must contain a properly-escaped literal, not the raw
+    // (invalid-as-C) bytes.
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "\"C:\\\\Users\\\\name\\\\file.txt\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "\"she said \\\"hi\\\" and left\"") != null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("C:\\Users\\name\\file.txt\nshe said \"hi\" and left\n", stdout);
+}
+
+test "raw string literal: multi-line block joins lines with a real newline" {
+    const allocator = std.testing.allocator;
+    const ifilepath = "codegen_raw_string_multiline.fn";
+    const c_path = "codegen_raw_string_multiline.c";
+    const exe_path = if (builtin.os.tag == .windows) "codegen_raw_string_multiline.exe" else "codegen_raw_string_multiline";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ifilepath) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, c_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, exe_path) catch {};
+
+    const input =
+        "imp std.c.io;\n" ++
+        "fun main() num {\n" ++
+        "  let block =\n" ++
+        "    `line one\n" ++
+        "    `line two\n" ++
+        "  ;\n" ++
+        "  printf(\"%s\\n\", block);\n" ++
+        "  ret 0;\n" ++
+        "}\n";
+
+    const out_owned = try runTranspile(allocator, ifilepath, input);
+    defer allocator.free(out_owned);
+    try std.testing.expect(std.mem.indexOf(u8, out_owned, "\"line one\\nline two\"") != null);
+    {
+        const c_file = try std.Io.Dir.cwd().createFile(std.testing.io, c_path, .{ .truncate = true });
+        defer c_file.close(std.testing.io);
+        try c_file.writeStreamingAll(std.testing.io, out_owned);
+    }
+    try compileWithZigCc(allocator, c_path, exe_path);
+    const stdout = try runExeWithEnv(allocator, exe_path, &.{});
+    defer allocator.free(stdout);
+    try std.testing.expectEqualStrings("line one\nline two\n", stdout);
+}
+
 test "single-letter quirk name emits impl method bodies (links)" {
     const allocator = std.testing.allocator;
     const ifilepath = "codegen_single_letter_quirk.fn";

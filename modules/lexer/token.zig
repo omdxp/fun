@@ -94,6 +94,15 @@ pub const Token = struct {
     } = null,
     /// Indicates if the token is preceded by whitespace.
     whitespace: bool = false,
+    /// True for a backtick-delimited raw string literal (`` `...` ``).
+    /// Unlike an ordinary `"..."` string (whose `data.sval` keeps escape
+    /// sequences verbatim, ready for direct re-embedding in C), a raw
+    /// string's `data.sval` holds the LITERAL bytes with no escape
+    /// processing at all -- codegen must escape this content when
+    /// emitting the C string literal, and the formatter must reproduce
+    /// the original backtick spelling verbatim rather than requoting the
+    /// buffer as `"..."`.
+    is_raw_string: bool = false,
     /// The text between brackets, if the token is within brackets.
     between_brackets: ?[]const u8 = null,
     /// The text between arguments, if the token is within arguments.

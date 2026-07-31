@@ -97,6 +97,17 @@
         {
           "name": "string.quoted.single.fun",
           "match": "'([^'\\\\]|\\\\.)*'"
+        },
+        {
+          "comment": "Inline raw string: `` `content` `` closed on the same line -- no escape processing at all.",
+          "name": "string.quoted.other.fun",
+          "match": "`[^`]*`"
+        },
+        {
+          "comment": "Multi-line raw string: a backtick with no closer on this line starts a block; each continuation line must itself begin (after leading whitespace) with a backtick to keep contributing, ending at the first line that doesn't.",
+          "name": "string.quoted.other.multiline.fun",
+          "begin": "`(?=[^`]*$)",
+          "while": "^\\s*`"
         }
       ]
     },

@@ -16,6 +16,15 @@
 - **Pattern Matching**: `fit x { ... }` for value-based branching.
 - **Async/Await**: Async functions are declared with `async fun ...`; async calls must be awaited with `await` inside async functions.
 - **Comments**: Use `//` for single-line comments, or `/* ... */` for block comments.
+- **Raw strings**: `` `...` `` needs no escaping at all -- a backslash or a double-quote inside is just a literal byte. Close it on the same line for an inline literal (`` `C:\Users\name` ``), or leave it unclosed and continue on the next line by opening again with a backtick (ending at the first line that doesn't):
+  ```fun
+  let sql =
+    `SELECT *
+    `FROM users
+    `WHERE id = ?
+  ;
+  ```
+  Whether you close the backtick on the same line is itself the inline-vs-multi-line signal, so trailing code (like the `;` above) that needs to sit right after the last line can close it explicitly instead: `` `WHERE id = ?`; ``.
 
 ### Types
 - **Primitive Types**:

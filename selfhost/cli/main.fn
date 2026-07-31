@@ -39,7 +39,8 @@ fun _codegen_error_kind_name(CodegenErrorKind kind) str {
 }
 
 fun _fail(str msg) num {
-  writeln_to(Sink.Stderr, format("[Error]\n{str}", msg));
+  writeln_to(Sink.Stderr, format(`[Error]
+    `{str}`, msg));
   ret 1;
 }
 

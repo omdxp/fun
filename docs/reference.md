@@ -58,6 +58,34 @@ pub quirk Display {
 ### Built-in Types
 - `num`, `dec`, `f32`, `f64`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `iN`, `uN`, `bin`, `chr`, `str`, `raw`
 
+### Raw Strings
+A backtick-delimited literal (`` `...` ``) needs no escaping at all: a backslash
+or an embedded double-quote is just a literal byte.
+```fun
+let path = `C:\Users\name\file.txt`;
+let msg = `she said "hi" and left`;
+```
+
+Two forms, both starting with a backtick, disambiguated purely by whether you
+close it on the same line:
+- **Inline**: closed by another backtick on the same line (as above).
+- **Multi-line**: a backtick left unclosed before the line's newline starts a
+  block. Each subsequent line that begins (after leading whitespace) with its
+  own backtick contributes its own content, joined with a real newline byte,
+  ending at the first line that doesn't:
+  ```fun
+  let sql =
+    `SELECT *
+    `FROM users
+    `WHERE id = ?
+  ;
+  ```
+  Trailing code that needs to sit on the same line as the last content line
+  can close the block explicitly instead: `` `WHERE id = ?`; ``.
+
+A literal backtick inside a raw string still needs to be avoided (there's no
+escape for it) -- use a regular `"..."` string for that rare case instead.
+
 ### Arrays
 - Syntax: `num[] arr = [1, 2, 3];`
 - Array literals require uniform element types.

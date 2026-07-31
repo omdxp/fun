@@ -195,6 +195,24 @@
         </array>
       </dict>
       <dict>
+        <key>comment</key>
+        <string>Inline raw string: closed on the same line -- no escape processing at all.</string>
+        <key>name</key>
+        <string>string.quoted.other.fun</string>
+        <key>match</key>
+        <string>`[^`]*`</string>
+      </dict>
+      <dict>
+        <key>comment</key>
+        <string>Multi-line raw string: a backtick with no closer on this line starts a block; each continuation line must itself begin (after leading whitespace) with a backtick to keep contributing, ending at the first line that doesn't.</string>
+        <key>name</key>
+        <string>string.quoted.other.multiline.fun</string>
+        <key>begin</key>
+        <string>`(?=[^`]*$)</string>
+        <key>while</key>
+        <string>^\s*`</string>
+      </dict>
+      <dict>
         <key>name</key>
         <string>keyword.control.fun</string>
         <key>match</key>

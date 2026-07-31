@@ -93,6 +93,39 @@ test "-fmt formats file in-place" {
     try std.testing.expectEqualStrings(expected, got);
 }
 
+test "-fmt preserves an inline raw string's backtick spelling verbatim" {
+    const allocator = std.testing.allocator;
+
+    // A regular string's escaping-sensitive content (backslashes, an
+    // embedded quote) would corrupt or fail to re-lex if the formatter
+    // naively requoted it as `"..."` -- it must reproduce the original
+    // backtick source instead.
+    const ugly =
+        "fun main() {\n" ++
+        "  let path=`C:\\Users\\name\\file.txt`;\n" ++
+        "  let msg=`she said \"hi\" and left`;\n" ++
+        "}\n";
+
+    const path = try writeTempFnFile(allocator, "fmt_raw_inline", ugly);
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+        allocator.free(path);
+    }
+
+    try cli.format_file_in_place(allocator, std.testing.io, path);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(got);
+
+    const expected =
+        "fun main() {\n" ++
+        "  let path = `C:\\Users\\name\\file.txt`;\n" ++
+        "  let msg = `she said \"hi\" and left`;\n" ++
+        "}\n";
+
+    try std.testing.expectEqualStrings(expected, got);
+}
+
 test "-fmt keeps a blank line between functions" {
     const allocator = std.testing.allocator;
 

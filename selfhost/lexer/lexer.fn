@@ -114,6 +114,7 @@ fun token_zero() Token {
   p.filename = "";
   t.pos = p;
   t.whitespace = false;
+  t.is_raw_string = false;
   ret t;
 }
 
@@ -121,6 +122,21 @@ fun token_zero() Token {
 // read a line comment up to (not including) its terminator.
 fun _not_newline(chr c) bin {
   ret c != '\n' && c != '\r' && c != 0;
+}
+
+// The result of scanning one line's worth of a raw (backtick) string --
+// see `Lexer._scan_raw_string_line`.
+enum RawLineResult {
+  // Hit a closing backtick: the whole raw string ends HERE, even if more
+  // text follows on the same line (`` `line two`; ``).
+  Closed,
+  // Hit the line's newline with no closing backtick: either the start of
+  // a multi-line block, or (on a later line) another contributed line --
+  // the caller decides which, based on whether the FOLLOWING line also
+  // starts with a backtick.
+  Continues,
+  // Hit end-of-file with no closing backtick.
+  Eof,
 }
 
 impl Lexer {
@@ -216,6 +232,7 @@ impl Lexer {
     t.data = .Sval(text);
     t.pos = p;
     t.whitespace = false;
+    t.is_raw_string = false;
     ret t;
   }
 
@@ -242,6 +259,7 @@ impl Lexer {
     t.data = .Sval(b.build());
     t.pos = p;
     t.whitespace = false;
+    t.is_raw_string = false;
     ret .Ok(t);
   }
 
@@ -256,6 +274,7 @@ impl Lexer {
     Token t;
     t.pos = p;
     t.whitespace = false;
+    t.is_raw_string = false;
     if is_boolean_keyword(text) {
       t.type = .Boolean;
       t.data = .Bval(equals(text, "true"));
@@ -424,6 +443,7 @@ impl Lexer {
     self._finish_pos(&p);
     out.pos = p;
     out.whitespace = false;
+    out.is_raw_string = false;
     ret .Ok(out);
   }
 
@@ -442,6 +462,7 @@ impl Lexer {
     t.data = .Num(v);
     t.pos = p;
     t.whitespace = false;
+    t.is_raw_string = false;
     ret t;
   }
 
@@ -458,6 +479,7 @@ impl Lexer {
     t.data = .Num(v);
     t.pos = p;
     t.whitespace = false;
+    t.is_raw_string = false;
     ret t;
   }
 
@@ -511,6 +533,96 @@ impl Lexer {
     t.data = .Sval(b.build());
     t.pos = p;
     t.whitespace = false;
+    t.is_raw_string = false;
+    ret .Ok(t);
+  }
+
+  // Scans one line's worth of raw-string content (from right after an
+  // opening backtick) into `b`, stopping at whichever comes first: a
+  // closing backtick (consumed, `.Closed`), the line's own newline (NOT
+  // consumed, `.Continues`), or EOF (`.Eof`). Shared by `_read_raw_string`
+  // for the first line and every continuation line, since both need the
+  // exact same "close, or hand off to the caller at the newline" behavior.
+  _scan_raw_string_line(StringBuilder* b) RawLineResult {
+    for {
+      if self.pos >= self.len {
+        ret .Eof;
+      }
+      let c = self._peek();
+      if c == '`' {
+        self._advance();
+        ret .Closed;
+      }
+      if c == '\n' {
+        ret .Continues;
+      }
+      b.append_char(self._advance());
+    }
+    ret .Eof;
+  }
+
+  // Reads a raw string token from a backtick-delimited literal.
+  // 
+  // Two forms, both starting with a backtick:
+  // - Inline (or explicitly-closed-multi-line): closed by another
+  // backtick, e.g. `` `content` ``, or on the LAST line of a multi-line
+  // block (`` `line two`; ``) when trailing code needs to sit on that
+  // same line. Content is taken completely literally: no escape
+  // processing at all (a backslash is just a backslash, a double-quote
+  // is just a double-quote).
+  // - Multi-line, implicitly closed: a backtick left unclosed before the
+  // line's newline starts a block. Each SUBSEQUENT line that begins
+  // (after leading spaces/tabs) with its own backtick contributes its
+  // own content, joined to the previous lines with a real newline byte.
+  // The block ends at the first line that doesn't start with a
+  // backtick, WITHOUT consuming that line -- exactly like Zig's `\\`
+  // multi-line strings (any trailing code, like the statement's `;`,
+  // goes on its own following line), just per-line-marked with backtick.
+  // 
+  // The buffer holds the LITERAL bytes (unlike `_read_string`, whose
+  // buffer keeps escape sequences verbatim for direct re-embedding in C)
+  // -- `t.is_raw_string = true` tells codegen to escape this content when
+  // emitting the C string literal, and tells the formatter to reproduce
+  // the original backtick spelling verbatim rather than requoting the
+  // buffer.
+  _read_raw_string() Result<Token, Error> {
+    let start = self._start_pos();
+    self._advance(); // opening '`'
+    let b = string_builder_init(16);
+
+    let result = self._scan_raw_string_line(&b);
+    if result == .Eof {
+      ret err_kind(.Parse, "unexpected end of file while reading raw string", token_zero());
+    }
+
+    for result == .Continues {
+      self._advance(); // consume the newline ending the previous segment
+
+      num lookahead = self.pos;
+      for lookahead < self.len && (self.src[lookahead] == ' ' || self.src[lookahead] == '\t') {
+        lookahead = lookahead + 1;
+      }
+      if lookahead >= self.len || self.src[lookahead] != '`' {
+        break;
+      }
+
+      b.append_char('\n');
+      for self._peek() == ' ' || self._peek() == '\t' {
+        self._advance();
+      }
+      self._advance(); // consume this line's opening backtick
+
+      result = self._scan_raw_string_line(&b);
+    }
+
+    Pos p = start;
+    self._finish_pos(&p);
+    Token t;
+    t.type = .String;
+    t.data = .Sval(b.build());
+    t.pos = p;
+    t.whitespace = false;
+    t.is_raw_string = true;
     ret .Ok(t);
   }
 
@@ -550,6 +662,7 @@ impl Lexer {
     t.data = .Cval(value);
     t.pos = p;
     t.whitespace = false;
+    t.is_raw_string = false;
     ret .Ok(t);
   }
 
@@ -565,6 +678,7 @@ impl Lexer {
     t.data = .Cval(c);
     t.pos = p;
     t.whitespace = false;
+    t.is_raw_string = false;
     ret t;
   }
 
@@ -612,6 +726,7 @@ impl Lexer {
       t.data = .Sval(text);
       t.pos = p;
       t.whitespace = false;
+      t.is_raw_string = false;
       ret .Ok(t);
     }
 
@@ -640,6 +755,7 @@ impl Lexer {
     t.data = .Sval(substr(text, 0, keep));
     t.pos = p;
     t.whitespace = false;
+    t.is_raw_string = false;
     ret .Ok(t);
   }
 
@@ -707,6 +823,7 @@ impl Lexer {
       t.data = .Cval('\n');
       t.pos = p;
       t.whitespace = false;
+      t.is_raw_string = false;
       ret .Ok(.Some(t));
     }
 
@@ -737,6 +854,14 @@ impl Lexer {
       let r = self._read_string();
       if r.is_err() {
         ret err_kind(.Parse, "invalid string literal", .None);
+      }
+      ret .Ok(.Some(r.unwrap()));
+    }
+
+    if c == '`' {
+      let r = self._read_raw_string();
+      if r.is_err() {
+        ret err_kind(.Parse, "invalid raw string literal", .None);
       }
       ret .Ok(.Some(r.unwrap()));
     }
@@ -940,6 +1065,55 @@ test "lexes string literals with escapes preserved verbatim" {
     .Sval(s) -> { assert equals(s, "hi\\n"), "expected verbatim 'hi\\n'"; }
     _ -> { panic("expected Sval"); }
   }
+}
+
+test "lexes an inline raw string with no escape processing" {
+  let toks = _lex("`C:\\Users\\name`");
+  assert toks.len == 1, "expected 1 token";
+  assert toks.get(0).type == .String, "expected String token";
+  assert toks.get(0).is_raw_string, "expected is_raw_string to be true";
+  fit toks.get(0).data {
+    // The backslashes are LITERAL bytes (one each), not escape-sequence pairs.
+    .Sval(s) -> { assert equals(s, "C:\\Users\\name"), "expected literal backslashes"; }
+    _ -> { panic("expected Sval"); }
+  }
+}
+
+test "lexes a raw string with an embedded double-quote needing no escaping" {
+  let toks = _lex("`she said \"hi\" and left`");
+  assert toks.len == 1, "expected 1 token";
+  assert toks.get(0).is_raw_string, "expected is_raw_string to be true";
+  fit toks.get(0).data {
+    .Sval(s) -> {
+      assert equals(s, "she said \"hi\" and left"), "expected the quote preserved literally";
+    }
+    _ -> { panic("expected Sval"); }
+  }
+}
+
+test "lexes a multi-line raw string block, implicitly closed" {
+  let toks = _lex("`line one\n  `line two\n  `line three\n;");
+  assert toks.len == 2, "expected 2 tokens (the string, then ';')";
+  assert toks.get(0).is_raw_string, "expected is_raw_string to be true";
+  fit toks.get(0).data {
+    .Sval(s) -> {
+      assert equals(s, "line one\nline two\nline three"), "expected lines joined with real newlines";
+    }
+    _ -> { panic("expected Sval"); }
+  }
+  assert token_is_symbol(toks.get(1), ';'), "expected the trailing ';' as its own token, not swallowed";
+}
+
+test "lexes a multi-line raw string block, explicitly closed on the last line" {
+  let toks = _lex("`line A\n  `line B`;");
+  assert toks.len == 2, "expected 2 tokens (the string, then ';')";
+  fit toks.get(0).data {
+    .Sval(s) -> {
+      assert equals(s, "line A\nline B"), "expected lines joined with a real newline";
+    }
+    _ -> { panic("expected Sval"); }
+  }
+  assert token_is_symbol(toks.get(1), ';'), "expected the trailing ';' as its own token, not swallowed";
 }
 
 test "lexes character literals with escapes decoded" {

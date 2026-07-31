@@ -18,6 +18,10 @@ syn keyword funConstant nil
 syn match funNumber "\v\d+(\.\d+)?"
 syn region funString start=+"+ skip=+\\"+ end=+"+
 syn region funChar start=+'+ skip=+\\'+ end=+'+
+" Raw (backtick) string: no escape processing at all -- the closing
+" backtick, whenever it's found (possibly several lines later for a
+" multi-line block), ends the literal.
+syn region funRawString start=+`+ end=+`+
 syn match funComment "//.*$"
 syn region funComment start=+/\*+ end=+\*/+
 
@@ -30,6 +34,7 @@ hi def link funConstant Constant
 hi def link funOperator Operator
 hi def link funNumber Number
 hi def link funString String
+hi def link funRawString String
 hi def link funChar Character
 hi def link funComment Comment
 

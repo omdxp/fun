@@ -134,6 +134,11 @@ pub compound NodeFlags {
   bin has_variable_combined;
   bin is_public;
   bin is_used;
+  // True for a `.String`-kind node built from a backtick raw string
+  // literal -- see `Token.is_raw_string`'s doc comment. Set by the parser
+  // when constructing this node from its token; codegen and the
+  // formatter both key off it for `.String` nodes specifically.
+  bin is_raw_string;
 }
 
 pub fun node_flags_new() NodeFlags {
@@ -142,6 +147,7 @@ pub fun node_flags_new() NodeFlags {
   f.has_variable_combined = false;
   f.is_public = false;
   f.is_used = false;
+  f.is_raw_string = false;
   ret f;
 }
 

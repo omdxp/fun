@@ -2348,6 +2348,29 @@ pub const TranspileProcess = struct {
         }
     }
 
+    /// Emits a backtick RAW string literal's literal bytes as a C
+    /// string-literal body. Unlike `write_c_string_literal_body` (whose
+    /// input already IS valid C escape syntax, verbatim from the lexer),
+    /// a raw string's bytes are the user's literal, unescaped content --
+    /// this actively encodes the handful of bytes that would otherwise
+    /// break or change the meaning of a C string literal: a backslash
+    /// (else read as the start of an escape), a double-quote (else ends
+    /// the literal early), and a real newline (a multi-line raw string's
+    /// line-joins -- C string literals can't contain one directly).
+    /// Everything else (including tabs and non-ASCII bytes) passes
+    /// through unchanged.
+    fn write_c_string_literal_body_from_raw(self: *Self, s: []const u8) TranspileError!void {
+        for (s) |c| {
+            switch (c) {
+                '\\' => try self.write("\\\\"),
+                '"' => try self.write("\\\""),
+                '\n' => try self.write("\\n"),
+                '\r' => try self.write("\\r"),
+                else => try self.write(&[_]u8{c}),
+            }
+        }
+    }
+
     fn next_tmp_name(self: *Self, prefix: []const u8) TranspileError![]const u8 {
         var buf: [64]u8 = undefined;
         const name = std.fmt.bufPrint(&buf, "__fun_{s}_{d}", .{ prefix, self.tmp_counter }) catch {
@@ -2447,6 +2470,11 @@ pub const TranspileProcess = struct {
 
         const fmt_node = args_nodes.items[0].*;
         if (fmt_node.type != .String or fmt_node.data == null) return false;
+        // A raw (backtick) format string's bytes are literal, unescaped
+        // content, not this fast path's assumed "already valid C escape
+        // syntax" shape -- fall back to the general call path instead of
+        // threading raw-escaping through the whole printf-format rewrite.
+        if (fmt_node.is_raw_string) return false;
 
         const fmt = fmt_node.data.?.sval.items;
         var fmt_out = ArrayList(u8).init(self.allocator);
@@ -2622,6 +2650,11 @@ pub const TranspileProcess = struct {
 
         const fmt_node = args_nodes.items[0].*;
         if (fmt_node.type != .String or fmt_node.data == null) return false;
+        // A raw (backtick) format string's bytes are literal, unescaped
+        // content, not this fast path's assumed "already valid C escape
+        // syntax" shape -- fall back to the general call path instead of
+        // threading raw-escaping through the whole printf-format rewrite.
+        if (fmt_node.is_raw_string) return false;
 
         const fmt = fmt_node.data.?.sval.items;
         var fmt_out = ArrayList(u8).init(self.allocator);
@@ -21081,7 +21114,11 @@ pub const TranspileProcess = struct {
             .String => {
                 const str = node.data.?.sval.items;
                 try self.write("\"");
-                try self.write_c_string_literal_body(str);
+                if (node.is_raw_string) {
+                    try self.write_c_string_literal_body_from_raw(str);
+                } else {
+                    try self.write_c_string_literal_body(str);
+                }
                 try self.write("\"");
             },
             .Identifier => {
@@ -21282,7 +21319,11 @@ pub const TranspileProcess = struct {
 
                     if (val.type == .String) {
                         try self.write("\"");
-                        try self.write_c_string_literal_body(val.data.?.sval.items);
+                        if (val.is_raw_string) {
+                            try self.write_c_string_literal_body_from_raw(val.data.?.sval.items);
+                        } else {
+                            try self.write_c_string_literal_body(val.data.?.sval.items);
+                        }
                         try self.write("\"");
                     } else if (val.type == .Boolean) {
                         const bval = val.data.?.bval;

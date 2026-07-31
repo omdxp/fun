@@ -752,7 +752,24 @@ fn token_text(allocator: mem.Allocator, t: token.Token, source: []const u8, line
                 else => base,
             };
         },
-        .String => std.fmt.allocPrint(allocator, "\"{s}\"", .{t.data.sval.items}),
+        .String => blk: {
+            if (t.is_raw_string) {
+                // Reproduce the original backtick spelling verbatim (source
+                // slice, like Number's literal lexeme above) -- `t.data.sval`
+                // holds the LITERAL, already-decoded bytes, not something
+                // that can be safely requoted as `"..."` the way a regular
+                // string's escape-preserving buffer can (a raw string may
+                // contain an unescaped `"` or a real newline, either of
+                // which would corrupt or fail to re-lex as a regular
+                // string).
+                const start = pos_to_index(line_starts, t.pos, false);
+                const end_excl = pos_to_index(line_starts, t.pos, true);
+                if (start <= end_excl and end_excl <= source.len and end_excl > start) {
+                    break :blk allocator.dupe(u8, source[start..end_excl]);
+                }
+            }
+            break :blk std.fmt.allocPrint(allocator, "\"{s}\"", .{t.data.sval.items});
+        },
         .Boolean => allocator.dupe(u8, if (t.data.bval) "true" else "false"),
         .Comment => blk: {
             // Always emit exactly one space after //

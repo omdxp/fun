@@ -1382,6 +1382,7 @@ impl Parser {
             Node node = node_new(NodeKind.String(s));
             node.pos = t.pos;
             node.has_pos = true;
+            node.flags.is_raw_string = t.is_raw_string;
             self.create_node(&node);
           }
           _ -> {}

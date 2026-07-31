@@ -59,6 +59,14 @@ pub compound Token {
   // to being immediately adjacent to the previous token. The formatter and
   // some parser disambiguation rules (e.g. `fork` vs a call) rely on this.
   bin whitespace;
+  // True for a backtick-delimited raw string literal (`` `...` ``). Unlike
+  // an ordinary `"..."` string (whose `.Sval` data keeps escape sequences
+  // verbatim, ready for direct re-embedding in C), a raw string's data
+  // holds the LITERAL bytes with no escape processing at all -- codegen
+  // must escape this content when emitting the C string literal, and the
+  // formatter must reproduce the original backtick spelling verbatim
+  // rather than requoting the buffer.
+  bin is_raw_string;
 }
 
 // Returns true if `t` is an `Operator` token whose text equals `val`.

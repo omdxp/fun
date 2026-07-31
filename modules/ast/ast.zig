@@ -202,6 +202,11 @@ pub const Node = struct {
     pos: ?token.Pos = null,
     /// The binded node associated with the node.
     binded: ?*BindedNode = null,
+    /// True for a `.String`-type node built from a backtick raw string
+    /// literal -- see `token.Token.is_raw_string`'s doc comment. Set by
+    /// the parser when constructing this node from its token; codegen and
+    /// the formatter both key off it for `.String` nodes specifically.
+    is_raw_string: bool = false,
     /// The token data associated with the node.
     data: ?token.TokenData = null,
     /// The variant data associated with the node.

@@ -1604,6 +1604,7 @@ pub const ParseProcess = struct {
                     .type = .String,
                     .pos = t.?.pos,
                     .data = .{ .sval = t.?.data.sval },
+                    .is_raw_string = t.?.is_raw_string,
                 };
                 try self.create_node(&str_node);
             },

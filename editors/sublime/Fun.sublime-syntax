@@ -34,6 +34,9 @@ contexts:
     - match: "'"
       scope: punctuation.definition.string.begin.fun
       push: single_quoted
+    - match: '`'
+      scope: punctuation.definition.string.begin.fun
+      push: raw_quoted
     - match: \b(imp|as|pub|fun|compound|quirk|impl|enum|let|const|asm|volatile|arch|defer|ret|if|elif|else|for|fit|async|await|fork|break|continue|assert|panic|test|fuzz|allow|expect)\b
       scope: keyword.control.fun
     - match: \b(void|raw|num|dec|f32|f64|str|bin|chr|i[1-9][0-9]*|u[1-9][0-9]*)\b
@@ -66,5 +69,14 @@ contexts:
     - match: "\\.'"
       scope: constant.character.escape.fun
     - match: "'"
+      scope: punctuation.definition.string.end.fun
+      pop: true
+
+  # Raw (backtick) string: no escape processing at all -- a closing
+  # backtick, whenever it's found (possibly several lines later for a
+  # multi-line block), ends the literal.
+  raw_quoted:
+    - meta_scope: string.quoted.other.fun
+    - match: '`'
       scope: punctuation.definition.string.end.fun
       pop: true

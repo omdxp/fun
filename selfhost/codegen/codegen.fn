@@ -1747,6 +1747,39 @@ impl Codegen {
     ret .None;
   }
 
+  // Writes a backtick RAW string literal's literal bytes as a C
+  // string-literal body. Unlike an ordinary string (whose bytes already
+  // ARE valid C escape syntax, verbatim from the lexer), a raw string's
+  // bytes are the user's literal, unescaped content -- this encodes the
+  // handful of bytes that would otherwise break or change the meaning of
+  // a C string literal: a backslash (else read as the start of an
+  // escape), a double-quote (else ends the literal early), and a real
+  // newline (a multi-line raw string's line-joins -- C string literals
+  // can't contain one directly). Everything else passes through
+  // unchanged.
+  write_raw_string_body(str s) {
+    num i = 0;
+    num n = len(s);
+    for i < n {
+      chr c = s[i];
+      if c == '\\' {
+        self.state.write("\\\\");
+      } elif c == '"' {
+        self.state.write("\\\"");
+      } elif c == '\n' {
+        self.state.write("\\n");
+      } elif c == '\r' {
+        self.state.write("\\r");
+      } else {
+        str buf = malloc(2);
+        buf[0] = c;
+        buf[1] = 0;
+        self.state.write(buf);
+      }
+      i = i + 1;
+    }
+  }
+
   // Writes a single-quoted C character literal for `c`, escaping the
   // same fixed set the original does (backslash/quote/newline/CR/tab/
   // NUL), and any other non-printable-ASCII byte as `\xHH`.
@@ -1798,7 +1831,11 @@ impl Codegen {
       }
       .String(s) -> {
         self.state.write("\"");
-        self.state.write(s);
+        if node.flags.is_raw_string {
+          self.write_raw_string_body(s);
+        } else {
+          self.state.write(s);
+        }
         self.state.write("\"");
         ret .None;
       }
@@ -4863,6 +4900,25 @@ test "emit_expr emits a string literal verbatim between quotes" {
   Node n = node_new(NodeKind.String("hello"));
   assert g.emit_expr(n).is_none(), "expected the string to emit";
   assert equals(st.out.build(), "\"hello\""), "expected a quoted string";
+}
+
+test "emit_expr escapes a raw string's literal bytes when node.flags.is_raw_string is set" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  Node n = node_new(NodeKind.String("C:\\Users\\name"));
+  n.flags.is_raw_string = true;
+  assert g.emit_expr(n).is_none(), "expected the raw string to emit";
+  // Each literal backslash must become an escaped pair in the C output.
+  assert equals(st.out.build(), "\"C:\\\\Users\\\\name\""), "expected backslashes escaped for C";
+}
+
+test "emit_expr escapes an embedded double-quote and newline in a raw string" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  Node n = node_new(NodeKind.String("she said \"hi\"\nbye"));
+  n.flags.is_raw_string = true;
+  assert g.emit_expr(n).is_none(), "expected the raw string to emit";
+  assert equals(st.out.build(), "\"she said \\\"hi\\\"\\nbye\""), "expected the quote and newline escaped for C";
 }
 
 test "emit_expr emits a boolean literal" {
