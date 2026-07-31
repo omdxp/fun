@@ -501,6 +501,12 @@ pub const TranspileProcess = struct {
     /// pthread-shaped symbols onto Win32 synchronization/thread primitives.
     requires_thread_compat_layer: bool = false,
 
+    /// True when `std.c.process` is imported anywhere in this module tree.
+    /// On POSIX this just needs the real `spawn.h`/`sys/wait.h`/`unistd.h`
+    /// headers; on Windows there is no `posix_spawn`/`waitpid` equivalent at
+    /// all, so codegen emits a small compat layer built on `CreateProcess`.
+    requires_process_compat_layer: bool = false,
+
     /// True when a `fork` statement appears anywhere in this module tree. Gates the
     /// M:N scheduler runtime in the prelude and the `__fun_sched_wait_idle()` call at
     /// each `main` exit, plus the per-callee `__fun_fork_*` support helpers. Set by a
@@ -8633,7 +8639,24 @@ pub const TranspileProcess = struct {
                                     self.report_type_error(node, "quirk '{s}' has no method '{s}'", .{ recv_name, mname });
                                     return TranspileError.NotCallable;
                                 };
-                                call_rtype = type_from_dtype(&method_sig.?.rtype);
+                                // `lookup_quirk_method` returns a VALUE copy (its
+                                // `for (methods) |m| return m;` loop copies the AST's
+                                // QuirkMethodSig out), so `method_sig` -- and its
+                                // embedded `.rtype: DataType` -- live on THIS call's own
+                                // stack frame. `type_from_dtype` stores whatever pointer
+                                // it's given straight into the returned CheckedType's
+                                // `dtype_ref`; passing `&method_sig.?.rtype` directly
+                                // would leak a pointer that dangles the moment this call
+                                // returns -- any later field access on the call's result
+                                // (e.g. `c.now().epoch`) then reads freed stack memory.
+                                // Copy `.rtype` into a heap slot with the compile's own
+                                // lifetime instead (same allocator/pattern as
+                                // `dtype_from_mangled_type`'s persistent DataType nodes).
+                                const rtype_copy = self.allocator.create(dtype.DataType) catch {
+                                    return TranspileError.MemoryAllocationFailed;
+                                };
+                                rtype_copy.* = method_sig.?.rtype;
+                                call_rtype = type_from_dtype(rtype_copy);
                                 callee_is_async = method_sig.?.is_async;
                                 callee_async_known = true;
                                 await_lowering_dynamic_quirk_dispatch = method_sig.?.is_async;
@@ -19468,6 +19491,24 @@ pub const TranspileProcess = struct {
             try self.write("static FILE* stdout_stream(void){ return stdout; }\n");
             try self.write("static FILE* stderr_stream(void){ return stderr; }\n");
             try self.write("static FILE* stdin_stream(void){ return stdin; }\n");
+            // MSVCRT's default text-mode stdio silently translates every `\n`
+            // byte written to stdout/stderr into `\r\n`, unlike glibc/macOS's
+            // libc. Fun's own string literals treat `\n` as a single LF byte
+            // (see `write_c_string_literal_body`), so left alone, a compiled
+            // program's actual output would only match that on POSIX. Force
+            // both streams to binary (untranslated) mode before `main` runs,
+            // via a constructor, so process output is consistent everywhere.
+            try self.write("#ifdef _WIN32\n");
+            try self.write("#pragma push_macro(\"close\")\n");
+            try self.write("#undef close\n");
+            try self.write("#include <io.h>\n");
+            try self.write("#include <fcntl.h>\n");
+            try self.write("#pragma pop_macro(\"close\")\n");
+            try self.write("__attribute__((constructor)) static void __fun_win_stdio_binary(void) {\n");
+            try self.write("  _setmode(_fileno(stdout), _O_BINARY);\n");
+            try self.write("  _setmode(_fileno(stderr), _O_BINARY);\n");
+            try self.write("}\n");
+            try self.write("#endif\n");
             // `environ` (the process environment, needed by std.c.process's
             // posix_spawn binding to inherit the parent's env) is a global, not a
             // callable symbol -- same reasoning as the stdout/stderr/stdin
@@ -19490,9 +19531,21 @@ pub const TranspileProcess = struct {
             // `raw*`, `long long` <-> `num`, `char*`/`const char*` <-> `str`),
             // sidestepping the ABI-width mismatches a raw libc binding risks.
             try self.write("#ifdef _WIN32\n");
+            // `std.c.net` (if imported) redefines `close` to `closesocket` via a
+            // plain `#define` before this point (see the net-compat block in
+            // `write_std_imports`). If that's already active, textually
+            // including <windows.h>/<direct.h>/<sys/stat.h> here would rename
+            // THEIR OWN `close()` declarations too (they transitively pull in
+            // MinGW's io.h), conflicting with winsock2's real `closesocket`
+            // signature. Shield these includes from whatever `close` currently
+            // means and restore it after, regardless of whether the net
+            // compat layer was active.
+            try self.write("#pragma push_macro(\"close\")\n");
+            try self.write("#undef close\n");
             try self.write("#include <windows.h>\n");
             try self.write("#include <direct.h>\n");
             try self.write("#include <sys/stat.h>\n");
+            try self.write("#pragma pop_macro(\"close\")\n");
             try self.write("typedef struct { HANDLE h; WIN32_FIND_DATAA data; int started; } __fun_dir_iter;\n");
             try self.write("static void* __fun_dir_open(const char* path) { if (!path) return NULL; char pattern[4096]; snprintf(pattern, sizeof(pattern), \"%s\\\\*\", path); __fun_dir_iter* it = (__fun_dir_iter*)malloc(sizeof(__fun_dir_iter)); if (!it) return NULL; it->h = FindFirstFileA(pattern, &it->data); it->started = 0; if (it->h == INVALID_HANDLE_VALUE) { free(it); return NULL; } return it; }\n");
             try self.write("static char* __fun_dir_read_name(void* dirp) { __fun_dir_iter* it = (__fun_dir_iter*)dirp; if (!it) return NULL; if (it->started) { if (!FindNextFileA(it->h, &it->data)) return NULL; } else { it->started = 1; } return it->data.cFileName; }\n");
@@ -22698,21 +22751,12 @@ pub const TranspileProcess = struct {
             try self.process_std_module_import(import_node, import_path);
             return;
         } else if (mem.eql(u8, import_path, "std.c.process")) {
-            // Needs THREE headers (posix_spawn, waitpid, pipe/read/write/dup2/close),
-            // not the single-header-per-import pattern the rest of this chain uses.
-            const needed = [_][]const u8{ "spawn.h", "sys/wait.h", "unistd.h" };
-            for (needed) |h| {
-                var already = false;
-                for (self.std_imports.items) |existing| {
-                    if (mem.eql(u8, existing, h)) {
-                        already = true;
-                        break;
-                    }
-                }
-                if (already) continue;
-                const dup = self.allocator.dupe(u8, h) catch return TranspileError.MemoryAllocationFailed;
-                self.std_imports.append(dup) catch return TranspileError.MemoryAllocationFailed;
-            }
+            self.requires_process_compat_layer = true;
+            // `std.c.process` is handled specially in `write_std_imports`:
+            // - on POSIX, include spawn.h/sys/wait.h/unistd.h (the real
+            //   posix_spawn/waitpid/pipe declarations)
+            // - on Windows, emit a CreateProcess-backed compat layer (no
+            //   posix_spawn/waitpid equivalent exists there at all)
             try self.process_std_module_import(import_node, import_path);
             return;
         } else if (mem.eql(u8, import_path, "std.c.limits")) {
@@ -23409,6 +23453,184 @@ pub const TranspileProcess = struct {
             try self.write("#include <pthread.h>\n");
             try self.write("#endif\n");
         }
+
+        if (requires_process_compat_recursive(self)) {
+            try self.write("\n");
+            try self.write("#if defined(_WIN32)\n");
+            // Shield these first-time header inclusions from a `close`
+            // macro an earlier `std.c.net` import may have already defined
+            // (`close` -> `closesocket`; see the net-compat block above) --
+            // same reasoning as the dir-iteration prelude block's own guard.
+            try self.write("#pragma push_macro(\"close\")\n");
+            try self.write("#undef close\n");
+            try self.write("#include <windows.h>\n");
+            try self.write("#include <io.h>\n");
+            try self.write("#include <fcntl.h>\n");
+            try self.write("#include <process.h>\n");
+            try self.write("#pragma pop_macro(\"close\")\n");
+            try self.write("\n");
+            // `pid_t` is ALREADY typedef'd by <sys/types.h> (transitively
+            // pulled in above) as a plain integer -- unlike POSIX, real
+            // Win32 process handles (HANDLE) and process IDs (DWORD) are
+            // different things, so this compat layer stores the numeric PID
+            // in `*pid` (matching real POSIX semantics exactly) and has
+            // `waitpid` re-open a HANDLE from it via OpenProcess, rather
+            // than repurposing `pid_t` to mean HANDLE.
+            try self.write("#include <sys/types.h>\n");
+            try self.write("typedef void* posix_spawnattr_t;\n");
+            try self.write("typedef struct {\n");
+            try self.write("    int has_dup2_1; int dup2_1_fd;\n");
+            try self.write("    int has_dup2_2; int dup2_2_fd;\n");
+            try self.write("} posix_spawn_file_actions_t;\n");
+            try self.write("\n");
+            try self.write("long long posix_spawn_file_actions_init(posix_spawn_file_actions_t* fa) {\n");
+            try self.write("    if (fa == NULL) return -1;\n");
+            try self.write("    fa->has_dup2_1 = 0;\n");
+            try self.write("    fa->has_dup2_2 = 0;\n");
+            try self.write("    return 0;\n");
+            try self.write("}\n");
+            try self.write("\n");
+            try self.write("long long posix_spawn_file_actions_destroy(posix_spawn_file_actions_t* fa) {\n");
+            try self.write("    (void)fa;\n");
+            try self.write("    return 0;\n");
+            try self.write("}\n");
+            try self.write("\n");
+            // Only stdout(1)/stderr(2) redirection is supported -- the only
+            // shape `std/process.fn`'s `run()` actually uses.
+            try self.write("long long posix_spawn_file_actions_adddup2(posix_spawn_file_actions_t* fa, long long fildes, long long newfildes) {\n");
+            try self.write("    if (fa == NULL) return -1;\n");
+            try self.write("    if (newfildes == 1) { fa->has_dup2_1 = 1; fa->dup2_1_fd = (int)fildes; return 0; }\n");
+            try self.write("    if (newfildes == 2) { fa->has_dup2_2 = 1; fa->dup2_2_fd = (int)fildes; return 0; }\n");
+            try self.write("    return -1;\n");
+            try self.write("}\n");
+            try self.write("\n");
+            // A no-op: with STARTF_USESTDHANDLES, unlisted std handles are
+            // simply left as the parent's own, so nothing needs closing in
+            // the (nonexistent) child before CreateProcess -- unlike POSIX,
+            // there is no fork'd child address space to prune fds in first.
+            try self.write("long long posix_spawn_file_actions_addclose(posix_spawn_file_actions_t* fa, long long fildes) {\n");
+            try self.write("    (void)fa; (void)fildes;\n");
+            try self.write("    return 0;\n");
+            try self.write("}\n");
+            try self.write("\n");
+            // Builds a Windows command-line string from argv, following the
+            // standard MSVCRT argument-quoting rules: quote an argument if
+            // it's empty or contains space/tab/quote, and backslash-escape
+            // runs of backslashes that immediately precede a quote (or end
+            // a quoted argument).
+            try self.write("static char* __fun_win_build_cmdline(char** argv) {\n");
+            try self.write("    size_t cap = 256, len = 0;\n");
+            try self.write("    char* out = (char*)malloc(cap);\n");
+            try self.write("    if (out == NULL) return NULL;\n");
+            try self.write("    for (int i = 0; argv[i] != NULL; i++) {\n");
+            try self.write("        const char* a = argv[i];\n");
+            try self.write("        size_t alen = strlen(a);\n");
+            try self.write("        int needs_quotes = (alen == 0);\n");
+            try self.write("        for (size_t j = 0; j < alen && !needs_quotes; j++) {\n");
+            try self.write("            if (a[j] == ' ' || a[j] == '\\t' || a[j] == '\"') needs_quotes = 1;\n");
+            try self.write("        }\n");
+            try self.write("        size_t need = alen * 2 + 3;\n");
+            try self.write("        while (len + need + 2 > cap) {\n");
+            try self.write("            cap *= 2;\n");
+            try self.write("            char* n = (char*)realloc(out, cap);\n");
+            try self.write("            if (n == NULL) { free(out); return NULL; }\n");
+            try self.write("            out = n;\n");
+            try self.write("        }\n");
+            try self.write("        if (i > 0) out[len++] = ' ';\n");
+            try self.write("        if (needs_quotes) out[len++] = '\"';\n");
+            try self.write("        size_t backslashes = 0;\n");
+            try self.write("        for (size_t j = 0; j < alen; j++) {\n");
+            try self.write("            char c = a[j];\n");
+            try self.write("            if (c == '\\\\') { backslashes++; out[len++] = c; continue; }\n");
+            try self.write("            if (c == '\"') {\n");
+            try self.write("                for (size_t k = 0; k <= backslashes; k++) out[len++] = '\\\\';\n");
+            try self.write("                out[len++] = '\"';\n");
+            try self.write("                backslashes = 0;\n");
+            try self.write("                continue;\n");
+            try self.write("            }\n");
+            try self.write("            backslashes = 0;\n");
+            try self.write("            out[len++] = c;\n");
+            try self.write("        }\n");
+            try self.write("        if (needs_quotes) {\n");
+            try self.write("            for (size_t k = 0; k < backslashes; k++) out[len++] = '\\\\';\n");
+            try self.write("            out[len++] = '\"';\n");
+            try self.write("        }\n");
+            try self.write("    }\n");
+            try self.write("    out[len] = '\\0';\n");
+            try self.write("    return out;\n");
+            try self.write("}\n");
+            try self.write("\n");
+            try self.write("long long posix_spawnp(pid_t* pid, const char* file, posix_spawn_file_actions_t* file_actions, posix_spawnattr_t* attrp, char** argv, char** envp) {\n");
+            try self.write("    (void)file; (void)attrp; (void)envp;\n");
+            try self.write("    if (pid == NULL || argv == NULL) return -1;\n");
+            try self.write("\n");
+            try self.write("    STARTUPINFOA si;\n");
+            try self.write("    PROCESS_INFORMATION pi;\n");
+            try self.write("    memset(&si, 0, sizeof(si));\n");
+            try self.write("    memset(&pi, 0, sizeof(pi));\n");
+            try self.write("    si.cb = sizeof(si);\n");
+            try self.write("\n");
+            try self.write("    BOOL inherit = FALSE;\n");
+            try self.write("    if (file_actions != NULL && (file_actions->has_dup2_1 || file_actions->has_dup2_2)) {\n");
+            try self.write("        si.dwFlags |= STARTF_USESTDHANDLES;\n");
+            try self.write("        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);\n");
+            try self.write("        si.hStdOutput = file_actions->has_dup2_1 ? (HANDLE)_get_osfhandle(file_actions->dup2_1_fd) : GetStdHandle(STD_OUTPUT_HANDLE);\n");
+            try self.write("        si.hStdError = file_actions->has_dup2_2 ? (HANDLE)_get_osfhandle(file_actions->dup2_2_fd) : GetStdHandle(STD_ERROR_HANDLE);\n");
+            try self.write("        if (file_actions->has_dup2_1) SetHandleInformation(si.hStdOutput, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);\n");
+            try self.write("        if (file_actions->has_dup2_2) SetHandleInformation(si.hStdError, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);\n");
+            try self.write("        inherit = TRUE;\n");
+            try self.write("    }\n");
+            try self.write("\n");
+            try self.write("    char* cmdline = __fun_win_build_cmdline(argv);\n");
+            try self.write("    if (cmdline == NULL) return -1;\n");
+            try self.write("    BOOL ok = CreateProcessA(NULL, cmdline, NULL, NULL, inherit, 0, NULL, NULL, &si, &pi);\n");
+            try self.write("    free(cmdline);\n");
+            try self.write("    if (!ok) return -1;\n");
+            try self.write("\n");
+            try self.write("    CloseHandle(pi.hThread);\n");
+            try self.write("    CloseHandle(pi.hProcess);\n");
+            try self.write("    *pid = (pid_t)pi.dwProcessId;\n");
+            try self.write("    return 0;\n");
+            try self.write("}\n");
+            try self.write("\n");
+            // Decoded into the SAME bit layout `_decode_wait_status`
+            // (std/process.fn) expects on POSIX: bits 0-6 the terminating
+            // signal (always 0 here -- Windows reports no such thing the
+            // same way), bits 8-15 the exit code.
+            try self.write("long long waitpid(pid_t pid, int32_t* status, long long options) {\n");
+            try self.write("    (void)options;\n");
+            try self.write("    HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION, FALSE, (DWORD)pid);\n");
+            try self.write("    if (h == NULL) return -1;\n");
+            try self.write("    WaitForSingleObject(h, INFINITE);\n");
+            try self.write("    DWORD code = 0;\n");
+            try self.write("    GetExitCodeProcess(h, &code);\n");
+            try self.write("    CloseHandle(h);\n");
+            try self.write("    if (status != NULL) *status = (int32_t)((code & 0xFF) << 8);\n");
+            try self.write("    return (long long)pid;\n");
+            try self.write("}\n");
+            try self.write("\n");
+            // `_pipe` needs a buffer size + text/binary mode that POSIX's
+            // 1-arg `pipe(fds)` has no room for -- arity mismatch, so unlike
+            // close/read/write/dup2 (which MinGW's io.h already aliases to
+            // their real msvcrt names with compatible signatures) this one
+            // needs an actual wrapper, not just relying on io.h.
+            try self.write("long long pipe(int32_t* fds) {\n");
+            try self.write("    return (long long)_pipe(fds, 4096, _O_BINARY);\n");
+            try self.write("}\n");
+            try self.write("#else\n");
+            try self.write("#include <spawn.h>\n");
+            try self.write("#include <sys/wait.h>\n");
+            try self.write("#include <unistd.h>\n");
+            try self.write("#endif\n");
+        }
+    }
+
+    fn requires_process_compat_recursive(proc: *Self) bool {
+        if (proc.requires_process_compat_layer) return true;
+        for (proc.children.items) |child| {
+            if (requires_process_compat_recursive(child)) return true;
+        }
+        return false;
     }
 
     fn requires_thread_compat_recursive(proc: *Self) bool {
