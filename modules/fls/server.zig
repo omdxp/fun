@@ -4865,6 +4865,59 @@ pub const LspServer = struct {
         return null;
     }
 
+    /// If the candidate return-type token at `rt_i` is immediately preceded
+    /// by a `)` that closes a `fun(...)` parameter-type-list, reconstructs
+    /// the whole `fun(T1, T2) RetType` signature text (arena-owned, lives
+    /// with `idx`); otherwise returns null (the ordinary, non-function-typed
+    /// case). Used by `guessVariableType`'s best-effort token scanner, whose
+    /// simple `Type name` pairing otherwise mistakes a function-type
+    /// parameter's OWN return type for its whole declared type.
+    fn reconstructFnTypeSignatureIfPresent(self: *LspServer, idx: *const Index, rt_i: usize) ?[]const u8 {
+        _ = self;
+        if (rt_i == 0) return null;
+        const closing = idx.tokens[rt_i - 1];
+        if (!((closing.kind == .symbol or closing.kind == .operator) and std.mem.eql(u8, closing.text, ")"))) return null;
+
+        var depth: i64 = 1;
+        var k: isize = @as(isize, @intCast(rt_i)) - 2;
+        var open_i: ?usize = null;
+        while (k >= 0) : (k -= 1) {
+            const tk = idx.tokens[@intCast(k)];
+            if ((tk.kind == .symbol or tk.kind == .operator) and std.mem.eql(u8, tk.text, ")")) depth += 1;
+            if ((tk.kind == .symbol or tk.kind == .operator) and std.mem.eql(u8, tk.text, "(")) {
+                depth -= 1;
+                if (depth == 0) {
+                    open_i = @intCast(k);
+                    break;
+                }
+            }
+        }
+        const lp_i = open_i orelse return null;
+        if (lp_i == 0) return null;
+        const fun_tok = idx.tokens[lp_i - 1];
+        if (!(fun_tok.kind == .keyword and std.mem.eql(u8, fun_tok.text, "fun"))) return null;
+
+        const arena = @constCast(&idx.arena).allocator();
+        var buf = ArrayList(u8).init(arena);
+        buf.appendSlice("fun(") catch return null;
+        var wrote_arg = false;
+        var fk = lp_i + 1;
+        while (fk < rt_i - 1) : (fk += 1) {
+            const ftk = idx.tokens[fk];
+            if (ftk.kind == .comment) continue;
+            if ((ftk.kind == .symbol or ftk.kind == .operator) and std.mem.eql(u8, ftk.text, ",")) {
+                buf.appendSlice(", ") catch return null;
+                continue;
+            }
+            if (wrote_arg) buf.append(' ') catch return null;
+            buf.appendSlice(ftk.text) catch return null;
+            wrote_arg = true;
+        }
+        buf.appendSlice(") ") catch return null;
+        buf.appendSlice(idx.tokens[rt_i].text) catch return null;
+        return buf.toOwnedSlice() catch null;
+    }
+
     fn guessVariableType(self: *LspServer, idx: *const Index, preferred_uri: []const u8, var_name: []const u8, at: Position) ?[]const u8 {
         // Prefer symbol table (locals + globals) when available.
         if (findBestDefinition(idx.symbols, var_name, at)) |d| {
@@ -4966,7 +5019,17 @@ pub const LspServer = struct {
 
             // Ensure the name token is also before position.
             if (!rangeStartLessOrEqual(t_name.range, at)) continue;
-            best = if (t_type.kind == .identifier) baseTypeName(t_type.text) else t_type.text;
+
+            // A function-TYPE parameter (`fun(T1, T2) RetType name`) has its
+            // OWN return-type token immediately before `name` too -- e.g.
+            // `run_at` in `fun(num) bin run_at` looks EXACTLY like an
+            // ordinary `bin run_at` declaration to this scanner, which only
+            // understands simple `Type name` pairs, and previously matched
+            // just the bare return type, losing the callable shape entirely.
+            // Detect it by walking back from a `)`-preceded candidate to its
+            // matching `(` and checking for a `fun` keyword just before that.
+            best = self.reconstructFnTypeSignatureIfPresent(idx, i) orelse
+                (if (t_type.kind == .identifier) baseTypeName(t_type.text) else t_type.text);
         }
         return best;
     }

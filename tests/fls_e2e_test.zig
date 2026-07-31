@@ -7974,6 +7974,26 @@ test "fls e2e: a function-type parameter's nested `fun(...)` does not clobber th
     const pred_val = try jsonResultFromResponseObj(pred_res.parsed.value.object);
     try expectHoverContains(allocator, pred_val, "fun(chr) bin pred");
 
+    // Regression: hovering `pred` at its OWN declaration site (inside the
+    // parameter list, before the method's body `{`) is structurally outside
+    // `container_fn_range` (which only spans the body), so the indexed-symbol
+    // lookup used by the use-site check above never matches here -- this
+    // falls all the way to `guessVariableType`'s best-effort token scanner,
+    // which previously mistook the return-type token (`bin`) immediately
+    // before `pred` for its WHOLE type, again losing the callable shape.
+    const pred_decl_pos = try findPosition(doc_text, "pred) str {", 0);
+    const pred_decl_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, pred_decl_pos.line, pred_decl_pos.col + 1 },
+    );
+    defer allocator.free(pred_decl_params);
+    const pred_decl_hid = try lsp.request("textDocument/hover", pred_decl_params);
+    var pred_decl_res = try lsp.waitResponse(pred_decl_hid, 15000);
+    defer pred_decl_res.deinit();
+    const pred_decl_val = try jsonResultFromResponseObj(pred_decl_res.parsed.value.object);
+    try expectHoverContains(allocator, pred_decl_val, "fun(chr) bin pred");
+
     const self_pos = try findPosition(doc_text, "self.pos", 0);
     const self_params = try std.fmt.allocPrint(
         allocator,
@@ -7986,6 +8006,56 @@ test "fls e2e: a function-type parameter's nested `fun(...)` does not clobber th
     defer self_res.deinit();
     const self_val = try jsonResultFromResponseObj(self_res.parsed.value.object);
     try expectHoverContains(allocator, self_val, "Reader*");
+
+    const shutdown_id = try lsp.request("shutdown", "{}");
+    var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
+    shutdown_res.deinit();
+    try lsp.notify("exit", "{}");
+}
+
+test "fls e2e: hover on a function-type parameter that is NOT the first parameter" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var setup = try resolveTestSetup(allocator);
+    defer freeTestSetup(allocator, &setup);
+
+    var lsp = try LspProc.start(allocator, setup.fls_path, setup.root_abs, setup.fun_abs);
+    defer lsp.stop();
+    try lspInitialize(allocator, &lsp, setup.root_uri);
+
+    // Regression (real repro from `stdlib/std/testing.fn`'s `run_one`):
+    // `guessVariableType`'s best-effort token scanner (the fallback used
+    // when a function-type parameter is hovered at its OWN declaration
+    // site, per the test above) walked forward from the start of the file
+    // and paired the FIRST `Type name` match it found -- for `run_at`, that
+    // was the bare return type (`bin`) immediately preceding it, not the
+    // whole `fun(num) bin` signature. Being the SECOND parameter (after
+    // `num i,`) wasn't itself the issue; any function-type parameter's
+    // declaration-site hover hit this same fallback.
+    const doc_text =
+        "async fun run_one(num i, fun(num) bin run_at, num out) {\n" ++
+        "  bin r = run_at(i);\n" ++
+        "  _ = r;\n" ++
+        "}\n";
+
+    const doc_uri = try lspMakeDocUri(allocator, setup.root_abs, "fls-e2e-fn-type-param-not-first.fn");
+    defer allocator.free(doc_uri);
+    try lspOpenDoc(allocator, &lsp, doc_uri, 1, doc_text);
+
+    const decl_pos = try findPosition(doc_text, "run_at,", 0);
+    const decl_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ doc_uri, decl_pos.line, decl_pos.col + 1 },
+    );
+    defer allocator.free(decl_params);
+    const decl_hid = try lsp.request("textDocument/hover", decl_params);
+    var decl_res = try lsp.waitResponse(decl_hid, 15000);
+    defer decl_res.deinit();
+    const decl_val = try jsonResultFromResponseObj(decl_res.parsed.value.object);
+    try expectHoverContains(allocator, decl_val, "fun(num) bin run_at");
 
     const shutdown_id = try lsp.request("shutdown", "{}");
     var shutdown_res = try lsp.waitResponse(shutdown_id, 5000);
