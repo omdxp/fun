@@ -1124,6 +1124,85 @@ impl Codegen {
   // slice's scope; an unsupported generic method body will simply emit
   // no/partial C for that one method rather than surface a codegen
   // error, which no existing test exercises.
+  // 
+  // A side-effect-free SIGNATURE-only emission of one generic impl
+  // method's monomorphized C prototype (`<rtype> <new_name>(<params>);`),
+  // used by `maybe_instantiate_generic_impl_methods` to forward-declare
+  // every method of an instantiation BEFORE any of their bodies -- one
+  // method's body can call ANOTHER method of the SAME instantiation
+  // declared LATER in the source (`Option<T>.unwrap()` calling its own
+  // `self.zero()`, `Vec<T>.init()` calling its own `self.grow()`), and
+  // without a forward declaration the C compiler sees an implicit
+  // (wrongly `int`-returning) declaration at the call site, then a
+  // "conflicting types" error at the real definition. Deliberately does
+  // NOT reuse `emit_function_param` (which also REGISTERS each param as a
+  // known local, a side effect only appropriate during real body
+  // emission) -- just resolves and writes each param's type.
+  emit_generic_impl_method_prototype(Node m, str new_name) Option<CodegenErrorKind> {
+    fit m.kind {
+      .Function(f) -> {
+        if !f.has_rtype {
+          ret .Some(CodegenErrorKind.InvalidNode);
+        }
+        let rt = self.write_type(*f.rtype);
+        if rt.is_none() {
+          ret .Some(CodegenErrorKind.UnsupportedNode);
+        }
+        self.state.write(" ");
+        self.state.write(new_name);
+        self.state.write("(");
+        if f.has_args && f.args.len > 0 {
+          bin first = true;
+          for arg : f.args {
+            if !first {
+              self.state.write(", ");
+            }
+            first = false;
+            fit arg.kind {
+              .Variable(v) -> {
+                if v.var_type.has_fn_sig {
+                  let sig = v.var_type.fn_sig;
+                  let prt = self.write_type(*sig.rtype);
+                  if prt.is_none() {
+                    ret .Some(CodegenErrorKind.UnsupportedNode);
+                  }
+                  self.state.write(" (*");
+                  self.state.write(v.name);
+                  self.state.write(")(");
+                  bin pfirst = true;
+                  for p : sig.params {
+                    if !pfirst {
+                      self.state.write(", ");
+                    }
+                    pfirst = false;
+                    let pt = self.write_type(*p);
+                    if pt.is_none() {
+                      ret .Some(CodegenErrorKind.UnsupportedNode);
+                    }
+                  }
+                  self.state.write(")");
+                } else {
+                  let wt = self.write_type(*v.var_type);
+                  if wt.is_none() {
+                    ret .Some(CodegenErrorKind.UnsupportedNode);
+                  }
+                  self.state.write(" ");
+                  self.state.write(v.name);
+                }
+              }
+              _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
+            }
+          }
+        } else {
+          self.state.write("void");
+        }
+        self.state.write(");\n");
+        ret .None;
+      }
+      _ -> { ret .Some(CodegenErrorKind.InvalidNode); }
+    }
+  }
+
   maybe_instantiate_generic_impl_methods(
     str base_name,
     str mangled_name,
@@ -1149,6 +1228,38 @@ impl Codegen {
               pfx.append("__");
             }
             str prefix = pfx.build();
+
+            // Forward-declare every method of THIS instantiation before any
+            // of their bodies (see `emit_generic_impl_method_prototype`'s
+            // own doc comment for why) -- one shared scratch buffer, hoisted
+            // as a single block right before the per-method bodies below
+            // (`emit_hoisted` appends each call after the last, so this
+            // block always lands first).
+            CodegenState proto_scratch = codegen_state_new();
+            CodegenState* saved_proto_state = self.state;
+            let saved_proto_hoist_pos = self.hoist_insert_pos;
+            self.state = &proto_scratch;
+            self.hoist_insert_pos = .None;
+            for pm : i.methods {
+              str proto_tmpl_name = "";
+              fit pm.kind {
+                .Function(pfnv) -> { proto_tmpl_name = pfnv.name; }
+                _ -> {}
+              }
+              let proto_bare_name = strip_prefix(proto_tmpl_name, prefix);
+              StringBuilder pnb = string_builder_init(16);
+              pnb.append(mangled_name);
+              pnb.append("__");
+              if i.has_quirk_name {
+                pnb.append(i.quirk_name);
+                pnb.append("__");
+              }
+              pnb.append(proto_bare_name);
+              self.emit_generic_impl_method_prototype(*pm, pnb.build());
+            }
+            self.state = saved_proto_state;
+            self.hoist_insert_pos = saved_proto_hoist_pos;
+            self.emit_hoisted(proto_scratch.out.build());
 
             for m : i.methods {
               str tmpl_name = "";
@@ -2003,6 +2114,47 @@ impl Codegen {
     args.init(0);
     defer args.free();
     self.flatten_call_args(e.right, &args);
+
+    // `sizeof(T)` where `T` is the bare type param of the generic impl
+    // method currently being monomorphized (`Option<T>.zero()`'s own
+    // `memset(&out, 0, sizeof(T))`) needs the SAME substitution every
+    // other reference to `T` in this method body already gets via
+    // `resolve_type_subst` -- but a `sizeof(...)` argument is parsed as
+    // an ordinary call argument EXPRESSION (see `parser.fn`'s own
+    // `parse_expressionable_single` doc comment: 'sizeof' isn't a real
+    // keyword, just an identifier callee), never as a `DataType` that
+    // flows through the type-substitution machinery at all -- so it was
+    // previously emitted verbatim as the literal identifier `T`, which
+    // doesn't exist in the generated C. Only fires when a substitution
+    // context is ACTUALLY active and the argument matches one of its
+    // params; every other `sizeof(...)` (a real, non-generic type name,
+    // the overwhelmingly common case) falls through unchanged below.
+    if equals(callee_name, "sizeof") && self.type_subst_param_names.len > 0 && args.len == 1 {
+      str sizeof_operand = "";
+      bin have_sizeof_operand = false;
+      fit args.get(0).kind {
+        .Identifier(name) -> {
+          sizeof_operand = name;
+          have_sizeof_operand = true;
+        }
+        _ -> {}
+      }
+      if have_sizeof_operand {
+        num spi = 0;
+        for spi < self.type_subst_param_names.len {
+          if equals(self.type_subst_param_names.get(spi), sizeof_operand) {
+            self.state.write("sizeof(");
+            self.write_type_name(self.type_subst_arg_type_strs.get(spi));
+            if self.type_subst_arg_is_pointer.get(spi) {
+              self.state.write("*");
+            }
+            self.state.write(")");
+            ret .None;
+          }
+          spi = spi + 1;
+        }
+      }
+    }
 
     // A call to a GENERIC function (`err_kind(.Parse, "msg",
     // token_zero())`) is monomorphized from THIS call site's own
@@ -3894,10 +4046,32 @@ impl Codegen {
   // 
   // Deliberately simplified from the original for this slice: no
   // forward declaration and no dependency-ordering pass for by-value
-  // nested compounds either (the original topologically sorts these) --
+  // nested compounds either (the original topologically sorts these,
+  // treating generic instantiations and plain compounds/enums as one
+  // unified worklist -- see `emit_generic_compound_specializations`'s
+  // own "topological pass" comment in `modules/codegen/transpiler.zig`
+  // around its `remaining_specs`/`remaining_enum_specs` worklists) --
   // this assumes source order already satisfies it, same as a plain
-  // sequential C struct-after-struct listing would require. No array-
-  // typed fields (`T[3]`/`T[]`) -- only scalar/pointer field types.
+  // sequential C struct-after-struct listing would require.
+  // 
+  // CONFIRMED BROKEN for a real multi-file program (found via the
+  // self-hosted driver's own first end-to-end run, `selfhost/cli/
+  // main.fn`, compiling something as simple as `imp std.io;`): `pub
+  // transpile` emits ALL enums in one pass, THEN all plain compounds in
+  // a separate one (see `pub transpile`'s own doc comment) -- but
+  // stdlib's own types depend on each other in BOTH directions
+  // (`std.io`'s `Sink` enum holds a `File` compound BY VALUE in one
+  // variant, needing compounds-before-enums; `std.error`'s `Error`
+  // compound holds an `ErrorKind` enum BY VALUE as a field, needing
+  // enums-before-compounds) -- so neither pass ORDER is universally
+  // safe, and a plain two-pass swap just trades one break for the
+  // other. A real fix needs the SAME lazy, first-reference-triggers-
+  // emission mechanism generic types already get via
+  // `ensure_compound_instantiated`/`ensure_enum_instantiated`, extended
+  // to cover plain (non-generic) compounds/enums too -- not a bigger
+  // hard-coded pass ordering. Left as a known, documented gap rather
+  // than a quick patch; no array-typed fields (`T[3]`/`T[]`) either --
+  // only scalar/pointer field types.
   emit_compound(Node node) Option<CodegenErrorKind> {
     fit node.kind {
       .Compound(c) -> {
@@ -8249,8 +8423,8 @@ test "emit_statement instantiates a generic impl's monomorphized method the firs
   assert g.emit_statement(n).is_none(), "expected the Box<num> declaration to emit";
   assert equals(
     st.out.build(),
-    "typedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nBox__num b;\n"
-  ), "expected the struct AND its generic impl's method (self/return type substituted T -> num) emitted once, before the declaration";
+    "typedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nint64_t Box__num__get(Box__num* self);\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nBox__num b;\n"
+  ), "expected the struct, a forward declaration, AND its generic impl's method (self/return type substituted T -> num) emitted once, before the declaration";
 }
 
 test "emit_statement does not re-emit a generic impl's monomorphized method on a second use" {
@@ -8265,8 +8439,8 @@ test "emit_statement does not re-emit a generic impl's monomorphized method on a
   assert g.emit_statement(n2).is_none(), "expected the second Box<num> declaration to emit";
   assert equals(
     st.out.build(),
-    "typedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nBox__num b1;\nBox__num b2;\n"
-  ), "expected the struct and the method emitted only once, even though Box<num> is used twice";
+    "typedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nint64_t Box__num__get(Box__num* self);\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nBox__num b1;\nBox__num b2;\n"
+  ), "expected the struct and the method (plus its forward declaration) emitted only once, even though Box<num> is used twice";
 }
 
 test "emit_expr calls a generic impl's monomorphized method through a value-typed instance" {
@@ -8307,7 +8481,7 @@ test "emit_expr calls a generic impl's monomorphized method through a value-type
   assert g.emit_expr(n).is_none(), "expected 'b.get()' to resolve to the monomorphized method";
   assert equals(
     st.out.build(),
-    "typedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nBox__num b;\nBox__num__get(&b)"
+    "typedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nint64_t Box__num__get(Box__num* self);\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nBox__num b;\nBox__num__get(&b)"
   ), "expected 'Box__num__get(&b)', resolved via the same lookup_impl_method path a non-generic impl uses";
 }
 
@@ -8603,7 +8777,7 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
   assert g.transpile(nodes).is_none(), "expected the whole program to transpile";
   assert equals(
     st.out.build(),
-    "#include <stdio.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdarg.h>\n#include <stdlib.h>\n#include <string.h>\nstatic FILE* stderr_stream(void){ return stderr; }\ntypedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nint64_t main(void) {\n    Box__num b;\n}\n"
+    "#include <stdio.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdarg.h>\n#include <stdlib.h>\n#include <string.h>\nstatic FILE* stderr_stream(void){ return stderr; }\ntypedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nint64_t Box__num__get(Box__num* self);\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nint64_t main(void) {\n    Box__num b;\n}\n"
   ), "expected the struct typedef AND the monomorphized method BEFORE 'main', not nested inside its braces";
 }
 
