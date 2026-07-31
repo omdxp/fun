@@ -120,7 +120,7 @@ pub fun try_thread_start(Thread* thread, raw* entry, raw* arg) Result<bin, Error
   if rc != 0 {
     ret err_kind_code(.System, rc, "thread_start failed", false);
   }
-  ret ok(true);
+  ret .Ok(true);
 }
 
 // Join a thread via pointer receiver helper.
@@ -151,7 +151,7 @@ pub fun try_thread_join(Thread* thread, raw* out_ret) Result<bin, Error> {
   if rc != 0 {
     ret err_kind_code(.System, rc, "thread_join failed", false);
   }
-  ret ok(true);
+  ret .Ok(true);
 }
 
 // Detach a thread via pointer receiver helper.
@@ -181,7 +181,7 @@ pub fun try_thread_detach(Thread* thread) Result<bin, Error> {
   if rc != 0 {
     ret err_kind_code(.System, rc, "thread_detach failed", false);
   }
-  ret ok(true);
+  ret .Ok(true);
 }
 
 // Return the current thread id.

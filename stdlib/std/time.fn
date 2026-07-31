@@ -172,7 +172,7 @@ pub fun try_format_local(num epoch, str buf, num buf_len, str format) Result<num
   if n <= 0 {
     ret err_kind(.Unexpected, "format_local failed", 0);
   }
-  ret ok(n);
+  ret .Ok(n);
 }
 
 // Format an epoch value with a custom format (UTC).
@@ -197,7 +197,7 @@ pub fun try_format_utc(num epoch, str buf, num buf_len, str format) Result<num, 
   if n <= 0 {
     ret err_kind(.Unexpected, "format_utc failed", 0);
   }
-  ret ok(n);
+  ret .Ok(n);
 }
 
 // Format an epoch value using C's human-readable format (ctime).
@@ -266,7 +266,7 @@ pub fun try_now_string(str buf, num buf_len) Result<num, Error> {
   if n <= 0 {
     ret err_kind(.Unexpected, "now_string failed", 0);
   }
-  ret ok(n);
+  ret .Ok(n);
 }
 
 // Format current time with default format (UTC).
@@ -292,7 +292,7 @@ pub fun try_now_string_utc(str buf, num buf_len) Result<num, Error> {
   if n <= 0 {
     ret err_kind(.Unexpected, "now_string_utc failed", 0);
   }
-  ret ok(n);
+  ret .Ok(n);
 }
 
 // Format current time using C's human-readable format (ctime).

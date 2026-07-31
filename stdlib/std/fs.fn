@@ -117,7 +117,7 @@ impl Fs {
     if out == nil {
       ret err_kind(.Io, "read_to_string failed", "");
     }
-    ret ok(out);
+    ret .Ok(out);
   }
 
   // Read up to max_len bytes into a string.
@@ -159,7 +159,7 @@ impl Fs {
     if out == nil {
       ret err_kind(.Io, "read_bytes failed", "");
     }
-    ret ok(out);
+    ret .Ok(out);
   }
 
   // Write a string to a file.
@@ -187,7 +187,7 @@ impl Fs {
     if ok_write == false {
       ret err_kind(.Io, "write_string failed", false);
     }
-    ret ok(true);
+    ret .Ok(true);
   }
 
   // Append a string to a file.
@@ -222,7 +222,7 @@ impl Fs {
     if ok_append == false {
       ret err_kind(.Io, "append_string failed", false);
     }
-    ret ok(true);
+    ret .Ok(true);
   }
 
   // Copy a file by reading into memory and writing out.
@@ -257,7 +257,7 @@ impl Fs {
     if write_all(dst, data) == false {
       ret err_kind(.Io, "copy_file write failed", false);
     }
-    ret ok(true);
+    ret .Ok(true);
   }
 
   // Get file size (bytes), or -1.
@@ -295,7 +295,7 @@ impl Fs {
     if out < 0 {
       ret err_kind(.Io, "size failed", -1);
     }
-    ret ok(out);
+    ret .Ok(out);
   }
 
   // Read all lines into a Vec<str>.
@@ -348,7 +348,7 @@ impl Fs {
         ret err_kind(.NotFound, "read_lines failed", out);
       }
     }
-    ret ok(out);
+    ret .Ok(out);
   }
 
   // Check whether path names a directory.
@@ -376,7 +376,7 @@ impl Fs {
     if __fun_make_dir(path) != 0 {
       ret err_kind(.Io, "make_dir failed", false);
     }
-    ret ok(true);
+    ret .Ok(true);
   }
 
   // List the immediate entries of a directory (excludes `.`/`..`; includes
@@ -407,7 +407,7 @@ impl Fs {
       out.push(_dup_cstr(name));
     }
     __fun_dir_close(d);
-    ret ok(out);
+    ret .Ok(out);
   }
 
   // Recursively discover every `.fn` file under a directory. Used by the
@@ -522,7 +522,7 @@ pub fun try_size(str path) Result<num, Error> {
   if n < 0 {
     ret err_kind(.Io, "size failed", -1);
   }
-  ret ok(n);
+  ret .Ok(n);
 }
 
 // Read all lines into a Vec<str>.

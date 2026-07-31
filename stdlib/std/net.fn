@@ -99,7 +99,7 @@ pub fun try_parse_url(str s) Result<Url, Error> {
   if is_empty(u.host) {
     ret err_kind(.Parse, "parse_url: missing host", u);
   }
-  ret ok(u);
+  ret .Ok(u);
 }
 
 // Build a simple HTTP GET request from a Url.
@@ -202,7 +202,7 @@ pub fun try_tcp_listen(num port) Result<num, Error> {
   if fd < 0 {
     ret err_kind(.Io, "tcp_listen failed", -1);
   }
-  ret ok(fd);
+  ret .Ok(fd);
 }
 
 // Accept a client connection.
@@ -226,7 +226,7 @@ pub fun try_tcp_accept(num server_fd) Result<num, Error> {
   if fd < 0 {
     ret err_kind(.Io, "tcp_accept failed", -1);
   }
-  ret ok(fd);
+  ret .Ok(fd);
 }
 
 // Read from a socket.
@@ -257,7 +257,7 @@ pub fun try_tcp_read(num fd, str buf, num len) Result<num, Error> {
   if n < 0 {
     ret err_kind(.Io, "tcp_read failed", -1);
   }
-  ret ok(n);
+  ret .Ok(n);
 }
 
 // Write to a socket.
@@ -288,7 +288,7 @@ pub fun try_tcp_write(num fd, str buf, num len) Result<num, Error> {
   if n < 0 {
     ret err_kind(.Io, "tcp_write failed", -1);
   }
-  ret ok(n);
+  ret .Ok(n);
 }
 
 // Close a socket.
@@ -531,7 +531,7 @@ pub fun try_http_serve_once(num port, str body) Result<num, Error> {
   if rc != 0 {
     ret err_kind(.Io, "http_serve_once failed", rc);
   }
-  ret ok(rc);
+  ret .Ok(rc);
 }
 
 // Serve HTTP requests forever in a blocking loop.
@@ -584,5 +584,5 @@ pub fun try_http_serve_forever(num port, str body) Result<num, Error> {
   if rc != 0 {
     ret err_kind(.Io, "http_serve_forever failed", rc);
   }
-  ret ok(rc);
+  ret .Ok(rc);
 }

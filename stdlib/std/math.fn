@@ -519,7 +519,7 @@ pub fun try_pow_int(num base, num exp) Result<num, Error> {
   if exp < 0 {
     ret err_kind(.Invalid, "pow_int: negative exponent", 1);
   }
-  ret ok(pow_int(base, exp));
+  ret .Ok(pow_int(base, exp));
 }
 
 // Return the distance between two vectors.

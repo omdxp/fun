@@ -124,7 +124,7 @@ pub fun some<T>(T value) Option<T> {
 // resolves from the call site.
 pub fun ok_or<T>(Option<T> o, ErrorKind kind, str message) Result<T, Error> {
   fit o {
-    .Some(v) -> { ret ok(v); }
+    .Some(v) -> { ret .Ok(v); }
     .None -> {
       T zero;
       ret err_kind(kind, message, zero);

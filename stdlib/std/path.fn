@@ -150,7 +150,7 @@ pub fun try_path_join(str a, str b) Result<str, Error> {
   if out == nil {
     ret err_kind(.Invalid, "path_join failed", "");
   }
-  ret ok(out);
+  ret .Ok(out);
 }
 
 // Join multiple segments.
@@ -191,7 +191,7 @@ pub fun try_path_join_many(Vec<str>* parts) Result<str, Error> {
   if out == nil {
     ret err_kind(.Invalid, "path_join_many failed", "");
   }
-  ret ok(out);
+  ret .Ok(out);
 }
 
 // True if path is absolute (posix).
@@ -375,5 +375,5 @@ pub fun try_change_ext(str path, str new_ext) Result<str, Error> {
   if out == nil {
     ret err_kind(.Invalid, "change_ext failed", "");
   }
-  ret ok(out);
+  ret .Ok(out);
 }

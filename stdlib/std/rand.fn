@@ -74,7 +74,7 @@ impl Rand {
     if min > max {
       ret err_kind(.Invalid, "range: min > max", min);
     }
-    ret ok(self.range(min, max));
+    ret .Ok(self.range(min, max));
   }
 
   // Return the next pseudo-random decimal in `[0, 1)`.
@@ -112,7 +112,7 @@ impl Rand {
     if min > max {
       ret err_kind(.Invalid, "range_dec: min > max", min);
     }
-    ret ok(self.range_dec(min, max));
+    ret .Ok(self.range_dec(min, max));
   }
 
   // Return true with probability `p`.

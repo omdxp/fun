@@ -125,7 +125,7 @@ impl ThreadPool {
     if rc != 0 {
       ret err_kind_code(.System, rc, "thread pool start_all failed", rc);
     }
-    ret ok(self.size);
+    ret .Ok(self.size);
   }
 
   // Join all started workers.
@@ -168,7 +168,7 @@ impl ThreadPool {
     if rc != 0 {
       ret err_kind_code(.System, rc, "thread pool join_all failed", rc);
     }
-    ret ok(self.size);
+    ret .Ok(self.size);
   }
 
   // Detach all started workers.
@@ -203,7 +203,7 @@ impl ThreadPool {
     if rc != 0 {
       ret err_kind_code(.System, rc, "thread pool detach_all failed", rc);
     }
-    ret ok(self.size);
+    ret .Ok(self.size);
   }
 
   // Free worker storage and reset the pool to an empty ready state.

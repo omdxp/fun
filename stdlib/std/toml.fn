@@ -177,7 +177,7 @@ impl TomlDoc {
     if out == nil {
       ret err_kind(.OutOfMemory, "toml stringify failed", "");
     }
-    ret ok(out);
+    ret .Ok(out);
   }
 }
 
@@ -272,7 +272,7 @@ pub fun parse_document(str s) TomlDoc {
 // Parse a flat TOML document with Result.
 pub fun try_parse_document(str s) Result<TomlDoc, Error> {
   let out = parse_document(s);
-  ret ok(out);
+  ret .Ok(out);
 }
 
 impl TomlDoc as To<str> {

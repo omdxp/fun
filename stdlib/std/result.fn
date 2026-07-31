@@ -122,8 +122,15 @@ impl Result<T, E> {
   }
 }
 
-// Construct a successful `Ok(value)`.
-pub fun ok<T>(T value) Result<T, Error> {
+// Construct a successful `Ok(value)`. Generic over the error type `E` (the
+// body never touches it) -- unlike `err()`/`err_kind()`/etc., which always
+// construct a concrete `Error` internally and so stay fixed to
+// `Result<T, Error>` (see the module doc comment above). `E` has no argument
+// to infer it from, so a caller either supplies it explicitly
+// (`ok<T, E>(value)`) or, more simply, uses the `.Ok(value)` shorthand
+// directly (which resolves both `T` and `E` from the surrounding declared
+// return/variable type, same as `.Err(...)` already does).
+pub fun ok<T, E>(T value) Result<T, E> {
   ret .Ok(value);
 }
 

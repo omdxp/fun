@@ -383,7 +383,7 @@ impl JsonParser {
         self.pos = self.pos + 1;
         let out = b.build();
         b.free();
-        ret ok(out);
+        ret .Ok(out);
       }
       if c == '\\' {
         self.pos = self.pos + 1;
@@ -442,25 +442,25 @@ impl JsonParser {
     }
     if c == '"' {
       fit self.parse_string() {
-        .Ok(s) -> { ret ok(JsonValue.Str(s)); }
+        .Ok(s) -> { ret .Ok(JsonValue.Str(s)); }
         .Err(e) -> { ret err_error(e, JsonValue.Null); }
       }
     }
     if self.starts_with("true") {
       self.pos = self.pos + 4;
-      ret ok(JsonValue.Bool(true));
+      ret .Ok(JsonValue.Bool(true));
     }
     if self.starts_with("false") {
       self.pos = self.pos + 5;
-      ret ok(JsonValue.Bool(false));
+      ret .Ok(JsonValue.Bool(false));
     }
     if self.starts_with("null") {
       self.pos = self.pos + 4;
-      ret ok(JsonValue.Null);
+      ret .Ok(JsonValue.Null);
     }
     if _json_is_digit(c) || c == '-' {
       let numtext = self.parse_number_text();
-      ret ok(JsonValue.Num(parse_dec(numtext)));
+      ret .Ok(JsonValue.Num(parse_dec(numtext)));
     }
     ret err_kind(.Parse, "unexpected character in JSON", JsonValue.Null);
   }
@@ -472,7 +472,7 @@ impl JsonParser {
     self.skip_ws();
     if self.peek() == ']' {
       self.pos = self.pos + 1;
-      ret ok(JsonValue.Array(items));
+      ret .Ok(JsonValue.Array(items));
     }
     for true {
       fit self.parse_value() {
@@ -488,13 +488,13 @@ impl JsonParser {
         self.pos = self.pos + 1;
       } elif c == ']' {
         self.pos = self.pos + 1;
-        ret ok(JsonValue.Array(items));
+        ret .Ok(JsonValue.Array(items));
       } else {
         items.free();
         ret err_kind(.Parse, "expected ',' or ']' in array", JsonValue.Null);
       }
     }
-    ret ok(JsonValue.Array(items));
+    ret .Ok(JsonValue.Array(items));
   }
 
   parse_object() Result<JsonValue, Error> {
@@ -504,7 +504,7 @@ impl JsonParser {
     self.skip_ws();
     if self.peek() == '}' {
       self.pos = self.pos + 1;
-      ret ok(JsonValue.Object(entries));
+      ret .Ok(JsonValue.Object(entries));
     }
     for true {
       self.skip_ws();
@@ -535,13 +535,13 @@ impl JsonParser {
         self.pos = self.pos + 1;
       } elif c == '}' {
         self.pos = self.pos + 1;
-        ret ok(JsonValue.Object(entries));
+        ret .Ok(JsonValue.Object(entries));
       } else {
         entries.free();
         ret err_kind(.Parse, "expected ',' or '}' in object", JsonValue.Null);
       }
     }
-    ret ok(JsonValue.Object(entries));
+    ret .Ok(JsonValue.Object(entries));
   }
 }
 

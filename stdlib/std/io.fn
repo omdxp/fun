@@ -257,7 +257,7 @@ pub fun try_open_read(str path) Result<File, Error> {
   if f.handle == nil {
     ret err_kind(.Io, "open_read failed", f);
   }
-  ret ok(f);
+  ret .Ok(f);
 }
 
 // Open file for writing (binary).
@@ -279,7 +279,7 @@ pub fun try_open_write(str path) Result<File, Error> {
   if f.handle == nil {
     ret err_kind(.Io, "open_write failed", f);
   }
-  ret ok(f);
+  ret .Ok(f);
 }
 
 // Open file for appending (binary).
@@ -301,7 +301,7 @@ pub fun try_open_append(str path) Result<File, Error> {
   if f.handle == nil {
     ret err_kind(.Io, "open_append failed", f);
   }
-  ret ok(f);
+  ret .Ok(f);
 }
 
 impl File {
@@ -346,7 +346,7 @@ impl File {
     if out == nil {
       ret err_kind(.Io, "read_all failed", "");
     }
-    ret ok(out);
+    ret .Ok(out);
   }
 
   // Read up to max_len bytes (binary-safe). Returns allocated buffer (NUL-terminated).
@@ -372,7 +372,7 @@ impl File {
     if out == nil {
       ret err_kind(.Io, "read_bytes failed", "");
     }
-    ret ok(out);
+    ret .Ok(out);
   }
 
   // Read a line up to max_len (including newline if present).
@@ -401,7 +401,7 @@ impl File {
     if out == nil {
       ret err_kind(.Io, "read_line_max failed", "");
     }
-    ret ok(out);
+    ret .Ok(out);
   }
 
   // Read all lines (up to max_len per line).
@@ -431,7 +431,7 @@ impl File {
       ret err_kind(.Invalid, "read_lines on closed file", empty);
     }
     let out = self.read_lines(max_len);
-    ret ok(out);
+    ret .Ok(out);
   }
 
   // Write raw bytes to the file.
@@ -452,7 +452,7 @@ impl File {
     if ok_write == false {
       ret err_kind(.Io, "write_bytes failed", false);
     }
-    ret ok(true);
+    ret .Ok(true);
   }
 
   // Read raw bytes into a buffer; returns bytes read.
@@ -469,7 +469,7 @@ impl File {
       ret err_kind(.Invalid, "read_into invalid", 0);
     }
     let n = self.read_into(dst, len);
-    ret ok(n);
+    ret .Ok(n);
   }
 
   // Seek within the file (whence: 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END).
@@ -489,7 +489,7 @@ impl File {
     if ok_seek == false {
       ret err_kind(.Io, "seek failed", false);
     }
-    ret ok(true);
+    ret .Ok(true);
   }
 
   // Tell current file position.
@@ -509,7 +509,7 @@ impl File {
     if pos < 0 {
       ret err_kind(.Io, "tell failed", -1);
     }
-    ret ok(pos);
+    ret .Ok(pos);
   }
 
   // Rewind to start of file.
@@ -537,7 +537,7 @@ impl File {
     if ok_flush == false {
       ret err_kind(.Io, "flush failed", false);
     }
-    ret ok(true);
+    ret .Ok(true);
   }
 
   // Get file size (best-effort; returns -1 on failure).
@@ -576,7 +576,7 @@ impl File {
     if ok_write == false {
       ret err_kind(.Io, "write failed", false);
     }
-    ret ok(true);
+    ret .Ok(true);
   }
 }
 
@@ -634,7 +634,7 @@ impl Sink {
     fit *self {
       .Rotating(r) -> {
         if r.write(s) {
-          ret ok(true);
+          ret .Ok(true);
         }
         ret err_kind(.Io, "sink write failed", false);
       }
@@ -648,7 +648,7 @@ impl Sink {
     if rc < 0 {
       ret err_kind(.Io, "sink write failed", false);
     }
-    ret ok(true);
+    ret .Ok(true);
   }
 
   // Flush any buffered bytes to the underlying stream.
@@ -667,7 +667,7 @@ impl Sink {
   // Flush any buffered bytes to the underlying stream, with a Result.
   pub try_flush() Result<bin, Error> {
     if self.flush() {
-      ret ok(true);
+      ret .Ok(true);
     }
     ret err_kind(.Io, "sink flush failed", false);
   }

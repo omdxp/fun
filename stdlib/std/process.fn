@@ -211,7 +211,7 @@ pub fun run(str[] argv) Result<ProcessResult, Error> {
   result.exit_code = exit_code;
   result.stdout_text = out_text;
   result.stderr_text = err_text;
-  ret ok(result);
+  ret .Ok(result);
 }
 
 // Spawn `argv[0]` (searched via PATH) with inherited stdio (stdin/stdout/

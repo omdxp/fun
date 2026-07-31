@@ -14,6 +14,11 @@ imp std.c.string;
 imp std.c.time;
 imp std.c.wd;
 
+// Time-unit conversion factors used by the absolute-deadline math below.
+const num MS_PER_SEC = 1_000;
+const num NS_PER_MS = 1_000_000;
+const num NS_PER_SEC = 1_000_000_000;
+
 // Bounded blocking channel implemented as a ring buffer.
 pub compound Channel<T> {
   // Channel mutex.
@@ -142,14 +147,14 @@ fun channel_normalize_abs_time(ChannelAbsTime* ts) {
     ret;
   }
 
-  if ts.tv_nsec <= -1000000000 || ts.tv_nsec >= 1000000000 {
-    ts.tv_sec = ts.tv_sec + (ts.tv_nsec / 1000000000);
-    ts.tv_nsec = ts.tv_nsec % 1000000000;
+  if ts.tv_nsec <= -NS_PER_SEC || ts.tv_nsec >= NS_PER_SEC {
+    ts.tv_sec = ts.tv_sec + (ts.tv_nsec / NS_PER_SEC);
+    ts.tv_nsec = ts.tv_nsec % NS_PER_SEC;
   }
 
   if ts.tv_nsec < 0 {
     ts.tv_sec = ts.tv_sec - 1;
-    ts.tv_nsec = ts.tv_nsec + 1000000000;
+    ts.tv_nsec = ts.tv_nsec + NS_PER_SEC;
   }
 }
 
@@ -159,7 +164,7 @@ fun channel_normalize_abs_time(ChannelAbsTime* ts) {
 // - Uses `clock_gettime` and keeps millisecond-scale precision.
 fun channel_make_abs_time(num timeout_ms, ChannelAbsTime* out) num {
   if out == nil {
-    ret channel_rc_null_arg();
+    ret CHANNEL_RC_NULL_ARG;
   }
   if timeout_ms < 0 {
     timeout_ms = 0;
@@ -172,19 +177,19 @@ fun channel_make_abs_time(num timeout_ms, ChannelAbsTime* out) num {
   raw* out_raw = out;
   let rc = clock_gettime(0, out_raw);
   if rc != 0 {
-    ret channel_rc_clock_failed();
+    ret CHANNEL_RC_CLOCK_FAILED;
   }
 
   channel_normalize_abs_time(out);
 
-  let add_sec = timeout_ms / 1000;
-  let add_nsec = (timeout_ms % 1000) * 1000000;
+  let add_sec = timeout_ms / MS_PER_SEC;
+  let add_nsec = (timeout_ms % MS_PER_SEC) * NS_PER_MS;
 
   out.tv_sec = out.tv_sec + add_sec;
   out.tv_nsec = out.tv_nsec + add_nsec;
   channel_normalize_abs_time(out);
 
-  ret channel_rc_ok();
+  ret CHANNEL_RC_OK;
 }
 
 // Returns true when the absolute timeout is reached.
@@ -265,15 +270,15 @@ fun channel_deadline_remaining_ms(ChannelAbsTime* abs_time) num {
   let nsec_diff = target.tv_nsec - now.tv_nsec;
   if nsec_diff < 0 {
     sec_diff = sec_diff - 1;
-    nsec_diff = nsec_diff + 1000000000;
+    nsec_diff = nsec_diff + NS_PER_SEC;
   }
 
   if sec_diff < 0 {
     ret 0;
   }
 
-  let out_ms = sec_diff * 1000 + (nsec_diff / 1000000);
-  if nsec_diff % 1000000 != 0 {
+  let out_ms = sec_diff * MS_PER_SEC + (nsec_diff / NS_PER_MS);
+  if nsec_diff % NS_PER_MS != 0 {
     out_ms = out_ms + 1;
   }
   ret out_ms;
@@ -353,19 +358,19 @@ pub fun channel_cancel_token_cancelled() ChannelCancelToken {
 // Set cancellation state to cancelled.
 pub fun channel_cancel_token_cancel(ChannelCancelToken* token) num {
   if token == nil {
-    ret channel_rc_null_arg();
+    ret CHANNEL_RC_NULL_ARG;
   }
   token.flag = 1;
-  ret channel_rc_ok();
+  ret CHANNEL_RC_OK;
 }
 
 // Set cancellation state to not-cancelled.
 pub fun channel_cancel_token_reset(ChannelCancelToken* token) num {
   if token == nil {
-    ret channel_rc_null_arg();
+    ret CHANNEL_RC_NULL_ARG;
   }
   token.flag = 0;
-  ret channel_rc_ok();
+  ret CHANNEL_RC_OK;
 }
 
 // Read cancellation state.
@@ -388,66 +393,23 @@ fun channel_cancel_token_flag_ptr(ChannelCancelToken* token) num* {
 // 
 // Note:
 // - Some APIs intentionally alias meanings to the same numeric code.
-pub fun channel_rc_ok() num {
-  ret 0;
-}
-
-pub fun channel_rc_closed() num {
-  ret 1;
-}
-
-pub fun channel_rc_timeout() num {
-  ret 2;
-}
-
-pub fun channel_rc_full() num {
-  ret 2;
-}
-
-pub fun channel_rc_empty() num {
-  ret 2;
-}
-
-pub fun channel_rc_default() num {
-  ret 3;
-}
-
-pub fun channel_rc_cancelled() num {
-  ret 3;
-}
-
-pub fun channel_rc_null_arg() num {
-  ret -1;
-}
-
-pub fun channel_rc_send_closed_blocking() num {
-  ret -1;
-}
-
-pub fun channel_rc_alloc_failed() num {
-  ret -2;
-}
-
-pub fun channel_rc_clock_failed() num {
-  ret -3;
-}
+pub const num CHANNEL_RC_OK = 0;
+pub const num CHANNEL_RC_CLOSED = 1;
+pub const num CHANNEL_RC_TIMEOUT = 2;
+pub const num CHANNEL_RC_FULL = 2;
+pub const num CHANNEL_RC_EMPTY = 2;
+pub const num CHANNEL_RC_DEFAULT = 3;
+pub const num CHANNEL_RC_CANCELLED = 3;
+pub const num CHANNEL_RC_NULL_ARG = -1;
+pub const num CHANNEL_RC_SEND_CLOSED_BLOCKING = -1;
+pub const num CHANNEL_RC_ALLOC_FAILED = -2;
+pub const num CHANNEL_RC_CLOCK_FAILED = -3;
 
 // Select index helpers for readability.
-pub fun channel_select_index_default() num {
-  ret -1;
-}
-
-pub fun channel_select_index_self() num {
-  ret 0;
-}
-
-pub fun channel_select_index_other() num {
-  ret 1;
-}
-
-pub fun channel_select_index_other_b() num {
-  ret 2;
-}
+pub const num CHANNEL_SELECT_INDEX_DEFAULT = -1;
+pub const num CHANNEL_SELECT_INDEX_SELF = 0;
+pub const num CHANNEL_SELECT_INDEX_OTHER = 1;
+pub const num CHANNEL_SELECT_INDEX_OTHER_B = 2;
 
 // The outcome of a receive, as a value you can `fit` on instead of decoding a raw
 // status code. This is the ergonomic layer over the `recv_*_into` core (which returns
@@ -494,16 +456,16 @@ impl Channel<T> {
   // than a free function so it monomorphizes with this channel's concrete T.)
   // Codes 2/3 mean timeout/cancelled in a recv context.
   result_from_rc(num rc, T value) RecvResult<T> {
-    if rc == channel_rc_ok() {
+    if rc == CHANNEL_RC_OK {
       ret .Ok(value);
     }
-    if rc == channel_rc_closed() {
+    if rc == CHANNEL_RC_CLOSED {
       ret .Closed;
     }
-    if rc == channel_rc_timeout() {
+    if rc == CHANNEL_RC_TIMEOUT {
       ret .Timeout;
     }
-    if rc == channel_rc_cancelled() {
+    if rc == CHANNEL_RC_CANCELLED {
       ret .Cancelled;
     }
     ret .Error(rc);
@@ -512,19 +474,19 @@ impl Channel<T> {
   // Map a send status code into a SendResult. Codes 2/3 mean full/cancelled in a send
   // context (full and timeout share code 2; in a send the meaning is "couldn't enqueue").
   send_result_from_rc(num rc) SendResult {
-    if rc == channel_rc_ok() {
+    if rc == CHANNEL_RC_OK {
       ret .Ok;
     }
-    if rc == channel_rc_closed() {
+    if rc == CHANNEL_RC_CLOSED {
       ret .Closed;
     }
-    if rc == channel_rc_send_closed_blocking() {
+    if rc == CHANNEL_RC_SEND_CLOSED_BLOCKING {
       ret .Closed;
     }
-    if rc == channel_rc_full() {
+    if rc == CHANNEL_RC_FULL {
       ret .Full;
     }
-    if rc == channel_rc_cancelled() {
+    if rc == CHANNEL_RC_CANCELLED {
       ret .Cancelled;
     }
     ret .Error(rc);
@@ -536,13 +498,13 @@ impl Channel<T> {
   // - 0 on success, nonzero error code on failure
   pub init() num {
     if self.has_buffer == false {
-      ret channel_rc_alloc_failed();
+      ret CHANNEL_RC_ALLOC_FAILED;
     }
 
     if self.mu.initialized == true && self.can_send.initialized == true && self.can_recv.initialized == true {
       self.select_wait_slice_ms = channel_sanitize_wait_slice_ms(self.select_wait_slice_ms);
       self.select_wait_backoff_steps = channel_sanitize_backoff_steps(self.select_wait_backoff_steps);
-      ret channel_rc_ok();
+      ret CHANNEL_RC_OK;
     }
 
     let rc = runtime_mutex_init(&self.mu);
@@ -559,7 +521,7 @@ impl Channel<T> {
     }
     self.select_wait_slice_ms = channel_sanitize_wait_slice_ms(self.select_wait_slice_ms);
     self.select_wait_backoff_steps = channel_sanitize_backoff_steps(self.select_wait_backoff_steps);
-    ret channel_rc_ok();
+    ret CHANNEL_RC_OK;
   }
 
   // Configure the per-channel select wait slice (in milliseconds).
@@ -614,7 +576,7 @@ impl Channel<T> {
     }
 
     if self.closed == true {
-      ret channel_rc_send_closed_blocking();
+      ret CHANNEL_RC_SEND_CLOSED_BLOCKING;
     }
 
     self.data[self.tail] = value;
@@ -625,7 +587,7 @@ impl Channel<T> {
     self.count = self.count + 1;
 
     _ = runtime_condvar_signal(&self.can_recv);
-    ret channel_rc_ok();
+    ret CHANNEL_RC_OK;
   }
 
   // Send one value, blocking up to timeout_ms while full.
@@ -676,7 +638,7 @@ impl Channel<T> {
     defer runtime_mutex_unlock(&self.mu);
 
     if self.closed == true {
-      ret channel_rc_closed();
+      ret CHANNEL_RC_CLOSED;
     }
 
     ChannelAbsTime abs_time;
@@ -692,14 +654,14 @@ impl Channel<T> {
 
     for self.count == self.cap && self.closed == false {
       if channel_is_cancelled(cancel_flag) == true {
-        ret channel_rc_cancelled();
+        ret CHANNEL_RC_CANCELLED;
       }
 
       num rem_ms = -1;
       if wait_forever == false {
         rem_ms = channel_deadline_remaining_ms(&abs_time);
         if rem_ms <= 0 {
-          ret channel_rc_timeout();
+          ret CHANNEL_RC_TIMEOUT;
         }
       }
 
@@ -724,7 +686,7 @@ impl Channel<T> {
 
         if channel_deadline_reached(&round_abs) == true {
           if wait_forever == false && channel_deadline_reached(&abs_time) == true {
-            ret channel_rc_timeout();
+            ret CHANNEL_RC_TIMEOUT;
           }
 
           if idle_rounds < max_backoff_steps {
@@ -734,7 +696,7 @@ impl Channel<T> {
         }
 
         if wait_forever == false && channel_deadline_reached(&abs_time) == true {
-          ret channel_rc_timeout();
+          ret CHANNEL_RC_TIMEOUT;
         }
 
         ret rc;
@@ -744,14 +706,14 @@ impl Channel<T> {
     }
 
     if channel_is_cancelled(cancel_flag) == true {
-      ret channel_rc_cancelled();
+      ret CHANNEL_RC_CANCELLED;
     }
 
     if self.closed == true {
-      ret channel_rc_closed();
+      ret CHANNEL_RC_CLOSED;
     }
     if self.count == self.cap {
-      ret channel_rc_timeout();
+      ret CHANNEL_RC_TIMEOUT;
     }
 
     self.data[self.tail] = value;
@@ -762,7 +724,7 @@ impl Channel<T> {
     self.count = self.count + 1;
 
     _ = runtime_condvar_signal(&self.can_recv);
-    ret channel_rc_ok();
+    ret CHANNEL_RC_OK;
   }
 
   // Send one value, waiting forever while full, with optional cancellation.
@@ -841,10 +803,10 @@ impl Channel<T> {
     defer runtime_mutex_unlock(&self.mu);
 
     if self.closed == true {
-      ret channel_rc_closed();
+      ret CHANNEL_RC_CLOSED;
     }
     if self.count == self.cap {
-      ret channel_rc_full();
+      ret CHANNEL_RC_FULL;
     }
 
     self.data[self.tail] = value;
@@ -855,7 +817,7 @@ impl Channel<T> {
     self.count = self.count + 1;
 
     _ = runtime_condvar_signal(&self.can_recv);
-    ret channel_rc_ok();
+    ret CHANNEL_RC_OK;
   }
 
   // Receive one value into out, blocking while empty.
@@ -870,7 +832,7 @@ impl Channel<T> {
   // - nonzero pthread error codes on synchronization failures
   pub recv_into(T* out) num {
     if out == nil {
-      ret channel_rc_null_arg();
+      ret CHANNEL_RC_NULL_ARG;
     }
 
     let rc = self.init();
@@ -896,7 +858,7 @@ impl Channel<T> {
     }
 
     if self.count == 0 {
-      ret channel_rc_closed();
+      ret CHANNEL_RC_CLOSED;
     }
 
     out[0] = self.data[self.head];
@@ -907,7 +869,7 @@ impl Channel<T> {
     self.count = self.count - 1;
 
     _ = runtime_condvar_signal(&self.can_send);
-    ret channel_rc_ok();
+    ret CHANNEL_RC_OK;
   }
 
   // Receive one value into out, blocking up to timeout_ms while empty.
@@ -943,7 +905,7 @@ impl Channel<T> {
   // - nonzero pthread error codes on synchronization failures
   pub recv_timeout_into_with_cancel(T* out, num timeout_ms, num* cancel_flag) num {
     if out == nil {
-      ret channel_rc_null_arg();
+      ret CHANNEL_RC_NULL_ARG;
     }
 
     let rc = self.init();
@@ -975,14 +937,14 @@ impl Channel<T> {
 
     for self.count == 0 && self.closed == false {
       if channel_is_cancelled(cancel_flag) == true {
-        ret channel_rc_cancelled();
+        ret CHANNEL_RC_CANCELLED;
       }
 
       num rem_ms = -1;
       if wait_forever == false {
         rem_ms = channel_deadline_remaining_ms(&abs_time);
         if rem_ms <= 0 {
-          ret channel_rc_timeout();
+          ret CHANNEL_RC_TIMEOUT;
         }
       }
 
@@ -1007,7 +969,7 @@ impl Channel<T> {
 
         if channel_deadline_reached(&round_abs) == true {
           if wait_forever == false && channel_deadline_reached(&abs_time) == true {
-            ret channel_rc_timeout();
+            ret CHANNEL_RC_TIMEOUT;
           }
 
           if idle_rounds < max_backoff_steps {
@@ -1017,7 +979,7 @@ impl Channel<T> {
         }
 
         if wait_forever == false && channel_deadline_reached(&abs_time) == true {
-          ret channel_rc_timeout();
+          ret CHANNEL_RC_TIMEOUT;
         }
 
         ret rc;
@@ -1027,14 +989,14 @@ impl Channel<T> {
     }
 
     if channel_is_cancelled(cancel_flag) == true {
-      ret channel_rc_cancelled();
+      ret CHANNEL_RC_CANCELLED;
     }
 
     if self.count == 0 {
       if self.closed == true {
-        ret channel_rc_closed();
+        ret CHANNEL_RC_CLOSED;
       }
-      ret channel_rc_timeout();
+      ret CHANNEL_RC_TIMEOUT;
     }
 
     out[0] = self.data[self.head];
@@ -1045,7 +1007,7 @@ impl Channel<T> {
     self.count = self.count - 1;
 
     _ = runtime_condvar_signal(&self.can_send);
-    ret channel_rc_ok();
+    ret CHANNEL_RC_OK;
   }
 
   // Receive one value, blocking while empty.
@@ -1318,7 +1280,7 @@ impl Channel<T> {
   // - nonzero pthread error codes on synchronization failures
   pub try_recv(T* out) num {
     if out == nil {
-      ret channel_rc_null_arg();
+      ret CHANNEL_RC_NULL_ARG;
     }
 
     let rc = self.init();
@@ -1334,9 +1296,9 @@ impl Channel<T> {
 
     if self.count == 0 {
       if self.closed == true {
-        ret channel_rc_closed();
+        ret CHANNEL_RC_CLOSED;
       }
-      ret channel_rc_empty();
+      ret CHANNEL_RC_EMPTY;
     }
 
     out[0] = self.data[self.head];
@@ -1347,7 +1309,7 @@ impl Channel<T> {
     self.count = self.count - 1;
 
     _ = runtime_condvar_signal(&self.can_send);
-    ret channel_rc_ok();
+    ret CHANNEL_RC_OK;
   }
 
   // Wait for a receive signal on a hint channel for up to timeout_ms.
@@ -1359,7 +1321,7 @@ impl Channel<T> {
   // - other nonzero codes on synchronization failures
   pub wait_recv_hint_timeout(Channel<T>* hint, num timeout_ms) num {
     if hint == nil {
-      ret channel_rc_null_arg();
+      ret CHANNEL_RC_NULL_ARG;
     }
     if timeout_ms < 0 {
       timeout_ms = 0;
@@ -1377,7 +1339,7 @@ impl Channel<T> {
     defer runtime_mutex_unlock(&hint.mu);
 
     if hint.count > 0 || hint.closed == true {
-      ret channel_rc_ok();
+      ret CHANNEL_RC_OK;
     }
 
     ChannelAbsTime abs_time;
@@ -1389,12 +1351,12 @@ impl Channel<T> {
     rc = runtime_condvar_timed_wait(&hint.can_recv, &hint.mu, &abs_time);
     if rc != 0 {
       if channel_deadline_reached(&abs_time) == true {
-        ret channel_rc_timeout();
+        ret CHANNEL_RC_TIMEOUT;
       }
       ret rc;
     }
 
-    ret channel_rc_ok();
+    ret CHANNEL_RC_OK;
   }
 
   // Try receiving from self or another channel without blocking.
@@ -1412,33 +1374,33 @@ impl Channel<T> {
   // - other nonzero codes on synchronization failures
   pub select_try_recv_with(Channel<T>* other, T* out, num* out_index) num {
     if other == nil || out == nil || out_index == nil {
-      ret channel_rc_null_arg();
+      ret CHANNEL_RC_NULL_ARG;
     }
 
-    out_index[0] = channel_select_index_default();
+    out_index[0] = CHANNEL_SELECT_INDEX_DEFAULT;
 
     let rc_self = self.try_recv(out);
-    if rc_self == channel_rc_ok() {
-      out_index[0] = channel_select_index_self();
-      ret channel_rc_ok();
+    if rc_self == CHANNEL_RC_OK {
+      out_index[0] = CHANNEL_SELECT_INDEX_SELF;
+      ret CHANNEL_RC_OK;
     }
-    if rc_self != channel_rc_closed() && rc_self != channel_rc_empty() {
+    if rc_self != CHANNEL_RC_CLOSED && rc_self != CHANNEL_RC_EMPTY {
       ret rc_self;
     }
 
     let rc_other = other.try_recv(out);
-    if rc_other == channel_rc_ok() {
-      out_index[0] = channel_select_index_other();
-      ret channel_rc_ok();
+    if rc_other == CHANNEL_RC_OK {
+      out_index[0] = CHANNEL_SELECT_INDEX_OTHER;
+      ret CHANNEL_RC_OK;
     }
-    if rc_other != channel_rc_closed() && rc_other != channel_rc_empty() {
+    if rc_other != CHANNEL_RC_CLOSED && rc_other != CHANNEL_RC_EMPTY {
       ret rc_other;
     }
 
-    if rc_self == channel_rc_closed() && rc_other == channel_rc_closed() {
-      ret channel_rc_closed();
+    if rc_self == CHANNEL_RC_CLOSED && rc_other == CHANNEL_RC_CLOSED {
+      ret CHANNEL_RC_CLOSED;
     }
-    ret channel_rc_empty();
+    ret CHANNEL_RC_EMPTY;
   }
 
   // Try receiving from self or another channel, else take the default branch.
@@ -1456,9 +1418,9 @@ impl Channel<T> {
   // - other nonzero codes on synchronization failures
   pub select_recv_default_with(Channel<T>* other, T* out, num* out_index) num {
     let rc = self.select_try_recv_with(other, out, out_index);
-    if rc == channel_rc_empty() {
-      out_index[0] = channel_select_index_default();
-      ret channel_rc_default();
+    if rc == CHANNEL_RC_EMPTY {
+      out_index[0] = CHANNEL_SELECT_INDEX_DEFAULT;
+      ret CHANNEL_RC_DEFAULT;
     }
     ret rc;
   }
@@ -1492,7 +1454,7 @@ impl Channel<T> {
     num* cancel_flag = nil
   ) num {
     if other == nil || out == nil || out_index == nil {
-      ret channel_rc_null_arg();
+      ret CHANNEL_RC_NULL_ARG;
     }
 
     // `-1` sentinels mean "use this channel's configured tuning" (default params
@@ -1518,56 +1480,56 @@ impl Channel<T> {
       }
     }
 
-    let wait_slot = channel_select_index_self();
+    let wait_slot = CHANNEL_SELECT_INDEX_SELF;
     num idle_rounds = 0;
 
     for true {
       if channel_is_cancelled(cancel_flag) == true {
-        out_index[0] = channel_select_index_default();
-        ret channel_rc_cancelled();
+        out_index[0] = CHANNEL_SELECT_INDEX_DEFAULT;
+        ret CHANNEL_RC_CANCELLED;
       }
 
-      out_index[0] = channel_select_index_default();
+      out_index[0] = CHANNEL_SELECT_INDEX_DEFAULT;
 
       let rc_self = self.try_recv(out);
-      if rc_self == channel_rc_ok() {
-        out_index[0] = channel_select_index_self();
-        ret channel_rc_ok();
+      if rc_self == CHANNEL_RC_OK {
+        out_index[0] = CHANNEL_SELECT_INDEX_SELF;
+        ret CHANNEL_RC_OK;
       }
-      if rc_self != channel_rc_closed() && rc_self != channel_rc_empty() {
+      if rc_self != CHANNEL_RC_CLOSED && rc_self != CHANNEL_RC_EMPTY {
         ret rc_self;
       }
 
       let rc_other = other.try_recv(out);
-      if rc_other == channel_rc_ok() {
-        out_index[0] = channel_select_index_other();
-        ret channel_rc_ok();
+      if rc_other == CHANNEL_RC_OK {
+        out_index[0] = CHANNEL_SELECT_INDEX_OTHER;
+        ret CHANNEL_RC_OK;
       }
-      if rc_other != channel_rc_closed() && rc_other != channel_rc_empty() {
+      if rc_other != CHANNEL_RC_CLOSED && rc_other != CHANNEL_RC_EMPTY {
         ret rc_other;
       }
 
-      if rc_self == channel_rc_closed() && rc_other == channel_rc_closed() {
-        ret channel_rc_closed();
+      if rc_self == CHANNEL_RC_CLOSED && rc_other == CHANNEL_RC_CLOSED {
+        ret CHANNEL_RC_CLOSED;
       }
       if wait_forever == false && channel_deadline_reached(&abs_time) == true {
-        ret channel_rc_timeout();
+        ret CHANNEL_RC_TIMEOUT;
       }
 
       let hint = self;
-      if wait_slot == channel_select_index_other() {
+      if wait_slot == CHANNEL_SELECT_INDEX_OTHER {
         hint = other;
       }
       wait_slot = wait_slot + 1;
       if wait_slot >= 2 {
-        wait_slot = channel_select_index_self();
+        wait_slot = CHANNEL_SELECT_INDEX_SELF;
       }
 
       num rem_ms = -1;
       if wait_forever == false {
         rem_ms = channel_deadline_remaining_ms(&abs_time);
         if rem_ms <= 0 {
-          ret channel_rc_timeout();
+          ret CHANNEL_RC_TIMEOUT;
         }
       }
 
@@ -1579,18 +1541,18 @@ impl Channel<T> {
       );
 
       let wait_rc = self.wait_recv_hint_timeout(hint, wait_now_ms);
-      if wait_rc != channel_rc_ok() && wait_rc != channel_rc_timeout() {
+      if wait_rc != CHANNEL_RC_OK && wait_rc != CHANNEL_RC_TIMEOUT {
         ret wait_rc;
       }
       if idle_rounds < max_backoff_steps {
         idle_rounds = idle_rounds + 1;
       }
-      if wait_rc == channel_rc_ok() {
+      if wait_rc == CHANNEL_RC_OK {
         idle_rounds = 0;
       }
     }
 
-    ret channel_rc_timeout();
+    ret CHANNEL_RC_TIMEOUT;
   }
 
   // Receive from self or another channel, polling until timeout, with
@@ -1686,10 +1648,10 @@ impl Channel<T> {
     num* out_index
   ) num {
     if other_a == nil || other_b == nil || next_index == nil || out == nil || out_index == nil {
-      ret channel_rc_null_arg();
+      ret CHANNEL_RC_NULL_ARG;
     }
 
-    out_index[0] = channel_select_index_default();
+    out_index[0] = CHANNEL_SELECT_INDEX_DEFAULT;
 
     let start = next_index[0] % 3;
     if start < 0 {
@@ -1704,29 +1666,29 @@ impl Channel<T> {
         slot = slot - 3;
       }
 
-      let rc = channel_rc_empty();
-      if slot == channel_select_index_self() {
+      let rc = CHANNEL_RC_EMPTY;
+      if slot == CHANNEL_SELECT_INDEX_SELF {
         rc = self.try_recv(out);
-      } elif slot == channel_select_index_other() {
+      } elif slot == CHANNEL_SELECT_INDEX_OTHER {
         rc = other_a.try_recv(out);
       } else {
         rc = other_b.try_recv(out);
       }
 
-      if rc == channel_rc_ok() {
+      if rc == CHANNEL_RC_OK {
         out_index[0] = slot;
         let nxt = slot + 1;
         if nxt >= 3 {
-          nxt = channel_select_index_self();
+          nxt = CHANNEL_SELECT_INDEX_SELF;
         }
         next_index[0] = nxt;
-        ret channel_rc_ok();
+        ret CHANNEL_RC_OK;
       }
 
-      if rc != channel_rc_closed() && rc != channel_rc_empty() {
+      if rc != CHANNEL_RC_CLOSED && rc != CHANNEL_RC_EMPTY {
         ret rc;
       }
-      if rc == channel_rc_closed() {
+      if rc == CHANNEL_RC_CLOSED {
         closed_count = closed_count + 1;
       }
 
@@ -1734,9 +1696,9 @@ impl Channel<T> {
     }
 
     if closed_count == 3 {
-      ret channel_rc_closed();
+      ret CHANNEL_RC_CLOSED;
     }
-    ret channel_rc_empty();
+    ret CHANNEL_RC_EMPTY;
   }
 
   // Try receiving from self + two other channels, else take the default branch.
@@ -1762,9 +1724,9 @@ impl Channel<T> {
     num* out_index
   ) num {
     let rc = self.select_try_recv3_rr_with(other_a, other_b, next_index, out, out_index);
-    if rc == channel_rc_empty() {
-      out_index[0] = channel_select_index_default();
-      ret channel_rc_default();
+    if rc == CHANNEL_RC_EMPTY {
+      out_index[0] = CHANNEL_SELECT_INDEX_DEFAULT;
+      ret CHANNEL_RC_DEFAULT;
     }
     ret rc;
   }
@@ -1791,7 +1753,7 @@ impl Channel<T> {
     num* cancel_flag = nil
   ) num {
     if other_a == nil || other_b == nil || next_index == nil || out == nil || out_index == nil {
-      ret channel_rc_null_arg();
+      ret CHANNEL_RC_NULL_ARG;
     }
 
     // `-1` sentinels mean "use this channel's configured tuning" (default params
@@ -1825,29 +1787,29 @@ impl Channel<T> {
 
     for true {
       if channel_is_cancelled(cancel_flag) == true {
-        out_index[0] = channel_select_index_default();
-        ret channel_rc_cancelled();
+        out_index[0] = CHANNEL_SELECT_INDEX_DEFAULT;
+        ret CHANNEL_RC_CANCELLED;
       }
 
       let rc = self.select_try_recv3_rr_with(other_a, other_b, next_index, out, out_index);
-      if rc == channel_rc_ok() {
-        ret channel_rc_ok();
+      if rc == CHANNEL_RC_OK {
+        ret CHANNEL_RC_OK;
       }
-      if rc == channel_rc_closed() {
-        ret channel_rc_closed();
+      if rc == CHANNEL_RC_CLOSED {
+        ret CHANNEL_RC_CLOSED;
       }
-      if rc != channel_rc_empty() {
+      if rc != CHANNEL_RC_EMPTY {
         ret rc;
       }
 
       if wait_forever == false && channel_deadline_reached(&abs_time) == true {
-        ret channel_rc_timeout();
+        ret CHANNEL_RC_TIMEOUT;
       }
 
       let hint = self;
-      if wait_slot == channel_select_index_other() {
+      if wait_slot == CHANNEL_SELECT_INDEX_OTHER {
         hint = other_a;
-      } elif wait_slot == channel_select_index_other_b() {
+      } elif wait_slot == CHANNEL_SELECT_INDEX_OTHER_B {
         hint = other_b;
       }
       wait_slot = wait_slot + 1;
@@ -1859,7 +1821,7 @@ impl Channel<T> {
       if wait_forever == false {
         rem_ms = channel_deadline_remaining_ms(&abs_time);
         if rem_ms <= 0 {
-          ret channel_rc_timeout();
+          ret CHANNEL_RC_TIMEOUT;
         }
       }
 
@@ -1871,18 +1833,18 @@ impl Channel<T> {
       );
 
       let wait_rc = self.wait_recv_hint_timeout(hint, wait_now_ms);
-      if wait_rc != channel_rc_ok() && wait_rc != channel_rc_timeout() {
+      if wait_rc != CHANNEL_RC_OK && wait_rc != CHANNEL_RC_TIMEOUT {
         ret wait_rc;
       }
       if idle_rounds < max_backoff_steps {
         idle_rounds = idle_rounds + 1;
       }
-      if wait_rc == channel_rc_ok() {
+      if wait_rc == CHANNEL_RC_OK {
         idle_rounds = 0;
       }
     }
 
-    ret channel_rc_timeout();
+    ret CHANNEL_RC_TIMEOUT;
   }
 
   // Receive from self + two other channels, polling until timeout, with
@@ -1947,12 +1909,12 @@ impl Channel<T> {
   // - timeout/closed/cancelled/null_arg values propagated from recv/send paths
   pub async forward_one_to_async(Channel<T>* dst, num timeout_ms) num {
     if dst == nil {
-      ret channel_rc_null_arg();
+      ret CHANNEL_RC_NULL_ARG;
     }
 
     let value = self.zero_value();
     let rc = await self.recv_timeout_into_async(&value, timeout_ms);
-    if rc != channel_rc_ok() {
+    if rc != CHANNEL_RC_OK {
       ret rc;
     }
 
@@ -1970,12 +1932,12 @@ impl Channel<T> {
     ChannelCancelToken* cancel_token
   ) num {
     if dst == nil {
-      ret channel_rc_null_arg();
+      ret CHANNEL_RC_NULL_ARG;
     }
 
     let value = self.zero_value();
     let rc = await self.recv_timeout_into_with_token_async(&value, timeout_ms, cancel_token);
-    if rc != channel_rc_ok() {
+    if rc != CHANNEL_RC_OK {
       ret rc;
     }
 
@@ -2000,7 +1962,7 @@ impl Channel<T> {
     num* out_index
   ) num {
     if other == nil || dst == nil || out_index == nil {
-      ret channel_rc_null_arg();
+      ret CHANNEL_RC_NULL_ARG;
     }
 
     let value = self.zero_value();
@@ -2013,7 +1975,7 @@ impl Channel<T> {
       -1,
       nil
     );
-    if rc != channel_rc_ok() {
+    if rc != CHANNEL_RC_OK {
       ret rc;
     }
 
@@ -2033,7 +1995,7 @@ impl Channel<T> {
     ChannelCancelToken* cancel_token
   ) num {
     if other == nil || dst == nil || out_index == nil {
-      ret channel_rc_null_arg();
+      ret CHANNEL_RC_NULL_ARG;
     }
 
     let value = self.zero_value();
@@ -2046,7 +2008,7 @@ impl Channel<T> {
       -1,
       cancel_token
     );
-    if rc != channel_rc_ok() {
+    if rc != CHANNEL_RC_OK {
       ret rc;
     }
 
@@ -2076,7 +2038,7 @@ impl Channel<T> {
     self.closed = true;
     _ = runtime_condvar_broadcast(&self.can_recv);
     _ = runtime_condvar_broadcast(&self.can_send);
-    ret channel_rc_ok();
+    ret CHANNEL_RC_OK;
   }
 
   // Read closed state as an unsynchronized snapshot.
@@ -2132,12 +2094,12 @@ impl Channel<T> {
     defer runtime_mutex_unlock(&self.mu);
 
     if new_cap <= self.cap {
-      ret channel_rc_ok();
+      ret CHANNEL_RC_OK;
     }
 
     T[] new_data = malloc(sizeof(T) * new_cap);
     if new_data == nil {
-      ret channel_rc_alloc_failed();
+      ret CHANNEL_RC_ALLOC_FAILED;
     }
 
     num i = 0;
@@ -2161,7 +2123,7 @@ impl Channel<T> {
 
     // There's more room now; wake anyone blocked in send() waiting for it.
     _ = runtime_condvar_broadcast(&self.can_send);
-    ret channel_rc_ok();
+    ret CHANNEL_RC_OK;
   }
 
   // Destroy channel storage and synchronization primitives.

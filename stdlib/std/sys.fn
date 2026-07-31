@@ -27,7 +27,7 @@ pub fun try_env(str name) Result<str, Error> {
   if out == nil {
     ret err_kind(.NotFound, "env missing", "");
   }
-  ret ok(out);
+  ret .Ok(out);
 }
 
 // Exit the process with a status code.
