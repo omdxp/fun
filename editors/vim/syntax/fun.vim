@@ -2,7 +2,7 @@ if exists("b:current_syntax")
   finish
 endif
 
-syn keyword funKeyword imp as pub fun compound quirk impl enum let asm volatile arch defer ret if elif else for fit async await fork break continue assert allow expect
+syn keyword funKeyword imp as pub fun compound quirk impl enum let const asm volatile arch defer ret if elif else for fit async await fork break continue assert panic test fuzz allow expect
 syn keyword funType void raw num dec f32 f64 str bin chr
 syn match funType "\v\<(i|u)[1-9][0-9]*\>"
 syn match funCustomType "\v\<(compound|quirk|enum|impl)\s+\zs[A-Za-z_][A-Za-z0-9_]*\>"
@@ -19,6 +19,7 @@ syn match funNumber "\v\d+(\.\d+)?"
 syn region funString start=+"+ skip=+\\"+ end=+"+
 syn region funChar start=+'+ skip=+\\'+ end=+'+
 syn match funComment "//.*$"
+syn region funComment start=+/\*+ end=+\*/+
 
 hi def link funKeyword Keyword
 hi def link funType Type

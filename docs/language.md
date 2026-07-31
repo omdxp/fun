@@ -15,7 +15,7 @@
     - Plain compound methods: `impl Point { ... }`
 - **Pattern Matching**: `fit x { ... }` for value-based branching.
 - **Async/Await**: Async functions are declared with `async fun ...`; async calls must be awaited with `await` inside async functions.
-- **Comments**: Use `//` for single-line comments.
+- **Comments**: Use `//` for single-line comments, or `/* ... */` for block comments.
 
 ### Types
 - **Primitive Types**:
@@ -48,6 +48,11 @@
     - Member access uses the receiver type (for example `Point p; let x = p.x;` -> `num`).
     - Indexing an array uses the element type (for example `let v = nums[i];` -> `num`).
 - If the expression mixes numeric types, inference prefers the wider category (`dec` over `num`).
+
+#### Constants
+- `const` declares an immutable binding, at top level or local scope: `const MAX = 10;` (inferred, like `let`) or `const num MAX = 10;` (explicit type). Both forms always require an initializer.
+- `pub const` exports a top-level constant.
+- Reassigning a `const` (directly or via a compound-assignment operator like `+=`) is a compile-time typecheck error, for both local and global constants.
 
 ### Enums
 - **Declaration**: `enum Color { Red, Green, Blue }`

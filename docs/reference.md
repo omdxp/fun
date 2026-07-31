@@ -257,6 +257,20 @@ fun main() {
 }
 ```
 
+### Constants
+- `const` declares an immutable binding, at either top level or local (function-body) scope: `const MAX = 10;` (type inferred, same rules as `let`) or `const num MAX = 10;` (explicit type). Both forms require an initializer.
+- `pub const` exports a top-level constant, same as `pub num`/`pub let` for ordinary globals.
+- Reassigning a `const` (including via `+=`/`-=`/etc.) is a compile-time error, caught at typecheck for both local and global constants:
+```fun
+const num MAX = 100;
+
+fun main() {
+  const local_max = MAX;
+  MAX = 200;       // error: cannot assign to const 'MAX'
+  local_max += 1;   // error: cannot assign to const 'local_max'
+}
+```
+
 ## Functions
 ```fun
 fun add(num a, num b) num {

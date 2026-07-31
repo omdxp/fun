@@ -10,6 +10,7 @@ const FUN_KEYWORDS = [
   "impl",
   "enum",
   "let",
+  "const",
   "asm",
   "volatile",
   "arch",
@@ -26,6 +27,9 @@ const FUN_KEYWORDS = [
   "continue",
   "defer",
   "assert",
+  "panic",
+  "test",
+  "fuzz",
   "allow",
   "expect",
 ];
@@ -103,7 +107,7 @@ function buildTokenRegex(code: string) {
 
   return new RegExp(
     [
-      "(?<comment>//.*$)",
+      "(?<comment>//.*$|/\\*[\\s\\S]*?\\*/)",
       "(?<string>\"(?:[^\\\"\\\\]|\\\\.)*\"|'(?:[^'\\\\]|\\\\.)*')",
       "(?<number>\\b(?:0x[0-9a-fA-F]+|\\d+(?:\\.\\d+)?)\\b)",
       "(?<operator>(?:->|::|\\+\\=|\\-\\=|\\*\\=|\\/\\=|\\%\\=|\\=\\=|\\!\\=|\\<\\=|\\>\\=|\\&\\&|\\|\\||\\<\\<|\\>\\>|\\+\\+|\\-\\-|[+\\-*/%=<>!&|^~.,;:]))",

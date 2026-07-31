@@ -160,7 +160,7 @@ pub fun parse(str src) Result<Expr*, Error> {
   Expr* result = p.parse_expr();
   let trailing = p.peek();
   fit trailing {
-    Token.Eof -> { ret ok(result); }
+    Token.Eof -> { ret .Ok(result); }
     _ -> { ret err(1, "unexpected trailing tokens after expression", result); }
   }
 }

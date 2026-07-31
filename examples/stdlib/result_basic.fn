@@ -12,7 +12,7 @@ fun checked_double(num n) Result<num, Error> {
   if n < 0 {
     ret err(1, "negative input", 0);
   }
-  ret ok(n * 2);
+  ret .Ok(n * 2);
 }
 
 fun main() num {
@@ -29,21 +29,21 @@ fun main() num {
     Result.Err(e) -> { printf("n2 err=%lld %s\n", e.code, e.message); }
   }
 
-  Result<str, Error> s = ok("hi");
+  Result<str, Error> s = .Ok("hi");
   printf("s=%s\n", s.unwrap_or("none"));
 
   Result<str, Error> s2 = err(2, "oops", "fallback");
   printf("s2=%s\n", s2.unwrap_or("none"));
 
-  Result<dec, Error> d = ok(3.14);
+  Result<dec, Error> d = .Ok(3.14);
   printf("d=%.2f\n", d.unwrap_or(0.0));
 
-  Result<bin, Error> b = ok(true);
+  Result<bin, Error> b = .Ok(true);
   printf("b=%d\n", b.unwrap_or(false));
 
   // `or` falls back to a second Result on Err.
   Result<num, Error> failed = checked_double(-1);
-  Result<num, Error> recovered = failed.or(ok(0));
+  Result<num, Error> recovered = failed.or(.Ok(0));
   printf("recovered=%lld\n", recovered.unwrap_or(-1));
   ret 0;
 }

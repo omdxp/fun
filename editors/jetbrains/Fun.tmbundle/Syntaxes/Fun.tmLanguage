@@ -20,6 +20,14 @@
       </dict>
       <dict>
         <key>name</key>
+        <string>comment.block.fun</string>
+        <key>begin</key>
+        <string>/\*</string>
+        <key>end</key>
+        <string>\*/</string>
+      </dict>
+      <dict>
+        <key>name</key>
         <string>meta.type.declaration.struct.fun</string>
         <key>match</key>
         <string>\b(compound)\s+([A-Za-z_][A-Za-z0-9_]*)(\s*&lt;[^&gt;]+&gt;)?</string>
@@ -191,7 +199,7 @@
         <string>keyword.control.fun</string>
         <key>match</key>
         <string>
-          \b(imp|as|pub|fun|compound|quirk|impl|enum|let|asm|volatile|arch|defer|ret|if|elif|else|for|fit|async|await|fork|break|continue|assert|allow|expect)\b</string>
+          \b(imp|as|pub|fun|compound|quirk|impl|enum|let|const|asm|volatile|arch|defer|ret|if|elif|else|for|fit|async|await|fork|break|continue|assert|panic|test|fuzz|allow|expect)\b</string>
       </dict>
       <dict>
         <key>name</key>

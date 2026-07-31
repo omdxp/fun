@@ -9,6 +9,9 @@ contexts:
   main:
     - match: //.*$
       scope: comment.line.double-slash.fun
+    - match: /\*
+      scope: punctuation.definition.comment.begin.fun
+      push: block_comment
     - match: \b(compound|quirk|enum|impl)\s+([A-Za-z_][A-Za-z0-9_]*)(\s*<[^>]+>)?
       captures:
         1: keyword.control.fun
@@ -31,7 +34,7 @@ contexts:
     - match: "'"
       scope: punctuation.definition.string.begin.fun
       push: single_quoted
-    - match: \b(imp|as|pub|fun|compound|quirk|impl|enum|let|asm|volatile|arch|defer|ret|if|elif|else|for|fit|async|await|fork|break|continue|assert|allow|expect)\b
+    - match: \b(imp|as|pub|fun|compound|quirk|impl|enum|let|const|asm|volatile|arch|defer|ret|if|elif|else|for|fit|async|await|fork|break|continue|assert|panic|test|fuzz|allow|expect)\b
       scope: keyword.control.fun
     - match: \b(void|raw|num|dec|f32|f64|str|bin|chr|i[1-9][0-9]*|u[1-9][0-9]*)\b
       scope: storage.type.fun
@@ -43,6 +46,12 @@ contexts:
       scope: constant.language.null.fun
     - match: \b\d+(\.\d+)?\b
       scope: constant.numeric.fun
+
+  block_comment:
+    - meta_scope: comment.block.fun
+    - match: \*/
+      scope: punctuation.definition.comment.end.fun
+      pop: true
 
   double_quoted:
     - meta_scope: string.quoted.double.fun

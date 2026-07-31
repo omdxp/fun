@@ -16,7 +16,7 @@ async fun main() {
 
   str req_raw = NULL;
   str req = "";
-  if reqs.try_recv(&req_raw) == channel_rc_ok() {
+  if reqs.try_recv(&req_raw) == CHANNEL_RC_OK {
     req = req_raw;
   }
 

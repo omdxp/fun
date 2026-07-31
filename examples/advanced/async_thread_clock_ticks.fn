@@ -22,20 +22,20 @@ fun clock_worker_main(raw* arg) raw* {
     num stop_signal = 0;
     num rc_wait = worker.stop.recv_timeout_into(&stop_signal, worker.interval);
 
-    if rc_wait == channel_rc_ok() {
+    if rc_wait == CHANNEL_RC_OK {
       break;
     }
 
-    if rc_wait == channel_rc_timeout() {
+    if rc_wait == CHANNEL_RC_TIMEOUT {
       sent = sent + 1;
       num rc_send = worker.ticks.send(sent);
-      if rc_send != channel_rc_ok() {
+      if rc_send != CHANNEL_RC_OK {
         break;
       }
       continue;
     }
 
-    if rc_wait == channel_rc_closed() {
+    if rc_wait == CHANNEL_RC_CLOSED {
       break;
     }
 
@@ -74,7 +74,7 @@ async fun main() {
     num tick = 0;
     num rc = await ticks.recv_timeout_into_async(&tick, 400);
 
-    if rc == channel_rc_ok() {
+    if rc == CHANNEL_RC_OK {
       observed = observed + 1;
       last_tick = tick;
       printf("tick %lld\n", tick);
@@ -87,11 +87,11 @@ async fun main() {
       continue;
     }
 
-    if rc == channel_rc_closed() {
+    if rc == CHANNEL_RC_CLOSED {
       break;
     }
 
-    if rc == channel_rc_timeout() {
+    if rc == CHANNEL_RC_TIMEOUT {
       printf("no tick yet...\n");
       continue;
     }

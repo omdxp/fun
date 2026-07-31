@@ -495,8 +495,10 @@ class FunCodeLensProvider implements vscode.CodeLensProvider {
     // Matches `test "name" {`, allowing an escaped `\"` inside the name the
     // same way the lexer does for any other string literal.
     const testLineRe = /^\s*test\s+"((?:[^"\\]|\\.)*)"\s*\{/;
-    // Matches `fuzz "name" (data, len) {` -- same name-escaping rule as
-    // `test`, plus the two fixed-shape parameter names (see parse_fuzz).
+    // Matches `fuzz "name" (raw* data, num len) {` -- same name-escaping
+    // rule as `test`; the params themselves aren't matched here (any
+    // explicitly-typed two-param list is accepted at the `(`, and their
+    // fixed shape is validated by the compiler's own parse_fuzz).
     const fuzzLineRe = /^\s*fuzz\s+"((?:[^"\\]|\\.)*)"\s*\(/;
     let sawMain = false;
     for (let i = 0; i < document.lineCount; i++) {
