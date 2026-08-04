@@ -2859,6 +2859,21 @@ impl Codegen {
         bin resolved_ptr = false;
         Option<DataType> resolved_dtype = .None;
 
+        // `const` on a POINTER-typed binding must land AFTER the pointer
+        // star(s) (`Type* const name`, "the pointer itself can't be
+        // reassigned") rather than before the base type (`const Type*
+        // name`, "what it points to can't be mutated" -- a stricter,
+        // different guarantee than what this codegen's own const-
+        // reassignment check enforces). For a `__auto_type`-inferred
+        // const, the eventual pointer-ness isn't known yet at this point
+        // in emission, so `const` always lands BEFORE -- a reasonable
+        // simplification (`const __auto_type x = 5;` is valid GNU C
+        // either way).
+        bin const_is_ptr_binding = !is_let && dtype_is_pointer(*v.var_type);
+        if v.is_const && !const_is_ptr_binding {
+          self.state.write("const ");
+        }
+
         if is_let {
           self.state.write("__auto_type");
         } else {
@@ -2871,6 +2886,9 @@ impl Codegen {
           resolved_ptr = dtype_is_pointer(subst_dt);
           resolved_dtype = .Some(subst_dt);
           have_resolved = true;
+        }
+        if v.is_const && const_is_ptr_binding {
+          self.state.write(" const");
         }
         self.state.write(" ");
         self.state.write(v.name);
@@ -5358,6 +5376,7 @@ test "emit_statement emits a variable declaration with an initializer" {
   v.name = "x";
   v.val = val;
   v.has_val = true;
+  v.is_const = false;
   Node n = node_new(NodeKind.Variable(v));
   assert g.emit_statement(n).is_none(), "expected the variable declaration to emit";
   assert equals(st.out.build(), "int64_t x = 5;\n"), "expected 'int64_t x = 5;\\n'";
@@ -5404,6 +5423,7 @@ test "emit_statement emits a 'let' declaration as '__auto_type', inferring its t
   v.name = "r";
   v.val = val;
   v.has_val = true;
+  v.is_const = false;
   Node n = node_new(NodeKind.Variable(v));
 
   assert g.emit_statement(n).is_none(), "expected the 'let' declaration to emit";
@@ -5466,6 +5486,7 @@ test "emit_statement infers a 'let' declaration's type from a plain field-access
   v.name = "ct";
   v.val = val;
   v.has_val = true;
+  v.is_const = false;
   Node n = node_new(NodeKind.Variable(v));
 
   assert g.emit_statement(n).is_none(), "expected the 'let' declaration to emit";
@@ -5520,6 +5541,7 @@ test "pub transpile resolves a 'fit' over a 'let'-declared local whose type was 
   selfv.var_type = self_dt;
   selfv.name = "self";
   selfv.has_val = false;
+  selfv.is_const = false;
   Node* self_param = malloc(sizeof(Node));
   *self_param = node_new(NodeKind.Variable(selfv));
   Vec<Node*> get_params;
@@ -5597,6 +5619,7 @@ test "pub transpile resolves a 'fit' over a 'let'-declared local whose type was 
   hparam.var_type = param_dt;
   hparam.name = "h";
   hparam.has_val = false;
+  hparam.is_const = false;
   Node* h_param = malloc(sizeof(Node));
   *h_param = node_new(NodeKind.Variable(hparam));
   Vec<Node*> check_params;
@@ -5635,6 +5658,7 @@ test "pub transpile resolves a 'fit' over a 'let'-declared local whose type was 
   letv.name = "last";
   letv.val = call_node;
   letv.has_val = true;
+  letv.is_const = false;
   Node* let_stmt = malloc(sizeof(Node));
   *let_stmt = node_new(NodeKind.Variable(letv));
 
@@ -5725,6 +5749,7 @@ test "emit_statement emits an uninitialized variable declaration" {
   v.name = "done";
   v.val = nil;
   v.has_val = false;
+  v.is_const = false;
   Node n = node_new(NodeKind.Variable(v));
   assert g.emit_statement(n).is_none(), "expected the variable declaration to emit";
   assert equals(st.out.build(), "bool done;\n"), "expected 'bool done;\\n'";
@@ -6100,6 +6125,7 @@ test "emit_function emits parameters, and a call to it" {
   va.var_type = dt_a;
   va.name = "a";
   va.has_val = false;
+  va.is_const = false;
   Node* param_a = malloc(sizeof(Node));
   *param_a = node_new(NodeKind.Variable(va));
 
@@ -6110,6 +6136,7 @@ test "emit_function emits parameters, and a call to it" {
   vb.var_type = dt_b;
   vb.name = "b";
   vb.has_val = false;
+  vb.is_const = false;
   Node* param_b = malloc(sizeof(Node));
   *param_b = node_new(NodeKind.Variable(vb));
 
@@ -6180,6 +6207,7 @@ test "emit_function_param emits a function-type parameter using C's function-poi
   cbv.var_type = cb_dt;
   cbv.name = "cb";
   cbv.has_val = false;
+  cbv.is_const = false;
   Node param = node_new(NodeKind.Variable(cbv));
 
   assert g.emit_function_param(param).is_none(), "expected the function-type parameter to emit";
@@ -6217,6 +6245,7 @@ test "emit_function emits a function-type parameter's signature, and calls throu
   cbv.var_type = cb_dt;
   cbv.name = "cb";
   cbv.has_val = false;
+  cbv.is_const = false;
   Node* cb_param = malloc(sizeof(Node));
   *cb_param = node_new(NodeKind.Variable(cbv));
 
@@ -6227,6 +6256,7 @@ test "emit_function emits a function-type parameter's signature, and calls throu
   av.var_type = dt_a;
   av.name = "a";
   av.has_val = false;
+  av.is_const = false;
   Node* a_param = malloc(sizeof(Node));
   *a_param = node_new(NodeKind.Variable(av));
 
@@ -6237,6 +6267,7 @@ test "emit_function emits a function-type parameter's signature, and calls throu
   bv.var_type = dt_b;
   bv.name = "b";
   bv.has_val = false;
+  bv.is_const = false;
   Node* b_param = malloc(sizeof(Node));
   *b_param = node_new(NodeKind.Variable(bv));
 
@@ -7914,6 +7945,7 @@ test "emit_statement resolves a bare-shorthand 'ret' against the enclosing funct
   xv.var_type = x_dt;
   xv.name = "x";
   xv.has_val = false;
+  xv.is_const = false;
   Node* x_param = malloc(sizeof(Node));
   *x_param = node_new(NodeKind.Variable(xv));
   Vec<Node*> params;
@@ -8147,6 +8179,7 @@ test "emit_impl emits each method as a mangled top-level C function, with self r
   selfv.var_type = self_dt;
   selfv.name = "self";
   selfv.has_val = false;
+  selfv.is_const = false;
   Node* self_param = malloc(sizeof(Node));
   *self_param = node_new(NodeKind.Variable(selfv));
   Vec<Node*> margs;
@@ -8211,6 +8244,7 @@ test "emit_impl emits a quirk-implementing impl's method under its already-doubl
   selfv.var_type = self_dt;
   selfv.name = "self";
   selfv.has_val = false;
+  selfv.is_const = false;
   Node* self_param = malloc(sizeof(Node));
   *self_param = node_new(NodeKind.Variable(selfv));
   Vec<Node*> margs;
@@ -8271,6 +8305,7 @@ test "register_impl_methods lets emit_method_call resolve a quirk-implementing i
   selfv.var_type = self_dt;
   selfv.name = "self";
   selfv.has_val = false;
+  selfv.is_const = false;
   Node* self_param = malloc(sizeof(Node));
   *self_param = node_new(NodeKind.Variable(selfv));
   Vec<Node*> margs;
@@ -8384,6 +8419,7 @@ fun _box_num_var_decl(str name) Node {
   v.var_type = box_dt;
   v.name = name;
   v.has_val = false;
+  v.is_const = false;
   ret node_new(NodeKind.Variable(v));
 }
 
@@ -8425,6 +8461,7 @@ fun _opt_num_var_decl(str name) Node {
   v.var_type = opt_dt;
   v.name = name;
   v.has_val = false;
+  v.is_const = false;
   ret node_new(NodeKind.Variable(v));
 }
 
@@ -8571,6 +8608,7 @@ fun _record_box_get_impl(Codegen* g) {
   selfv.var_type = self_dt;
   selfv.name = "self";
   selfv.has_val = false;
+  selfv.is_const = false;
   Node* self_param = malloc(sizeof(Node));
   *self_param = node_new(NodeKind.Variable(selfv));
   Vec<Node*> margs;
@@ -8735,6 +8773,7 @@ test "pub transpile monomorphizes a generic impl's methods even when a PLAIN com
   selfv.var_type = selfdt;
   selfv.name = "self";
   selfv.has_val = false;
+  selfv.is_const = false;
   Node* self_param = malloc(sizeof(Node));
   *self_param = node_new(NodeKind.Variable(selfv));
   Vec<Node*> margs;
@@ -8905,6 +8944,7 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
   selfv.var_type = self_dt;
   selfv.name = "self";
   selfv.has_val = false;
+  selfv.is_const = false;
   Node* self_param = malloc(sizeof(Node));
   *self_param = node_new(NodeKind.Variable(selfv));
   Vec<Node*> margs;
@@ -9008,6 +9048,7 @@ test "ensure_compound_instantiated rejects an unrecognized generic template name
   v.var_type = dt;
   v.name = "x";
   v.has_val = false;
+  v.is_const = false;
   Node n = node_new(NodeKind.Variable(v));
 
   assert g.emit_statement(n).is_some(), "expected an unrecognized generic template name to be rejected rather than guessed";
@@ -9033,6 +9074,7 @@ test "ensure_compound_instantiated rejects a wrong generic argument count" {
   v.var_type = dt;
   v.name = "x";
   v.has_val = false;
+  v.is_const = false;
   Node n = node_new(NodeKind.Variable(v));
 
   assert g.emit_statement(n).is_some(), "expected Box (one type param) instantiated with two arguments to be rejected";
@@ -9064,6 +9106,7 @@ test "ensure_compound_instantiated rejects a nested generic argument whose OWN t
   v.var_type = dt;
   v.name = "x";
   v.has_val = false;
+  v.is_const = false;
   Node n = node_new(NodeKind.Variable(v));
 
   assert g.emit_statement(n).is_some(), "expected Box<Vec<num>> rejected because 'Vec' itself was never registered as a template, not because nesting itself is unsupported";
@@ -9097,6 +9140,7 @@ test "ensure_compound_instantiated instantiates a nested generic argument (Box<B
   v.var_type = outer_dt;
   v.name = "x";
   v.has_val = false;
+  v.is_const = false;
   Node n = node_new(NodeKind.Variable(v));
 
   assert g.emit_statement(n).is_none(), "expected Box<Box<num>> to instantiate, resolving the nested Box<num> first";
@@ -9123,6 +9167,7 @@ test "ensure_compound_instantiated mangles a pointer-typed generic argument dist
   v.var_type = dt;
   v.name = "b";
   v.has_val = false;
+  v.is_const = false;
   Node n = node_new(NodeKind.Variable(v));
 
   assert g.emit_statement(n).is_none(), "expected Box<Node*> to instantiate";
@@ -9226,6 +9271,7 @@ test "ensure_enum_instantiated rejects an unrecognized generic template name" {
   v.var_type = dt;
   v.name = "x";
   v.has_val = false;
+  v.is_const = false;
   Node n = node_new(NodeKind.Variable(v));
 
   assert g.emit_statement(n).is_some(), "expected an unrecognized generic enum template name to be rejected rather than guessed";
@@ -9251,6 +9297,7 @@ test "ensure_enum_instantiated rejects a wrong generic argument count" {
   v.var_type = dt;
   v.name = "x";
   v.has_val = false;
+  v.is_const = false;
   Node n = node_new(NodeKind.Variable(v));
 
   assert g.emit_statement(n).is_some(), "expected Opt (one type param) instantiated with two arguments to be rejected";
@@ -9281,6 +9328,7 @@ test "ensure_enum_instantiated rejects a nested generic argument whose OWN templ
   v.var_type = dt;
   v.name = "x";
   v.has_val = false;
+  v.is_const = false;
   Node n = node_new(NodeKind.Variable(v));
 
   assert g.emit_statement(n).is_some(), "expected Opt<Vec<num>> rejected because 'Vec' itself was never registered as a template, not because nesting itself is unsupported";
@@ -9312,6 +9360,7 @@ test "ensure_enum_instantiated instantiates a nested generic argument (Opt<Box<n
   v.var_type = dt;
   v.name = "x";
   v.has_val = false;
+  v.is_const = false;
   Node n = node_new(NodeKind.Variable(v));
 
   assert g.emit_statement(n).is_none(), "expected Opt<Box<num>> to instantiate, resolving the nested Box<num> first";
@@ -9338,6 +9387,7 @@ test "ensure_enum_instantiated mangles a pointer-typed generic argument distinct
   v.var_type = dt;
   v.name = "o";
   v.has_val = false;
+  v.is_const = false;
   Node n = node_new(NodeKind.Variable(v));
 
   assert g.emit_statement(n).is_none(), "expected Opt<Node*> to instantiate";
@@ -9781,6 +9831,7 @@ test "pub transpile resolves a bare-shorthand call argument against the callee's
   kindv.var_type = kind_dt;
   kindv.name = "kind";
   kindv.has_val = false;
+  kindv.is_const = false;
   Node* kind_param = malloc(sizeof(Node));
   *kind_param = node_new(NodeKind.Variable(kindv));
 
@@ -9893,6 +9944,7 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
   pv.var_type = pdt;
   pv.name = "value";
   pv.has_val = false;
+  pv.is_const = false;
   Node* param = malloc(sizeof(Node));
   *param = node_new(NodeKind.Variable(pv));
   Vec<Node*> params;
@@ -10019,6 +10071,7 @@ test "pub transpile does not crash when a generic function's OWN return type is 
   wv.var_type = pdt2;
   wv.name = "value";
   wv.has_val = false;
+  wv.is_const = false;
   Node* wparam = malloc(sizeof(Node));
   *wparam = node_new(NodeKind.Variable(wv));
   Vec<Node*> wparams;
@@ -10207,6 +10260,7 @@ test "pub transpile infers a generic function's type param from the CALLER's exp
   okv.var_type = okp_dt;
   okv.name = "value";
   okv.has_val = false;
+  okv.is_const = false;
   Node* ok_param = malloc(sizeof(Node));
   *ok_param = node_new(NodeKind.Variable(okv));
   Vec<Node*> ok_params;
@@ -10417,6 +10471,7 @@ test "emit_function resets the locals table's type-name column between functions
   xv.var_type = x_dt;
   xv.name = "x";
   xv.has_val = false;
+  xv.is_const = false;
   Node* x_param = malloc(sizeof(Node));
   *x_param = node_new(NodeKind.Variable(xv));
   Vec<Node*> fa_params;
@@ -10456,6 +10511,7 @@ test "emit_function resets the locals table's type-name column between functions
   ov.var_type = o_dt;
   ov.name = "o";
   ov.has_val = false;
+  ov.is_const = false;
   Node* o_param = malloc(sizeof(Node));
   *o_param = node_new(NodeKind.Variable(ov));
   Vec<Node*> fb_params;
@@ -10560,6 +10616,7 @@ test "emit_function resets local_dtype (not just local_names/local_type_name) be
   av.var_type = a_param_dt;
   av.name = "unused";
   av.has_val = false;
+  av.is_const = false;
   Node* a_param = malloc(sizeof(Node));
   *a_param = node_new(NodeKind.Variable(av));
   Vec<Node*> fa_params;
@@ -10612,6 +10669,7 @@ test "emit_function resets local_dtype (not just local_names/local_type_name) be
   bv.var_type = b_param_dt;
   bv.name = "y";
   bv.has_val = false;
+  bv.is_const = false;
   Node* b_param = malloc(sizeof(Node));
   *b_param = node_new(NodeKind.Variable(bv));
   Vec<Node*> fb_params;

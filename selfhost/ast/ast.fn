@@ -316,6 +316,12 @@ pub compound VariableNode {
   str name;
   Node* val;
   bin has_val;
+  // `const NAME = value;` / `const TYPE NAME = value;` -- always requires
+  // an initializer (no notion of a later one-time-only assignment to
+  // enforce instead). False for every other variable-shaped construction
+  // (a plain `let`/typed local, a function parameter, a method's own
+  // `self` binding).
+  bin is_const;
 }
 
 // A `{ ... }` block: an ordered list of statements.

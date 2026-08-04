@@ -2693,7 +2693,7 @@ impl Parser {
   // 
   // Handles the `T[] name;` array-bracket form (the brackets appear
   // right after the base type, BEFORE the name) via `parse_array_brackets`.
-  pub parse_variable(DataType* dt, bin is_public, bin require_initializer) Option<ParseErrorKind> {
+  pub parse_variable(DataType* dt, bin is_public, bin require_initializer, bin is_const) Option<ParseErrorKind> {
     if self.state.next_token_is_operator("[") {
       let aberr = self.parse_array_brackets(dt);
       if aberr.is_some() {
@@ -2733,6 +2733,7 @@ impl Parser {
     v.var_type = dt;
     v.name = name;
     v.has_val = false;
+    v.is_const = is_const;
 
     if has_value {
       self.state.token_next();
@@ -2778,9 +2779,65 @@ impl Parser {
     *dt = dtype_new();
     dt.type_str = "__let_infer__";
 
-    let verr = self.parse_variable(dt, is_public, true);
+    let verr = self.parse_variable(dt, is_public, true, false);
     if verr.is_some() {
       ret verr;
+    }
+    ret self.state.expect_sym(';');
+  }
+
+  // Parses `const NAME = value;` (type-inferred, mirroring
+  // `parse_let_declaration` exactly except immutable) or
+  // `const TYPE NAME = value;` (explicit type, builtin datatype keyword
+  // only for this slice -- disambiguating a bare identifier as a
+  // USER-DEFINED type name here would need the original's own
+  // `peek_type_then_name_offset` lookahead, not ported yet). Always
+  // requires an initializer: a `const` with no value has nothing to ever
+  // be assigned, and this codegen has no notion of a later one-time-only
+  // initialization to enforce instead. Valid at both top-level (a global
+  // constant) and local (function-body) scope -- `parse_statement`/
+  // `parse_top_level_declaration` are the shared dispatchers for both.
+  pub parse_const_declaration(bin is_public) Option<ParseErrorKind> {
+    let kw_err = self.state.expect_keyword("const");
+    if kw_err.is_some() {
+      ret kw_err;
+    }
+
+    let peeked = self.state.token_peek_next();
+    if peeked.is_none() {
+      self.state.err("expected identifier or type after 'const'");
+      ret .Some(ParseErrorKind.InvalidStatement);
+    }
+    let t = peeked.unwrap();
+    str kw = "";
+    if t.type == TokenType.Keyword {
+      fit t.data {
+        .Sval(s) -> { kw = s; }
+        _ -> {}
+      }
+    }
+
+    if t.type == TokenType.Keyword && keyword_is_datatype(kw) {
+      DataType* dt = malloc(sizeof(DataType));
+      *dt = dtype_new();
+      let derr = self.state.parse_datatype(dt);
+      if derr.is_some() {
+        ret derr;
+      }
+      let verr = self.parse_variable(dt, is_public, true, true);
+      if verr.is_some() {
+        ret verr;
+      }
+      ret self.state.expect_sym(';');
+    }
+
+    DataType* idt = malloc(sizeof(DataType));
+    *idt = dtype_new();
+    idt.type_str = "__let_infer__";
+
+    let iverr = self.parse_variable(idt, is_public, true, true);
+    if iverr.is_some() {
+      ret iverr;
     }
     ret self.state.expect_sym(';');
   }
@@ -3180,7 +3237,7 @@ impl Parser {
     if derr.is_some() {
       ret derr;
     }
-    ret self.parse_variable(dt, false, false);
+    ret self.parse_variable(dt, false, false, false);
   }
 
   // Parses a comma-separated argument list up to (not including) the
@@ -3345,6 +3402,7 @@ impl Parser {
       vv.var_type = vdt;
       vv.name = "vargs";
       vv.has_val = false;
+      vv.is_const = false;
 
       Node vnode = node_new(NodeKind.Variable(vv));
       vnode.pos = fn_node_ptr.pos;
@@ -3978,6 +4036,7 @@ impl Parser {
         bv.var_type = bdt;
         bv.name = bname;
         bv.has_val = false;
+        bv.is_const = false;
 
         Node bvar = node_new(NodeKind.Variable(bv));
         Node* bvar_ptr = malloc(sizeof(Node));
@@ -4655,6 +4714,9 @@ impl Parser {
       }
       if equals(kw, "let") {
         ret self.parse_let_declaration(false);
+      }
+      if equals(kw, "const") {
+        ret self.parse_const_declaration(false);
       }
       if equals(kw, "ret") {
         ret self.parse_return();
@@ -5683,6 +5745,7 @@ impl Parser {
     selfv.var_type = self_dt;
     selfv.name = "self";
     selfv.has_val = false;
+    selfv.is_const = false;
 
     Node self_node = node_new(NodeKind.Variable(selfv));
     self_node.pos = mname_tok.unwrap().pos;
@@ -5886,6 +5949,9 @@ impl Parser {
           if equals(nkw, "let") {
             ret self.parse_let_declaration(true);
           }
+          if equals(nkw, "const") {
+            ret self.parse_const_declaration(true);
+          }
           if equals(nkw, "compound") {
             ret self.parse_compound(true);
           }
@@ -5955,7 +6021,7 @@ impl Parser {
     if derr.is_some() {
       ret derr;
     }
-    let verr = self.parse_variable(dt, is_public, false);
+    let verr = self.parse_variable(dt, is_public, false, false);
     if verr.is_some() {
       ret verr;
     }
