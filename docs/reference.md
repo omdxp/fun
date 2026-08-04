@@ -597,9 +597,11 @@ wait to avoid warning on slow-but-live operations.
   the Testing section of `docs/language.md` for a worked example.
 
 ## Fuzzing
-- `fuzz "description" (data, len) { ... }` at the top level. `data`/`len` have
-  no type annotation — always `raw*`/`num` (a byte buffer and its length),
-  since that shape never varies.
+- `fuzz "description" (raw* data, num len) { ... }` at the top level.
+  Parameters are written out explicitly, like an ordinary function's, but
+  the types are fixed by the fuzzing calling convention (always
+  `raw*`/`num` — a byte buffer and its length) and a declaration with any
+  other shape is rejected.
 - Ignored entirely by an ordinary compile or `fun test` run, same reasoning
   as `test` blocks.
 - `fun fuzz <path> [<target>]` (or `-fuzz [-fuzz-target <name>]`) compiles the

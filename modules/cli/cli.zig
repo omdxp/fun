@@ -3344,30 +3344,36 @@ fn invoke_fuzz_compiler_to_exe(allocator: mem.Allocator, io: std.Io, c_path: []c
 
     if (!any_compiler_found) return CliError.MissingCCompiler;
 
-    std.Io.File.stderr().writeStreamingAll(io, "Compilation error:\n") catch {};
-    std.Io.File.stderr().writeStreamingAll(io, last_stderr) catch {};
-    std.Io.File.stderr().writeStreamingAll(io,
-        \\
-        \\Note: fuzzing needs a compiler whose toolchain bundles a
-        \\coverage-guided fuzzing runtime (commonly available with a
-        \\mainline install; not always bundled with a platform's default
-        \\one). Set FUN_FUZZ_CC to point at a compiler that has it if none
-        \\of the ones tried automatically worked -- this is separate from
-        \\FUN_CC (your ordinary build compiler), since they may need to be
-        \\different compilers entirely. If it compiles but then hangs
-        \\immediately on running, try FUN_FUZZ_NO_ASAN=1 -- some
-        \\restricted/sandboxed environments hang during AddressSanitizer's
-        \\own startup.
-        \\
-    ) catch {};
-    if (builtin.target.os.tag == .windows) {
+    // Deliberately-broken-C tests (exercising the CompilationFailed path
+    // itself) would otherwise dump a real-looking "Compilation error:"
+    // block into every test run/CI log even though the test is passing --
+    // real CLI usage still needs to see this, so only test mode is muted.
+    if (!builtin.is_test) {
+        std.Io.File.stderr().writeStreamingAll(io, "Compilation error:\n") catch {};
+        std.Io.File.stderr().writeStreamingAll(io, last_stderr) catch {};
         std.Io.File.stderr().writeStreamingAll(io,
             \\
-            \\Windows note: fuzzing is unverified on Windows -- try
-            \\installing plain LLVM `clang.exe` (not clang-cl) and pointing
-            \\FUN_FUZZ_CC at it if it isn't already found automatically.
+            \\Note: fuzzing needs a compiler whose toolchain bundles a
+            \\coverage-guided fuzzing runtime (commonly available with a
+            \\mainline install; not always bundled with a platform's default
+            \\one). Set FUN_FUZZ_CC to point at a compiler that has it if none
+            \\of the ones tried automatically worked -- this is separate from
+            \\FUN_CC (your ordinary build compiler), since they may need to be
+            \\different compilers entirely. If it compiles but then hangs
+            \\immediately on running, try FUN_FUZZ_NO_ASAN=1 -- some
+            \\restricted/sandboxed environments hang during AddressSanitizer's
+            \\own startup.
             \\
         ) catch {};
+        if (builtin.target.os.tag == .windows) {
+            std.Io.File.stderr().writeStreamingAll(io,
+                \\
+                \\Windows note: fuzzing is unverified on Windows -- try
+                \\installing plain LLVM `clang.exe` (not clang-cl) and pointing
+                \\FUN_FUZZ_CC at it if it isn't already found automatically.
+                \\
+            ) catch {};
+        }
     }
     return CliError.CompilationFailed;
 }
@@ -3447,8 +3453,13 @@ fn invoke_c_compiler_to_exe(allocator: mem.Allocator, io: std.Io, c_path: []cons
         }
 
         if (result.term.exited != 0) {
-            std.Io.File.stderr().writeStreamingAll(io, "Compilation error:\n") catch {};
-            std.Io.File.stderr().writeStreamingAll(io, result.stderr) catch {};
+            // See the matching comment in the fuzz-compiler fallback below --
+            // muted in test mode so a deliberately-broken-C negative test
+            // doesn't dump a real-looking compiler error into CI logs.
+            if (!builtin.is_test) {
+                std.Io.File.stderr().writeStreamingAll(io, "Compilation error:\n") catch {};
+                std.Io.File.stderr().writeStreamingAll(io, result.stderr) catch {};
+            }
             return CliError.CompilationFailed;
         }
     } else {
@@ -3479,8 +3490,10 @@ fn invoke_c_compiler_to_exe(allocator: mem.Allocator, io: std.Io, c_path: []cons
 
             any_compiler_found = true;
             if (result.term.exited != 0) {
-                std.Io.File.stderr().writeStreamingAll(io, "Compilation error:\n") catch {};
-                std.Io.File.stderr().writeStreamingAll(io, result.stderr) catch {};
+                if (!builtin.is_test) {
+                    std.Io.File.stderr().writeStreamingAll(io, "Compilation error:\n") catch {};
+                    std.Io.File.stderr().writeStreamingAll(io, result.stderr) catch {};
+                }
                 return CliError.CompilationFailed;
             }
 

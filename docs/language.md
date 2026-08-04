@@ -250,12 +250,13 @@ payload; payload-free variants still coexist.
   (`&clk`), same as any other quirk coercion.
 
 ### Fuzzing
-- **Declaration**: `fuzz "description" (data, len) { ... }` at the top level.
-  Unlike a real function's parameters, `data`/`len` have no type annotation in
-  the source — their types are always fixed (`data` is `raw*`, a byte buffer;
-  `len` is `num`, its length), since that shape never varies.
+- **Declaration**: `fuzz "description" (raw* data, num len) { ... }` at the
+  top level. Parameters are written out explicitly, like an ordinary
+  function's — but the TYPES are fixed by the fuzzing calling convention
+  (`data` is always `raw*`, a byte buffer; `len` is always `num`, its
+  length), so a declaration with any other shape is rejected.
     ```fun
-    fuzz "parser never crashes on garbage input" (data, len) {
+    fuzz "parser never crashes on garbage input" (raw* data, num len) {
       parse_bytes(data, len);
     }
     ```
