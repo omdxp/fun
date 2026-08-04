@@ -555,6 +555,14 @@ pub compound Codegen {
   // from inside gets spliced in just before that enclosing item instead
   // -- see `emit_hoisted`'s doc comment for the actual splice mechanism.
   Option<num> hoist_insert_pos;
+  // Whether ANY `fork` statement appears anywhere in the program being
+  // transpiled -- computed once by `uses_fork_in` at the very start of
+  // `pub transpile`, before the prelude is written, mirroring the
+  // original implementation's own `uses_fork` field/pre-scan. Not yet
+  // read by anything (the M:N scheduler this eventually selects between
+  // is a later slice of this port); `write_prelude` currently always
+  // emits the plain, scheduler-less watchdog.
+  bin uses_fork;
 }
 
 pub fun codegen_new(CodegenState* state) Codegen {
@@ -604,7 +612,76 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.expected_compound_type = "";
   g.defer_stack.init(0);
   g.defer_scope_starts.init(0);
+  g.uses_fork = false;
   ret g;
+}
+
+// True if `node`'s subtree contains a `fork <call>;` statement anywhere,
+// through nested if/elif/else/defer/for/fit bodies -- ported from the
+// original implementation's own `node_contains_fork`. A `fork` is always
+// a statement, never nested inside an expression, so only the statement/
+// body shapes that can directly contain one need walking.
+fun node_contains_fork(Node* node) bin {
+  fit node.kind {
+    .StatementFork(_) -> { ret true; }
+    .Body(bn) -> {
+      for s : bn.statements {
+        if node_contains_fork(s) {
+          ret true;
+        }
+      }
+      ret false;
+    }
+    .StatementIf(ifn) -> { ret node_contains_fork(ifn.body); }
+    .StatementElseIf(ein) -> { ret node_contains_fork(ein.body); }
+    .StatementElse(ebody) -> { ret node_contains_fork(ebody); }
+    .StatementDefer(body) -> { ret node_contains_fork(body); }
+    .StatementFor(fk) -> {
+      fit fk {
+        .Cond(fc) -> { ret node_contains_fork(fc.body); }
+        .Range(fr) -> { ret node_contains_fork(fr.body); }
+        .Iter(fi) -> { ret node_contains_fork(fi.body); }
+      }
+    }
+    .StatementFit(f) -> {
+      for br : f.branches {
+        if node_contains_fork(br.body) {
+          ret true;
+        }
+      }
+      ret false;
+    }
+    .Function(fnv) -> {
+      if fnv.has_body {
+        ret node_contains_fork(fnv.body);
+      }
+      ret false;
+    }
+    .Impl(i) -> {
+      for m : i.methods {
+        if node_contains_fork(m) {
+          ret true;
+        }
+      }
+      ret false;
+    }
+    _ -> { ret false; }
+  }
+}
+
+// True if any `fork` statement appears anywhere across `nodes` -- the
+// program's whole flattened top-level declaration list. Unlike the
+// original implementation's own `uses_fork_recursive`, there is no
+// separate "recurse into imported children" step to port: selfhost's
+// `nodes` is already the WHOLE program, imports already resolved and
+// flattened in before codegen ever runs (see `import_resolver.fn`).
+fun uses_fork_in(Vec<Node> nodes) bin {
+  for n : nodes {
+    if node_contains_fork(&n) {
+      ret true;
+    }
+  }
+  ret false;
 }
 
 // True when `dt` is a pointer of any depth -- mirrors `write_type`'s own
@@ -4785,6 +4862,57 @@ impl Codegen {
     self.state.write("static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }\n");
     self.state.write("static int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }\n");
     self.state.write("#endif\n");
+    // A plain (non-fork) program can still deadlock on a channel wait (e.g.
+    // a lone `ch.recv()` with no sender) -- `std/channel.fn` calls
+    // `__fun_wd_enter_wait`/`__fun_wd_leave_wait` around every blocking wait
+    // unconditionally, so these three symbols must always exist regardless
+    // of whether `fork` is used. This minimal, self-contained watchdog
+    // (no task queue to track, since nothing is scheduled -- just "at least
+    // one blocking wait open, no progress for the configured threshold") is
+    // ALWAYS what gets emitted today; the M:N scheduler's own alternative
+    // watchdog (gated on `self.uses_fork`, once `fork` support itself is
+    // ported) is a later slice of this port. Dormant unless
+    // FUN_DEADLOCK_WATCHDOG_MS is set. Byte-for-byte copy of the original
+    // implementation's own text for this block.
+    self.state.write(`typedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;
+    `static __fun_wd_state __fun_g_wd;
+    `void __fun_wd_warn(long long blocked_or_count, long long pending_or_cap, long long stall_ms){
+    `  fprintf(stderr, "fun: possible deadlock: %lld blocked, %lld pending/cap, no progress for %lldms\n", blocked_or_count, pending_or_cap, stall_ms);
+    `}
+    `static void* __fun_wd_thread(void* unused){ (void)unused;
+    `  long long last_seq=-1; long long stall_ms=0;
+    `  long long step=__fun_g_wd.threshold_ms/4; if(step<1)step=1; if(step>1000)step=1000;
+    `  for(;;){
+    `#ifdef _WIN32
+    `    Sleep((DWORD)step);
+    `#else
+    `    struct timespec __ts; __ts.tv_sec=step/1000; __ts.tv_nsec=(step%1000)*1000000L; nanosleep(&__ts,NULL);
+    `#endif
+    `    int blk=__fun_g_wd.blocked; long long seq=__fun_g_wd.progress_seq;
+    `    if(blk>0 && seq==last_seq){ stall_ms+=step; } else { stall_ms=0; }
+    `    last_seq=seq;
+    `    if(stall_ms>=__fun_g_wd.threshold_ms){
+    `      __fun_wd_warn((long long)blk, 0, stall_ms);
+    `      if(__fun_g_wd.abort_on_fire) abort();
+    `      stall_ms=0;
+    `    }
+    `  }
+    `}
+    `void __fun_wd_enter_wait(void){
+    `  if(!__fun_g_wd.started){
+    `    __fun_g_wd.started=1;
+    `    const char* w=getenv("FUN_DEADLOCK_WATCHDOG_MS");
+    `    long long wm=(w && w[0])?atoll(w):0;
+    `    __fun_g_wd.armed=(wm>0)?1:0; __fun_g_wd.threshold_ms=(wm>0)?wm:0;
+    `    const char* a=getenv("FUN_DEADLOCK_ABORT");
+    `    __fun_g_wd.abort_on_fire=(a && a[0]=='1')?1:0;
+    `    if(__fun_g_wd.armed){ __fun_thread_t th; __fun_thread_start(&th, __fun_wd_thread, NULL); }
+    `  }
+    `  if(!__fun_g_wd.armed) return;
+    `  __fun_g_wd.blocked++;
+    `}
+    `void __fun_wd_leave_wait(void){ if(!__fun_g_wd.armed) return; if(__fun_g_wd.blocked>0)__fun_g_wd.blocked--; __fun_g_wd.progress_seq++; }
+    ``);
   }
 
   // Transpiles every top-level `Enum`/`Compound`/`Impl`/`Function` node
@@ -4810,6 +4938,11 @@ impl Codegen {
   // plain top-level functions in a fifth, so a plain function calling a
   // method doesn't need a forward declaration.
   pub transpile(Vec<Node> nodes) Option<CodegenErrorKind> {
+    // Computed before the prelude is written -- not read yet (see
+    // `uses_fork`'s own doc comment), but the original implementation
+    // requires this ordering once the scheduler starts reading it, so
+    // matching it now avoids a reorder later.
+    self.uses_fork = uses_fork_in(nodes);
     self.write_prelude();
     self.register_function_signatures(nodes);
     // Impl methods are pre-registered FIRST, before either the enum or
@@ -8727,7 +8860,7 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
   assert g.transpile(nodes).is_none(), "expected the whole program to transpile";
   assert equals(
     st.out.build(),
-    "#include <stdio.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdarg.h>\n#include <stdlib.h>\n#include <string.h>\nstatic FILE* stderr_stream(void){ return stderr; }\n#ifdef _WIN32\n#include <windows.h>\ntypedef HANDLE __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\ntypedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;\nstatic DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 0, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }\nstatic int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }\n#else\n#include <pthread.h>\ntypedef pthread_t __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }\nstatic int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }\n#endif\ntypedef struct Box__num {\n  int64_t value;\n} Box__num;\n\ntypedef struct Outer {\n  Box__num inner;\n} Outer;\n\n"
+    "#include <stdio.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdarg.h>\n#include <stdlib.h>\n#include <string.h>\nstatic FILE* stderr_stream(void){ return stderr; }\n#ifdef _WIN32\n#include <windows.h>\ntypedef HANDLE __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\ntypedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;\nstatic DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 0, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }\nstatic int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }\n#else\n#include <pthread.h>\ntypedef pthread_t __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }\nstatic int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }\n#endif\ntypedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;\nstatic __fun_wd_state __fun_g_wd;\nvoid __fun_wd_warn(long long blocked_or_count, long long pending_or_cap, long long stall_ms){\n  fprintf(stderr, \"fun: possible deadlock: %lld blocked, %lld pending/cap, no progress for %lldms\\n\", blocked_or_count, pending_or_cap, stall_ms);\n}\nstatic void* __fun_wd_thread(void* unused){ (void)unused;\n  long long last_seq=-1; long long stall_ms=0;\n  long long step=__fun_g_wd.threshold_ms/4; if(step<1)step=1; if(step>1000)step=1000;\n  for(;;){\n#ifdef _WIN32\n    Sleep((DWORD)step);\n#else\n    struct timespec __ts; __ts.tv_sec=step/1000; __ts.tv_nsec=(step%1000)*1000000L; nanosleep(&__ts,NULL);\n#endif\n    int blk=__fun_g_wd.blocked; long long seq=__fun_g_wd.progress_seq;\n    if(blk>0 && seq==last_seq){ stall_ms+=step; } else { stall_ms=0; }\n    last_seq=seq;\n    if(stall_ms>=__fun_g_wd.threshold_ms){\n      __fun_wd_warn((long long)blk, 0, stall_ms);\n      if(__fun_g_wd.abort_on_fire) abort();\n      stall_ms=0;\n    }\n  }\n}\nvoid __fun_wd_enter_wait(void){\n  if(!__fun_g_wd.started){\n    __fun_g_wd.started=1;\n    const char* w=getenv(\"FUN_DEADLOCK_WATCHDOG_MS\");\n    long long wm=(w && w[0])?atoll(w):0;\n    __fun_g_wd.armed=(wm>0)?1:0; __fun_g_wd.threshold_ms=(wm>0)?wm:0;\n    const char* a=getenv(\"FUN_DEADLOCK_ABORT\");\n    __fun_g_wd.abort_on_fire=(a && a[0]=='1')?1:0;\n    if(__fun_g_wd.armed){ __fun_thread_t th; __fun_thread_start(&th, __fun_wd_thread, NULL); }\n  }\n  if(!__fun_g_wd.armed) return;\n  __fun_g_wd.blocked++;\n}\nvoid __fun_wd_leave_wait(void){ if(!__fun_g_wd.armed) return; if(__fun_g_wd.blocked>0)__fun_g_wd.blocked--; __fun_g_wd.progress_seq++; }\ntypedef struct Box__num {\n  int64_t value;\n} Box__num;\n\ntypedef struct Outer {\n  Box__num inner;\n} Outer;\n\n"
   ), "expected Box__num's typedef BEFORE Outer's, not nested inside its field list";
 }
 
@@ -8855,7 +8988,7 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
   assert g.transpile(nodes).is_none(), "expected the whole program to transpile";
   assert equals(
     st.out.build(),
-    "#include <stdio.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdarg.h>\n#include <stdlib.h>\n#include <string.h>\nstatic FILE* stderr_stream(void){ return stderr; }\n#ifdef _WIN32\n#include <windows.h>\ntypedef HANDLE __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\ntypedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;\nstatic DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 0, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }\nstatic int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }\n#else\n#include <pthread.h>\ntypedef pthread_t __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }\nstatic int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }\n#endif\ntypedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nint64_t Box__num__get(Box__num* self);\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nint64_t main(void) {\n    Box__num b;\n}\n"
+    "#include <stdio.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdarg.h>\n#include <stdlib.h>\n#include <string.h>\nstatic FILE* stderr_stream(void){ return stderr; }\n#ifdef _WIN32\n#include <windows.h>\ntypedef HANDLE __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\ntypedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;\nstatic DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 0, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }\nstatic int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }\n#else\n#include <pthread.h>\ntypedef pthread_t __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }\nstatic int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }\n#endif\ntypedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;\nstatic __fun_wd_state __fun_g_wd;\nvoid __fun_wd_warn(long long blocked_or_count, long long pending_or_cap, long long stall_ms){\n  fprintf(stderr, \"fun: possible deadlock: %lld blocked, %lld pending/cap, no progress for %lldms\\n\", blocked_or_count, pending_or_cap, stall_ms);\n}\nstatic void* __fun_wd_thread(void* unused){ (void)unused;\n  long long last_seq=-1; long long stall_ms=0;\n  long long step=__fun_g_wd.threshold_ms/4; if(step<1)step=1; if(step>1000)step=1000;\n  for(;;){\n#ifdef _WIN32\n    Sleep((DWORD)step);\n#else\n    struct timespec __ts; __ts.tv_sec=step/1000; __ts.tv_nsec=(step%1000)*1000000L; nanosleep(&__ts,NULL);\n#endif\n    int blk=__fun_g_wd.blocked; long long seq=__fun_g_wd.progress_seq;\n    if(blk>0 && seq==last_seq){ stall_ms+=step; } else { stall_ms=0; }\n    last_seq=seq;\n    if(stall_ms>=__fun_g_wd.threshold_ms){\n      __fun_wd_warn((long long)blk, 0, stall_ms);\n      if(__fun_g_wd.abort_on_fire) abort();\n      stall_ms=0;\n    }\n  }\n}\nvoid __fun_wd_enter_wait(void){\n  if(!__fun_g_wd.started){\n    __fun_g_wd.started=1;\n    const char* w=getenv(\"FUN_DEADLOCK_WATCHDOG_MS\");\n    long long wm=(w && w[0])?atoll(w):0;\n    __fun_g_wd.armed=(wm>0)?1:0; __fun_g_wd.threshold_ms=(wm>0)?wm:0;\n    const char* a=getenv(\"FUN_DEADLOCK_ABORT\");\n    __fun_g_wd.abort_on_fire=(a && a[0]=='1')?1:0;\n    if(__fun_g_wd.armed){ __fun_thread_t th; __fun_thread_start(&th, __fun_wd_thread, NULL); }\n  }\n  if(!__fun_g_wd.armed) return;\n  __fun_g_wd.blocked++;\n}\nvoid __fun_wd_leave_wait(void){ if(!__fun_g_wd.armed) return; if(__fun_g_wd.blocked>0)__fun_g_wd.blocked--; __fun_g_wd.progress_seq++; }\ntypedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nint64_t Box__num__get(Box__num* self);\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nint64_t main(void) {\n    Box__num b;\n}\n"
   ), "expected the struct typedef AND the monomorphized method BEFORE 'main', not nested inside its braces";
 }
 
@@ -9839,7 +9972,7 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
   assert g.transpile(nodes).is_none(), "expected the whole program to transpile";
   assert equals(
     st.out.build(),
-    "#include <stdio.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdarg.h>\n#include <stdlib.h>\n#include <string.h>\nstatic FILE* stderr_stream(void){ return stderr; }\n#ifdef _WIN32\n#include <windows.h>\ntypedef HANDLE __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\ntypedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;\nstatic DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 0, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }\nstatic int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }\n#else\n#include <pthread.h>\ntypedef pthread_t __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }\nstatic int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }\n#endif\nint64_t identity__num(int64_t value) {\n    return value;\n}\nint64_t main(void) {\n    return identity__num(5);\n}\n"
+    "#include <stdio.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdarg.h>\n#include <stdlib.h>\n#include <string.h>\nstatic FILE* stderr_stream(void){ return stderr; }\n#ifdef _WIN32\n#include <windows.h>\ntypedef HANDLE __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\ntypedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;\nstatic DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 0, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }\nstatic int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }\n#else\n#include <pthread.h>\ntypedef pthread_t __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }\nstatic int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }\n#endif\ntypedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;\nstatic __fun_wd_state __fun_g_wd;\nvoid __fun_wd_warn(long long blocked_or_count, long long pending_or_cap, long long stall_ms){\n  fprintf(stderr, \"fun: possible deadlock: %lld blocked, %lld pending/cap, no progress for %lldms\\n\", blocked_or_count, pending_or_cap, stall_ms);\n}\nstatic void* __fun_wd_thread(void* unused){ (void)unused;\n  long long last_seq=-1; long long stall_ms=0;\n  long long step=__fun_g_wd.threshold_ms/4; if(step<1)step=1; if(step>1000)step=1000;\n  for(;;){\n#ifdef _WIN32\n    Sleep((DWORD)step);\n#else\n    struct timespec __ts; __ts.tv_sec=step/1000; __ts.tv_nsec=(step%1000)*1000000L; nanosleep(&__ts,NULL);\n#endif\n    int blk=__fun_g_wd.blocked; long long seq=__fun_g_wd.progress_seq;\n    if(blk>0 && seq==last_seq){ stall_ms+=step; } else { stall_ms=0; }\n    last_seq=seq;\n    if(stall_ms>=__fun_g_wd.threshold_ms){\n      __fun_wd_warn((long long)blk, 0, stall_ms);\n      if(__fun_g_wd.abort_on_fire) abort();\n      stall_ms=0;\n    }\n  }\n}\nvoid __fun_wd_enter_wait(void){\n  if(!__fun_g_wd.started){\n    __fun_g_wd.started=1;\n    const char* w=getenv(\"FUN_DEADLOCK_WATCHDOG_MS\");\n    long long wm=(w && w[0])?atoll(w):0;\n    __fun_g_wd.armed=(wm>0)?1:0; __fun_g_wd.threshold_ms=(wm>0)?wm:0;\n    const char* a=getenv(\"FUN_DEADLOCK_ABORT\");\n    __fun_g_wd.abort_on_fire=(a && a[0]=='1')?1:0;\n    if(__fun_g_wd.armed){ __fun_thread_t th; __fun_thread_start(&th, __fun_wd_thread, NULL); }\n  }\n  if(!__fun_g_wd.armed) return;\n  __fun_g_wd.blocked++;\n}\nvoid __fun_wd_leave_wait(void){ if(!__fun_g_wd.armed) return; if(__fun_g_wd.blocked>0)__fun_g_wd.blocked--; __fun_g_wd.progress_seq++; }\nint64_t identity__num(int64_t value) {\n    return value;\n}\nint64_t main(void) {\n    return identity__num(5);\n}\n"
   ), "expected only the monomorphized 'identity__num', never the unsubstituted 'identity' template itself";
 }
 
