@@ -4763,6 +4763,28 @@ impl Codegen {
     self.state.write("#include <stdlib.h>\n");
     self.state.write("#include <string.h>\n");
     self.state.write("static FILE* stderr_stream(void){ return stderr; }\n");
+    // The compiler's own private thread primitive -- always emitted,
+    // regardless of whether this program uses `fork`/`async`/channels.
+    // `await`/`fork` support (ported next) build directly on
+    // `__fun_thread_start`/`__fun_thread_join`; the M:N scheduler
+    // (`fork`'s own task queue) builds on top of THIS, not the other way
+    // around. Kept as a byte-for-byte copy of the original implementation's
+    // own prelude text for this layer.
+    self.state.write("#ifdef _WIN32\n");
+    self.state.write("#include <windows.h>\n");
+    self.state.write("typedef HANDLE __fun_thread_t;\n");
+    self.state.write("typedef void* (*__fun_thread_entry_t)(void*);\n");
+    self.state.write("typedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;\n");
+    self.state.write("static DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }\n");
+    self.state.write("static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 0, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }\n");
+    self.state.write("static int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }\n");
+    self.state.write("#else\n");
+    self.state.write("#include <pthread.h>\n");
+    self.state.write("typedef pthread_t __fun_thread_t;\n");
+    self.state.write("typedef void* (*__fun_thread_entry_t)(void*);\n");
+    self.state.write("static int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }\n");
+    self.state.write("static int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }\n");
+    self.state.write("#endif\n");
   }
 
   // Transpiles every top-level `Enum`/`Compound`/`Impl`/`Function` node
@@ -8705,7 +8727,7 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
   assert g.transpile(nodes).is_none(), "expected the whole program to transpile";
   assert equals(
     st.out.build(),
-    "#include <stdio.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdarg.h>\n#include <stdlib.h>\n#include <string.h>\nstatic FILE* stderr_stream(void){ return stderr; }\ntypedef struct Box__num {\n  int64_t value;\n} Box__num;\n\ntypedef struct Outer {\n  Box__num inner;\n} Outer;\n\n"
+    "#include <stdio.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdarg.h>\n#include <stdlib.h>\n#include <string.h>\nstatic FILE* stderr_stream(void){ return stderr; }\n#ifdef _WIN32\n#include <windows.h>\ntypedef HANDLE __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\ntypedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;\nstatic DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 0, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }\nstatic int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }\n#else\n#include <pthread.h>\ntypedef pthread_t __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }\nstatic int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }\n#endif\ntypedef struct Box__num {\n  int64_t value;\n} Box__num;\n\ntypedef struct Outer {\n  Box__num inner;\n} Outer;\n\n"
   ), "expected Box__num's typedef BEFORE Outer's, not nested inside its field list";
 }
 
@@ -8833,7 +8855,7 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
   assert g.transpile(nodes).is_none(), "expected the whole program to transpile";
   assert equals(
     st.out.build(),
-    "#include <stdio.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdarg.h>\n#include <stdlib.h>\n#include <string.h>\nstatic FILE* stderr_stream(void){ return stderr; }\ntypedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nint64_t Box__num__get(Box__num* self);\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nint64_t main(void) {\n    Box__num b;\n}\n"
+    "#include <stdio.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdarg.h>\n#include <stdlib.h>\n#include <string.h>\nstatic FILE* stderr_stream(void){ return stderr; }\n#ifdef _WIN32\n#include <windows.h>\ntypedef HANDLE __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\ntypedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;\nstatic DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 0, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }\nstatic int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }\n#else\n#include <pthread.h>\ntypedef pthread_t __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }\nstatic int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }\n#endif\ntypedef struct Box__num {\n  int64_t value;\n} Box__num;\n\nint64_t Box__num__get(Box__num* self);\nint64_t Box__num__get(Box__num* self) {\n    return self->value;\n}\nint64_t main(void) {\n    Box__num b;\n}\n"
   ), "expected the struct typedef AND the monomorphized method BEFORE 'main', not nested inside its braces";
 }
 
@@ -9817,7 +9839,7 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
   assert g.transpile(nodes).is_none(), "expected the whole program to transpile";
   assert equals(
     st.out.build(),
-    "#include <stdio.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdarg.h>\n#include <stdlib.h>\n#include <string.h>\nstatic FILE* stderr_stream(void){ return stderr; }\nint64_t identity__num(int64_t value) {\n    return value;\n}\nint64_t main(void) {\n    return identity__num(5);\n}\n"
+    "#include <stdio.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdarg.h>\n#include <stdlib.h>\n#include <string.h>\nstatic FILE* stderr_stream(void){ return stderr; }\n#ifdef _WIN32\n#include <windows.h>\ntypedef HANDLE __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\ntypedef struct __fun_thread_start_pack { __fun_thread_entry_t entry; void* arg; } __fun_thread_start_pack;\nstatic DWORD WINAPI __fun_thread_entry_win(LPVOID p) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)p; if (pack) { pack->entry(pack->arg); free(pack); } return 0; }\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { __fun_thread_start_pack* pack = (__fun_thread_start_pack*)malloc(sizeof(__fun_thread_start_pack)); if (!pack) return -1; pack->entry = entry; pack->arg = arg; HANDLE h = CreateThread(NULL, 0, __fun_thread_entry_win, pack, 0, NULL); if (!h) { free(pack); return -1; } *t = h; return 0; }\nstatic int __fun_thread_join(__fun_thread_t t) { DWORD rc = WaitForSingleObject(t, INFINITE); CloseHandle(t); return rc == WAIT_OBJECT_0 ? 0 : -1; }\n#else\n#include <pthread.h>\ntypedef pthread_t __fun_thread_t;\ntypedef void* (*__fun_thread_entry_t)(void*);\nstatic int __fun_thread_start(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg) { return pthread_create(t, NULL, entry, arg); }\nstatic int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }\n#endif\nint64_t identity__num(int64_t value) {\n    return value;\n}\nint64_t main(void) {\n    return identity__num(5);\n}\n"
   ), "expected only the monomorphized 'identity__num', never the unsubstituted 'identity' template itself";
 }
 
